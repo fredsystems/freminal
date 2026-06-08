@@ -477,7 +477,11 @@ impl super::FreminalGui {
                 let snap = pane.arc_swap.load();
                 if let Some(offset) =
                     super::search::jump_to_prev_command(&mut pane.view_state, &snap)
-                    && let Err(e) = pane.input_tx.send(InputEvent::ScrollOffset(offset))
+                    && let Err(e) = pane.input_tx.send(super::terminal::input::scroll_event(
+                        &snap,
+                        &pane.view_state.folded_blocks,
+                        offset,
+                    ))
                 {
                     error!("Failed to send scroll offset to PTY: {e}");
                 }
@@ -491,7 +495,11 @@ impl super::FreminalGui {
                 let snap = pane.arc_swap.load();
                 if let Some(offset) =
                     super::search::jump_to_next_command(&mut pane.view_state, &snap)
-                    && let Err(e) = pane.input_tx.send(InputEvent::ScrollOffset(offset))
+                    && let Err(e) = pane.input_tx.send(super::terminal::input::scroll_event(
+                        &snap,
+                        &pane.view_state.folded_blocks,
+                        offset,
+                    ))
                 {
                     error!("Failed to send scroll offset to PTY: {e}");
                 }

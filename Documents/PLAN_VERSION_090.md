@@ -1809,7 +1809,7 @@ block-highlight overlay.
 
 ### 73 Subtasks
 
-#### 73.1 — `ThemePalette` gutter colors
+#### 73.1 — `ThemePalette` gutter colors ✅
 
 **Scope:** `freminal-common/src/themes.rs` (or wherever `ThemePalette` lives).
 
@@ -1828,10 +1828,34 @@ block-highlight overlay.
 `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md` history) does not need updating —
 existing themes default to None and use the fallback.
 
-#### 73.2 — Render the gutter column
+**Completion notes (2026-06-08):**
 
-**Scope:** `freminal/src/gui/renderer/` (whichever pass draws the terminal
-cell background — likely a glow shader / atlas layer).
+- **Color-type deviation from the pseudocode:** `ThemePalette` colors are
+  `(u8, u8, u8)` tuples, NOT `egui::Color32` (that type lives in the
+  `freminal` GUI crate and cannot be referenced from `freminal-common`).
+  The three new fields are therefore `Option<(u8, u8, u8)>`. The
+  `freminal/src/gui/colors.rs` helpers convert tuples to `Color32` /
+  `[f32; 4]` at the GUI call sites, so a later subtask (73.2) wraps the
+  resolved tuple there.
+- **No TOML round-trip test (deviation):** `ThemePalette` has no serde
+  derives — it is never serialized to/from TOML; only theme _slugs_ are
+  stored in config. The plan's "Round-trip TOML test" is therefore not
+  applicable to `ThemePalette`. Coverage is instead: a test asserting all
+  27 shipped themes default the three overrides to `None`, plus resolver
+  tests for fallback, override-preference, and exit-code-independence.
+- `gutter_color_for(status)` is a `const fn` method on `ThemePalette`.
+  Fallbacks: Success → `ansi[2]` (green), Failure → `ansi[1]` (red),
+  Running → `ansi[3]` (yellow). `CommandStatus::Unknown` has no dedicated
+  override field and resolves to `ansi[7]` (white).
+- All 27 `const ThemePalette` literals updated to add
+  `gutter_success/failure/running: None` (mechanical, via a verified
+  exact-match pass; the `ansi: [ … ],` close is the last field on every
+  literal so the insertion point was unambiguous).
+- 4 new unit tests in `themes::tests`. `cargo test --all`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo machete` all clean workspace-wide.
+
+#### 73.2 — Render the gutter column ✅
 
 - Add a config knob `[command_blocks] gutter = "left" | "off"` (default
   `"left"`).
@@ -1846,7 +1870,75 @@ cell background — likely a glow shader / atlas layer).
 **Verification:** Visual verification via a recorded `.frec` of a typical
 session. Benchmark: `render_loop_bench` should not regress > 15%.
 
-#### 73.3 — Gutter click and hover
+**Completion notes (2026-06-08):**
+
+- **Single-source-of-truth inset (the column-count correctness rule).**
+  The reserved left inset is computed once per frame in `app_impl.rs`
+  (`gutter_inset_logical = gutter.total_inset_px() / ppp`, zeroed when
+  the feature is disabled) and consumed by BOTH the PTY column-count
+  computation (`pane_content_width = content_rect.width() - inset`) AND
+  the renderer (`terminal_rect.min.x += inset`). Because both derive
+  from the identical inset, the column count reported to the PTY always
+  equals the rendered cell-grid width — no drift, no wrapping/cursor
+  desync. The widget consumes `snap.term_width` (the value `app_impl`
+  sent), never re-deriving columns from its own rect.
+- **Renderer scope.** The plan guessed `freminal/src/gui/renderer/`. In
+  practice the gutter is drawn in `terminal/widget.rs` via egui's
+  painter (`rect_filled` per visible row), not in the glow vertex
+  builders. The `PaintCallback` rect was changed from `ui.max_rect()`
+  (full pane) to `terminal_rect` (full pane minus inset) so the GL
+  viewport origin clears the gutter and column 0 does not render under
+  the strip.
+- **Strip width vs. inset (padding gap).** Per mid-task feedback, the
+  4px painted strip would otherwise sit flush against the first glyph.
+  Split into two constants in `freminal-common/src/config.rs`:
+  `COMMAND_BLOCK_GUTTER_WIDTH_PX = 4.0` (painted strip) and
+  `COMMAND_BLOCK_GUTTER_PADDING_PX = 4.0` (blank gap).
+  `GutterPosition::total_inset_px()` (= strip + padding = 8px) is the
+  shared inset; `width_px()` (= 4px) is the painted strip only. Layout:
+  `[0–4px] status strip` → `[4–8px] padding` → `[8px+] glyphs`.
+- **Config.** Added `[command_blocks] gutter = "left" | "off"`
+  (`GutterPosition` enum, kebab-case serde, default `Left`) and the
+  `config_example.toml` entry. Disabling `command_blocks.enabled` zeroes
+  the inset entirely (no gutter, full width).
+- **Row → color mapping** factored into the pure, unit-tested
+  `gutter_status_for_row(blocks, row, running_extent)` in
+  `gui/command_blocks.rs`. A running block (no `end_row`) extends to the
+  last visible row so the live prompt shows a full yellow bar; on
+  overlap the last-emitted block wins. Fold placeholders are colored by
+  the folded block's status at half alpha. Status colors come from
+  `ThemePalette::gutter_color_for` (73.1): green/red/yellow/white.
+- **Alternate screen.** The gutter is suppressed on the alternate screen
+  (same rationale as the earlier overlay fix — stored blocks describe
+  primary-screen rows).
+- **Mouse.** Because `terminal_rect.min.x` shifted right, gutter pixels
+  fall outside `terminal_rect`, so terminal mouse-event forwarding and
+  hover already ignore the strip; `encode_egui_mouse_pos_as_usize`
+  saturates `x < origin` to column 0. Gutter click/hover interception is
+  73.3.
+- **Tests:** 5 `gutter_status_for_row` tests (containment, inclusivity,
+  exit-code → status, running-extent, overlap), 3 config tests
+  (default, kebab-case serialization, `total_inset_px` padding),
+  extended the 72.5 round-trip test with the `gutter` field.
+- **Benchmark (`render_loop_bench`, 15% budget):** the vertex-builder
+  passes are untouched by the gutter (it's egui-painter-side); measured
+  for regression safety:
+
+  | Benchmark                              | Before   | After    | Change        |
+  | -------------------------------------- | -------- | -------- | ------------- |
+  | instanced_bg/build_bg_instances/80x24  | 75.7 ns  | 73.2 ns  | -1.0% (noise) |
+  | instanced_bg/build_bg_instances/200x50 | 136.6 ns | 129.8 ns | -5.7%         |
+  | instanced_fg/build_fg_instances/80x24  | 422.8 µs | 388.1 µs | -5.3%         |
+  | instanced_fg/build_fg_instances/200x50 | 464.2 µs | 474.5 µs | -0.8% (noise) |
+
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
+- **Open follow-up (not blocking):** `CommandStatus::Unknown` resolves
+  to normal white (`ansi[7]`); the plan text said "gray". Could map to
+  `ansi[8]` (bright-black/gray) if a grayer neutral is preferred —
+  deferred pending user preference.
+
+#### 73.3 — Gutter click and hover ✅
 
 **Scope:** `freminal/src/gui/mouse.rs`, `terminal/widget.rs`.
 
@@ -1861,7 +1953,62 @@ session. Benchmark: `render_loop_bench` should not regress > 15%.
 **Verification:** Integration test using egui's test harness for mouse
 events.
 
-#### 73.4 — Settings UI: gutter toggle
+**Completion notes (2026-06-08):**
+
+- **Click interception.** A gutter pre-check in `widget.rs::show()` (modeled
+  on the existing scrollbar pre-check) intercepts a primary press whose
+  position falls in the inset region (`pos.x ∈ [pane.min.x,
+terminal_rect.min.x)`) before `write_input_to_terminal`. Gutter positions
+  are already outside `terminal_rect`, so they would otherwise be dropped
+  entirely (no fold, no focus). The press maps `y → rendered row → buffer
+  row → block` via a fresh fold-aware `RowMap`
+  (`gutter_block_id_at_pos`). A finished block toggles its fold
+  (`view_state.toggle_fold`); a running block is a no-op fold. Either way
+  the pane is focused (`left_mouse_button_pressed`), since the gutter is
+  outside the rect that normally sets that flag.
+- **Foldability guard** factored into the pure, tested
+  `command_blocks::block_is_foldable` (finished blocks only), mirroring the
+  `FoldPreviousCommand` "completed block" guard.
+- **Hover hit-test** shares `command_blocks::gutter_block_for_row`
+  (a `gutter_status_for_row` refactor that returns the block, not just the
+  status). The gutter trigger is added _alongside_ the existing 72.12
+  cell-hover trigger; 73.5 retires the cell trigger.
+- **Hit zone** is the whole inset (4px strip + 4px padding), a more
+  forgiving target than the 4px strip alone.
+- **Two-part hover-live fix (the subtle one).** Getting the gutter hover
+  tint to appear/clear on bare pointer motion required two independent
+  fixes, both necessary:
+  1. **Waking a frame.** The windowing cursor-move fast path
+     (`freminal-windowing/event_loop.rs`, Task 65/68 idle-CPU
+     optimization) only schedules a repaint when egui reports `repaint`,
+     i.e. when an egui-tracked interactive region's hover state changes.
+     The terminal hover tint is painted by our own GL pass, not an egui
+     widget, so a bare move never woke a frame. Registering the gutter as
+     a `Sense::click()` region makes egui report `repaint` on enter/leave,
+     waking the frame (and giving the hand cursor).
+  2. **Rebuilding the VBO.** The hover tint is baked into the background
+     instance buffer, which was only rebuilt on
+     content/selection/search/blink changes. A hover-only change reused
+     stale vertices and showed nothing. Added a `hover_changed` term
+     (tracked via `cache.previous_command_block_hover_rows`) to both the
+     cursor-only fast-path exclusion and the full-rebuild trigger. The
+     hover-row computation was hoisted into
+     `compute_command_block_hover_rows` and run _before_ the rebuild
+     decision so `hover_changed` is known in time.
+- **Mouse-reporting safety.** Gutter positions are outside `terminal_rect`,
+  so `terminal_rect.contains` already excludes them from terminal mouse-
+  event forwarding and selection; DEC mouse modes never see gutter
+  hover/clicks.
+- **Tests:** added `gutter_block_for_row` and `block_is_foldable` unit
+  tests (finished foldable, running not, containment, returns block). No
+  egui-harness integration test was added — the repo has no egui_kittest
+  harness; the click/hover logic is covered by the pure helper tests, and
+  the wiring was verified manually with debug instrumentation across the
+  appear/track/clear lifecycle.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
+
+#### 73.4 — Settings UI: gutter toggle ✅
 
 **Scope:** `freminal/src/gui/settings.rs` / `settings_dispatch.rs`.
 
@@ -1870,7 +2017,27 @@ events.
 
 **Verification:** Toggle persists via TOML round-trip.
 
-#### 73.5 — Move hover trigger from buffer to gutter
+**Completion notes (2026-06-08):**
+
+- Added a "Status gutter" `ComboBox` (`Left` / `Off`) to the Command Blocks
+  section of the **Shell Integration** settings tab (where 72.5
+  consolidated the command-block settings), below the duration threshold.
+  Mirrors the existing `tab_bar_position` dropdown pattern with a
+  `gutter_position_label` helper.
+- **No `settings_dispatch.rs` change needed.** On Apply the dispatch
+  already replaces the whole live config (`self.config = new_cfg`), and
+  `app_impl` reads `command_blocks.gutter.total_inset_px()` every frame, so
+  toggling takes effect immediately — switching to `Off` zeroes the inset,
+  which flows through the normal resize path (wider PTY column count, strip
+  hidden). Same "takes effect on next render" model 72.5 documented.
+- **Tests:** `gutter_position_labels` (label helper) and
+  `gutter_setting_persists_through_draft_apply` (modal surfaces and mutates
+  the field). The TOML round-trip is already covered by the
+  `freminal-common` config test added in 73.2.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
+
+#### 73.5 — Move hover trigger from buffer to gutter ✅
 
 **Scope:** `freminal/src/gui/mouse.rs`, `freminal/src/gui/renderer/`
 (whichever module currently owns the 72.12 hover overlay), and the view-
@@ -1905,7 +2072,35 @@ block-related.
 integration test: hovering output cells does not set
 `hovered_block_id`; hovering gutter rows belonging to a block does.
 
-#### 73.6 — Move command-duration label into the gutter
+**Completion notes (2026-06-08):**
+
+- **Minimal change thanks to 73.3.** 73.3 had already added the gutter as a
+  hover trigger _alongside_ the 72.12 cell trigger inside
+  `compute_command_block_hover_rows`. 73.5 simply deletes the cell-hover
+  branch (`else if terminal_rect.contains(...)`), leaving the gutter strip
+  as the sole surface. The tint rendering (25%-alpha row range across the
+  cell grid) is unchanged — only the trigger surface moved.
+- **Disabled states.** Hover returns `None` when the feature is off, the
+  alternate screen is active, there are no blocks, OR the gutter is off
+  (`gutter_inset <= 0.0`, which is the case for `gutter = "off"`). The
+  unused `logical_cell_w` parameter was dropped.
+- **No view-state field.** There is no stored `hovered_block_id`; hover is
+  recomputed per frame as a local (`command_block_hover_rows`), gated by
+  the `hover_changed` cache term from 73.3. The plan's "does not set
+  `hovered_block_id`" is expressed as "returns `None`".
+- **Mouse-reporting safety** is inherited: the gutter is outside
+  `terminal_rect`, so DEC mouse modes never see gutter hover.
+- **Tests:** new `gutter_hover_trigger_tests` module —
+  `hovering_gutter_row_tints_the_block` (gutter -> `Some(range)`),
+  `hovering_output_cell_does_not_tint` (the regression: cell -> `None`),
+  `gutter_off_disables_hover`, and `no_pointer_no_tint`. Built on
+  `TerminalSnapshot::empty()` + `ViewState::new()` + a no-fold `RowMap`, so
+  no GUI/GL context is needed. No prior 72.12 hover unit test existed to
+  retire (the cell trigger was inline render-path code).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
+
+#### 73.6 — Move command-duration label into the gutter ✅
 
 **Scope:** Same renderer module as 73.2 (the gutter draw pass) and the
 duration-formatting helper introduced in 72.12.
@@ -1945,7 +2140,41 @@ duration-formatting unit test from 72.12 still applies; add a placement
 test (the label coordinate is computed against the block's last on-screen
 row, not its first row).
 
-#### 73.7 — Investigate spurious long duration for instant commands
+**Completion notes (2026-06-08):**
+
+- **Option (a) chosen** (floating layer, keep the gutter thin). The label
+  is drawn as an egui-painter text layer just inside the cell grid
+  (`terminal_rect.min.x + 2px`, left-aligned, ~60% alpha), overlaying the
+  first cells of the block's last visible row. The gutter stays 4px; no
+  `gutter_width_px` config was added.
+- **Last-visible-row anchor.** Relocated from 72.12's first-row placement
+  (which scrolled off immediately) to the block's last on-screen row via
+  the pure, tested `duration_label_anchor_row(block, win_start, win_end,
+running_extent)` — clamps to the viewport bottom when the block extends
+  below, returns `None` when the block is entirely off-screen, and uses
+  `running_extent` for running blocks.
+- **Gating.** Requires the gutter to be present (`gutter_inset > 0`), so a
+  `gutter = "off"` config also hides the label (no anchor). Threshold
+  gating unchanged; running blocks have no `duration()` and are skipped;
+  suppressed on the alternate screen. Uses `block.duration()` (the 73.7
+  C->D fix), so values are correct.
+- **Tests:** five `duration_label_anchor_row` cases (last-not-first,
+  clamp-to-viewport, above/below viewport -> `None`, running-block ->
+  `running_extent`).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean. No
+  `render_loop_bench` regression (label is egui-painter-side, no
+  vertex-builder change).
+
+**Shell-integration follow-up (committed separately):** visual testing of
+73.6 in bash surfaced that bash never emitted `OSC 133 C` under freminal's
+`bash --posix` launch (bash-preexec's preexec dispatch is dead in that
+mode), so bash durations showed prompt-to-prompt. Fixed in
+`shell-integration/bash/freminal-init.bash` by emitting C from a
+re-armed DEBUG trap; shell-integration bumped to v4. zsh/fish were
+unaffected.
+
+#### 73.7 — Investigate spurious long duration for instant commands ✅
 
 **Scope:** Investigation first; fix scope determined by findings.
 Likely surfaces: `CommandBlock::started_at` / `finished_at`
@@ -2006,6 +2235,47 @@ either absent (below threshold) or correctly reporting milliseconds.
 duration computation, not the gutter rendering. Schedule it early in
 Task 73 so the fix is in place before 73.6 moves the label into the
 gutter, otherwise the bug just relocates with the label.
+
+**Completion notes (2026-06-08):**
+
+- **Root cause: timing semantics, not units.** Hypothesis 1 (unit/format
+  mismatch) was ruled out — `duration()` used correct `SystemTime`
+  arithmetic and the formatter truncates whole seconds correctly.
+  Hypothesis 2 was the cause, in its "wrong window" form: `started_at` is
+  stamped at `OSC 133 A` (prompt start) and `finished_at` at `OSC 133 D`,
+  so `duration() = D - A` **included the time the user spent typing the
+  command and reading the previous output at the prompt**. An instant `ls`
+  preceded by a 30 s pause reported ~30 s. The fid correlation itself
+  (72.8c) was correct — no off-by-one.
+- **Fix.** Added `executed_at: Option<SystemTime>` to `CommandBlock`,
+  stamped in `Buffer::mark_output_start_row` (`OSC 133 C`, command-execution
+  start). `CommandBlock::duration()` now measures `finished_at -
+executed_at` (true runtime C->D), falling back to `started_at` only when
+  no `C` was received. The in-buffer duration-overlay renderer was also
+  fixed: it computed `finished_at.duration_since(started_at)` directly
+  (the D-A bug) and now calls `block.duration()`.
+- **No FREC/snapshot serialization concern.** `CommandBlock` rides the
+  snapshot as `Arc<[CommandBlock]>` (cloned), so the new field propagates
+  automatically; FREC v2 captures the OSC byte stream, not the struct.
+- **No escape-sequence-doc change.** OSC 133 C parsing/support is
+  unchanged (still ✅); only internal timing semantics changed, and the
+  coverage row makes no duration claim.
+- **Tests:** `duration_measures_from_executed_at_not_started_at` (the
+  regression: 30 s prompt-wait + 5 ms command -> 5 ms),
+  `duration_falls_back_to_started_at_when_executed_at_missing`,
+  `duration_clock_skew_against_executed_at_is_none`, and
+  `mark_output_start_row_stamps_executed_at` (buffer-level: `OSC 133 C`
+  stamps `executed_at`). Five `CommandBlock` test-literal sites updated
+  for the new field. A handler-level wall-clock-delta integration test was
+  not added because `executed_at` uses real `SystemTime::now()` and cannot
+  assert a deterministic delta without sleeping; the deterministic unit
+  tests cover the C->D semantics fully.
+- **Benchmark:** `command_block_record_10k` ~895 µs (vs ~863 µs documented
+  baseline) — within machine variance; the one-field struct growth and the
+  `C`-path `SystemTime::now()` (not exercised by this bench) cause no
+  regression.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 ### 73 Open Questions Resolved
 

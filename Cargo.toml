@@ -17,7 +17,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.9.0-beta.1"
+version = "0.9.0-beta.2"
 edition = "2024"
 rust-version = "1.95.0"
 description = "A terminal emulator written in Rust"
@@ -34,7 +34,7 @@ anyhow = "1.0.102"
 arboard = "3.6.1"
 arc-swap = "1.9.1"
 assert_cmd = "2.2.2"
-bitflags = "2.11.1"
+bitflags = "2.13.0"
 cargo_metadata = "0.23.1"
 clap = { version = "4.6.1", features = ["derive"] }
 clap-cargo = { version = "0.18.3", features = ["cargo_metadata"] }
@@ -46,27 +46,19 @@ crossbeam-channel = "0.5.15"
 directories = "6.0.0"
 downcast-rs = "2.0.2"
 duct = "1.1.1"
-egui = { version = "0.34.2", default-features = false, features = [
-  "default_fonts",
-  "persistence",
-] }
-egui_glow = { version = "0.34.2", default-features = false }
-egui-winit = "0.34.1"
+egui = { version = "0.34.3", default-features = false, features = ["default_fonts", "persistence"] }
+egui_glow = { version = "0.34.3", default-features = false }
+egui-winit = "0.34.3"
 filedescriptor = "0.8.3"
 fontdb = "0.23.0"
 futures = "0.3.32"
 glow = "0.17.0"
 glutin = "0.32.3"
 glutin-winit = "0.5.0"
-image = { version = "0.25.10", default-features = false, features = [
-  "gif",
-  "jpeg",
-  "png",
-  "webp",
-] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lazy_static = "1.5.0"
 libc = "0.2.186"
-log = "0.4.29"
+log = "0.4.32"
 nix = "0.31.3"
 open = "5.3.5"
 predicates = "3.1.4"
@@ -84,25 +76,20 @@ shared_library = "0.1.9"
 shell-words = "1.1.1"
 smol = "2.0.2"
 swash = "0.2.7"
+sysinfo = { version = "0.39.3", default-features = false, features = ["system"] }
 sys-locale = "0.3.2"
-sysinfo = { version = "0.39.2", default-features = false, features = [
-  "system",
-] }
-tar = "0.4.45"
+tar = "0.4.46"
 tempfile = "3.27.0"
-test-log = { version = "0.2.19", features = ["trace"] }
+test-log = { version = "0.2.21", features = ["trace"] }
 thiserror = "2.0.18"
 toml = "1.1.2"
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
-tracing-subscriber = { version = "0.3.23", features = [
-  "env-filter",
-  "parking_lot",
-] }
-unicode-segmentation = "1.13.2"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "parking_lot"] }
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.2"
-vergen = { version = "9.1.0", features = ["build", "cargo", "rustc", "si"] }
+vergen = { version = "10.0.0", features = ["build", "cargo", "rustc", "si"] }
 winapi = "0.3.9"
 winit = { version = "0.30.13", features = ["rwh_06"] }
 winreg = "0.56.0"

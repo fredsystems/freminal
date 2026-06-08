@@ -263,6 +263,13 @@ limit = 4000
 # Default: 2.0.
 # duration_threshold_secs = 2.0
 
+# Where the per-command status gutter is drawn.  A thin colored strip on
+# the left edge of the terminal area shows each command block's status
+# (green = success, red = failure, yellow = running).  "left" reserves the
+# strip; "off" disables the gutter entirely.
+# Default: "left".
+# gutter = "left"
+
 ## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################

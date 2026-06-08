@@ -418,8 +418,8 @@ fn spawn_pty_consumer_thread(
                         Ok(InputEvent::FocusChange(focused)) => {
                             emulator.internal.send_focus_event(focused);
                         }
-                        Ok(InputEvent::ScrollOffset(offset)) => {
-                            emulator.set_gui_scroll_offset(offset);
+                        Ok(InputEvent::ScrollOffset { offset, extra_rows }) => {
+                            emulator.set_gui_scroll_window(offset, extra_rows);
                         }
                         Ok(InputEvent::ThemeChange(theme)) => {
                             emulator.internal.handler.set_theme(theme);

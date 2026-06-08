@@ -610,3 +610,99 @@ fn has_urls_false_after_hyperlink_overwritten() {
         "has_urls must be false after all hyperlink cells are overwritten"
     );
 }
+
+// ─── window_extra_rows (command-block fold support) ──────────────────────────
+
+#[test]
+fn extra_rows_zero_by_default() {
+    let (mut emu, _rx) = make_emulator();
+    fill_scrollback(&mut emu, 150);
+    let snap = emu.build_snapshot();
+    assert_eq!(
+        snap.window_extra_rows, 0,
+        "no fold request → window_extra_rows must be 0"
+    );
+    assert_eq!(
+        snap.row_offsets.len(),
+        snap.term_height,
+        "default snapshot flattens exactly term_height rows"
+    );
+}
+
+#[test]
+fn extra_rows_extends_flattened_window() {
+    let (mut emu, _rx) = make_emulator();
+    fill_scrollback(&mut emu, 150);
+
+    let baseline = emu.build_snapshot();
+    let base_rows = baseline.row_offsets.len();
+    assert_eq!(base_rows, baseline.term_height);
+
+    // Request 5 extra rows above the live window (live bottom, offset 0).
+    emu.set_gui_scroll_window(0, 5);
+    let extended = emu.build_snapshot();
+    assert_eq!(
+        extended.window_extra_rows, 5,
+        "snapshot must report the requested extra-row count"
+    );
+    assert_eq!(
+        extended.row_offsets.len(),
+        baseline.term_height + 5,
+        "flattened window must carry term_height + extra rows"
+    );
+    assert_eq!(
+        extended.scroll_offset, 0,
+        "extra rows must NOT change the scroll offset (live bottom)"
+    );
+    assert!(
+        extended.show_cursor,
+        "extra rows must NOT hide the cursor (still at live bottom)"
+    );
+}
+
+#[test]
+fn extra_rows_clamped_to_available_scrollback() {
+    let (mut emu, _rx) = make_emulator();
+    fill_scrollback(&mut emu, 150);
+    let max = emu.build_snapshot().max_scroll_offset;
+
+    // Scroll to the very top, then request more extra rows than exist above.
+    emu.set_gui_scroll_window(max, 9999);
+    let snap = emu.build_snapshot();
+    // At the top of scrollback there are no rows above the window, so the
+    // effective extra-row count is clamped to 0.
+    assert_eq!(
+        snap.window_extra_rows, 0,
+        "extra rows must clamp to available scrollback above the window"
+    );
+}
+
+#[test]
+fn extra_rows_forced_zero_on_alternate_screen() {
+    let (mut emu, _rx) = make_emulator();
+    fill_scrollback(&mut emu, 150);
+    // Enter the alternate screen.
+    emu.handle_incoming_data(b"\x1b[?1049h");
+    emu.set_gui_scroll_window(0, 5);
+    let snap = emu.build_snapshot();
+    assert!(snap.is_alternate_screen);
+    assert_eq!(
+        snap.window_extra_rows, 0,
+        "alternate screen has no scrollback → extra rows must be 0"
+    );
+    assert_eq!(snap.row_offsets.len(), snap.term_height);
+}
+
+#[test]
+fn extra_rows_change_invalidates_cache() {
+    let (mut emu, _rx) = make_emulator();
+    fill_scrollback(&mut emu, 150);
+
+    emu.set_gui_scroll_window(0, 0);
+    let _ = emu.build_snapshot();
+    // Changing only the extra-row count must produce a fresh flatten with a
+    // different row count (cache cannot be reused).
+    emu.set_gui_scroll_window(0, 3);
+    let snap = emu.build_snapshot();
+    assert_eq!(snap.row_offsets.len(), snap.term_height + 3);
+}

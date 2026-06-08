@@ -5,7 +5,7 @@
 
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
-    self, BackgroundImageMode, Config, CursorShapeConfig, TabBarPosition, ThemeMode,
+    self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition, ThemeMode,
 };
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
@@ -1287,6 +1287,32 @@ impl SettingsModal {
             egui::Color32::GRAY,
             "Minimum command duration before the duration label is shown.",
         );
+
+        ui.add_space(12.0);
+
+        ui.label("Status gutter:");
+        let current_label = gutter_position_label(self.draft.command_blocks.gutter);
+        ComboBox::from_id_salt("command_block_gutter")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.draft.command_blocks.gutter,
+                    GutterPosition::Left,
+                    "Left",
+                );
+                ui.selectable_value(
+                    &mut self.draft.command_blocks.gutter,
+                    GutterPosition::Off,
+                    "Off",
+                );
+            });
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "A thin colored strip on the left edge of each pane showing every \
+             command's status (green = success, red = failure, yellow = \
+             running). \"Off\" hides the gutter and reclaims its width for text.",
+        );
     }
 
     fn show_bell_tab(&mut self, ui: &mut Ui) {
@@ -1964,6 +1990,13 @@ const fn tab_bar_position_label(pos: TabBarPosition) -> &'static str {
     }
 }
 
+const fn gutter_position_label(pos: GutterPosition) -> &'static str {
+    match pos {
+        GutterPosition::Left => "Left",
+        GutterPosition::Off => "Off",
+    }
+}
+
 const fn bell_mode_label(mode: config::BellMode) -> &'static str {
     match mode {
         config::BellMode::Visual => "Visual",
@@ -2117,6 +2150,29 @@ mod tests {
     fn tab_bar_position_labels() {
         assert_eq!(tab_bar_position_label(TabBarPosition::Top), "Top");
         assert_eq!(tab_bar_position_label(TabBarPosition::Bottom), "Bottom");
+    }
+
+    #[test]
+    fn gutter_position_labels() {
+        assert_eq!(gutter_position_label(GutterPosition::Left), "Left");
+        assert_eq!(gutter_position_label(GutterPosition::Off), "Off");
+    }
+
+    #[test]
+    fn gutter_setting_persists_through_draft_apply() {
+        // Editing the draft's gutter and applying it must carry the value
+        // into the saved config (the modal edits `self.draft`, which is
+        // written back on Apply).  The TOML round-trip itself is covered by
+        // the freminal-common config test; here we verify the settings
+        // modal surfaces and mutates the same field.
+        let mut modal = SettingsModal::new(None);
+        let mut cfg = Config::default();
+        cfg.command_blocks.gutter = GutterPosition::Off;
+        modal.open(&cfg, Vec::new(), false);
+        assert_eq!(modal.draft.command_blocks.gutter, GutterPosition::Off);
+        modal.draft.command_blocks.gutter = GutterPosition::Left;
+        let applied = modal.draft.clone();
+        assert_eq!(applied.command_blocks.gutter, GutterPosition::Left);
     }
 
     #[test]

@@ -3,6 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use crate::buffer_states::command_block::CommandStatus;
+
 /// A complete terminal color palette.
 ///
 /// Contains the 16 ANSI colors (normal + bright), special-purpose colors
@@ -41,6 +43,54 @@ pub struct ThemePalette {
     /// Layout: `[black, red, green, yellow, blue, magenta, cyan, white,
     ///          bright_black, bright_red, ..., bright_white]`
     pub ansi: [(u8, u8, u8); 16],
+
+    /// Command-block gutter color for a successful command (OSC 133 exit
+    /// code 0).  `None` falls back to the normal-green ANSI color
+    /// (`ansi[2]`).  See [`ThemePalette::gutter_color_for`].
+    pub gutter_success: Option<(u8, u8, u8)>,
+
+    /// Command-block gutter color for a failed command (OSC 133 non-zero
+    /// exit code).  `None` falls back to the normal-red ANSI color
+    /// (`ansi[1]`).  See [`ThemePalette::gutter_color_for`].
+    pub gutter_failure: Option<(u8, u8, u8)>,
+
+    /// Command-block gutter color for a running command (OSC 133 A
+    /// received, no D yet).  `None` falls back to the normal-yellow ANSI
+    /// color (`ansi[3]`).  See [`ThemePalette::gutter_color_for`].
+    pub gutter_running: Option<(u8, u8, u8)>,
+}
+
+impl ThemePalette {
+    /// Resolve the gutter color for a command-block [`CommandStatus`].
+    ///
+    /// Returns the theme's configured override when present, otherwise a
+    /// sensible default derived from the palette's normal ANSI colors:
+    ///
+    /// - [`CommandStatus::Success`] -> `gutter_success` or green (`ansi[2]`).
+    /// - [`CommandStatus::Failure`] -> `gutter_failure` or red (`ansi[1]`).
+    /// - [`CommandStatus::Running`] -> `gutter_running` or yellow (`ansi[3]`).
+    /// - [`CommandStatus::Unknown`] -> the normal-white ANSI color
+    ///   (`ansi[7]`); there is no dedicated override for the unknown
+    ///   state because it is not a status a user typically wants to
+    ///   recolor.
+    #[must_use]
+    pub const fn gutter_color_for(&self, status: CommandStatus) -> (u8, u8, u8) {
+        match status {
+            CommandStatus::Success => match self.gutter_success {
+                Some(c) => c,
+                None => self.ansi[2],
+            },
+            CommandStatus::Failure(_) => match self.gutter_failure {
+                Some(c) => c,
+                None => self.ansi[1],
+            },
+            CommandStatus::Running => match self.gutter_running {
+                Some(c) => c,
+                None => self.ansi[3],
+            },
+            CommandStatus::Unknown => self.ansi[7],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +128,9 @@ pub const CATPPUCCIN_MOCHA: ThemePalette = ThemePalette {
         (0x6b, 0xd7, 0xca), // 14 BrightCyan
         (0xba, 0xc2, 0xde), // 15 BrightWhite (Subtext1)
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -115,6 +168,9 @@ pub const CATPPUCCIN_MACCHIATO: ThemePalette = ThemePalette {
         (0x63, 0xcb, 0xbe), // 14 BrightCyan
         (0xb8, 0xc0, 0xe0), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -152,6 +208,9 @@ pub const CATPPUCCIN_FRAPPE: ThemePalette = ThemePalette {
         (0x5f, 0xbf, 0xb4), // 14 BrightCyan
         (0xb5, 0xbf, 0xe2), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -189,6 +248,9 @@ pub const CATPPUCCIN_LATTE: ThemePalette = ThemePalette {
         (0x14, 0x8f, 0x93), // 14 BrightCyan
         (0xbc, 0xc0, 0xcc), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +288,9 @@ pub const DRACULA: ThemePalette = ThemePalette {
         (0xa4, 0xff, 0xff), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -263,6 +328,9 @@ pub const NORD: ThemePalette = ThemePalette {
         (0x8f, 0xbc, 0xbb), // 14 BrightCyan
         (0xec, 0xef, 0xf4), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -300,6 +368,9 @@ pub const SOLARIZED_DARK: ThemePalette = ThemePalette {
         (0x93, 0xa1, 0xa1), // 14 BrightCyan
         (0xfd, 0xf6, 0xe3), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -337,6 +408,9 @@ pub const SOLARIZED_LIGHT: ThemePalette = ThemePalette {
         (0x93, 0xa1, 0xa1), // 14 BrightCyan
         (0xfd, 0xf6, 0xe3), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -374,6 +448,9 @@ pub const GRUVBOX_DARK: ThemePalette = ThemePalette {
         (0x8e, 0xc0, 0x7c), // 14 BrightCyan
         (0xeb, 0xdb, 0xb2), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +488,9 @@ pub const GRUVBOX_LIGHT: ThemePalette = ThemePalette {
         (0x42, 0x7b, 0x58), // 14 BrightCyan
         (0x3c, 0x38, 0x36), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -448,6 +528,9 @@ pub const ONE_DARK: ThemePalette = ThemePalette {
         (0x56, 0xb6, 0xc2), // 14 BrightCyan
         (0xc8, 0xcc, 0xd4), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -485,6 +568,9 @@ pub const ONE_LIGHT: ThemePalette = ThemePalette {
         (0x01, 0x84, 0xbc), // 14 BrightCyan
         (0xfa, 0xfa, 0xfa), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -522,6 +608,9 @@ pub const TOKYO_NIGHT: ThemePalette = ThemePalette {
         (0x7d, 0xcf, 0xff), // 14 BrightCyan
         (0xc0, 0xca, 0xf5), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -559,6 +648,9 @@ pub const TOKYO_NIGHT_STORM: ThemePalette = ThemePalette {
         (0x7d, 0xcf, 0xff), // 14 BrightCyan
         (0xc0, 0xca, 0xf5), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -596,6 +688,9 @@ pub const KANAGAWA: ThemePalette = ThemePalette {
         (0x7a, 0xa8, 0x9f), // 14 BrightCyan
         (0xdc, 0xd7, 0xba), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -633,6 +728,9 @@ pub const ROSE_PINE: ThemePalette = ThemePalette {
         (0xeb, 0xbc, 0xba), // 14 BrightCyan
         (0xe0, 0xde, 0xf4), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -670,6 +768,9 @@ pub const ROSE_PINE_MOON: ThemePalette = ThemePalette {
         (0xea, 0x9a, 0x97), // 14 BrightCyan
         (0xe0, 0xde, 0xf4), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -707,6 +808,9 @@ pub const ROSE_PINE_DAWN: ThemePalette = ThemePalette {
         (0xd7, 0x82, 0x7e), // 14 BrightCyan
         (0x57, 0x52, 0x79), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -744,6 +848,9 @@ pub const MONOKAI_PRO: ThemePalette = ThemePalette {
         (0x78, 0xdc, 0xe8), // 14 BrightCyan
         (0xfc, 0xfc, 0xfa), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -781,6 +888,9 @@ pub const AYU_DARK: ThemePalette = ThemePalette {
         (0x95, 0xe6, 0xcb), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -818,6 +928,9 @@ pub const AYU_LIGHT: ThemePalette = ThemePalette {
         (0x4c, 0xbf, 0x99), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -855,6 +968,9 @@ pub const EVERFOREST_DARK: ThemePalette = ThemePalette {
         (0x83, 0xc0, 0x92), // 14 BrightCyan
         (0xd3, 0xc6, 0xaa), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -892,6 +1008,9 @@ pub const EVERFOREST_LIGHT: ThemePalette = ThemePalette {
         (0x35, 0xa7, 0x7c), // 14 BrightCyan
         (0xdf, 0xdd, 0xc8), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -929,6 +1048,9 @@ pub const MATERIAL_DARK: ThemePalette = ThemePalette {
         (0x90, 0xe7, 0xd4), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -966,6 +1088,9 @@ pub const XTERM_DEFAULT: ThemePalette = ThemePalette {
         (0x00, 0xff, 0xff), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1127,9 @@ pub const WEZTERM_DEFAULT: ThemePalette = ThemePalette {
         (0x55, 0xff, 0xff), // 14 BrightCyan
         (0xff, 0xff, 0xff), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1166,9 @@ pub const GHOSTTY_DEFAULT: ThemePalette = ThemePalette {
         (0x70, 0xc0, 0xb1), // 14 BrightCyan
         (0xea, 0xea, 0xea), // 15 BrightWhite
     ],
+    gutter_success: None,
+    gutter_failure: None,
+    gutter_running: None,
 };
 
 /// The default theme used when no theme is configured or the configured slug
@@ -1258,5 +1389,49 @@ mod tests {
                 window[1].name,
             );
         }
+    }
+
+    #[test]
+    fn all_themes_default_gutter_overrides_to_none() {
+        // No shipped theme customizes the gutter colors yet; they all
+        // rely on the ANSI-derived fallback.
+        for theme in all_themes() {
+            assert_eq!(theme.gutter_success, None, "theme {}", theme.slug);
+            assert_eq!(theme.gutter_failure, None, "theme {}", theme.slug);
+            assert_eq!(theme.gutter_running, None, "theme {}", theme.slug);
+        }
+    }
+
+    #[test]
+    fn gutter_color_for_falls_back_to_ansi_when_unset() {
+        let t = CATPPUCCIN_MOCHA;
+        assert_eq!(t.gutter_color_for(CommandStatus::Success), t.ansi[2]);
+        assert_eq!(t.gutter_color_for(CommandStatus::Failure(1)), t.ansi[1]);
+        assert_eq!(t.gutter_color_for(CommandStatus::Running), t.ansi[3]);
+        // Unknown has no override; it always uses normal white (ansi[7]).
+        assert_eq!(t.gutter_color_for(CommandStatus::Unknown), t.ansi[7]);
+    }
+
+    #[test]
+    fn gutter_color_for_failure_ignores_exit_code_value() {
+        let t = CATPPUCCIN_MOCHA;
+        // The exit code carried by Failure does not change the color.
+        assert_eq!(
+            t.gutter_color_for(CommandStatus::Failure(1)),
+            t.gutter_color_for(CommandStatus::Failure(137)),
+        );
+    }
+
+    #[test]
+    fn gutter_color_for_prefers_override_when_set() {
+        let mut t = CATPPUCCIN_MOCHA;
+        t.gutter_success = Some((1, 2, 3));
+        t.gutter_failure = Some((4, 5, 6));
+        t.gutter_running = Some((7, 8, 9));
+        assert_eq!(t.gutter_color_for(CommandStatus::Success), (1, 2, 3));
+        assert_eq!(t.gutter_color_for(CommandStatus::Failure(2)), (4, 5, 6));
+        assert_eq!(t.gutter_color_for(CommandStatus::Running), (7, 8, 9));
+        // Unknown is unaffected by overrides.
+        assert_eq!(t.gutter_color_for(CommandStatus::Unknown), t.ansi[7]);
     }
 }

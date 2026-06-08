@@ -297,7 +297,11 @@ pub fn scroll_to_match_and_send(
     input_tx: &Sender<InputEvent>,
 ) {
     if let Some(offset) = scroll_to_match(view_state, snap)
-        && let Err(e) = input_tx.send(InputEvent::ScrollOffset(offset))
+        && let Err(e) = input_tx.send(crate::gui::terminal::input::scroll_event(
+            snap,
+            &view_state.folded_blocks,
+            offset,
+        ))
     {
         error!("Failed to send scroll offset to PTY: {e}");
     }

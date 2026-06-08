@@ -99,10 +99,23 @@ pub struct CommandBlock {
     /// CWD captured from OSC 7 at the time of prompt start.
     pub cwd: Option<String>,
 
-    /// Wall-clock timestamp of prompt start.
+    /// Wall-clock timestamp of prompt start (`OSC 133 A`).
+    ///
+    /// This is when the prompt was drawn, NOT when the command began
+    /// executing — the interval between this and [`Self::executed_at`] is the
+    /// time the user spent typing the command (and reading the previous
+    /// output).  Do not use this for command-duration display; use
+    /// [`Self::duration`], which measures from `executed_at`.
     pub started_at: SystemTime,
 
-    /// Wall-clock timestamp of command-finished, if known.
+    /// Wall-clock timestamp of command execution start (`OSC 133 C`), if
+    /// known.  `None` until `C` is received (or if the shell omits it).
+    ///
+    /// This is the anchor for command duration: the user's typing/thinking
+    /// time at the prompt (`started_at` -> `executed_at`) is excluded.
+    pub executed_at: Option<SystemTime>,
+
+    /// Wall-clock timestamp of command-finished (`OSC 133 D`), if known.
     pub finished_at: Option<SystemTime>,
 }
 
@@ -122,6 +135,7 @@ impl CommandBlock {
             exit_code: None,
             cwd,
             started_at: SystemTime::now(),
+            executed_at: None,
             finished_at: None,
         }
     }
@@ -142,12 +156,21 @@ impl CommandBlock {
         }
     }
 
-    /// Duration if finished; `None` while still running or if `SystemTime`
-    /// arithmetic fails (clock skew).
+    /// Command execution duration if finished; `None` while still running or
+    /// if `SystemTime` arithmetic fails (clock skew).
+    ///
+    /// Measured from [`Self::executed_at`] (`OSC 133 C`, command-execution
+    /// start) to [`Self::finished_at`] (`OSC 133 D`).  This deliberately
+    /// excludes the time the user spent typing the command at the prompt
+    /// (`started_at` -> `executed_at`); measuring from `started_at` would
+    /// report multi-second durations for instant commands whenever the user
+    /// paused at the prompt.  Falls back to `started_at` only when
+    /// `executed_at` is unknown (no `C` marker was received).
     #[must_use]
     pub fn duration(&self) -> Option<Duration> {
         let finished = self.finished_at?;
-        finished.duration_since(self.started_at).ok()
+        let anchor = self.executed_at.unwrap_or(self.started_at);
+        finished.duration_since(anchor).ok()
     }
 
     /// Row range covered by this block: `(start, end)`.  `end` is `None`
@@ -316,6 +339,49 @@ mod tests {
         assert!(
             block.duration().is_none(),
             "clock skew should produce None duration"
+        );
+    }
+
+    #[test]
+    fn duration_measures_from_executed_at_not_started_at() {
+        // Regression for 73.7: an instant command after a long pause at the
+        // prompt must report only the execution time (C->D), not the time
+        // the user spent typing/reading (A->C->D).
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        // User sat at the prompt for 30 s before the command executed...
+        block.executed_at = Some(block.started_at + Duration::from_secs(30));
+        // ...and the command itself took 5 ms.
+        block.finished_at =
+            Some(block.started_at + Duration::from_secs(30) + Duration::from_millis(5));
+        match block.duration() {
+            Some(dur) => assert_eq!(
+                dur,
+                Duration::from_millis(5),
+                "duration must be C->D (5ms), not A->D (30.005s)"
+            ),
+            None => panic!("expected Some duration"),
+        }
+    }
+
+    #[test]
+    fn duration_falls_back_to_started_at_when_executed_at_missing() {
+        // When no `OSC 133 C` was received (executed_at is None), fall back
+        // to started_at so a duration is still reported.
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        assert!(block.executed_at.is_none());
+        block.finished_at = Some(block.started_at + Duration::from_millis(250));
+        assert_eq!(block.duration(), Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn duration_clock_skew_against_executed_at_is_none() {
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        block.executed_at = Some(block.started_at + Duration::from_secs(2));
+        // finished_at before executed_at — skew relative to the new anchor.
+        block.finished_at = Some(block.started_at + Duration::from_secs(1));
+        assert!(
+            block.duration().is_none(),
+            "finished before executed should produce None"
         );
     }
 

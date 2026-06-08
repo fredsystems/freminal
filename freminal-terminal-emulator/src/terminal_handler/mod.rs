@@ -886,6 +886,14 @@ impl TerminalHandler {
         self.buffer.any_visible_dirty(scroll_offset)
     }
 
+    /// Like [`Self::any_visible_dirty`] but checks the window extended upward
+    /// by `extra_rows` (command-block fold support).
+    #[must_use]
+    pub fn any_visible_dirty_extended(&self, scroll_offset: usize, extra_rows: usize) -> bool {
+        self.buffer
+            .any_visible_dirty_extended(scroll_offset, extra_rows)
+    }
+
     /// Extract image placements for all cells in the visible window.
     ///
     /// Returns a flat `Vec` of `Option<ImagePlacement>`, one entry per cell
@@ -896,6 +904,19 @@ impl TerminalHandler {
         scroll_offset: usize,
     ) -> Vec<Option<freminal_buffer::image_store::ImagePlacement>> {
         self.buffer.visible_image_placements(scroll_offset)
+    }
+
+    /// Like [`Self::visible_image_placements`] but extends the window upward by
+    /// `extra_rows` (command-block fold support). The returned vector matches
+    /// the extended `visible_chars` layout.
+    #[must_use]
+    pub fn visible_image_placements_extended(
+        &self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> Vec<Option<freminal_buffer::image_store::ImagePlacement>> {
+        self.buffer
+            .visible_image_placements_extended(scroll_offset, extra_rows)
     }
 
     /// Returns `true` if any cell in the visible window carries an image placement.

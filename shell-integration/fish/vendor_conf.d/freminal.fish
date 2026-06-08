@@ -1,4 +1,4 @@
-# freminal-shell-integration v2
+# freminal-shell-integration v4
 #
 # Freminal fish integration — installed under `vendor_conf.d/` and loaded
 # automatically by fish when Freminal prepends our resources directory to

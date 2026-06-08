@@ -158,10 +158,24 @@ pub struct TerminalEmulator {
     /// Updated when an `InputEvent::ScrollOffset(n)` is received.  Reset to 0
     /// when new PTY output arrives (auto-scroll to bottom).
     gui_scroll_offset: usize,
+    /// Number of extra rows the GUI wants flattened **above** the normal
+    /// visible window (command-block fold support).
+    ///
+    /// Updated alongside `gui_scroll_offset` when an
+    /// `InputEvent::ScrollOffset` is received. When the GUI has folds active
+    /// in the visible window, it requests extra rows so the renderer can fill
+    /// the screen after collapsing folds (keeping the live bottom pinned).
+    /// `0` for the common case (no folds). Reset to 0 on new PTY output along
+    /// with the scroll offset.
+    gui_extra_rows: usize,
     /// The scroll offset used for the previous snapshot.  When this differs
     /// from the current `gui_scroll_offset`, the visible window has moved and
     /// the cached snapshot must be invalidated.
     previous_scroll_offset: usize,
+    /// The `gui_extra_rows` value used for the previous snapshot. When this
+    /// differs from the current value the flatten window grew/shrank and the
+    /// cached snapshot must be invalidated.
+    previous_extra_rows: usize,
     /// The terminal dimensions (cols, rows) at the time of the previous
     /// snapshot.  When these change (e.g. after a pane resize), the cached
     /// snapshot must be invalidated — it was built for a different grid size.
@@ -198,7 +212,9 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
+            gui_extra_rows: 0,
             previous_scroll_offset: 0,
+            previous_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         }
@@ -225,7 +241,9 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
+            gui_extra_rows: 0,
             previous_scroll_offset: 0,
+            previous_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -303,7 +321,9 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
+            gui_extra_rows: 0,
             previous_scroll_offset: 0,
+            previous_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -460,15 +480,33 @@ impl TerminalEmulator {
     /// Called by the PTY consumer thread when it receives
     /// `InputEvent::ScrollOffset(n)`.  The value is clamped to
     /// `max_scroll_offset()` during the next `build_snapshot()` call.
+    ///
+    /// Leaves `gui_extra_rows` unchanged; use
+    /// [`Self::set_gui_scroll_window`] to update both at once.
     pub const fn set_gui_scroll_offset(&mut self, offset: usize) {
         self.gui_scroll_offset = offset;
     }
 
-    /// Reset the scroll offset to 0 (live bottom).
+    /// Update the GUI-requested scroll offset together with the number of
+    /// extra rows to flatten above the visible window (command-block fold
+    /// support).
+    ///
+    /// Called by the PTY consumer thread when it receives an
+    /// `InputEvent::ScrollOffset`. Both values are clamped during the next
+    /// `build_snapshot()` call (`offset` to `max_scroll_offset()`, and the
+    /// effective `extra_rows` to the available scrollback above the window).
+    pub const fn set_gui_scroll_window(&mut self, offset: usize, extra_rows: usize) {
+        self.gui_scroll_offset = offset;
+        self.gui_extra_rows = extra_rows;
+    }
+
+    /// Reset the scroll offset to 0 (live bottom) and clear any extra-row
+    /// fold request.
     ///
     /// Called when new PTY data arrives while the user is scrolled back.
     pub const fn reset_scroll_offset(&mut self) {
         self.gui_scroll_offset = 0;
+        self.gui_extra_rows = 0;
     }
 
     /// Write to the terminal
@@ -536,6 +574,8 @@ impl TerminalEmulator {
         let (term_width, term_height) = self.internal.handler.win_size();
         let is_alternate_screen = self.internal.handler.is_alternate_screen();
 
+        let total_rows = self.internal.handler.buffer().rows().len();
+
         // On the alternate screen scrollback is meaningless — clamp to 0.
         let (scroll_offset, max_scroll_offset) = if is_alternate_screen {
             (0, 0)
@@ -544,6 +584,25 @@ impl TerminalEmulator {
             // (e.g. from a previous buffer state) doesn't panic.
             let max = self.internal.handler.buffer().max_scroll_offset();
             (self.gui_scroll_offset.min(max), max)
+        };
+
+        // ── Extra rows above the visible window (command-block folds) ────────
+        //
+        // The GUI requests `gui_extra_rows` extra rows flattened ABOVE the
+        // normal visible window so it can fill the screen after collapsing
+        // folded command blocks (keeping the live bottom pinned). The
+        // effective count is clamped to the rows actually available above the
+        // window (`visible_window_start`), and forced to 0 on the alternate
+        // screen (no scrollback). This never moves the live bottom — only the
+        // top of the flatten window — so `scroll_offset`, `show_cursor`, and
+        // `scroll_changed` are all unaffected by folding.
+        let extra_rows = if is_alternate_screen {
+            0
+        } else {
+            let available_above = total_rows
+                .saturating_sub(term_height)
+                .saturating_sub(scroll_offset);
+            self.gui_extra_rows.min(available_above)
         };
 
         // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
@@ -565,6 +624,16 @@ impl TerminalEmulator {
             self.previous_scroll_offset = scroll_offset;
         }
 
+        // ── Invalidate the snap cache when the extra-row count changes ───────
+        //
+        // A fold/unfold changes how many rows are flattened above the window;
+        // the cached flat content covers a different row span and must not be
+        // reused.
+        if extra_rows != self.previous_extra_rows {
+            self.previous_visible_snap = None;
+            self.previous_extra_rows = extra_rows;
+        }
+
         // ── Invalidate the snap cache when terminal dimensions change ────
         //
         // After a resize the grid has a different number of columns and/or
@@ -579,15 +648,18 @@ impl TerminalEmulator {
         }
 
         // ── Determine whether any visible row changed since last snapshot ────
-        let any_dirty = self.internal.handler.any_visible_dirty(scroll_offset);
+        let any_dirty = self
+            .internal
+            .handler
+            .any_visible_dirty_extended(scroll_offset, extra_rows);
 
         // ── Produce (visible_chars, visible_tags, content_changed) ───────
         //
-        // Only flatten the *visible* rows — scrollback is not part of the
-        // snapshot.  The previous code called `data_and_format_data_for_gui`
-        // which also flattened scrollback, then discarded the result.
+        // Only flatten the *visible* rows (plus any fold-requested extra rows
+        // above them) — scrollback below the window is not part of the
+        // snapshot.
         let (visible_chars, visible_tags, row_offsets, url_tag_indices, content_changed) =
-            self.flatten_visible(any_dirty, scroll_offset);
+            self.flatten_visible(any_dirty, scroll_offset, extra_rows);
 
         // ── Remaining cheap reads ────────────────────────────────────────────
         self.apply_sync_updates_timeout();
@@ -637,23 +709,23 @@ impl TerminalEmulator {
         let theme = self.internal.handler.theme();
 
         // ── Inline image data ────────────────────────────────────────────────
-        let (images, visible_image_placements) = self.collect_visible_images(scroll_offset);
+        let (images, visible_image_placements) =
+            self.collect_visible_images(scroll_offset, extra_rows);
 
         // ── Per-row line-width attributes (DECDWL / DECDHL) ──────────────────
         let visible_line_widths = Arc::new(
             self.internal
                 .handler
                 .buffer()
-                .visible_line_widths(scroll_offset),
+                .visible_line_widths_extended(scroll_offset, extra_rows),
         );
-
-        let total_rows = self.internal.handler.buffer().rows().len();
 
         TerminalSnapshot {
             visible_chars,
             visible_tags,
             scroll_offset,
             max_scroll_offset,
+            window_extra_rows: extra_rows,
             height: term_height,
             cursor_pos,
             show_cursor,
@@ -704,14 +776,19 @@ impl TerminalEmulator {
     /// The `row_offsets` contains per-row flat-index offsets into the chars vec
     /// (one entry per visible row).  `url_tag_indices` contains the indices of
     /// tags in `tags` that carry a URL.
-    fn flatten_visible(&mut self, any_dirty: bool, scroll_offset: usize) -> FlattenResult {
+    fn flatten_visible(
+        &mut self,
+        any_dirty: bool,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> FlattenResult {
         if any_dirty {
             // At least one visible row is dirty — re-flatten via the cache.
             let (vis_chars, vis_tags, vis_row_offsets, vis_url_indices) = self
                 .internal
                 .handler
                 .buffer_mut()
-                .visible_as_tchars_and_tags(scroll_offset);
+                .visible_as_tchars_and_tags_extended(scroll_offset, extra_rows);
             let vc = Arc::new(vis_chars);
             let vt = Arc::new(vis_tags);
             let vr = Arc::new(vis_row_offsets);
@@ -751,7 +828,7 @@ impl TerminalEmulator {
                 .internal
                 .handler
                 .buffer_mut()
-                .visible_as_tchars_and_tags(scroll_offset);
+                .visible_as_tchars_and_tags_extended(scroll_offset, extra_rows);
             let vc = Arc::new(vis_chars);
             let vt = Arc::new(vis_tags);
             let vr = Arc::new(vis_row_offsets);
@@ -825,7 +902,7 @@ impl TerminalEmulator {
     /// Returns `(images, placements)` — both wrapped in `Arc` for cheap
     /// snapshot cloning.  The common case (no images) returns empty containers
     /// with zero allocation.
-    fn collect_visible_images(&self, scroll_offset: usize) -> VisibleImages {
+    fn collect_visible_images(&self, scroll_offset: usize, extra_rows: usize) -> VisibleImages {
         if !self.internal.handler.has_visible_images(scroll_offset) {
             return (Arc::new(HashMap::new()), Arc::new(Vec::new()));
         }
@@ -833,7 +910,7 @@ impl TerminalEmulator {
         let placements = self
             .internal
             .handler
-            .visible_image_placements(scroll_offset);
+            .visible_image_placements_extended(scroll_offset, extra_rows);
 
         // Collect only the images actually referenced by a visible cell so the
         // snapshot doesn't grow without bound.
