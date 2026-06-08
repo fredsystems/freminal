@@ -1938,7 +1938,7 @@ warnings`, `cargo machete`, `cargo fmt --check` all clean.
   `ansi[8]` (bright-black/gray) if a grayer neutral is preferred —
   deferred pending user preference.
 
-#### 73.3 — Gutter click and hover
+#### 73.3 — Gutter click and hover ✅
 
 **Scope:** `freminal/src/gui/mouse.rs`, `terminal/widget.rs`.
 
@@ -1952,6 +1952,61 @@ warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 **Verification:** Integration test using egui's test harness for mouse
 events.
+
+**Completion notes (2026-06-08):**
+
+- **Click interception.** A gutter pre-check in `widget.rs::show()` (modeled
+  on the existing scrollbar pre-check) intercepts a primary press whose
+  position falls in the inset region (`pos.x ∈ [pane.min.x,
+terminal_rect.min.x)`) before `write_input_to_terminal`. Gutter positions
+  are already outside `terminal_rect`, so they would otherwise be dropped
+  entirely (no fold, no focus). The press maps `y → rendered row → buffer
+  row → block` via a fresh fold-aware `RowMap`
+  (`gutter_block_id_at_pos`). A finished block toggles its fold
+  (`view_state.toggle_fold`); a running block is a no-op fold. Either way
+  the pane is focused (`left_mouse_button_pressed`), since the gutter is
+  outside the rect that normally sets that flag.
+- **Foldability guard** factored into the pure, tested
+  `command_blocks::block_is_foldable` (finished blocks only), mirroring the
+  `FoldPreviousCommand` "completed block" guard.
+- **Hover hit-test** shares `command_blocks::gutter_block_for_row`
+  (a `gutter_status_for_row` refactor that returns the block, not just the
+  status). The gutter trigger is added _alongside_ the existing 72.12
+  cell-hover trigger; 73.5 retires the cell trigger.
+- **Hit zone** is the whole inset (4px strip + 4px padding), a more
+  forgiving target than the 4px strip alone.
+- **Two-part hover-live fix (the subtle one).** Getting the gutter hover
+  tint to appear/clear on bare pointer motion required two independent
+  fixes, both necessary:
+  1. **Waking a frame.** The windowing cursor-move fast path
+     (`freminal-windowing/event_loop.rs`, Task 65/68 idle-CPU
+     optimization) only schedules a repaint when egui reports `repaint`,
+     i.e. when an egui-tracked interactive region's hover state changes.
+     The terminal hover tint is painted by our own GL pass, not an egui
+     widget, so a bare move never woke a frame. Registering the gutter as
+     a `Sense::click()` region makes egui report `repaint` on enter/leave,
+     waking the frame (and giving the hand cursor).
+  2. **Rebuilding the VBO.** The hover tint is baked into the background
+     instance buffer, which was only rebuilt on
+     content/selection/search/blink changes. A hover-only change reused
+     stale vertices and showed nothing. Added a `hover_changed` term
+     (tracked via `cache.previous_command_block_hover_rows`) to both the
+     cursor-only fast-path exclusion and the full-rebuild trigger. The
+     hover-row computation was hoisted into
+     `compute_command_block_hover_rows` and run _before_ the rebuild
+     decision so `hover_changed` is known in time.
+- **Mouse-reporting safety.** Gutter positions are outside `terminal_rect`,
+  so `terminal_rect.contains` already excludes them from terminal mouse-
+  event forwarding and selection; DEC mouse modes never see gutter
+  hover/clicks.
+- **Tests:** added `gutter_block_for_row` and `block_is_foldable` unit
+  tests (finished foldable, running not, containment, returns block). No
+  egui-harness integration test was added — the repo has no egui_kittest
+  harness; the click/hover logic is covered by the pure helper tests, and
+  the wiring was verified manually with debug instrumentation across the
+  appear/track/clear lifecycle.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 #### 73.4 — Settings UI: gutter toggle
 

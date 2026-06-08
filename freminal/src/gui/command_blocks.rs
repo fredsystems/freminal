@@ -22,34 +22,60 @@
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use std::time::Duration;
 
-/// Determine the [`CommandStatus`] of the command block containing the
-/// given buffer-absolute `row`, for gutter coloring.
+/// Find the command block containing the given buffer-absolute `row`, for
+/// gutter coloring, hover, and click hit-testing.
 ///
 /// A block spans from its `prompt_start_row` to its `end_row` (inclusive).
 /// A still-running block (no `end_row`) is treated as extending to
 /// `running_extent` — the last visible buffer row — so its gutter bar
 /// fills down to the live prompt.  Returns `None` for rows not covered by
-/// any block (those render an empty gutter).
+/// any block.
 ///
 /// When blocks overlap (which should not happen for well-formed OSC 133
 /// streams, but is not structurally prevented), the **last** matching
 /// block in iteration order wins, matching the most-recently-emitted
 /// command.
 #[must_use]
-pub fn gutter_status_for_row(
+pub fn gutter_block_for_row(
     blocks: &[CommandBlock],
     row: usize,
     running_extent: usize,
-) -> Option<CommandStatus> {
+) -> Option<&CommandBlock> {
     let mut found = None;
     for block in blocks {
         let start = block.prompt_start_row;
         let end = block.end_row.unwrap_or(running_extent);
         if row >= start && row <= end {
-            found = Some(block.status());
+            found = Some(block);
         }
     }
     found
+}
+
+/// Determine the [`CommandStatus`] of the command block containing the
+/// given buffer-absolute `row`, for gutter coloring.
+///
+/// Thin wrapper over [`gutter_block_for_row`]; see that function for the
+/// row-span and overlap semantics.
+#[must_use]
+pub fn gutter_status_for_row(
+    blocks: &[CommandBlock],
+    row: usize,
+    running_extent: usize,
+) -> Option<CommandStatus> {
+    gutter_block_for_row(blocks, row, running_extent).map(CommandBlock::status)
+}
+
+/// Whether a command block can be folded.
+///
+/// Only finished blocks (those with an `end_row`) are foldable; a running
+/// block has no defined output range to collapse, so a gutter click on it
+/// is a no-op (it still focuses the pane).  This mirrors the
+/// `command_start_row.is_some() && end_row.is_some()` guard used by the
+/// `FoldPreviousCommand` keybinding.
+#[must_use]
+pub const fn block_is_foldable(block: &CommandBlock) -> bool {
+    block.end_row.is_some()
 }
 
 /// Decide whether command-block visual overlays (hover-row tint and the
@@ -119,6 +145,7 @@ pub fn format_command_duration(d: Duration) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -357,5 +384,30 @@ mod tests {
             gutter_status_for_row(&blocks, 1, 100),
             Some(CommandStatus::Success)
         );
+    }
+
+    #[test]
+    fn gutter_block_for_row_returns_the_block_not_just_status() {
+        let blocks = [finished_block(2, 5, Some(7))];
+        let hit = gutter_block_for_row(&blocks, 3, 100).expect("row 3 is inside the block");
+        assert_eq!(hit.prompt_start_row, 2);
+        assert_eq!(hit.exit_code, Some(7));
+        assert!(gutter_block_for_row(&blocks, 6, 100).is_none());
+    }
+
+    // ── block_is_foldable ────────────────────────────────────────────────
+
+    #[test]
+    fn finished_block_is_foldable() {
+        assert!(block_is_foldable(&finished_block(0, 3, Some(0))));
+        assert!(block_is_foldable(&finished_block(0, 3, Some(1))));
+        assert!(block_is_foldable(&finished_block(0, 3, None)));
+    }
+
+    #[test]
+    fn running_block_is_not_foldable() {
+        // A running command has no end_row; a gutter click on it is a
+        // no-op fold (it only focuses the pane).
+        assert!(!block_is_foldable(&running_block(4)));
     }
 }

@@ -114,6 +114,150 @@ pub fn hit_test_placeholder(
         .map(|(_, id)| *id)
 }
 
+/// Resolve a pointer position in the command-block gutter to the
+/// `CommandBlockId` of the block whose rendered row range the pointer is
+/// over, accounting for folds.
+///
+/// `pos` is a logical-point position; only its `y` is used (the gutter
+/// spans the full pane height to the left of `terminal_rect`).  Returns
+/// `None` when the row maps to a fold placeholder for no block, or to a
+/// row not covered by any block.  Mirrors the fold-aware row mapping the
+/// renderer uses so the hit-test agrees with what is painted.
+fn gutter_block_id_at_pos(
+    pos: Pos2,
+    snap: &TerminalSnapshot,
+    view_state: &ViewState,
+    terminal_rect: Rect,
+    logical_cell_h: f32,
+) -> Option<freminal_common::buffer_states::command_block::CommandBlockId> {
+    if logical_cell_h <= 0.0 {
+        return None;
+    }
+    // Rendered row under the pointer (relative to the terminal area top).
+    let rendered_row = ((pos.y - terminal_rect.min.y) / logical_cell_h)
+        .floor()
+        .approx_as::<usize>()
+        .ok()?;
+
+    // Build the same fold-aware row map the renderer uses this frame.
+    let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, &view_state.folded_blocks);
+    let win_start = super::coords::visible_window_start(snap);
+    let fold_ranges =
+        crate::gui::folding::translate_ranges_to_snapshot(&raw_fold_ranges, win_start);
+    let row_map = RowMap::new(snap.term_height, &fold_ranges);
+
+    match row_map.rendered_to_snapshot(rendered_row) {
+        // A live snapshot row → containment hit-test against the blocks.
+        Some(RenderedRow::Snapshot(screen_row)) => {
+            let buffer_row = win_start + screen_row;
+            let running_extent = win_start + snap.term_height.saturating_sub(1);
+            crate::gui::command_blocks::gutter_block_for_row(
+                &snap.command_blocks,
+                buffer_row,
+                running_extent,
+            )
+            .map(|b| b.id)
+        }
+        // A fold placeholder → the folded block itself.
+        Some(RenderedRow::Placeholder(range)) => Some(range.command_block_id),
+        None => None,
+    }
+}
+
+/// Compute the rendered-row span (inclusive) of the command block the pointer
+/// is currently hovering, for the hover-tint overlay.
+///
+/// Two trigger surfaces feed this: hovering a cell inside the terminal area
+/// (72.12) and hovering the command-block gutter strip (73.3).  Returns `None`
+/// when the feature is off, the alternate screen is active, there are no
+/// blocks, the pointer is elsewhere, or the hovered block is entirely inside a
+/// fold.  The result must be recomputed before the vertex-rebuild decision so a
+/// hover-only change can invalidate the cached background instances.
+#[allow(clippy::too_many_arguments)]
+fn compute_command_block_hover_rows(
+    snap: &TerminalSnapshot,
+    view_state: &ViewState,
+    command_blocks_config: &freminal_common::config::CommandBlocksConfig,
+    row_map: &RowMap,
+    win_start: usize,
+    pane_rect: Rect,
+    terminal_rect: Rect,
+    gutter_inset: f32,
+    logical_cell_w: f32,
+    logical_cell_h: f32,
+) -> Option<(usize, usize)> {
+    if !crate::gui::command_blocks::command_block_overlays_visible(
+        command_blocks_config.enabled,
+        snap.is_alternate_screen,
+        !snap.command_blocks.is_empty(),
+    ) {
+        return None;
+    }
+    if logical_cell_h <= 0.0 {
+        return None;
+    }
+
+    // Resolve the hovered buffer row from whichever surface the pointer is
+    // over: the gutter (left of the terminal rect) or a terminal cell.
+    let mouse_position = view_state.mouse_position?;
+    let hovered_buffer_row: Option<usize> = if gutter_inset > 0.0
+        && mouse_position.x >= pane_rect.min.x
+        && mouse_position.x < terminal_rect.min.x
+        && mouse_position.y >= terminal_rect.min.y
+        && mouse_position.y < terminal_rect.max.y
+    {
+        // Gutter hover: map y → rendered row → buffer row (live rows only; a
+        // placeholder resolves to the folded block via its first row).
+        let rendered_row = ((mouse_position.y - terminal_rect.min.y) / logical_cell_h)
+            .floor()
+            .approx_as::<usize>()
+            .ok()?;
+        match row_map.rendered_to_snapshot(rendered_row) {
+            Some(RenderedRow::Snapshot(r)) => Some(win_start + r),
+            Some(RenderedRow::Placeholder(range)) => Some(win_start + range.start_row),
+            None => None,
+        }
+    } else if terminal_rect.contains(mouse_position) {
+        // Terminal-cell hover.
+        let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
+            mouse_position,
+            (logical_cell_w, logical_cell_h),
+            terminal_rect.min,
+        );
+        match row_map.rendered_to_snapshot(rendered_row) {
+            Some(RenderedRow::Snapshot(r)) => Some(win_start + r),
+            Some(RenderedRow::Placeholder(_)) | None => None,
+        }
+    } else {
+        None
+    };
+
+    let buffer_row = hovered_buffer_row?;
+    // Find the block containing this absolute row.  A running block (no
+    // `end_row`) extends to the last visible row so its gutter is hoverable.
+    let running_extent = win_start + snap.term_height.saturating_sub(1);
+    let block = crate::gui::command_blocks::gutter_block_for_row(
+        &snap.command_blocks,
+        buffer_row,
+        running_extent,
+    )?;
+    let start = block.command_start_row?;
+    let end = block.end_row.unwrap_or(running_extent);
+    // Clip [start, end] to the visible window, then convert each endpoint into
+    // rendered-row space.  If the entire block sits inside a fold, None.
+    let win_end = win_start + snap.term_height;
+    if end < win_start || start >= win_end {
+        return None;
+    }
+    let s_screen = start.saturating_sub(win_start);
+    let e_screen = end
+        .saturating_sub(win_start)
+        .min(snap.term_height.saturating_sub(1));
+    let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
+    let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
+    Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
+}
+
 ///
 /// The scrollbar is shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
@@ -823,6 +967,10 @@ pub struct PaneRenderCache {
     /// The terminal cell `(col, row)` the mouse was hovering over in the
     /// previous frame.
     pub(super) previous_hover_cell: Option<(usize, usize)>,
+    /// The command-block hover-tint rendered-row range from the previous
+    /// frame.  A hover change (different range, or appearing/disappearing)
+    /// forces a vertex rebuild so the tint is baked into the background VBO.
+    pub(super) previous_command_block_hover_rows: Option<(usize, usize)>,
     /// Cached URL from the most recent URL hover lookup.
     pub(super) cached_hovered_url: Option<Arc<Url>>,
     /// Pointer identity of the `visible_chars` `Arc` used for the last URL
@@ -832,6 +980,10 @@ pub struct PaneRenderCache {
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
     /// Whether the user is currently dragging the scrollbar thumb.
     pub(super) scrollbar_dragging: bool,
+    /// Whether the pointer was over the command-block gutter hit zone on the
+    /// previous frame.  Used to request one extra repaint on the frame the
+    /// pointer leaves the gutter so the hover-tint clearing frame is drawn.
+    pub(super) pointer_in_gutter_last_frame: bool,
     /// Terminal width (columns) from the last full vertex rebuild.  When this
     /// changes (window resize), the cell-instance VBOs still contain vertices
     /// for the old column count; drawing them into a smaller viewport leaves
@@ -884,10 +1036,12 @@ impl PaneRenderCache {
             previous_search_match_count: 0,
             previous_search_current_match: 0,
             previous_hover_cell: None,
+            previous_command_block_hover_rows: None,
             cached_hovered_url: None,
             hover_snap_ptr: 0,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
             scrollbar_dragging: false,
+            pointer_in_gutter_last_frame: false,
             previous_term_width: 0,
             previous_term_height: 0,
             previous_fold_epoch: 0,
@@ -1197,6 +1351,51 @@ impl FreminalTerminalWidget {
             pane_rect.max,
         );
 
+        // Keep the gutter hover-tint live.  This works together with the
+        // `hover_changed` cache invalidation below; both are required:
+        //
+        //   1. WAKING A FRAME on cursor motion.  The windowing layer's
+        //      cursor-move fast path (Task 65/68 idle-CPU optimization) only
+        //      schedules a repaint when egui itself reports `repaint` — i.e.
+        //      when an egui-tracked interactive region's hover state changes.
+        //      Registering the gutter as a `Sense::click()` region makes egui
+        //      report that on enter/leave, so the frame runs and the hover
+        //      recompute happens.
+        //   2. REBUILDING THE VBO (the `hover_changed` term, further below):
+        //      the hover tint is baked into the background instance buffer,
+        //      which is otherwise only rebuilt on content/selection/search
+        //      changes.  Without `hover_changed` the woken frame would reuse
+        //      stale vertices and show nothing.
+        //
+        // The click itself is still handled by the pre-check that follows; this
+        // response is only used for the repaint wake-up and the hand cursor.
+        // We also force one repaint on the frame the pointer leaves so the
+        // clearing frame is guaranteed.
+        if gutter_inset > 0.0 && command_blocks_config.enabled && !snap.is_alternate_screen {
+            let gutter_hit_rect = egui::Rect::from_min_max(
+                pane_rect.min,
+                egui::pos2(terminal_rect.min.x, pane_rect.max.y),
+            );
+            let gutter_response = ui.interact(
+                gutter_hit_rect,
+                ui.id().with(("command_block_gutter", pane_id)),
+                egui::Sense::click(),
+            );
+            let hovered = gutter_response.hovered();
+            if hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if hovered || cache.pointer_in_gutter_last_frame {
+                ui.ctx().request_repaint();
+            }
+            cache.pointer_in_gutter_last_frame = hovered;
+        } else if cache.pointer_in_gutter_last_frame {
+            // Feature toggled off / alt-screen entered while we were hovering:
+            // draw one clearing frame.
+            ui.ctx().request_repaint();
+            cache.pointer_in_gutter_last_frame = false;
+        }
+
         // ── Scrollbar pre-check ──────────────────────────────────────────
         // Detect if the user is clicking or starting a drag on the scrollbar
         // BEFORE processing terminal input, so the click is not forwarded
@@ -1224,6 +1423,56 @@ impl FreminalTerminalWidget {
             }
         }
 
+        // ── Command-block gutter pre-check ────────────────────────────────
+        // Intercept primary clicks that land in the reserved gutter inset
+        // (left of `terminal_rect`) BEFORE they reach `write_input_to_terminal`
+        // — gutter positions are outside `terminal_rect`, so they would
+        // otherwise be dropped entirely (no fold, no focus).  A click on a
+        // FINISHED block toggles its fold; a click on a RUNNING block is a
+        // no-op fold but still focuses the pane.  Hovering the gutter is
+        // handled later (it feeds the same hover-tint overlay as the cell
+        // grid).  Suppressed on the alternate screen.
+        let mut left_mouse_button_pressed_gutter = false;
+        if gutter_inset > 0.0
+            && command_blocks_config.enabled
+            && !snap.is_alternate_screen
+            && !snap.command_blocks.is_empty()
+            && !suppress_input
+            && !context_menu_open
+            && !view_state.search_state.is_open
+            && !view_state.command_history.is_open
+        {
+            let gutter_press_pos = ui.input(|i| {
+                let ptr = &i.pointer;
+                if ptr.primary_pressed() {
+                    ptr.interact_pos()
+                } else {
+                    None
+                }
+            });
+            // The hit zone is the whole inset region [pane left, terminal
+            // left), i.e. the painted strip plus the padding gap — a more
+            // forgiving target than the 4px strip alone.
+            if let Some(pos) = gutter_press_pos
+                && pos.x >= pane_rect.min.x
+                && pos.x < terminal_rect.min.x
+                && pos.y >= terminal_rect.min.y
+                && pos.y < terminal_rect.max.y
+                && let Some(block_id) =
+                    gutter_block_id_at_pos(pos, snap, view_state, terminal_rect, logical_cell_h)
+            {
+                // Focus the pane regardless of fold outcome.
+                left_mouse_button_pressed_gutter = true;
+                // Only finished blocks can fold (running blocks have no
+                // `end_row`).
+                if let Some(block) = snap.command_blocks.iter().find(|b| b.id == block_id)
+                    && crate::gui::command_blocks::block_is_foldable(block)
+                {
+                    view_state.toggle_fold(block_id);
+                }
+            }
+        }
+
         // When a modal dialog (e.g. the settings window) or the right-click
         // context menu is open — or the modal was open last frame — do NOT
         // forward keyboard/mouse events to the PTY.  For modals, the one-frame
@@ -1232,7 +1481,9 @@ impl FreminalTerminalWidget {
         // menu button (e.g. Copy) is delivered to egui's Area widget instead
         // of being consumed by `write_input_to_terminal` as a terminal click.
         let mut deferred_actions = Vec::new();
-        let mut left_mouse_button_pressed = false;
+        // A gutter click never reaches `write_input_to_terminal` (it is outside
+        // `terminal_rect`), so its click-to-focus intent is carried here.
+        let mut left_mouse_button_pressed = left_mouse_button_pressed_gutter;
         if suppress_input
             || context_menu_open
             || view_state.search_state.is_open
@@ -1272,7 +1523,7 @@ impl FreminalTerminalWidget {
                     &cache.placeholder_hit_rects,
                 )
             });
-            left_mouse_button_pressed = left_mouse_button_pressed_inner;
+            left_mouse_button_pressed |= left_mouse_button_pressed_inner;
             cache.previous_mouse_state = new_mouse_pos;
             cache.previous_key = previous_key;
             cache.previous_scroll_amount = scroll_amount;
@@ -1515,6 +1766,28 @@ impl FreminalTerminalWidget {
             // Convert buffer-absolute selection coordinates to screen-relative
             // for the renderer (which iterates `shaped_lines` by screen row).
             let win_start = visible_window_start(snap);
+
+            // Compute the command-block hover-row range NOW (before the
+            // vertex-rebuild decision) so a hover-only change — which does not
+            // touch text content, selection, or search — still forces a full
+            // rebuild.  The hover tint is baked into the background instance
+            // VBO, so without this a hover change would be invisible until some
+            // other event (PTY output, fold) invalidated the cache.
+            let command_block_hover_rows_early = compute_command_block_hover_rows(
+                snap,
+                view_state,
+                command_blocks_config,
+                &row_map,
+                win_start,
+                pane_rect,
+                terminal_rect,
+                gutter_inset,
+                logical_cell_w,
+                logical_cell_h,
+            );
+            let hover_changed =
+                command_block_hover_rows_early != cache.previous_command_block_hover_rows;
+
             let screen_selection = current_selection.and_then(|(s, e)| {
                 // Clamp the selection to the visible window.  If both start
                 // and end are outside the visible range, there is nothing to
@@ -1630,6 +1903,7 @@ impl FreminalTerminalWidget {
                 && !selection_changed
                 && !text_blink_changed
                 && !search_changed
+                && !hover_changed
                 && cursor_state_changed
                 && !render_state
                     .lock()
@@ -1675,6 +1949,7 @@ impl FreminalTerminalWidget {
                 || selection_changed
                 || text_blink_changed
                 || search_changed
+                || hover_changed
                 || render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1811,62 +2086,16 @@ impl FreminalTerminalWidget {
                 // the same vertex batch.  Disabled when the feature is
                 // off, when the alternate screen is active (command
                 // blocks describe primary-screen rows and must not tint
-                // a full-screen TUI), when no blocks exist, or when the
-                // mouse is not inside the terminal area.
-                let command_block_hover_rows: Option<(usize, usize)> =
-                    if crate::gui::command_blocks::command_block_overlays_visible(
-                        command_blocks_config.enabled,
-                        snap.is_alternate_screen,
-                        !snap.command_blocks.is_empty(),
-                    ) && let Some(mouse_position) = view_state.mouse_position
-                        && terminal_rect.contains(mouse_position)
-                    {
-                        let (_col, rendered_row) = encode_egui_mouse_pos_as_usize(
-                            mouse_position,
-                            (logical_cell_w, logical_cell_h),
-                            terminal_rect.min,
-                        );
-                        // Translate to a snapshot (buffer-absolute) row via the
-                        // fold-aware row map; placeholder / out-of-range rows
-                        // never hover-tint a block.
-                        let snap_screen_row = match row_map.rendered_to_snapshot(rendered_row) {
-                            Some(RenderedRow::Snapshot(r)) => Some(r),
-                            Some(RenderedRow::Placeholder(_)) | None => None,
-                        };
-                        snap_screen_row.and_then(|screen_row| {
-                            let buffer_row = win_start + screen_row;
-                            // Find the block containing this absolute row.
-                            // Skips running blocks (no end_row) and blocks
-                            // missing `command_start_row`.
-                            let block = snap.command_blocks.iter().find(|b| {
-                                match (b.command_start_row, b.end_row) {
-                                    (Some(s), Some(e)) => buffer_row >= s && buffer_row <= e,
-                                    _ => false,
-                                }
-                            })?;
-                            let start = block.command_start_row?;
-                            let end = block.end_row?;
-                            // Clip the block's [start, end] to the visible
-                            // window, then convert each endpoint into
-                            // rendered-row space.  Endpoints inside a fold
-                            // are snapped to the placeholder's surviving
-                            // row via the row-map lookup; if the entire
-                            // block sits inside a fold the result is None.
-                            let win_end = win_start + snap.term_height;
-                            if end < win_start || start >= win_end {
-                                return None;
-                            }
-                            let s_screen = start.saturating_sub(win_start);
-                            let e_screen = end
-                                .saturating_sub(win_start)
-                                .min(snap.term_height.saturating_sub(1));
-                            let s_rendered = row_map.snapshot_to_rendered(s_screen)?;
-                            let e_rendered = row_map.snapshot_to_rendered(e_screen)?;
-                            Some((s_rendered.min(e_rendered), s_rendered.max(e_rendered)))
-                        })
-                    } else {
-                        None
-                    };
+                // a full-screen TUI), or when no blocks exist.
+                //
+                // Two trigger surfaces feed this: hovering a cell inside
+                // the terminal area (72.12), and hovering the command-block
+                // gutter strip (73.3).  73.5 will retire the cell trigger,
+                // leaving the gutter as the sole affordance.
+                // `command_block_hover_rows` was computed earlier (before the
+                // vertex-rebuild decision) so a hover-only change can force a
+                // rebuild; reuse it here.
+                let command_block_hover_rows = command_block_hover_rows_early;
 
                 // Acquire the lock early so all vertex builders can write
                 // directly into the persistent `RenderState` Vecs, reusing
@@ -1959,6 +2188,7 @@ impl FreminalTerminalWidget {
                 cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
                 cache.previous_search_match_count = search_match_count;
                 cache.previous_search_current_match = search_current_match;
+                cache.previous_command_block_hover_rows = command_block_hover_rows_early;
                 cache.previous_term_width = snap.term_width;
                 cache.previous_term_height = snap.term_height;
                 cache.previous_fold_epoch = fold_epoch;
