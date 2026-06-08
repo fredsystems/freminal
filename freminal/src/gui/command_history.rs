@@ -622,6 +622,7 @@ mod tests {
             exit_code,
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
+            executed_at: Some(SystemTime::UNIX_EPOCH),
             finished_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
         }
     }

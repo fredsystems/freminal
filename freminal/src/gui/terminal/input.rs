@@ -1900,6 +1900,7 @@ mod fold_target_tests {
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
+            executed_at: Some(SystemTime::UNIX_EPOCH),
             finished_at: Some(SystemTime::UNIX_EPOCH),
         }
     }
@@ -1916,6 +1917,7 @@ mod fold_target_tests {
             exit_code: None,
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
+            executed_at: None,
             finished_at: None,
         }
     }

@@ -2112,7 +2112,7 @@ duration-formatting unit test from 72.12 still applies; add a placement
 test (the label coordinate is computed against the block's last on-screen
 row, not its first row).
 
-#### 73.7 — Investigate spurious long duration for instant commands
+#### 73.7 — Investigate spurious long duration for instant commands ✅
 
 **Scope:** Investigation first; fix scope determined by findings.
 Likely surfaces: `CommandBlock::started_at` / `finished_at`
@@ -2173,6 +2173,47 @@ either absent (below threshold) or correctly reporting milliseconds.
 duration computation, not the gutter rendering. Schedule it early in
 Task 73 so the fix is in place before 73.6 moves the label into the
 gutter, otherwise the bug just relocates with the label.
+
+**Completion notes (2026-06-08):**
+
+- **Root cause: timing semantics, not units.** Hypothesis 1 (unit/format
+  mismatch) was ruled out — `duration()` used correct `SystemTime`
+  arithmetic and the formatter truncates whole seconds correctly.
+  Hypothesis 2 was the cause, in its "wrong window" form: `started_at` is
+  stamped at `OSC 133 A` (prompt start) and `finished_at` at `OSC 133 D`,
+  so `duration() = D - A` **included the time the user spent typing the
+  command and reading the previous output at the prompt**. An instant `ls`
+  preceded by a 30 s pause reported ~30 s. The fid correlation itself
+  (72.8c) was correct — no off-by-one.
+- **Fix.** Added `executed_at: Option<SystemTime>` to `CommandBlock`,
+  stamped in `Buffer::mark_output_start_row` (`OSC 133 C`, command-execution
+  start). `CommandBlock::duration()` now measures `finished_at -
+executed_at` (true runtime C->D), falling back to `started_at` only when
+  no `C` was received. The in-buffer duration-overlay renderer was also
+  fixed: it computed `finished_at.duration_since(started_at)` directly
+  (the D-A bug) and now calls `block.duration()`.
+- **No FREC/snapshot serialization concern.** `CommandBlock` rides the
+  snapshot as `Arc<[CommandBlock]>` (cloned), so the new field propagates
+  automatically; FREC v2 captures the OSC byte stream, not the struct.
+- **No escape-sequence-doc change.** OSC 133 C parsing/support is
+  unchanged (still ✅); only internal timing semantics changed, and the
+  coverage row makes no duration claim.
+- **Tests:** `duration_measures_from_executed_at_not_started_at` (the
+  regression: 30 s prompt-wait + 5 ms command -> 5 ms),
+  `duration_falls_back_to_started_at_when_executed_at_missing`,
+  `duration_clock_skew_against_executed_at_is_none`, and
+  `mark_output_start_row_stamps_executed_at` (buffer-level: `OSC 133 C`
+  stamps `executed_at`). Five `CommandBlock` test-literal sites updated
+  for the new field. A handler-level wall-clock-delta integration test was
+  not added because `executed_at` uses real `SystemTime::now()` and cannot
+  assert a deterministic delta without sleeping; the deterministic unit
+  tests cover the C->D semantics fully.
+- **Benchmark:** `command_block_record_10k` ~895 µs (vs ~863 µs documented
+  baseline) — within machine variance; the one-field struct growth and the
+  `C`-path `SystemTime::now()` (not exercised by this bench) cause no
+  regression.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 ### 73 Open Questions Resolved
 

@@ -284,6 +284,7 @@ mod tests {
             exit_code: exit,
             cwd: None,
             started_at: started,
+            executed_at: Some(started),
             finished_at: Some(started + Duration::from_secs(1)),
         }
     }
@@ -300,6 +301,7 @@ mod tests {
             exit_code: None,
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
+            executed_at: None,
             finished_at: None,
         }
     }

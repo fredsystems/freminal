@@ -2489,10 +2489,11 @@ impl FreminalTerminalWidget {
             let label_color = egui::Color32::from_rgba_unmultiplied(fg_r, fg_g, fg_b, 153);
             let font_id = egui::FontId::monospace(logical_cell_h * 0.75);
             for block in snap.command_blocks.iter() {
-                let Some(finished_at) = block.finished_at else {
-                    continue;
-                };
-                let Ok(elapsed) = finished_at.duration_since(block.started_at) else {
+                // `duration()` measures from command-execution start
+                // (`executed_at`/OSC 133 C), excluding the user's typing time
+                // at the prompt — so instant commands no longer report
+                // multi-second durations.  `None` while the block is running.
+                let Some(elapsed) = block.duration() else {
                     continue;
                 };
                 if elapsed < threshold {

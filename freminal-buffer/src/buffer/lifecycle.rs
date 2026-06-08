@@ -243,11 +243,17 @@ impl Buffer {
     /// Set `output_start_row` to the current cursor row on the block whose
     /// `fid` matches and whose `output_start_row` is `None`.  Searches
     /// newest-to-oldest.  No-op if no matching block exists.
+    ///
+    /// Also stamps `executed_at = SystemTime::now()` — this is the moment the
+    /// command begins executing (`OSC 133 C`), which anchors the command's
+    /// duration (see [`CommandBlock::duration`]).  The user's typing time at
+    /// the prompt (`started_at` -> `executed_at`) is thereby excluded.
     pub fn mark_output_start_row(&mut self, fid: &str) {
         for block in self.command_blocks.iter_mut().rev() {
             if block.fid == fid {
                 if block.output_start_row.is_none() {
                     block.output_start_row = Some(self.cursor.pos.y);
+                    block.executed_at = Some(SystemTime::now());
                 }
                 return;
             }
@@ -487,6 +493,30 @@ mod command_block_tests {
 
         let block = buf.command_blocks.front().unwrap();
         assert_eq!(block.output_start_row, Some(6));
+    }
+
+    // ── 73.7: OSC 133 C stamps executed_at so duration excludes prompt-wait
+    #[test]
+    fn mark_output_start_row_stamps_executed_at() {
+        let mut buf = make_buf();
+        let _id = buf.start_command_block(None, "fid1".to_owned());
+        let block = buf.command_blocks.front().unwrap();
+        let started_at = block.started_at;
+        assert!(
+            block.executed_at.is_none(),
+            "executed_at must be None before OSC 133 C"
+        );
+
+        buf.mark_output_start_row("fid1");
+
+        let block = buf.command_blocks.front().unwrap();
+        let executed_at = block
+            .executed_at
+            .expect("executed_at must be stamped at OSC 133 C");
+        assert!(
+            executed_at >= started_at,
+            "executed_at must be at or after started_at"
+        );
     }
 
     // ── 6: finish_command_block full A→B→C→D cycle ───────────────────────
@@ -792,6 +822,7 @@ mod command_block_tests {
             output_start_row: Some(visible_start + 1),
             end_row: Some(visible_start + 3),
             started_at: SystemTime::now(),
+            executed_at: Some(SystemTime::now()),
             finished_at: Some(SystemTime::now()),
             cwd: None,
             exit_code: Some(0),
