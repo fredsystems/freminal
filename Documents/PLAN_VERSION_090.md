@@ -1809,7 +1809,7 @@ block-highlight overlay.
 
 ### 73 Subtasks
 
-#### 73.1 — `ThemePalette` gutter colors
+#### 73.1 — `ThemePalette` gutter colors ✅
 
 **Scope:** `freminal-common/src/themes.rs` (or wherever `ThemePalette` lives).
 
@@ -1827,6 +1827,33 @@ block-highlight overlay.
 **Verification:** Round-trip TOML test. The themes count test (mentioned in
 `PLAN_33_WEZTERM_GHOSTTY_PALETTES.md` history) does not need updating —
 existing themes default to None and use the fallback.
+
+**Completion notes (2026-06-08):**
+
+- **Color-type deviation from the pseudocode:** `ThemePalette` colors are
+  `(u8, u8, u8)` tuples, NOT `egui::Color32` (that type lives in the
+  `freminal` GUI crate and cannot be referenced from `freminal-common`).
+  The three new fields are therefore `Option<(u8, u8, u8)>`. The
+  `freminal/src/gui/colors.rs` helpers convert tuples to `Color32` /
+  `[f32; 4]` at the GUI call sites, so a later subtask (73.2) wraps the
+  resolved tuple there.
+- **No TOML round-trip test (deviation):** `ThemePalette` has no serde
+  derives — it is never serialized to/from TOML; only theme _slugs_ are
+  stored in config. The plan's "Round-trip TOML test" is therefore not
+  applicable to `ThemePalette`. Coverage is instead: a test asserting all
+  27 shipped themes default the three overrides to `None`, plus resolver
+  tests for fallback, override-preference, and exit-code-independence.
+- `gutter_color_for(status)` is a `const fn` method on `ThemePalette`.
+  Fallbacks: Success → `ansi[2]` (green), Failure → `ansi[1]` (red),
+  Running → `ansi[3]` (yellow). `CommandStatus::Unknown` has no dedicated
+  override field and resolves to `ansi[7]` (white).
+- All 27 `const ThemePalette` literals updated to add
+  `gutter_success/failure/running: None` (mechanical, via a verified
+  exact-match pass; the `ansi: [ … ],` close is the last field on every
+  literal so the insertion point was unambiguous).
+- 4 new unit tests in `themes::tests`. `cargo test --all`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo machete` all clean workspace-wide.
 
 #### 73.2 — Render the gutter column
 
