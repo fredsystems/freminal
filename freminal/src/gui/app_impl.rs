@@ -837,6 +837,19 @@ impl freminal_windowing::App for FreminalGui {
             let logical_char_w = f32::approx_from(cell_w_u).unwrap_or(0.0) / ppp;
             let logical_char_h = f32::approx_from(cell_height_u).unwrap_or(0.0) / ppp;
 
+            // Command-block gutter inset, in logical points.  This is reserved
+            // on the left edge of every pane's content rect when the gutter is
+            // enabled.  It is subtracted from the available width BEFORE the
+            // column count is computed (below) so the column count reported to
+            // the PTY matches the rendered cell-grid width — the renderer
+            // shifts its terminal rect right by the same inset.  Zero when the
+            // feature is disabled or the gutter is set to `Off`.
+            let gutter_inset_logical = if self.config.command_blocks.enabled {
+                self.config.command_blocks.gutter.total_inset_px() / ppp
+            } else {
+                0.0
+            };
+
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
             // Drain window commands for ALL tabs and ALL panes within each tab.
@@ -1199,7 +1212,11 @@ impl freminal_windowing::App for FreminalGui {
                 };
 
                 // Per-pane character dimensions from this pane's content rect.
-                let pane_width_chars = (content_rect.width() / logical_char_w)
+                // The gutter inset is removed from the available width first so
+                // the column count matches the rendered cell grid (the widget
+                // shifts its terminal rect right by the same inset).
+                let pane_content_width = (content_rect.width() - gutter_inset_logical).max(0.0);
+                let pane_width_chars = (pane_content_width / logical_char_w)
                     .floor()
                     .approx_as::<usize>()
                     .unwrap_or_else(|e| {
@@ -1335,6 +1352,7 @@ impl freminal_windowing::App for FreminalGui {
                             self.config.ui.background_image_opacity,
                             self.config.ui.background_image_mode,
                             &self.config.command_blocks,
+                            gutter_inset_logical,
                             &self.binding_map,
                             is_echo_off,
                             is_active,

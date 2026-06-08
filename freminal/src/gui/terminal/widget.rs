@@ -15,7 +15,9 @@ use crate::gui::{
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
-    buffer_states::{pointer_shape::PointerShape, tchar::TChar, url::Url},
+    buffer_states::{
+        command_block::CommandStatus, pointer_shape::PointerShape, tchar::TChar, url::Url,
+    },
     config::Config,
     send_or_log,
     themes::ThemePalette,
@@ -1088,6 +1090,7 @@ impl FreminalTerminalWidget {
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
         command_blocks_config: &freminal_common::config::CommandBlocksConfig,
+        gutter_inset_logical: f32,
         binding_map: &freminal_common::keybindings::BindingMap,
         is_echo_off: bool,
         is_active_pane: bool,
@@ -1169,7 +1172,30 @@ impl FreminalTerminalWidget {
         // corner to get terminal-grid-relative coordinates.  The full rect
         // is also used to reject pointer events outside the terminal area
         // (e.g. clicks on the tab bar).
-        let terminal_rect = ui.available_rect_before_wrap();
+        //
+        // The command-block gutter (if enabled) reserves `gutter_inset_logical`
+        // points on the LEFT edge.  That total inset is the painted strip
+        // width PLUS a padding gap, so `terminal_rect` is shifted right by the
+        // whole inset (keeping the cell grid, mouse hit-testing — which
+        // subtracts `terminal_rect.min` — and the PTY column count in agreement;
+        // `app_impl` computes the column count from the identical inset).  The
+        // painted `gutter_rect` is only the strip width; the remaining padding
+        // is left blank so glyphs are not flush against the status bar.
+        let pane_rect = ui.available_rect_before_wrap();
+        let gutter_inset = gutter_inset_logical.max(0.0);
+        let gutter_strip_w = if gutter_inset > 0.0 {
+            command_blocks_config.gutter.width_px() / ppp
+        } else {
+            0.0
+        };
+        let gutter_rect = egui::Rect::from_min_max(
+            pane_rect.min,
+            egui::pos2(pane_rect.min.x + gutter_strip_w, pane_rect.max.y),
+        );
+        let terminal_rect = egui::Rect::from_min_max(
+            egui::pos2(pane_rect.min.x + gutter_inset, pane_rect.min.y),
+            pane_rect.max,
+        );
 
         // ── Scrollbar pre-check ──────────────────────────────────────────
         // Detect if the user is clicking or starting a drag on the scrollbar
@@ -1961,13 +1987,15 @@ impl FreminalTerminalWidget {
             snap.height.approx_as::<f32>().unwrap_or(0.0) * logical_cell_h,
         );
         let (_rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
-        // Use the full available pane area as the PaintCallback rect so the
-        // post-process shader covers the entire pane, not just the integer-cell
-        // sub-rect.  The cell-content vertex coordinates are already computed
-        // relative to (0,0) in physical pixels; the FBO is sized to the full
-        // pane dimensions (vp.width_px × vp.height_px), so the shader can
-        // cover any sub-cell padding at the right/bottom edges.
-        let rect = ui.max_rect();
+        // Use the terminal area (the full pane minus the command-block gutter
+        // strip on the left) as the PaintCallback rect.  The cell-content
+        // vertex coordinates are computed relative to (0,0) in physical pixels,
+        // so the GL viewport origin must be the terminal rect's left edge —
+        // otherwise column 0 would render under the gutter strip.  The right
+        // and bottom edges are unchanged, so the post-process shader still
+        // covers the full cell area (any sub-cell padding at the right/bottom).
+        // The gutter slice itself is painted separately by egui below.
+        let rect = terminal_rect;
 
         // Hand off the draw call to egui's paint phase via PaintCallback.
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
@@ -2137,6 +2165,71 @@ impl FreminalTerminalWidget {
                 egui::FontId::proportional(logical_cell_h),
                 egui::Color32::from_rgb(255, 200, 50),
             );
+        }
+
+        // ── Command-block status gutter ──────────────────────────────
+        // Fill the reserved left strip (`gutter_rect`) with a per-row
+        // status color: each visible rendered row maps back to a buffer
+        // row; if a command block contains that row, the gutter cell is
+        // painted with the block's status color (green = success,
+        // red = failure, yellow = running, white = unknown).  Rows in no
+        // block render the terminal background (empty gutter).
+        //
+        // Suppressed on the alternate screen for the same reason the
+        // overlays are: the stored blocks describe primary-screen rows.
+        // The 4px strip is OUTSIDE the cell grid (`terminal_rect` was
+        // shifted right by the inset), so it never overlaps glyph cells.
+        if gutter_inset > 0.0
+            && command_blocks_config.enabled
+            && !snap.is_alternate_screen
+            && !snap.command_blocks.is_empty()
+        {
+            let win_start = visible_window_start(snap);
+            // Running blocks extend to the last visible buffer row.
+            let running_extent = win_start + snap.term_height.saturating_sub(1);
+            let rendered_rows = row_map.rendered_row_count();
+            for rendered_row in 0..rendered_rows {
+                // Resolve each rendered row to a status color.  Snapshot
+                // rows map back to a buffer row and use row containment;
+                // fold placeholders are colored (desaturated) by the
+                // folded block's own status, looked up by id.
+                let resolved: Option<(CommandStatus, bool)> =
+                    match row_map.rendered_to_snapshot(rendered_row) {
+                        Some(RenderedRow::Snapshot(screen_row)) => {
+                            let buffer_row = win_start + screen_row;
+                            crate::gui::command_blocks::gutter_status_for_row(
+                                &snap.command_blocks,
+                                buffer_row,
+                                running_extent,
+                            )
+                            .map(|s| (s, false))
+                        }
+                        Some(RenderedRow::Placeholder(range)) => snap
+                            .command_blocks
+                            .iter()
+                            .find(|b| b.id == range.command_block_id)
+                            .map(|b| (b.status(), true)),
+                        None => None,
+                    };
+                let Some((status, desaturate)) = resolved else {
+                    continue;
+                };
+                let (cr, cg, cb) = snap.theme.gutter_color_for(status);
+                let color = if desaturate {
+                    // Half-alpha for folded placeholder rows so a collapsed
+                    // block still shows its status, muted.
+                    egui::Color32::from_rgba_unmultiplied(cr, cg, cb, 128)
+                } else {
+                    egui::Color32::from_rgb(cr, cg, cb)
+                };
+                let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
+                let y0 = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
+                let row_rect = egui::Rect::from_min_max(
+                    egui::pos2(gutter_rect.min.x, y0),
+                    egui::pos2(gutter_rect.max.x, y0 + logical_cell_h),
+                );
+                ui.painter().rect_filled(row_rect, 0.0, color);
+            }
         }
 
         // ── Command-block duration overlay ───────────────────────────

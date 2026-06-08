@@ -523,6 +523,66 @@ impl Default for ShellIntegrationConfig {
 //  Command Blocks
 // ------------------------------------------------------------------------------------------------
 
+/// Width, in physical pixels, of the colored command-block gutter strip
+/// itself when it is enabled (`GutterPosition::Left`).
+///
+/// This is only the painted bar.  The cell grid is shifted further right by
+/// an additional [`COMMAND_BLOCK_GUTTER_PADDING_PX`] so glyphs do not sit
+/// flush against the strip; see [`GutterPosition::total_inset_px`].
+pub const COMMAND_BLOCK_GUTTER_WIDTH_PX: f32 = 4.0;
+
+/// Padding, in physical pixels, between the colored gutter strip and the
+/// first glyph column.  Gives the status bar visual breathing room without
+/// widening the painted strip.
+pub const COMMAND_BLOCK_GUTTER_PADDING_PX: f32 = 4.0;
+
+/// Where the command-block status gutter is drawn relative to the terminal
+/// cell grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum GutterPosition {
+    /// Reserve a thin strip on the left edge of the terminal area and draw a
+    /// per-command status color bar in it.  Default.
+    #[default]
+    Left,
+    /// No gutter.  The full terminal width is used for cell content and no
+    /// status bar is drawn.
+    Off,
+}
+
+impl GutterPosition {
+    /// The painted gutter-strip width in physical pixels for this position.
+    ///
+    /// [`GutterPosition::Off`] reserves zero width.
+    #[must_use]
+    pub const fn width_px(self) -> f32 {
+        match self {
+            Self::Left => COMMAND_BLOCK_GUTTER_WIDTH_PX,
+            Self::Off => 0.0,
+        }
+    }
+
+    /// The total left inset in physical pixels: the painted strip width plus
+    /// the padding gap before the first glyph column.
+    ///
+    /// This is the single source of truth shared by the column-count
+    /// computation (which subtracts it from the available width before
+    /// dividing by the cell width) and the renderer (which shifts the cell
+    /// grid right by the same amount).  Keeping both consumers tied to this
+    /// one value is what guarantees the column count reported to the PTY
+    /// always matches the rendered cell-grid width.
+    ///
+    /// [`GutterPosition::Off`] reserves zero inset so both consumers fall
+    /// back to the full terminal width with no shift.
+    #[must_use]
+    pub const fn total_inset_px(self) -> f32 {
+        match self {
+            Self::Left => COMMAND_BLOCK_GUTTER_WIDTH_PX + COMMAND_BLOCK_GUTTER_PADDING_PX,
+            Self::Off => 0.0,
+        }
+    }
+}
+
 /// Configuration for OSC 133 command-block visualization.
 ///
 /// Command blocks group each shell command's prompt, input, and output into
@@ -535,6 +595,7 @@ impl Default for ShellIntegrationConfig {
 /// enabled = true
 /// show_duration = true
 /// duration_threshold_secs = 2.0
+/// gutter = "left"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -556,6 +617,11 @@ pub struct CommandBlocksConfig {
     /// rendered.  Below this threshold the label is suppressed to avoid
     /// flicker on fast commands.  Default: `2.0`.
     pub duration_threshold_secs: f32,
+
+    /// Where the per-command status gutter is drawn.  `"left"` reserves a
+    /// thin strip on the left edge of the terminal area; `"off"` disables
+    /// the gutter entirely.  Default: `"left"`.
+    pub gutter: GutterPosition,
 }
 
 impl Default for CommandBlocksConfig {
@@ -564,6 +630,7 @@ impl Default for CommandBlocksConfig {
             enabled: true,
             show_duration: true,
             duration_threshold_secs: 2.0,
+            gutter: GutterPosition::Left,
         }
     }
 }
@@ -1447,6 +1514,13 @@ pub fn log_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Minimal wrapper used to assert the TOML key/value form of
+    /// [`GutterPosition`] independent of the full [`Config`] document.
+    #[derive(Serialize)]
+    struct GutterToml {
+        gutter: GutterPosition,
+    }
+
     #[test]
     fn font_config_default_ligatures_true() {
         let cfg = FontConfig::default();
@@ -1506,6 +1580,7 @@ size = 14.0
         cfg.command_blocks.enabled = false;
         cfg.command_blocks.show_duration = false;
         cfg.command_blocks.duration_threshold_secs = 5.5;
+        cfg.command_blocks.gutter = GutterPosition::Off;
 
         let toml = toml::to_string_pretty(&cfg).expect("serialise default config");
         let parsed: Config = toml::from_str(&toml).expect("re-parse");
@@ -1514,6 +1589,48 @@ size = 14.0
         assert!(!parsed.command_blocks.enabled);
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
+        assert_eq!(parsed.command_blocks.gutter, GutterPosition::Off);
+    }
+
+    #[test]
+    fn gutter_position_defaults_to_left() {
+        assert_eq!(CommandBlocksConfig::default().gutter, GutterPosition::Left);
+    }
+
+    #[test]
+    fn gutter_position_serializes_as_kebab_case() {
+        // "left"/"off" lowercase in TOML, per the documented config key.
+        let toml = toml::to_string(&GutterToml {
+            gutter: GutterPosition::Left,
+        })
+        .expect("serialise");
+        assert!(toml.contains("gutter = \"left\""), "got: {toml}");
+        let toml_off = toml::to_string(&GutterToml {
+            gutter: GutterPosition::Off,
+        })
+        .expect("serialise");
+        assert!(toml_off.contains("gutter = \"off\""), "got: {toml_off}");
+    }
+
+    #[test]
+    fn gutter_position_width_px_matches_constant() {
+        assert!(
+            (GutterPosition::Left.width_px() - COMMAND_BLOCK_GUTTER_WIDTH_PX).abs() < f32::EPSILON
+        );
+        assert!(GutterPosition::Off.width_px().abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn gutter_position_total_inset_includes_padding() {
+        // The cell grid is shifted by strip width + padding; the painted
+        // strip is just the strip width.
+        let expected = COMMAND_BLOCK_GUTTER_WIDTH_PX + COMMAND_BLOCK_GUTTER_PADDING_PX;
+        assert!((GutterPosition::Left.total_inset_px() - expected).abs() < f32::EPSILON);
+        assert!(
+            GutterPosition::Left.total_inset_px() > GutterPosition::Left.width_px(),
+            "total inset must exceed the painted strip width (padding gap)"
+        );
+        assert!(GutterPosition::Off.total_inset_px().abs() < f32::EPSILON);
     }
 
     #[test]

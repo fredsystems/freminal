@@ -1855,10 +1855,7 @@ existing themes default to None and use the fallback.
   `cargo clippy --all-targets --all-features -- -D warnings`, and
   `cargo machete` all clean workspace-wide.
 
-#### 73.2 — Render the gutter column
-
-**Scope:** `freminal/src/gui/renderer/` (whichever pass draws the terminal
-cell background — likely a glow shader / atlas layer).
+#### 73.2 — Render the gutter column ✅
 
 - Add a config knob `[command_blocks] gutter = "left" | "off"` (default
   `"left"`).
@@ -1872,6 +1869,74 @@ cell background — likely a glow shader / atlas layer).
 
 **Verification:** Visual verification via a recorded `.frec` of a typical
 session. Benchmark: `render_loop_bench` should not regress > 15%.
+
+**Completion notes (2026-06-08):**
+
+- **Single-source-of-truth inset (the column-count correctness rule).**
+  The reserved left inset is computed once per frame in `app_impl.rs`
+  (`gutter_inset_logical = gutter.total_inset_px() / ppp`, zeroed when
+  the feature is disabled) and consumed by BOTH the PTY column-count
+  computation (`pane_content_width = content_rect.width() - inset`) AND
+  the renderer (`terminal_rect.min.x += inset`). Because both derive
+  from the identical inset, the column count reported to the PTY always
+  equals the rendered cell-grid width — no drift, no wrapping/cursor
+  desync. The widget consumes `snap.term_width` (the value `app_impl`
+  sent), never re-deriving columns from its own rect.
+- **Renderer scope.** The plan guessed `freminal/src/gui/renderer/`. In
+  practice the gutter is drawn in `terminal/widget.rs` via egui's
+  painter (`rect_filled` per visible row), not in the glow vertex
+  builders. The `PaintCallback` rect was changed from `ui.max_rect()`
+  (full pane) to `terminal_rect` (full pane minus inset) so the GL
+  viewport origin clears the gutter and column 0 does not render under
+  the strip.
+- **Strip width vs. inset (padding gap).** Per mid-task feedback, the
+  4px painted strip would otherwise sit flush against the first glyph.
+  Split into two constants in `freminal-common/src/config.rs`:
+  `COMMAND_BLOCK_GUTTER_WIDTH_PX = 4.0` (painted strip) and
+  `COMMAND_BLOCK_GUTTER_PADDING_PX = 4.0` (blank gap).
+  `GutterPosition::total_inset_px()` (= strip + padding = 8px) is the
+  shared inset; `width_px()` (= 4px) is the painted strip only. Layout:
+  `[0–4px] status strip` → `[4–8px] padding` → `[8px+] glyphs`.
+- **Config.** Added `[command_blocks] gutter = "left" | "off"`
+  (`GutterPosition` enum, kebab-case serde, default `Left`) and the
+  `config_example.toml` entry. Disabling `command_blocks.enabled` zeroes
+  the inset entirely (no gutter, full width).
+- **Row → color mapping** factored into the pure, unit-tested
+  `gutter_status_for_row(blocks, row, running_extent)` in
+  `gui/command_blocks.rs`. A running block (no `end_row`) extends to the
+  last visible row so the live prompt shows a full yellow bar; on
+  overlap the last-emitted block wins. Fold placeholders are colored by
+  the folded block's status at half alpha. Status colors come from
+  `ThemePalette::gutter_color_for` (73.1): green/red/yellow/white.
+- **Alternate screen.** The gutter is suppressed on the alternate screen
+  (same rationale as the earlier overlay fix — stored blocks describe
+  primary-screen rows).
+- **Mouse.** Because `terminal_rect.min.x` shifted right, gutter pixels
+  fall outside `terminal_rect`, so terminal mouse-event forwarding and
+  hover already ignore the strip; `encode_egui_mouse_pos_as_usize`
+  saturates `x < origin` to column 0. Gutter click/hover interception is
+  73.3.
+- **Tests:** 5 `gutter_status_for_row` tests (containment, inclusivity,
+  exit-code → status, running-extent, overlap), 3 config tests
+  (default, kebab-case serialization, `total_inset_px` padding),
+  extended the 72.5 round-trip test with the `gutter` field.
+- **Benchmark (`render_loop_bench`, 15% budget):** the vertex-builder
+  passes are untouched by the gutter (it's egui-painter-side); measured
+  for regression safety:
+
+  | Benchmark                              | Before   | After    | Change        |
+  | -------------------------------------- | -------- | -------- | ------------- |
+  | instanced_bg/build_bg_instances/80x24  | 75.7 ns  | 73.2 ns  | -1.0% (noise) |
+  | instanced_bg/build_bg_instances/200x50 | 136.6 ns | 129.8 ns | -5.7%         |
+  | instanced_fg/build_fg_instances/80x24  | 422.8 µs | 388.1 µs | -5.3%         |
+  | instanced_fg/build_fg_instances/200x50 | 464.2 µs | 474.5 µs | -0.8% (noise) |
+
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
+- **Open follow-up (not blocking):** `CommandStatus::Unknown` resolves
+  to normal white (`ansi[7]`); the plan text said "gray". Could map to
+  `ansi[8]` (bright-black/gray) if a grayer neutral is preferred —
+  deferred pending user preference.
 
 #### 73.3 — Gutter click and hover
 

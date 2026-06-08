@@ -12,11 +12,45 @@
 //! - [`command_block_overlays_visible`] — gate deciding whether any
 //!   command-block visual affordance (hover tint, duration label) may be
 //!   drawn for the current frame.
+//! - [`gutter_status_for_row`] — maps a buffer-absolute row to the
+//!   [`CommandStatus`] of the command block that contains it, if any
+//!   (the gutter color decision, factored out for unit testing).
 //!
 //! Kept as a standalone module so the formatter can be unit-tested
 //! without an egui or GPU context.
 
+use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
 use std::time::Duration;
+
+/// Determine the [`CommandStatus`] of the command block containing the
+/// given buffer-absolute `row`, for gutter coloring.
+///
+/// A block spans from its `prompt_start_row` to its `end_row` (inclusive).
+/// A still-running block (no `end_row`) is treated as extending to
+/// `running_extent` — the last visible buffer row — so its gutter bar
+/// fills down to the live prompt.  Returns `None` for rows not covered by
+/// any block (those render an empty gutter).
+///
+/// When blocks overlap (which should not happen for well-formed OSC 133
+/// streams, but is not structurally prevented), the **last** matching
+/// block in iteration order wins, matching the most-recently-emitted
+/// command.
+#[must_use]
+pub fn gutter_status_for_row(
+    blocks: &[CommandBlock],
+    row: usize,
+    running_extent: usize,
+) -> Option<CommandStatus> {
+    let mut found = None;
+    for block in blocks {
+        let start = block.prompt_start_row;
+        let end = block.end_row.unwrap_or(running_extent);
+        if row >= start && row <= end {
+            found = Some(block.status());
+        }
+    }
+    found
+}
 
 /// Decide whether command-block visual overlays (hover-row tint and the
 /// duration label) may be drawn this frame.
@@ -202,5 +236,126 @@ mod tests {
             let s = format_command_duration(Duration::from_secs(secs));
             assert!(!s.contains(' '), "duration '{s}' contains whitespace");
         }
+    }
+
+    // ── gutter_status_for_row ────────────────────────────────────────────
+
+    use freminal_common::buffer_states::command_block::CommandBlockId;
+    use std::time::SystemTime;
+
+    /// Build a finished block spanning `[prompt_start, end]` with the given
+    /// exit code.
+    fn finished_block(prompt_start: usize, end: usize, exit: Option<i32>) -> CommandBlock {
+        let started = SystemTime::UNIX_EPOCH;
+        CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: prompt_start,
+            command_start_row: Some(prompt_start),
+            output_start_row: Some(prompt_start + 1),
+            end_row: Some(end),
+            exit_code: exit,
+            cwd: None,
+            started_at: started,
+            finished_at: Some(started + Duration::from_secs(1)),
+        }
+    }
+
+    /// Build a still-running block starting at `prompt_start` (no end row).
+    fn running_block(prompt_start: usize) -> CommandBlock {
+        CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: prompt_start,
+            command_start_row: Some(prompt_start),
+            output_start_row: Some(prompt_start + 1),
+            end_row: None,
+            exit_code: None,
+            cwd: None,
+            started_at: SystemTime::UNIX_EPOCH,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn gutter_status_none_when_no_block_contains_row() {
+        let blocks = [finished_block(2, 5, Some(0))];
+        assert_eq!(gutter_status_for_row(&blocks, 0, 100), None);
+        assert_eq!(gutter_status_for_row(&blocks, 1, 100), None);
+        assert_eq!(gutter_status_for_row(&blocks, 6, 100), None);
+    }
+
+    #[test]
+    fn gutter_status_inclusive_of_both_endpoints() {
+        let blocks = [finished_block(2, 5, Some(0))];
+        // prompt_start_row (2) and end_row (5) are both inside the block.
+        assert_eq!(
+            gutter_status_for_row(&blocks, 2, 100),
+            Some(CommandStatus::Success)
+        );
+        assert_eq!(
+            gutter_status_for_row(&blocks, 5, 100),
+            Some(CommandStatus::Success)
+        );
+        assert_eq!(
+            gutter_status_for_row(&blocks, 3, 100),
+            Some(CommandStatus::Success)
+        );
+    }
+
+    #[test]
+    fn gutter_status_reflects_exit_code() {
+        let success = [finished_block(0, 3, Some(0))];
+        let failure = [finished_block(0, 3, Some(127))];
+        let unknown = [finished_block(0, 3, None)];
+        assert_eq!(
+            gutter_status_for_row(&success, 1, 100),
+            Some(CommandStatus::Success)
+        );
+        assert_eq!(
+            gutter_status_for_row(&failure, 1, 100),
+            Some(CommandStatus::Failure(127))
+        );
+        assert_eq!(
+            gutter_status_for_row(&unknown, 1, 100),
+            Some(CommandStatus::Unknown)
+        );
+    }
+
+    #[test]
+    fn gutter_status_running_block_extends_to_running_extent() {
+        let blocks = [running_block(4)];
+        // Inside [4, running_extent=10].
+        assert_eq!(
+            gutter_status_for_row(&blocks, 4, 10),
+            Some(CommandStatus::Running)
+        );
+        assert_eq!(
+            gutter_status_for_row(&blocks, 10, 10),
+            Some(CommandStatus::Running)
+        );
+        // Above prompt start — not in the block.
+        assert_eq!(gutter_status_for_row(&blocks, 3, 10), None);
+        // Past the running extent — not painted.
+        assert_eq!(gutter_status_for_row(&blocks, 11, 10), None);
+    }
+
+    #[test]
+    fn gutter_status_last_matching_block_wins_on_overlap() {
+        // Two blocks both claiming row 5; the later one (in iteration
+        // order) wins, matching the most-recently-emitted command.
+        let blocks = [
+            finished_block(0, 8, Some(0)), // success, spans 0..=8
+            finished_block(5, 9, Some(1)), // failure, spans 5..=9
+        ];
+        assert_eq!(
+            gutter_status_for_row(&blocks, 5, 100),
+            Some(CommandStatus::Failure(1))
+        );
+        // Row only in the first block stays success.
+        assert_eq!(
+            gutter_status_for_row(&blocks, 1, 100),
+            Some(CommandStatus::Success)
+        );
     }
 }
