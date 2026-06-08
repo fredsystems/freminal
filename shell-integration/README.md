@@ -1,4 +1,4 @@
-<!-- freminal-shell-integration v2 -->
+<!-- freminal-shell-integration v4 -->
 
 # Freminal Shell Integration
 

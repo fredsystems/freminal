@@ -1,4 +1,4 @@
-# freminal-shell-integration v2
+# freminal-shell-integration v4
 #
 # Freminal zsh integration body — sourced by our `.zshenv` after the user's
 # own zsh startup files have run.

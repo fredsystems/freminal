@@ -34,7 +34,7 @@ use std::path::Path;
 /// (e.g. payload format, marker semantics) so downstream tooling can
 /// detect mismatched on-disk copies.
 #[cfg(test)]
-const FREMINAL_SHELL_INTEGRATION_VERSION: u32 = 2;
+const FREMINAL_SHELL_INTEGRATION_VERSION: u32 = 4;
 
 /// The bundled bash init script (loaded via `ENV=`).
 pub const FREMINAL_BASH_INIT: &str =

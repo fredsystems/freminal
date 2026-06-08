@@ -1,4 +1,4 @@
-# freminal-shell-integration v2
+# freminal-shell-integration v4
 # shellcheck shell=bash
 #
 # Freminal bash integration — loaded automatically when Freminal spawns bash.
@@ -137,6 +137,9 @@ __freminal_prompt_command() {
 	# when the user runs a command), and the next prompt_command's D.
 	__freminal_fid_next
 
+	# Allow the DEBUG trap to emit exactly one C for the upcoming command.
+	__FREMINAL_C_EMITTED=0
+
 	# OSC 7 cwd notification.
 	local __freminal_hostname
 	__freminal_hostname="$(hostname 2>/dev/null || echo localhost)"
@@ -152,6 +155,12 @@ __freminal_prompt_command() {
 	PS1='\[\033]133;A;${__FREMINAL_FID_PAYLOAD}\007\]'"${PS1}"'\[\033]133;B;${__FREMINAL_FID_PAYLOAD}\007\]'
 
 	__freminal_rearm_prompt_command
+
+	# Re-arm the C hook every cycle.  bash-preexec (Starship et al.) may have
+	# loaded after us, or may re-install its DEBUG dispatcher each prompt and
+	# clobber our trap; re-running the installer keeps our `preexec_functions`
+	# entry / DEBUG trap in place.  Idempotent.
+	__freminal_install_c_hook
 }
 
 # Strip any existing freminal A/B wrap from PS1 (defensive: avoids stacking
@@ -208,32 +217,72 @@ else
 	fi
 fi
 
-# ── DEBUG trap (C marker) ─────────────────────────────────────────────────────
-# The DEBUG trap fires before every simple command.  C shares the fid
-# established at the most recent PROMPT_COMMAND (and embedded in the A/B
-# markers of the prompt the user just submitted).  No fid roll here.
+# ── C marker (command execution start) ───────────────────────────────────────
+# C must fire once, just before the user's command runs, carrying the fid
+# established at the most recent PROMPT_COMMAND (the same fid embedded in the
+# A/B markers of the prompt the user just submitted).  freminal computes the
+# command's duration from C->D, so a missing C makes the duration fall back
+# to the prompt-start time (A->D) — which over-reports by however long the
+# user sat at the prompt.
 #
-# Conditions where we must NOT emit C:
+# We emit C from a DEBUG trap that we OWN and re-arm every prompt cycle.
+#
+# Why not bash-preexec's `preexec_functions`?  Freminal launches bash with
+# `--posix` (so it honours $ENV to load this file).  Under that launch,
+# bash-preexec's interactive-mode gating never enables, so its
+# `preexec_functions` dispatch silently never runs — WezTerm's and Starship's
+# preexec C markers are dropped too.  A DEBUG trap, by contrast, fires
+# natively regardless of bash-preexec's state.
+#
+# Why re-arm every cycle?  Prompt frameworks (Starship via bash-preexec,
+# WezTerm) install their own DEBUG trap on the first prompt, clobbering ours.
+# `__freminal_prompt_command` re-arms itself to the END of PROMPT_COMMAND and
+# calls `__freminal_install_c_hook` from there, so our re-install runs AFTER
+# any framework's install each cycle and composes our handler in front of
+# whatever DEBUG trap currently exists.
+__freminal_emit_c() {
+	printf '\033]133;C;%s\007' "${__FREMINAL_FID_PAYLOAD}"
+}
+
+# The DEBUG trap fires before every simple command, so it needs guards:
 #   1. During tab-completion ($COMP_LINE is set).
 #   2. When $BASH_COMMAND is empty.
 #   3. When the command is one of our own internal helpers.
+#   4. When the command is part of the prompt machinery (PROMPT_COMMAND,
+#      bash-preexec, WezTerm, Starship); those are not user commands.
+#   5. Only once per command lifecycle (a compound command / pipeline fires
+#      DEBUG per simple command; we want a single C per submitted command).
 __freminal_debug_trap() {
 	[ -n "${COMP_LINE+x}" ] && return 0
 	[ -z "${BASH_COMMAND:-}" ] && return 0
 	case "${BASH_COMMAND}" in
-	__freminal_*) return 0 ;;
+	__freminal_* | __bp_* | __wezterm_* | starship_* | _*) return 0 ;;
 	esac
-	printf '\033]133;C;%s\007' "${__FREMINAL_FID_PAYLOAD}"
+	# Emit C only once between prompts.  Reset to 0 in PROMPT_COMMAND.
+	[ "${__FREMINAL_C_EMITTED:-0}" = "1" ] && return 0
+	__FREMINAL_C_EMITTED=1
+	__freminal_emit_c
 }
 
-# Install the DEBUG trap, composing with any existing trap.
-__freminal_existing_debug_trap="$(trap -p DEBUG 2>/dev/null)"
-if [ -n "${__freminal_existing_debug_trap}" ]; then
-	__freminal_existing_debug_cmd="${__freminal_existing_debug_trap#trap -- \'}"
-	__freminal_existing_debug_cmd="${__freminal_existing_debug_cmd%\' DEBUG}"
-	# shellcheck disable=SC2064
-	trap "__freminal_debug_trap; ${__freminal_existing_debug_cmd}" DEBUG
-else
-	trap '__freminal_debug_trap' DEBUG
-fi
-unset __freminal_existing_debug_trap __freminal_existing_debug_cmd
+# Install (or re-install) our DEBUG trap, composing IN FRONT of any existing
+# DEBUG trap (e.g. bash-preexec's dispatcher) so both run.  Idempotent: if our
+# handler is already the leading command, do nothing.  Re-armed every prompt
+# cycle from `__freminal_prompt_command`.
+__freminal_install_c_hook() {
+	local __freminal_existing
+	__freminal_existing="$(trap -p DEBUG 2>/dev/null)"
+	case "${__freminal_existing}" in
+	"trap -- '__freminal_debug_trap"*) return 0 ;; # already leading
+	esac
+	if [ -n "${__freminal_existing}" ]; then
+		# Strip `trap -- '` prefix and `' DEBUG` suffix to recover the command.
+		local __freminal_cmd="${__freminal_existing#trap -- \'}"
+		__freminal_cmd="${__freminal_cmd%\' DEBUG}"
+		# shellcheck disable=SC2064
+		trap "__freminal_debug_trap; ${__freminal_cmd}" DEBUG
+	else
+		trap '__freminal_debug_trap' DEBUG
+	fi
+}
+
+__freminal_install_c_hook
