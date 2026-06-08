@@ -2100,7 +2100,7 @@ integration test: hovering output cells does not set
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
-#### 73.6 — Move command-duration label into the gutter
+#### 73.6 — Move command-duration label into the gutter ✅
 
 **Scope:** Same renderer module as 73.2 (the gutter draw pass) and the
 duration-formatting helper introduced in 72.12.
@@ -2139,6 +2139,40 @@ label belongs there.
 duration-formatting unit test from 72.12 still applies; add a placement
 test (the label coordinate is computed against the block's last on-screen
 row, not its first row).
+
+**Completion notes (2026-06-08):**
+
+- **Option (a) chosen** (floating layer, keep the gutter thin). The label
+  is drawn as an egui-painter text layer just inside the cell grid
+  (`terminal_rect.min.x + 2px`, left-aligned, ~60% alpha), overlaying the
+  first cells of the block's last visible row. The gutter stays 4px; no
+  `gutter_width_px` config was added.
+- **Last-visible-row anchor.** Relocated from 72.12's first-row placement
+  (which scrolled off immediately) to the block's last on-screen row via
+  the pure, tested `duration_label_anchor_row(block, win_start, win_end,
+running_extent)` — clamps to the viewport bottom when the block extends
+  below, returns `None` when the block is entirely off-screen, and uses
+  `running_extent` for running blocks.
+- **Gating.** Requires the gutter to be present (`gutter_inset > 0`), so a
+  `gutter = "off"` config also hides the label (no anchor). Threshold
+  gating unchanged; running blocks have no `duration()` and are skipped;
+  suppressed on the alternate screen. Uses `block.duration()` (the 73.7
+  C->D fix), so values are correct.
+- **Tests:** five `duration_label_anchor_row` cases (last-not-first,
+  clamp-to-viewport, above/below viewport -> `None`, running-block ->
+  `running_extent`).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean. No
+  `render_loop_bench` regression (label is egui-painter-side, no
+  vertex-builder change).
+
+**Shell-integration follow-up (committed separately):** visual testing of
+73.6 in bash surfaced that bash never emitted `OSC 133 C` under freminal's
+`bash --posix` launch (bash-preexec's preexec dispatch is dead in that
+mode), so bash durations showed prompt-to-prompt. Fixed in
+`shell-integration/bash/freminal-init.bash` by emitting C from a
+re-armed DEBUG trap; shell-integration bumped to v4. zsh/fish were
+unaffected.
 
 #### 73.7 — Investigate spurious long duration for instant commands ✅
 

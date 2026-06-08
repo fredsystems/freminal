@@ -2449,17 +2449,21 @@ impl FreminalTerminalWidget {
             }
         }
 
-        // ── Command-block duration overlay ───────────────────────────
-        // For each finished command block whose duration meets the
-        // configured threshold, paint a compact right-aligned label on
-        // the block's first visible rendered row.  Running blocks have
-        // no `finished_at` and are skipped.  Blocks entirely outside
-        // the visible window or hidden inside a fold are also skipped
-        // (the row-map lookup yields `None`).  Suppressed entirely on
-        // the alternate screen: the stored blocks describe primary-
-        // screen rows, so their durations must not be painted over a
-        // full-screen TUI.
+        // ── Command-block duration label (gutter-anchored, 73.6) ─────
+        // For each finished block whose duration meets the configured
+        // threshold, paint a compact duration label as a floating layer
+        // immediately RIGHT of the gutter strip, anchored to the block's
+        // LAST visible rendered row.  Anchoring to the last on-screen row
+        // (rather than the first, as 72.12 did) keeps the label visible:
+        // the first row scrolls off almost immediately for any command
+        // that produces output, whereas the gutter follows the block.
+        //
+        // Requires the gutter to be present (`gutter_inset > 0`) — the
+        // label is positioned against it.  Running blocks (no duration)
+        // are skipped.  Suppressed on the alternate screen for the usual
+        // reason (stored blocks describe primary-screen rows).
         if command_blocks_config.show_duration
+            && gutter_inset > 0.0
             && crate::gui::command_blocks::command_block_overlays_visible(
                 command_blocks_config.enabled,
                 snap.is_alternate_screen,
@@ -2470,11 +2474,18 @@ impl FreminalTerminalWidget {
                 Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));
             let win_start = visible_window_start(snap);
             let win_end = win_start + snap.term_height;
+            let running_extent = win_start + snap.term_height.saturating_sub(1);
             let (fg_r, fg_g, fg_b) = snap.theme.foreground;
             // Muted: ~60% alpha so the label reads without overpowering
             // the underlying cell content.
             let label_color = egui::Color32::from_rgba_unmultiplied(fg_r, fg_g, fg_b, 153);
             let font_id = egui::FontId::monospace(logical_cell_h * 0.75);
+            // Floating layer (option a): anchored just inside the cell grid,
+            // immediately right of the gutter inset, on the block's last
+            // visible row.  It overlays the first cells of that row — a small
+            // muted label on the block's bottom line, which follows the block
+            // as it scrolls (unlike the old first-row placement).
+            let label_x = terminal_rect.min.x + 2.0;
             for block in snap.command_blocks.iter() {
                 // `duration()` measures from command-execution start
                 // (`executed_at`/OSC 133 C), excluding the user's typing time
@@ -2486,24 +2497,29 @@ impl FreminalTerminalWidget {
                 if elapsed < threshold {
                     continue;
                 }
-                // Anchor on `command_start_row` when available, else
-                // fall back to `prompt_start_row` (very early blocks
-                // that finished before any output line).
-                let anchor_buffer_row = block.command_start_row.unwrap_or(block.prompt_start_row);
-                if anchor_buffer_row < win_start || anchor_buffer_row >= win_end {
-                    continue;
-                }
-                let screen_row = anchor_buffer_row - win_start;
+                // Anchor on the block's LAST visible row so the label follows
+                // the block as it scrolls (see `duration_label_anchor_row`).
+                let Some(last_visible_buffer_row) =
+                    crate::gui::command_blocks::duration_label_anchor_row(
+                        block,
+                        win_start,
+                        win_end,
+                        running_extent,
+                    )
+                else {
+                    continue; // block entirely outside the viewport
+                };
+                let screen_row = last_visible_buffer_row.saturating_sub(win_start);
                 let Some(rendered_row) = row_map.snapshot_to_rendered(screen_row) else {
-                    continue;
+                    continue; // last row hidden inside a fold
                 };
                 let rendered_f = rendered_row.approx_as::<f32>().unwrap_or(0.0);
                 let y = rendered_f.mul_add(logical_cell_h, terminal_rect.min.y);
-                let pos = egui::pos2(terminal_rect.max.x - 4.0, y);
+                let pos = egui::pos2(label_x, y);
                 let label = crate::gui::command_blocks::format_command_duration(elapsed);
                 ui.painter().text(
                     pos,
-                    egui::Align2::RIGHT_TOP,
+                    egui::Align2::LEFT_TOP,
                     label,
                     font_id.clone(),
                     label_color,

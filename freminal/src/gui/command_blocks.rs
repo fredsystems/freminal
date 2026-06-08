@@ -78,6 +78,34 @@ pub const fn block_is_foldable(block: &CommandBlock) -> bool {
     block.end_row.is_some()
 }
 
+/// Buffer-absolute row to anchor a block's duration label on (73.6): the
+/// block's **last on-screen row**.
+///
+/// The label is anchored to the bottom of the block's visible portion so it
+/// follows the block as it scrolls, instead of the first row (which scrolls
+/// off almost immediately for any command that produces output).
+///
+/// `win_start` / `win_end` are the visible window's buffer-row bounds
+/// (`win_end` exclusive).  `running_extent` is the last visible buffer row,
+/// used as the end of a running block.  Returns `None` when the block is
+/// entirely outside the visible window.
+#[must_use]
+pub fn duration_label_anchor_row(
+    block: &CommandBlock,
+    win_start: usize,
+    win_end: usize,
+    running_extent: usize,
+) -> Option<usize> {
+    let start = block.prompt_start_row;
+    let end = block.end_row.unwrap_or(running_extent);
+    if end < win_start || start >= win_end {
+        return None;
+    }
+    // Last visible row of the block: its end, clamped to the bottom of the
+    // viewport when the block extends below it.
+    Some(end.min(win_end.saturating_sub(1)))
+}
+
 /// Decide whether command-block visual overlays (hover-row tint and the
 /// duration label) may be drawn this frame.
 ///
@@ -411,5 +439,45 @@ mod tests {
         // A running command has no end_row; a gutter click on it is a
         // no-op fold (it only focuses the pane).
         assert!(!block_is_foldable(&running_block(4)));
+    }
+
+    // ── duration_label_anchor_row (73.6) ─────────────────────────────────
+
+    #[test]
+    fn anchor_is_the_blocks_last_row_not_first() {
+        // Block spans rows 2..=5.  The label must anchor on row 5 (last),
+        // not row 2 (first) — the regression this subtask fixes.
+        let block = finished_block(2, 5, Some(0));
+        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(5));
+    }
+
+    #[test]
+    fn anchor_clamps_to_last_visible_row_when_block_extends_below() {
+        // Block ends at row 30 but the viewport bottom (win_end exclusive)
+        // is 24, so the anchor clamps to row 23.
+        let block = finished_block(2, 30, Some(0));
+        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(23));
+    }
+
+    #[test]
+    fn anchor_none_when_block_entirely_above_viewport() {
+        // Block 0..=3 is entirely above a window starting at row 10.
+        let block = finished_block(0, 3, Some(0));
+        assert_eq!(duration_label_anchor_row(&block, 10, 34, 33), None);
+    }
+
+    #[test]
+    fn anchor_none_when_block_entirely_below_viewport() {
+        // Block starts at row 50, window is rows 0..24.
+        let block = finished_block(50, 53, Some(0));
+        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), None);
+    }
+
+    #[test]
+    fn anchor_running_block_uses_running_extent() {
+        // A running block (no end_row) extends to running_extent (23), so
+        // its label anchors there.
+        let block = running_block(4);
+        assert_eq!(duration_label_anchor_row(&block, 0, 24, 23), Some(23));
     }
 }
