@@ -2008,7 +2008,7 @@ terminal_rect.min.x)`) before `write_input_to_terminal`. Gutter positions
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
-#### 73.4 — Settings UI: gutter toggle
+#### 73.4 — Settings UI: gutter toggle ✅
 
 **Scope:** `freminal/src/gui/settings.rs` / `settings_dispatch.rs`.
 
@@ -2016,6 +2016,26 @@ warnings`, `cargo machete`, `cargo fmt --check` all clean.
   position (`Left` / `Off`).
 
 **Verification:** Toggle persists via TOML round-trip.
+
+**Completion notes (2026-06-08):**
+
+- Added a "Status gutter" `ComboBox` (`Left` / `Off`) to the Command Blocks
+  section of the **Shell Integration** settings tab (where 72.5
+  consolidated the command-block settings), below the duration threshold.
+  Mirrors the existing `tab_bar_position` dropdown pattern with a
+  `gutter_position_label` helper.
+- **No `settings_dispatch.rs` change needed.** On Apply the dispatch
+  already replaces the whole live config (`self.config = new_cfg`), and
+  `app_impl` reads `command_blocks.gutter.total_inset_px()` every frame, so
+  toggling takes effect immediately — switching to `Off` zeroes the inset,
+  which flows through the normal resize path (wider PTY column count, strip
+  hidden). Same "takes effect on next render" model 72.5 documented.
+- **Tests:** `gutter_position_labels` (label helper) and
+  `gutter_setting_persists_through_draft_apply` (modal surfaces and mutates
+  the field). The TOML round-trip is already covered by the
+  `freminal-common` config test added in 73.2.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo machete`, `cargo fmt --check` all clean.
 
 #### 73.5 — Move hover trigger from buffer to gutter
 
