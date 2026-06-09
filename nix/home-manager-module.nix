@@ -105,6 +105,36 @@ let
         inherit (s.security) allow_clipboard_read;
       };
 
+      tabTitleSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.tab_title) policy separator;
+      };
+
+      shellIntegrationSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.shell_integration) set_term_program;
+      };
+
+      commandBlocksSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.command_blocks)
+          enabled
+          show_duration
+          duration_threshold_secs
+          gutter
+          ;
+      };
+
+      notificationsSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.notifications)
+          enabled
+          osc_9
+          osc_777
+          on_command_finished
+          command_finished_threshold_secs
+          routing_error
+          routing_info
+          routing_command_finished
+          ;
+      };
+
       keybindingsSection = s.keybindings;
 
       shaderSection = lib.filterAttrs (_: v: v != null) {
@@ -134,6 +164,12 @@ let
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
+      // lib.optionalAttrs (tabTitleSection != { }) { tab_title = tabTitleSection; }
+      // lib.optionalAttrs (shellIntegrationSection != { }) {
+        shell_integration = shellIntegrationSection;
+      }
+      // lib.optionalAttrs (commandBlocksSection != { }) { command_blocks = commandBlocksSection; }
+      // lib.optionalAttrs (notificationsSection != { }) { notifications = notificationsSection; }
       // lib.optionalAttrs (startupSection != { }) { startup = startupSection; }
       // lib.optionalAttrs (onboardingSection != { }) { onboarding = onboardingSection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
@@ -507,6 +543,203 @@ in
             Allow applications to read the system clipboard via OSC 52 query.
             When true, OSC 52 queries return the clipboard contents base64-encoded.
             Null uses the default (false).
+          '';
+        };
+      };
+
+      tab_title = {
+        policy = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "prefix"
+              "suffix"
+              "custom_wins"
+              "osc_wins"
+            ]
+          );
+          default = null;
+          description = ''
+            How a user-assigned custom tab name combines with a shell-set
+            (OSC 0/1/2) title.
+            "prefix"      shows "{custom}{separator}{osc}";
+            "suffix"      shows "{osc}{separator}{custom}";
+            "custom_wins" shows only the custom name when set;
+            "osc_wins"    lets the shell title clear the custom name.
+            Null uses the default ("prefix").
+          '';
+        };
+
+        separator = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = ''
+            Separator inserted between the custom name and the shell title
+            under the "prefix"/"suffix" policies.
+            Null uses the default (": ").
+          '';
+        };
+      };
+
+      shell_integration = {
+        set_term_program = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, Freminal sets TERM_PROGRAM=freminal and
+            TERM_PROGRAM_VERSION in the PTY environment and injects its
+            shell-integration scripts (OSC 133 command blocks, OSC 7 cwd).
+            Null uses the default (true).
+          '';
+        };
+      };
+
+      command_blocks = {
+        enabled = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Master switch for OSC 133 command-block visualization. When false,
+            markers are still parsed but no gutters, duration overlays, or
+            fold/collapse affordances appear.
+            Null uses the default (true).
+          '';
+        };
+
+        show_duration = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Display the duration of long-running commands next to the gutter.
+            Null uses the default (true).
+          '';
+        };
+
+        duration_threshold_secs = mkOption {
+          type = types.nullOr types.float;
+          default = null;
+          description = ''
+            Minimum command duration (seconds) before a duration label is
+            rendered, to avoid flicker on fast commands.
+            Null uses the default (2.0).
+          '';
+        };
+
+        gutter = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "left"
+              "off"
+            ]
+          );
+          default = null;
+          description = ''
+            Where the per-command status gutter is drawn. "left" reserves a
+            thin colored strip on the left edge; "off" disables it.
+            Null uses the default ("left").
+          '';
+        };
+      };
+
+      notifications = {
+        enabled = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Master switch for the notification system. When false, no
+            notifications (toast or desktop) are produced.
+            Null uses the default (false — opt-in).
+          '';
+        };
+
+        osc_9 = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, OSC 9 (iTerm2/WezTerm) text payloads create
+            notifications.
+            Null uses the default (true).
+          '';
+        };
+
+        osc_777 = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, OSC 777 ("notify;TITLE;BODY", urxvt) payloads create
+            notifications.
+            Null uses the default (true).
+          '';
+        };
+
+        on_command_finished = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, an OSC 133 D (command finished) event fires a
+            notification.
+            Null uses the default (true).
+          '';
+        };
+
+        command_finished_threshold_secs = mkOption {
+          type = types.nullOr types.float;
+          default = null;
+          description = ''
+            Minimum command duration (seconds) before a command-finished
+            notification fires, to avoid spamming on fast commands.
+            Null uses the default (10.0).
+          '';
+        };
+
+        routing_error = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "system"
+              "both"
+              "system_when_unfocused"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for error-category notifications: "toast" (in-app only),
+            "system" (desktop only), "both", or "system_when_unfocused"
+            (desktop when unfocused, toast when focused).
+            Null uses the default ("both").
+          '';
+        };
+
+        routing_info = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "system"
+              "both"
+              "system_when_unfocused"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for informational notifications (see routing_error for the
+            value meanings).
+            Null uses the default ("toast").
+          '';
+        };
+
+        routing_command_finished = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "system"
+              "both"
+              "system_when_unfocused"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for command-finished notifications (see routing_error for
+            the value meanings).
+            Null uses the default ("system_when_unfocused").
           '';
         };
       };
