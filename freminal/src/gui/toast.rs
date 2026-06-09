@@ -133,6 +133,13 @@ impl ToastStack {
         self.push(ToastKind::Info, title.into(), detail);
     }
 
+    /// Number of toasts currently on the stack. Test-only helper used by the
+    /// notification router tests to assert toast-leg routing decisions.
+    #[cfg(test)]
+    pub(super) const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn push(&mut self, kind: ToastKind, title: String, detail: Option<String>) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);

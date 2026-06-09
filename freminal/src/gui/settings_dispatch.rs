@@ -313,6 +313,22 @@ impl FreminalGui {
                     handle.request_repaint(wid);
                 }
             }
+            SettingsAction::TestNotification => {
+                // Route a sample notification through the draft `[notifications]`
+                // config so the user sees exactly what their current (unsaved)
+                // settings produce.  The Settings window is focused when the
+                // button is clicked, so route as focused.
+                let config = self.settings_modal.draft_notifications().clone();
+                let request = crate::gui::notifications::NotificationRequest::sample();
+                if let Ok(mut toasts) = self.toasts.try_borrow_mut() {
+                    crate::gui::notifications::NotificationRouter::route_test(
+                        &request,
+                        &config,
+                        true,
+                        &mut toasts,
+                    );
+                }
+            }
             SettingsAction::RevertTheme(_, _)
             | SettingsAction::PreviewTheme(_)
             | SettingsAction::None => {}

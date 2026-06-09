@@ -2,10 +2,10 @@
 
 ## Last updated
 
-Last updated: 2026-06-03 — Task 72.13: cross-checked OSC 133 coverage against the
-shipped Task 72 surface (storage, navigation, fold, copy, hover, duration) and
-confirmed full support. No new entries; the existing OSC 133 row is already accurate.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72)
+Last updated: 2026-06-09 — Task 76.2: added OSC 9 (iTerm2/WezTerm) and promoted
+OSC 777 (urxvt) to implemented. Both parse into `AnsiOscType::Notify` and are
+routed by the GUI notification system per the `[notifications]` config.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76)
 
 ## Overview
 
@@ -170,26 +170,27 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 ## OSC — Operating System Commands
 
-| Sequence                 | Purpose                       | Status | Notes                                                                                                    |
-| ------------------------ | ----------------------------- | ------ | -------------------------------------------------------------------------------------------------------- |
-| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished                                                         |
-| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)                                                         |
-| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                                                              |
-| OSC 4 ; n ; rgb          | Set palette entry             | ✅     | Sets 256-color palette entry; query responds with current value                                          |
-| OSC 7 ; URI              | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`                                         |
-| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata                                                |
-| OSC 10 ; ? BEL           | Foreground color query/set    | ✅     | Query returns theme fg (or dynamic override); set stores override                                        |
-| OSC 11 ; ? BEL           | Background color query/set    | ✅     | Query returns theme bg (or dynamic override); set stores override                                        |
-| OSC 12 ; color           | Set/query cursor color        | ✅     | Set/query/reset via `cursor_color_override`; snapshotted and consumed by renderer                        |
-| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query                                                  |
-| OSC 66 ; theme BEL       | ColorScheme Notification      | ⬜     | Parsed/recognized; silently consumed. DECRPM ?2031 is the functional adaptive-theme query path (Task 52) |
-| OSC 104                  | Reset palette entry           | ✅     | Resets specific or all palette entries to defaults                                                       |
-| OSC 110                  | Reset foreground color        | ✅     | Clears dynamic fg override; query returns theme default                                                  |
-| OSC 111                  | Reset background color        | ✅     | Clears dynamic bg override; query returns theme default                                                  |
-| OSC 112                  | Reset cursor color            | ✅     | Clears `cursor_color_override`                                                                           |
-| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed; freminal=1 extension required (see FTCS section below)                          |
-| OSC 777                  | System notification (Konsole) | ⬜     | Not implemented; Task 76 (v0.9.0)                                                                        |
-| OSC 1337                 | iTerm2 inline images          | ✅     | Full `File=`, `MultipartFile=`/`FilePart=`/`FileEnd` handling; decoded and placed                        |
+| Sequence                 | Purpose                       | Status | Notes                                                                                                       |
+| ------------------------ | ----------------------------- | ------ | ----------------------------------------------------------------------------------------------------------- |
+| OSC 0 ; txt BEL          | Set icon + window title       | 🚧     | Works, but icon name vs. title not distinguished                                                            |
+| OSC 1 ; txt BEL          | Set icon title only           | 🚧     | Shares handler with OSC 0 (treats as full title)                                                            |
+| OSC 2 ; txt BEL          | Set window title only         | ✅     | Implemented                                                                                                 |
+| OSC 4 ; n ; rgb          | Set palette entry             | ✅     | Sets 256-color palette entry; query responds with current value                                             |
+| OSC 7 ; URI              | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`                                            |
+| OSC 8 ; params ; URI BEL | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata                                                   |
+| OSC 9 ; body BEL         | Desktop notification (iTerm2) | ✅     | Body parsed into `AnsiOscType::Notify`; routed by GUI per `[notifications]` config (Task 76)                |
+| OSC 10 ; ? BEL           | Foreground color query/set    | ✅     | Query returns theme fg (or dynamic override); set stores override                                           |
+| OSC 11 ; ? BEL           | Background color query/set    | ✅     | Query returns theme bg (or dynamic override); set stores override                                           |
+| OSC 12 ; color           | Set/query cursor color        | ✅     | Set/query/reset via `cursor_color_override`; snapshotted and consumed by renderer                           |
+| OSC 52 ; c ; data BEL    | Clipboard copy/paste          | ✅     | Implemented — base64 encode/decode, clipboard set/query                                                     |
+| OSC 66 ; theme BEL       | ColorScheme Notification      | ⬜     | Parsed/recognized; silently consumed. DECRPM ?2031 is the functional adaptive-theme query path (Task 52)    |
+| OSC 104                  | Reset palette entry           | ✅     | Resets specific or all palette entries to defaults                                                          |
+| OSC 110                  | Reset foreground color        | ✅     | Clears dynamic fg override; query returns theme default                                                     |
+| OSC 111                  | Reset background color        | ✅     | Clears dynamic bg override; query returns theme default                                                     |
+| OSC 112                  | Reset cursor color            | ✅     | Clears `cursor_color_override`                                                                              |
+| OSC 133 ; …              | FTCS / Shell Integration      | ✅     | All four markers parsed; freminal=1 extension required (see FTCS section below)                             |
+| OSC 777 ; notify ; T ; B | Desktop notification (urxvt)  | ✅     | `notify;TITLE;BODY` parsed into `AnsiOscType::Notify`; routed by GUI per `[notifications]` config (Task 76) |
+| OSC 1337                 | iTerm2 inline images          | ✅     | Full `File=`, `MultipartFile=`/`FilePart=`/`FileEnd` handling; decoded and placed                           |
 
 ---
 
@@ -337,7 +338,7 @@ The gaps that remain are either low-priority polish or require significant new i
 
 1. **Cell-level DECSCNM inversion** — Panel fill is inverted, but individual cell fg/bg are not swapped.
 2. **SO/SI G1 charset switching** — Consumed as control characters; G1 rendering not implemented (simplified single-slot charset model).
-3. **OSC 66 / OSC 777** — Recognized/not-recognized respectively; OSC 777 slated for Task 76 (v0.9.0).
+3. **OSC 66** — Recognized; silently consumed (DECRPM ?2031 is the functional adaptive-theme path). OSC 777 is now implemented (Task 76).
 4. **Standard mode SRM (12)** — Rare in practice.
 5. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
 6. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).

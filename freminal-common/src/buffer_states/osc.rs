@@ -167,6 +167,13 @@ pub enum OscTarget {
     /// OSC 66 — Konsole/zsh color-scheme notification (one-way; no response).
     /// Silently consumed.
     ColorSchemeNotification,
+    /// OSC 9 — iTerm2/WezTerm desktop notification.  The entire payload after
+    /// `9;` is the notification body; there is no separate title.  One-way,
+    /// fire-and-forget.
+    Notify9,
+    /// OSC 777 — urxvt-style desktop notification of the form
+    /// `notify;TITLE;BODY`.  One-way, fire-and-forget.
+    Notify777,
     Unknown,
     ITerm2,
     /// OSC 1338 — Freminal-private shell-information sub-protocol.
@@ -222,6 +229,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(4) => Self::PaletteColor,
             AnsiOscToken::OscValue(7) => Self::RemoteHost,
             AnsiOscToken::OscValue(8) => Self::Url,
+            AnsiOscToken::OscValue(9) => Self::Notify9,
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
             AnsiOscToken::OscValue(12) => Self::CursorColor,
@@ -241,6 +249,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(1338) => Self::ShellInfo,
             AnsiOscToken::OscValue(110) => Self::ResetForeground,
             AnsiOscToken::OscValue(111) => Self::ResetBackground,
+            AnsiOscToken::OscValue(777) => Self::Notify777,
             _ => Self::Unknown,
         }
     }
@@ -342,6 +351,18 @@ pub enum AnsiOscType {
     /// command-history seed with the authoritative path the shell itself
     /// reports.  See [`OscTarget::ShellInfo`].
     ShellInfoHistFile(PathBuf),
+    /// OSC 9 / OSC 777 — desktop notification request.
+    ///
+    /// `title` is `None` for OSC 9 (which has no title field) and `Some` for
+    /// OSC 777 (`notify;TITLE;BODY`) when a title is present.  `body` holds
+    /// the notification text.  One-way; the GUI routes it to a toast and/or
+    /// the system notification daemon per the `[notifications]` config.
+    Notify {
+        /// The notification title, if any.
+        title: Option<String>,
+        /// The notification body text.
+        body: String,
+    },
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -394,6 +415,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
             Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
             Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
+            Self::Notify { title, body } => write!(f, "Notify(title={title:?}, body={body:?})"),
         }
     }
 }
@@ -1027,6 +1049,45 @@ mod tests {
             OscTarget::from(&AnsiOscToken::OscValue(111)),
             OscTarget::ResetBackground
         );
+    }
+
+    #[test]
+    fn osc_target_from_token_notify9() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(9)),
+            OscTarget::Notify9
+        );
+    }
+
+    #[test]
+    fn osc_target_from_token_notify777() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(777)),
+            OscTarget::Notify777
+        );
+    }
+
+    #[test]
+    fn display_ansi_osc_notify_with_title() {
+        let s = AnsiOscType::Notify {
+            title: Some("Build".to_string()),
+            body: "done".to_string(),
+        }
+        .to_string();
+        assert!(s.contains("Notify"), "got: {s}");
+        assert!(s.contains("Build"), "got: {s}");
+        assert!(s.contains("done"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_notify_without_title() {
+        let s = AnsiOscType::Notify {
+            title: None,
+            body: "hello".to_string(),
+        }
+        .to_string();
+        assert!(s.contains("Notify"), "got: {s}");
+        assert!(s.contains("hello"), "got: {s}");
     }
 
     #[test]

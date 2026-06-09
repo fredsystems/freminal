@@ -92,3 +92,42 @@ impl TerminalHandler {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use crate::terminal_handler::TerminalHandler;
+    use freminal_common::pty_write::PtyWrite;
+
+    fn recv_pty_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        let Ok(PtyWrite::Write(bytes)) = rx.try_recv() else {
+            panic!("expected PtyWrite::Write response");
+        };
+        String::from_utf8(bytes).expect("response should be valid UTF-8")
+    }
+
+    /// Regression guard (Task 76.6): the XTVERSION / XTGETTCAP device-name
+    /// response must keep the `>|XTerm(Freminal ...)` shape. The `XTerm(`
+    /// prefix is load-bearing — tmux only enables `extkeys`
+    /// (`modifyOtherKeys`) when it recognises the prefix
+    /// (`tty_keys_extended_device_attributes`). Dropping it regresses
+    /// extended-key forwarding inside tmux. The `Freminal` token is the
+    /// freminal-identifying part of the payload.
+    #[test]
+    fn device_name_and_version_keeps_xterm_prefix_and_freminal_token() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        handler.handle_device_name_and_version();
+
+        let response = recv_pty_response(&rx);
+        let version = env!("CARGO_PKG_VERSION");
+        // 7-bit DCS framing: ESC P {body} ESC \
+        assert_eq!(
+            response,
+            format!("\x1bP>|XTerm(Freminal {version})\x1b\\"),
+            "XTVERSION response must keep the tmux-compatible XTerm( prefix"
+        );
+    }
+}

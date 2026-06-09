@@ -87,6 +87,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-frec-decoder`          | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                    |
 | `freminal-escape-sequence-docs`  | Adding / removing / altering escape sequence support. Dual-doc update required.                                                               |
 | `freminal-numeric-conversions`   | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                           |
+| `freminal-config-options`        | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.   |
 | `rust-best-practices`            | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                |
 | `performance-benchmarks`         | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                              |
 | `flake-dev-shell-discipline`     | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                           |

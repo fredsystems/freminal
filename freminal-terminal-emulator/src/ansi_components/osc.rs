@@ -15,6 +15,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::osc_clipboard::handle_osc_clipboard;
 use super::osc_iterm2::handle_osc_iterm2;
+use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_777};
 use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 use super::osc_shell_info::handle_osc_shell_info;
 
@@ -213,6 +214,11 @@ fn handle_osc_pointer_shape(params: &[Option<AnsiOscToken>], output: &mut Vec<Te
     )));
 }
 
+// A flat dispatch match over every recognised OSC target.  Its bulk is the
+// match itself; splitting it would scatter one-line arms across helpers and
+// obscure the dispatch table, so the over-100-line lint is suppressed here
+// (consistent with similar flat-match allows elsewhere in the parser).
+#[allow(clippy::too_many_lines)]
 fn dispatch_osc_target(
     osc_target: &OscTarget,
     osc_internal_type: AnsiOscInternalType,
@@ -309,6 +315,14 @@ fn dispatch_osc_target(
         }
         OscTarget::ShellInfo => {
             handle_osc_shell_info(raw_params, seq_trace, output);
+        }
+        // OSC 9 / OSC 777 — desktop notifications (Task 76).  Parsed from the
+        // raw bytes so notification bodies containing `;` survive intact.
+        OscTarget::Notify9 => {
+            handle_osc_notify_9(raw_params, seq_trace, output);
+        }
+        OscTarget::Notify777 => {
+            handle_osc_notify_777(raw_params, seq_trace, output);
         }
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => {

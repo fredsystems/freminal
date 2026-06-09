@@ -24,7 +24,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 73  | Command Gutters (exit-status indicator) | Medium       | Pending       | Task 72         | `task-73/command-gutters`        |
 | 74  | Broadcast Input to Panes                | Medium       | Pending       | v0.8.0, Task 58 | `task-74/broadcast-input`        |
 | 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending       | v0.8.0, Task 72 | `task-76/notifications`          |
+| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending merge | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete      | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete      | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
@@ -2494,7 +2494,7 @@ existing `BellConfig`).
 
 ### 76 Subtasks
 
-#### 76.1 — Add `notify-rust` and capability flags
+#### 76.1 — Add `notify-rust` and capability flags ✅ 2026-06-09
 
 **Scope:** `freminal/Cargo.toml`, `freminal-common/src/config.rs`.
 
@@ -2534,7 +2534,48 @@ existing `BellConfig`).
 **Verification:** Config round-trip test. `cargo build` succeeds with
 notify-rust dep.
 
-#### 76.2 — OSC 9 and OSC 777 parsing
+**Completion notes (2026-06-09):**
+
+- `notify-rust = "4"` added to the workspace `[workspace.dependencies]`
+  (alphabetical, after `nix`) and referenced as `notify-rust.workspace
+= true` in `freminal/Cargo.toml` `[dependencies]` only — matching the
+  workspace's `crate.workspace = true` convention. **Not** added to
+  `freminal-common`, `freminal-buffer`, or
+  `freminal-terminal-emulator`. Resolves to `notify-rust v4.17.0`,
+  which uses pure-Rust `zbus` on Linux — no system dbus dev library is
+  required in the dev shell.
+- `NotificationsConfig` added to `freminal-common/src/config.rs` with
+  all eight documented fields (`enabled`, `osc_9`, `osc_777`,
+  `on_command_finished`, `command_finished_threshold_secs`,
+  `routing_error`, `routing_info`, `routing_command_finished`), wired
+  into the top-level `Config` struct and its `Default` impl between
+  `command_blocks` and `keybindings`.
+- New `NotificationRouting` enum (`Toast`, `System`, `Both`,
+  `SystemWhenUnfocused`) with `#[serde(rename_all = "snake_case")]`,
+  mirroring the `GutterPosition` pattern. Added `const fn
+wants_toast(focused)` and `const fn wants_system(focused)` helpers so
+  the routing decision is unit-testable and reusable by the 76.4
+  router. Default is `SystemWhenUnfocused`.
+- `NotificationsConfig` required a localized
+  `#[allow(clippy::struct_excessive_bools)]` (four independent TOML
+  toggles), matching the documented precedent in `snapshot.rs`,
+  `gui/mod.rs`, `rendering.rs`, `widget.rs`, and `view_state.rs`.
+- `[notifications]` section added to `config_example.toml` (all keys
+  commented out, defaults documented) under a new `NOTIFICATIONS`
+  banner between `[command_blocks]` and `[startup]`.
+- `notify-rust` is unused until 76.4, so it was added to the
+  `[workspace.metadata.cargo-machete] ignored` list with a comment
+  instructing its removal once 76.4 lands. This keeps the 76.1 commit's
+  `cargo machete` verification green without a permanent suppression.
+- 4 new tests in `config::tests`: `notifications_default_is_opt_in`,
+  `notifications_round_trip_through_toml`,
+  `notification_routing_serializes_as_snake_case`,
+  `notification_routing_dispatch_decisions`.
+- Verification: `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all
+-- --check` clean, `cargo machete` clean.
+
+#### 76.2 — OSC 9 and OSC 777 parsing ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/buffer_states/osc.rs`,
 `freminal-terminal-emulator/src/ansi_components/osc.rs`.
@@ -2554,7 +2595,50 @@ notify-rust dep.
 **Verification:** Unit tests for both parsers. Update
 `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` per AGENTS.md.
 
-#### 76.3 — OSC 9/777 dispatch
+**Completion notes (2026-06-09):**
+
+- **`AnsiOscType::Notify { title: Option<String>, body: String }`** added to
+  `freminal-common/src/buffer_states/osc.rs` (single variant for both OSC 9
+  and OSC 777, as specified) with a `Display` arm. Two new `OscTarget`
+  variants `Notify9` (OSC 9) and `Notify777` (OSC 777), wired into the
+  `From<&AnsiOscToken>` code→target table (9 → `Notify9`, 777 → `Notify777`).
+- **New handler module `freminal-terminal-emulator/src/ansi_components/osc_notify.rs`**
+  mirroring the `osc_shell_info.rs` pattern. Both parsers read from the
+  **raw (un-split) parameter bytes** rather than the upstream semicolon
+  token split, because notification bodies legitimately contain `;` and the
+  token split is too aggressive. Declared `pub mod osc_notify;` in
+  `ansi_components/mod.rs`.
+  - **OSC 9:** body = everything after the first `;`. `title = None`. Empty
+    or missing body silently consumed.
+  - **OSC 777:** strips the `notify;` prefix when present, then splits the
+    remainder on the _first_ `;` into `(title, body)` (preserving semicolons
+    in the body). `notify;TITLE` → title only, empty body. A payload without
+    the `notify;` prefix is treated as an all-body notification with no
+    title. Empty notifications silently consumed.
+  - Non-UTF-8 payloads are dropped (logged at debug), not lossy-decoded.
+- **Dispatch arms** for `OscTarget::Notify9`/`Notify777` added to
+  `dispatch_osc_target` in `osc.rs`, forwarding to the new handlers.
+- **`TerminalHandler::handle_osc`** (the exhaustive `AnsiOscType` match in
+  `terminal_handler/osc.rs`) gained an explicit `AnsiOscType::Notify` arm
+  that logs at debug with a `TODO(76.3)` marker — actual GUI forwarding is
+  76.3's scope; this arm only keeps the match exhaustive/compiling.
+- **Clippy:** `dispatch_osc_target` crossed 100 lines (106) with the two new
+  arms; added a localized `#[allow(clippy::too_many_lines)]` with
+  justification (flat dispatch table), consistent with the 72.4 precedent.
+- **Escape-sequence docs (mandatory dual-doc update):**
+  `ESCAPE_SEQUENCE_COVERAGE.md` gained an OSC 9 row and promoted OSC 777 to
+  ✅; `ESCAPE_SEQUENCE_GAPS.md` removed the OSC 777 gap entries (Priority 2
+  table + OSC Gaps table + prose). "Last updated" headers refreshed in both.
+- **Tests:** 4 new in `freminal-common` (target mappings + Notify Display);
+  17 new in `osc_notify.rs` (OSC 9 body/empty/semicolon/ST; OSC 777
+  title+body / title-only / no-prefix / semicolon-body / empty / ST;
+  non-UTF-8 and missing-semicolon direct-call branches; `parse_777_payload`
+  unit).
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
+
+#### 76.3 — OSC 9/777 dispatch ✅ 2026-06-09
 
 **Scope:** `freminal-terminal-emulator/src/terminal_handler/osc.rs`.
 
@@ -2567,7 +2651,55 @@ title: Option<String>, body: String }` to the GUI thread via the existing
 **Verification:** Unit test that emitting OSC 9 produces a
 `WindowCommand::Notification`.
 
-#### 76.4 — GUI notification router
+**Architectural note — routed via `WindowManipulation`, not a new
+`WindowCommand` variant (decided 2026-06-09):**
+
+The plan called for a `WindowCommand::Notification { kind, title, body }`
+variant forwarded "via the existing window-post channel". Investigation
+confirmed the same constraint documented in 72.3: the `TerminalHandler`
+does not own a `Sender<WindowCommand>`. It produces a
+`Vec<WindowManipulation>` (drained by `take_window_commands`); the PTY
+loop in `freminal/src/gui/pty.rs` then wraps each into
+`WindowCommand::Viewport`/`Report`. The `WindowCommand` enum
+(`io/mod.rs`) only wraps `WindowManipulation` — it has no free-standing
+payload variants. The idiomatic transport for a handler→GUI side-effect
+signal is therefore a new `WindowManipulation` variant, exactly how
+`Bell` and `SetClipboard` already flow. So 76.3 adds
+`WindowManipulation::Notification { kind, title, body }` rather than a
+`WindowCommand::Notification`. It still arrives on the GUI through the
+`WindowCommand::Viewport` wrapper and is consumed in
+`rendering::handle_window_manipulation`, which is where 76.4 hooks the
+`NotificationRouter`.
+
+**Completion notes (2026-06-09):**
+
+- **`NotificationKind` enum** (`OscText`, `CommandFinished`, `Error`,
+  `Info`) added to `freminal-common/src/buffer_states/window_manipulation.rs`.
+- **`WindowManipulation::Notification { kind, title, body }`** variant
+  added to the same enum, documented alongside `Bell`.
+- **`TerminalHandler::handle_osc`** `AnsiOscType::Notify` arm (the 76.2
+  `TODO(76.3)` placeholder) now pushes
+  `WindowManipulation::Notification { kind: OscText, title, body }` onto
+  `window_commands` instead of only logging.
+- **`rendering::handle_window_manipulation`** (GUI) gained a
+  `WindowManipulation::Notification` arm. For 76.3 it logs at debug with
+  a `TODO(76.4)` marker — the actual routing (toast vs system daemon per
+  `[notifications]`) is 76.4's scope. The arm exists so the exhaustive
+  match compiles.
+- **Tests:** 2 new in a new `terminal_handler::osc::tests` module
+  (`osc_notify_pushes_window_command`,
+  `osc_notify_without_title_pushes_window_command`) verifying a
+  `TerminalOutput::OscResponse(AnsiOscType::Notify { … })` produces
+  exactly one `WindowManipulation::Notification` with the right kind /
+  title / body. Byte-stream coverage (raw OSC 9 / 777 through the
+  parser) already lives in 76.2's `osc_notify.rs`; the parser pipeline
+  is not re-driven here because `TerminalHandler::handle_data` only
+  inserts text — the ANSI parser sits above the handler.
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
+
+#### 76.4 — GUI notification router ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/app_impl.rs` (handle WindowCommand) and a new
 `freminal/src/gui/notifications.rs` module.
@@ -2591,7 +2723,140 @@ title: Option<String>, body: String }` to the GUI thread via the existing
 instead of dispatching. Manual test on Linux (notify-osd or KDE
 notifications), macOS (Notification Center), Windows (toast notifications).
 
-#### 76.5 — Notification templates and bell
+**Completion notes (2026-06-09):**
+
+- **New module `freminal/src/gui/notifications.rs`** exporting
+  `NotificationRouter` (a stateless zero-field struct) and a
+  `NotificationRequest { kind, title, body }` type.
+  - `NotificationRouter::route(req, config, focused, &mut ToastStack)` is
+    the single dispatch entry. Returns early when
+    `config.enabled == false`. Selects the per-category
+    `NotificationRouting` (`routing_error` / `routing_command_finished` /
+    `routing_info`) via `routing_for`, then uses the focus-aware
+    `wants_toast` / `wants_system` helpers (76.1) to decide each leg.
+  - **Toast leg:** `Error`-kind → `ToastStack::error`, everything else →
+    `ToastStack::info`. (No `warning` push method exists; that's fine —
+    OSC text / command-finished are informational.)
+  - **System leg:** spawns a named `freminal-notify` thread that calls
+    `notify_rust::Notification::new().summary(..).body(..).show()`,
+    mirroring the existing `freminal-open-url` thread pattern in
+    `terminal/widget.rs`. `notify-rust`'s `show()` blocks on D-Bus on
+    Linux, so it must not run on the egui frame thread. Failures (no
+    daemon) are logged and ignored.
+  - `command_finished_request(block, command, config) -> Option<NotificationRequest>`
+    builds the command-finished notification, applying the `enabled` +
+    `on_command_finished` + `command_finished_threshold_secs` +
+    not-`Running` gates. Failure → `Error` kind with `(exit N)`; success /
+    unknown-exit → `CommandFinished` kind. Duration rendered via the
+    existing `command_blocks::format_command_duration`. Empty command text
+    falls back to `"Command"`.
+- **OSC 9/777 wiring:** `rendering::handle_window_manipulation` gained a
+  `&mut Vec<NotificationRequest>` out-parameter; its `Notification` arm
+  (the 76.3 `TODO(76.4)` placeholder) now pushes a request into it. The
+  caller in `app_impl::update()` collects across all panes and routes them
+  after the pane loop, where `self.config.notifications` and the toast
+  stack are borrowable. This avoids threading `&mut self` into the free
+  `handle_window_manipulation` function.
+- **Command-finished wiring:** the 72.9 drain site
+  (`app_impl.rs`, formerly the `TODO(Task 76)` marker) now calls
+  `command_finished_request` for each finished block (before it is moved
+  into the recent-commands ring) and routes the collected requests after
+  the loop. Focus state read from the active pane's
+  `view_state.window_focused`. The `win` local is owned (removed from
+  `self.windows`), so routing alongside `win.tabs.iter_mut()` does not
+  conflict with the `self.toasts` borrow.
+- **`notify-rust` removed from the `cargo-machete` ignore list** — it is
+  now genuinely referenced, so the temporary 76.1 suppression is gone.
+- **Tests:** 14 in `gui::notifications::tests` — summary fallback per
+  kind / explicit title; `routing_for` mapping; disabled-config no-op;
+  toast-only / system-only / both / system-when-unfocused leg decisions;
+  and `command_finished_request` gating (disabled, off, threshold,
+  running, success-kind, failure-kind, empty-command placeholder). A
+  test-only `ToastStack::len()` was added to assert toast-leg outcomes
+  without rendering. The system leg (background thread) is not asserted —
+  it is best-effort and has no observable state in-process.
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
+
+#### 76.4a — Cleanup: `[notifications]` (and siblings) never loaded from user TOML ✅ 2026-06-09
+
+**Surfaced during manual testing of 76.4:** with `[notifications]
+enabled = true` in a user `config.toml`, no notifications fired — not
+even a direct `printf '\e]9;hi\a'` toast. Root cause: the config loader
+deserializes into a `ConfigPartial` (all-`Option` fields) and merges it
+onto `Config::default()` via `Config::apply_partial`. `ConfigPartial`
+was **missing** the `notifications`, `shell_integration`,
+`command_blocks`, and `tab_title` fields, so those four whole sections
+were silently dropped on load and always kept their defaults
+(`notifications.enabled = false`). This is a latent bug predating Task
+76 — `shell_integration` / `command_blocks` (Task 72) and `tab_title`
+(Task 94) were added to `Config` but never to `ConfigPartial`. Task
+76.1 added `notifications` with the same omission.
+
+**Fix:** added all four fields to `ConfigPartial` and their merge arms
+to `apply_partial`. Regression tests:
+`notifications_apply_partial_enables_from_toml` and
+`previously_dropped_sections_apply_partial` (covers all four sections
+through the partial-merge path). `cargo test --all`, clippy
+`-D warnings`, fmt, machete all clean.
+
+#### 76.4b — Polish: zbus log silencer + desktop-notification urgency ✅ 2026-06-09
+
+Two small fixes found during manual testing of 76.4 on Linux/Hyprland:
+
+- **zbus log spam.** `notify-rust`'s `zbus` D-Bus dependency emits
+  `INFO`-level connection-handshake spans on every notification, which
+  flooded stdout and the log file. Added `zbus=warn` to the existing
+  framework-silencer directive list (alongside `winit=off` / `wgpu=off`
+  / `egui=off`) on both the stdout and file `EnvFilter`s in `main.rs`.
+  `warn` rather than `off` so genuine D-Bus errors still surface.
+- **Desktop-notification urgency + appname.** `show_system` now sets
+  `appname("freminal")` and an urgency hint —
+  `notify_rust::Urgency::Critical` for `Error`-kind notifications,
+  `Normal` for everything else. Many Linux notification daemons only
+  raise a banner (rather than silently filing the notification in the
+  tray) when an urgency hint is present. (Whether a banner appears, and
+  on which monitor, is ultimately the daemon's policy — verified working
+  end-to-end under `wayle` on Hyprland.)
+
+`cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
+
+#### 76.4c — Config load-path audit + self-protecting guard test ✅ 2026-06-09
+
+Follow-up to 76.4a: a full audit of the config load/save path to find any
+other silently-dropped options, plus a durable guard so the bug class
+cannot recur.
+
+**Audit findings (only 76.4a was a real bug):**
+
+- Section-level sync of `Config` ↔ `ConfigPartial` ↔ `apply_partial` is
+  now complete (all 20 top-level fields; verified field-by-field).
+- Serde attributes are safe: only `skip_serializing_if =
+"Option::is_none"` / `"KeybindingsConfig::is_empty"` (which omit only
+  absent/empty values) and a correct `#[serde(flatten)]` on the
+  keybindings map. No `#[serde(skip)]` drops data.
+- CLI override path (`apply_cli_overrides`) is narrow by design (shell,
+  hide_menu_bar, deprecated write-logs flag) — no silent drops.
+- Save/load is symmetric: `save_config` serializes the full `Config`;
+  `load_config` merges via the now-field-complete `ConfigPartial`.
+- `config_example.toml` has no documentation drift against the structs.
+
+**Guard test `every_config_section_survives_partial_merge`:** sets a
+non-default value in every section, runs the real load path
+(`to_string_pretty` → `ConfigPartial` → `apply_partial`), and asserts
+each value survived. Two protection layers, both proven:
+
+- **Runtime:** disabling any merge arm fails with `"<section> section
+dropped"` (verified by temporarily disabling the notifications arm).
+- **Compile-time:** a trailing exhaustive `let Config { .. } = loaded`
+  destructure with **no** `..` rest pattern means adding a new field to
+  `Config` fails to compile the test (`E0027`) until the author wires it
+  in — verified by temporarily adding a dummy field.
+
+`cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
+
+#### 76.5 — Notification templates and bell ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/config.rs` (extend NotificationsConfig and
 existing `BellConfig`).
@@ -2620,7 +2885,59 @@ existing `BellConfig`).
 **Verification:** Template-render unit test. Bell-ring integration with the
 existing test harness (if any).
 
-#### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM)
+**Completion notes (2026-06-09):**
+
+- **`NotificationsConfig::command_finished_template: String`** added with
+  default `"{command} finished in {duration} (exit {exit_code})"`. Both
+  the struct doc-comment TOML example and `config_example.toml` document
+  the five tokens.
+- **`BellConfig::on_command_finished: bool`** added, default `false`.
+  Both `NotificationsConfig` and `BellConfig` already round-trip as
+  whole-struct `Option<…>` fields in `ConfigPartial` / `apply_partial`,
+  so the two new fields merge from user TOML with no extra wiring (the
+  76.4a/76.4c class of bug does not apply at the field level).
+- **Template rendering** moved into a new
+  `gui::notifications::render_command_finished_template(template, block,
+command, tab_name)` helper. Tokens: `{command}` (trimmed, or
+  `"Command"` when empty), `{duration}` (`format_command_duration`, empty
+  when unknown), `{exit_code}` (numeric, or `"?"` when the shell omitted
+  it), `{cwd}` (block cwd, empty when unknown), `{tab_name}`. Unknown
+  tokens are left untouched. The five token literals are module
+  constants so clippy's nursery `literal_string_with_formatting_args`
+  does not flag the brace placeholders as `format!` directives.
+- **`command_finished_request`** gained a `tab_name: &str` parameter and
+  now renders the body via the template instead of the hard-coded
+  string. The Error-vs-CommandFinished `kind` is still driven by the
+  exit code (non-zero ⇒ `Error`), independent of the template body.
+- **Tab name** is resolved at the 72.9 drain site in `app_impl::update()`
+  via `tab.display_name(policy, separator)` (computed before the
+  `iter_panes_mut` borrow, since that borrows `tab` mutably) using the
+  existing `[tab_title]` policy/separator.
+- **Bell on command finished:** the drain loop, when
+  `config.bell.on_command_finished` is set, rings the bell using the
+  configured `bell.mode` — visual sets `pane.bell_active` +
+  `pane.view_state.bell_since`, audio calls `platform::system_beep()`,
+  mirroring the `WindowManipulation::Bell` path in `rendering`. This
+  fires on every finished command (not gated by the notification
+  duration threshold).
+- **Tests:** 7 new in `gui::notifications::tests` (all-token
+  substitution, empty-command placeholder, unknown exit ⇒ `?`, unknown
+  cwd ⇒ empty, unknown token untouched, custom-template through
+  `command_finished_request`, default-template format + Error kind). The
+  pre-existing failure-kind test had its `"failed"` body assertion
+  replaced (the default template uses `{exit_code}`, not a "failed"
+  verb; the Error kind assertion is unchanged). Config-side: extended
+  `notifications_default_is_opt_in` + `notifications_round_trip_through_toml`
+  for the template field, extended `bell_config_defaults_to_visual`, and
+  added `bell_on_command_finished_round_trip`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
+- **Not in scope (deferred to 76.7):** the Settings UI text-edit for the
+  template and the routing dropdowns live in the Notifications tab,
+  which 76.7 builds.
+
+#### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM) ✅ 2026-06-09
 
 **Scope:** `freminal/freminal.ti` (terminfo source),
 `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (existing
@@ -2668,7 +2985,51 @@ existing terminfo-audit harness, see PLAN_12_TERMINFO.md — note that
 PLAN_12 is now retired into the v0.2.0 task set; the tests live in
 `dcs.rs` and `xtversion.rs`).
 
-#### 76.7 — Settings UI: Notifications tab
+**Completion notes (2026-06-09) — verification + documentation only,
+no behavior change (decided with the user):**
+
+- **Both plan-suggested response changes were intentionally NOT made**
+  because each conflicts with deliberate, documented codebase behavior:
+  - **XTGETTCAP `TN` stays `xterm-256color`** (not `freminal`). `TN`
+    means "the value of `$TERM`", and `io::pty::run_terminal` sets
+    `TERM=xterm-256color` as the documented Task-12 compatibility
+    strategy (mirroring WezTerm/Alacritty). Reporting `freminal` would
+    desync TN from TERM and break terminfo lookups.
+  - **XTVERSION stays `>|XTerm(Freminal <version>)`** (not
+    `freminal v<version>`). The `XTerm(` prefix is load-bearing: tmux
+    only enables `extkeys` / `modifyOtherKeys` when it recognises the
+    prefix (`tty_keys_extended_device_attributes`). Dropping it would
+    regress extended-key forwarding inside tmux — already documented in
+    `reports.rs::handle_device_name_and_version`.
+  - The freminal-identifying signal is `TERM_PROGRAM=freminal` (set in
+    72.6), and `Freminal` is already present in the XTVERSION payload.
+- **Verified existing responders first:** ran the existing 29 XTGETTCAP
+  tests + XTVERSION parser tests (all green) before touching anything.
+- **New regression guard test** `reports.rs::tests::
+device_name_and_version_keeps_xterm_prefix_and_freminal_token`
+  asserts the exact 7-bit-framed XTVERSION response
+  `\x1bP>|XTerm(Freminal <version>)\x1b\\` (the `reports.rs` response
+  builder previously had no test module — only the parser emitting
+  `RequestDeviceNameAndVersion` was covered).
+- **Hardened the existing `xtgettcap_known_capability_tn` test** with a
+  comment explaining the TN-must-equal-TERM invariant, and added an
+  explanatory comment to the `TN` arm of `lookup_termcap`.
+- **Terminfo (`res/freminal.ti`):** added a top-of-file comment block
+  explaining OSC 9 / OSC 777 have no terminfo capability code and that
+  detection is via `TERM_PROGRAM`. Comment-only; `tic -c` still
+  compiles.
+- **`shell-integration/README.md`:** added a "Desktop Notifications
+  (OSC 9 / OSC 777)" section documenting the `TERM_PROGRAM`-guarded
+  emission idiom for both sequences. The version marker was not bumped
+  (prose-only doc change; the marker tracks script protocol version).
+- **No escape-sequence dual-doc update needed:** 76.6 adds/removes/alters
+  no escape-sequence support. OSC 9/777 (76.2) and XTVERSION/XTGETTCAP
+  are already ✅ in `ESCAPE_SEQUENCE_COVERAGE.md`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
+
+#### 76.7 — Settings UI: Notifications tab ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/settings.rs`, `settings_dispatch.rs`.
 
@@ -2688,7 +3049,46 @@ PLAN_12 is now retired into the v0.2.0 task set; the tests live in
 **Verification:** Toggle persistence; "Test Notification" actually fires a
 notification through the configured routing.
 
-#### 76.8 — Docs
+**Completion notes (2026-06-09):**
+
+- **New `SettingsTab::Notifications`** inserted between `Bell` and
+  `Security`. `SettingsTab::ALL` grew `[Self; 13] → [Self; 14]`; the
+  `all_tabs_present` assertion and `settings_tab_labels` updated.
+- **`show_notifications_tab`** renders: master `enabled` checkbox;
+  Sources (`osc_9`, `osc_777`, `on_command_finished`); a
+  `command_finished_threshold_secs` `DragValue` (0–600 s); three routing
+  combo boxes via the extracted `notification_routing_row` helper
+  (Toast / System / Both / System-when-unfocused); a full-width
+  `command_finished_template` text edit with a token hint; a "Test
+  Notification" button; and a Bell cross-reference checkbox bound to the
+  same `bell.on_command_finished` field shown in the Bell tab.
+- **Bell tab** also gained the `bell.on_command_finished` checkbox (the
+  same field is editable from both tabs; egui binds both to the draft).
+- **"Test Notification"** sets a `pending_test_notification` flag (the
+  same pattern as `pending_delete_layout`), drained in both `show` and
+  `show_standalone` to return the new `SettingsAction::TestNotification`.
+  The dispatcher in `settings_dispatch.rs` routes a
+  `NotificationRequest::sample()` (Info kind, "Freminal" / "Test
+  notification") through `NotificationRouter::route_test` using the draft
+  `[notifications]` config (so unsaved routing changes are reflected) and
+  the focused state.
+- **`route_test`** is a sibling of `route` that skips only the `enabled`
+  master-switch gate — the test button must give feedback even while the
+  system is disabled; the per-category routing policy still applies.
+- **`draft_notifications()`** accessor added so the dispatcher reads the
+  draft config without exposing the private `draft` field.
+- **`NotificationRouting` label helper** `notification_routing_label`
+  added next to `bell_mode_label`.
+- **Tests:** `notification_routing_labels`,
+  `notification_settings_persist_through_draft`,
+  `test_notification_button_sets_pending_flag` (settings.rs);
+  `route_test_ignores_enabled_master_switch`, `sample_request_is_info_kind`
+  (notifications.rs).
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
+
+#### 76.8 — Docs ✅ 2026-06-09
 
 **Scope:** `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
 `shell-integration/README.md`.
@@ -2699,6 +3099,18 @@ notification through the configured routing.
   with the `TERM_PROGRAM` detection idiom.
 
 **Verification:** Per AGENTS.md "Escape Sequence Documentation" rules.
+
+**Completion notes (2026-06-09) — scope absorbed into 76.2 and 76.6:**
+
+- The escape-sequence dual-doc update was done in **76.2**: OSC 9
+  (iTerm2/WezTerm) and OSC 777 (urxvt) are ✅ in
+  `ESCAPE_SEQUENCE_COVERAGE.md` and were removed from
+  `ESCAPE_SEQUENCE_GAPS.md` (both files' "Last updated" headers cite
+  Task 76.2).
+- The `shell-integration/README.md` "Desktop Notifications (OSC 9 /
+  OSC 777)" section documenting the `TERM_PROGRAM` detection idiom was
+  added in **76.6**.
+- No further work was required; this subtask is bookkeeping only.
 
 ### 76 Open Questions Resolved
 

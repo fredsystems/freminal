@@ -16,7 +16,7 @@ use freminal_common::buffer_states::{
     kitty_graphics::{KittyParseError, parse_kitty_graphics},
     osc::{AnsiOscType, UrlResponse},
     url::Url,
-    window_manipulation::WindowManipulation,
+    window_manipulation::{NotificationKind, WindowManipulation},
 };
 
 use super::{TerminalHandler, shell_integration};
@@ -145,6 +145,17 @@ impl TerminalHandler {
                 self.pointer_shape = *shape;
             }
 
+            // OSC 9 / OSC 777 — desktop notification.  Forward to the GUI via
+            // the window-command channel; the GUI's notification router
+            // (Task 76.4) applies the `[notifications]` routing policy.
+            AnsiOscType::Notify { title, body } => {
+                self.window_commands.push(WindowManipulation::Notification {
+                    kind: NotificationKind::OscText,
+                    title: title.clone(),
+                    body: body.clone(),
+                });
+            }
+
             AnsiOscType::NoOp => {}
         }
     }
@@ -187,6 +198,61 @@ impl TerminalHandler {
                 // the type of the next prompt (initial, continuation, right)
                 // but does not change the FTCS state machine.
             }
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::TerminalHandler;
+    use freminal_common::buffer_states::osc::AnsiOscType;
+    use freminal_common::buffer_states::terminal_output::TerminalOutput;
+    use freminal_common::buffer_states::window_manipulation::{
+        NotificationKind, WindowManipulation,
+    };
+
+    #[test]
+    fn osc_notify_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(
+            handler.window_commands.is_empty(),
+            "no window commands initially"
+        );
+
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify {
+            title: Some("Build".to_owned()),
+            body: "done".to_owned(),
+        })]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification { kind, title, body } => {
+                assert_eq!(*kind, NotificationKind::OscText);
+                assert_eq!(title.as_deref(), Some("Build"));
+                assert_eq!(body, "done");
+            }
+            other => panic!("expected Notification, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc_notify_without_title_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify {
+            title: None,
+            body: "hello".to_owned(),
+        })]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification { kind, title, body } => {
+                assert_eq!(*kind, NotificationKind::OscText);
+                assert_eq!(*title, None);
+                assert_eq!(body, "hello");
+            }
+            other => panic!("expected Notification, got: {other:?}"),
         }
     }
 }

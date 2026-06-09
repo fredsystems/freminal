@@ -25,6 +25,7 @@ pub enum SettingsTab {
     Tabs,
     ShellIntegration,
     Bell,
+    Notifications,
     Security,
     Keybindings,
     Startup,
@@ -32,7 +33,7 @@ pub enum SettingsTab {
 
 impl SettingsTab {
     /// All tabs in display order.
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Font,
         Self::Cursor,
         Self::Theme,
@@ -43,6 +44,7 @@ impl SettingsTab {
         Self::Tabs,
         Self::ShellIntegration,
         Self::Bell,
+        Self::Notifications,
         Self::Security,
         Self::Keybindings,
         Self::Startup,
@@ -60,6 +62,7 @@ impl SettingsTab {
             Self::Tabs => "Tabs",
             Self::ShellIntegration => "Shell Integration",
             Self::Bell => "Bell",
+            Self::Notifications => "Notifications",
             Self::Security => "Security",
             Self::Keybindings => "Keybindings",
             Self::Startup => "Startup",
@@ -94,6 +97,10 @@ pub enum SettingsAction {
     /// The modal was closed without Apply while opacity was being previewed —
     /// revert to the original value.
     RevertOpacity(f32),
+    /// The user clicked "Test Notification" in the Notifications tab — route
+    /// a sample notification through the current draft `[notifications]`
+    /// config so the user can verify routing without running a command.
+    TestNotification,
 }
 
 /// Result of scanning a frame's egui events for a key-binding press.
@@ -222,6 +229,12 @@ pub struct SettingsModal {
     /// `Asking`, the settings UI renders a confirmation prompt instead of
     /// actually closing.  Cleared by Save / Discard / keep-open decisions.
     pending_close: PendingClose,
+
+    /// Set by `show_notifications_tab` when the user clicks "Test
+    /// Notification".  Consumed by `show` / `show_standalone` which return it
+    /// as `SettingsAction::TestNotification` so the app can route a sample
+    /// notification through the draft `[notifications]` config.
+    pending_test_notification: bool,
 }
 
 impl SettingsModal {
@@ -247,6 +260,7 @@ impl SettingsModal {
             pending_delete_layout: None,
             baseline_toml: String::new(),
             pending_close: PendingClose::None,
+            pending_test_notification: false,
         }
     }
 
@@ -513,6 +527,10 @@ impl SettingsModal {
             return SettingsAction::DeleteLayout(path);
         }
 
+        if std::mem::take(&mut self.pending_test_notification) {
+            return SettingsAction::TestNotification;
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -666,6 +684,10 @@ impl SettingsModal {
             return SettingsAction::DeleteLayout(path);
         }
 
+        if std::mem::take(&mut self.pending_test_notification) {
+            return SettingsAction::TestNotification;
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -705,6 +727,14 @@ impl SettingsModal {
         &self.draft
     }
 
+    /// Returns the draft `[notifications]` config so the app can route a
+    /// "Test Notification" through exactly the settings the user is currently
+    /// editing (including unsaved changes).
+    #[must_use]
+    pub(super) const fn draft_notifications(&self) -> &config::NotificationsConfig {
+        &self.draft.notifications
+    }
+
     // -------------------------------------------------------------------------
     //  Tab dispatch
     // -------------------------------------------------------------------------
@@ -722,6 +752,7 @@ impl SettingsModal {
             SettingsTab::Tabs => self.show_tabs_tab(ui),
             SettingsTab::ShellIntegration => self.show_shell_integration_tab(ui),
             SettingsTab::Bell => self.show_bell_tab(ui),
+            SettingsTab::Notifications => self.show_notifications_tab(ui),
             SettingsTab::Security => self.show_security_tab(ui),
             SettingsTab::Keybindings => self.show_keybindings_tab(ui),
             SettingsTab::Startup => self.show_startup_tab(ui),
@@ -1396,6 +1427,151 @@ impl SettingsModal {
             "Visual: briefly flash the terminal area.\n\
              None: silently ignore the bell.",
         );
+
+        ui.add_space(12.0);
+
+        ui.checkbox(
+            &mut self.draft.bell.on_command_finished,
+            "Ring bell on command completion",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Ring the bell (using the mode above) when a command finishes \
+             (OSC 133 D), even if the program emitted no bell character. \
+             Requires shell integration.",
+        );
+    }
+
+    fn show_notifications_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.notifications.enabled,
+            "Enable notifications",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Master switch. When off, no toasts or desktop notifications are \
+             produced, regardless of the options below.",
+        );
+
+        ui.add_space(12.0);
+        ui.heading("Sources");
+        ui.checkbox(
+            &mut self.draft.notifications.osc_9,
+            "OSC 9 (iTerm2 / WezTerm text)",
+        );
+        ui.checkbox(
+            &mut self.draft.notifications.osc_777,
+            "OSC 777 (urxvt notify;TITLE;BODY)",
+        );
+        ui.checkbox(
+            &mut self.draft.notifications.on_command_finished,
+            "Command finished (OSC 133 D)",
+        );
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.label("Command threshold:");
+            ui.add(
+                DragValue::new(&mut self.draft.notifications.command_finished_threshold_secs)
+                    .speed(0.1)
+                    .range(0.0_f32..=600.0_f32)
+                    .suffix(" s"),
+            );
+        });
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Minimum command duration before a command-finished notification \
+             fires. Avoids spamming notifications for fast commands.",
+        );
+
+        ui.add_space(12.0);
+        ui.heading("Routing");
+        Self::notification_routing_row(ui, "Errors", &mut self.draft.notifications.routing_error);
+        Self::notification_routing_row(ui, "Info", &mut self.draft.notifications.routing_info);
+        Self::notification_routing_row(
+            ui,
+            "Command finished",
+            &mut self.draft.notifications.routing_command_finished,
+        );
+
+        ui.add_space(12.0);
+        ui.heading("Template");
+        ui.label("Command-finished notification body:");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.draft.notifications.command_finished_template)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Tokens: {command}, {duration}, {exit_code}, {cwd}, {tab_name}.",
+        );
+
+        ui.add_space(8.0);
+        if ui.button("Test Notification").clicked() {
+            self.pending_test_notification = true;
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Dispatches a sample notification through the routing selected \
+             above (uses the current, unsaved settings).",
+        );
+
+        ui.add_space(12.0);
+        ui.heading("Bell");
+        ui.checkbox(
+            &mut self.draft.bell.on_command_finished,
+            "Ring bell on command completion",
+        );
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Mirrors the toggle in the Bell tab. The bell mode is configured \
+             there.",
+        );
+    }
+
+    /// Render one labeled routing combo box. Extracted so the three routing
+    /// categories share identical UI and the per-category borrow of
+    /// `self.draft.notifications` stays scoped.
+    fn notification_routing_row(
+        ui: &mut Ui,
+        label: &str,
+        routing: &mut config::NotificationRouting,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ComboBox::from_id_salt(format!("notif_routing_{label}"))
+                .selected_text(notification_routing_label(*routing))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        routing,
+                        config::NotificationRouting::Toast,
+                        notification_routing_label(config::NotificationRouting::Toast),
+                    );
+                    ui.selectable_value(
+                        routing,
+                        config::NotificationRouting::System,
+                        notification_routing_label(config::NotificationRouting::System),
+                    );
+                    ui.selectable_value(
+                        routing,
+                        config::NotificationRouting::Both,
+                        notification_routing_label(config::NotificationRouting::Both),
+                    );
+                    ui.selectable_value(
+                        routing,
+                        config::NotificationRouting::SystemWhenUnfocused,
+                        notification_routing_label(
+                            config::NotificationRouting::SystemWhenUnfocused,
+                        ),
+                    );
+                });
+        });
     }
 
     fn show_security_tab(&mut self, ui: &mut Ui) {
@@ -2085,6 +2261,15 @@ const fn bell_mode_label(mode: config::BellMode) -> &'static str {
     }
 }
 
+const fn notification_routing_label(routing: config::NotificationRouting) -> &'static str {
+    match routing {
+        config::NotificationRouting::Toast => "Toast",
+        config::NotificationRouting::System => "System",
+        config::NotificationRouting::Both => "Both",
+        config::NotificationRouting::SystemWhenUnfocused => "System when unfocused",
+    }
+}
+
 /// Returns `true` when a startup layout is configured but not present in
 /// the discovered layout list.  Extracted for unit testing since the
 /// `ComboBox` UI itself is hard to exercise in isolation.
@@ -2233,6 +2418,7 @@ mod tests {
         assert_eq!(SettingsTab::Tabs.label(), "Tabs");
         assert_eq!(SettingsTab::ShellIntegration.label(), "Shell Integration");
         assert_eq!(SettingsTab::Bell.label(), "Bell");
+        assert_eq!(SettingsTab::Notifications.label(), "Notifications");
         assert_eq!(SettingsTab::Security.label(), "Security");
         assert_eq!(SettingsTab::Keybindings.label(), "Keybindings");
         assert_eq!(SettingsTab::Startup.label(), "Startup");
@@ -2300,7 +2486,56 @@ mod tests {
 
     #[test]
     fn all_tabs_present() {
-        assert_eq!(SettingsTab::ALL.len(), 13);
+        assert_eq!(SettingsTab::ALL.len(), 14);
+    }
+
+    #[test]
+    fn notification_routing_labels() {
+        assert_eq!(
+            notification_routing_label(config::NotificationRouting::Toast),
+            "Toast"
+        );
+        assert_eq!(
+            notification_routing_label(config::NotificationRouting::System),
+            "System"
+        );
+        assert_eq!(
+            notification_routing_label(config::NotificationRouting::Both),
+            "Both"
+        );
+        assert_eq!(
+            notification_routing_label(config::NotificationRouting::SystemWhenUnfocused),
+            "System when unfocused"
+        );
+    }
+
+    #[test]
+    fn notification_settings_persist_through_draft() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        modal.draft.notifications.enabled = true;
+        modal.draft.notifications.command_finished_template = "{command}".to_owned();
+        modal.draft.bell.on_command_finished = true;
+        let applied = modal.draft.clone();
+        assert!(applied.notifications.enabled);
+        assert_eq!(applied.notifications.command_finished_template, "{command}");
+        assert!(applied.bell.on_command_finished);
+    }
+
+    #[test]
+    fn test_notification_button_sets_pending_flag() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert!(!modal.pending_test_notification);
+        // Simulate the button click side-effect.
+        modal.pending_test_notification = true;
+        // The drain in `show`/`show_standalone` takes the flag and returns the
+        // action; emulate that here.
+        let drained = std::mem::take(&mut modal.pending_test_notification);
+        assert!(drained);
+        assert!(!modal.pending_test_notification);
     }
 
     #[test]

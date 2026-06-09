@@ -19,6 +19,7 @@ use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::io::WindowCommand;
 
 use crate::gui::colors::internal_color_to_egui_with_alpha;
+use crate::gui::notifications::NotificationRequest;
 
 pub(super) fn set_egui_options(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
     ctx.global_style_mut(|style| {
@@ -182,6 +183,7 @@ pub(super) fn handle_window_manipulation(
     bell_since: &mut Option<Instant>,
     bell_mode: BellMode,
     flags: &WindowManipFlags,
+    notifications: &mut Vec<NotificationRequest>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
     // by the caller to clear any user-assigned custom tab name, so
@@ -508,6 +510,14 @@ pub(super) fn handle_window_manipulation(
                             egui::UserAttentionType::Informational,
                         ));
                 }
+            }
+
+            // OSC 9 / OSC 777 desktop notification (Task 76).  Collect into
+            // the out-parameter; the caller in `app_impl::update()` (where
+            // `self.config` and the toast stack are in scope) dispatches each
+            // request through the `NotificationRouter`.
+            WindowManipulation::Notification { kind, title, body } => {
+                notifications.push(NotificationRequest { kind, title, body });
             }
         }
     }

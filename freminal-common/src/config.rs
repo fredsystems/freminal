@@ -37,6 +37,7 @@ pub struct Config {
     pub security: SecurityConfig,
     pub shell_integration: ShellIntegrationConfig,
     pub command_blocks: CommandBlocksConfig,
+    pub notifications: NotificationsConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -79,6 +80,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             shell_integration: ShellIntegrationConfig::default(),
             command_blocks: CommandBlocksConfig::default(),
+            notifications: NotificationsConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -492,12 +494,20 @@ pub enum BellMode {
 pub struct BellConfig {
     /// Bell mode: `"visual"` (default) or `"none"`.
     pub mode: BellMode,
+
+    /// When `true`, ring the bell (using the configured [`Self::mode`]) on an
+    /// OSC 133 `D` (command finished) event.  Lets long-running commands beep
+    /// even when no `\x07` was emitted by the program.
+    ///
+    /// Default: `false`.
+    pub on_command_finished: bool,
 }
 
 impl Default for BellConfig {
     fn default() -> Self {
         Self {
             mode: BellMode::Visual,
+            on_command_finished: false,
         }
     }
 }
@@ -685,6 +695,157 @@ impl Default for CommandBlocksConfig {
             show_duration: true,
             duration_threshold_secs: 2.0,
             gutter: GutterPosition::Left,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Notifications
+// ------------------------------------------------------------------------------------------------
+
+/// Where a notification of a given category is delivered.
+///
+/// Notifications can surface as an in-app toast, a desktop notification via
+/// the system notification daemon, both, or — for the command-finished
+/// category — a desktop notification only when freminal is unfocused
+/// (falling back to a toast when focused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationRouting {
+    /// In-app toast only.
+    Toast,
+    /// Desktop notification only.
+    System,
+    /// Both an in-app toast and a desktop notification.
+    Both,
+    /// Desktop notification when freminal is unfocused; an in-app toast when
+    /// it is focused.  Default for command-finished events.
+    #[default]
+    SystemWhenUnfocused,
+}
+
+impl NotificationRouting {
+    /// Whether this routing dispatches an in-app toast given the current
+    /// focus state.
+    ///
+    /// [`Self::SystemWhenUnfocused`] produces a toast only when freminal is
+    /// focused (the desktop notification is reserved for the unfocused case).
+    #[must_use]
+    pub const fn wants_toast(self, focused: bool) -> bool {
+        match self {
+            Self::Toast | Self::Both => true,
+            Self::SystemWhenUnfocused => focused,
+            Self::System => false,
+        }
+    }
+
+    /// Whether this routing dispatches a desktop notification given the
+    /// current focus state.
+    ///
+    /// [`Self::SystemWhenUnfocused`] produces a desktop notification only when
+    /// freminal is unfocused.
+    #[must_use]
+    pub const fn wants_system(self, focused: bool) -> bool {
+        match self {
+            Self::System | Self::Both => true,
+            Self::SystemWhenUnfocused => !focused,
+            Self::Toast => false,
+        }
+    }
+}
+
+/// Configuration for the notification system (Task 76).
+///
+/// Notifications are produced from three sources: OSC 9 (iTerm2/WezTerm)
+/// text payloads, OSC 777 (`notify;TITLE;BODY`, urxvt) payloads, and OSC 133
+/// `D` command-finished events.  Each category routes independently to an
+/// in-app toast and/or a desktop notification per [`NotificationRouting`].
+///
+/// The system is opt-in: [`Self::enabled`] defaults to `false`.
+///
+/// ```toml
+/// [notifications]
+/// enabled = false
+/// osc_9 = true
+/// osc_777 = true
+/// on_command_finished = true
+/// command_finished_threshold_secs = 10.0
+/// routing_error = "both"
+/// routing_info = "toast"
+/// routing_command_finished = "system_when_unfocused"
+/// command_finished_template = "{command} finished in {duration} (exit {exit_code})"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+// Four independent TOML config toggles (master switch + per-source enables).
+// Each maps directly to a documented `[notifications]` key; collapsing them
+// into an enum would distort the config schema and add noise.
+#[allow(clippy::struct_excessive_bools)]
+pub struct NotificationsConfig {
+    /// Master switch for the notification system.  When `false`, no
+    /// notifications of any kind are produced.  Default: `false` (opt-in).
+    pub enabled: bool,
+
+    /// When `true`, OSC 9 (iTerm2) text payloads create notifications.
+    /// Default: `true`.
+    pub osc_9: bool,
+
+    /// When `true`, OSC 777 (`notify;TITLE;BODY`) payloads create
+    /// notifications.  Default: `true`.
+    pub osc_777: bool,
+
+    /// When `true`, an OSC 133 `D` (command finished) event fires a
+    /// notification.  Default: `true`.
+    pub on_command_finished: bool,
+
+    /// Minimum command duration (in seconds) before a command-finished
+    /// notification fires.  Avoids spamming notifications for fast commands.
+    /// Default: `10.0`.
+    pub command_finished_threshold_secs: f32,
+
+    /// Routing for error-category notifications.  Default:
+    /// [`NotificationRouting::Both`].
+    pub routing_error: NotificationRouting,
+
+    /// Routing for informational notifications.  Default:
+    /// [`NotificationRouting::Toast`].
+    pub routing_info: NotificationRouting,
+
+    /// Routing for command-finished notifications.  Default:
+    /// [`NotificationRouting::SystemWhenUnfocused`].
+    pub routing_command_finished: NotificationRouting,
+
+    /// Template for the body of command-finished notifications.
+    ///
+    /// Supported tokens, substituted at notification time:
+    ///
+    /// - `{command}` — the command text (or `Command` if it scrolled out
+    ///   of the buffer before extraction);
+    /// - `{duration}` — human-readable elapsed time (e.g. `3s`, `2m15s`);
+    /// - `{exit_code}` — the numeric exit code, or `?` when the shell
+    ///   omitted it;
+    /// - `{cwd}` — the working directory captured at prompt start, or an
+    ///   empty string when unknown;
+    /// - `{tab_name}` — the display name of the tab the command ran in.
+    ///
+    /// Default: `"{command} finished in {duration} (exit {exit_code})"`.
+    pub command_finished_template: String,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            osc_9: true,
+            osc_777: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 10.0,
+            routing_error: NotificationRouting::Both,
+            routing_info: NotificationRouting::Toast,
+            routing_command_finished: NotificationRouting::SystemWhenUnfocused,
+            command_finished_template: String::from(
+                "{command} finished in {duration} (exit {exit_code})",
+            ),
         }
     }
 }
@@ -1051,8 +1212,12 @@ struct ConfigPartial {
     pub ui: Option<UiConfig>,
     pub shader: Option<ShaderConfig>,
     pub tabs: Option<TabsConfig>,
+    pub tab_title: Option<TabTitleConfig>,
     pub bell: Option<BellConfig>,
     pub security: Option<SecurityConfig>,
+    pub shell_integration: Option<ShellIntegrationConfig>,
+    pub command_blocks: Option<CommandBlocksConfig>,
+    pub notifications: Option<NotificationsConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
@@ -1091,11 +1256,23 @@ impl Config {
         if let Some(tabs) = partial.tabs {
             self.tabs = tabs;
         }
+        if let Some(tab_title) = partial.tab_title {
+            self.tab_title = tab_title;
+        }
         if let Some(bell) = partial.bell {
             self.bell = bell;
         }
         if let Some(security) = partial.security {
             self.security = security;
+        }
+        if let Some(shell_integration) = partial.shell_integration {
+            self.shell_integration = shell_integration;
+        }
+        if let Some(command_blocks) = partial.command_blocks {
+            self.command_blocks = command_blocks;
+        }
+        if let Some(notifications) = partial.notifications {
+            self.notifications = notifications;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -1644,6 +1821,110 @@ size = 14.0
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
         assert_eq!(parsed.command_blocks.gutter, GutterPosition::Off);
+    }
+
+    #[test]
+    fn notifications_default_is_opt_in() {
+        let cfg = NotificationsConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.osc_9);
+        assert!(cfg.osc_777);
+        assert!(cfg.on_command_finished);
+        assert!((cfg.command_finished_threshold_secs - 10.0_f32).abs() < f32::EPSILON);
+        assert_eq!(cfg.routing_error, NotificationRouting::Both);
+        assert_eq!(cfg.routing_info, NotificationRouting::Toast);
+        assert_eq!(
+            cfg.routing_command_finished,
+            NotificationRouting::SystemWhenUnfocused
+        );
+        assert_eq!(
+            cfg.command_finished_template,
+            "{command} finished in {duration} (exit {exit_code})"
+        );
+    }
+
+    #[test]
+    fn notifications_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.notifications.enabled = true;
+        cfg.notifications.osc_9 = false;
+        cfg.notifications.osc_777 = false;
+        cfg.notifications.on_command_finished = false;
+        cfg.notifications.command_finished_threshold_secs = 3.5;
+        cfg.notifications.routing_error = NotificationRouting::System;
+        cfg.notifications.routing_info = NotificationRouting::Both;
+        cfg.notifications.routing_command_finished = NotificationRouting::Toast;
+        cfg.notifications.command_finished_template = "{command}: {exit_code}".to_owned();
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert!(parsed.notifications.enabled);
+        assert!(!parsed.notifications.osc_9);
+        assert!(!parsed.notifications.osc_777);
+        assert!(!parsed.notifications.on_command_finished);
+        assert!(
+            (parsed.notifications.command_finished_threshold_secs - 3.5_f32).abs() < f32::EPSILON
+        );
+        assert_eq!(
+            parsed.notifications.routing_error,
+            NotificationRouting::System
+        );
+        assert_eq!(parsed.notifications.routing_info, NotificationRouting::Both);
+        assert_eq!(
+            parsed.notifications.routing_command_finished,
+            NotificationRouting::Toast
+        );
+        assert_eq!(
+            parsed.notifications.command_finished_template,
+            "{command}: {exit_code}"
+        );
+    }
+
+    #[test]
+    fn notification_routing_serializes_as_snake_case() {
+        #[derive(Serialize)]
+        struct RoutingToml {
+            routing: NotificationRouting,
+        }
+        let cases = [
+            (NotificationRouting::Toast, "routing = \"toast\""),
+            (NotificationRouting::System, "routing = \"system\""),
+            (NotificationRouting::Both, "routing = \"both\""),
+            (
+                NotificationRouting::SystemWhenUnfocused,
+                "routing = \"system_when_unfocused\"",
+            ),
+        ];
+        for (routing, expected) in cases {
+            let toml = toml::to_string(&RoutingToml { routing }).expect("serialise");
+            assert!(toml.contains(expected), "got: {toml}");
+        }
+    }
+
+    #[test]
+    fn notification_routing_dispatch_decisions() {
+        // Toast: always toast, never system.
+        assert!(NotificationRouting::Toast.wants_toast(true));
+        assert!(NotificationRouting::Toast.wants_toast(false));
+        assert!(!NotificationRouting::Toast.wants_system(true));
+        assert!(!NotificationRouting::Toast.wants_system(false));
+
+        // System: never toast, always system.
+        assert!(!NotificationRouting::System.wants_toast(true));
+        assert!(!NotificationRouting::System.wants_toast(false));
+        assert!(NotificationRouting::System.wants_system(true));
+        assert!(NotificationRouting::System.wants_system(false));
+
+        // Both: always toast, always system.
+        assert!(NotificationRouting::Both.wants_toast(true));
+        assert!(NotificationRouting::Both.wants_system(false));
+
+        // SystemWhenUnfocused: toast when focused, system when unfocused.
+        assert!(NotificationRouting::SystemWhenUnfocused.wants_toast(true));
+        assert!(!NotificationRouting::SystemWhenUnfocused.wants_toast(false));
+        assert!(!NotificationRouting::SystemWhenUnfocused.wants_system(true));
+        assert!(NotificationRouting::SystemWhenUnfocused.wants_system(false));
     }
 
     #[test]
@@ -2298,6 +2579,19 @@ show_single_tab = true
             BellMode::Visual,
             "bell mode should default to Visual"
         );
+        assert!(
+            !cfg.on_command_finished,
+            "on_command_finished should default to false"
+        );
+    }
+
+    #[test]
+    fn bell_on_command_finished_round_trip() {
+        let mut cfg = Config::default();
+        cfg.bell.on_command_finished = true;
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml_str).expect("re-parse");
+        assert!(parsed.bell.on_command_finished);
     }
 
     #[test]
@@ -2325,6 +2619,220 @@ mode = "none"
         .expect("valid TOML");
         cfg.apply_partial(partial);
         assert_eq!(cfg.bell.mode, BellMode::None);
+    }
+
+    /// Round-trip guard: every top-level `Config` section must survive the
+    /// real load path (`toml::to_string_pretty` -> `ConfigPartial` ->
+    /// `apply_partial`). This is the regression net for the class of bug
+    /// where a section is added to `Config` but not wired into
+    /// `ConfigPartial` / `apply_partial`, causing user TOML to be silently
+    /// dropped (see fix 76.4a). A non-default value is set in EVERY section;
+    /// if any section fails to merge, that section's assertion reverts to the
+    /// default and fails here.
+    #[test]
+    // One comprehensive guard covering every section plus the exhaustive
+    // destructure; splitting it would scatter the invariant and weaken it.
+    #[allow(clippy::too_many_lines)]
+    fn every_config_section_survives_partial_merge() {
+        // `version` is the only top-level (non-nested) field mutated, so set
+        // it via struct-update syntax to avoid `field_reassign_with_default`;
+        // every other mutation targets a nested section field, which the lint
+        // does not flag.
+        let mut original = Config {
+            version: 7,
+            ..Config::default()
+        };
+
+        // Mutate one distinctive, non-default field per section.
+        original.font.size = 18.0;
+        original.cursor.blink = !Config::default().cursor.blink;
+        original.theme.mode = ThemeMode::Light;
+        original.shell.path = Some("/bin/dash".to_owned());
+        original.logging.write_to_file = !Config::default().logging.write_to_file;
+        original.scrollback.limit = 12_345;
+        original.ui.hide_menu_bar = !Config::default().ui.hide_menu_bar;
+        original.shader.hot_reload = !Config::default().shader.hot_reload;
+        original.tabs.show_single_tab = !Config::default().tabs.show_single_tab;
+        original.tab_title.policy = TabTitlePolicy::OscWins;
+        original.bell.mode = BellMode::None;
+        original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.shell_integration.set_term_program =
+            !Config::default().shell_integration.set_term_program;
+        original.command_blocks.enabled = !Config::default().command_blocks.enabled;
+        original.notifications.enabled = !Config::default().notifications.enabled;
+        original
+            .keybindings
+            .overrides
+            .insert("copy".to_owned(), "Ctrl+Shift+C".to_owned());
+        original.startup.restore_last_session = !Config::default().startup.restore_last_session;
+        original.onboarding.first_run_complete = !Config::default().onboarding.first_run_complete;
+
+        // Serialize exactly as `save_config` does, then re-load exactly as
+        // `load_config` does (partial deserialize + merge onto defaults).
+        let toml = toml::to_string_pretty(&original).expect("serialize Config");
+        let partial: ConfigPartial = toml::from_str(&toml).expect("deserialize ConfigPartial");
+        let mut loaded = Config::default();
+        loaded.apply_partial(partial);
+
+        // Each section's mutated field must have survived the merge.
+        assert_eq!(loaded.version, 7, "version section dropped");
+        assert!(
+            (loaded.font.size - 18.0).abs() < f32::EPSILON,
+            "font section dropped"
+        );
+        assert_eq!(
+            loaded.cursor.blink, original.cursor.blink,
+            "cursor section dropped"
+        );
+        assert_eq!(loaded.theme.mode, ThemeMode::Light, "theme section dropped");
+        assert_eq!(
+            loaded.shell.path.as_deref(),
+            Some("/bin/dash"),
+            "shell section dropped"
+        );
+        assert_eq!(
+            loaded.logging.write_to_file, original.logging.write_to_file,
+            "logging section dropped"
+        );
+        assert_eq!(
+            loaded.scrollback.limit, 12_345,
+            "scrollback section dropped"
+        );
+        assert_eq!(
+            loaded.ui.hide_menu_bar, original.ui.hide_menu_bar,
+            "ui section dropped"
+        );
+        assert_eq!(
+            loaded.shader.hot_reload, original.shader.hot_reload,
+            "shader section dropped"
+        );
+        assert_eq!(
+            loaded.tabs.show_single_tab, original.tabs.show_single_tab,
+            "tabs section dropped"
+        );
+        assert_eq!(
+            loaded.tab_title.policy,
+            TabTitlePolicy::OscWins,
+            "tab_title section dropped"
+        );
+        assert_eq!(loaded.bell.mode, BellMode::None, "bell section dropped");
+        assert_eq!(
+            loaded.security.allow_clipboard_read, original.security.allow_clipboard_read,
+            "security section dropped"
+        );
+        assert_eq!(
+            loaded.shell_integration.set_term_program, original.shell_integration.set_term_program,
+            "shell_integration section dropped"
+        );
+        assert_eq!(
+            loaded.command_blocks.enabled, original.command_blocks.enabled,
+            "command_blocks section dropped"
+        );
+        assert_eq!(
+            loaded.notifications.enabled, original.notifications.enabled,
+            "notifications section dropped"
+        );
+        assert_eq!(
+            loaded.keybindings.overrides.get("copy").map(String::as_str),
+            Some("Ctrl+Shift+C"),
+            "keybindings section dropped"
+        );
+        assert_eq!(
+            loaded.startup.restore_last_session, original.startup.restore_last_session,
+            "startup section dropped"
+        );
+        assert_eq!(
+            loaded.onboarding.first_run_complete, original.onboarding.first_run_complete,
+            "onboarding section dropped"
+        );
+
+        // Exhaustiveness guard: this destructure has NO `..` rest pattern, so
+        // adding a new field to `Config` breaks compilation here until the
+        // author adds a mutation + assertion for it above. That converts the
+        // "new section silently not wired into ConfigPartial/apply_partial"
+        // bug class (see fix 76.4a) from a runtime surprise into a
+        // compile-time failure. If you are here because of a build error:
+        // wire your new field into `ConfigPartial` and `apply_partial`, then
+        // add a mutation and an assertion to this test.
+        let Config {
+            version: _,
+            font: _,
+            cursor: _,
+            theme: _,
+            shell: _,
+            logging: _,
+            scrollback: _,
+            ui: _,
+            shader: _,
+            tabs: _,
+            tab_title: _,
+            bell: _,
+            security: _,
+            shell_integration: _,
+            command_blocks: _,
+            notifications: _,
+            keybindings: _,
+            managed_by: _,
+            startup: _,
+            onboarding: _,
+        } = loaded;
+    }
+
+    #[test]
+    fn notifications_apply_partial_enables_from_toml() {
+        // Regression: [notifications] (and its sibling sections) must survive
+        // the ConfigPartial -> Config merge.  Previously ConfigPartial omitted
+        // these fields, so `enabled = true` was silently dropped on load.
+        let mut cfg = Config::default();
+        assert!(!cfg.notifications.enabled, "default is opt-out");
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[notifications]
+enabled = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(
+            cfg.notifications.enabled,
+            "[notifications] enabled must merge through ConfigPartial"
+        );
+    }
+
+    #[test]
+    fn previously_dropped_sections_apply_partial() {
+        // Regression for the ConfigPartial omission: tab_title,
+        // shell_integration, command_blocks, and notifications must all merge.
+        let mut cfg = Config::default();
+        // Pick non-default values for each section.
+        assert!(cfg.command_blocks.enabled);
+        assert!(cfg.shell_integration.set_term_program);
+
+        let partial: ConfigPartial = toml::from_str(
+            r#"
+[tab_title]
+policy = "osc_wins"
+
+[shell_integration]
+set_term_program = false
+
+[command_blocks]
+enabled = false
+
+[notifications]
+enabled = true
+osc_9 = false
+"#,
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+
+        assert_eq!(cfg.tab_title.policy, TabTitlePolicy::OscWins);
+        assert!(!cfg.shell_integration.set_term_program);
+        assert!(!cfg.command_blocks.enabled);
+        assert!(cfg.notifications.enabled);
+        assert!(!cfg.notifications.osc_9);
     }
 
     #[test]

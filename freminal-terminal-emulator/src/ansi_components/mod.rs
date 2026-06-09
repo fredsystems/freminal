@@ -10,6 +10,7 @@ pub mod dcs;
 pub mod osc;
 pub mod osc_clipboard;
 pub mod osc_iterm2;
+pub mod osc_notify;
 pub mod osc_palette;
 pub mod osc_shell_info;
 pub mod standard;
