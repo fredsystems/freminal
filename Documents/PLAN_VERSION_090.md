@@ -3225,7 +3225,7 @@ true`; already pinned to `1.12.3` in the workspace deps).
 warnings`, `cargo fmt --check`, `cargo machete`, and the Nix lint
   stack (`nixfmt`/`statix`/`deadnix`) all clean.
 
-#### 77.2 — Paste analyzer
+#### 77.2 — Paste analyzer ✅ 2026-06-09
 
 **Scope:** New module `freminal/src/gui/paste_guard.rs`.
 
@@ -3240,6 +3240,36 @@ warnings`, `cargo fmt --check`, `cargo machete`, and the Nix lint
   `PasteGuardConfig` (use `OnceCell` or rebuild on hot-reload).
 
 **Verification:** Unit tests for each trigger and combination thereof.
+
+**Completion notes (commit `ee15974`, 2026-06-09):**
+
+- New module `freminal/src/gui/paste_guard.rs` with the `PasteAnalysis`
+  enum (all five variants as specified) and a pure
+  `analyze(payload, config, compiled) -> PasteAnalysis`.
+- **Cache placement differs from the plan.** The plan suggested caching
+  the compiled regexes on `PasteGuardConfig` via `OnceCell`.
+  `PasteGuardConfig` lives in `freminal-common`, derives
+  `Clone`/`Serialize`/`Deserialize`, and is hot-reloaded by value, so
+  hanging a `OnceCell<Vec<Regex>>` off it fights the derives. Instead a
+  GUI-side `PasteGuard` struct owns `compiled: Vec<Regex>`;
+  `PasteGuard::rebuild(&config)` recompiles and returns the invalid
+  patterns for the caller to toast (77.6) while keeping the valid
+  siblings. `analyze` is the pure free function the `PasteGuard::analyze`
+  method delegates to, so the hot path never compiles a regex.
+- Control-char trigger flags genuine C0/C1 controls (ESC, BEL, ...) but
+  ignores `\n` (the multiline trigger's job), `\r`, and `\t`, which
+  appear in legitimate pasted text. Flagged chars are de-duplicated in
+  first-seen order.
+- `Multiple` is always a flat list (never nests `Multiple` or `Safe`),
+  ordered multiline → control chars → patterns.
+- 13 unit tests cover every trigger, the disabled master switch, dedup
+  ordering, trailing-newline line counting, and partial-compile recovery.
+- **Temporary `#[allow(dead_code)]` on `mod paste_guard;`** with a
+  `TODO(77.4)` comment: the module has no production caller until the
+  wire-in lands. Removed in 77.4. Permitted by the AGENTS.md temporary-
+  refactor exception; user-approved.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
 #### 77.3 — Preview dialog
 
