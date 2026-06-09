@@ -509,6 +509,17 @@ pub(super) fn handle_window_manipulation(
                         ));
                 }
             }
+
+            // OSC 9 / OSC 777 desktop notification (Task 76).  The dispatch
+            // landed in 76.3; the notification router that applies the
+            // `[notifications]` routing policy (toast vs system daemon) is
+            // wired in 76.4.
+            // TODO(76.4): route through NotificationRouter.
+            WindowManipulation::Notification { kind, title, body } => {
+                tracing::debug!(
+                    "notification (pending 76.4 routing): kind={kind:?}, title={title:?}, body={body:?}"
+                );
+            }
         }
     }
     shell_set_title

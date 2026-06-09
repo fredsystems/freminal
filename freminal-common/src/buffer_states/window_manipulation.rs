@@ -5,6 +5,22 @@
 
 use thiserror::Error;
 
+/// Category of a desktop/in-app notification (Task 76).
+///
+/// Determines which routing policy in `[notifications]` applies and which
+/// toast styling the GUI uses when surfacing the notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    /// Free-form text from an OSC 9 / OSC 777 sequence.
+    OscText,
+    /// A shell command finished (OSC 133 D).
+    CommandFinished,
+    /// An error-category notification.
+    Error,
+    /// An informational notification.
+    Info,
+}
+
 /// Errors produced when converting a raw `(Ps1, Ps2, Ps3)` XTWINOPS parameter
 /// triple into a [`WindowManipulation`].
 #[derive(Debug, Error, Eq, PartialEq, Clone)]
@@ -98,6 +114,20 @@ pub enum WindowManipulation {
     /// Forwarded to the GUI so it can trigger a visual bell indicator
     /// and/or mark the originating tab as having an unacknowledged bell.
     Bell,
+    /// Desktop/in-app notification request (OSC 9 / OSC 777, Task 76).
+    ///
+    /// Forwarded to the GUI so it can route the notification to an in-app
+    /// toast and/or the system notification daemon per the `[notifications]`
+    /// config.  `title` is `None` for OSC 9 and `Some` for OSC 777 when a
+    /// title is present.
+    Notification {
+        /// The notification category, selecting the routing policy.
+        kind: NotificationKind,
+        /// The notification title, if any.
+        title: Option<String>,
+        /// The notification body text.
+        body: String,
+    },
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {

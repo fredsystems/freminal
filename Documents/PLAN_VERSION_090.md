@@ -2638,7 +2638,7 @@ wants_toast(focused)` and `const fn wants_system(focused)` helpers so
 --all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
 --check` clean, `cargo machete` clean.
 
-#### 76.3 — OSC 9/777 dispatch
+#### 76.3 — OSC 9/777 dispatch ✅ 2026-06-09
 
 **Scope:** `freminal-terminal-emulator/src/terminal_handler/osc.rs`.
 
@@ -2650,6 +2650,54 @@ title: Option<String>, body: String }` to the GUI thread via the existing
 
 **Verification:** Unit test that emitting OSC 9 produces a
 `WindowCommand::Notification`.
+
+**Architectural note — routed via `WindowManipulation`, not a new
+`WindowCommand` variant (decided 2026-06-09):**
+
+The plan called for a `WindowCommand::Notification { kind, title, body }`
+variant forwarded "via the existing window-post channel". Investigation
+confirmed the same constraint documented in 72.3: the `TerminalHandler`
+does not own a `Sender<WindowCommand>`. It produces a
+`Vec<WindowManipulation>` (drained by `take_window_commands`); the PTY
+loop in `freminal/src/gui/pty.rs` then wraps each into
+`WindowCommand::Viewport`/`Report`. The `WindowCommand` enum
+(`io/mod.rs`) only wraps `WindowManipulation` — it has no free-standing
+payload variants. The idiomatic transport for a handler→GUI side-effect
+signal is therefore a new `WindowManipulation` variant, exactly how
+`Bell` and `SetClipboard` already flow. So 76.3 adds
+`WindowManipulation::Notification { kind, title, body }` rather than a
+`WindowCommand::Notification`. It still arrives on the GUI through the
+`WindowCommand::Viewport` wrapper and is consumed in
+`rendering::handle_window_manipulation`, which is where 76.4 hooks the
+`NotificationRouter`.
+
+**Completion notes (2026-06-09):**
+
+- **`NotificationKind` enum** (`OscText`, `CommandFinished`, `Error`,
+  `Info`) added to `freminal-common/src/buffer_states/window_manipulation.rs`.
+- **`WindowManipulation::Notification { kind, title, body }`** variant
+  added to the same enum, documented alongside `Bell`.
+- **`TerminalHandler::handle_osc`** `AnsiOscType::Notify` arm (the 76.2
+  `TODO(76.3)` placeholder) now pushes
+  `WindowManipulation::Notification { kind: OscText, title, body }` onto
+  `window_commands` instead of only logging.
+- **`rendering::handle_window_manipulation`** (GUI) gained a
+  `WindowManipulation::Notification` arm. For 76.3 it logs at debug with
+  a `TODO(76.4)` marker — the actual routing (toast vs system daemon per
+  `[notifications]`) is 76.4's scope. The arm exists so the exhaustive
+  match compiles.
+- **Tests:** 2 new in a new `terminal_handler::osc::tests` module
+  (`osc_notify_pushes_window_command`,
+  `osc_notify_without_title_pushes_window_command`) verifying a
+  `TerminalOutput::OscResponse(AnsiOscType::Notify { … })` produces
+  exactly one `WindowManipulation::Notification` with the right kind /
+  title / body. Byte-stream coverage (raw OSC 9 / 777 through the
+  parser) already lives in 76.2's `osc_notify.rs`; the parser pipeline
+  is not re-driven here because `TerminalHandler::handle_data` only
+  inserts text — the ANSI parser sits above the handler.
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
 
 #### 76.4 — GUI notification router
 
