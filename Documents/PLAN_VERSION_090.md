@@ -2575,7 +2575,7 @@ wants_toast(focused)` and `const fn wants_system(focused)` helpers so
 --all-targets --all-features -- -D warnings` clean, `cargo fmt --all
 -- --check` clean, `cargo machete` clean.
 
-#### 76.2 — OSC 9 and OSC 777 parsing
+#### 76.2 — OSC 9 and OSC 777 parsing ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/buffer_states/osc.rs`,
 `freminal-terminal-emulator/src/ansi_components/osc.rs`.
@@ -2594,6 +2594,49 @@ wants_toast(focused)` and `const fn wants_system(focused)` helpers so
 
 **Verification:** Unit tests for both parsers. Update
 `ESCAPE_SEQUENCE_COVERAGE.md` and `ESCAPE_SEQUENCE_GAPS.md` per AGENTS.md.
+
+**Completion notes (2026-06-09):**
+
+- **`AnsiOscType::Notify { title: Option<String>, body: String }`** added to
+  `freminal-common/src/buffer_states/osc.rs` (single variant for both OSC 9
+  and OSC 777, as specified) with a `Display` arm. Two new `OscTarget`
+  variants `Notify9` (OSC 9) and `Notify777` (OSC 777), wired into the
+  `From<&AnsiOscToken>` code→target table (9 → `Notify9`, 777 → `Notify777`).
+- **New handler module `freminal-terminal-emulator/src/ansi_components/osc_notify.rs`**
+  mirroring the `osc_shell_info.rs` pattern. Both parsers read from the
+  **raw (un-split) parameter bytes** rather than the upstream semicolon
+  token split, because notification bodies legitimately contain `;` and the
+  token split is too aggressive. Declared `pub mod osc_notify;` in
+  `ansi_components/mod.rs`.
+  - **OSC 9:** body = everything after the first `;`. `title = None`. Empty
+    or missing body silently consumed.
+  - **OSC 777:** strips the `notify;` prefix when present, then splits the
+    remainder on the _first_ `;` into `(title, body)` (preserving semicolons
+    in the body). `notify;TITLE` → title only, empty body. A payload without
+    the `notify;` prefix is treated as an all-body notification with no
+    title. Empty notifications silently consumed.
+  - Non-UTF-8 payloads are dropped (logged at debug), not lossy-decoded.
+- **Dispatch arms** for `OscTarget::Notify9`/`Notify777` added to
+  `dispatch_osc_target` in `osc.rs`, forwarding to the new handlers.
+- **`TerminalHandler::handle_osc`** (the exhaustive `AnsiOscType` match in
+  `terminal_handler/osc.rs`) gained an explicit `AnsiOscType::Notify` arm
+  that logs at debug with a `TODO(76.3)` marker — actual GUI forwarding is
+  76.3's scope; this arm only keeps the match exhaustive/compiling.
+- **Clippy:** `dispatch_osc_target` crossed 100 lines (106) with the two new
+  arms; added a localized `#[allow(clippy::too_many_lines)]` with
+  justification (flat dispatch table), consistent with the 72.4 precedent.
+- **Escape-sequence docs (mandatory dual-doc update):**
+  `ESCAPE_SEQUENCE_COVERAGE.md` gained an OSC 9 row and promoted OSC 777 to
+  ✅; `ESCAPE_SEQUENCE_GAPS.md` removed the OSC 777 gap entries (Priority 2
+  table + OSC Gaps table + prose). "Last updated" headers refreshed in both.
+- **Tests:** 4 new in `freminal-common` (target mappings + Notify Display);
+  17 new in `osc_notify.rs` (OSC 9 body/empty/semicolon/ST; OSC 777
+  title+body / title-only / no-prefix / semicolon-body / empty / ST;
+  non-UTF-8 and missing-semicolon direct-call branches; `parse_777_payload`
+  unit).
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
 
 #### 76.3 — OSC 9/777 dispatch
 

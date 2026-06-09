@@ -145,6 +145,15 @@ impl TerminalHandler {
                 self.pointer_shape = *shape;
             }
 
+            // OSC 9 / OSC 777 — desktop notification.  Parsing landed in 76.2;
+            // forwarding to the GUI notification router is wired in 76.3.
+            // TODO(76.3): dispatch a WindowCommand::Notification here.
+            AnsiOscType::Notify { title, body } => {
+                tracing::debug!(
+                    "OSC notification (pending 76.3 dispatch): title={title:?}, body={body:?}"
+                );
+            }
+
             AnsiOscType::NoOp => {}
         }
     }

@@ -1,9 +1,9 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-06-03 — Task 72.13: OSC 133 command-block storage and navigation
-complete; only the gutter UI (v0.9.0 Task 73) remains. Added XTGETTCAP capability-
-recognition polish entry (Task 72.16.e demoted the unknown-capability log to debug).
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72)
+Last updated: 2026-06-09 — Task 76.2: removed OSC 777 from the gap list and the OSC
+gaps prose — OSC 9 (iTerm2/WezTerm) and OSC 777 (urxvt) now parse into
+`AnsiOscType::Notify` and are routed by the GUI notification system.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -26,7 +26,7 @@ and iTerm2 inline images (OSC 1337) are fully implemented (Task 13). Kitty keybo
 protocol is complete (Task 35). The remaining gaps are:
 
 - **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
-- **OSC gaps:** OSC 66 (recognized but no effect), OSC 777 (Konsole notification)
+- **OSC gaps:** OSC 66 (recognized but no effect)
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
@@ -55,7 +55,6 @@ These features are tracked at the state-machine level but the renderer does not 
 | Sequence   | Importance | Type | Planned        | Notes                                                                                                                              |
 | ---------- | ---------- | ---- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 66     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                     |
-| OSC 777    | ⬜         | ⬜   | v0.9.0 Task 76 | Konsole system notification — scheduled under Notification System task                                                             |
 | OSC 133 UI | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73 |
 
 ---
@@ -145,10 +144,9 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                           | Rationale                                                                                                                                                                    | Planned        |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| OSC 777                        | Konsole notification compat                                                                                                                                                  | v0.9.0 Task 76 |
-| XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —              |
+| Item                           | Rationale                                                                                                                                                                    | Planned |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —       |
 
 ### Priority 3 — Low priority / optional
 
