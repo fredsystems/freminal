@@ -1,4 +1,11 @@
 #       Reconstructed via infocmp from file: /Applications/Freminal.app/Contents/Resources/terminfo/78/freminal
+#
+#       Notification support (Task 76): Freminal handles OSC 9 (iTerm2/WezTerm)
+#       and OSC 777 (urxvt "notify;TITLE;BODY") desktop notifications.  These
+#       are one-way, fire-and-forget sequences with no capability-query
+#       handshake, and terminfo defines no capability code for them, so there
+#       is nothing to advertise here.  Programs detect Freminal at runtime via
+#       TERM_PROGRAM=freminal (set in the PTY environment) rather than terminfo.
 xterm-freminal|freminal|Freminal,
         am, bce, ccc, hs, km, mc5i, mir, msgr, npc, xenl,
         colors#256, cols#80, it#8, lines#24, pairs#32767,

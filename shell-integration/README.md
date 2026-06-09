@@ -87,6 +87,32 @@ end
 
 ---
 
+## Desktop Notifications (OSC 9 / OSC 777)
+
+Freminal raises a desktop notification (and/or an in-app toast) when a
+program emits an [OSC 9](https://iterm2.com/documentation-escape-codes.html)
+(iTerm2/WezTerm) or [OSC 777](https://github.com/tmux/tmux/wiki/Modifier-Keys)
+(urxvt `notify;TITLE;BODY`) sequence, and on command completion when
+`[notifications] on_command_finished` is enabled (see the `[notifications]`
+section of `config_example.toml`).
+
+These sequences are **one-way and fire-and-forget** — there is no
+capability-query handshake to test for. The portable way to decide whether
+to emit them is the `TERM_PROGRAM` environment variable, which Freminal sets
+to `freminal`:
+
+```sh
+if [ "${TERM_PROGRAM:-}" = "freminal" ]; then
+    notify_via_osc9() { printf '\e]9;%s\a' "$1"; }
+    notify_via_osc777() { printf '\e]777;notify;%s;%s\a' "$1" "$2"; }
+fi
+```
+
+OSC 9 takes a single body string; OSC 777 takes a title and a body. Both are
+ignored unless `[notifications] enabled = true`.
+
+---
+
 ## Compatibility Notes
 
 ### OSC 7 double-emission is harmless

@@ -2937,7 +2937,7 @@ command, tab_name)` helper. Tokens: `{command}` (trimmed, or
   template and the routing dropdowns live in the Notifications tab,
   which 76.7 builds.
 
-#### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM)
+#### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM) ✅ 2026-06-09
 
 **Scope:** `freminal/freminal.ti` (terminfo source),
 `freminal-terminal-emulator/src/terminal_handler/dcs.rs` (existing
@@ -2984,6 +2984,50 @@ Work to do:
 existing terminfo-audit harness, see PLAN_12_TERMINFO.md — note that
 PLAN_12 is now retired into the v0.2.0 task set; the tests live in
 `dcs.rs` and `xtversion.rs`).
+
+**Completion notes (2026-06-09) — verification + documentation only,
+no behavior change (decided with the user):**
+
+- **Both plan-suggested response changes were intentionally NOT made**
+  because each conflicts with deliberate, documented codebase behavior:
+  - **XTGETTCAP `TN` stays `xterm-256color`** (not `freminal`). `TN`
+    means "the value of `$TERM`", and `io::pty::run_terminal` sets
+    `TERM=xterm-256color` as the documented Task-12 compatibility
+    strategy (mirroring WezTerm/Alacritty). Reporting `freminal` would
+    desync TN from TERM and break terminfo lookups.
+  - **XTVERSION stays `>|XTerm(Freminal <version>)`** (not
+    `freminal v<version>`). The `XTerm(` prefix is load-bearing: tmux
+    only enables `extkeys` / `modifyOtherKeys` when it recognises the
+    prefix (`tty_keys_extended_device_attributes`). Dropping it would
+    regress extended-key forwarding inside tmux — already documented in
+    `reports.rs::handle_device_name_and_version`.
+  - The freminal-identifying signal is `TERM_PROGRAM=freminal` (set in
+    72.6), and `Freminal` is already present in the XTVERSION payload.
+- **Verified existing responders first:** ran the existing 29 XTGETTCAP
+  tests + XTVERSION parser tests (all green) before touching anything.
+- **New regression guard test** `reports.rs::tests::
+device_name_and_version_keeps_xterm_prefix_and_freminal_token`
+  asserts the exact 7-bit-framed XTVERSION response
+  `\x1bP>|XTerm(Freminal <version>)\x1b\\` (the `reports.rs` response
+  builder previously had no test module — only the parser emitting
+  `RequestDeviceNameAndVersion` was covered).
+- **Hardened the existing `xtgettcap_known_capability_tn` test** with a
+  comment explaining the TN-must-equal-TERM invariant, and added an
+  explanatory comment to the `TN` arm of `lookup_termcap`.
+- **Terminfo (`res/freminal.ti`):** added a top-of-file comment block
+  explaining OSC 9 / OSC 777 have no terminfo capability code and that
+  detection is via `TERM_PROGRAM`. Comment-only; `tic -c` still
+  compiles.
+- **`shell-integration/README.md`:** added a "Desktop Notifications
+  (OSC 9 / OSC 777)" section documenting the `TERM_PROGRAM`-guarded
+  emission idiom for both sequences. The version marker was not bumped
+  (prose-only doc change; the marker tracks script protocol version).
+- **No escape-sequence dual-doc update needed:** 76.6 adds/removes/alters
+  no escape-sequence support. OSC 9/777 (76.2) and XTVERSION/XTGETTCAP
+  are already ✅ in `ESCAPE_SEQUENCE_COVERAGE.md`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
 
 #### 76.7 — Settings UI: Notifications tab
 

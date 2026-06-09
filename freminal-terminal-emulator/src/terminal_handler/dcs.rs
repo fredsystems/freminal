@@ -707,7 +707,15 @@ impl TerminalHandler {
             "setrgbb" => Some("\x1b[48;2;%p1%d;%p2%d;%p3%dm"),
             // colors — number of colors supported
             "colors" | "Co" => Some("256"),
-            // TN — terminal name
+            // TN — terminal name.  This MUST match the runtime `TERM` value
+            // (`xterm-256color`, set in `io::pty::run_terminal`), since TN is
+            // defined as "the value of $TERM".  Freminal deliberately presents
+            // as `xterm-256color` for maximum compatibility (the Task-12
+            // strategy mirroring WezTerm/Alacritty); the freminal identity is
+            // advertised separately via `TERM_PROGRAM=freminal` (Task 72.6)
+            // and the XTVERSION `>|XTerm(Freminal ...)` payload.  Do not change
+            // TN to `freminal` — it would desync from TERM and break terminfo
+            // lookups.
             "TN" => Some("xterm-256color"),
             // Ms — set selection (clipboard) via OSC 52
             "Ms" => Some("\x1b]52;%p1%s;%p2%s\x1b\\"),
@@ -1328,7 +1336,11 @@ mod tests {
         handler.handle_device_control_string(&dcs);
 
         let response = recv_pty_response(&rx);
-        // "xterm-256color" → hex
+        // Regression guard (Task 76.6): TN must report `xterm-256color`, the
+        // same value as the runtime `TERM` env var.  TN is "the value of
+        // $TERM"; reporting `freminal` would desync from TERM and break
+        // terminfo lookups.  Freminal advertises its identity via
+        // TERM_PROGRAM and XTVERSION instead.
         let expected_hex = TerminalHandler::hex_encode("xterm-256color");
         assert_eq!(response, format!("\x1bP1+r544E={expected_hex}\x1b\\"));
     }
