@@ -602,8 +602,17 @@ impl freminal_windowing::App for FreminalGui {
             .is_some_and(|p| p.view_state.window_focused);
         let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> =
             Vec::new();
+        let tab_title_policy = self.config.tab_title.policy;
+        let tab_title_separator = self.config.tab_title.separator.clone();
         for (tab_idx, tab) in win.tabs.iter_mut().enumerate() {
             let mut tab_received_event = false;
+            // Resolve the tab display name up front: `iter_panes_mut` borrows
+            // `tab` mutably, so `display_name` cannot be called inside the
+            // inner loop.  Used for the `{tab_name}` notification template
+            // token (Task 76.5).
+            let tab_name = tab
+                .display_name(tab_title_policy, &tab_title_separator)
+                .into_owned();
             if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
                 for pane in panes {
                     while let Ok(event) = pane.command_event_rx.try_recv() {
@@ -629,9 +638,26 @@ impl freminal_windowing::App for FreminalGui {
                         if let Some(req) = crate::gui::notifications::command_finished_request(
                             &event.block,
                             command_text.as_deref().unwrap_or(""),
+                            &tab_name,
                             &self.config.notifications,
                         ) {
                             command_notifications.push(req);
+                        }
+
+                        // Ring the bell on command completion when
+                        // `[bell] on_command_finished` is set (Task 76.5).
+                        // Uses the configured bell mode, mirroring the
+                        // `WindowManipulation::Bell` path in `rendering`.
+                        if self.config.bell.on_command_finished {
+                            use freminal_common::config::BellMode;
+                            let mode = self.config.bell.mode;
+                            if matches!(mode, BellMode::Visual | BellMode::Both) {
+                                pane.bell_active = true;
+                                pane.view_state.bell_since = Some(std::time::Instant::now());
+                            }
+                            if matches!(mode, BellMode::Audio | BellMode::Both) {
+                                crate::gui::platform::system_beep();
+                            }
                         }
 
                         pane.push_recent_command(event.block);

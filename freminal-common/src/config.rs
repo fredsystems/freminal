@@ -494,12 +494,20 @@ pub enum BellMode {
 pub struct BellConfig {
     /// Bell mode: `"visual"` (default) or `"none"`.
     pub mode: BellMode,
+
+    /// When `true`, ring the bell (using the configured [`Self::mode`]) on an
+    /// OSC 133 `D` (command finished) event.  Lets long-running commands beep
+    /// even when no `\x07` was emitted by the program.
+    ///
+    /// Default: `false`.
+    pub on_command_finished: bool,
 }
 
 impl Default for BellConfig {
     fn default() -> Self {
         Self {
             mode: BellMode::Visual,
+            on_command_finished: false,
         }
     }
 }
@@ -765,6 +773,7 @@ impl NotificationRouting {
 /// routing_error = "both"
 /// routing_info = "toast"
 /// routing_command_finished = "system_when_unfocused"
+/// command_finished_template = "{command} finished in {duration} (exit {exit_code})"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -805,6 +814,22 @@ pub struct NotificationsConfig {
     /// Routing for command-finished notifications.  Default:
     /// [`NotificationRouting::SystemWhenUnfocused`].
     pub routing_command_finished: NotificationRouting,
+
+    /// Template for the body of command-finished notifications.
+    ///
+    /// Supported tokens, substituted at notification time:
+    ///
+    /// - `{command}` — the command text (or `Command` if it scrolled out
+    ///   of the buffer before extraction);
+    /// - `{duration}` — human-readable elapsed time (e.g. `3s`, `2m15s`);
+    /// - `{exit_code}` — the numeric exit code, or `?` when the shell
+    ///   omitted it;
+    /// - `{cwd}` — the working directory captured at prompt start, or an
+    ///   empty string when unknown;
+    /// - `{tab_name}` — the display name of the tab the command ran in.
+    ///
+    /// Default: `"{command} finished in {duration} (exit {exit_code})"`.
+    pub command_finished_template: String,
 }
 
 impl Default for NotificationsConfig {
@@ -818,6 +843,9 @@ impl Default for NotificationsConfig {
             routing_error: NotificationRouting::Both,
             routing_info: NotificationRouting::Toast,
             routing_command_finished: NotificationRouting::SystemWhenUnfocused,
+            command_finished_template: String::from(
+                "{command} finished in {duration} (exit {exit_code})",
+            ),
         }
     }
 }
@@ -1809,6 +1837,10 @@ size = 14.0
             cfg.routing_command_finished,
             NotificationRouting::SystemWhenUnfocused
         );
+        assert_eq!(
+            cfg.command_finished_template,
+            "{command} finished in {duration} (exit {exit_code})"
+        );
     }
 
     #[test]
@@ -1822,6 +1854,7 @@ size = 14.0
         cfg.notifications.routing_error = NotificationRouting::System;
         cfg.notifications.routing_info = NotificationRouting::Both;
         cfg.notifications.routing_command_finished = NotificationRouting::Toast;
+        cfg.notifications.command_finished_template = "{command}: {exit_code}".to_owned();
 
         let toml = toml::to_string_pretty(&cfg).expect("serialise config");
         let parsed: Config = toml::from_str(&toml).expect("re-parse");
@@ -1841,6 +1874,10 @@ size = 14.0
         assert_eq!(
             parsed.notifications.routing_command_finished,
             NotificationRouting::Toast
+        );
+        assert_eq!(
+            parsed.notifications.command_finished_template,
+            "{command}: {exit_code}"
         );
     }
 
@@ -2542,6 +2579,19 @@ show_single_tab = true
             BellMode::Visual,
             "bell mode should default to Visual"
         );
+        assert!(
+            !cfg.on_command_finished,
+            "on_command_finished should default to false"
+        );
+    }
+
+    #[test]
+    fn bell_on_command_finished_round_trip() {
+        let mut cfg = Config::default();
+        cfg.bell.on_command_finished = true;
+        let toml_str = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml_str).expect("re-parse");
+        assert!(parsed.bell.on_command_finished);
     }
 
     #[test]

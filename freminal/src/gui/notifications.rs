@@ -67,10 +67,16 @@ impl NotificationRequest {
 /// A failed command produces an [`NotificationKind::Error`]; success or
 /// unknown-exit produces [`NotificationKind::CommandFinished`]. `command`
 /// is the extracted command text (may be empty if it scrolled out of the
-/// buffer before extraction).
+/// buffer before extraction). `tab_name` is the display name of the tab the
+/// command ran in, used for the `{tab_name}` template token.
+///
+/// The body is rendered from
+/// [`NotificationsConfig::command_finished_template`] via
+/// [`render_command_finished_template`].
 pub(super) fn command_finished_request(
     block: &CommandBlock,
     command: &str,
+    tab_name: &str,
     config: &NotificationsConfig,
 ) -> Option<NotificationRequest> {
     if !config.enabled || !config.on_command_finished {
@@ -87,27 +93,20 @@ pub(super) fn command_finished_request(
         return None;
     }
 
-    let duration_label = format_command_duration(duration);
-    let command = command.trim();
-    let command_label = if command.is_empty() {
-        "Command".to_owned()
-    } else {
-        command.to_owned()
-    };
+    let body = render_command_finished_template(
+        &config.command_finished_template,
+        block,
+        command,
+        tab_name,
+    );
 
     // A non-zero exit is an error notification; success / unknown-exit
     // (shell omitted the code) are informational "finished" notifications.
     // `Running` was already excluded by the status check above.
-    let (kind, body) = if let CommandStatus::Failure(code) = status {
-        (
-            NotificationKind::Error,
-            format!("{command_label} failed in {duration_label} (exit {code})"),
-        )
+    let kind = if matches!(status, CommandStatus::Failure(_)) {
+        NotificationKind::Error
     } else {
-        (
-            NotificationKind::CommandFinished,
-            format!("{command_label} finished in {duration_label}"),
-        )
+        NotificationKind::CommandFinished
     };
 
     Some(NotificationRequest {
@@ -116,6 +115,59 @@ pub(super) fn command_finished_request(
         body,
     })
 }
+
+/// Render a command-finished notification body from a template string.
+///
+/// Substitutes the documented tokens with values derived from `block`,
+/// `command`, and `tab_name`:
+///
+/// - `{command}` — `command` trimmed, or `"Command"` when empty;
+/// - `{duration}` — [`format_command_duration`] of the block's duration, or
+///   an empty string when the duration is unknown;
+/// - `{exit_code}` — the block's exit code, or `"?"` when the shell omitted
+///   it;
+/// - `{cwd}` — the block's captured working directory, or an empty string;
+/// - `{tab_name}` — `tab_name` verbatim.
+///
+/// Unknown tokens are left untouched.
+fn render_command_finished_template(
+    template: &str,
+    block: &CommandBlock,
+    command: &str,
+    tab_name: &str,
+) -> String {
+    let command = command.trim();
+    let command_label = if command.is_empty() {
+        "Command"
+    } else {
+        command
+    };
+    let duration_label = block
+        .duration()
+        .map(format_command_duration)
+        .unwrap_or_default();
+    let exit_label = block
+        .exit_code
+        .map_or_else(|| "?".to_owned(), |code| code.to_string());
+    let cwd_label = block.cwd.as_deref().unwrap_or("");
+
+    template
+        .replace(TOKEN_COMMAND, command_label)
+        .replace(TOKEN_DURATION, &duration_label)
+        .replace(TOKEN_EXIT_CODE, &exit_label)
+        .replace(TOKEN_CWD, cwd_label)
+        .replace(TOKEN_TAB_NAME, tab_name)
+}
+
+// Template token literals, defined as module constants so the
+// brace-delimited placeholders are not mistaken for `format!`-style
+// arguments by clippy's `literal_string_with_formatting_args` lint —
+// these are user-facing template tokens, not Rust formatting directives.
+const TOKEN_COMMAND: &str = "{command}";
+const TOKEN_DURATION: &str = "{duration}";
+const TOKEN_EXIT_CODE: &str = "{exit_code}";
+const TOKEN_CWD: &str = "{cwd}";
+const TOKEN_TAB_NAME: &str = "{tab_name}";
 
 /// Stateless notification dispatcher.
 ///
@@ -343,7 +395,7 @@ mod tests {
         let block = finished_block(Some(0), 30);
         let mut config = enabled_config(1.0);
         config.enabled = false;
-        assert!(command_finished_request(&block, "ls", &config).is_none());
+        assert!(command_finished_request(&block, "ls", "tab", &config).is_none());
     }
 
     #[test]
@@ -351,7 +403,7 @@ mod tests {
         let block = finished_block(Some(0), 30);
         let mut config = enabled_config(1.0);
         config.on_command_finished = false;
-        assert!(command_finished_request(&block, "ls", &config).is_none());
+        assert!(command_finished_request(&block, "ls", "tab", &config).is_none());
     }
 
     #[test]
@@ -359,7 +411,7 @@ mod tests {
         // 2s command, 10s threshold -> suppressed.
         let block = finished_block(Some(0), 2);
         let config = enabled_config(10.0);
-        assert!(command_finished_request(&block, "ls", &config).is_none());
+        assert!(command_finished_request(&block, "ls", "tab", &config).is_none());
     }
 
     #[test]
@@ -379,14 +431,14 @@ mod tests {
             finished_at: None,
         };
         let config = enabled_config(0.0);
-        assert!(command_finished_request(&running, "ls", &config).is_none());
+        assert!(command_finished_request(&running, "ls", "tab", &config).is_none());
     }
 
     #[test]
     fn command_finished_request_success_is_command_finished_kind() {
         let block = finished_block(Some(0), 30);
         let config = enabled_config(1.0);
-        let req = command_finished_request(&block, "cargo build", &config).expect("request");
+        let req = command_finished_request(&block, "cargo build", "tab", &config).expect("request");
         assert_eq!(req.kind, NotificationKind::CommandFinished);
         assert!(req.body.contains("cargo build"), "body: {}", req.body);
         assert!(req.body.contains("finished in"), "body: {}", req.body);
@@ -396,17 +448,19 @@ mod tests {
     fn command_finished_request_failure_is_error_kind() {
         let block = finished_block(Some(127), 30);
         let config = enabled_config(1.0);
-        let req = command_finished_request(&block, "nope", &config).expect("request");
+        let req = command_finished_request(&block, "nope", "tab", &config).expect("request");
+        // A non-zero exit drives the Error kind regardless of the template
+        // body (which uses {exit_code} rather than a "failed" verb).
         assert_eq!(req.kind, NotificationKind::Error);
         assert!(req.body.contains("exit 127"), "body: {}", req.body);
-        assert!(req.body.contains("failed"), "body: {}", req.body);
+        assert!(req.body.contains("nope"), "body: {}", req.body);
     }
 
     #[test]
     fn command_finished_request_empty_command_uses_placeholder() {
         let block = finished_block(Some(0), 30);
         let config = enabled_config(1.0);
-        let req = command_finished_request(&block, "   ", &config).expect("request");
+        let req = command_finished_request(&block, "   ", "tab", &config).expect("request");
         assert!(req.body.starts_with("Command "), "body: {}", req.body);
     }
 
@@ -425,5 +479,88 @@ mod tests {
         let mut unfocused_toasts = ToastStack::default();
         NotificationRouter::route(&osc_req("hi"), &config, false, &mut unfocused_toasts);
         assert_eq!(unfocused_toasts.len(), 0, "unfocused -> system, no toast");
+    }
+
+    fn block_with_cwd(exit_code: Option<i32>, dur_secs: u64, cwd: Option<&str>) -> CommandBlock {
+        use freminal_common::buffer_states::command_block::CommandBlockId;
+        use std::time::{Duration, SystemTime};
+        let executed = SystemTime::now();
+        CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: 0,
+            command_start_row: Some(0),
+            output_start_row: Some(0),
+            end_row: Some(1),
+            exit_code,
+            cwd: cwd.map(str::to_owned),
+            started_at: executed,
+            executed_at: Some(executed),
+            finished_at: Some(executed + Duration::from_secs(dur_secs)),
+        }
+    }
+
+    #[test]
+    fn template_substitutes_all_tokens() {
+        let block = block_with_cwd(Some(0), 30, Some("/home/fred"));
+        let body = render_command_finished_template(
+            "{command} | {duration} | {exit_code} | {cwd} | {tab_name}",
+            &block,
+            "cargo build",
+            "work",
+        );
+        assert_eq!(body, "cargo build | 30s | 0 | /home/fred | work");
+    }
+
+    #[test]
+    fn template_empty_command_falls_back_to_placeholder() {
+        let block = block_with_cwd(Some(0), 5, None);
+        let body = render_command_finished_template("{command}", &block, "   ", "tab");
+        assert_eq!(body, "Command");
+    }
+
+    #[test]
+    fn template_unknown_exit_code_renders_question_mark() {
+        // Shell omitted the exit code.
+        let block = block_with_cwd(None, 5, None);
+        let body = render_command_finished_template("exit {exit_code}", &block, "ls", "tab");
+        assert_eq!(body, "exit ?");
+    }
+
+    #[test]
+    fn template_unknown_cwd_renders_empty() {
+        let block = block_with_cwd(Some(0), 5, None);
+        let body = render_command_finished_template("[{cwd}]", &block, "ls", "tab");
+        assert_eq!(body, "[]");
+    }
+
+    #[test]
+    fn template_unknown_token_is_left_untouched() {
+        let block = block_with_cwd(Some(0), 5, None);
+        let body = render_command_finished_template("{command} {unknown}", &block, "ls", "tab");
+        assert_eq!(body, "ls {unknown}");
+    }
+
+    #[test]
+    fn command_finished_request_uses_custom_template() {
+        let block = block_with_cwd(Some(0), 30, Some("/srv"));
+        let config = NotificationsConfig {
+            command_finished_template: "{tab_name}: {command} ({cwd})".to_owned(),
+            ..enabled_config(1.0)
+        };
+        let req = command_finished_request(&block, "make", "build", &config).expect("request");
+        assert_eq!(req.body, "build: make (/srv)");
+        assert_eq!(req.kind, NotificationKind::CommandFinished);
+    }
+
+    #[test]
+    fn default_template_matches_documented_format() {
+        let block = block_with_cwd(Some(2), 30, None);
+        let config = enabled_config(1.0);
+        let req = command_finished_request(&block, "test", "tab", &config).expect("request");
+        // Default: "{command} finished in {duration} (exit {exit_code})".
+        assert_eq!(req.body, "test finished in 30s (exit 2)");
+        // Non-zero exit -> Error kind.
+        assert_eq!(req.kind, NotificationKind::Error);
     }
 }

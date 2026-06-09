@@ -2856,7 +2856,7 @@ dropped"` (verified by temporarily disabling the notifications arm).
 
 `cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
 
-#### 76.5 — Notification templates and bell
+#### 76.5 — Notification templates and bell ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/config.rs` (extend NotificationsConfig and
 existing `BellConfig`).
@@ -2884,6 +2884,58 @@ existing `BellConfig`).
 
 **Verification:** Template-render unit test. Bell-ring integration with the
 existing test harness (if any).
+
+**Completion notes (2026-06-09):**
+
+- **`NotificationsConfig::command_finished_template: String`** added with
+  default `"{command} finished in {duration} (exit {exit_code})"`. Both
+  the struct doc-comment TOML example and `config_example.toml` document
+  the five tokens.
+- **`BellConfig::on_command_finished: bool`** added, default `false`.
+  Both `NotificationsConfig` and `BellConfig` already round-trip as
+  whole-struct `Option<…>` fields in `ConfigPartial` / `apply_partial`,
+  so the two new fields merge from user TOML with no extra wiring (the
+  76.4a/76.4c class of bug does not apply at the field level).
+- **Template rendering** moved into a new
+  `gui::notifications::render_command_finished_template(template, block,
+command, tab_name)` helper. Tokens: `{command}` (trimmed, or
+  `"Command"` when empty), `{duration}` (`format_command_duration`, empty
+  when unknown), `{exit_code}` (numeric, or `"?"` when the shell omitted
+  it), `{cwd}` (block cwd, empty when unknown), `{tab_name}`. Unknown
+  tokens are left untouched. The five token literals are module
+  constants so clippy's nursery `literal_string_with_formatting_args`
+  does not flag the brace placeholders as `format!` directives.
+- **`command_finished_request`** gained a `tab_name: &str` parameter and
+  now renders the body via the template instead of the hard-coded
+  string. The Error-vs-CommandFinished `kind` is still driven by the
+  exit code (non-zero ⇒ `Error`), independent of the template body.
+- **Tab name** is resolved at the 72.9 drain site in `app_impl::update()`
+  via `tab.display_name(policy, separator)` (computed before the
+  `iter_panes_mut` borrow, since that borrows `tab` mutably) using the
+  existing `[tab_title]` policy/separator.
+- **Bell on command finished:** the drain loop, when
+  `config.bell.on_command_finished` is set, rings the bell using the
+  configured `bell.mode` — visual sets `pane.bell_active` +
+  `pane.view_state.bell_since`, audio calls `platform::system_beep()`,
+  mirroring the `WindowManipulation::Bell` path in `rendering`. This
+  fires on every finished command (not gated by the notification
+  duration threshold).
+- **Tests:** 7 new in `gui::notifications::tests` (all-token
+  substitution, empty-command placeholder, unknown exit ⇒ `?`, unknown
+  cwd ⇒ empty, unknown token untouched, custom-template through
+  `command_finished_request`, default-template format + Error kind). The
+  pre-existing failure-kind test had its `"failed"` body assertion
+  replaced (the default template uses `{exit_code}`, not a "failed"
+  verb; the Error kind assertion is unchanged). Config-side: extended
+  `notifications_default_is_opt_in` + `notifications_round_trip_through_toml`
+  for the template field, extended `bell_config_defaults_to_visual`, and
+  added `bell_on_command_finished_round_trip`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
+- **Not in scope (deferred to 76.7):** the Settings UI text-edit for the
+  template and the routing dropdowns live in the Notifications tab,
+  which 76.7 builds.
 
 #### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM)
 

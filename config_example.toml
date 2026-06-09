@@ -228,6 +228,11 @@ limit = 4000
 # Default: "visual"
 # mode = "visual"
 
+# Ring the bell (using the mode above) when a command finishes (OSC 133 D).
+# Lets long-running commands beep even when the program emitted no \x07.
+# Default: false.
+# on_command_finished = false
+
 ## ##############################################################################
 # SECURITY SETTINGS
 ## ##############################################################################
@@ -326,6 +331,15 @@ limit = 4000
 # routing_error = "both"
 # routing_info = "toast"
 # routing_command_finished = "system_when_unfocused"
+
+# Template for the body of command-finished notifications.  Tokens:
+#   {command}   - the command text (or "Command" if it scrolled away)
+#   {duration}  - human-readable elapsed time (e.g. "3s", "2m15s")
+#   {exit_code} - the numeric exit code, or "?" if the shell omitted it
+#   {cwd}       - the working directory at prompt start, or empty
+#   {tab_name}  - the display name of the tab the command ran in
+# Default: "{command} finished in {duration} (exit {exit_code})".
+# command_finished_template = "{command} finished in {duration} (exit {exit_code})"
 
 ## ##############################################################################
 # STARTUP & LAYOUTS
