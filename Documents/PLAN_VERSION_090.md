@@ -24,7 +24,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 73  | Command Gutters (exit-status indicator) | Medium       | Pending       | Task 72         | `task-73/command-gutters`        |
 | 74  | Broadcast Input to Panes                | Medium       | Pending       | v0.8.0, Task 58 | `task-74/broadcast-input`        |
 | 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending       | v0.8.0, Task 72 | `task-76/notifications`          |
+| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending merge | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete      | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete      | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
@@ -3088,7 +3088,7 @@ notification through the configured routing.
 --all-targets --all-features -- -D warnings`, `cargo test --all`, and
   `cargo machete` all clean.
 
-#### 76.8 — Docs
+#### 76.8 — Docs ✅ 2026-06-09
 
 **Scope:** `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
 `shell-integration/README.md`.
@@ -3099,6 +3099,18 @@ notification through the configured routing.
   with the `TERM_PROGRAM` detection idiom.
 
 **Verification:** Per AGENTS.md "Escape Sequence Documentation" rules.
+
+**Completion notes (2026-06-09) — scope absorbed into 76.2 and 76.6:**
+
+- The escape-sequence dual-doc update was done in **76.2**: OSC 9
+  (iTerm2/WezTerm) and OSC 777 (urxvt) are ✅ in
+  `ESCAPE_SEQUENCE_COVERAGE.md` and were removed from
+  `ESCAPE_SEQUENCE_GAPS.md` (both files' "Last updated" headers cite
+  Task 76.2).
+- The `shell-integration/README.md` "Desktop Notifications (OSC 9 /
+  OSC 777)" section documenting the `TERM_PROGRAM` detection idiom was
+  added in **76.6**.
+- No further work was required; this subtask is bookkeeping only.
 
 ### 76 Open Questions Resolved
 

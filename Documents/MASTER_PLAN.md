@@ -106,7 +106,7 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 | 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub          | Task 72                |
 | 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub          | v0.8.0, Task 58        |
 | 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub          | v0.8.0, Task 61        |
-| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Stub          | v0.8.0, Task 72        |
+| 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Pending merge | v0.8.0, Task 72        |
 | 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Stub          | v0.8.0                 |
 | 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub          | v0.8.0                 |
 | 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub          | v0.8.0                 |
@@ -515,6 +515,7 @@ Update this section as tasks complete:
 | 72   | 2026-05-17 | 2026-06-04 | 16 subtasks (72.1-72.16) complete on task-72/osc-133-command-blocks; PR pending |
 | 94   | 2026-06-04 | 2026-06-04 | All 7 subtasks complete; merged via PR #343                                     |
 | 95   | 2026-06-04 | 2026-06-04 | All 5 subtasks complete; merged via PR #343                                     |
+| 76   | 2026-06-09 | 2026-06-09 | All subtasks (76.1-76.8) complete on task-76/notifications; PR pending          |
 
 ---
 
