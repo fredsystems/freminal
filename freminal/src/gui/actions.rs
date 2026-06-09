@@ -203,7 +203,10 @@ impl super::FreminalGui {
                 // reference a tab that has since been closed.
                 if let Some(tab) = win.tabs.iter().nth(i) {
                     let tab_id = tab.id;
-                    let current = tab.display_name().to_owned();
+                    // Seed the rename editor with the existing custom name so
+                    // the user edits their own label, not the combined
+                    // policy-rendered display string.
+                    let current = tab.custom_name.clone().unwrap_or_default();
                     win.renaming_tab = Some(tab_id);
                     win.rename_buffer = current;
                 } else {
@@ -229,6 +232,13 @@ impl super::FreminalGui {
             super::TabBarAction::CancelRename => {
                 win.renaming_tab = None;
                 win.rename_buffer.clear();
+            }
+            super::TabBarAction::ClearCustomName(i) => {
+                if let Some(tab) = win.tabs.iter_mut().nth(i) {
+                    tab.custom_name = None;
+                } else {
+                    warn!("TabBarAction::ClearCustomName: tab index {i} out of bounds");
+                }
             }
             super::TabBarAction::Reorder { from, to } => {
                 if let Err(e) = win.tabs.move_tab(from, to) {
@@ -520,7 +530,8 @@ impl super::FreminalGui {
                 // `renaming_tab` is set; Enter commits, Escape cancels.
                 let tab = win.tabs.active_tab();
                 let tab_id = tab.id;
-                let current = tab.display_name().to_owned();
+                // Seed with the existing custom name (see BeginRename above).
+                let current = tab.custom_name.clone().unwrap_or_default();
                 win.renaming_tab = Some(tab_id);
                 win.rename_buffer = current;
             }

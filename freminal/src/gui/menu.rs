@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use egui;
+use freminal_common::config::TabTitlePolicy;
 use freminal_common::keybindings::KeyAction;
 
 use super::TabBarAction;
@@ -607,6 +608,8 @@ impl super::FreminalGui {
                     &mut win.rename_buffer,
                     &mut win.dragging_tab,
                     &mut drag_ended_this_frame,
+                    self.config.tab_title.policy,
+                    &self.config.tab_title.separator,
                 );
                 current_rects[orig_idx] = tab_rect;
                 if !matches!(tab_action, TabBarAction::None) {
@@ -702,17 +705,20 @@ impl super::FreminalGui {
         rename_buffer: &mut String,
         dragging_tab: &mut Option<usize>,
         drag_ended_this_frame: &mut bool,
+        title_policy: TabTitlePolicy,
+        title_separator: &str,
     ) -> (TabBarAction, egui::Rect) {
         let mut action = TabBarAction::None;
         let pane = tab.active_pane();
-        // Prefer the user-assigned tab name over the pane-derived title.
-        let label = tab.custom_name.as_deref().map_or_else(
-            || match pane {
-                Some(p) if !p.title.is_empty() => p.title.as_str(),
-                _ => "Shell",
-            },
-            |name| if name.is_empty() { "Shell" } else { name },
-        );
+        // Resolve the tab label under the configured title policy, combining
+        // the user-assigned custom name with the shell-asserted OSC title.
+        // An empty result falls back to a "Shell" placeholder.
+        let resolved = tab.display_name(title_policy, title_separator);
+        let label = if resolved.is_empty() {
+            "Shell"
+        } else {
+            resolved.as_ref()
+        };
 
         let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
@@ -808,6 +814,19 @@ impl super::FreminalGui {
                         *drag_ended_this_frame = true;
                         *dragging_tab = None;
                     }
+
+                    // Right-click context menu. "Clear Custom Name" is only
+                    // offered when the tab has a user-assigned custom name.
+                    response.context_menu(|ui| {
+                        if ui.button("Rename Tab\u{2026}").clicked() {
+                            action = TabBarAction::BeginRename(index);
+                            ui.close();
+                        }
+                        if tab.custom_name.is_some() && ui.button("Clear Custom Name").clicked() {
+                            action = TabBarAction::ClearCustomName(index);
+                            ui.close();
+                        }
+                    });
 
                     // Show close button when more than one tab is open.
                     if count > 1 && ui.small_button("\u{00d7}").clicked() {

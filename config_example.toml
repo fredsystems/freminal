@@ -198,6 +198,23 @@ limit = 4000
 # position = "top"
 
 ## ##############################################################################
+# TAB TITLE SETTINGS
+## ##############################################################################
+[tab_title]
+# Precedence policy when a tab has both a custom name (set via Rename Tab or a
+# double-click rename) and an OSC title (set by the shell via OSC 0/1/2):
+#   "prefix"      - show "{custom}: {osc}"            (default)
+#   "suffix"      - show "{osc}: {custom}"
+#   "custom_wins" - show the custom name only
+#   "osc_wins"    - show the OSC title only; OSC events clear the custom name
+# Default: "prefix"
+# policy = "prefix"
+
+# Separator used between the two parts in the "prefix" and "suffix" policies.
+# Default: ": "
+# separator = ": "
+
+## ##############################################################################
 # BELL SETTINGS
 ## ##############################################################################
 [bell]

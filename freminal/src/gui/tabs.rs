@@ -13,6 +13,10 @@
 //! reordering tabs.  It is owned exclusively by `FreminalGui` and never
 //! shared with the PTY thread.
 
+use std::borrow::Cow;
+
+use freminal_common::config::TabTitlePolicy;
+
 use super::panes::{Pane, PaneId, PaneTree};
 
 /// A unique, monotonically increasing identifier for each tab.
@@ -71,12 +75,14 @@ pub struct Tab {
 
     /// User-assigned tab name.
     ///
-    /// When `Some`, this overrides the pane-derived title in the tab bar
-    /// and window title.  Set via `KeyAction::RenameTab` or a double-click
-    /// on the tab label.  Cleared automatically when the shell sets a new
-    /// title via OSC 0/1/2 (`SetTitleBarText` or `RestoreWindowTitleFromStack`)
-    /// so that shell-driven titles remain authoritative once the user stops
-    /// pinning a custom name.
+    /// When `Some`, this is combined with the shell-asserted OSC title
+    /// according to the configured [`TabTitlePolicy`] (see
+    /// [`Tab::display_name`]).  Set via `KeyAction::RenameTab` or a
+    /// double-click on the tab label, and persisted in layouts.  Under the
+    /// `OscWins` policy a shell-asserted OSC 0/1/2 title clears this field
+    /// so shell-driven titles become authoritative; under every other
+    /// policy it persists until the user clears it (empty rename or the
+    /// "Clear Custom Name" context-menu entry).
     pub custom_name: Option<String>,
 
     /// Set when an unfocused tab has received a [`CommandFinishedEvent`]
@@ -103,18 +109,44 @@ impl Tab {
         }
     }
 
-    /// Return the name to display for this tab.
+    /// Return the name to display for this tab under the given title policy.
     ///
-    /// Returns the user-assigned `custom_name` if set, otherwise falls
-    /// back to the active pane's title.  Returns an empty string if the
-    /// active pane cannot be resolved (a programming bug — every tab
-    /// must have a valid active pane).
+    /// Combines the user-assigned `custom_name` with the shell-asserted OSC
+    /// title (the active pane's `title`) according to `policy`:
+    ///
+    /// - [`TabTitlePolicy::Prefix`]: when both exist, `"{custom}{sep}{osc}"`;
+    ///   otherwise whichever is present.
+    /// - [`TabTitlePolicy::Suffix`]: when both exist, `"{osc}{sep}{custom}"`;
+    ///   otherwise whichever is present.
+    /// - [`TabTitlePolicy::CustomWins`]: custom if present, else osc.
+    /// - [`TabTitlePolicy::OscWins`]: osc if present, else custom.
+    ///
+    /// Returns an empty string if neither a custom name nor an OSC title is
+    /// available (the UI layer substitutes a `"Shell"` placeholder).
     #[must_use]
-    pub fn display_name(&self) -> &str {
-        if let Some(name) = self.custom_name.as_deref() {
-            return name;
+    pub fn display_name(&self, policy: TabTitlePolicy, separator: &str) -> Cow<'_, str> {
+        // The OSC title lives on the active pane. An unresolved active pane
+        // is a programming bug; treat it as an empty OSC title.
+        let osc = self
+            .active_pane()
+            .map(|p| p.title.as_str())
+            .filter(|t| !t.is_empty());
+        let custom = self.custom_name.as_deref().filter(|c| !c.is_empty());
+
+        match (custom, osc) {
+            // Both present: combining policies join them; the "wins" policies
+            // pick a single side.
+            (Some(c), Some(o)) => match policy {
+                TabTitlePolicy::Prefix => Cow::Owned(format!("{c}{separator}{o}")),
+                TabTitlePolicy::Suffix => Cow::Owned(format!("{o}{separator}{c}")),
+                TabTitlePolicy::CustomWins => Cow::Borrowed(c),
+                TabTitlePolicy::OscWins => Cow::Borrowed(o),
+            },
+            // Only one side present: every policy degrades to that side.
+            (Some(c), None) => Cow::Borrowed(c),
+            (None, Some(o)) => Cow::Borrowed(o),
+            (None, None) => Cow::Borrowed(""),
         }
-        self.active_pane().map_or("", |p| p.title.as_str())
     }
 
     /// Return a reference to the currently active pane, if it exists.
@@ -135,6 +167,28 @@ impl Tab {
     pub fn active_pane_mut(&mut self) -> Option<&mut Pane> {
         let id = self.active_pane;
         self.pane_tree.find_mut(id)
+    }
+
+    /// React to a shell-asserted OSC 0/1/2 title under the given policy.
+    ///
+    /// Under [`TabTitlePolicy::OscWins`] a freshly-asserted shell title
+    /// clears any user-pinned `custom_name` so shell-driven titles become
+    /// authoritative.  Under every other policy the custom name persists and
+    /// the policy decides how the two combine at render time.
+    ///
+    /// `shell_set_title` indicates whether the shell asserted a title this
+    /// frame.  Returns `true` if `custom_name` was cleared.
+    pub fn apply_osc_title_policy(
+        &mut self,
+        policy: TabTitlePolicy,
+        shell_set_title: bool,
+    ) -> bool {
+        if policy == TabTitlePolicy::OscWins && shell_set_title && self.custom_name.is_some() {
+            self.custom_name = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -459,37 +513,133 @@ mod tests {
         assert_eq!(mgr.active_tab().active_pane().unwrap().title, "Tab 1");
     }
 
+    /// Helper: build a tab with an optional custom name and a pane (OSC)
+    /// title, then resolve `display_name` under `policy` with the default
+    /// `": "` separator.
+    fn name_under(custom: Option<&str>, osc: &str, policy: TabTitlePolicy) -> String {
+        let mut tab = dummy_tab(TabId(0), osc);
+        tab.custom_name = custom.map(str::to_owned);
+        tab.display_name(policy, ": ").into_owned()
+    }
+
     #[test]
     fn display_name_defaults_to_pane_title() {
         let tab = dummy_tab(TabId(0), "PaneTitle");
         assert!(tab.custom_name.is_none());
-        assert_eq!(tab.display_name(), "PaneTitle");
+        assert_eq!(tab.display_name(TabTitlePolicy::Prefix, ": "), "PaneTitle");
     }
 
     #[test]
-    fn display_name_prefers_custom_name_when_set() {
-        let mut tab = dummy_tab(TabId(0), "PaneTitle");
-        tab.custom_name = Some("My Custom Tab".to_owned());
-        assert_eq!(tab.display_name(), "My Custom Tab");
+    fn display_name_prefix_combines_custom_and_osc() {
+        assert_eq!(
+            name_under(Some("My Custom Tab"), "PaneTitle", TabTitlePolicy::Prefix),
+            "My Custom Tab: PaneTitle"
+        );
     }
 
     #[test]
-    fn display_name_empty_custom_name_is_returned_verbatim() {
-        // Trimming/fallback for an empty custom name is a UI concern
-        // (`show_single_tab` replaces it with "Shell"); the model layer
-        // returns whatever was stored.
-        let mut tab = dummy_tab(TabId(0), "PaneTitle");
-        tab.custom_name = Some(String::new());
-        assert_eq!(tab.display_name(), "");
+    fn display_name_suffix_combines_osc_then_custom() {
+        assert_eq!(
+            name_under(Some("My Custom Tab"), "PaneTitle", TabTitlePolicy::Suffix),
+            "PaneTitle: My Custom Tab"
+        );
     }
 
     #[test]
-    fn display_name_falls_back_when_custom_name_cleared() {
+    fn display_name_prefix_with_only_custom_returns_custom() {
+        assert_eq!(
+            name_under(Some("Custom"), "", TabTitlePolicy::Prefix),
+            "Custom"
+        );
+    }
+
+    #[test]
+    fn display_name_prefix_with_only_osc_returns_osc() {
+        assert_eq!(
+            name_under(None, "PaneTitle", TabTitlePolicy::Prefix),
+            "PaneTitle"
+        );
+    }
+
+    #[test]
+    fn display_name_prefix_with_neither_returns_empty() {
+        assert_eq!(name_under(None, "", TabTitlePolicy::Prefix), "");
+    }
+
+    #[test]
+    fn display_name_custom_wins_prefers_custom() {
+        assert_eq!(
+            name_under(Some("Custom"), "PaneTitle", TabTitlePolicy::CustomWins),
+            "Custom"
+        );
+        assert_eq!(
+            name_under(None, "PaneTitle", TabTitlePolicy::CustomWins),
+            "PaneTitle"
+        );
+        assert_eq!(name_under(None, "", TabTitlePolicy::CustomWins), "");
+    }
+
+    #[test]
+    fn display_name_osc_wins_prefers_osc() {
+        assert_eq!(
+            name_under(Some("Custom"), "PaneTitle", TabTitlePolicy::OscWins),
+            "PaneTitle"
+        );
+        assert_eq!(
+            name_under(Some("Custom"), "", TabTitlePolicy::OscWins),
+            "Custom"
+        );
+        assert_eq!(name_under(None, "", TabTitlePolicy::OscWins), "");
+    }
+
+    #[test]
+    fn osc_title_clears_custom_name_only_under_osc_wins() {
+        for policy in [
+            TabTitlePolicy::Prefix,
+            TabTitlePolicy::Suffix,
+            TabTitlePolicy::CustomWins,
+        ] {
+            let mut tab = dummy_tab(TabId(0), "PaneTitle");
+            tab.custom_name = Some("Custom".to_owned());
+            let cleared = tab.apply_osc_title_policy(policy, true);
+            assert!(!cleared, "policy {policy:?} must not clear custom_name");
+            assert_eq!(tab.custom_name.as_deref(), Some("Custom"));
+        }
+
         let mut tab = dummy_tab(TabId(0), "PaneTitle");
         tab.custom_name = Some("Custom".to_owned());
-        assert_eq!(tab.display_name(), "Custom");
-        tab.custom_name = None;
-        assert_eq!(tab.display_name(), "PaneTitle");
+        let cleared = tab.apply_osc_title_policy(TabTitlePolicy::OscWins, true);
+        assert!(cleared, "OscWins must clear custom_name on a shell title");
+        assert!(tab.custom_name.is_none());
+    }
+
+    #[test]
+    fn osc_title_policy_noop_when_shell_did_not_set_title() {
+        let mut tab = dummy_tab(TabId(0), "PaneTitle");
+        tab.custom_name = Some("Custom".to_owned());
+        // Even under OscWins, no shell title this frame means no clearing.
+        let cleared = tab.apply_osc_title_policy(TabTitlePolicy::OscWins, false);
+        assert!(!cleared);
+        assert_eq!(tab.custom_name.as_deref(), Some("Custom"));
+    }
+
+    #[test]
+    fn osc_title_policy_noop_when_no_custom_name() {
+        let mut tab = dummy_tab(TabId(0), "PaneTitle");
+        assert!(tab.custom_name.is_none());
+        let cleared = tab.apply_osc_title_policy(TabTitlePolicy::OscWins, true);
+        assert!(!cleared);
+        assert!(tab.custom_name.is_none());
+    }
+
+    #[test]
+    fn display_name_empty_custom_name_treated_as_absent() {
+        // An empty custom name is treated as "no custom name"; the OSC title
+        // (or empty) is used instead.
+        assert_eq!(
+            name_under(Some(""), "PaneTitle", TabTitlePolicy::Prefix),
+            "PaneTitle"
+        );
     }
 
     #[test]
