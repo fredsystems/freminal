@@ -1,7 +1,8 @@
 [package]
 name = "portable-pty"
 version = "0.9.1"
-authors = ["Wez Furlong"]
+# Originally authored by Wez Furlong as part of wezterm; the `authors` key is
+# deprecated by Cargo, so attribution is retained here as a comment.
 edition = "2018"
 repository = "https://github.com/wezterm/wezterm"
 description = "Cross platform pty interface"
