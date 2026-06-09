@@ -47,6 +47,7 @@ lazy_static = "1.5.0"
 libc = "0.2.186"
 log = "0.4.32"
 nix = "0.31.3"
+notify-rust = "4.17.0"
 open = "5.3.5"
 predicates = "3.1.4"
 proptest = "1.11.0"
@@ -63,8 +64,8 @@ shared_library = "0.1.9"
 shell-words = "1.1.1"
 smol = "2.0.2"
 swash = "0.2.8"
-sysinfo = { version = "0.39.3", default-features = false, features = ["system"] }
 sys-locale = "0.3.2"
+sysinfo = { version = "0.39.3", default-features = false, features = ["system"] }
 tar = "0.4.46"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
@@ -82,4 +83,6 @@ winit = { version = "0.30.13", features = ["rwh_06"] }
 winreg = "0.56.0"
 
 [workspace.metadata.cargo-machete]
-ignored = ["vergen"]
+# `notify-rust` is added in Task 76.1 but not referenced until Task 76.4
+# wires the notification router. Remove this entry once 76.4 lands.
+ignored = ["vergen", "notify-rust"]

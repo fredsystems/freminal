@@ -37,6 +37,7 @@ pub struct Config {
     pub security: SecurityConfig,
     pub shell_integration: ShellIntegrationConfig,
     pub command_blocks: CommandBlocksConfig,
+    pub notifications: NotificationsConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -79,6 +80,7 @@ impl Default for Config {
             security: SecurityConfig::default(),
             shell_integration: ShellIntegrationConfig::default(),
             command_blocks: CommandBlocksConfig::default(),
+            notifications: NotificationsConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -685,6 +687,137 @@ impl Default for CommandBlocksConfig {
             show_duration: true,
             duration_threshold_secs: 2.0,
             gutter: GutterPosition::Left,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Notifications
+// ------------------------------------------------------------------------------------------------
+
+/// Where a notification of a given category is delivered.
+///
+/// Notifications can surface as an in-app toast, a desktop notification via
+/// the system notification daemon, both, or — for the command-finished
+/// category — a desktop notification only when freminal is unfocused
+/// (falling back to a toast when focused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationRouting {
+    /// In-app toast only.
+    Toast,
+    /// Desktop notification only.
+    System,
+    /// Both an in-app toast and a desktop notification.
+    Both,
+    /// Desktop notification when freminal is unfocused; an in-app toast when
+    /// it is focused.  Default for command-finished events.
+    #[default]
+    SystemWhenUnfocused,
+}
+
+impl NotificationRouting {
+    /// Whether this routing dispatches an in-app toast given the current
+    /// focus state.
+    ///
+    /// [`Self::SystemWhenUnfocused`] produces a toast only when freminal is
+    /// focused (the desktop notification is reserved for the unfocused case).
+    #[must_use]
+    pub const fn wants_toast(self, focused: bool) -> bool {
+        match self {
+            Self::Toast | Self::Both => true,
+            Self::SystemWhenUnfocused => focused,
+            Self::System => false,
+        }
+    }
+
+    /// Whether this routing dispatches a desktop notification given the
+    /// current focus state.
+    ///
+    /// [`Self::SystemWhenUnfocused`] produces a desktop notification only when
+    /// freminal is unfocused.
+    #[must_use]
+    pub const fn wants_system(self, focused: bool) -> bool {
+        match self {
+            Self::System | Self::Both => true,
+            Self::SystemWhenUnfocused => !focused,
+            Self::Toast => false,
+        }
+    }
+}
+
+/// Configuration for the notification system (Task 76).
+///
+/// Notifications are produced from three sources: OSC 9 (iTerm2/WezTerm)
+/// text payloads, OSC 777 (`notify;TITLE;BODY`, urxvt) payloads, and OSC 133
+/// `D` command-finished events.  Each category routes independently to an
+/// in-app toast and/or a desktop notification per [`NotificationRouting`].
+///
+/// The system is opt-in: [`Self::enabled`] defaults to `false`.
+///
+/// ```toml
+/// [notifications]
+/// enabled = false
+/// osc_9 = true
+/// osc_777 = true
+/// on_command_finished = true
+/// command_finished_threshold_secs = 10.0
+/// routing_error = "both"
+/// routing_info = "toast"
+/// routing_command_finished = "system_when_unfocused"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+// Four independent TOML config toggles (master switch + per-source enables).
+// Each maps directly to a documented `[notifications]` key; collapsing them
+// into an enum would distort the config schema and add noise.
+#[allow(clippy::struct_excessive_bools)]
+pub struct NotificationsConfig {
+    /// Master switch for the notification system.  When `false`, no
+    /// notifications of any kind are produced.  Default: `false` (opt-in).
+    pub enabled: bool,
+
+    /// When `true`, OSC 9 (iTerm2) text payloads create notifications.
+    /// Default: `true`.
+    pub osc_9: bool,
+
+    /// When `true`, OSC 777 (`notify;TITLE;BODY`) payloads create
+    /// notifications.  Default: `true`.
+    pub osc_777: bool,
+
+    /// When `true`, an OSC 133 `D` (command finished) event fires a
+    /// notification.  Default: `true`.
+    pub on_command_finished: bool,
+
+    /// Minimum command duration (in seconds) before a command-finished
+    /// notification fires.  Avoids spamming notifications for fast commands.
+    /// Default: `10.0`.
+    pub command_finished_threshold_secs: f32,
+
+    /// Routing for error-category notifications.  Default:
+    /// [`NotificationRouting::Both`].
+    pub routing_error: NotificationRouting,
+
+    /// Routing for informational notifications.  Default:
+    /// [`NotificationRouting::Toast`].
+    pub routing_info: NotificationRouting,
+
+    /// Routing for command-finished notifications.  Default:
+    /// [`NotificationRouting::SystemWhenUnfocused`].
+    pub routing_command_finished: NotificationRouting,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            osc_9: true,
+            osc_777: true,
+            on_command_finished: true,
+            command_finished_threshold_secs: 10.0,
+            routing_error: NotificationRouting::Both,
+            routing_info: NotificationRouting::Toast,
+            routing_command_finished: NotificationRouting::SystemWhenUnfocused,
         }
     }
 }
@@ -1644,6 +1777,101 @@ size = 14.0
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
         assert_eq!(parsed.command_blocks.gutter, GutterPosition::Off);
+    }
+
+    #[test]
+    fn notifications_default_is_opt_in() {
+        let cfg = NotificationsConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.osc_9);
+        assert!(cfg.osc_777);
+        assert!(cfg.on_command_finished);
+        assert!((cfg.command_finished_threshold_secs - 10.0_f32).abs() < f32::EPSILON);
+        assert_eq!(cfg.routing_error, NotificationRouting::Both);
+        assert_eq!(cfg.routing_info, NotificationRouting::Toast);
+        assert_eq!(
+            cfg.routing_command_finished,
+            NotificationRouting::SystemWhenUnfocused
+        );
+    }
+
+    #[test]
+    fn notifications_round_trip_through_toml() {
+        let mut cfg = Config::default();
+        cfg.notifications.enabled = true;
+        cfg.notifications.osc_9 = false;
+        cfg.notifications.osc_777 = false;
+        cfg.notifications.on_command_finished = false;
+        cfg.notifications.command_finished_threshold_secs = 3.5;
+        cfg.notifications.routing_error = NotificationRouting::System;
+        cfg.notifications.routing_info = NotificationRouting::Both;
+        cfg.notifications.routing_command_finished = NotificationRouting::Toast;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert!(parsed.notifications.enabled);
+        assert!(!parsed.notifications.osc_9);
+        assert!(!parsed.notifications.osc_777);
+        assert!(!parsed.notifications.on_command_finished);
+        assert!(
+            (parsed.notifications.command_finished_threshold_secs - 3.5_f32).abs() < f32::EPSILON
+        );
+        assert_eq!(
+            parsed.notifications.routing_error,
+            NotificationRouting::System
+        );
+        assert_eq!(parsed.notifications.routing_info, NotificationRouting::Both);
+        assert_eq!(
+            parsed.notifications.routing_command_finished,
+            NotificationRouting::Toast
+        );
+    }
+
+    #[test]
+    fn notification_routing_serializes_as_snake_case() {
+        #[derive(Serialize)]
+        struct RoutingToml {
+            routing: NotificationRouting,
+        }
+        let cases = [
+            (NotificationRouting::Toast, "routing = \"toast\""),
+            (NotificationRouting::System, "routing = \"system\""),
+            (NotificationRouting::Both, "routing = \"both\""),
+            (
+                NotificationRouting::SystemWhenUnfocused,
+                "routing = \"system_when_unfocused\"",
+            ),
+        ];
+        for (routing, expected) in cases {
+            let toml = toml::to_string(&RoutingToml { routing }).expect("serialise");
+            assert!(toml.contains(expected), "got: {toml}");
+        }
+    }
+
+    #[test]
+    fn notification_routing_dispatch_decisions() {
+        // Toast: always toast, never system.
+        assert!(NotificationRouting::Toast.wants_toast(true));
+        assert!(NotificationRouting::Toast.wants_toast(false));
+        assert!(!NotificationRouting::Toast.wants_system(true));
+        assert!(!NotificationRouting::Toast.wants_system(false));
+
+        // System: never toast, always system.
+        assert!(!NotificationRouting::System.wants_toast(true));
+        assert!(!NotificationRouting::System.wants_toast(false));
+        assert!(NotificationRouting::System.wants_system(true));
+        assert!(NotificationRouting::System.wants_system(false));
+
+        // Both: always toast, always system.
+        assert!(NotificationRouting::Both.wants_toast(true));
+        assert!(NotificationRouting::Both.wants_system(false));
+
+        // SystemWhenUnfocused: toast when focused, system when unfocused.
+        assert!(NotificationRouting::SystemWhenUnfocused.wants_toast(true));
+        assert!(!NotificationRouting::SystemWhenUnfocused.wants_toast(false));
+        assert!(!NotificationRouting::SystemWhenUnfocused.wants_system(true));
+        assert!(NotificationRouting::SystemWhenUnfocused.wants_system(false));
     }
 
     #[test]

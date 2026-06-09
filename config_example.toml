@@ -288,6 +288,46 @@ limit = 4000
 # gutter = "left"
 
 ## ##############################################################################
+# NOTIFICATIONS
+## ##############################################################################
+
+[notifications]
+# Master switch for the notification system.  When false, no notifications
+# of any kind are produced (toast or desktop).
+# Default: false (opt-in).
+# enabled = false
+
+# When true, OSC 9 (iTerm2/WezTerm) text payloads create notifications.
+# Default: true.
+# osc_9 = true
+
+# When true, OSC 777 ("notify;TITLE;BODY", urxvt) payloads create
+# notifications.
+# Default: true.
+# osc_777 = true
+
+# When true, an OSC 133 D (command finished) event fires a notification.
+# Default: true.
+# on_command_finished = true
+
+# Minimum command duration in seconds before a command-finished
+# notification fires.  Avoids spamming notifications for fast commands.
+# Default: 10.0.
+# command_finished_threshold_secs = 10.0
+
+# Routing per category.  One of:
+#   "toast"                  - in-app toast only
+#   "system"                 - desktop notification only
+#   "both"                   - both a toast and a desktop notification
+#   "system_when_unfocused"  - desktop notification when freminal is
+#                              unfocused, in-app toast when focused
+# Defaults: error = "both", info = "toast",
+#           command_finished = "system_when_unfocused".
+# routing_error = "both"
+# routing_info = "toast"
+# routing_command_finished = "system_when_unfocused"
+
+## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################
 

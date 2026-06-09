@@ -58,6 +58,7 @@ freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
 freminal-windowing = { path = "../freminal-windowing" }
 glow.workspace = true
 image.workspace = true
+notify-rust.workspace = true
 open.workspace = true
 regex.workspace = true
 rustc-hash.workspace = true

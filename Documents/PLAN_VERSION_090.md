@@ -2494,7 +2494,7 @@ existing `BellConfig`).
 
 ### 76 Subtasks
 
-#### 76.1 — Add `notify-rust` and capability flags
+#### 76.1 — Add `notify-rust` and capability flags ✅ 2026-06-09
 
 **Scope:** `freminal/Cargo.toml`, `freminal-common/src/config.rs`.
 
@@ -2533,6 +2533,47 @@ existing `BellConfig`).
 
 **Verification:** Config round-trip test. `cargo build` succeeds with
 notify-rust dep.
+
+**Completion notes (2026-06-09):**
+
+- `notify-rust = "4"` added to the workspace `[workspace.dependencies]`
+  (alphabetical, after `nix`) and referenced as `notify-rust.workspace
+= true` in `freminal/Cargo.toml` `[dependencies]` only — matching the
+  workspace's `crate.workspace = true` convention. **Not** added to
+  `freminal-common`, `freminal-buffer`, or
+  `freminal-terminal-emulator`. Resolves to `notify-rust v4.17.0`,
+  which uses pure-Rust `zbus` on Linux — no system dbus dev library is
+  required in the dev shell.
+- `NotificationsConfig` added to `freminal-common/src/config.rs` with
+  all eight documented fields (`enabled`, `osc_9`, `osc_777`,
+  `on_command_finished`, `command_finished_threshold_secs`,
+  `routing_error`, `routing_info`, `routing_command_finished`), wired
+  into the top-level `Config` struct and its `Default` impl between
+  `command_blocks` and `keybindings`.
+- New `NotificationRouting` enum (`Toast`, `System`, `Both`,
+  `SystemWhenUnfocused`) with `#[serde(rename_all = "snake_case")]`,
+  mirroring the `GutterPosition` pattern. Added `const fn
+wants_toast(focused)` and `const fn wants_system(focused)` helpers so
+  the routing decision is unit-testable and reusable by the 76.4
+  router. Default is `SystemWhenUnfocused`.
+- `NotificationsConfig` required a localized
+  `#[allow(clippy::struct_excessive_bools)]` (four independent TOML
+  toggles), matching the documented precedent in `snapshot.rs`,
+  `gui/mod.rs`, `rendering.rs`, `widget.rs`, and `view_state.rs`.
+- `[notifications]` section added to `config_example.toml` (all keys
+  commented out, defaults documented) under a new `NOTIFICATIONS`
+  banner between `[command_blocks]` and `[startup]`.
+- `notify-rust` is unused until 76.4, so it was added to the
+  `[workspace.metadata.cargo-machete] ignored` list with a comment
+  instructing its removal once 76.4 lands. This keeps the 76.1 commit's
+  `cargo machete` verification green without a permanent suppression.
+- 4 new tests in `config::tests`: `notifications_default_is_opt_in`,
+  `notifications_round_trip_through_toml`,
+  `notification_routing_serializes_as_snake_case`,
+  `notification_routing_dispatch_decisions`.
+- Verification: `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all
+-- --check` clean, `cargo machete` clean.
 
 #### 76.2 — OSC 9 and OSC 777 parsing
 
