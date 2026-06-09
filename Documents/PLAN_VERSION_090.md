@@ -3029,7 +3029,7 @@ device_name_and_version_keeps_xterm_prefix_and_freminal_token`
 --all-targets --all-features -- -D warnings`, `cargo test --all`, and
   `cargo machete` all clean.
 
-#### 76.7 — Settings UI: Notifications tab
+#### 76.7 — Settings UI: Notifications tab ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/settings.rs`, `settings_dispatch.rs`.
 
@@ -3048,6 +3048,45 @@ device_name_and_version_keeps_xterm_prefix_and_freminal_token`
 
 **Verification:** Toggle persistence; "Test Notification" actually fires a
 notification through the configured routing.
+
+**Completion notes (2026-06-09):**
+
+- **New `SettingsTab::Notifications`** inserted between `Bell` and
+  `Security`. `SettingsTab::ALL` grew `[Self; 13] → [Self; 14]`; the
+  `all_tabs_present` assertion and `settings_tab_labels` updated.
+- **`show_notifications_tab`** renders: master `enabled` checkbox;
+  Sources (`osc_9`, `osc_777`, `on_command_finished`); a
+  `command_finished_threshold_secs` `DragValue` (0–600 s); three routing
+  combo boxes via the extracted `notification_routing_row` helper
+  (Toast / System / Both / System-when-unfocused); a full-width
+  `command_finished_template` text edit with a token hint; a "Test
+  Notification" button; and a Bell cross-reference checkbox bound to the
+  same `bell.on_command_finished` field shown in the Bell tab.
+- **Bell tab** also gained the `bell.on_command_finished` checkbox (the
+  same field is editable from both tabs; egui binds both to the draft).
+- **"Test Notification"** sets a `pending_test_notification` flag (the
+  same pattern as `pending_delete_layout`), drained in both `show` and
+  `show_standalone` to return the new `SettingsAction::TestNotification`.
+  The dispatcher in `settings_dispatch.rs` routes a
+  `NotificationRequest::sample()` (Info kind, "Freminal" / "Test
+  notification") through `NotificationRouter::route_test` using the draft
+  `[notifications]` config (so unsaved routing changes are reflected) and
+  the focused state.
+- **`route_test`** is a sibling of `route` that skips only the `enabled`
+  master-switch gate — the test button must give feedback even while the
+  system is disabled; the per-category routing policy still applies.
+- **`draft_notifications()`** accessor added so the dispatcher reads the
+  draft config without exposing the private `draft` field.
+- **`NotificationRouting` label helper** `notification_routing_label`
+  added next to `bell_mode_label`.
+- **Tests:** `notification_routing_labels`,
+  `notification_settings_persist_through_draft`,
+  `test_notification_button_sets_pending_flag` (settings.rs);
+  `route_test_ignores_enabled_master_switch`, `sample_request_is_info_kind`
+  (notifications.rs).
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo test --all`, and
+  `cargo machete` all clean.
 
 #### 76.8 — Docs
 

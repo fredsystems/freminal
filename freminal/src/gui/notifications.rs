@@ -42,6 +42,18 @@ pub(super) struct NotificationRequest {
 }
 
 impl NotificationRequest {
+    /// A sample notification used by the Settings "Test Notification" button
+    /// so the user can verify their routing/template configuration without
+    /// running a command. Categorised as [`NotificationKind::Info`] so it
+    /// follows the `routing_info` policy.
+    pub(super) fn sample() -> Self {
+        Self {
+            kind: NotificationKind::Info,
+            title: Some("Freminal".to_owned()),
+            body: "Test notification".to_owned(),
+        }
+    }
+
     /// The summary/title string shown to the user, falling back to a
     /// category-derived default when the source supplied no title.
     fn summary(&self) -> &str {
@@ -205,6 +217,30 @@ impl NotificationRouter {
         }
     }
 
+    /// Route a request for the Settings "Test Notification" button, ignoring
+    /// the [`NotificationsConfig::enabled`] master switch.
+    ///
+    /// The test button must give the user feedback even while the master
+    /// switch is off (they may be configuring routing before enabling the
+    /// system), so the only difference from [`Self::route`] is the skipped
+    /// `enabled` check. The per-category routing policy still applies.
+    pub(super) fn route_test(
+        req: &NotificationRequest,
+        config: &NotificationsConfig,
+        focused: bool,
+        toasts: &mut ToastStack,
+    ) {
+        let routing = Self::routing_for(req.kind, config);
+
+        if routing.wants_toast(focused) {
+            Self::push_toast(req, toasts);
+        }
+
+        if routing.wants_system(focused) {
+            Self::show_system(req);
+        }
+    }
+
     /// Select the routing policy for a notification category.
     const fn routing_for(
         kind: NotificationKind,
@@ -334,6 +370,27 @@ mod tests {
         let mut toasts = ToastStack::default();
         NotificationRouter::route(&osc_req("hello"), &config, true, &mut toasts);
         assert_eq!(toasts.len(), 0);
+    }
+
+    #[test]
+    fn route_test_ignores_enabled_master_switch() {
+        // route() drops everything when disabled; route_test() must still
+        // fire so the Settings "Test Notification" button gives feedback.
+        let config = NotificationsConfig {
+            enabled: false,
+            routing_info: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_test(&NotificationRequest::sample(), &config, true, &mut toasts);
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn sample_request_is_info_kind() {
+        let req = NotificationRequest::sample();
+        assert_eq!(req.kind, NotificationKind::Info);
+        assert_eq!(req.summary(), "Freminal");
     }
 
     #[test]
