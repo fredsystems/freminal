@@ -2822,6 +2822,40 @@ Two small fixes found during manual testing of 76.4 on Linux/Hyprland:
 
 `cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
 
+#### 76.4c — Config load-path audit + self-protecting guard test ✅ 2026-06-09
+
+Follow-up to 76.4a: a full audit of the config load/save path to find any
+other silently-dropped options, plus a durable guard so the bug class
+cannot recur.
+
+**Audit findings (only 76.4a was a real bug):**
+
+- Section-level sync of `Config` ↔ `ConfigPartial` ↔ `apply_partial` is
+  now complete (all 20 top-level fields; verified field-by-field).
+- Serde attributes are safe: only `skip_serializing_if =
+"Option::is_none"` / `"KeybindingsConfig::is_empty"` (which omit only
+  absent/empty values) and a correct `#[serde(flatten)]` on the
+  keybindings map. No `#[serde(skip)]` drops data.
+- CLI override path (`apply_cli_overrides`) is narrow by design (shell,
+  hide_menu_bar, deprecated write-logs flag) — no silent drops.
+- Save/load is symmetric: `save_config` serializes the full `Config`;
+  `load_config` merges via the now-field-complete `ConfigPartial`.
+- `config_example.toml` has no documentation drift against the structs.
+
+**Guard test `every_config_section_survives_partial_merge`:** sets a
+non-default value in every section, runs the real load path
+(`to_string_pretty` → `ConfigPartial` → `apply_partial`), and asserts
+each value survived. Two protection layers, both proven:
+
+- **Runtime:** disabling any merge arm fails with `"<section> section
+dropped"` (verified by temporarily disabling the notifications arm).
+- **Compile-time:** a trailing exhaustive `let Config { .. } = loaded`
+  destructure with **no** `..` rest pattern means adding a new field to
+  `Config` fails to compile the test (`E0027`) until the author wires it
+  in — verified by temporarily adding a dummy field.
+
+`cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
+
 #### 76.5 — Notification templates and bell
 
 **Scope:** `freminal-common/src/config.rs` (extend NotificationsConfig and

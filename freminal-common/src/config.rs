@@ -2571,6 +2571,163 @@ mode = "none"
         assert_eq!(cfg.bell.mode, BellMode::None);
     }
 
+    /// Round-trip guard: every top-level `Config` section must survive the
+    /// real load path (`toml::to_string_pretty` -> `ConfigPartial` ->
+    /// `apply_partial`). This is the regression net for the class of bug
+    /// where a section is added to `Config` but not wired into
+    /// `ConfigPartial` / `apply_partial`, causing user TOML to be silently
+    /// dropped (see fix 76.4a). A non-default value is set in EVERY section;
+    /// if any section fails to merge, that section's assertion reverts to the
+    /// default and fails here.
+    #[test]
+    // One comprehensive guard covering every section plus the exhaustive
+    // destructure; splitting it would scatter the invariant and weaken it.
+    #[allow(clippy::too_many_lines)]
+    fn every_config_section_survives_partial_merge() {
+        // `version` is the only top-level (non-nested) field mutated, so set
+        // it via struct-update syntax to avoid `field_reassign_with_default`;
+        // every other mutation targets a nested section field, which the lint
+        // does not flag.
+        let mut original = Config {
+            version: 7,
+            ..Config::default()
+        };
+
+        // Mutate one distinctive, non-default field per section.
+        original.font.size = 18.0;
+        original.cursor.blink = !Config::default().cursor.blink;
+        original.theme.mode = ThemeMode::Light;
+        original.shell.path = Some("/bin/dash".to_owned());
+        original.logging.write_to_file = !Config::default().logging.write_to_file;
+        original.scrollback.limit = 12_345;
+        original.ui.hide_menu_bar = !Config::default().ui.hide_menu_bar;
+        original.shader.hot_reload = !Config::default().shader.hot_reload;
+        original.tabs.show_single_tab = !Config::default().tabs.show_single_tab;
+        original.tab_title.policy = TabTitlePolicy::OscWins;
+        original.bell.mode = BellMode::None;
+        original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.shell_integration.set_term_program =
+            !Config::default().shell_integration.set_term_program;
+        original.command_blocks.enabled = !Config::default().command_blocks.enabled;
+        original.notifications.enabled = !Config::default().notifications.enabled;
+        original
+            .keybindings
+            .overrides
+            .insert("copy".to_owned(), "Ctrl+Shift+C".to_owned());
+        original.startup.restore_last_session = !Config::default().startup.restore_last_session;
+        original.onboarding.first_run_complete = !Config::default().onboarding.first_run_complete;
+
+        // Serialize exactly as `save_config` does, then re-load exactly as
+        // `load_config` does (partial deserialize + merge onto defaults).
+        let toml = toml::to_string_pretty(&original).expect("serialize Config");
+        let partial: ConfigPartial = toml::from_str(&toml).expect("deserialize ConfigPartial");
+        let mut loaded = Config::default();
+        loaded.apply_partial(partial);
+
+        // Each section's mutated field must have survived the merge.
+        assert_eq!(loaded.version, 7, "version section dropped");
+        assert!(
+            (loaded.font.size - 18.0).abs() < f32::EPSILON,
+            "font section dropped"
+        );
+        assert_eq!(
+            loaded.cursor.blink, original.cursor.blink,
+            "cursor section dropped"
+        );
+        assert_eq!(loaded.theme.mode, ThemeMode::Light, "theme section dropped");
+        assert_eq!(
+            loaded.shell.path.as_deref(),
+            Some("/bin/dash"),
+            "shell section dropped"
+        );
+        assert_eq!(
+            loaded.logging.write_to_file, original.logging.write_to_file,
+            "logging section dropped"
+        );
+        assert_eq!(
+            loaded.scrollback.limit, 12_345,
+            "scrollback section dropped"
+        );
+        assert_eq!(
+            loaded.ui.hide_menu_bar, original.ui.hide_menu_bar,
+            "ui section dropped"
+        );
+        assert_eq!(
+            loaded.shader.hot_reload, original.shader.hot_reload,
+            "shader section dropped"
+        );
+        assert_eq!(
+            loaded.tabs.show_single_tab, original.tabs.show_single_tab,
+            "tabs section dropped"
+        );
+        assert_eq!(
+            loaded.tab_title.policy,
+            TabTitlePolicy::OscWins,
+            "tab_title section dropped"
+        );
+        assert_eq!(loaded.bell.mode, BellMode::None, "bell section dropped");
+        assert_eq!(
+            loaded.security.allow_clipboard_read, original.security.allow_clipboard_read,
+            "security section dropped"
+        );
+        assert_eq!(
+            loaded.shell_integration.set_term_program, original.shell_integration.set_term_program,
+            "shell_integration section dropped"
+        );
+        assert_eq!(
+            loaded.command_blocks.enabled, original.command_blocks.enabled,
+            "command_blocks section dropped"
+        );
+        assert_eq!(
+            loaded.notifications.enabled, original.notifications.enabled,
+            "notifications section dropped"
+        );
+        assert_eq!(
+            loaded.keybindings.overrides.get("copy").map(String::as_str),
+            Some("Ctrl+Shift+C"),
+            "keybindings section dropped"
+        );
+        assert_eq!(
+            loaded.startup.restore_last_session, original.startup.restore_last_session,
+            "startup section dropped"
+        );
+        assert_eq!(
+            loaded.onboarding.first_run_complete, original.onboarding.first_run_complete,
+            "onboarding section dropped"
+        );
+
+        // Exhaustiveness guard: this destructure has NO `..` rest pattern, so
+        // adding a new field to `Config` breaks compilation here until the
+        // author adds a mutation + assertion for it above. That converts the
+        // "new section silently not wired into ConfigPartial/apply_partial"
+        // bug class (see fix 76.4a) from a runtime surprise into a
+        // compile-time failure. If you are here because of a build error:
+        // wire your new field into `ConfigPartial` and `apply_partial`, then
+        // add a mutation and an assertion to this test.
+        let Config {
+            version: _,
+            font: _,
+            cursor: _,
+            theme: _,
+            shell: _,
+            logging: _,
+            scrollback: _,
+            ui: _,
+            shader: _,
+            tabs: _,
+            tab_title: _,
+            bell: _,
+            security: _,
+            shell_integration: _,
+            command_blocks: _,
+            notifications: _,
+            keybindings: _,
+            managed_by: _,
+            startup: _,
+            onboarding: _,
+        } = loaded;
+    }
+
     #[test]
     fn notifications_apply_partial_enables_from_toml() {
         // Regression: [notifications] (and its sibling sections) must survive
