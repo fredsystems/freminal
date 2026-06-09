@@ -28,6 +28,17 @@ deb_depends = ["libgl1-mesa-glx"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[package.metadata.generate-rpm]
+# RPM forbids '-' in the Version field (it is the NEVRA Version/Release
+# separator), so a SemVer pre-release such as "0.9.0-beta.2" is illegal as-is.
+# `cargo xtask bump-version` keeps this in sync, translating the SemVer
+# pre-release separator to the RPM tilde operator (e.g. "0.9.0~beta.2"), which
+# sorts older than the final release just like the SemVer pre-release does.
+version = "0.9.0~beta.2"
+assets = [
+  { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
+]
+
 [[bench]]
 harness = false
 name = "render_loop_bench"
@@ -44,19 +55,24 @@ egui_glow.workspace = true
 fontdb.workspace = true
 freminal-common = { path = "../freminal-common" }
 freminal-terminal-emulator = { path = "../freminal-terminal-emulator" }
+freminal-windowing = { path = "../freminal-windowing" }
 glow.workspace = true
 image.workspace = true
-thiserror.workspace = true
 open.workspace = true
+regex.workspace = true
+rustc-hash.workspace = true
 rustybuzz.workspace = true
 swash.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-regex.workspace = true
-rustc-hash.workspace = true
 unicode-width.workspace = true
-freminal-windowing = { path = "../freminal-windowing" }
+
+# dev dependencies
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
 
 # Platform-specific: CWD readback for layout save / recording snapshots.
 # See freminal/src/gui/platform.rs::read_cwd and plan subtask 71.16.
@@ -66,16 +82,6 @@ freminal-windowing = { path = "../freminal-windowing" }
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 sysinfo.workspace = true
 
-# dev dependencies
-[dev-dependencies]
-criterion.workspace = true
-tempfile.workspace = true
-
 [features]
 default = []
 validation = []
-
-[package.metadata.generate-rpm]
-assets = [
-    { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
-]
