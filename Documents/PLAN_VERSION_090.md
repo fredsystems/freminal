@@ -3146,7 +3146,7 @@ for dangerous patterns. Per-config toggle to disable.
 
 ### 77 Subtasks
 
-#### 77.1 — Config schema
+#### 77.1 — Config schema ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`.
 
@@ -3185,6 +3185,45 @@ for dangerous patterns. Per-config toggle to disable.
   malformed patterns via the existing toast system.
 
 **Verification:** Round-trip TOML test. Regex compile-time validation test.
+
+**Completion notes (commit `4eeb8b8`, 2026-06-09):**
+
+- `PasteGuardConfig` added next to `SecurityConfig` in
+  `freminal-common/src/config.rs`. Fields: `enabled`, `multiline`,
+  `control_chars`, `patterns` (all `bool`), `pattern_list: Vec<String>`.
+- **Default change vs. the plan:** `patterns` defaults to `true`
+  (dangerous-command detection on out of the box) rather than the
+  `false` the plan originally specified. Requested by the user at task
+  start. All other defaults match the plan (`enabled`/`multiline`/
+  `control_chars = true`).
+- The default `pattern_list` is produced by a private
+  `default_paste_guard_patterns()` helper using the seven patterns from
+  the plan (`rm -rf`, `curl|sh`, `wget|sh`, `sudo`, `doas`, `dd of=/dev/`,
+  `mkfs.`).
+- Regex validation is exposed as
+  `PasteGuardConfig::invalid_patterns() -> Vec<(String, String)>`
+  rather than enforced at load time. Rationale: `freminal-common` is a
+  library crate with no UI surface and no `anyhow`; the load path
+  (`apply_partial`) cannot raise a toast. The GUI consumes
+  `invalid_patterns()` in 77.2/77.6 and surfaces malformed patterns via
+  the existing toast system, skipping them at match time.
+- `regex` added to `freminal-common/Cargo.toml` (`regex.workspace =
+true`; already pinned to `1.12.3` in the workspace deps).
+- `#[allow(clippy::struct_excessive_bools)]` with a justifying comment
+  on the struct, matching the established `NotificationsConfig` pattern
+  (four documented TOML toggles; an enum would distort the schema).
+- Full merge-wiring per the config-options checklist: `Config` field +
+  `Default`, `ConfigPartial` field, `apply_partial` arm, the
+  `every_config_section_survives_partial_merge` guard test (mutation +
+  assertion + no-`..` destructure entry), `config_example.toml`
+  documentation, and the Nix home-manager module mirror (let-binding,
+  merge arm, five `mkOption`s including a `listOf str` for
+  `pattern_list`).
+- 4 new unit tests: defaults, TOML round-trip, all-default-patterns-
+  compile, and malformed-pattern reporting.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, `cargo machete`, and the Nix lint
+  stack (`nixfmt`/`statix`/`deadnix`) all clean.
 
 #### 77.2 — Paste analyzer
 
