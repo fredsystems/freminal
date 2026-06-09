@@ -1,20 +1,7 @@
 [workspace]
 resolver = "3"
-members = [
-  "freminal",
-  "freminal-buffer",
-  "freminal-common",
-  "freminal-terminal-emulator",
-  "freminal-windowing",
-  "portable-pty",
-  "xtask",
-]
-default-members = [
-  "freminal",
-  "freminal-buffer",
-  "freminal-common",
-  "freminal-terminal-emulator",
-]
+members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator", "freminal-windowing", "portable-pty", "xtask"]
+default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator"]
 
 [workspace.package]
 version = "0.9.0-beta.2"
@@ -75,7 +62,7 @@ serial2 = "0.2.37"
 shared_library = "0.1.9"
 shell-words = "1.1.1"
 smol = "2.0.2"
-swash = "0.2.7"
+swash = "0.2.8"
 sysinfo = { version = "0.39.3", default-features = false, features = ["system"] }
 sys-locale = "0.3.2"
 tar = "0.4.46"

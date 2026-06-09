@@ -184,28 +184,76 @@
       ## CHECKS — unified base+rust via mkCheck
       ##########################################################################
       checks = builtins.listToAttrs (
-        map (system: {
-          name = system;
-          value = {
-            pre-commit-check = precommit.lib.mkCheck {
-              inherit system;
-              src = ./.;
-              check_rust = true;
+        map (
+          system:
+          let
+            pkgs = import nixpkgs { inherit system; };
+
+            # git-hooks.nix, reached transitively through the shared precommit
+            # flake.  Used to re-run the hook generation with our extra TOML
+            # hook merged in (mkCheck has no extraHooks parameter, so we
+            # reconstruct the merged hook set the same way mkCheck does).
+            gitHooks = precommit.inputs.git-hooks;
+
+            extraExcludes = [
+              "^speed_tests/"
+              "^Documents/reference"
+              "^res/"
+              "typos.toml"
+              "\\.bin$"
+              "assets/"
+            ];
+
+            # The shared base + rust modules, exactly as mkCheck would build
+            # them.  We merge their hooks/excludes/passthru ourselves so we can
+            # add the tombi hook before handing the result to git-hooks.
+            baseModule = precommit.lib.mkBaseCheck { inherit system extraExcludes; };
+            rustModule = precommit.lib.mkRustCheck {
+              inherit system extraExcludes;
               enableXtask = true;
-              rust_options = {
-                xtaskCheck = "pc";
-              };
-              extraExcludes = [
-                "^speed_tests/"
-                "^Documents/reference"
-                "^res/"
-                "typos.toml"
-                "\\.bin$"
-                "assets/"
-              ];
+              xtaskType = "pc";
             };
-          };
-        }) systems
+
+            # Custom hook: lint every staged TOML file with tombi, failing the
+            # commit on warnings as well as errors.  TOML files are the Cargo
+            # manifests and config_example.toml; `--error-on-warnings` makes
+            # tombi exit non-zero on lint warnings (verified: clean files exit
+            # 0, any warning exits 1), so this gates the commit.
+            tombiHook = {
+              tombi = {
+                enable = true;
+                name = "tombi (TOML lint)";
+                description = "Lint TOML files with tombi, failing on warnings.";
+                entry = "${pkgs.tombi}/bin/tombi lint --error-on-warnings";
+                files = "\\.toml$";
+                language = "system";
+                pass_filenames = true;
+              };
+            };
+
+            mergedHooks = baseModule.hooks // rustModule.hooks // tombiHook;
+            mergedExcludes = (baseModule.excludes or [ ]) ++ (rustModule.excludes or [ ]) ++ extraExcludes;
+
+            run = gitHooks.lib.${system}.run {
+              src = ./.;
+              hooks = mergedHooks;
+              excludes = mergedExcludes;
+            };
+          in
+          {
+            name = system;
+            value = {
+              pre-commit-check = run // {
+                passthru = {
+                  devPackages = (baseModule.passthru.devPackages or [ ]) ++ (rustModule.passthru.devPackages or [ ]);
+                  libPath = (baseModule.passthru.libPath or [ ]) ++ (rustModule.passthru.libPath or [ ]);
+                };
+                shellHook = run.shellHook or "";
+                enabledPackages = run.enabledPackages or [ ];
+              };
+            };
+          }
+        ) systems
       );
 
       ##########################################################################
@@ -228,6 +276,7 @@
               # Extra Rust / tooling packages (NO extra rustc here)
               extraRustTools = [
                 chk.passthru.devPackages
+                pkgs.tombi
                 pkgs.cargo-deny
                 pkgs.cargo-machete
                 pkgs.cargo-make

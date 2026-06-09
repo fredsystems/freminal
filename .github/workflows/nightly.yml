@@ -325,7 +325,7 @@ jobs:
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: ${{ needs.check-changes.outputs.tag }}
-          name: "Nightly ${{ needs.check-changes.outputs.tag }}"
+          name: "Nightly ${{ needs.check-changes.outputs.nightly_version }}"
           prerelease: true
           generate_release_notes: true
           files: artifacts/*

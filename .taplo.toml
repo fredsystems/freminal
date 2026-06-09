@@ -1,0 +1,5 @@
+# .taplo.toml or taplo.toml
+[formatting]
+column_width = 254
+array_auto_expand = false
+inline_table_expand = false

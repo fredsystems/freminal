@@ -466,10 +466,59 @@ fn precommit() -> Result<()> {
 /// matching occurrences with the new version. Missing expected occurrences
 /// are not ignored silently: the command emits warnings for files that do
 /// not contain the old version string and then continues successfully.
-fn bump_version(new_version: &str) -> Result<()> {
-    // Validate that the new version is valid semver.
+/// Translate a `SemVer` version into an RPM-legal `Version` string.
+///
+/// RPM's `Version` field forbids the hyphen `-` (it is the separator between
+/// the `Version` and `Release` components of a `NEVRA`), but `SemVer` uses `-`
+/// to introduce the pre-release identifier. RPM does, however, understand the
+/// tilde operator `~`, which sorts *older* than the same version without it —
+/// exactly mirroring `SemVer` pre-release ordering (`0.9.0~beta.2` < `0.9.0`).
+///
+/// The translation is:
+///
+/// * the first `-` (the `SemVer` pre-release separator) becomes `~`;
+/// * any further `-` (hyphens permitted *inside* `SemVer` identifiers, e.g.
+///   `0.9.0-x-y`) become `_`, which is RPM-legal and ordering-neutral;
+/// * everything else is left untouched (`.`, `+` build metadata, and ASCII
+///   alphanumerics are all valid in an RPM `Version`).
+///
+/// The input is first parsed with [`semver::Version::parse`], so it is
+/// guaranteed to contain only the `SemVer`-legal character set
+/// (`0-9A-Za-z.-+`). That guarantee is what makes this translation total: the
+/// only RPM-illegal character a parsed `SemVer` can contain is `-`, and both
+/// occurrences of it are handled above. Any genuinely malformed input (e.g.
+/// containing `&`) is rejected by the parse before translation.
+fn rpm_version(new_version: &str) -> Result<String> {
+    // Parsing rejects anything that is not well-formed SemVer, which also
+    // rejects any character outside the SemVer-legal set.
     semver::Version::parse(new_version)
         .wrap_err_with(|| format!("invalid semver version: {new_version}"))?;
+
+    let mut out = String::with_capacity(new_version.len());
+    let mut seen_hyphen = false;
+    for ch in new_version.chars() {
+        if ch == '-' {
+            if seen_hyphen {
+                // A hyphen inside an identifier — RPM-illegal, map to '_'.
+                out.push('_');
+            } else {
+                // The pre-release separator — map to the tilde operator.
+                out.push('~');
+                seen_hyphen = true;
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+fn bump_version(new_version: &str) -> Result<()> {
+    // Validate that the new version is valid semver, and derive the RPM-legal
+    // form up front so an invalid version fails before any files are touched.
+    semver::Version::parse(new_version)
+        .wrap_err_with(|| format!("invalid semver version: {new_version}"))?;
+    let new_rpm_version = rpm_version(new_version)?;
 
     // Read current version from Cargo.toml.
     let cargo_toml_path = "Cargo.toml";
@@ -489,6 +538,11 @@ fn bump_version(new_version: &str) -> Result<()> {
 
     if old_version == new_version {
         tracing::info!("version is already {new_version}, nothing to do");
+        // Still reconcile the RPM Version override in case it has drifted out
+        // of sync with the workspace version (the override is RPM-illegal to
+        // leave stale, and `cargo generate-rpm` reads it instead of the
+        // workspace version).
+        update_rpm_version("freminal/Cargo.toml", &new_rpm_version)?;
         return Ok(());
     }
 
@@ -522,9 +576,68 @@ fn bump_version(new_version: &str) -> Result<()> {
         tracing::info!("  updated {flake_path} ({replacements} occurrences)");
     }
 
+    // 3. Update the RPM `Version` override in freminal/Cargo.toml.
+    //
+    // RPM forbids '-' in its Version field, so `cargo generate-rpm` reads this
+    // tilde-translated override from `[package.metadata.generate-rpm].version`
+    // instead of the workspace SemVer version.
+    update_rpm_version("freminal/Cargo.toml", &new_rpm_version)?;
+
     tracing::info!("version bump complete: {old_version} -> {new_version}");
+    tracing::info!("  rpm Version override: {new_rpm_version}");
     tracing::info!("remember to run `cargo check` to update Cargo.lock");
 
+    Ok(())
+}
+
+/// Rewrite the `version = "…"` line under `[package.metadata.generate-rpm]`
+/// in the given manifest to `new_rpm_version`.
+///
+/// The package's own version is set via `version.workspace = true`, so the
+/// only literal `version = "…"` line in `freminal/Cargo.toml` is the RPM
+/// override; this locates the `[package.metadata.generate-rpm]` table and
+/// rewrites the first `version = "…"` line that follows it.
+fn update_rpm_version(manifest_path: &str, new_rpm_version: &str) -> Result<()> {
+    let content = fs::read_to_string(manifest_path)
+        .wrap_err_with(|| format!("failed to read {manifest_path}"))?;
+
+    let mut in_rpm_section = false;
+    let mut replaced = false;
+    let mut updated = String::with_capacity(content.len());
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') {
+            in_rpm_section = trimmed.starts_with("[package.metadata.generate-rpm]");
+        }
+
+        if in_rpm_section && !replaced && trimmed.starts_with("version = \"") {
+            updated.push_str("version = \"");
+            updated.push_str(new_rpm_version);
+            updated.push('"');
+            replaced = true;
+        } else {
+            updated.push_str(line);
+        }
+        updated.push('\n');
+    }
+
+    color_eyre::eyre::ensure!(
+        replaced,
+        "could not find a 'version = \"…\"' line under \
+         [package.metadata.generate-rpm] in {manifest_path}"
+    );
+
+    // Preserve the absence of a trailing newline if the original lacked one.
+    let final_content = if content.ends_with('\n') {
+        updated
+    } else {
+        updated.trim_end_matches('\n').to_owned()
+    };
+
+    fs::write(manifest_path, final_content)
+        .wrap_err_with(|| format!("failed to write {manifest_path}"))?;
+    tracing::info!("  updated {manifest_path} (rpm Version = {new_rpm_version})");
     Ok(())
 }
 
@@ -587,5 +700,66 @@ impl ExpressionExt for duct::Expression {
             // The command that was run may have scrolled off the screen, so repeat it here
             tracing::error!("failed to run command: {:?}", self);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rpm_version;
+
+    #[test]
+    fn release_version_is_unchanged() {
+        // A plain release version contains no RPM-illegal characters.
+        assert_eq!(rpm_version("0.9.0").unwrap(), "0.9.0");
+        assert_eq!(rpm_version("1.2.3").unwrap(), "1.2.3");
+    }
+
+    #[test]
+    fn pre_release_separator_becomes_tilde() {
+        assert_eq!(rpm_version("0.9.0-beta.2").unwrap(), "0.9.0~beta.2");
+        assert_eq!(rpm_version("0.9.0-rc.1").unwrap(), "0.9.0~rc.1");
+        assert_eq!(rpm_version("1.0.0-alpha").unwrap(), "1.0.0~alpha");
+    }
+
+    #[test]
+    fn nightly_pre_release_becomes_tilde() {
+        // The exact case from the failing nightly run.
+        assert_eq!(
+            rpm_version("0.9.0-beta.2.nightly.20260609").unwrap(),
+            "0.9.0~beta.2.nightly.20260609"
+        );
+        // Base version without a pre-release, nightly appended as a pre-release.
+        assert_eq!(
+            rpm_version("0.9.0-nightly.20260609").unwrap(),
+            "0.9.0~nightly.20260609"
+        );
+    }
+
+    #[test]
+    fn build_metadata_plus_is_preserved() {
+        // '+' is RPM-legal and must survive untouched.
+        assert_eq!(
+            rpm_version("0.9.0-beta.2+build.5").unwrap(),
+            "0.9.0~beta.2+build.5"
+        );
+        assert_eq!(rpm_version("0.9.0+build.5").unwrap(), "0.9.0+build.5");
+    }
+
+    #[test]
+    fn hyphen_inside_identifier_becomes_underscore() {
+        // SemVer permits hyphens inside pre-release identifiers; only the
+        // first (separator) hyphen becomes '~', the rest become '_'.
+        assert_eq!(rpm_version("0.9.0-x-y").unwrap(), "0.9.0~x_y");
+        assert_eq!(rpm_version("0.9.0-a-b-c").unwrap(), "0.9.0~a_b_c");
+    }
+
+    #[test]
+    fn invalid_semver_is_rejected() {
+        // Garbage that is not SemVer at all is rejected before translation,
+        // so RPM-illegal characters like '&' can never reach the output.
+        assert!(rpm_version("0.9.0-beta&2").is_err());
+        assert!(rpm_version("not-a-version").is_err());
+        assert!(rpm_version("1.0").is_err());
+        assert!(rpm_version("").is_err());
     }
 }
