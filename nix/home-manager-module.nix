@@ -105,6 +105,16 @@ let
         inherit (s.security) allow_clipboard_read;
       };
 
+      pasteGuardSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.paste_guard)
+          enabled
+          multiline
+          control_chars
+          patterns
+          pattern_list
+          ;
+      };
+
       tabTitleSection = lib.filterAttrs (_: v: v != null) {
         inherit (s.tab_title) policy separator;
       };
@@ -164,6 +174,7 @@ let
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
+      // lib.optionalAttrs (pasteGuardSection != { }) { paste_guard = pasteGuardSection; }
       // lib.optionalAttrs (tabTitleSection != { }) { tab_title = tabTitleSection; }
       // lib.optionalAttrs (shellIntegrationSection != { }) {
         shell_integration = shellIntegrationSection;
@@ -543,6 +554,59 @@ in
             Allow applications to read the system clipboard via OSC 52 query.
             When true, OSC 52 queries return the clipboard contents base64-encoded.
             Null uses the default (false).
+          '';
+        };
+      };
+
+      paste_guard = {
+        enabled = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Master switch for the paste guard. When false, no paste is ever
+            intercepted regardless of the per-trigger toggles below.
+            Null uses the default (true).
+          '';
+        };
+
+        multiline = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Confirm any paste containing a newline.
+            Null uses the default (true).
+          '';
+        };
+
+        control_chars = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Confirm any paste containing control characters (ESC, BEL, etc.)
+            other than the newline covered by multiline and the bracketed-paste
+            markers Freminal wraps the payload with.
+            Null uses the default (true).
+          '';
+        };
+
+        patterns = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, additionally match the payload against pattern_list and
+            escalate the warning when a dangerous pattern is found.
+            Null uses the default (true).
+          '';
+        };
+
+        pattern_list = mkOption {
+          type = types.nullOr (types.listOf types.str);
+          default = null;
+          description = ''
+            Regex patterns (Rust regex syntax) treated as dangerous. Matched
+            only when patterns is true. Malformed patterns are reported and
+            skipped at match time.
+            Null uses the default dangerous-command pattern set.
           '';
         };
       };

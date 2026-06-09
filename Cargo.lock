@@ -1578,6 +1578,7 @@ dependencies = [
  "directories",
  "predicates",
  "proptest",
+ "regex",
  "serde",
  "tempfile",
  "test-log",
