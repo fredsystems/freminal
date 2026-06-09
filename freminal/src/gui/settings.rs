@@ -5,7 +5,8 @@
 
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
-    self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition, ThemeMode,
+    self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
+    TabTitlePolicy, ThemeMode,
 };
 use freminal_common::keybindings::{BindingMap, KeyAction, KeyCombo};
 use freminal_common::themes;
@@ -1200,6 +1201,64 @@ impl SettingsModal {
                     "Bottom",
                 );
             });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Tab Title Policy:");
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "How a tab combines a custom name (your rename) with the title the \
+             shell sets via OSC 0/1/2.",
+        );
+        ui.add_space(4.0);
+
+        let policy_label = tab_title_policy_label(self.draft.tab_title.policy);
+        ComboBox::from_id_salt("tab_title_policy")
+            .selected_text(policy_label)
+            .show_ui(ui, |ui| {
+                for policy in [
+                    TabTitlePolicy::Prefix,
+                    TabTitlePolicy::Suffix,
+                    TabTitlePolicy::CustomWins,
+                    TabTitlePolicy::OscWins,
+                ] {
+                    ui.selectable_value(
+                        &mut self.draft.tab_title.policy,
+                        policy,
+                        tab_title_policy_label(policy),
+                    );
+                }
+            });
+
+        // The separator only applies to the combining policies.
+        let separator_relevant = matches!(
+            self.draft.tab_title.policy,
+            TabTitlePolicy::Prefix | TabTitlePolicy::Suffix
+        );
+        if separator_relevant {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Separator:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.tab_title.separator)
+                        .desired_width(80.0),
+                );
+            });
+        }
+
+        // Live preview of how a renamed tab whose shell set a cwd-style
+        // title would render under the current policy.
+        ui.add_space(8.0);
+        let preview = tab_title_preview(
+            "my-rename",
+            "~/projects",
+            self.draft.tab_title.policy,
+            &self.draft.tab_title.separator,
+        );
+        ui.colored_label(egui::Color32::GRAY, format!("Preview:  {preview}"));
     }
 
     // Renders both the Shell Integration section and the Command Blocks
@@ -1990,6 +2049,26 @@ const fn tab_bar_position_label(pos: TabBarPosition) -> &'static str {
     }
 }
 
+const fn tab_title_policy_label(policy: TabTitlePolicy) -> &'static str {
+    match policy {
+        TabTitlePolicy::Prefix => "Prefix (custom: osc)",
+        TabTitlePolicy::Suffix => "Suffix (osc: custom)",
+        TabTitlePolicy::CustomWins => "Custom Wins",
+        TabTitlePolicy::OscWins => "OSC Wins",
+    }
+}
+
+/// Render a live preview of the tab title under `policy`, mirroring the
+/// runtime logic in `Tab::display_name`.
+fn tab_title_preview(custom: &str, osc: &str, policy: TabTitlePolicy, separator: &str) -> String {
+    match policy {
+        TabTitlePolicy::Prefix => format!("{custom}{separator}{osc}"),
+        TabTitlePolicy::Suffix => format!("{osc}{separator}{custom}"),
+        TabTitlePolicy::CustomWins => custom.to_owned(),
+        TabTitlePolicy::OscWins => osc.to_owned(),
+    }
+}
+
 const fn gutter_position_label(pos: GutterPosition) -> &'static str {
     match pos {
         GutterPosition::Left => "Left",
@@ -2063,6 +2142,50 @@ mod tests {
     fn modal_starts_closed() {
         let modal = SettingsModal::new(None);
         assert!(!modal.is_open);
+    }
+
+    #[test]
+    fn tab_title_preview_matches_each_policy() {
+        assert_eq!(
+            tab_title_preview("c", "o", TabTitlePolicy::Prefix, ": "),
+            "c: o"
+        );
+        assert_eq!(
+            tab_title_preview("c", "o", TabTitlePolicy::Suffix, ": "),
+            "o: c"
+        );
+        assert_eq!(
+            tab_title_preview("c", "o", TabTitlePolicy::CustomWins, ": "),
+            "c"
+        );
+        assert_eq!(
+            tab_title_preview("c", "o", TabTitlePolicy::OscWins, ": "),
+            "o"
+        );
+    }
+
+    #[test]
+    fn tab_title_policy_label_is_set_for_each_variant() {
+        for policy in [
+            TabTitlePolicy::Prefix,
+            TabTitlePolicy::Suffix,
+            TabTitlePolicy::CustomWins,
+            TabTitlePolicy::OscWins,
+        ] {
+            assert!(!tab_title_policy_label(policy).is_empty());
+        }
+    }
+
+    #[test]
+    fn tab_title_draft_round_trips_through_open() {
+        let mut modal = SettingsModal::new(None);
+        let mut live = Config::default();
+        live.tab_title.policy = TabTitlePolicy::Suffix;
+        live.tab_title.separator = String::from(" / ");
+        modal.open(&live, Vec::new(), false);
+
+        assert_eq!(modal.draft.tab_title.policy, TabTitlePolicy::Suffix);
+        assert_eq!(modal.draft.tab_title.separator, " / ");
     }
 
     #[test]

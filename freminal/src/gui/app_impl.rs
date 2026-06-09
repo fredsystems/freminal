@@ -902,12 +902,10 @@ impl freminal_windowing::App for FreminalGui {
                             tab_shell_set_title = true;
                         }
                     }
-                    // Once the shell asserts a title via OSC 0/1/2, any
-                    // user-pinned custom name for this tab is cleared so
-                    // shell-driven titles become authoritative again.
-                    if tab_shell_set_title && tab.custom_name.is_some() {
-                        tab.custom_name = None;
-                    }
+                    // The title policy decides whether a shell-asserted OSC
+                    // 0/1/2 title clears the user-pinned custom name (only
+                    // under `OscWins`); see `Tab::apply_osc_title_policy`.
+                    tab.apply_osc_title_policy(self.config.tab_title.policy, tab_shell_set_title);
                 }
             }
 
@@ -1638,20 +1636,24 @@ impl freminal_windowing::App for FreminalGui {
             // This handles tab switches, OSC 0/2 title changes, and restore
             // from the title stack — all in one place.
             //
-            // A user-assigned custom tab name (via `RenameTab` or a
-            // double-click rename) takes precedence over the pane-derived
-            // title.  The custom name is cleared by `handle_window_manipulation`
-            // the next time the shell asserts a title via OSC 0/1/2.
+            // The window title is resolved under the configured tab-title
+            // policy (`[tab_title] policy`), combining the user-assigned
+            // custom name with the shell-asserted OSC title.  Under the
+            // `OscWins` policy a shell title clears the custom name; under
+            // every other policy the custom name persists.
             //
             // Only issue the viewport command when the title actually changed;
             // calling `send_viewport_cmd` unconditionally every frame triggers
             // an infinite repaint loop (~3 % idle CPU).
             let active_tab = win.tabs.active_tab();
-            let active_title = active_tab.display_name();
+            let active_title = active_tab.display_name(
+                self.config.tab_title.policy,
+                &self.config.tab_title.separator,
+            );
             let window_title = if active_title.is_empty() {
                 "Freminal"
             } else {
-                active_title
+                active_title.as_ref()
             };
             if window_title != win.last_window_title {
                 window_title.clone_into(&mut win.last_window_title);

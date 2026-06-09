@@ -32,6 +32,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub shader: ShaderConfig,
     pub tabs: TabsConfig,
+    pub tab_title: TabTitleConfig,
     pub bell: BellConfig,
     pub security: SecurityConfig,
     pub shell_integration: ShellIntegrationConfig,
@@ -73,6 +74,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             shader: ShaderConfig::default(),
             tabs: TabsConfig::default(),
+            tab_title: TabTitleConfig::default(),
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
             shell_integration: ShellIntegrationConfig::default(),
@@ -407,6 +409,58 @@ impl Default for TabsConfig {
         Self {
             show_single_tab: false,
             position: TabBarPosition::Top,
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Tab Title
+// ------------------------------------------------------------------------------------------------
+
+/// Precedence policy that decides what is shown in a tab label (and the
+/// window title) when a tab has both a user-assigned custom name and a
+/// shell-asserted OSC 0/1/2 title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabTitlePolicy {
+    /// Show `"{custom}{separator}{osc}"` when both are present.  Default.
+    #[default]
+    Prefix,
+    /// Show `"{osc}{separator}{custom}"` when both are present.
+    Suffix,
+    /// Show the custom name only; ignore the OSC title for display.
+    CustomWins,
+    /// Show the OSC title only; OSC events clear `custom_name`.
+    OscWins,
+}
+
+/// Configuration for tab/window title precedence.
+///
+/// ```toml
+/// [tab_title]
+/// policy = "prefix"
+/// separator = ": "
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabTitleConfig {
+    /// Precedence policy when a tab has both a custom name and an OSC title.
+    ///
+    /// - `"prefix"` — show `"{custom}: {osc}"` (default)
+    /// - `"suffix"` — show `"{osc}: {custom}"`
+    /// - `"custom_wins"` — show custom only
+    /// - `"osc_wins"` — show osc only; OSC events clear `custom_name`
+    pub policy: TabTitlePolicy,
+
+    /// Separator used in the `prefix` and `suffix` policies.  Default: `": "`.
+    pub separator: String,
+}
+
+impl Default for TabTitleConfig {
+    fn default() -> Self {
+        Self {
+            policy: TabTitlePolicy::default(),
+            separator: String::from(": "),
         }
     }
 }
@@ -1590,6 +1644,51 @@ size = 14.0
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
         assert_eq!(parsed.command_blocks.gutter, GutterPosition::Off);
+    }
+
+    #[test]
+    fn tab_title_defaults_to_prefix_with_colon_space_separator() {
+        let cfg = TabTitleConfig::default();
+        assert_eq!(cfg.policy, TabTitlePolicy::Prefix);
+        assert_eq!(cfg.separator, ": ");
+    }
+
+    #[test]
+    fn tab_title_round_trips_through_toml() {
+        for policy in [
+            TabTitlePolicy::Prefix,
+            TabTitlePolicy::Suffix,
+            TabTitlePolicy::CustomWins,
+            TabTitlePolicy::OscWins,
+        ] {
+            let mut cfg = Config::default();
+            cfg.tab_title.policy = policy;
+            cfg.tab_title.separator = String::from(" | ");
+
+            let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+            let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+            assert_eq!(parsed.tab_title.policy, policy);
+            assert_eq!(parsed.tab_title.separator, " | ");
+        }
+    }
+
+    #[test]
+    fn tab_title_policy_serializes_as_snake_case() {
+        #[derive(Serialize)]
+        struct PolicyToml {
+            policy: TabTitlePolicy,
+        }
+        let cases = [
+            (TabTitlePolicy::Prefix, "policy = \"prefix\""),
+            (TabTitlePolicy::Suffix, "policy = \"suffix\""),
+            (TabTitlePolicy::CustomWins, "policy = \"custom_wins\""),
+            (TabTitlePolicy::OscWins, "policy = \"osc_wins\""),
+        ];
+        for (policy, expected) in cases {
+            let toml = toml::to_string(&PolicyToml { policy }).expect("serialise");
+            assert!(toml.contains(expected), "got: {toml}");
+        }
     }
 
     #[test]

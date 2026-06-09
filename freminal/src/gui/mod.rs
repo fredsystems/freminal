@@ -74,6 +74,9 @@ enum TabBarAction {
     CommitRename(usize, String),
     /// User pressed Escape in the rename editor — discard the edit.
     CancelRename,
+    /// User chose "Clear Custom Name" from the tab context menu — reset the
+    /// tab's `custom_name` to `None` so the OSC title takes over.
+    ClearCustomName(usize),
     /// User finished dragging tab `from` over tab `to` — move it.
     Reorder { from: usize, to: usize },
 }

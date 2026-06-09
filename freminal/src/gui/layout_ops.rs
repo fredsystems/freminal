@@ -193,13 +193,18 @@ impl FreminalGui {
         // Build the tab with the root pane.
         let mut tab = tabs::Tab::new(tab_id, root_spawned);
         if let Some(title) = resolved_tab.title.as_deref() {
-            // Title will be overridden by PTY title changes but set it now.
+            // `title` is an author seed for the OSC (shell-asserted) title; it
+            // is overridden once the PTY asserts a real title.
             if let Ok(panes_mut) = tab.pane_tree.iter_panes_mut() {
                 for p in panes_mut {
                     title.clone_into(&mut p.title);
                 }
             }
         }
+        // Restore the persisted user rename, if any. Distinct from the OSC
+        // seed above: this is the explicit custom name and survives across
+        // save/load (Task 95).
+        tab.custom_name.clone_from(&resolved_tab.custom_name);
 
         // If there's a rest subtree (Split), insert it.
         if let Some(rest) = root_node_rest {
@@ -347,7 +352,12 @@ impl FreminalGui {
                     self.read_cwd_for_pane_with_extra(pane_id, win_extra)
                 });
                 tabs.push(LayoutTab {
+                    // `title` is an author seed for the OSC title and is not
+                    // written back when saving a running session.
                     title: None,
+                    // Persist the user-pinned custom name so renames survive
+                    // save/load and session restore (Task 95).
+                    custom_name: tab.custom_name.clone(),
                     active: tab_idx == active_tab_idx,
                     panes,
                 });
