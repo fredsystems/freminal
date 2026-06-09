@@ -1184,8 +1184,12 @@ struct ConfigPartial {
     pub ui: Option<UiConfig>,
     pub shader: Option<ShaderConfig>,
     pub tabs: Option<TabsConfig>,
+    pub tab_title: Option<TabTitleConfig>,
     pub bell: Option<BellConfig>,
     pub security: Option<SecurityConfig>,
+    pub shell_integration: Option<ShellIntegrationConfig>,
+    pub command_blocks: Option<CommandBlocksConfig>,
+    pub notifications: Option<NotificationsConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
@@ -1224,11 +1228,23 @@ impl Config {
         if let Some(tabs) = partial.tabs {
             self.tabs = tabs;
         }
+        if let Some(tab_title) = partial.tab_title {
+            self.tab_title = tab_title;
+        }
         if let Some(bell) = partial.bell {
             self.bell = bell;
         }
         if let Some(security) = partial.security {
             self.security = security;
+        }
+        if let Some(shell_integration) = partial.shell_integration {
+            self.shell_integration = shell_integration;
+        }
+        if let Some(command_blocks) = partial.command_blocks {
+            self.command_blocks = command_blocks;
+        }
+        if let Some(notifications) = partial.notifications {
+            self.notifications = notifications;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -2553,6 +2569,63 @@ mode = "none"
         .expect("valid TOML");
         cfg.apply_partial(partial);
         assert_eq!(cfg.bell.mode, BellMode::None);
+    }
+
+    #[test]
+    fn notifications_apply_partial_enables_from_toml() {
+        // Regression: [notifications] (and its sibling sections) must survive
+        // the ConfigPartial -> Config merge.  Previously ConfigPartial omitted
+        // these fields, so `enabled = true` was silently dropped on load.
+        let mut cfg = Config::default();
+        assert!(!cfg.notifications.enabled, "default is opt-out");
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[notifications]
+enabled = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(
+            cfg.notifications.enabled,
+            "[notifications] enabled must merge through ConfigPartial"
+        );
+    }
+
+    #[test]
+    fn previously_dropped_sections_apply_partial() {
+        // Regression for the ConfigPartial omission: tab_title,
+        // shell_integration, command_blocks, and notifications must all merge.
+        let mut cfg = Config::default();
+        // Pick non-default values for each section.
+        assert!(cfg.command_blocks.enabled);
+        assert!(cfg.shell_integration.set_term_program);
+
+        let partial: ConfigPartial = toml::from_str(
+            r#"
+[tab_title]
+policy = "osc_wins"
+
+[shell_integration]
+set_term_program = false
+
+[command_blocks]
+enabled = false
+
+[notifications]
+enabled = true
+osc_9 = false
+"#,
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+
+        assert_eq!(cfg.tab_title.policy, TabTitlePolicy::OscWins);
+        assert!(!cfg.shell_integration.set_term_program);
+        assert!(!cfg.command_blocks.enabled);
+        assert!(cfg.notifications.enabled);
+        assert!(!cfg.notifications.osc_9);
     }
 
     #[test]
