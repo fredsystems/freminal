@@ -275,7 +275,6 @@
 
               # Extra Rust / tooling packages (NO extra rustc here)
               extraRustTools = [
-                chk.passthru.devPackages
                 pkgs.tombi
                 pkgs.cargo-deny
                 pkgs.cargo-machete
@@ -311,7 +310,7 @@
             in
             {
               default = pkgs.mkShell {
-                buildInputs = extraRustTools ++ corePkgs ++ extraDev;
+                buildInputs = extraDev ++ corePkgs ++ extraRustTools;
 
                 LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
 
