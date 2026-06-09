@@ -183,7 +183,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(Level::INFO.into())
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off", "zbus=warn"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {
@@ -212,7 +212,7 @@ fn main() {
         let mut filter = EnvFilter::builder()
             .with_default_directive(file_default_directive)
             .from_env_lossy();
-        for spec in &["winit=off", "wgpu=off", "egui=off"] {
+        for spec in &["winit=off", "wgpu=off", "egui=off", "zbus=warn"] {
             match spec.parse::<Directive>() {
                 Ok(d) => filter = filter.add_directive(d),
                 Err(e) => {

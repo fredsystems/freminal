@@ -186,11 +186,23 @@ impl NotificationRouter {
     fn show_system(req: &NotificationRequest) {
         let summary = req.summary().to_owned();
         let body = req.body.clone();
+        // Error-category notifications use Critical urgency so they persist
+        // and pop as a banner; everything else is Normal. Many Linux
+        // notification daemons only raise a banner (rather than silently
+        // filing the notification in the tray) when an urgency hint is set.
+        let urgency = match req.kind {
+            NotificationKind::Error => notify_rust::Urgency::Critical,
+            NotificationKind::OscText
+            | NotificationKind::CommandFinished
+            | NotificationKind::Info => notify_rust::Urgency::Normal,
+        };
         let builder = std::thread::Builder::new().name("freminal-notify".to_owned());
         if let Err(e) = builder.spawn(move || {
             if let Err(e) = notify_rust::Notification::new()
+                .appname("freminal")
                 .summary(&summary)
                 .body(&body)
+                .urgency(urgency)
                 .show()
             {
                 tracing::warn!("failed to show desktop notification: {e}");

@@ -2779,6 +2779,49 @@ notifications), macOS (Notification Center), Windows (toast notifications).
 --all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
 --check` clean, `cargo machete` clean.
 
+#### 76.4a — Cleanup: `[notifications]` (and siblings) never loaded from user TOML ✅ 2026-06-09
+
+**Surfaced during manual testing of 76.4:** with `[notifications]
+enabled = true` in a user `config.toml`, no notifications fired — not
+even a direct `printf '\e]9;hi\a'` toast. Root cause: the config loader
+deserializes into a `ConfigPartial` (all-`Option` fields) and merges it
+onto `Config::default()` via `Config::apply_partial`. `ConfigPartial`
+was **missing** the `notifications`, `shell_integration`,
+`command_blocks`, and `tab_title` fields, so those four whole sections
+were silently dropped on load and always kept their defaults
+(`notifications.enabled = false`). This is a latent bug predating Task
+76 — `shell_integration` / `command_blocks` (Task 72) and `tab_title`
+(Task 94) were added to `Config` but never to `ConfigPartial`. Task
+76.1 added `notifications` with the same omission.
+
+**Fix:** added all four fields to `ConfigPartial` and their merge arms
+to `apply_partial`. Regression tests:
+`notifications_apply_partial_enables_from_toml` and
+`previously_dropped_sections_apply_partial` (covers all four sections
+through the partial-merge path). `cargo test --all`, clippy
+`-D warnings`, fmt, machete all clean.
+
+#### 76.4b — Polish: zbus log silencer + desktop-notification urgency ✅ 2026-06-09
+
+Two small fixes found during manual testing of 76.4 on Linux/Hyprland:
+
+- **zbus log spam.** `notify-rust`'s `zbus` D-Bus dependency emits
+  `INFO`-level connection-handshake spans on every notification, which
+  flooded stdout and the log file. Added `zbus=warn` to the existing
+  framework-silencer directive list (alongside `winit=off` / `wgpu=off`
+  / `egui=off`) on both the stdout and file `EnvFilter`s in `main.rs`.
+  `warn` rather than `off` so genuine D-Bus errors still surface.
+- **Desktop-notification urgency + appname.** `show_system` now sets
+  `appname("freminal")` and an urgency hint —
+  `notify_rust::Urgency::Critical` for `Error`-kind notifications,
+  `Normal` for everything else. Many Linux notification daemons only
+  raise a banner (rather than silently filing the notification in the
+  tray) when an urgency hint is present. (Whether a banner appears, and
+  on which monitor, is ultimately the daemon's policy — verified working
+  end-to-end under `wayle` on Hyprland.)
+
+`cargo test --all`, clippy `-D warnings`, fmt, machete all clean.
+
 #### 76.5 — Notification templates and bell
 
 **Scope:** `freminal-common/src/config.rs` (extend NotificationsConfig and
