@@ -18,17 +18,17 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 
 ## Task Summary
 
-| #   | Feature                                 | Scope        | Status        | Depends On      | Branch                           |
-| --- | --------------------------------------- | ------------ | ------------- | --------------- | -------------------------------- |
-| 72  | OSC 133 Command Blocks                  | Large        | Pending merge | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator) | Medium       | Pending       | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Pending       | v0.8.0, Task 58 | `task-74/broadcast-input`        |
-| 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending merge | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)   | Small        | Complete      | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete      | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending       | Task 72         | `task-98/block-close-on-running` |
+| #   | Feature                                 | Scope        | Status   | Depends On      | Branch                           |
+| --- | --------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
+| 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
+| 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
+| 74  | Broadcast Input to Panes                | Medium       | Pending  | v0.8.0, Task 58 | `task-74/broadcast-input`        |
+| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-75/pane-env-roundtrip`     |
+| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
+| 77  | Smart Paste Guard                       | Small–Medium | Pending  | v0.8.0          | `task-77/paste-guard`            |
+| 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
+| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-98/block-close-on-running` |
 
 ### Execution order
 
@@ -111,7 +111,7 @@ extend or rewrite it.
 
 ---
 
-## Task 72 — OSC 133 Command Blocks
+## Task 72 — OSC 133 Command Blocks ✅ Complete (2026-06-04)
 
 ### 72 Summary
 
@@ -1784,7 +1784,7 @@ Each subtask's commit message must contain a before/after table. Regressions
 
 ---
 
-## Task 73 — Command Gutters
+## Task 73 — Command Gutters ✅ Complete (2026-06-08)
 
 ### 73 Summary
 
@@ -2463,7 +2463,7 @@ None. No code change.
 
 ---
 
-## Task 76 — Notification System (OSC 9 / OSC 777)
+## Task 76 — Notification System (OSC 9 / OSC 777) ✅ Complete (2026-06-09)
 
 ### 76 Summary
 
