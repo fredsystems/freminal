@@ -216,9 +216,22 @@ impl LayoutPane {
 /// A tab definition within a window or at the top level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutTab {
-    /// Tab title shown in the tab bar.
+    /// Author-supplied initial title for the tab.
+    ///
+    /// This seeds the tab's shell-asserted (OSC) title when the layout is
+    /// applied and a custom name is not present.  It is *not* written back
+    /// when a running session is saved — see [`Self::custom_name`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+
+    /// User-assigned custom tab name, persisted across save/load.
+    ///
+    /// Distinct from [`Self::title`]: `title` is an author seed for the OSC
+    /// title, while `custom_name` is the explicit rename a user pinned (via
+    /// Rename Tab or a double-click).  Backward compatible — layouts written
+    /// before this field existed load with `custom_name = None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_name: Option<String>,
 
     /// When `true`, this tab is focused after layout application.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -446,6 +459,9 @@ impl Layout {
         let map_tab = |t: &LayoutTab| -> LayoutTab {
             LayoutTab {
                 title: t.title.as_deref().map(&substitute),
+                // custom_name is a literal user rename; no variable
+                // substitution is applied (see Task 95 decisions).
+                custom_name: t.custom_name.clone(),
                 active: t.active,
                 panes: t.panes.iter().map(&map_pane).collect(),
             }
@@ -699,8 +715,10 @@ pub enum ResolvedNode {
 /// A resolved tab with a binary pane tree.
 #[derive(Debug, Clone)]
 pub struct ResolvedTab {
-    /// Tab title.
+    /// Author-supplied initial (OSC seed) title.
     pub title: Option<String>,
+    /// User-assigned custom tab name, persisted across save/load.
+    pub custom_name: Option<String>,
     /// Whether this tab should be active.
     pub active: bool,
     /// Root of the pane tree, or `None` for an empty tab.
@@ -780,6 +798,7 @@ fn resolve_tab(wi: usize, ti: usize, tab: &LayoutTab) -> Result<ResolvedTab, Lay
 
     Ok(ResolvedTab {
         title: tab.title.clone(),
+        custom_name: tab.custom_name.clone(),
         active: tab.active,
         root,
     })
@@ -1179,6 +1198,135 @@ project_dir = "~/default"
             Layout::from_str_content(Path::new("test.toml"), &toml_str).expect("reparse failed");
         assert_eq!(reparsed.display_name(), layout.display_name());
         assert_eq!(reparsed.windows.len(), layout.windows.len());
+    }
+
+    #[test]
+    fn layout_tab_custom_name_round_trips_through_toml() {
+        let content = r#"
+[layout]
+name = "Named"
+
+[[windows]]
+
+  [[windows.tabs]]
+  title = "seed-title"
+  custom_name = "my-rename"
+
+    [[windows.tabs.panes]]
+    id = "p1"
+    active = true
+"#;
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), content).expect("parse failed");
+        assert_eq!(
+            layout.windows[0].tabs[0].custom_name.as_deref(),
+            Some("my-rename")
+        );
+        assert_eq!(
+            layout.windows[0].tabs[0].title.as_deref(),
+            Some("seed-title")
+        );
+
+        // Round-trip: serialize and re-parse.
+        let toml_str = layout.to_toml_string().expect("serialize failed");
+        let reparsed =
+            Layout::from_str_content(Path::new("test.toml"), &toml_str).expect("reparse failed");
+        assert_eq!(
+            reparsed.windows[0].tabs[0].custom_name.as_deref(),
+            Some("my-rename")
+        );
+    }
+
+    #[test]
+    fn layout_tab_without_custom_name_defaults_to_none() {
+        // Backward compatibility: a layout written before custom_name
+        // existed must load with custom_name = None.
+        let content = r#"
+[layout]
+name = "Legacy"
+
+[[windows]]
+
+  [[windows.tabs]]
+  title = "old-tab"
+
+    [[windows.tabs.panes]]
+    id = "p1"
+    active = true
+"#;
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), content).expect("parse failed");
+        assert!(layout.windows[0].tabs[0].custom_name.is_none());
+    }
+
+    #[test]
+    fn resolve_tab_carries_custom_name() {
+        let content = r#"
+[layout]
+name = "Resolve"
+
+[[windows]]
+
+  [[windows.tabs]]
+  custom_name = "resolved-name"
+
+    [[windows.tabs.panes]]
+    id = "p1"
+    active = true
+"#;
+        let layout =
+            Layout::from_str_content(Path::new("test.toml"), content).expect("parse failed");
+        let resolved = layout.resolve().expect("resolve failed");
+        assert_eq!(
+            resolved.windows[0].tabs[0].custom_name.as_deref(),
+            Some("resolved-name")
+        );
+    }
+
+    #[test]
+    fn programmatic_layout_with_custom_name_survives_save_and_resolve() {
+        // Mirrors the save path: a Layout is built in memory (as
+        // `save_layout` does from running tabs), serialized to TOML, then
+        // re-parsed and resolved (as session restore does on next launch).
+        let layout = Layout {
+            layout: LayoutMeta {
+                name: Some("Last Session".to_owned()),
+                ..LayoutMeta::default()
+            },
+            windows: vec![LayoutWindow {
+                size: None,
+                position: None,
+                monitor: None,
+                tabs: vec![LayoutTab {
+                    title: None,
+                    custom_name: Some("pinned-rename".to_owned()),
+                    active: true,
+                    panes: vec![LayoutPane {
+                        id: "p1".to_owned(),
+                        parent: None,
+                        position: None,
+                        split: None,
+                        ratio: 0.5,
+                        directory: None,
+                        command: None,
+                        shell: None,
+                        env: HashMap::new(),
+                        title: None,
+                        active: true,
+                    }],
+                }],
+            }],
+            tabs: Vec::new(),
+        };
+
+        let toml_str = layout.to_toml_string().expect("serialize failed");
+        let reparsed =
+            Layout::from_str_content(Path::new("last_session.toml"), &toml_str).expect("reparse");
+        let resolved = reparsed.resolve().expect("resolve failed");
+        assert_eq!(
+            resolved.windows[0].tabs[0].custom_name.as_deref(),
+            Some("pinned-rename")
+        );
     }
 
     #[test]

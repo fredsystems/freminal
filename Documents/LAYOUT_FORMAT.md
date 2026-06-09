@@ -143,6 +143,28 @@ xdg-toplevel-position-v1), Freminal can adopt them without format changes.
 
 ---
 
+## Tab Properties
+
+Each `[[windows.tabs]]` (or top-level `[[tabs]]`) entry describes one tab.
+
+| Field         | Type   | Required | Description                                                   |
+| ------------- | ------ | -------- | ------------------------------------------------------------- |
+| `title`       | String | No       | Author-supplied seed for the OSC title (overridden by shell)  |
+| `custom_name` | String | No       | Persisted user rename; combined with the OSC title per policy |
+| `active`      | Bool   | No       | If true, this tab has focus on launch                         |
+| `panes`       | Array  | No       | Pane tree entries (see Pane Node Properties)                  |
+
+`title` and `custom_name` serve different roles. `title` is an author seed
+for the shell-asserted (OSC 0/1/2) title; it is consumed once at load time
+and is **not** written back when Freminal saves a running session.
+`custom_name` is the explicit name the user pinned via "Rename Tab" or a
+double-click; Freminal saves it on every session save and restores it on
+load. How the two combine for display is controlled by the `[tab_title]`
+config policy (see `config_example.toml`). Layouts written before
+`custom_name` existed load with no custom name (fully backward compatible).
+
+---
+
 ## Pane Node Properties
 
 The pane tree is a flat list of nodes with parent references. Each
@@ -203,6 +225,7 @@ Without variables, layouts would be project-specific (hardcoded paths). The
 
 - Window count, positions, and sizes
 - Tab count and order per window
+- Per-tab user rename (`custom_name`), when one was set
 - Per-tab pane tree structure (split directions, ratios)
 - Per-pane working directory (read from `/proc/<pid>/cwd` on Linux)
 - Per-pane foreground process (read from `/proc/<pid>/cmdline` on Linux —
