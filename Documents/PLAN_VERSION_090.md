@@ -26,8 +26,8 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending       | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)   | Small        | Pending       | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts     | Small        | Pending       | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 94  | Tab Title Precedence (prefix default)   | Small        | Complete      | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
+| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete      | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
 | 98  | Block Close on Running Commands         | Small–Medium | Pending       | Task 72         | `task-98/block-close-on-running` |
 
 ### Execution order
@@ -2484,9 +2484,13 @@ existing `BellConfig`).
 - **Default:** `[notifications] enabled = false` — opt-in.
 - **OSC sequences:** OSC 9 (iTerm2/WezTerm) and OSC 777 (urxvt). OSC 99
   (kitty) deferred.
-- **Capability advertisement:** Set `TERM_PROGRAM=freminal` (handled in
-  72.6) and advertise via terminfo + XTGETTCAP. Document detection in the
-  shell integration README.
+- **Capability detection:** OSC 9/777 have no capability-query handshake;
+  clients detect freminal via the `TERM_PROGRAM=freminal` env var (set in
+  72.6). There is no terminal-side notification "broadcast" to implement.
+  `XTGETTCAP TN` / `XTVERSION` already have responders that 76.6 verifies
+  and extends. OSC 99's `p=?` support query is out of scope (see
+  `PLAN_FULL_KITTY_SUPPORT.md`). Document detection in the shell
+  integration README.
 
 ### 76 Subtasks
 
@@ -2616,19 +2620,42 @@ existing `BellConfig`).
 **Verification:** Template-render unit test. Bell-ring integration with the
 existing test harness (if any).
 
-#### 76.6 — Capability advertisement
+#### 76.6 — Capability detection (verify existing responders + document TERM_PROGRAM)
 
 **Scope:** `freminal/freminal.ti` (terminfo source),
-`freminal-terminal-emulator/src/terminal_handler/` (XTGETTCAP responder).
+`freminal-terminal-emulator/src/terminal_handler/dcs.rs` (existing
+XTGETTCAP responder), `freminal-terminal-emulator/src/ansi_components/csi_commands/xtversion.rs`
+(existing XTVERSION handler), `shell-integration/README.md`.
 
-- Add notification-related capabilities to terminfo:
-  - Document that freminal supports OSC 9 and OSC 777 (terminfo doesn't
-    have a dedicated capability for these; add comment lines).
-- Extend XTGETTCAP responses (the existing handler — find via grep for
-  `XTGETTCAP`):
-  - Respond to `XTGETTCAP TN` (Terminal Name) with `freminal`.
-  - Respond to `XTVERSION` with `\eP>|freminal v<version>\e\\`.
-- Document detection recipes in `shell-integration/README.md`:
+**Reality check (decided 2026-06-09):** OSC 9 (iTerm2/WezTerm) and OSC 777
+(urxvt) are one-way, fire-and-forget sequences. **Neither defines a
+capability-query handshake.** There is no terminal-side "broadcast" to
+implement and nothing analogous to the kitty keyboard `CSI ? u` query or
+the kitty graphics `a=q` query — those are client-initiated queries we
+_answer_, and OSC 9/777 have no such query. The real-world detection
+mechanism for these sequences is the `TERM_PROGRAM` environment variable,
+which freminal already sets to `freminal` in subtask 72.6. So this subtask
+is mostly verification + documentation, not new capability machinery. The
+one genuine support handshake in the notification space is OSC 99's
+`p=?` — that is out of scope here and lives in
+`PLAN_FULL_KITTY_SUPPORT.md`.
+
+Work to do:
+
+- **Verify, do not rebuild, the existing responders.** freminal already
+  has an XTGETTCAP responder (`dcs.rs`, `handle_xtgettcap`) and an
+  XTVERSION handler (`xtversion.rs`). First run the existing XTGETTCAP /
+  XTVERSION tests and confirm what they return today. Only then:
+  - Ensure `XTGETTCAP TN` (Terminal Name) responds with `freminal` if it
+    does not already.
+  - Ensure `XTVERSION` responds with `\eP>|freminal v<version>\e\\` if it
+    does not already.
+  - Do not regress current behavior; extend the existing tests rather
+    than replacing them.
+- **Terminfo:** add comment lines only. Terminfo has no dedicated
+  capability code for OSC 9 / OSC 777; do not invent one.
+- **Document detection in `shell-integration/README.md`** using the
+  `TERM_PROGRAM` idiom (the actual mechanism clients use):
 
   ```bash
   if [ "${TERM_PROGRAM:-}" = "freminal" ]; then
@@ -2636,8 +2663,10 @@ existing test harness (if any).
   fi
   ```
 
-**Verification:** XTGETTCAP and XTVERSION round-trip tests (existing test
-harness for terminfo audit, see PLAN_12_TERMINFO.md).
+**Verification:** XTGETTCAP and XTVERSION round-trip tests (extend the
+existing terminfo-audit harness, see PLAN_12_TERMINFO.md — note that
+PLAN_12 is now retired into the v0.2.0 task set; the tests live in
+`dcs.rs` and `xtversion.rs`).
 
 #### 76.7 — Settings UI: Notifications tab
 
@@ -2839,7 +2868,7 @@ Add a benchmark in a new `freminal/benches/paste_guard_bench.rs`.
 
 ---
 
-## Task 94 — Tab Title Precedence
+## Task 94 — Tab Title Precedence ✅ Complete (2026-06-04, PR #343)
 
 ### 94 Summary
 
@@ -2966,7 +2995,7 @@ None mandated.
 
 ---
 
-## Task 95 — Persist Custom Tab Names in Layouts
+## Task 95 — Persist Custom Tab Names in Layouts ✅ Complete (2026-06-04, PR #343)
 
 ### 95 Summary
 
@@ -3353,8 +3382,11 @@ Every subtask completion requires:
 
 The following ideas surfaced during planning but are explicitly deferred:
 
-- **OSC 99 (kitty notifications)** — defer to v0.10.0 or v0.12.0
-  (Completeness) alongside other kitty-protocol additions.
+- **OSC 99 (kitty notifications)** — deferred to the full-kitty-support
+  plan (`PLAN_FULL_KITTY_SUPPORT.md`, working title "Plan 13"). OSC 99 is
+  a stateful protocol (chunked payloads, notification identity,
+  activation callbacks, buttons/icons/sounds) and does not belong in
+  Task 76's fire-and-forget OSC 9/777 path.
 - **Layout-wide / window-wide `[layout.env]`** — defer to v0.10.0 with
   Profiles (Task 78).
 - **Theme / font / profile binding per layout** — defer to v0.10.0 with

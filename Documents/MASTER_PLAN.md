@@ -125,8 +125,8 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 | 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub          | Task 19                |
 | 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub          | None                   |
 | 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub          | None                   |
-| 94  | Tab Title Precedence (OSC vs custom)     | `PLAN_VERSION_090.md` (Task 94)               | Stub          | v0.8.0 (71.1)          |
-| 95  | Persist Custom Tab Names in Layouts      | `PLAN_VERSION_090.md` (Task 95)               | Stub          | v0.8.0 (71.1), Task 61 |
+| 94  | Tab Title Precedence (OSC vs custom)     | `PLAN_VERSION_090.md` (Task 94)               | Complete      | v0.8.0 (71.1)          |
+| 95  | Persist Custom Tab Names in Layouts      | `PLAN_VERSION_090.md` (Task 95)               | Complete      | v0.8.0 (71.1), Task 61 |
 | 96  | Per-Pane Title Bar                       | `PLAN_VERSION_100.md` (Task 96)               | Stub          | Task 58                |
 | 97  | Dynamic Tab Width & Overflow             | `PLAN_VERSION_100.md` (Task 97)               | Stub          | v0.8.0 (71.1)          |
 | 98  | Block Close on Running Commands          | `PLAN_VERSION_090.md` (Task 98)               | Stub          | Task 72                |
@@ -513,6 +513,8 @@ Update this section as tasks complete:
 | 70   | 2026-04-21 | 2026-04-22 | All subtasks A–O complete; merged to main via PR #324 (`c537ae1`)               |
 | 71   | 2026-04-22 | 2026-05-17 | 21 subtasks + 6 post-MT bug fixes on task-71/ux-polish-sweep; PR pending        |
 | 72   | 2026-05-17 | 2026-06-04 | 16 subtasks (72.1-72.16) complete on task-72/osc-133-command-blocks; PR pending |
+| 94   | 2026-06-04 | 2026-06-04 | All 7 subtasks complete; merged via PR #343                                     |
+| 95   | 2026-06-04 | 2026-06-04 | All 5 subtasks complete; merged via PR #343                                     |
 
 ---
 
@@ -530,4 +532,5 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_120.md` — v0.12.0 "Completeness & Credibility" (stubs, Tasks 88–93)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
+- `Documents/PLAN_FULL_KITTY_SUPPORT.md` — Full kitty protocol support (stub, working title "Plan 13"; owns OSC 99 and the untriaged kitty extensions)
 - `config_example.toml` — Current config format
