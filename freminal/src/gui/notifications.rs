@@ -274,25 +274,43 @@ impl NotificationRouter {
     fn show_system(req: &NotificationRequest) {
         let summary = req.summary().to_owned();
         let body = req.body.clone();
-        // Error-category notifications use Critical urgency so they persist
-        // and pop as a banner; everything else is Normal. Many Linux
-        // notification daemons only raise a banner (rather than silently
-        // filing the notification in the tray) when an urgency hint is set.
-        let urgency = match req.kind {
-            NotificationKind::Error => notify_rust::Urgency::Critical,
-            NotificationKind::OscText
-            | NotificationKind::CommandFinished
-            | NotificationKind::Info => notify_rust::Urgency::Normal,
-        };
+        // `notify-rust`'s `urgency()` setter exists on Linux/BSD and Windows
+        // but NOT on macOS, so capture whether this is a high-urgency
+        // (error-category) notification here and apply the hint only on the
+        // platforms that support it (see the cfg-gated block below).
+        let critical = matches!(req.kind, NotificationKind::Error);
         let builder = std::thread::Builder::new().name("freminal-notify".to_owned());
         if let Err(e) = builder.spawn(move || {
-            if let Err(e) = notify_rust::Notification::new()
+            let mut notification = notify_rust::Notification::new();
+            notification
                 .appname("freminal")
                 .summary(&summary)
-                .body(&body)
-                .urgency(urgency)
-                .show()
+                .body(&body);
+
+            // Error-category notifications use Critical urgency so they persist
+            // and pop as a banner; everything else is Normal. Many Linux
+            // notification daemons only raise a banner (rather than silently
+            // filing the notification in the tray) when an urgency hint is set.
+            //
+            // `notify_rust`'s `urgency()` exists on Linux/BSD and Windows but
+            // NOT on macOS (the `Urgency` type is re-exported there but
+            // deprecated and the method is absent), so gate the call on
+            // `not(target_os = "macos")`.
+            #[cfg(not(target_os = "macos"))]
             {
+                let urgency = if critical {
+                    notify_rust::Urgency::Critical
+                } else {
+                    notify_rust::Urgency::Normal
+                };
+                notification.urgency(urgency);
+            }
+            // Silence the unused-variable warning on macOS, where the urgency
+            // hint is unavailable.
+            #[cfg(target_os = "macos")]
+            let _ = critical;
+
+            if let Err(e) = notification.show() {
                 tracing::warn!("failed to show desktop notification: {e}");
             }
         }) {
