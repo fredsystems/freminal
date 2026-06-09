@@ -1848,7 +1848,7 @@ pub(super) fn write_input_to_terminal(
                         scroll_amount += delta.y;
                     }
                     egui::MouseWheelUnit::Line => {
-                        scroll_amount += delta.y * character_size_y;
+                        scroll_amount = delta.y.mul_add(character_size_y, scroll_amount);
                     }
                     egui::MouseWheelUnit::Page => {
                         error!("Unhandled MouseWheelUnit: {:?}", unit);
