@@ -42,6 +42,11 @@ mod hot_reload;
 mod layout_ops;
 mod menu;
 mod notifications;
+// TODO(77.4): remove this `allow` once the analyzer is wired into the paste
+// handling path in `terminal/input.rs`. The module is fully unit-tested but
+// has no production caller until then.
+#[allow(dead_code)]
+mod paste_guard;
 mod platform;
 mod recording;
 mod rendering;
