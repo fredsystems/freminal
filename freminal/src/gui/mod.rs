@@ -41,6 +41,7 @@ mod command_history;
 mod hot_reload;
 mod layout_ops;
 mod menu;
+mod notifications;
 mod platform;
 mod recording;
 mod rendering;

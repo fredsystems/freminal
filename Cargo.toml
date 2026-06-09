@@ -83,6 +83,4 @@ winit = { version = "0.30.13", features = ["rwh_06"] }
 winreg = "0.56.0"
 
 [workspace.metadata.cargo-machete]
-# `notify-rust` is added in Task 76.1 but not referenced until Task 76.4
-# wires the notification router. Remove this entry once 76.4 lands.
-ignored = ["vergen", "notify-rust"]
+ignored = ["vergen"]

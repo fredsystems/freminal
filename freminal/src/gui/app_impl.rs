@@ -591,9 +591,17 @@ impl freminal_windowing::App for FreminalGui {
         // recent_commands ring (cap RECENT_COMMANDS_CAP) and set the tab's
         // has_pending_event flag if the event arrived on a non-active tab.
         //
-        // TODO(Task 76): dispatch CommandFinishedEvent to the notification
-        // subsystem here (OSC 9 / OSC 777) before the badge is set.
+        // Command-finished notifications (Task 76.4) are collected here and
+        // routed after the loop, where `self.config` / the toast stack are
+        // borrowable without conflicting with `win.tabs`.
         let active_tab_idx = win.tabs.active_index();
+        let cmd_window_focused = win
+            .tabs
+            .active_tab()
+            .active_pane()
+            .is_some_and(|p| p.view_state.window_focused);
+        let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> =
+            Vec::new();
         for (tab_idx, tab) in win.tabs.iter_mut().enumerate() {
             let mut tab_received_event = false;
             if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
@@ -608,12 +616,24 @@ impl freminal_windowing::App for FreminalGui {
                         // seed half of the palette still works in that
                         // case.
                         let snap = pane.arc_swap.load();
-                        if let Some(text) =
-                            crate::gui::command_history::extract_command_text(&snap, &event.block)
-                        {
-                            pane.record_command_text(event.block.id, text);
+                        let command_text =
+                            crate::gui::command_history::extract_command_text(&snap, &event.block);
+                        if let Some(text) = &command_text {
+                            pane.record_command_text(event.block.id, text.clone());
                         }
                         drop(snap);
+
+                        // Build a command-finished notification request (the
+                        // builder applies the enable + threshold gates) before
+                        // the block is moved into the recent-commands ring.
+                        if let Some(req) = crate::gui::notifications::command_finished_request(
+                            &event.block,
+                            command_text.as_deref().unwrap_or(""),
+                            &self.config.notifications,
+                        ) {
+                            command_notifications.push(req);
+                        }
+
                         pane.push_recent_command(event.block);
                         tab_received_event = true;
                     }
@@ -621,6 +641,20 @@ impl freminal_windowing::App for FreminalGui {
             }
             if tab_received_event && tab_idx != active_tab_idx {
                 tab.has_pending_event = true;
+            }
+        }
+
+        // Route command-finished notifications collected above (Task 76.4).
+        if !command_notifications.is_empty()
+            && let Ok(mut toasts) = self.toasts.try_borrow_mut()
+        {
+            for req in &command_notifications {
+                crate::gui::notifications::NotificationRouter::route(
+                    req,
+                    &self.config.notifications,
+                    cmd_window_focused,
+                    &mut toasts,
+                );
             }
         }
 
@@ -866,6 +900,10 @@ impl freminal_windowing::App for FreminalGui {
                 .active_tab()
                 .active_pane()
                 .is_some_and(|p| p.view_state.window_focused);
+            // OSC 9 / OSC 777 notifications collected from every pane this
+            // frame, routed after the loop (Task 76.4).
+            let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
+                Vec::new();
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -897,6 +935,7 @@ impl freminal_windowing::App for FreminalGui {
                                 window_focused,
                                 is_only_pane,
                             },
+                            &mut osc_notifications,
                         );
                         if shell_set {
                             tab_shell_set_title = true;
@@ -906,6 +945,22 @@ impl freminal_windowing::App for FreminalGui {
                     // 0/1/2 title clears the user-pinned custom name (only
                     // under `OscWins`); see `Tab::apply_osc_title_policy`.
                     tab.apply_osc_title_policy(self.config.tab_title.policy, tab_shell_set_title);
+                }
+            }
+
+            // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
+            // Done after the pane loop so `self.config` and the toast stack
+            // are borrowable without conflicting with the `win.tabs` borrow.
+            if !osc_notifications.is_empty()
+                && let Ok(mut toasts) = self.toasts.try_borrow_mut()
+            {
+                for req in &osc_notifications {
+                    crate::gui::notifications::NotificationRouter::route(
+                        req,
+                        &self.config.notifications,
+                        window_focused,
+                        &mut toasts,
+                    );
                 }
             }
 

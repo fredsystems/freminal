@@ -2699,7 +2699,7 @@ signal is therefore a new `WindowManipulation` variant, exactly how
 --all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
 --check` clean, `cargo machete` clean.
 
-#### 76.4 — GUI notification router
+#### 76.4 — GUI notification router ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/app_impl.rs` (handle WindowCommand) and a new
 `freminal/src/gui/notifications.rs` module.
@@ -2722,6 +2722,62 @@ signal is therefore a new `WindowManipulation` variant, exactly how
 **Verification:** Integration tests using a mock router that records calls
 instead of dispatching. Manual test on Linux (notify-osd or KDE
 notifications), macOS (Notification Center), Windows (toast notifications).
+
+**Completion notes (2026-06-09):**
+
+- **New module `freminal/src/gui/notifications.rs`** exporting
+  `NotificationRouter` (a stateless zero-field struct) and a
+  `NotificationRequest { kind, title, body }` type.
+  - `NotificationRouter::route(req, config, focused, &mut ToastStack)` is
+    the single dispatch entry. Returns early when
+    `config.enabled == false`. Selects the per-category
+    `NotificationRouting` (`routing_error` / `routing_command_finished` /
+    `routing_info`) via `routing_for`, then uses the focus-aware
+    `wants_toast` / `wants_system` helpers (76.1) to decide each leg.
+  - **Toast leg:** `Error`-kind → `ToastStack::error`, everything else →
+    `ToastStack::info`. (No `warning` push method exists; that's fine —
+    OSC text / command-finished are informational.)
+  - **System leg:** spawns a named `freminal-notify` thread that calls
+    `notify_rust::Notification::new().summary(..).body(..).show()`,
+    mirroring the existing `freminal-open-url` thread pattern in
+    `terminal/widget.rs`. `notify-rust`'s `show()` blocks on D-Bus on
+    Linux, so it must not run on the egui frame thread. Failures (no
+    daemon) are logged and ignored.
+  - `command_finished_request(block, command, config) -> Option<NotificationRequest>`
+    builds the command-finished notification, applying the `enabled` +
+    `on_command_finished` + `command_finished_threshold_secs` +
+    not-`Running` gates. Failure → `Error` kind with `(exit N)`; success /
+    unknown-exit → `CommandFinished` kind. Duration rendered via the
+    existing `command_blocks::format_command_duration`. Empty command text
+    falls back to `"Command"`.
+- **OSC 9/777 wiring:** `rendering::handle_window_manipulation` gained a
+  `&mut Vec<NotificationRequest>` out-parameter; its `Notification` arm
+  (the 76.3 `TODO(76.4)` placeholder) now pushes a request into it. The
+  caller in `app_impl::update()` collects across all panes and routes them
+  after the pane loop, where `self.config.notifications` and the toast
+  stack are borrowable. This avoids threading `&mut self` into the free
+  `handle_window_manipulation` function.
+- **Command-finished wiring:** the 72.9 drain site
+  (`app_impl.rs`, formerly the `TODO(Task 76)` marker) now calls
+  `command_finished_request` for each finished block (before it is moved
+  into the recent-commands ring) and routes the collected requests after
+  the loop. Focus state read from the active pane's
+  `view_state.window_focused`. The `win` local is owned (removed from
+  `self.windows`), so routing alongside `win.tabs.iter_mut()` does not
+  conflict with the `self.toasts` borrow.
+- **`notify-rust` removed from the `cargo-machete` ignore list** — it is
+  now genuinely referenced, so the temporary 76.1 suppression is gone.
+- **Tests:** 14 in `gui::notifications::tests` — summary fallback per
+  kind / explicit title; `routing_for` mapping; disabled-config no-op;
+  toast-only / system-only / both / system-when-unfocused leg decisions;
+  and `command_finished_request` gating (disabled, off, threshold,
+  running, success-kind, failure-kind, empty-command placeholder). A
+  test-only `ToastStack::len()` was added to assert toast-leg outcomes
+  without rendering. The system leg (background thread) is not asserted —
+  it is best-effort and has no observable state in-process.
+- **Verification:** `cargo test --all` (no regressions), `cargo clippy
+--all-targets --all-features -- -D warnings` clean, `cargo fmt --all --
+--check` clean, `cargo machete` clean.
 
 #### 76.5 — Notification templates and bell
 
