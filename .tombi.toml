@@ -1,0 +1,3 @@
+# .tombi.toml or tombi.toml
+[format.rules]
+line-width = 254
