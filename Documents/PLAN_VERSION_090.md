@@ -25,7 +25,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 74  | Broadcast Input to Panes                | Medium       | Pending  | v0.8.0, Task 58 | `task-74/broadcast-input`        |
 | 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-75/pane-env-roundtrip`     |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                       | Small–Medium | Pending  | v0.8.0          | `task-77/paste-guard`            |
+| 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
 | 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-98/block-close-on-running` |
@@ -3458,7 +3458,7 @@ confirmation)"`, `FromStr`, and `ALL` membership); a new
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
-#### 77.6 — Settings UI
+#### 77.6 — Settings UI ✅ 2026-06-10
 
 **Scope:** Existing Security settings tab (`freminal/src/gui/settings.rs`).
 
@@ -3474,15 +3474,51 @@ warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 **Verification:** Round-trip persistence. Pattern editor accepts/rejects
 malformed regex correctly.
 
+**Completion notes (commit `15107b7`, 2026-06-10):**
+
+- A "Paste Guard" section added to the Security settings tab
+  (`show_paste_guard_section`): master enable toggle; multi-line /
+  control-character / pattern per-trigger toggles (disabled via
+  `add_enabled_ui` when the guard / pattern matching is off); an
+  editable pattern list with per-row remove (`➖`) and an "Add pattern"
+  (`➕`) button. Invalid regexes render in red (`text_color_opt`) with a
+  hover note that they are ignored at match time (live
+  `regex::Regex::new(...).is_ok()` check per row).
+- A "Test Paste" button mirrors the Notifications tab's "Test
+  Notification": sets `pending_test_paste`, drained in
+  `show`/`show_standalone` as `SettingsAction::TestPaste`, handled in
+  `handle_settings_action` by building a temporary `PasteGuard` from
+  `draft_paste_guard()` (the unsaved draft), analyzing a sample payload,
+  and opening the confirm dialog on the `settings_owner` window. If the
+  draft would not intercept the sample, an info toast says so instead.
+- Per-section persistence relies on the existing `[paste_guard]`
+  `ConfigPartial`/`apply_partial` wiring from 77.1; the Settings tab
+  edits `self.draft.paste_guard` directly, saved on Apply like every
+  other section.
+- `SettingsModal` gained a justified `#[allow(clippy::struct_excessive_bools)]`
+  (several independent one-shot UI flags).
+- Tests: `test_paste_button_sets_pending_flag`,
+  `draft_paste_guard_reflects_edits`. The egui render path is
+  manual-tested. `cargo test --all`, clippy, fmt, machete all clean.
+
 ### 77 Open Questions Resolved
 
 All resolved.
 
-### 77 Benchmarks
+### 77 Benchmarks ✅ 2026-06-10
 
 `paste_guard::analyze` runs in the GUI thread on a paste event. For a 1MB
 paste with all triggers and 20 patterns, it must complete in < 50ms.
 Add a benchmark in a new `freminal/benches/paste_guard_bench.rs`.
+
+**Done (commit `406f7d8`).** `freminal/benches/paste_guard_bench.rs`
+(Criterion) covers `analyze_1mb_all_triggers`, `analyze_typical_paste`,
+and `rebuild_patterns`. Measured: the 1 MB / all-triggers / 20-pattern
+worst case is **~688 µs** — roughly 70× under the 50 ms budget; a
+typical ~2 KB paste is ~1.8 µs; rebuilding the 20-pattern cache is
+~745 µs. To make the analyzer reachable from the separate-crate bench,
+`mod paste_guard` and the analyzer API were promoted to `pub` (matching
+`gui::atlas` / `gui::shaping`); the dialog types stay `pub(in crate::gui)`.
 
 ---
 
