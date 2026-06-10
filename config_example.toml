@@ -441,6 +441,7 @@ limit = 4000
 #   Clipboard:
 #     copy            = "Ctrl+Shift+C"
 #     paste           = "Ctrl+Shift+V"
+#     paste_unsafe    = "Ctrl+Shift+Alt+V"  # paste, skipping the paste-guard dialog
 #     select_all      = (unbound)
 #
 #   Search:

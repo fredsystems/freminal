@@ -1717,15 +1717,20 @@ impl freminal_windowing::App for FreminalGui {
             }
 
             // Drain a pending paste injected by the windowing layer's
-            // `Event::Paste` (Task 77). Run the smart paste guard on the
-            // already-read text; do not re-read the clipboard here.
+            // `Event::Paste` (Task 77). Use the already-read text; do not
+            // re-read the clipboard here. `bypass_guard` (the PasteUnsafe
+            // action, Ctrl+Shift+Alt+V) sends directly without analysis.
             let pending_paste = win
                 .tabs
                 .active_tab_mut()
                 .active_pane_mut()
                 .and_then(|pane| pane.view_state.pending_paste.take());
-            if let Some(text) = pending_paste {
-                self.guarded_paste_text(&mut win, text);
+            if let Some(pending) = pending_paste {
+                if pending.bypass_guard {
+                    Self::send_paste_to_active_pane(&mut win, pending.text);
+                } else {
+                    self.guarded_paste_text(&mut win, pending.text);
+                }
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).

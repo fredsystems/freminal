@@ -588,6 +588,7 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::Paste => self.guarded_paste(win),
+            KeyAction::PasteUnsafe => Self::unguarded_paste(win),
             KeyAction::Copy
             | KeyAction::SelectAll
             | KeyAction::ToggleMenuBar
@@ -707,6 +708,25 @@ impl super::FreminalGui {
         };
 
         self.guarded_paste_text(win, text);
+    }
+
+    /// Paste the clipboard directly, bypassing the smart paste guard
+    /// (`KeyAction::PasteUnsafe`).
+    ///
+    /// This is the arboard path for the bypass action on platforms/configs
+    /// where the windowing paste interceptor does not fire (the common path
+    /// detects the bypass via the Alt modifier on `Event::Paste` and routes
+    /// through `send_paste_to_active_pane` directly).
+    pub(super) fn unguarded_paste(win: &mut PerWindowState) {
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) if !text.is_empty() => text.replace("\r\n", "\n"),
+            Ok(_) => return,
+            Err(e) => {
+                error!("Paste (unsafe): clipboard read failed: {e}");
+                return;
+            }
+        };
+        Self::send_paste_to_active_pane(win, text);
     }
 
     /// Run the smart paste guard on an already-obtained `text` payload.

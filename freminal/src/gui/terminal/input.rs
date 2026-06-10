@@ -10,7 +10,7 @@ use crate::gui::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
     },
-    view_state::{CellCoord, ViewState},
+    view_state::{CellCoord, PendingPaste, ViewState},
 };
 
 use conv2::ConvUtil;
@@ -1475,11 +1475,20 @@ pub(super) fn write_input_to_terminal(
             Event::Paste(text) => {
                 // The windowing layer already read the clipboard (via the
                 // reliable egui-winit path) and injected this event. Stash the
-                // text for the smart paste guard (Task 77), which runs in
-                // `update()` with access to the config and confirm dialog.
-                // Do NOT re-read the clipboard via arboard here — that path is
-                // unreliable on Wayland and would discard this known-good text.
-                view_state.pending_paste = Some(text.clone());
+                // text for handling in `update()` with access to the config and
+                // confirm dialog. Do NOT re-read the clipboard via arboard here
+                // — that path is unreliable on Wayland and would discard this
+                // known-good text.
+                //
+                // The windowing paste interceptor fires for any `command + v`,
+                // including the `PasteUnsafe` combo (Ctrl+Shift+Alt+V), so the
+                // BindingMap entry never sees it on that path. Detect the
+                // bypass intent here by the Alt modifier: Alt held ==
+                // PasteUnsafe (skip the guard).
+                view_state.pending_paste = Some(PendingPaste {
+                    text: text.clone(),
+                    bypass_guard: input.modifiers.alt,
+                });
                 continue;
             }
             Event::PointerGone => {
