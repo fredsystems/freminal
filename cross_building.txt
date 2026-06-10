@@ -1,9 +1,0 @@
-
-```
-Code signing mac: codesign --force --verify --verbose --sign "Developer ID Application: Fred Clausen (8J9KGJ49RD)" target/release/bundle/osx/Freminal.app
-cross run --target aarch64-unknown-linux-gnu
-cross run --target i686-pc-windows-gnu
-cross run --target aarch64-apple-darwin
-cross run --target x86_64-unknown-linux-gnu
-https://localazy.com/blog/how-to-automatically-sign-macos-apps-using-github-actions?srsltid=AfmBOopG0UdHDQtybbg_8draMvxQkJIVuXz0RKC_0RL-nJ_23e4ldXIm
-with cross installed:

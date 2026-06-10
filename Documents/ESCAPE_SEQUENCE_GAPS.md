@@ -1,8 +1,10 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-06-09 — Task 76.2: removed OSC 777 from the gap list and the OSC
-gaps prose — OSC 9 (iTerm2/WezTerm) and OSC 777 (urxvt) now parse into
-`AnsiOscType::Notify` and are routed by the GUI notification system.
+Last updated: 2026-06-10 — Kitty Keyboard fix: closed a latent defect where
+functional keys (arrows, Home/End, Insert/Delete, PageUp/PageDown, F-keys)
+emitted bare legacy sequences on repeat/release under `REPORT_EVENT_TYPES`,
+which applications read as duplicate presses. They now emit the CSI
+`:event-type` form. No new gap; the protocol remains complete.
 (Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
