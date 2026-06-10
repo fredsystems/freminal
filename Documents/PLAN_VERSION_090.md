@@ -3417,7 +3417,7 @@ re-request focus every frame it lacks it (mirroring `show_search_bar`
 and `show_command_history_palette`). The redundant `just_entered_edit`
 flag was removed.
 
-#### 77.5 — KeyAction::PasteUnsafe
+#### 77.5 — KeyAction::PasteUnsafe ✅ 2026-06-10
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.
 
@@ -3427,6 +3427,36 @@ flag was removed.
 - Document the action as "Paste without confirmation".
 
 **Verification:** Round-trip keybinding test.
+
+**Completion notes (commit `2ab8caa`, 2026-06-10):**
+
+- **Default binding is `Ctrl+Shift+Alt+V`, not the plan's
+  `Ctrl+Shift+V`** (which collides with `Paste`). One modifier beyond
+  the normal paste combo, so the bypass is deliberate. User-approved.
+- Full four-step keybinding ritual: `KeyAction::PasteUnsafe` variant
+  (with `name() = "paste_unsafe"`, `display_label() = "Paste (no
+confirmation)"`, `FromStr`, and `ALL` membership); a new
+  `BindingModifiers::CTRL_SHIFT_ALT` constant; the default binding in
+  `register_misc_bindings`; and the action list in `config_example.toml`.
+- **Dispatch reality vs. the plan.** The windowing paste interceptor
+  (`event_loop.rs`) fires for _any_ `command + v`, including
+  `Ctrl+Shift+Alt+V`, and converts it to an `Event::Paste` — so the
+  `BindingMap` entry never sees the bypass combo on that (common) path.
+  The bypass intent is therefore detected at the `Event::Paste` arm via
+  the **Alt modifier** (`input.modifiers.alt`) and carried through a new
+  `ViewState::PendingPaste { text, bypass_guard }` (replacing the bare
+  `Option<String>` from the 77.4 fix). `update()` sends a bypassing
+  paste straight to the active pane (`send_paste_to_active_pane`),
+  otherwise runs the guard. The `BindingMap` entry plus a new
+  `unguarded_paste` (arboard) handler in `dispatch_deferred_action`
+  cover the menu and any platform/config where the interceptor does not
+  fire.
+- Tests: `default_paste_unsafe_binding` (asserts the bypass combo maps
+  to `PasteUnsafe` and stays distinct from `Paste`),
+  `paste_unsafe_name_round_trips`, and the updated guard counts
+  (`ALL` = 60 actions, default map = 47 bindings).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
 #### 77.6 — Settings UI
 
