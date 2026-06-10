@@ -258,9 +258,6 @@ struct PasteDialogState {
     editing: bool,
     /// Scratch buffer for the edit mode, initialised from `payload`.
     edit_buffer: String,
-    /// `true` only on the first frame after opening, used to focus the edit
-    /// field exactly once when entering edit mode.
-    just_entered_edit: bool,
 }
 
 /// The confirm-paste modal dialog (Task 77.3).
@@ -288,7 +285,6 @@ impl PasteDialog {
             payload,
             analysis,
             editing: false,
-            just_entered_edit: false,
         });
     }
 
@@ -340,11 +336,19 @@ impl PasteDialog {
                                 egui::TextEdit::multiline(&mut state.edit_buffer)
                                     .font(egui::TextStyle::Monospace)
                                     .desired_width(f32::INFINITY)
-                                    .desired_rows(10),
+                                    .desired_rows(10)
+                                    // Hold focus so Tab and clicks inside the
+                                    // dialog do not bounce focus back to the
+                                    // terminal.
+                                    .lock_focus(true),
                             );
-                            if state.just_entered_edit {
+                            // Pull focus every frame the editor lacks it — same
+                            // pattern as the search and command-history
+                            // overlays. Requesting only once on entry is not
+                            // enough; egui can hand focus back to the terminal's
+                            // focus-lock interactable otherwise.
+                            if !response.has_focus() {
                                 response.request_focus();
-                                state.just_entered_edit = false;
                             }
                         } else {
                             // Read-only: a disabled multiline TextEdit keeps the
@@ -378,7 +382,6 @@ impl PasteDialog {
                     }
                     if !state.editing && ui.button("Edit and Paste").clicked() {
                         state.editing = true;
-                        state.just_entered_edit = true;
                     }
                 });
             });

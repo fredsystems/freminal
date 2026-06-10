@@ -1122,7 +1122,8 @@ impl freminal_windowing::App for FreminalGui {
                 || self.pending_save_layout.is_some()
                 || self.about_window_open
                 || self.welcome.is_open()
-                || win.renaming_tab.is_some();
+                || win.renaming_tab.is_some()
+                || win.paste_dialog.is_open();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
