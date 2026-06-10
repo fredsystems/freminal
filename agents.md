@@ -79,24 +79,25 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 
 ## Skills you will need in this repo
 
-| Skill                            | When it fires                                                                                                                                 |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `freminal-architecture`          | Architecture-affecting changes (GUI/PTY split, snapshot transport, crate boundaries).                                                         |
-| `freminal-orchestrator-protocol` | About to spawn sub-agents. The action-class / scope / stop-condition discipline is mandatory.                                                 |
-| `freminal-bench-table`           | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`). |
-| `freminal-frec-decoder`          | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                    |
-| `freminal-escape-sequence-docs`  | Adding / removing / altering escape sequence support. Dual-doc update required.                                                               |
-| `freminal-numeric-conversions`   | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                           |
-| `freminal-config-options`        | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.   |
-| `rust-best-practices`            | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                |
-| `performance-benchmarks`         | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                              |
-| `flake-dev-shell-discipline`     | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                           |
-| `precommit-fix-loop`             | When a commit is rejected by pre-commit hooks.                                                                                                |
-| `commit-discipline`              | Before any commit / PR. Plan-subtask numbering convention is freminal-specific.                                                               |
-| `testing-mandate`                | Before declaring any task done.                                                                                                               |
-| `no-summary-documents`           | Before creating any new markdown file (no PHASE_X_SUMMARY.md, no IMPLEMENTATION_PROGRESS.md, etc.).                                           |
-| `markdown-lint-discipline`       | Before writing or editing any `.md` file. Common markdownlint pitfalls (MD031, MD040, table widths).                                          |
-| `flaky-tests-are-bugs`           | A test fails sporadically. Root-cause it; no retries / `#[ignore]` / longer timeouts.                                                         |
+| Skill                              | When it fires                                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `freminal-architecture`            | Architecture-affecting changes (GUI/PTY split, snapshot transport, crate boundaries).                                                             |
+| `freminal-orchestrator-protocol`   | About to spawn sub-agents. The action-class / scope / stop-condition discipline is mandatory.                                                     |
+| `freminal-bench-table`             | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`).     |
+| `freminal-frec-decoder`            | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                        |
+| `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                   |
+| `freminal-numeric-conversions`     | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                               |
+| `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
+| `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
+| `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
+| `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |
+| `flake-dev-shell-discipline`       | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                               |
+| `precommit-fix-loop`               | When a commit is rejected by pre-commit hooks.                                                                                                    |
+| `commit-discipline`                | Before any commit / PR. Plan-subtask numbering convention is freminal-specific.                                                                   |
+| `testing-mandate`                  | Before declaring any task done.                                                                                                                   |
+| `no-summary-documents`             | Before creating any new markdown file (no PHASE_X_SUMMARY.md, no IMPLEMENTATION_PROGRESS.md, etc.).                                               |
+| `markdown-lint-discipline`         | Before writing or editing any `.md` file. Common markdownlint pitfalls (MD031, MD040, table widths).                                              |
+| `flaky-tests-are-bugs`             | A test fails sporadically. Root-cause it; no retries / `#[ignore]` / longer timeouts.                                                             |
 
 ---
 
