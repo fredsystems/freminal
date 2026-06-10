@@ -3271,7 +3271,7 @@ warnings`, `cargo fmt --check`, `cargo machete`, and the Nix lint
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
-#### 77.3 — Preview dialog
+#### 77.3 — Preview dialog ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/paste_guard.rs` (UI) and integration with the
 existing modal pattern (look at the existing Settings modal infra in
@@ -3292,6 +3292,42 @@ existing modal pattern (look at the existing Settings modal infra in
 
 **Verification:** Manual visual test. Snapshot test of the analyzer
 classifications.
+
+**Completion notes (commit `d62faaf`, 2026-06-09):**
+
+- `PasteDialog` added to `freminal/src/gui/paste_guard.rs`: a centered,
+  non-resizable `egui::Window` titled "Confirm Paste" following the
+  established `show_save_layout_prompt` / `show_confirm_close_prompt`
+  modal pattern.
+- Banner is produced by a pure, unit-tested `banner_text(&PasteAnalysis)
+-> String` (e.g. "Multi-line paste — 17 lines, 420 bytes",
+  "Dangerous patterns detected: …", control chars rendered as `U+XXXX`,
+  and a flattened "Multiple triggers — …").
+- **Content area:** a scrollable monospace preview. Read-only mode uses
+  a disabled multiline `TextEdit` (monospace + selectable without
+  edits); "Edit and Paste" flips it to an editable `TextEdit` bound to a
+  scratch `edit_buffer`, focused once on entry. The plan mentioned
+  optional renderer syntax highlighting "or plain monospace if that's
+  too invasive" — plain monospace was chosen.
+- **Buttons:** Cancel, Paste Anyway, Edit and Paste. **Keyboard:**
+  Escape = Cancel, Ctrl+Enter = Paste Anyway (clicks in the same frame
+  take precedence over shortcuts).
+- `show()` returns `PasteDialogOutcome { Idle | Cancelled |
+Paste(String) }` and closes the dialog on resolve. The dialog is
+  **target-agnostic** — it yields only the resolved text. Bracketed-
+  paste wrapping and the `InputEvent::Key` send stay in 77.4, which
+  owns the `input_tx` and pane routing.
+- State lives on `PerWindowState::paste_dialog` (paste targets a
+  window's active pane). That field carries a temporary
+  `#[allow(dead_code)]` + `TODO(77.4)` until `update()` renders it and
+  the paste path opens it; the module-level allow from 77.2 also
+  remains until 77.4.
+- 8 new unit tests (banner formatting incl. flattened `Multiple`,
+  open/close/`is_open`, the `Safe`-never-opens rule, outcome equality).
+  The egui render path itself is exercised manually, per the plan's
+  "manual visual test"; the testable state logic is unit-covered.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
 #### 77.4 — Wire into paste handling
 
