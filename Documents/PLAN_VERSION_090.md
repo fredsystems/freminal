@@ -3329,7 +3329,7 @@ Paste(String) }` and closes the dialog on resolve. The dialog is
 - `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
 warnings`, `cargo fmt --check`, and `cargo machete` all clean.
 
-#### 77.4 — Wire into paste handling
+#### 77.4 — Wire into paste handling ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/terminal/input.rs` (line 210 `KeyAction::Paste`
 and line 1191 `Event::Paste`).
@@ -3345,6 +3345,47 @@ and line 1191 `Event::Paste`).
 
 **Verification:** Integration test: paste multi-line text → dialog appears
 → confirm → PTY receives bytes.
+
+**Completion notes (commit `962a210`, 2026-06-09):**
+
+- **Interception point differs from the plan.** The plan said to call
+  `paste_guard::analyze` inline at the two `input.rs` paste sites. Those
+  sites (`dispatch_binding_action`, `write_input_to_terminal`) run deep
+  in the input loop with no access to `&Config`, the `PasteGuard` cache,
+  or `PerWindowState.paste_dialog`. Instead all three paste sites
+  (keybinding, Edit-menu, and egui `Event::Paste`) now **defer
+  `KeyAction::Paste`** up to `dispatch_deferred_action`, which runs at
+  the `update()` layer with full `self` + `win` access. User-approved
+  design.
+- New `FreminalGui::guarded_paste(win)`: ignores the request if a dialog
+  is already open (no dialog stacking), reads the clipboard via
+  `arboard`, normalises CRLF, calls `PasteGuard::analyze`, and either
+  sends straight to the active pane (`Safe`) or opens
+  `win.paste_dialog`.
+- New `FreminalGui::send_paste_to_active_pane(win, payload)`: applies
+  bracketed-paste wrapping (when the active pane has it enabled) and
+  sends `InputEvent::Key`. Used by both the `Safe` fast path and the
+  dialog `Paste` resolution.
+- `update()` renders `win.paste_dialog.show(ctx)` next to the
+  save-layout prompt; a `Paste(payload)` outcome calls
+  `send_paste_to_active_pane`, `Cancelled`/`Idle` discard.
+- `Event::Paste` now reads the clipboard in the deferred handler instead
+  of forwarding the event text — unifying all paste origins on one
+  guarded clipboard-read path (the content is identical for a normal
+  Ctrl/Cmd+V).
+- `PasteGuard` cache lives on `FreminalGui`, built at startup and
+  rebuilt in `apply_new_config` next to `binding_map`. Invalid user
+  patterns are surfaced via `push_error_toast` and skipped.
+- **Removed both temporary `#[allow(dead_code)]` markers** (the 77.2
+  module-level one and the 77.3 `paste_dialog`-field one); everything is
+  now wired and read. The unused `PasteDialog::close()` speculatively
+  added in 77.3 was deleted rather than left dead.
+- An automated end-to-end paste→dialog→confirm→PTY integration test is
+  not feasible without an egui context + a live PTY; the analyzer,
+  dialog state, and banner logic are unit-covered (18 tests) and the
+  full flow is manual-tested. `cargo test --all`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo fmt --check`, and
+  `cargo machete` all clean.
 
 #### 77.5 — KeyAction::PasteUnsafe
 
