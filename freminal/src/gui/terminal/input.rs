@@ -1472,13 +1472,14 @@ pub(super) fn write_input_to_terminal(
                 previous_key = Some(*key);
                 continue;
             }
-            Event::Paste(_text) => {
-                // Route egui paste events through the smart paste guard
-                // (Task 77) rather than sending inline. The guard reads the
-                // clipboard itself in `dispatch_deferred_action`, so the event
-                // text is not forwarded here; deferring `KeyAction::Paste`
-                // unifies this path with the Ctrl+Shift+V / menu paste paths.
-                deferred_actions.push(KeyAction::Paste);
+            Event::Paste(text) => {
+                // The windowing layer already read the clipboard (via the
+                // reliable egui-winit path) and injected this event. Stash the
+                // text for the smart paste guard (Task 77), which runs in
+                // `update()` with access to the config and confirm dialog.
+                // Do NOT re-read the clipboard via arboard here — that path is
+                // unreliable on Wayland and would discard this known-good text.
+                view_state.pending_paste = Some(text.clone());
                 continue;
             }
             Event::PointerGone => {

@@ -691,6 +691,12 @@ impl super::FreminalGui {
 
         // Read clipboard directly via arboard, bypassing egui-winit's
         // per-window clipboard (which fails on Wayland child windows).
+        //
+        // This is the menu-Paste / explicit-keybinding path. The far more
+        // common paste path is the windowing layer intercepting the paste
+        // shortcut and injecting an `Event::Paste` with already-read text;
+        // that goes through `guarded_paste_text` instead (see `update()`),
+        // which is why we must NOT rely on arboard for the common case.
         let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
             Ok(text) if !text.is_empty() => text.replace("\r\n", "\n"),
             Ok(_) => return,
@@ -699,6 +705,24 @@ impl super::FreminalGui {
                 return;
             }
         };
+
+        self.guarded_paste_text(win, text);
+    }
+
+    /// Run the smart paste guard on an already-obtained `text` payload.
+    ///
+    /// Shared by the arboard path ([`guarded_paste`]) and the
+    /// windowing-injected `Event::Paste` path. A `Safe` analysis sends
+    /// straight to the active pane; anything flagged opens the confirm dialog.
+    ///
+    /// [`guarded_paste`]: Self::guarded_paste
+    pub(super) fn guarded_paste_text(&self, win: &mut PerWindowState, text: String) {
+        if win.paste_dialog.is_open() {
+            return;
+        }
+        if text.is_empty() {
+            return;
+        }
 
         let analysis = self.paste_guard.analyze(&text, &self.config.paste_guard);
 
