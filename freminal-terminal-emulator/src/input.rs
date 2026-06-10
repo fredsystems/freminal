@@ -88,6 +88,34 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
 }
 
+/// Build a KKP CSI-final functional-key sequence with an event-type
+/// sub-field: `ESC [ 1 ; <mod>:<event> <final>`.
+///
+/// Used for arrows, Home/End, and F1–F4 when the Kitty Keyboard Protocol
+/// `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a repeat or
+/// release.  Per the Kitty spec, when no modifiers are present the modifier
+/// field must still be the literal `1` so the `:<event>` sub-field is
+/// unambiguous; callers pass `modifier = 1` in that case.  A bare legacy
+/// sequence (e.g. `ESC O B`) carries no event-type information and would be
+/// wrongly read by applications as a fresh key *press*, duplicating the
+/// key — this builder exists to avoid exactly that bug.
+fn kkp_csi_final_event(modifier: u8, event: u8, final_byte: u8) -> TerminalInputPayload {
+    TerminalInputPayload::Owned(
+        format!("\x1b[1;{modifier}:{event}{}", final_byte as char).into_bytes(),
+    )
+}
+
+/// Build a KKP CSI-tilde functional-key sequence with an event-type
+/// sub-field: `ESC [ <code> ; <mod>:<event> ~`.
+///
+/// Used for Insert/Delete/PageUp/PageDown and F5–F12 when the Kitty Keyboard
+/// Protocol `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a
+/// repeat or release.  See [`kkp_csi_final_event`] for why a bare legacy
+/// tilde sequence is unsafe for non-press events.
+fn kkp_csi_tilde_event(code: u8, modifier: u8, event: u8) -> TerminalInputPayload {
+    TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}:{event}~").into_bytes())
+}
+
 /// Build an xterm `modifyOtherKeys` level 2 sequence: `ESC [ 27 ; <mod> ; <code> ~`.
 ///
 /// The format uses 27 as a fixed identifier (chosen because decimal 27 was
@@ -614,6 +642,24 @@ impl TerminalInput {
     ) -> TerminalInputPayload {
         let report_all = flags & 8 != 0;
         let disambiguate = flags & 1 != 0;
+        let report_event = flags & 2 != 0;
+
+        // Functional keys (arrows, Home/End, Insert/Delete, PageUp/PageDown,
+        // F-keys) keep their legacy encoding for *press* events, which carry
+        // no event-type field.  But when `REPORT_EVENT_TYPES` (flag 2) is
+        // active, a *repeat* or *release* must instead use the CSI form with
+        // an explicit `:<event-type>` sub-field — a bare legacy sequence
+        // (e.g. `ESC O B`) would be read by the application as a fresh press,
+        // duplicating the key (the "arrow moves twice in nvim" bug).
+        //
+        // `Some(event_code)` => emit the event-aware CSI form; `None` =>
+        // legacy press encoding.  Per the Kitty spec, when no modifier is
+        // present the modifier field is still the literal `1`.
+        let functional_event_code: Option<u8> = if report_event {
+            meta.event_type.kkp_code()
+        } else {
+            None
+        };
 
         match self {
             // ── Plain ASCII ─────────────────────────────────────────────
@@ -717,62 +763,87 @@ impl TerminalInput {
                 }
             }
 
-            // ── Functional keys: retain legacy encoding ─────────────────
+            // ── Functional keys ─────────────────────────────────────────
             //
             // Arrow keys, Home, End, F-keys, Insert, Delete, PageUp,
-            // PageDown all keep their legacy xterm encoding.  The modifier
-            // parameter formula (1 + shift + alt*2 + ctrl*4) is identical
-            // between xterm and KKP, so no change is needed.
-            Self::ArrowRight(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'C'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOC"),
-                None => TerminalInputPayload::Many(b"\x1b[C"),
+            // PageDown keep their legacy xterm encoding for *press* events:
+            // the modifier-parameter formula (1 + shift + alt*2 + ctrl*4) is
+            // identical between xterm and KKP, so presses need no change.
+            //
+            // For *repeat* / *release* events under `REPORT_EVENT_TYPES`
+            // (flag 2), `functional_event_code` is `Some(ev)` and the key is
+            // re-encoded as the CSI form carrying `:<event-type>` — a bare
+            // legacy sequence has no way to express the event type and the
+            // application would treat it as a fresh press, duplicating the
+            // key.
+            Self::ArrowRight(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'C'),
+                (None, Some(m)) => modified_csi_final(m, b'C'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOC")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[C"),
             },
-            Self::ArrowLeft(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'D'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOD"),
-                None => TerminalInputPayload::Many(b"\x1b[D"),
+            Self::ArrowLeft(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'D'),
+                (None, Some(m)) => modified_csi_final(m, b'D'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOD")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[D"),
             },
-            Self::ArrowUp(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'A'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOA"),
-                None => TerminalInputPayload::Many(b"\x1b[A"),
+            Self::ArrowUp(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'A'),
+                (None, Some(m)) => modified_csi_final(m, b'A'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOA")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[A"),
             },
-            Self::ArrowDown(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'B'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOB"),
-                None => TerminalInputPayload::Many(b"\x1b[B"),
+            Self::ArrowDown(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'B'),
+                (None, Some(m)) => modified_csi_final(m, b'B'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOB")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[B"),
             },
-            Self::Home(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'H'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOH"),
-                None => TerminalInputPayload::Many(b"\x1b[H"),
+            Self::Home(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'H'),
+                (None, Some(m)) => modified_csi_final(m, b'H'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOH")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[H"),
             },
-            Self::End(mods) => match mods.modifier_param() {
-                Some(m) => modified_csi_final(m, b'F'),
-                None if decckm_mode == Decckm::Application => TerminalInputPayload::Many(b"\x1bOF"),
-                None => TerminalInputPayload::Many(b"\x1b[F"),
+            Self::End(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b'F'),
+                (None, Some(m)) => modified_csi_final(m, b'F'),
+                (None, None) if decckm_mode == Decckm::Application => {
+                    TerminalInputPayload::Many(b"\x1bOF")
+                }
+                (None, None) => TerminalInputPayload::Many(b"\x1b[F"),
             },
-            Self::Delete(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[3~"), |m| {
-                    modified_csi_tilde(3, m)
-                }),
-            Self::Insert(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[2~"), |m| {
-                    modified_csi_tilde(2, m)
-                }),
-            Self::PageUp(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[5~"), |m| {
-                    modified_csi_tilde(5, m)
-                }),
-            Self::PageDown(mods) => mods
-                .modifier_param()
-                .map_or(TerminalInputPayload::Many(b"\x1b[6~"), |m| {
-                    modified_csi_tilde(6, m)
-                }),
+            Self::Delete(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_tilde_event(3, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(3, m),
+                (None, None) => TerminalInputPayload::Many(b"\x1b[3~"),
+            },
+            Self::Insert(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_tilde_event(2, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(2, m),
+                (None, None) => TerminalInputPayload::Many(b"\x1b[2~"),
+            },
+            Self::PageUp(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_tilde_event(5, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(5, m),
+                (None, None) => TerminalInputPayload::Many(b"\x1b[5~"),
+            },
+            Self::PageDown(mods) => match (functional_event_code, mods.modifier_param()) {
+                (Some(ev), m) => kkp_csi_tilde_event(6, m.unwrap_or(1), ev),
+                (None, Some(m)) => modified_csi_tilde(6, m),
+                (None, None) => TerminalInputPayload::Many(b"\x1b[6~"),
+            },
             Self::KeyPad(c) => {
                 if keypad_mode == KeypadMode::Numeric {
                     TerminalInputPayload::Single(*c)
@@ -803,31 +874,39 @@ impl TerminalInput {
             Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
             Self::FunctionKey(n, mods) => {
                 let mod_param = mods.modifier_param();
-                match (n, mod_param) {
-                    (1, Some(m)) => modified_csi_final(m, b'P'),
-                    (2, Some(m)) => modified_csi_final(m, b'Q'),
-                    (3, Some(m)) => modified_csi_final(m, b'R'),
-                    (4, Some(m)) => modified_csi_final(m, b'S'),
-                    (1, None) => TerminalInputPayload::Many(b"\x1bOP"),
-                    (2, None) => TerminalInputPayload::Many(b"\x1bOQ"),
-                    (3, None) => TerminalInputPayload::Many(b"\x1bOR"),
-                    (4, None) => TerminalInputPayload::Many(b"\x1bOS"),
-                    (5, Some(m)) => modified_csi_tilde(15, m),
-                    (6, Some(m)) => modified_csi_tilde(17, m),
-                    (7, Some(m)) => modified_csi_tilde(18, m),
-                    (8, Some(m)) => modified_csi_tilde(19, m),
-                    (9, Some(m)) => modified_csi_tilde(20, m),
-                    (10, Some(m)) => modified_csi_tilde(21, m),
-                    (11, Some(m)) => modified_csi_tilde(23, m),
-                    (12, Some(m)) => modified_csi_tilde(24, m),
-                    (5, None) => TerminalInputPayload::Many(b"\x1b[15~"),
-                    (6, None) => TerminalInputPayload::Many(b"\x1b[17~"),
-                    (7, None) => TerminalInputPayload::Many(b"\x1b[18~"),
-                    (8, None) => TerminalInputPayload::Many(b"\x1b[19~"),
-                    (9, None) => TerminalInputPayload::Many(b"\x1b[20~"),
-                    (10, None) => TerminalInputPayload::Many(b"\x1b[21~"),
-                    (11, None) => TerminalInputPayload::Many(b"\x1b[23~"),
-                    (12, None) => TerminalInputPayload::Many(b"\x1b[24~"),
+                // F1–F4 use the CSI-final form (P/Q/R/S); F5–F12 use the
+                // CSI-tilde form.  Under `REPORT_EVENT_TYPES`, repeats and
+                // releases must carry the `:<event-type>` sub-field instead of
+                // the bare legacy sequence (see the arrow-key arms above).
+                let f_final = |b: u8| match (functional_event_code, mod_param) {
+                    (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b),
+                    (None, Some(m)) => modified_csi_final(m, b),
+                    (None, None) => match b {
+                        b'P' => TerminalInputPayload::Many(b"\x1bOP"),
+                        b'Q' => TerminalInputPayload::Many(b"\x1bOQ"),
+                        b'R' => TerminalInputPayload::Many(b"\x1bOR"),
+                        _ => TerminalInputPayload::Many(b"\x1bOS"),
+                    },
+                };
+                let f_tilde =
+                    |code: u8, legacy: &'static [u8]| match (functional_event_code, mod_param) {
+                        (Some(ev), m) => kkp_csi_tilde_event(code, m.unwrap_or(1), ev),
+                        (None, Some(m)) => modified_csi_tilde(code, m),
+                        (None, None) => TerminalInputPayload::Many(legacy),
+                    };
+                match n {
+                    1 => f_final(b'P'),
+                    2 => f_final(b'Q'),
+                    3 => f_final(b'R'),
+                    4 => f_final(b'S'),
+                    5 => f_tilde(15, b"\x1b[15~"),
+                    6 => f_tilde(17, b"\x1b[17~"),
+                    7 => f_tilde(18, b"\x1b[18~"),
+                    8 => f_tilde(19, b"\x1b[19~"),
+                    9 => f_tilde(20, b"\x1b[20~"),
+                    10 => f_tilde(21, b"\x1b[21~"),
+                    11 => f_tilde(23, b"\x1b[23~"),
+                    12 => f_tilde(24, b"\x1b[24~"),
                     _ => {
                         warn!("Unhandled function key: F{n}");
                         TerminalInputPayload::Many(b"")
@@ -871,6 +950,29 @@ mod tests {
             Lnm::LineFeed,
             flags,
             &KeyEventMeta::PRESS,
+        )
+    }
+
+    /// Convenience: call `to_payload` forcing the KKP path with given flags
+    /// and an explicit key-event type (press / repeat / release).
+    fn to_payload_kkp_event(
+        input: &TerminalInput,
+        flags: u32,
+        event_type: KeyEventType,
+    ) -> TerminalInputPayload {
+        let meta = KeyEventMeta {
+            event_type,
+            associated_text: None,
+        };
+        input.to_payload(
+            Decckm::Ansi,
+            KeypadMode::Numeric,
+            0,
+            ApplicationEscapeKey::Reset,
+            Decbkm::BackarrowSendsDel,
+            Lnm::LineFeed,
+            flags,
+            &meta,
         )
     }
 
@@ -1656,6 +1758,151 @@ mod tests {
     fn kkp_pagedown_no_modifier() {
         let p = to_payload_kkp(&TerminalInput::PageDown(KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b"\x1b[6~"));
+    }
+
+    // ── to_payload_kkp: functional-key release/repeat event types ────────────
+    //
+    // Regression coverage for the "arrow moves twice in nvim" bug: under
+    // KKP REPORT_EVENT_TYPES (flag 2), a functional-key *release* or *repeat*
+    // must emit the CSI form carrying the `:<event-type>` sub-field, NOT a
+    // bare legacy sequence.  A bare `ESC O B` (or `ESC [ B`) on release is
+    // read by the application as a fresh key press, duplicating the key.
+    //
+    // Flag value `3` = DISAMBIGUATE_ESCAPE_CODES (1) | REPORT_EVENT_TYPES (2),
+    // exactly what neovim requests via `ESC[>3u`.
+
+    #[test]
+    fn kkp_arrow_release_uses_csi_event_type_not_legacy() {
+        // Release with no modifiers: modifier field is literal 1, event 3.
+        let p = to_payload_kkp_event(
+            &TerminalInput::ArrowDown(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;1:3B".to_vec()));
+    }
+
+    #[test]
+    fn kkp_arrow_repeat_uses_csi_event_type() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::ArrowUp(KeyModifiers::NONE),
+            3,
+            KeyEventType::Repeat,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;1:2A".to_vec()));
+    }
+
+    #[test]
+    fn kkp_arrow_press_still_legacy_under_report_event_types() {
+        // Presses must remain legacy so non-event-aware behavior is unchanged.
+        let p = to_payload_kkp_event(
+            &TerminalInput::ArrowLeft(KeyModifiers::NONE),
+            3,
+            KeyEventType::Press,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[D"));
+    }
+
+    #[test]
+    fn kkp_arrow_release_without_report_event_types_is_legacy() {
+        // Flag 1 only (no flag 2): no event type is reported, so even a
+        // release falls back to the legacy press encoding.
+        let p = to_payload_kkp_event(
+            &TerminalInput::ArrowRight(KeyModifiers::NONE),
+            1,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Many(b"\x1b[C"));
+    }
+
+    #[test]
+    fn kkp_arrow_release_with_modifier_keeps_modifier_param() {
+        // Ctrl held: modifier param is 5 (1 + ctrl*4), event 3 appended.
+        let ctrl = KeyModifiers {
+            shift: false,
+            ctrl: true,
+            alt: false,
+        };
+        let p = to_payload_kkp_event(&TerminalInput::ArrowRight(ctrl), 3, KeyEventType::Release);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5:3C".to_vec()));
+    }
+
+    #[test]
+    fn kkp_home_end_release_use_csi_event_type() {
+        let home = to_payload_kkp_event(
+            &TerminalInput::Home(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(home, TerminalInputPayload::Owned(b"\x1b[1;1:3H".to_vec()));
+        let end = to_payload_kkp_event(
+            &TerminalInput::End(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(end, TerminalInputPayload::Owned(b"\x1b[1;1:3F".to_vec()));
+    }
+
+    #[test]
+    fn kkp_tilde_keys_release_use_csi_event_type() {
+        let del = to_payload_kkp_event(
+            &TerminalInput::Delete(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(del, TerminalInputPayload::Owned(b"\x1b[3;1:3~".to_vec()));
+        let ins = to_payload_kkp_event(
+            &TerminalInput::Insert(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(ins, TerminalInputPayload::Owned(b"\x1b[2;1:3~".to_vec()));
+        let pgup = to_payload_kkp_event(
+            &TerminalInput::PageUp(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(pgup, TerminalInputPayload::Owned(b"\x1b[5;1:3~".to_vec()));
+        let pgdn = to_payload_kkp_event(
+            &TerminalInput::PageDown(KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(pgdn, TerminalInputPayload::Owned(b"\x1b[6;1:3~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_function_keys_release_use_csi_event_type() {
+        // F1–F4: CSI-final form (P/Q/R/S) with event sub-field.
+        let f1 = to_payload_kkp_event(
+            &TerminalInput::FunctionKey(1, KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(f1, TerminalInputPayload::Owned(b"\x1b[1;1:3P".to_vec()));
+        // F5–F12: CSI-tilde form with event sub-field.
+        let f5 = to_payload_kkp_event(
+            &TerminalInput::FunctionKey(5, KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(f5, TerminalInputPayload::Owned(b"\x1b[15;1:3~".to_vec()));
+        let f12 = to_payload_kkp_event(
+            &TerminalInput::FunctionKey(12, KeyModifiers::NONE),
+            3,
+            KeyEventType::Release,
+        );
+        assert_eq!(f12, TerminalInputPayload::Owned(b"\x1b[24;1:3~".to_vec()));
+    }
+
+    #[test]
+    fn kkp_function_key_press_still_legacy() {
+        let f1 = to_payload_kkp_event(
+            &TerminalInput::FunctionKey(1, KeyModifiers::NONE),
+            3,
+            KeyEventType::Press,
+        );
+        assert_eq!(f1, TerminalInputPayload::Many(b"\x1bOP"));
     }
 
     // ── to_payload_kkp: LostFocus/InFocus ───────────────────────────────────

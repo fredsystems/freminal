@@ -2,9 +2,12 @@
 
 ## Last updated
 
-Last updated: 2026-06-09 — Task 76.2: added OSC 9 (iTerm2/WezTerm) and promoted
-OSC 777 (urxvt) to implemented. Both parse into `AnsiOscType::Notify` and are
-routed by the GUI notification system per the `[notifications]` config.
+Last updated: 2026-06-10 — Kitty Keyboard fix: functional keys (arrows,
+Home/End, Insert/Delete, PageUp/PageDown, F-keys) now emit the CSI event-type
+sub-field (`CSI … ; <mod>:<event> …`) on repeat/release under
+`REPORT_EVENT_TYPES` (flag 2) instead of a bare legacy sequence, which
+applications (e.g. neovim) misread as a duplicate press. Previously only
+ASCII/Enter/Tab/Backspace/Escape handled this.
 (Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76)
 
 ## Overview
@@ -159,7 +162,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | CSI ? Pm l    | DECRST — Reset DEC Private Mode     | ✅     | Same as DECSET                                                                                                                                                       |
 | CSI s         | Save Cursor Position (SCOSC)        | ✅     | Implemented (ambiguous with DECSLRM; disambiguated by param count)                                                                                                   |
 | CSI u         | Restore Cursor Position (SCORC)     | ✅     | Fixed; Kitty protocol uses `CSI > u` (different prefix)                                                                                                              |
-| CSI > u       | Kitty Keyboard: push flags          | ✅     | Full Kitty keyboard protocol support (Task 35)                                                                                                                       |
+| CSI > u       | Kitty Keyboard: push flags          | ✅     | Full Kitty keyboard protocol support (Task 35); functional keys emit `:event-type` on repeat/release under flag 2 (no duplicate-press on release)                    |
 | CSI ? u       | Kitty Keyboard: query flags         | ✅     | (Task 35)                                                                                                                                                            |
 | CSI = u       | Kitty Keyboard: set flags           | ✅     | (Task 35)                                                                                                                                                            |
 | CSI ? Pm $p   | DECRQM — Request Mode               | ✅     | Full mode query support via mode-sync loop; includes DECRPM ?2031 adaptive theme (Task 52)                                                                           |
