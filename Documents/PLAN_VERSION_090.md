@@ -3387,6 +3387,22 @@ and line 1191 `Event::Paste`).
 --all-targets --all-features -- -D warnings`, `cargo fmt --check`, and
   `cargo machete` all clean.
 
+**Follow-up fix (commit `9dbc433`, 2026-06-10): paste regression.**
+The initial 77.4 wire-in broke paste entirely. Root cause: the
+windowing layer (`freminal-windowing/src/event_loop.rs`) already
+intercepts paste shortcuts (Ctrl+V **and** Ctrl+Shift+V — the modifier
+check is `command && "v"`, case-insensitive), reads the clipboard via
+the reliable egui-winit/smithay path, and injects `Event::Paste(text)`
+to work around Wayland multi-window clipboard breakage. The wire-in
+made the `Event::Paste` arm discard that known-good text and defer a
+second `arboard` read, which fails (`clipboard … empty`) on the common
+path. Fix: `Event::Paste` now stashes its text in
+`ViewState::pending_paste`, drained in `update()` and fed to a new
+`guarded_paste_text` (analyze → send or open dialog) with no clipboard
+read. `arboard` (`guarded_paste`) is retained only for the menu-Paste /
+explicit-keybinding path that does not flow through the windowing
+interceptor.
+
 #### 77.5 — KeyAction::PasteUnsafe
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.
