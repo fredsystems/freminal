@@ -42,6 +42,7 @@ mod hot_reload;
 mod layout_ops;
 mod menu;
 mod notifications;
+pub mod paste_guard;
 mod platform;
 mod recording;
 mod rendering;
@@ -132,6 +133,12 @@ struct FreminalGui {
     /// new settings. Passed into the terminal widget on every frame so that
     /// bound key combos are intercepted before PTY dispatch.
     binding_map: freminal_common::keybindings::BindingMap,
+
+    /// Smart paste guard with its compiled dangerous-command pattern cache
+    /// (Task 77). Rebuilt from `config.paste_guard` when the user applies new
+    /// settings. Consulted on every paste to decide whether to show the
+    /// confirm dialog.
+    paste_guard: paste_guard::PasteGuard,
 
     /// Monotonic generator for `PaneId` values.
     ///
@@ -310,6 +317,8 @@ impl FreminalGui {
             freminal_common::keybindings::BindingMap::default()
         });
 
+        let paste_guard = paste_guard::PasteGuard::new(&config.paste_guard);
+
         // Load persisted app state (currently just the first-run flag).
         // Lives in `$XDG_STATE_HOME/freminal/state.toml` so NixOS
         // home-manager users with a read-only `config.toml` can still
@@ -364,6 +373,7 @@ impl FreminalGui {
         let app = Self {
             windows: HashMap::new(),
             binding_map,
+            paste_guard,
             config,
             args,
             settings_modal: SettingsModal::new(config_path.clone()),

@@ -18,17 +18,17 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 
 ## Task Summary
 
-| #   | Feature                                 | Scope        | Status        | Depends On      | Branch                           |
-| --- | --------------------------------------- | ------------ | ------------- | --------------- | -------------------------------- |
-| 72  | OSC 133 Command Blocks                  | Large        | Pending merge | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator) | Medium       | Pending       | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Pending       | v0.8.0, Task 58 | `task-74/broadcast-input`        |
-| 75  | Verify per-pane env round-trip          | Small        | Pending       | v0.8.0          | `task-75/pane-env-roundtrip`     |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Pending merge | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                       | Small–Medium | Pending       | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)   | Small        | Complete      | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete      | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending       | Task 72         | `task-98/block-close-on-running` |
+| #   | Feature                                 | Scope        | Status   | Depends On      | Branch                           |
+| --- | --------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
+| 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
+| 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
+| 74  | Broadcast Input to Panes                | Medium       | Pending  | v0.8.0, Task 58 | `task-74/broadcast-input`        |
+| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-75/pane-env-roundtrip`     |
+| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
+| 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
+| 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
+| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-98/block-close-on-running` |
 
 ### Execution order
 
@@ -111,7 +111,7 @@ extend or rewrite it.
 
 ---
 
-## Task 72 — OSC 133 Command Blocks
+## Task 72 — OSC 133 Command Blocks ✅ Complete (2026-06-04)
 
 ### 72 Summary
 
@@ -1784,7 +1784,7 @@ Each subtask's commit message must contain a before/after table. Regressions
 
 ---
 
-## Task 73 — Command Gutters
+## Task 73 — Command Gutters ✅ Complete (2026-06-08)
 
 ### 73 Summary
 
@@ -2463,7 +2463,7 @@ None. No code change.
 
 ---
 
-## Task 76 — Notification System (OSC 9 / OSC 777)
+## Task 76 — Notification System (OSC 9 / OSC 777) ✅ Complete (2026-06-09)
 
 ### 76 Summary
 
@@ -3146,7 +3146,7 @@ for dangerous patterns. Per-config toggle to disable.
 
 ### 77 Subtasks
 
-#### 77.1 — Config schema
+#### 77.1 — Config schema ✅ 2026-06-09
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`.
 
@@ -3186,7 +3186,46 @@ for dangerous patterns. Per-config toggle to disable.
 
 **Verification:** Round-trip TOML test. Regex compile-time validation test.
 
-#### 77.2 — Paste analyzer
+**Completion notes (commit `4eeb8b8`, 2026-06-09):**
+
+- `PasteGuardConfig` added next to `SecurityConfig` in
+  `freminal-common/src/config.rs`. Fields: `enabled`, `multiline`,
+  `control_chars`, `patterns` (all `bool`), `pattern_list: Vec<String>`.
+- **Default change vs. the plan:** `patterns` defaults to `true`
+  (dangerous-command detection on out of the box) rather than the
+  `false` the plan originally specified. Requested by the user at task
+  start. All other defaults match the plan (`enabled`/`multiline`/
+  `control_chars = true`).
+- The default `pattern_list` is produced by a private
+  `default_paste_guard_patterns()` helper using the seven patterns from
+  the plan (`rm -rf`, `curl|sh`, `wget|sh`, `sudo`, `doas`, `dd of=/dev/`,
+  `mkfs.`).
+- Regex validation is exposed as
+  `PasteGuardConfig::invalid_patterns() -> Vec<(String, String)>`
+  rather than enforced at load time. Rationale: `freminal-common` is a
+  library crate with no UI surface and no `anyhow`; the load path
+  (`apply_partial`) cannot raise a toast. The GUI consumes
+  `invalid_patterns()` in 77.2/77.6 and surfaces malformed patterns via
+  the existing toast system, skipping them at match time.
+- `regex` added to `freminal-common/Cargo.toml` (`regex.workspace =
+true`; already pinned to `1.12.3` in the workspace deps).
+- `#[allow(clippy::struct_excessive_bools)]` with a justifying comment
+  on the struct, matching the established `NotificationsConfig` pattern
+  (four documented TOML toggles; an enum would distort the schema).
+- Full merge-wiring per the config-options checklist: `Config` field +
+  `Default`, `ConfigPartial` field, `apply_partial` arm, the
+  `every_config_section_survives_partial_merge` guard test (mutation +
+  assertion + no-`..` destructure entry), `config_example.toml`
+  documentation, and the Nix home-manager module mirror (let-binding,
+  merge arm, five `mkOption`s including a `listOf str` for
+  `pattern_list`).
+- 4 new unit tests: defaults, TOML round-trip, all-default-patterns-
+  compile, and malformed-pattern reporting.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, `cargo machete`, and the Nix lint
+  stack (`nixfmt`/`statix`/`deadnix`) all clean.
+
+#### 77.2 — Paste analyzer ✅ 2026-06-09
 
 **Scope:** New module `freminal/src/gui/paste_guard.rs`.
 
@@ -3202,7 +3241,37 @@ for dangerous patterns. Per-config toggle to disable.
 
 **Verification:** Unit tests for each trigger and combination thereof.
 
-#### 77.3 — Preview dialog
+**Completion notes (commit `ee15974`, 2026-06-09):**
+
+- New module `freminal/src/gui/paste_guard.rs` with the `PasteAnalysis`
+  enum (all five variants as specified) and a pure
+  `analyze(payload, config, compiled) -> PasteAnalysis`.
+- **Cache placement differs from the plan.** The plan suggested caching
+  the compiled regexes on `PasteGuardConfig` via `OnceCell`.
+  `PasteGuardConfig` lives in `freminal-common`, derives
+  `Clone`/`Serialize`/`Deserialize`, and is hot-reloaded by value, so
+  hanging a `OnceCell<Vec<Regex>>` off it fights the derives. Instead a
+  GUI-side `PasteGuard` struct owns `compiled: Vec<Regex>`;
+  `PasteGuard::rebuild(&config)` recompiles and returns the invalid
+  patterns for the caller to toast (77.6) while keeping the valid
+  siblings. `analyze` is the pure free function the `PasteGuard::analyze`
+  method delegates to, so the hot path never compiles a regex.
+- Control-char trigger flags genuine C0/C1 controls (ESC, BEL, ...) but
+  ignores `\n` (the multiline trigger's job), `\r`, and `\t`, which
+  appear in legitimate pasted text. Flagged chars are de-duplicated in
+  first-seen order.
+- `Multiple` is always a flat list (never nests `Multiple` or `Safe`),
+  ordered multiline → control chars → patterns.
+- 13 unit tests cover every trigger, the disabled master switch, dedup
+  ordering, trailing-newline line counting, and partial-compile recovery.
+- **Temporary `#[allow(dead_code)]` on `mod paste_guard;`** with a
+  `TODO(77.4)` comment: the module has no production caller until the
+  wire-in lands. Removed in 77.4. Permitted by the AGENTS.md temporary-
+  refactor exception; user-approved.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
+
+#### 77.3 — Preview dialog ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/paste_guard.rs` (UI) and integration with the
 existing modal pattern (look at the existing Settings modal infra in
@@ -3224,7 +3293,43 @@ existing modal pattern (look at the existing Settings modal infra in
 **Verification:** Manual visual test. Snapshot test of the analyzer
 classifications.
 
-#### 77.4 — Wire into paste handling
+**Completion notes (commit `d62faaf`, 2026-06-09):**
+
+- `PasteDialog` added to `freminal/src/gui/paste_guard.rs`: a centered,
+  non-resizable `egui::Window` titled "Confirm Paste" following the
+  established `show_save_layout_prompt` / `show_confirm_close_prompt`
+  modal pattern.
+- Banner is produced by a pure, unit-tested `banner_text(&PasteAnalysis)
+-> String` (e.g. "Multi-line paste — 17 lines, 420 bytes",
+  "Dangerous patterns detected: …", control chars rendered as `U+XXXX`,
+  and a flattened "Multiple triggers — …").
+- **Content area:** a scrollable monospace preview. Read-only mode uses
+  a disabled multiline `TextEdit` (monospace + selectable without
+  edits); "Edit and Paste" flips it to an editable `TextEdit` bound to a
+  scratch `edit_buffer`, focused once on entry. The plan mentioned
+  optional renderer syntax highlighting "or plain monospace if that's
+  too invasive" — plain monospace was chosen.
+- **Buttons:** Cancel, Paste Anyway, Edit and Paste. **Keyboard:**
+  Escape = Cancel, Ctrl+Enter = Paste Anyway (clicks in the same frame
+  take precedence over shortcuts).
+- `show()` returns `PasteDialogOutcome { Idle | Cancelled |
+Paste(String) }` and closes the dialog on resolve. The dialog is
+  **target-agnostic** — it yields only the resolved text. Bracketed-
+  paste wrapping and the `InputEvent::Key` send stay in 77.4, which
+  owns the `input_tx` and pane routing.
+- State lives on `PerWindowState::paste_dialog` (paste targets a
+  window's active pane). That field carries a temporary
+  `#[allow(dead_code)]` + `TODO(77.4)` until `update()` renders it and
+  the paste path opens it; the module-level allow from 77.2 also
+  remains until 77.4.
+- 8 new unit tests (banner formatting incl. flattened `Multiple`,
+  open/close/`is_open`, the `Safe`-never-opens rule, outcome equality).
+  The egui render path itself is exercised manually, per the plan's
+  "manual visual test"; the testable state logic is unit-covered.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
+
+#### 77.4 — Wire into paste handling ✅ 2026-06-09
 
 **Scope:** `freminal/src/gui/terminal/input.rs` (line 210 `KeyAction::Paste`
 and line 1191 `Event::Paste`).
@@ -3241,7 +3346,78 @@ and line 1191 `Event::Paste`).
 **Verification:** Integration test: paste multi-line text → dialog appears
 → confirm → PTY receives bytes.
 
-#### 77.5 — KeyAction::PasteUnsafe
+**Completion notes (commit `962a210`, 2026-06-09):**
+
+- **Interception point differs from the plan.** The plan said to call
+  `paste_guard::analyze` inline at the two `input.rs` paste sites. Those
+  sites (`dispatch_binding_action`, `write_input_to_terminal`) run deep
+  in the input loop with no access to `&Config`, the `PasteGuard` cache,
+  or `PerWindowState.paste_dialog`. Instead all three paste sites
+  (keybinding, Edit-menu, and egui `Event::Paste`) now **defer
+  `KeyAction::Paste`** up to `dispatch_deferred_action`, which runs at
+  the `update()` layer with full `self` + `win` access. User-approved
+  design.
+- New `FreminalGui::guarded_paste(win)`: ignores the request if a dialog
+  is already open (no dialog stacking), reads the clipboard via
+  `arboard`, normalises CRLF, calls `PasteGuard::analyze`, and either
+  sends straight to the active pane (`Safe`) or opens
+  `win.paste_dialog`.
+- New `FreminalGui::send_paste_to_active_pane(win, payload)`: applies
+  bracketed-paste wrapping (when the active pane has it enabled) and
+  sends `InputEvent::Key`. Used by both the `Safe` fast path and the
+  dialog `Paste` resolution.
+- `update()` renders `win.paste_dialog.show(ctx)` next to the
+  save-layout prompt; a `Paste(payload)` outcome calls
+  `send_paste_to_active_pane`, `Cancelled`/`Idle` discard.
+- `Event::Paste` now reads the clipboard in the deferred handler instead
+  of forwarding the event text — unifying all paste origins on one
+  guarded clipboard-read path (the content is identical for a normal
+  Ctrl/Cmd+V).
+- `PasteGuard` cache lives on `FreminalGui`, built at startup and
+  rebuilt in `apply_new_config` next to `binding_map`. Invalid user
+  patterns are surfaced via `push_error_toast` and skipped.
+- **Removed both temporary `#[allow(dead_code)]` markers** (the 77.2
+  module-level one and the 77.3 `paste_dialog`-field one); everything is
+  now wired and read. The unused `PasteDialog::close()` speculatively
+  added in 77.3 was deleted rather than left dead.
+- An automated end-to-end paste→dialog→confirm→PTY integration test is
+  not feasible without an egui context + a live PTY; the analyzer,
+  dialog state, and banner logic are unit-covered (18 tests) and the
+  full flow is manual-tested. `cargo test --all`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo fmt --check`, and
+  `cargo machete` all clean.
+
+**Follow-up fix (commit `9dbc433`, 2026-06-10): paste regression.**
+The initial 77.4 wire-in broke paste entirely. Root cause: the
+windowing layer (`freminal-windowing/src/event_loop.rs`) already
+intercepts paste shortcuts (Ctrl+V **and** Ctrl+Shift+V — the modifier
+check is `command && "v"`, case-insensitive), reads the clipboard via
+the reliable egui-winit/smithay path, and injects `Event::Paste(text)`
+to work around Wayland multi-window clipboard breakage. The wire-in
+made the `Event::Paste` arm discard that known-good text and defer a
+second `arboard` read, which fails (`clipboard … empty`) on the common
+path. Fix: `Event::Paste` now stashes its text in
+`ViewState::pending_paste`, drained in `update()` and fed to a new
+`guarded_paste_text` (analyze → send or open dialog) with no clipboard
+read. `arboard` (`guarded_paste`) is retained only for the menu-Paste /
+explicit-keybinding path that does not flow through the windowing
+interceptor.
+
+**Follow-up fix (commit `7dbf538`, 2026-06-10): dialog focus.**
+The dialog rendered but never captured keyboard input — focus bounced
+back to the terminal, so the Edit-and-Paste field was untypable (the
+recurring modal-focus bug class also fixed for settings/search/command
+history). Two fixes, matching the established pattern: (1) add
+`win.paste_dialog.is_open()` to the `ui_overlay_open` flag in
+`update()` (`app_impl.rs`) — that flag gates the terminal widget's
+focus-lock and its `write_input_to_terminal` call, so the active pane
+stops stealing focus and forwarding keystrokes while the dialog is
+open; (2) give the edit-mode `TextEdit` `.lock_focus(true)` and
+re-request focus every frame it lacks it (mirroring `show_search_bar`
+and `show_command_history_palette`). The redundant `just_entered_edit`
+flag was removed.
+
+#### 77.5 — KeyAction::PasteUnsafe ✅ 2026-06-10
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.
 
@@ -3252,7 +3428,37 @@ and line 1191 `Event::Paste`).
 
 **Verification:** Round-trip keybinding test.
 
-#### 77.6 — Settings UI
+**Completion notes (commit `2ab8caa`, 2026-06-10):**
+
+- **Default binding is `Ctrl+Shift+Alt+V`, not the plan's
+  `Ctrl+Shift+V`** (which collides with `Paste`). One modifier beyond
+  the normal paste combo, so the bypass is deliberate. User-approved.
+- Full four-step keybinding ritual: `KeyAction::PasteUnsafe` variant
+  (with `name() = "paste_unsafe"`, `display_label() = "Paste (no
+confirmation)"`, `FromStr`, and `ALL` membership); a new
+  `BindingModifiers::CTRL_SHIFT_ALT` constant; the default binding in
+  `register_misc_bindings`; and the action list in `config_example.toml`.
+- **Dispatch reality vs. the plan.** The windowing paste interceptor
+  (`event_loop.rs`) fires for _any_ `command + v`, including
+  `Ctrl+Shift+Alt+V`, and converts it to an `Event::Paste` — so the
+  `BindingMap` entry never sees the bypass combo on that (common) path.
+  The bypass intent is therefore detected at the `Event::Paste` arm via
+  the **Alt modifier** (`input.modifiers.alt`) and carried through a new
+  `ViewState::PendingPaste { text, bypass_guard }` (replacing the bare
+  `Option<String>` from the 77.4 fix). `update()` sends a bypassing
+  paste straight to the active pane (`send_paste_to_active_pane`),
+  otherwise runs the guard. The `BindingMap` entry plus a new
+  `unguarded_paste` (arboard) handler in `dispatch_deferred_action`
+  cover the menu and any platform/config where the interceptor does not
+  fire.
+- Tests: `default_paste_unsafe_binding` (asserts the bypass combo maps
+  to `PasteUnsafe` and stays distinct from `Paste`),
+  `paste_unsafe_name_round_trips`, and the updated guard counts
+  (`ALL` = 60 actions, default map = 47 bindings).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --check`, and `cargo machete` all clean.
+
+#### 77.6 — Settings UI ✅ 2026-06-10
 
 **Scope:** Existing Security settings tab (`freminal/src/gui/settings.rs`).
 
@@ -3268,15 +3474,51 @@ and line 1191 `Event::Paste`).
 **Verification:** Round-trip persistence. Pattern editor accepts/rejects
 malformed regex correctly.
 
+**Completion notes (commit `15107b7`, 2026-06-10):**
+
+- A "Paste Guard" section added to the Security settings tab
+  (`show_paste_guard_section`): master enable toggle; multi-line /
+  control-character / pattern per-trigger toggles (disabled via
+  `add_enabled_ui` when the guard / pattern matching is off); an
+  editable pattern list with per-row remove (`➖`) and an "Add pattern"
+  (`➕`) button. Invalid regexes render in red (`text_color_opt`) with a
+  hover note that they are ignored at match time (live
+  `regex::Regex::new(...).is_ok()` check per row).
+- A "Test Paste" button mirrors the Notifications tab's "Test
+  Notification": sets `pending_test_paste`, drained in
+  `show`/`show_standalone` as `SettingsAction::TestPaste`, handled in
+  `handle_settings_action` by building a temporary `PasteGuard` from
+  `draft_paste_guard()` (the unsaved draft), analyzing a sample payload,
+  and opening the confirm dialog on the `settings_owner` window. If the
+  draft would not intercept the sample, an info toast says so instead.
+- Per-section persistence relies on the existing `[paste_guard]`
+  `ConfigPartial`/`apply_partial` wiring from 77.1; the Settings tab
+  edits `self.draft.paste_guard` directly, saved on Apply like every
+  other section.
+- `SettingsModal` gained a justified `#[allow(clippy::struct_excessive_bools)]`
+  (several independent one-shot UI flags).
+- Tests: `test_paste_button_sets_pending_flag`,
+  `draft_paste_guard_reflects_edits`. The egui render path is
+  manual-tested. `cargo test --all`, clippy, fmt, machete all clean.
+
 ### 77 Open Questions Resolved
 
 All resolved.
 
-### 77 Benchmarks
+### 77 Benchmarks ✅ 2026-06-10
 
 `paste_guard::analyze` runs in the GUI thread on a paste event. For a 1MB
 paste with all triggers and 20 patterns, it must complete in < 50ms.
 Add a benchmark in a new `freminal/benches/paste_guard_bench.rs`.
+
+**Done (commit `406f7d8`).** `freminal/benches/paste_guard_bench.rs`
+(Criterion) covers `analyze_1mb_all_triggers`, `analyze_typical_paste`,
+and `rebuild_patterns`. Measured: the 1 MB / all-triggers / 20-pattern
+worst case is **~688 µs** — roughly 70× under the 50 ms budget; a
+typical ~2 KB paste is ~1.8 µs; rebuilding the 20-pattern cache is
+~745 µs. To make the analyzer reachable from the separate-crate bench,
+`mod paste_guard` and the analyzer API were promoted to `pub` (matching
+`gui::atlas` / `gui::shaping`); the dialog types stay `pub(in crate::gui)`.
 
 ---
 

@@ -10,7 +10,7 @@ use crate::gui::{
         FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
         handle_pointer_scroll,
     },
-    view_state::{CellCoord, ViewState},
+    view_state::{CellCoord, PendingPaste, ViewState},
 };
 
 use conv2::ConvUtil;
@@ -19,7 +19,7 @@ use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_common::send_or_log;
@@ -448,29 +448,11 @@ pub(super) fn dispatch_binding_action(
     deferred_actions: &mut Vec<KeyAction>,
 ) {
     match action {
-        KeyAction::Paste => {
-            // Read clipboard directly via arboard, bypassing egui-winit's
-            // per-window clipboard (which fails on Wayland child windows).
-            match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                Ok(text) if !text.is_empty() => {
-                    let text = text.replace("\r\n", "\n");
-                    let payload = if snap.bracketed_paste == RlBracket::Enabled {
-                        format!("\x1b[200~{text}\x1b[201~")
-                    } else {
-                        text
-                    };
-                    send_or_log!(
-                        input_tx,
-                        InputEvent::Key(payload.into_bytes()),
-                        "Failed to send paste to PTY consumer"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Clipboard read failed: {e}");
-                }
-            }
-        }
+        // `KeyAction::Paste` is intentionally NOT handled here. It is deferred
+        // to `dispatch_deferred_action` (via the `other` arm below) so the
+        // smart paste guard (Task 77) can analyze the clipboard with access to
+        // the live config and the per-window confirm dialog, which are not
+        // reachable at this input-layer call site.
         KeyAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
             if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
                 start_row: start.row,
@@ -1491,12 +1473,23 @@ pub(super) fn write_input_to_terminal(
                 continue;
             }
             Event::Paste(text) => {
-                if snap.bracketed_paste == RlBracket::Enabled {
-                    // ESC [ 200 ~, followed by the pasted text, followed by ESC [ 201 ~.
-                    collect_text(&format!("\x1b[200~{}{}", text, "\x1b[201~"))
-                } else {
-                    collect_text(text)
-                }
+                // The windowing layer already read the clipboard (via the
+                // reliable egui-winit path) and injected this event. Stash the
+                // text for handling in `update()` with access to the config and
+                // confirm dialog. Do NOT re-read the clipboard via arboard here
+                // — that path is unreliable on Wayland and would discard this
+                // known-good text.
+                //
+                // The windowing paste interceptor fires for any `command + v`,
+                // including the `PasteUnsafe` combo (Ctrl+Shift+Alt+V), so the
+                // BindingMap entry never sees it on that path. Detect the
+                // bypass intent here by the Alt modifier: Alt held ==
+                // PasteUnsafe (skip the guard).
+                view_state.pending_paste = Some(PendingPaste {
+                    text: text.clone(),
+                    bypass_guard: input.modifiers.alt,
+                });
+                continue;
             }
             Event::PointerGone => {
                 view_state.mouse_position = None;

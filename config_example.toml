@@ -250,6 +250,44 @@ limit = 4000
 # password_indicator = true
 
 ## ##############################################################################
+# PASTE GUARD
+## ##############################################################################
+[paste_guard]
+# Master switch. When false, no paste is ever intercepted regardless of the
+# per-trigger toggles below.
+# Default: true (safer-by-default).
+# enabled = true
+
+# Confirm any paste containing a newline.
+# Default: true.
+# multiline = true
+
+# Confirm any paste containing control characters (ESC, BEL, etc.) other than
+# the newline covered by `multiline` and the bracketed-paste markers Freminal
+# wraps the payload with.
+# Default: true.
+# control_chars = true
+
+# When true, additionally match the payload against `pattern_list` and escalate
+# the warning when a dangerous pattern is found.
+# Default: true.
+# patterns = true
+
+# Regex patterns (Rust regex syntax) treated as dangerous. Matched only when
+# `patterns` is true. Malformed patterns are reported (via a toast) at load
+# time and skipped at match time.
+# Default:
+# pattern_list = [
+#     "\\brm\\s+-rf?\\b",
+#     "\\bcurl\\b[^|]+\\|\\s*(sh|bash|zsh|fish)\\b",
+#     "\\bwget\\b[^|]+\\|\\s*(sh|bash|zsh|fish)\\b",
+#     "\\bsudo\\b",
+#     "\\bdoas\\b",
+#     "\\bdd\\s+.*of=/dev/",
+#     "\\bmkfs\\.",
+# ]
+
+## ##############################################################################
 # SHELL INTEGRATION (OSC 133)
 ## ##############################################################################
 [shell_integration]
@@ -403,6 +441,7 @@ limit = 4000
 #   Clipboard:
 #     copy            = "Ctrl+Shift+C"
 #     paste           = "Ctrl+Shift+V"
+#     paste_unsafe    = "Ctrl+Shift+Alt+V"  # paste, skipping the paste-guard dialog
 #     select_all      = (unbound)
 #
 #   Search:

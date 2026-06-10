@@ -266,7 +266,6 @@ impl super::FreminalGui {
         action: freminal_common::keybindings::KeyAction,
         all_deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
     ) {
-        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
         use freminal_common::keybindings::KeyAction;
 
         match action {
@@ -293,28 +292,11 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::Paste => {
-                let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
-                    warn!("Menu Paste: active tab has no active pane");
-                    return;
-                };
-                let snap = pane.arc_swap.load();
-                match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                    Ok(text) if !text.is_empty() => {
-                        let text = text.replace("\r\n", "\n");
-                        let payload = if snap.bracketed_paste == RlBracket::Enabled {
-                            format!("\x1b[200~{text}\x1b[201~")
-                        } else {
-                            text
-                        };
-                        if let Err(e) = pane.input_tx.send(InputEvent::Key(payload.into_bytes())) {
-                            error!("Menu Paste: failed to send paste to PTY: {e}");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("Menu Paste: clipboard read failed: {e}");
-                    }
-                }
+                // Defer to `dispatch_deferred_action` so the smart paste guard
+                // (Task 77) can analyze the clipboard with access to the live
+                // config and the per-window confirm dialog. Unifies the menu
+                // paste path with the keybinding and egui-event paste paths.
+                all_deferred_actions.push(KeyAction::Paste);
             }
             KeyAction::SelectAll => {
                 let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
@@ -605,8 +587,9 @@ impl super::FreminalGui {
                     }
                 }
             }
+            KeyAction::Paste => self.guarded_paste(win),
+            KeyAction::PasteUnsafe => Self::unguarded_paste(win),
             KeyAction::Copy
-            | KeyAction::Paste
             | KeyAction::SelectAll
             | KeyAction::ToggleMenuBar
             | KeyAction::ScrollPageUp
@@ -689,6 +672,107 @@ impl super::FreminalGui {
                 // parse error.  See `reload_config_from_disk` for details.
                 self.reload_config_from_disk(handle);
             }
+        }
+    }
+
+    /// Handle a paste request that has been deferred to the GUI layer so the
+    /// smart paste guard (Task 77) can run with access to the live config and
+    /// the per-window confirm dialog.
+    ///
+    /// Reads the system clipboard, normalises line endings, and analyses the
+    /// payload. A `Safe` result is sent straight to the active pane; anything
+    /// flagged opens the confirm dialog instead (resolved later in `update()`).
+    pub(super) fn guarded_paste(&self, win: &mut PerWindowState) {
+        // A confirm dialog is already up for this window; ignore the new
+        // paste request rather than stacking a second dialog or clobbering
+        // the pending payload. The user must resolve the open one first.
+        if win.paste_dialog.is_open() {
+            return;
+        }
+
+        // Read clipboard directly via arboard, bypassing egui-winit's
+        // per-window clipboard (which fails on Wayland child windows).
+        //
+        // This is the menu-Paste / explicit-keybinding path. The far more
+        // common paste path is the windowing layer intercepting the paste
+        // shortcut and injecting an `Event::Paste` with already-read text;
+        // that goes through `guarded_paste_text` instead (see `update()`),
+        // which is why we must NOT rely on arboard for the common case.
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) if !text.is_empty() => text.replace("\r\n", "\n"),
+            Ok(_) => return,
+            Err(e) => {
+                error!("Paste: clipboard read failed: {e}");
+                return;
+            }
+        };
+
+        self.guarded_paste_text(win, text);
+    }
+
+    /// Paste the clipboard directly, bypassing the smart paste guard
+    /// (`KeyAction::PasteUnsafe`).
+    ///
+    /// This is the arboard path for the bypass action on platforms/configs
+    /// where the windowing paste interceptor does not fire (the common path
+    /// detects the bypass via the Alt modifier on `Event::Paste` and routes
+    /// through `send_paste_to_active_pane` directly).
+    pub(super) fn unguarded_paste(win: &mut PerWindowState) {
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) if !text.is_empty() => text.replace("\r\n", "\n"),
+            Ok(_) => return,
+            Err(e) => {
+                error!("Paste (unsafe): clipboard read failed: {e}");
+                return;
+            }
+        };
+        Self::send_paste_to_active_pane(win, text);
+    }
+
+    /// Run the smart paste guard on an already-obtained `text` payload.
+    ///
+    /// Shared by the arboard path ([`guarded_paste`]) and the
+    /// windowing-injected `Event::Paste` path. A `Safe` analysis sends
+    /// straight to the active pane; anything flagged opens the confirm dialog.
+    ///
+    /// [`guarded_paste`]: Self::guarded_paste
+    pub(super) fn guarded_paste_text(&self, win: &mut PerWindowState, text: String) {
+        if win.paste_dialog.is_open() {
+            return;
+        }
+        if text.is_empty() {
+            return;
+        }
+
+        let analysis = self.paste_guard.analyze(&text, &self.config.paste_guard);
+
+        if analysis.is_safe() {
+            Self::send_paste_to_active_pane(win, text);
+        } else {
+            win.paste_dialog.open(text, analysis);
+        }
+    }
+
+    /// Wrap `payload` for bracketed paste (when the active pane has it enabled)
+    /// and send it to the active pane's PTY.
+    ///
+    /// Used both for the `Safe` fast path and when the user confirms a flagged
+    /// paste via the dialog. A send failure (dead PTY) is logged, not fatal.
+    pub(super) fn send_paste_to_active_pane(win: &mut PerWindowState, payload: String) {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+
+        let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
+            warn!("Paste: active tab has no active pane");
+            return;
+        };
+        let snap = pane.arc_swap.load();
+        let wrapped = if snap.bracketed_paste == RlBracket::Enabled {
+            format!("\x1b[200~{payload}\x1b[201~")
+        } else {
+            payload
+        };
+        if let Err(e) = pane.input_tx.send(InputEvent::Key(wrapped.into_bytes())) {
+            error!("Paste: failed to send paste to PTY: {e}");
         }
     }
 }

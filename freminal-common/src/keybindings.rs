@@ -22,6 +22,7 @@
 //! |--------------------|------------------|
 //! | `Ctrl+Shift+C`     | Copy             |
 //! | `Ctrl+Shift+V`     | Paste            |
+//! | `Ctrl+Shift+Alt+V` | Paste (no guard) |
 //! | `Ctrl+Shift+T`     | New Tab          |
 //! | `Ctrl+Shift+W`     | Close Tab        |
 //! | `Ctrl+Shift+,`     | Open Settings    |
@@ -460,6 +461,13 @@ impl BindingModifiers {
         shift: false,
         alt: true,
     };
+
+    /// Ctrl + Shift + Alt.
+    pub const CTRL_SHIFT_ALT: Self = Self {
+        ctrl: true,
+        shift: true,
+        alt: true,
+    };
 }
 
 impl fmt::Display for BindingModifiers {
@@ -688,6 +696,9 @@ pub enum KeyAction {
     Copy,
     /// Paste the system clipboard contents into the terminal.
     Paste,
+    /// Paste the system clipboard contents directly, bypassing the smart
+    /// paste guard's confirmation dialog (Task 77).
+    PasteUnsafe,
     /// Select all visible terminal content.
     SelectAll,
 
@@ -868,6 +879,7 @@ impl KeyAction {
             Self::RenameTab => "rename_tab",
             Self::Copy => "copy",
             Self::Paste => "paste",
+            Self::PasteUnsafe => "paste_unsafe",
             Self::SelectAll => "select_all",
             Self::OpenSearch => "open_search",
             Self::SearchNext => "search_next",
@@ -938,6 +950,7 @@ impl KeyAction {
             Self::RenameTab => "Rename Tab",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
+            Self::PasteUnsafe => "Paste (no confirmation)",
             Self::SelectAll => "Select All",
             Self::OpenSearch => "Open Search",
             Self::SearchNext => "Search Next",
@@ -1005,6 +1018,7 @@ impl KeyAction {
         Self::RenameTab,
         Self::Copy,
         Self::Paste,
+        Self::PasteUnsafe,
         Self::SelectAll,
         Self::OpenSearch,
         Self::SearchNext,
@@ -1084,6 +1098,7 @@ impl FromStr for KeyAction {
             "rename_tab" => Ok(Self::RenameTab),
             "copy" => Ok(Self::Copy),
             "paste" => Ok(Self::Paste),
+            "paste_unsafe" => Ok(Self::PasteUnsafe),
             "select_all" => Ok(Self::SelectAll),
             "open_search" => Ok(Self::OpenSearch),
             "search_next" => Ok(Self::SearchNext),
@@ -1313,6 +1328,13 @@ fn register_misc_bindings(map: &mut BindingMap) {
     map.bind(
         KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT),
         KeyAction::Paste,
+    );
+    // Paste bypassing the smart paste guard's confirmation dialog (Task 77).
+    // Ctrl+Shift+Alt+V is one modifier beyond the normal Paste combo so the
+    // "unsafe" variant is deliberate and not fat-fingered.
+    map.bind(
+        KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT_ALT),
+        KeyAction::PasteUnsafe,
     );
     // Copy the last completed command's output (OSC 133 D-bounded region).
     // Ctrl+Shift+Y is free on all platforms — bash readline binds Ctrl+Y to
@@ -1828,7 +1850,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            59,
+            60,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1853,6 +1875,25 @@ mod tests {
         let map = BindingMap::default();
         let combo = KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT);
         assert_eq!(map.lookup(&combo), Some(KeyAction::Paste));
+    }
+
+    #[test]
+    fn default_paste_unsafe_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT_ALT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::PasteUnsafe));
+        // The bypass combo must be distinct from the normal Paste combo.
+        let paste_combo = KeyCombo::new(BindingKey::V, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&paste_combo), Some(KeyAction::Paste));
+    }
+
+    #[test]
+    fn paste_unsafe_name_round_trips() {
+        assert_eq!(KeyAction::PasteUnsafe.name(), "paste_unsafe");
+        assert_eq!(
+            "paste_unsafe".parse::<KeyAction>(),
+            Ok(KeyAction::PasteUnsafe)
+        );
     }
 
     #[test]
@@ -2182,7 +2223,7 @@ mod tests {
         // The default map should have a known number of bindings.
         // This catches silent additions or removals.
         let map = BindingMap::default();
-        // Count: Copy(1) + Paste(1) + NewTab(1) + NextTab(1)
+        // Count: Copy(1) + Paste(1) + PasteUnsafe(1) + NewTab(1) + NextTab(1)
         //        + PrevTab(1) + SwitchToTab1-9(9) + ZoomIn(2) + ZoomOut(1)
         //        + ZoomReset(1) + OpenSettings(1) + OpenSearch(1)
         //        + PrevCommand(1) + NextCommand(1) + ScrollPageUp(1)
@@ -2192,11 +2233,11 @@ mod tests {
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
         //        + ToggleRecording(1) + UnfoldAll(1)
-        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1) = 46
+        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1) = 47
         assert_eq!(
             map.len(),
-            46,
-            "default binding map should have exactly 46 bindings"
+            47,
+            "default binding map should have exactly 47 bindings"
         );
     }
 

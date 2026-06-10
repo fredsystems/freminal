@@ -35,6 +35,7 @@ pub struct Config {
     pub tab_title: TabTitleConfig,
     pub bell: BellConfig,
     pub security: SecurityConfig,
+    pub paste_guard: PasteGuardConfig,
     pub shell_integration: ShellIntegrationConfig,
     pub command_blocks: CommandBlocksConfig,
     pub notifications: NotificationsConfig,
@@ -78,6 +79,7 @@ impl Default for Config {
             tab_title: TabTitleConfig::default(),
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
+            paste_guard: PasteGuardConfig::default(),
             shell_integration: ShellIntegrationConfig::default(),
             command_blocks: CommandBlocksConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -541,6 +543,107 @@ impl Default for SecurityConfig {
             allow_clipboard_read: false,
             password_indicator: true,
         }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Paste Guard
+// ------------------------------------------------------------------------------------------------
+
+/// The default set of dangerous-command regex patterns matched against paste
+/// payloads when [`PasteGuardConfig::patterns`] is enabled.
+///
+/// Patterns use Rust [`regex`] syntax. They are intentionally conservative:
+/// each targets a command that is irreversible or privilege-escalating, so a
+/// false positive merely shows a confirmation dialog rather than silently
+/// running the command.
+fn default_paste_guard_patterns() -> Vec<String> {
+    vec![
+        r"\brm\s+-rf?\b".to_owned(),
+        r"\bcurl\b[^|]+\|\s*(sh|bash|zsh|fish)\b".to_owned(),
+        r"\bwget\b[^|]+\|\s*(sh|bash|zsh|fish)\b".to_owned(),
+        r"\bsudo\b".to_owned(),
+        r"\bdoas\b".to_owned(),
+        r"\bdd\s+.*of=/dev/".to_owned(),
+        r"\bmkfs\.".to_owned(),
+    ]
+}
+
+/// Configuration for the smart paste guard.
+///
+/// When a paste is "interesting" (multi-line, contains control characters, or
+/// matches a dangerous pattern) the GUI shows a confirmation dialog before
+/// sending the payload to the PTY. Each trigger can be toggled independently;
+/// the master [`enabled`](Self::enabled) switch disables the guard entirely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+// Four independent TOML config toggles (master switch + three per-trigger
+// enables). Each maps directly to a documented `[paste_guard]` key; collapsing
+// them into an enum would distort the config schema and add noise.
+#[allow(clippy::struct_excessive_bools)]
+pub struct PasteGuardConfig {
+    /// Master switch. When `false`, no paste is ever intercepted regardless of
+    /// the per-trigger toggles below.
+    ///
+    /// Default: `true` (safer-by-default).
+    pub enabled: bool,
+
+    /// Confirm any paste containing a newline (`\n`).
+    ///
+    /// Default: `true`.
+    pub multiline: bool,
+
+    /// Confirm any paste containing control characters (ESC, BEL, etc.) other
+    /// than the line feeds covered by [`multiline`](Self::multiline) and the
+    /// bracketed-paste markers freminal wraps the payload with.
+    ///
+    /// Default: `true`.
+    pub control_chars: bool,
+
+    /// When `true`, additionally match the payload against
+    /// [`pattern_list`](Self::pattern_list) and escalate the warning when a
+    /// dangerous pattern is found.
+    ///
+    /// Default: `true`.
+    pub patterns: bool,
+
+    /// Regex patterns (Rust [`regex`] syntax) treated as dangerous. Matched
+    /// only when [`patterns`](Self::patterns) is `true`.
+    ///
+    /// Defaults to [`default_paste_guard_patterns`].
+    pub pattern_list: Vec<String>,
+}
+
+impl Default for PasteGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            multiline: true,
+            control_chars: true,
+            patterns: true,
+            pattern_list: default_paste_guard_patterns(),
+        }
+    }
+}
+
+impl PasteGuardConfig {
+    /// Validate every entry in [`pattern_list`](Self::pattern_list), returning
+    /// one `(pattern, error_message)` pair per pattern that fails to compile as
+    /// a Rust [`regex`].
+    ///
+    /// An empty result means every pattern compiled successfully. The caller
+    /// (GUI) is expected to surface any returned errors to the user (e.g. via
+    /// the toast system) and skip the offending patterns at match time. This
+    /// crate has no UI surface, so validation is reported rather than enforced.
+    #[must_use]
+    pub fn invalid_patterns(&self) -> Vec<(String, String)> {
+        self.pattern_list
+            .iter()
+            .filter_map(|pattern| match regex::Regex::new(pattern) {
+                Ok(_) => None,
+                Err(err) => Some((pattern.clone(), err.to_string())),
+            })
+            .collect()
     }
 }
 
@@ -1215,6 +1318,7 @@ struct ConfigPartial {
     pub tab_title: Option<TabTitleConfig>,
     pub bell: Option<BellConfig>,
     pub security: Option<SecurityConfig>,
+    pub paste_guard: Option<PasteGuardConfig>,
     pub shell_integration: Option<ShellIntegrationConfig>,
     pub command_blocks: Option<CommandBlocksConfig>,
     pub notifications: Option<NotificationsConfig>,
@@ -1264,6 +1368,9 @@ impl Config {
         }
         if let Some(security) = partial.security {
             self.security = security;
+        }
+        if let Some(paste_guard) = partial.paste_guard {
+            self.paste_guard = paste_guard;
         }
         if let Some(shell_integration) = partial.shell_integration {
             self.shell_integration = shell_integration;
@@ -1821,6 +1928,68 @@ size = 14.0
         assert!(!parsed.command_blocks.show_duration);
         assert!((parsed.command_blocks.duration_threshold_secs - 5.5_f32).abs() < f32::EPSILON);
         assert_eq!(parsed.command_blocks.gutter, GutterPosition::Off);
+    }
+
+    #[test]
+    fn paste_guard_defaults_are_safer_by_default() {
+        let cfg = PasteGuardConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.multiline);
+        assert!(cfg.control_chars);
+        // Pattern matching is enabled by default (dangerous-command detection
+        // is on out of the box).
+        assert!(cfg.patterns);
+        assert_eq!(cfg.pattern_list, default_paste_guard_patterns());
+        assert!(!cfg.pattern_list.is_empty());
+    }
+
+    #[test]
+    fn paste_guard_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.paste_guard.enabled = false;
+        cfg.paste_guard.multiline = false;
+        cfg.paste_guard.control_chars = false;
+        cfg.paste_guard.patterns = false;
+        cfg.paste_guard.pattern_list = vec![r"\bgit\s+push\b".to_owned()];
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert!(!parsed.paste_guard.enabled);
+        assert!(!parsed.paste_guard.multiline);
+        assert!(!parsed.paste_guard.control_chars);
+        assert!(!parsed.paste_guard.patterns);
+        assert_eq!(parsed.paste_guard.pattern_list, vec![r"\bgit\s+push\b"]);
+    }
+
+    #[test]
+    fn paste_guard_default_patterns_all_compile() {
+        let cfg = PasteGuardConfig::default();
+        let invalid = cfg.invalid_patterns();
+        assert!(
+            invalid.is_empty(),
+            "default paste-guard patterns must all compile: {invalid:?}"
+        );
+    }
+
+    #[test]
+    fn paste_guard_invalid_patterns_are_reported() {
+        let cfg = PasteGuardConfig {
+            // `[` opens an unterminated character class; `(` an unclosed group.
+            pattern_list: vec![r"\bsudo\b".to_owned(), "[".to_owned(), "(".to_owned()],
+            ..PasteGuardConfig::default()
+        };
+
+        let invalid = cfg.invalid_patterns();
+        assert_eq!(
+            invalid.len(),
+            2,
+            "exactly the two malformed patterns: {invalid:?}"
+        );
+        let bad: Vec<&str> = invalid.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(bad.contains(&"["));
+        assert!(bad.contains(&"("));
+        assert!(!bad.contains(&r"\bsudo\b"));
     }
 
     #[test]
@@ -2656,6 +2825,7 @@ mode = "none"
         original.tab_title.policy = TabTitlePolicy::OscWins;
         original.bell.mode = BellMode::None;
         original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
+        original.paste_guard.patterns = !Config::default().paste_guard.patterns;
         original.shell_integration.set_term_program =
             !Config::default().shell_integration.set_term_program;
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
@@ -2721,6 +2891,10 @@ mode = "none"
             "security section dropped"
         );
         assert_eq!(
+            loaded.paste_guard.patterns, original.paste_guard.patterns,
+            "paste_guard section dropped"
+        );
+        assert_eq!(
             loaded.shell_integration.set_term_program, original.shell_integration.set_term_program,
             "shell_integration section dropped"
         );
@@ -2768,6 +2942,7 @@ mode = "none"
             tab_title: _,
             bell: _,
             security: _,
+            paste_guard: _,
             shell_integration: _,
             command_blocks: _,
             notifications: _,

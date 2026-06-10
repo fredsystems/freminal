@@ -328,6 +328,20 @@ impl CommandHistoryState {
 
 /// GUI-local view state for the terminal widget.
 ///
+/// A paste payload awaiting handling by the GUI layer (Task 77).
+///
+/// Stashed by `write_input_to_terminal` when an `Event::Paste` arrives (the
+/// windowing layer reads the clipboard reliably and injects the event) and
+/// drained in `update()`.
+#[derive(Debug, Clone)]
+pub struct PendingPaste {
+    /// The clipboard text to paste (already read by the windowing layer).
+    pub text: String,
+    /// When `true`, skip the smart paste guard entirely and send directly —
+    /// the user invoked the `PasteUnsafe` action (Ctrl+Shift+Alt+V).
+    pub bypass_guard: bool,
+}
+
 /// Everything here belongs to the render thread only.  The PTY thread never
 /// reads or writes any of these fields.
 ///
@@ -375,6 +389,18 @@ pub struct ViewState {
     /// Populated when the user clicks and drags with the primary mouse button
     /// while mouse tracking is off (no mouse-aware TUI application running).
     pub selection: SelectionState,
+
+    /// Pending paste from an egui `Event::Paste`, awaiting handling by the GUI
+    /// layer (Task 77).
+    ///
+    /// The windowing layer intercepts paste shortcuts, reads the clipboard via
+    /// the reliable egui-winit path, and injects `Event::Paste(text)`. The
+    /// payload is stashed here by `write_input_to_terminal` and drained in
+    /// `update()`, where (unless `bypass_guard` is set) the smart paste guard
+    /// runs with access to the config and the confirm dialog. Using the
+    /// injected text avoids a second, unreliable `arboard` clipboard read on
+    /// this path.
+    pub pending_paste: Option<PendingPaste>,
 
     /// Set of OSC 133 command blocks the user has folded in this pane.
     ///
@@ -526,6 +552,7 @@ impl Default for ViewState {
             previous_scroll_amount: 0.0,
             previous_mouse_state: None,
             selection: SelectionState::default(),
+            pending_paste: None,
             folded_blocks: HashSet::new(),
             text_blink_cycle: 0,
             text_blink_last_tick: Instant::now(),

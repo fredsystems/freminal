@@ -142,4 +142,10 @@ pub(super) struct PerWindowState {
     /// here.  Drained and dispatched at the top of the active pane's input
     /// processing each frame.
     pub(super) pending_menu_actions: Vec<freminal_common::keybindings::KeyAction>,
+
+    /// Smart paste guard confirmation dialog for this window (Task 77).
+    ///
+    /// Opened by `guarded_paste` when the analyzer flags a payload, rendered
+    /// every frame while open, and resolved when the user confirms or cancels.
+    pub(super) paste_dialog: super::paste_guard::PasteDialog,
 }

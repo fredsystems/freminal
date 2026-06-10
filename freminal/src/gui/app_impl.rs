@@ -222,6 +222,7 @@ impl freminal_windowing::App for FreminalGui {
                         dragging_tab: None,
                         last_tab_rects: Vec::new(),
                         pending_menu_actions: Vec::new(),
+                        paste_dialog: super::paste_guard::PasteDialog::default(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1078,6 +1079,18 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
+            // Smart paste guard confirm dialog (Task 77).  Shown whenever a
+            // flagged paste is pending for this window.  On confirm, the
+            // resolved (possibly edited) payload is sent to the active pane;
+            // on cancel the paste is discarded.
+            match win.paste_dialog.show(ctx) {
+                super::paste_guard::PasteDialogOutcome::Paste(payload) => {
+                    Self::send_paste_to_active_pane(&mut win, payload);
+                }
+                super::paste_guard::PasteDialogOutcome::Cancelled
+                | super::paste_guard::PasteDialogOutcome::Idle => {}
+            }
+
             // Floating "About Freminal" dialog.  Shown whenever the user
             // clicked "About Freminal" in the Help menu.  Self-dismissing
             // via its own Close button or title-bar X.
@@ -1109,7 +1122,8 @@ impl freminal_windowing::App for FreminalGui {
                 || self.pending_save_layout.is_some()
                 || self.about_window_open
                 || self.welcome.is_open()
-                || win.renaming_tab.is_some();
+                || win.renaming_tab.is_some()
+                || win.paste_dialog.is_open();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -1702,6 +1716,23 @@ impl freminal_windowing::App for FreminalGui {
                 self.dispatch_deferred_action(action, &mut win, window_id, handle);
             }
 
+            // Drain a pending paste injected by the windowing layer's
+            // `Event::Paste` (Task 77). Use the already-read text; do not
+            // re-read the clipboard here. `bypass_guard` (the PasteUnsafe
+            // action, Ctrl+Shift+Alt+V) sends directly without analysis.
+            let pending_paste = win
+                .tabs
+                .active_tab_mut()
+                .active_pane_mut()
+                .and_then(|pane| pane.view_state.pending_paste.take());
+            if let Some(pending) = pending_paste {
+                if pending.bypass_guard {
+                    Self::send_paste_to_active_pane(&mut win, pending.text);
+                } else {
+                    self.guarded_paste_text(&mut win, pending.text);
+                }
+            }
+
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
             if win.pending_close_pane {
                 win.pending_close_pane = false;
@@ -1938,6 +1969,7 @@ impl FreminalGui {
             dragging_tab: None,
             last_tab_rects: Vec::new(),
             pending_menu_actions: Vec::new(),
+            paste_dialog: super::paste_guard::PasteDialog::default(),
         }
     }
 
