@@ -297,13 +297,6 @@ impl PasteDialog {
         self.state.is_some()
     }
 
-    /// Discard any open dialog without producing an outcome.
-    ///
-    /// Used by 77.4 when the target pane closes out from under an open dialog.
-    pub(in crate::gui) fn close(&mut self) {
-        self.state = None;
-    }
-
     /// Render the dialog for one frame and return the resulting outcome.
     ///
     /// Returns [`PasteDialogOutcome::Idle`] when the dialog is closed or still
@@ -666,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn dialog_opens_and_closes() {
+    fn dialog_opens_on_flagged_analysis() {
         let mut dialog = PasteDialog::default();
         assert!(!dialog.is_open());
 
@@ -677,9 +670,6 @@ mod tests {
             },
         );
         assert!(dialog.is_open());
-
-        dialog.close();
-        assert!(!dialog.is_open());
     }
 
     #[test]

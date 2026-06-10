@@ -19,7 +19,7 @@ use egui::{Event, InputState, Key, Modifiers, PointerButton, Rect};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
-    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack, rl_bracket::RlBracket,
+    keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
 };
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_common::send_or_log;
@@ -448,29 +448,11 @@ pub(super) fn dispatch_binding_action(
     deferred_actions: &mut Vec<KeyAction>,
 ) {
     match action {
-        KeyAction::Paste => {
-            // Read clipboard directly via arboard, bypassing egui-winit's
-            // per-window clipboard (which fails on Wayland child windows).
-            match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                Ok(text) if !text.is_empty() => {
-                    let text = text.replace("\r\n", "\n");
-                    let payload = if snap.bracketed_paste == RlBracket::Enabled {
-                        format!("\x1b[200~{text}\x1b[201~")
-                    } else {
-                        text
-                    };
-                    send_or_log!(
-                        input_tx,
-                        InputEvent::Key(payload.into_bytes()),
-                        "Failed to send paste to PTY consumer"
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Clipboard read failed: {e}");
-                }
-            }
-        }
+        // `KeyAction::Paste` is intentionally NOT handled here. It is deferred
+        // to `dispatch_deferred_action` (via the `other` arm below) so the
+        // smart paste guard (Task 77) can analyze the clipboard with access to
+        // the live config and the per-window confirm dialog, which are not
+        // reachable at this input-layer call site.
         KeyAction::Copy if let Some((start, end)) = view_state.selection.normalised() => {
             if let Err(e) = input_tx.send(InputEvent::ExtractSelection {
                 start_row: start.row,
@@ -1490,13 +1472,14 @@ pub(super) fn write_input_to_terminal(
                 previous_key = Some(*key);
                 continue;
             }
-            Event::Paste(text) => {
-                if snap.bracketed_paste == RlBracket::Enabled {
-                    // ESC [ 200 ~, followed by the pasted text, followed by ESC [ 201 ~.
-                    collect_text(&format!("\x1b[200~{}{}", text, "\x1b[201~"))
-                } else {
-                    collect_text(text)
-                }
+            Event::Paste(_text) => {
+                // Route egui paste events through the smart paste guard
+                // (Task 77) rather than sending inline. The guard reads the
+                // clipboard itself in `dispatch_deferred_action`, so the event
+                // text is not forwarded here; deferring `KeyAction::Paste`
+                // unifies this path with the Ctrl+Shift+V / menu paste paths.
+                deferred_actions.push(KeyAction::Paste);
+                continue;
             }
             Event::PointerGone => {
                 view_state.mouse_position = None;

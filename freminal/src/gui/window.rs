@@ -145,11 +145,7 @@ pub(super) struct PerWindowState {
 
     /// Smart paste guard confirmation dialog for this window (Task 77).
     ///
-    /// Opened by the paste path when the analyzer flags a payload, rendered
+    /// Opened by `guarded_paste` when the analyzer flags a payload, rendered
     /// every frame while open, and resolved when the user confirms or cancels.
-    /// Wired into the paste flow in 77.4.
-    // TODO(77.4): remove this `allow` once `update()` renders the dialog and
-    // the paste path opens it. The field has no reader until then.
-    #[allow(dead_code)]
     pub(super) paste_dialog: super::paste_guard::PasteDialog,
 }

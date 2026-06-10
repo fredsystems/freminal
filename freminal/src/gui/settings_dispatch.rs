@@ -117,6 +117,17 @@ impl FreminalGui {
 
         self.config = new_cfg;
 
+        // Rebuild the paste-guard pattern cache from the new config and report
+        // any patterns that fail to compile (skipped at match time).
+        let invalid = self.paste_guard.rebuild(&self.config.paste_guard);
+        for (pattern, err) in invalid {
+            error!("Paste guard: ignoring invalid pattern `{pattern}`: {err}");
+            self.push_error_toast(
+                "Invalid paste-guard pattern",
+                Some(format!("`{pattern}` — {err}")),
+            );
+        }
+
         // Apply background image to all panes in all windows.
         let new_bg_path = self.config.ui.background_image.clone();
         for win in self.windows.values() {

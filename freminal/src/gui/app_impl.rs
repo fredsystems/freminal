@@ -1079,6 +1079,18 @@ impl freminal_windowing::App for FreminalGui {
                 all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
             }
 
+            // Smart paste guard confirm dialog (Task 77).  Shown whenever a
+            // flagged paste is pending for this window.  On confirm, the
+            // resolved (possibly edited) payload is sent to the active pane;
+            // on cancel the paste is discarded.
+            match win.paste_dialog.show(ctx) {
+                super::paste_guard::PasteDialogOutcome::Paste(payload) => {
+                    Self::send_paste_to_active_pane(&mut win, payload);
+                }
+                super::paste_guard::PasteDialogOutcome::Cancelled
+                | super::paste_guard::PasteDialogOutcome::Idle => {}
+            }
+
             // Floating "About Freminal" dialog.  Shown whenever the user
             // clicked "About Freminal" in the Help menu.  Self-dismissing
             // via its own Close button or title-bar X.
