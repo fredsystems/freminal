@@ -31,7 +31,7 @@ use regex::Regex;
 /// directly. Every other variant means the confirmation dialog should be
 /// shown, carrying enough detail to explain *why* to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::gui) enum PasteAnalysis {
+pub enum PasteAnalysis {
     /// No enabled trigger fired; send the payload without confirmation.
     Safe,
     /// The payload contains at least one newline.
@@ -63,7 +63,8 @@ pub(in crate::gui) enum PasteAnalysis {
 
 impl PasteAnalysis {
     /// Whether the payload may be sent without confirmation.
-    pub(in crate::gui) const fn is_safe(&self) -> bool {
+    #[must_use]
+    pub const fn is_safe(&self) -> bool {
         matches!(self, Self::Safe)
     }
 }
@@ -88,11 +89,8 @@ fn is_flagged_control(c: char) -> bool {
 /// paste.
 ///
 /// When `config.enabled` is `false` the result is always [`PasteAnalysis::Safe`].
-pub(in crate::gui) fn analyze(
-    payload: &str,
-    config: &PasteGuardConfig,
-    compiled: &[Regex],
-) -> PasteAnalysis {
+#[must_use]
+pub fn analyze(payload: &str, config: &PasteGuardConfig, compiled: &[Regex]) -> PasteAnalysis {
     if !config.enabled {
         return PasteAnalysis::Safe;
     }
@@ -148,7 +146,7 @@ pub(in crate::gui) fn analyze(
 /// skipped (and reported by [`PasteGuard::rebuild`]) so a single malformed
 /// user pattern never disables the guard.
 #[derive(Debug, Default)]
-pub(in crate::gui) struct PasteGuard {
+pub struct PasteGuard {
     compiled: Vec<Regex>,
 }
 
@@ -157,7 +155,8 @@ impl PasteGuard {
     ///
     /// Prefer [`PasteGuard::rebuild`] on an existing guard when you need to
     /// surface compile errors to the user.
-    pub(in crate::gui) fn new(config: &PasteGuardConfig) -> Self {
+    #[must_use]
+    pub fn new(config: &PasteGuardConfig) -> Self {
         let mut guard = Self::default();
         let _ = guard.rebuild(config);
         guard
@@ -169,7 +168,7 @@ impl PasteGuard {
     ///
     /// Successfully-compiled patterns are always installed even when some
     /// siblings fail, so the guard stays maximally effective.
-    pub(in crate::gui) fn rebuild(&mut self, config: &PasteGuardConfig) -> Vec<(String, String)> {
+    pub fn rebuild(&mut self, config: &PasteGuardConfig) -> Vec<(String, String)> {
         let mut compiled = Vec::with_capacity(config.pattern_list.len());
         let mut errors = Vec::new();
         for pattern in &config.pattern_list {
@@ -183,11 +182,8 @@ impl PasteGuard {
     }
 
     /// Classify `payload` using the cached patterns and `config`.
-    pub(in crate::gui) fn analyze(
-        &self,
-        payload: &str,
-        config: &PasteGuardConfig,
-    ) -> PasteAnalysis {
+    #[must_use]
+    pub fn analyze(&self, payload: &str, config: &PasteGuardConfig) -> PasteAnalysis {
         analyze(payload, config, &self.compiled)
     }
 }

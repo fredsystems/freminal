@@ -42,7 +42,7 @@ mod hot_reload;
 mod layout_ops;
 mod menu;
 mod notifications;
-mod paste_guard;
+pub mod paste_guard;
 mod platform;
 mod recording;
 mod rendering;

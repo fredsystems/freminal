@@ -41,6 +41,10 @@ assets = [
 
 [[bench]]
 harness = false
+name = "paste_guard_bench"
+
+[[bench]]
+harness = false
 name = "render_loop_bench"
 
 [dependencies]
