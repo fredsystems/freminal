@@ -20,6 +20,8 @@
 //!   the caller can surface them (e.g. via the toast stack) and the guard
 //!   silently skips them at match time.
 
+use std::fmt::Write as _;
+
 use freminal_common::config::PasteGuardConfig;
 use regex::Regex;
 
@@ -187,6 +189,226 @@ impl PasteGuard {
         config: &PasteGuardConfig,
     ) -> PasteAnalysis {
         analyze(payload, config, &self.compiled)
+    }
+}
+
+/// A one-line, human-readable explanation of why the paste was flagged,
+/// shown in the dialog banner.
+///
+/// Pure and unit-tested; the dialog renderer only formats this string.
+fn banner_text(analysis: &PasteAnalysis) -> String {
+    match analysis {
+        // `Safe` never reaches the dialog, but give a sane string rather than
+        // panicking if it somehow does.
+        PasteAnalysis::Safe => "Paste".to_owned(),
+        PasteAnalysis::Multiline {
+            line_count,
+            byte_count,
+        } => {
+            format!("Multi-line paste — {line_count} lines, {byte_count} bytes")
+        }
+        PasteAnalysis::ControlChars { chars } => {
+            let rendered = chars
+                .iter()
+                .map(|c| format!("U+{:04X}", u32::from(*c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Control characters detected: {rendered}")
+        }
+        PasteAnalysis::Patterns { matched } => {
+            format!("Dangerous patterns detected: {}", matched.join(", "))
+        }
+        PasteAnalysis::Multiple { triggers } => {
+            let parts = triggers
+                .iter()
+                .map(banner_text)
+                .collect::<Vec<_>>()
+                .join("; ");
+            let mut out = String::from("Multiple triggers — ");
+            // `write!` into a String is infallible; ignore the Result without
+            // an `unwrap` to satisfy the panic-free policy.
+            let _ = write!(out, "{parts}");
+            out
+        }
+    }
+}
+
+/// The result of rendering the confirm-paste dialog for one frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::gui) enum PasteDialogOutcome {
+    /// The dialog is closed, or open and awaiting a decision. Nothing to do.
+    Idle,
+    /// The user cancelled. The pending paste must be discarded.
+    Cancelled,
+    /// The user confirmed. The carried payload (original or edited) must be
+    /// sent to the PTY by the caller (77.4), which owns bracketed-paste
+    /// wrapping and PTY routing.
+    Paste(String),
+}
+
+/// State for a single open confirm-paste dialog.
+#[derive(Debug, Clone)]
+struct PasteDialogState {
+    /// The raw, unwrapped paste payload as analysed.
+    payload: String,
+    /// Why the paste was flagged (drives the banner).
+    analysis: PasteAnalysis,
+    /// `true` once the user clicked "Edit and Paste"; the content area becomes
+    /// an editable `TextEdit` bound to `edit_buffer`.
+    editing: bool,
+    /// Scratch buffer for the edit mode, initialised from `payload`.
+    edit_buffer: String,
+    /// `true` only on the first frame after opening, used to focus the edit
+    /// field exactly once when entering edit mode.
+    just_entered_edit: bool,
+}
+
+/// The confirm-paste modal dialog (Task 77.3).
+///
+/// Lives on `PerWindowState`. Opened by the paste path (77.4) when the
+/// analyzer flags a payload, rendered every frame while open via [`show`],
+/// and resolved when the user confirms, cancels, or presses a shortcut.
+///
+/// [`show`]: PasteDialog::show
+#[derive(Debug, Default)]
+pub(in crate::gui) struct PasteDialog {
+    state: Option<PasteDialogState>,
+}
+
+impl PasteDialog {
+    /// Open the dialog for `payload` with its precomputed `analysis`.
+    ///
+    /// A `Safe` analysis is ignored — the dialog is only for flagged pastes.
+    pub(in crate::gui) fn open(&mut self, payload: String, analysis: PasteAnalysis) {
+        if analysis.is_safe() {
+            return;
+        }
+        self.state = Some(PasteDialogState {
+            edit_buffer: payload.clone(),
+            payload,
+            analysis,
+            editing: false,
+            just_entered_edit: false,
+        });
+    }
+
+    /// Whether the dialog is currently open.
+    pub(in crate::gui) const fn is_open(&self) -> bool {
+        self.state.is_some()
+    }
+
+    /// Discard any open dialog without producing an outcome.
+    ///
+    /// Used by 77.4 when the target pane closes out from under an open dialog.
+    pub(in crate::gui) fn close(&mut self) {
+        self.state = None;
+    }
+
+    /// Render the dialog for one frame and return the resulting outcome.
+    ///
+    /// Returns [`PasteDialogOutcome::Idle`] when the dialog is closed or still
+    /// awaiting a decision. On `Cancelled` or `Paste`, the dialog closes
+    /// itself before returning.
+    ///
+    /// Keyboard shortcuts: `Escape` cancels; `Ctrl+Enter` pastes the current
+    /// payload (edited content when in edit mode).
+    pub(in crate::gui) fn show(&mut self, ctx: &egui::Context) -> PasteDialogOutcome {
+        let Some(state) = self.state.as_mut() else {
+            return PasteDialogOutcome::Idle;
+        };
+
+        let mut outcome = PasteDialogOutcome::Idle;
+
+        let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let ctrl_enter = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+
+        egui::Window::new("Confirm Paste")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(560.0);
+
+                // Trigger banner.
+                ui.label(
+                    egui::RichText::new(banner_text(&state.analysis))
+                        .strong()
+                        .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x4B)),
+                );
+                ui.add_space(6.0);
+
+                // Content area: read-only preview, or editable buffer.
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        if state.editing {
+                            let response = ui.add(
+                                egui::TextEdit::multiline(&mut state.edit_buffer)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(10),
+                            );
+                            if state.just_entered_edit {
+                                response.request_focus();
+                                state.just_entered_edit = false;
+                            }
+                        } else {
+                            // Read-only: a disabled multiline TextEdit keeps the
+                            // monospace + selectable behaviour without allowing
+                            // edits.
+                            let mut view = state.payload.as_str();
+                            ui.add_enabled(
+                                false,
+                                egui::TextEdit::multiline(&mut view)
+                                    .font(egui::TextStyle::Monospace)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(10),
+                            );
+                        }
+                    });
+
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    // Cancel is the default (safest) action.
+                    if ui.button("Cancel").clicked() {
+                        outcome = PasteDialogOutcome::Cancelled;
+                    }
+                    if ui.button("Paste Anyway").clicked() {
+                        let payload = if state.editing {
+                            state.edit_buffer.clone()
+                        } else {
+                            state.payload.clone()
+                        };
+                        outcome = PasteDialogOutcome::Paste(payload);
+                    }
+                    if !state.editing && ui.button("Edit and Paste").clicked() {
+                        state.editing = true;
+                        state.just_entered_edit = true;
+                    }
+                });
+            });
+
+        // Keyboard shortcuts resolve after rendering so a click in the same
+        // frame still wins if both happen (clicks set `outcome` above).
+        if outcome == PasteDialogOutcome::Idle {
+            if escape {
+                outcome = PasteDialogOutcome::Cancelled;
+            } else if ctrl_enter {
+                let payload = if state.editing {
+                    state.edit_buffer.clone()
+                } else {
+                    state.payload.clone()
+                };
+                outcome = PasteDialogOutcome::Paste(payload);
+            }
+        }
+
+        if outcome != PasteDialogOutcome::Idle {
+            self.state = None;
+        }
+        outcome
     }
 }
 
@@ -398,5 +620,86 @@ mod tests {
             }
             .is_safe()
         );
+    }
+
+    #[test]
+    fn banner_text_for_each_variant() {
+        assert_eq!(
+            banner_text(&PasteAnalysis::Multiline {
+                line_count: 17,
+                byte_count: 420,
+            }),
+            "Multi-line paste — 17 lines, 420 bytes"
+        );
+        assert_eq!(
+            banner_text(&PasteAnalysis::ControlChars {
+                chars: vec!['\x1b', '\x07'],
+            }),
+            "Control characters detected: U+001B, U+0007"
+        );
+        assert_eq!(
+            banner_text(&PasteAnalysis::Patterns {
+                matched: vec![r"\bsudo\b".to_owned(), r"\brm\s+-rf?\b".to_owned()],
+            }),
+            r"Dangerous patterns detected: \bsudo\b, \brm\s+-rf?\b"
+        );
+        assert_eq!(banner_text(&PasteAnalysis::Safe), "Paste");
+    }
+
+    #[test]
+    fn banner_text_flattens_multiple() {
+        let banner = banner_text(&PasteAnalysis::Multiple {
+            triggers: vec![
+                PasteAnalysis::Multiline {
+                    line_count: 2,
+                    byte_count: 8,
+                },
+                PasteAnalysis::Patterns {
+                    matched: vec![r"\bsudo\b".to_owned()],
+                },
+            ],
+        });
+        assert_eq!(
+            banner,
+            r"Multiple triggers — Multi-line paste — 2 lines, 8 bytes; Dangerous patterns detected: \bsudo\b"
+        );
+    }
+
+    #[test]
+    fn dialog_opens_and_closes() {
+        let mut dialog = PasteDialog::default();
+        assert!(!dialog.is_open());
+
+        dialog.open(
+            "sudo rm -rf /".to_owned(),
+            PasteAnalysis::Patterns {
+                matched: vec![r"\bsudo\b".to_owned()],
+            },
+        );
+        assert!(dialog.is_open());
+
+        dialog.close();
+        assert!(!dialog.is_open());
+    }
+
+    #[test]
+    fn dialog_ignores_safe_analysis() {
+        let mut dialog = PasteDialog::default();
+        dialog.open("harmless".to_owned(), PasteAnalysis::Safe);
+        assert!(
+            !dialog.is_open(),
+            "a Safe analysis must never open the dialog"
+        );
+    }
+
+    #[test]
+    fn dialog_outcome_equality() {
+        // Sanity-check the outcome enum used by 77.4's wire-in.
+        assert_eq!(PasteDialogOutcome::Idle, PasteDialogOutcome::Idle);
+        assert_ne!(
+            PasteDialogOutcome::Paste("a".to_owned()),
+            PasteDialogOutcome::Paste("b".to_owned())
+        );
+        assert_ne!(PasteDialogOutcome::Cancelled, PasteDialogOutcome::Idle);
     }
 }
