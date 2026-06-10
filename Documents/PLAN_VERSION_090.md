@@ -3403,6 +3403,20 @@ read. `arboard` (`guarded_paste`) is retained only for the menu-Paste /
 explicit-keybinding path that does not flow through the windowing
 interceptor.
 
+**Follow-up fix (commit `7dbf538`, 2026-06-10): dialog focus.**
+The dialog rendered but never captured keyboard input — focus bounced
+back to the terminal, so the Edit-and-Paste field was untypable (the
+recurring modal-focus bug class also fixed for settings/search/command
+history). Two fixes, matching the established pattern: (1) add
+`win.paste_dialog.is_open()` to the `ui_overlay_open` flag in
+`update()` (`app_impl.rs`) — that flag gates the terminal widget's
+focus-lock and its `write_input_to_terminal` call, so the active pane
+stops stealing focus and forwarding keystrokes while the dialog is
+open; (2) give the edit-mode `TextEdit` `.lock_focus(true)` and
+re-request focus every frame it lacks it (mirroring `show_search_bar`
+and `show_command_history_palette`). The redundant `just_entered_edit`
+flag was removed.
+
 #### 77.5 — KeyAction::PasteUnsafe
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.
