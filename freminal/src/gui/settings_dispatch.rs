@@ -340,6 +340,36 @@ impl FreminalGui {
                     );
                 }
             }
+            SettingsAction::TestPaste => {
+                // Open the confirm dialog with sample content using the draft
+                // `[paste_guard]` config, so the user previews exactly what
+                // their current (unsaved) settings produce. Routed to the
+                // terminal window that owns the Settings window.
+                const SAMPLE: &str = "echo first line\nsudo rm -rf /tmp/example\necho third line";
+                let cfg = self.settings_modal.draft_paste_guard().clone();
+                let guard = crate::gui::paste_guard::PasteGuard::new(&cfg);
+                let analysis = guard.analyze(SAMPLE, &cfg);
+                if analysis.is_safe() {
+                    self.push_info_toast(
+                        "Test Paste",
+                        Some(
+                            "With these settings the sample paste would NOT be \
+                             intercepted."
+                                .to_owned(),
+                        ),
+                    );
+                } else if let Some(owner) = self.settings_owner
+                    && let Some(win) = self.windows.get_mut(&owner)
+                {
+                    win.paste_dialog.open(SAMPLE.to_owned(), analysis);
+                    handle.request_repaint(owner);
+                } else {
+                    self.push_error_toast(
+                        "Test Paste",
+                        Some("No terminal window available to show the dialog.".to_owned()),
+                    );
+                }
+            }
             SettingsAction::RevertTheme(_, _)
             | SettingsAction::PreviewTheme(_)
             | SettingsAction::None => {}

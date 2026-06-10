@@ -101,6 +101,10 @@ pub enum SettingsAction {
     /// a sample notification through the current draft `[notifications]`
     /// config so the user can verify routing without running a command.
     TestNotification,
+    /// The user clicked "Test Paste" in the Security tab — open the confirm
+    /// dialog with sample content using the current draft `[paste_guard]`
+    /// config so the user can preview the guard without pasting for real.
+    TestPaste,
 }
 
 /// Result of scanning a frame's egui events for a key-binding press.
@@ -149,6 +153,11 @@ enum KeyRecordingState {
 }
 
 /// Persistent state for the settings modal.
+// Several independent UI flags (window-open, per-tab "pending action" one-shots
+// like test-notification / test-paste, recording state). Each is a distinct,
+// unrelated boolean; collapsing them into a state machine would obscure rather
+// than clarify the modal's state.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SettingsModal {
     /// Whether the modal window is currently visible.
     pub is_open: bool,
@@ -235,6 +244,12 @@ pub struct SettingsModal {
     /// as `SettingsAction::TestNotification` so the app can route a sample
     /// notification through the draft `[notifications]` config.
     pending_test_notification: bool,
+
+    /// Set by `show_security_tab` when the user clicks "Test Paste".  Consumed
+    /// by `show` / `show_standalone` which return it as
+    /// `SettingsAction::TestPaste` so the app can open the confirm dialog with
+    /// sample content using the draft `[paste_guard]` config.
+    pending_test_paste: bool,
 }
 
 impl SettingsModal {
@@ -261,6 +276,7 @@ impl SettingsModal {
             baseline_toml: String::new(),
             pending_close: PendingClose::None,
             pending_test_notification: false,
+            pending_test_paste: false,
         }
     }
 
@@ -531,6 +547,10 @@ impl SettingsModal {
             return SettingsAction::TestNotification;
         }
 
+        if std::mem::take(&mut self.pending_test_paste) {
+            return SettingsAction::TestPaste;
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -688,6 +708,10 @@ impl SettingsModal {
             return SettingsAction::TestNotification;
         }
 
+        if std::mem::take(&mut self.pending_test_paste) {
+            return SettingsAction::TestPaste;
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -733,6 +757,14 @@ impl SettingsModal {
     #[must_use]
     pub(super) const fn draft_notifications(&self) -> &config::NotificationsConfig {
         &self.draft.notifications
+    }
+
+    /// The draft `[paste_guard]` config, so the "Test Paste" button can preview
+    /// the confirm dialog using the settings the user is currently editing
+    /// (including unsaved changes).
+    #[must_use]
+    pub(super) const fn draft_paste_guard(&self) -> &config::PasteGuardConfig {
+        &self.draft.paste_guard
     }
 
     // -------------------------------------------------------------------------
@@ -1600,6 +1632,92 @@ impl SettingsModal {
             "Show a \u{1f510} lock icon in the tab bar when the foreground \
              process disables terminal echo (e.g. password prompts from \
              sudo, ssh, passwd).",
+        );
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+        self.show_paste_guard_section(ui);
+    }
+
+    /// The Paste Guard subsection of the Security tab (Task 77).
+    fn show_paste_guard_section(&mut self, ui: &mut Ui) {
+        ui.heading("Paste Guard");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Show a confirmation dialog before pasting risky content. \
+             Bypass for a single paste with Ctrl+Shift+Alt+V.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.paste_guard.enabled, "Enable paste guard");
+
+        // The per-trigger toggles are only meaningful while the guard is on.
+        ui.add_enabled_ui(self.draft.paste_guard.enabled, |ui| {
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.draft.paste_guard.multiline,
+                "Confirm multi-line pastes",
+            );
+            ui.checkbox(
+                &mut self.draft.paste_guard.control_chars,
+                "Confirm pastes containing control characters",
+            );
+            ui.checkbox(
+                &mut self.draft.paste_guard.patterns,
+                "Confirm pastes matching dangerous patterns",
+            );
+
+            // Pattern list editor — only relevant when pattern matching is on.
+            ui.add_enabled_ui(self.draft.paste_guard.patterns, |ui| {
+                ui.add_space(8.0);
+                ui.label("Dangerous patterns (Rust regex):");
+                ui.add_space(2.0);
+
+                // Index of a row to delete, applied after the loop so we do
+                // not mutate the Vec while iterating it.
+                let mut remove_index: Option<usize> = None;
+                for (idx, pattern) in self.draft.paste_guard.pattern_list.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.button("\u{2796}").on_hover_text("Remove").clicked() {
+                            remove_index = Some(idx);
+                        }
+                        let valid = regex::Regex::new(pattern).is_ok();
+                        let edit = egui::TextEdit::singleline(pattern)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace)
+                            .text_color_opt(
+                                (!valid).then_some(egui::Color32::from_rgb(0xE0, 0x6C, 0x4B)),
+                            );
+                        ui.add(edit).on_hover_text(if valid {
+                            "Valid regex"
+                        } else {
+                            "Invalid regex \u{2014} this pattern is ignored at match time"
+                        });
+                    });
+                }
+                if let Some(idx) = remove_index {
+                    self.draft.paste_guard.pattern_list.remove(idx);
+                }
+
+                ui.add_space(2.0);
+                if ui.button("\u{2795} Add pattern").clicked() {
+                    self.draft.paste_guard.pattern_list.push(String::new());
+                }
+            });
+        });
+
+        ui.add_space(8.0);
+        if ui.button("Test Paste").clicked() {
+            self.pending_test_paste = true;
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Opens the confirm dialog with sample content using the current \
+             (unsaved) settings, so you can preview the guard without pasting \
+             for real.",
         );
     }
 
@@ -2536,6 +2654,38 @@ mod tests {
         let drained = std::mem::take(&mut modal.pending_test_notification);
         assert!(drained);
         assert!(!modal.pending_test_notification);
+    }
+
+    #[test]
+    fn test_paste_button_sets_pending_flag() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert!(!modal.pending_test_paste);
+        // Simulate the button click side-effect.
+        modal.pending_test_paste = true;
+        // The drain in `show`/`show_standalone` takes the flag and returns
+        // `SettingsAction::TestPaste`; emulate that here.
+        let drained = std::mem::take(&mut modal.pending_test_paste);
+        assert!(drained);
+        assert!(!modal.pending_test_paste);
+    }
+
+    #[test]
+    fn draft_paste_guard_reflects_edits() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert!(modal.draft_paste_guard().enabled);
+        // Edits to the draft are visible through the accessor used by the
+        // "Test Paste" dispatch.
+        modal.draft.paste_guard.enabled = false;
+        modal.draft.paste_guard.pattern_list = vec![r"\bgit\s+push\b".to_owned()];
+        assert!(!modal.draft_paste_guard().enabled);
+        assert_eq!(
+            modal.draft_paste_guard().pattern_list,
+            vec![r"\bgit\s+push\b"]
+        );
     }
 
     #[test]
