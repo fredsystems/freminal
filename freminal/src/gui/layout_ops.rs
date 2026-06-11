@@ -631,6 +631,7 @@ impl FreminalGui {
             last_tab_rects: Vec::new(),
             pending_menu_actions: Vec::new(),
             paste_dialog: super::paste_guard::PasteDialog::default(),
+            broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
         };
         self.windows.insert(window_id, win);
 

@@ -1322,6 +1322,50 @@ impl SettingsModal {
             &self.draft.tab_title.separator,
         );
         ui.colored_label(egui::Color32::GRAY, format!("Preview:  {preview}"));
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        self.show_broadcast_input_section(ui);
+    }
+
+    /// Render the "Broadcast Input" section of the Tabs settings tab
+    /// (Task 74.5): the read-only shortcut display with a jump-to-keybindings
+    /// button, and the confirm-before-enabling toggle.
+    fn show_broadcast_input_section(&mut self, ui: &mut Ui) {
+        ui.label("Broadcast Input:");
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled for a tab, keystrokes are sent to every pane in the \
+             tab at once. Toggle it per-tab with the keybinding below.",
+        );
+        ui.add_space(4.0);
+
+        let effective_map = self.draft.build_binding_map().unwrap_or_default();
+        let binding_text = effective_map
+            .combo_for(KeyAction::ToggleBroadcastInput)
+            .map_or_else(|| "unbound".to_owned(), |c| c.to_string());
+        ui.horizontal(|ui| {
+            ui.label("Shortcut:");
+            ui.monospace(&binding_text);
+            if ui.button("Change…").clicked() {
+                self.active_tab = SettingsTab::Keybindings;
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.draft.tabs.confirm_broadcast,
+            "Confirm before enabling broadcast",
+        );
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When on, the first time you enable broadcast in a tab a dialog \
+             asks you to confirm. Disabling broadcast never prompts.",
+        );
     }
 
     // Renders both the Shell Integration section and the Command Blocks

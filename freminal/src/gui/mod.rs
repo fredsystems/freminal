@@ -36,6 +36,7 @@ pub mod view_state;
 
 mod actions;
 mod app_impl;
+mod broadcast_guard;
 mod command_blocks;
 mod command_history;
 mod hot_reload;

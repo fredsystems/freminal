@@ -223,6 +223,7 @@ impl freminal_windowing::App for FreminalGui {
                         last_tab_rects: Vec::new(),
                         pending_menu_actions: Vec::new(),
                         paste_dialog: super::paste_guard::PasteDialog::default(),
+                        broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1113,6 +1114,26 @@ impl freminal_windowing::App for FreminalGui {
                 | super::paste_guard::PasteDialogOutcome::Idle => {}
             }
 
+            // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
+            // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
+            // On confirm, broadcast is enabled on the dialog's target tab.
+            match win.broadcast_dialog.show(ctx) {
+                super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
+                    if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.broadcast_input = true;
+                        let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                        self.push_info_toast(
+                            "Broadcast input enabled",
+                            Some(format!(
+                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                            )),
+                        );
+                    }
+                }
+                super::broadcast_guard::BroadcastDialogOutcome::Cancelled
+                | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
+            }
+
             // Floating "About Freminal" dialog.  Shown whenever the user
             // clicked "About Freminal" in the Help menu.  Self-dismissing
             // via its own Close button or title-bar X.
@@ -1145,7 +1166,8 @@ impl freminal_windowing::App for FreminalGui {
                 || self.about_window_open
                 || self.welcome.is_open()
                 || win.renaming_tab.is_some()
-                || win.paste_dialog.is_open();
+                || win.paste_dialog.is_open()
+                || win.broadcast_dialog.is_open();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -2049,6 +2071,7 @@ impl FreminalGui {
             last_tab_rects: Vec::new(),
             pending_menu_actions: Vec::new(),
             paste_dialog: super::paste_guard::PasteDialog::default(),
+            broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
         }
     }
 

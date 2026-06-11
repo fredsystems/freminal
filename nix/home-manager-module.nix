@@ -94,7 +94,7 @@ let
       };
 
       tabsSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.tabs) show_single_tab position;
+        inherit (s.tabs) show_single_tab position confirm_broadcast;
       };
 
       bellSection = lib.filterAttrs (_: v: v != null) {
@@ -525,6 +525,16 @@ in
           description = ''
             Position of the tab bar: "top" or "bottom".
             Null uses the default ("top").
+          '';
+        };
+
+        confirm_broadcast = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Whether enabling broadcast input (sending keystrokes to every
+            pane in a tab) requires a confirmation dialog the first time it
+            is turned on for a tab. Null uses the default (false).
           '';
         };
       };

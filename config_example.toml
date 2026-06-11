@@ -197,6 +197,12 @@ limit = 4000
 # Default: "top"
 # position = "top"
 
+# Whether enabling broadcast input (Ctrl+Shift+I — send keystrokes to every
+# pane in the tab) requires a confirmation dialog the first time it is turned
+# on for a tab. Disabling broadcast never prompts.
+# Default: false
+# confirm_broadcast = false
+
 ## ##############################################################################
 # TAB TITLE SETTINGS
 ## ##############################################################################

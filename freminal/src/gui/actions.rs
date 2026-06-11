@@ -588,18 +588,30 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::ToggleBroadcastInput => {
+                let confirm = self.config.tabs.confirm_broadcast;
                 let tab = win.tabs.active_tab_mut();
-                let now_on = tab.toggle_broadcast();
                 let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
-                if now_on {
-                    self.push_info_toast(
-                        "Broadcast input enabled",
-                        Some(format!(
-                            "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
-                        )),
-                    );
+                let currently_on = tab.broadcast_input;
+
+                // Turning broadcast ON with confirmation enabled defers the
+                // toggle to the confirm dialog. Turning it OFF (or with
+                // confirmation disabled) toggles immediately. Disabling never
+                // prompts.
+                if !currently_on && confirm {
+                    let tab_id = tab.id;
+                    win.broadcast_dialog.open(tab_id, pane_count);
                 } else {
-                    self.push_info_toast("Broadcast input disabled", None);
+                    let now_on = tab.toggle_broadcast();
+                    if now_on {
+                        self.push_info_toast(
+                            "Broadcast input enabled",
+                            Some(format!(
+                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                            )),
+                        );
+                    } else {
+                        self.push_info_toast("Broadcast input disabled", None);
+                    }
                 }
             }
             KeyAction::Paste => self.guarded_paste(win),

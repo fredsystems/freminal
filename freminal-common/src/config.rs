@@ -406,6 +406,11 @@ pub struct TabsConfig {
     pub show_single_tab: bool,
     /// Position of the tab bar: `"top"` or `"bottom"`.
     pub position: TabBarPosition,
+    /// Whether toggling broadcast input *on* requires a confirmation dialog
+    /// (Task 74). When `true`, the first activation of broadcast in a tab
+    /// prompts "You are about to broadcast keyboard input to N panes.
+    /// Continue?". Disabling broadcast never prompts. Default: `false`.
+    pub confirm_broadcast: bool,
 }
 
 impl Default for TabsConfig {
@@ -413,6 +418,7 @@ impl Default for TabsConfig {
         Self {
             show_single_tab: false,
             position: TabBarPosition::Top,
+            confirm_broadcast: false,
         }
     }
 }
@@ -2712,12 +2718,14 @@ position = "bottom"
         let mut cfg = Config::default();
         cfg.tabs.show_single_tab = true;
         cfg.tabs.position = TabBarPosition::Bottom;
+        cfg.tabs.confirm_broadcast = true;
 
         let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
         let deserialized: Config =
             toml::from_str(&toml_str).expect("serialized TOML should round-trip");
         assert!(deserialized.tabs.show_single_tab);
         assert_eq!(deserialized.tabs.position, TabBarPosition::Bottom);
+        assert!(deserialized.tabs.confirm_broadcast);
     }
 
     #[test]

@@ -148,4 +148,10 @@ pub(super) struct PerWindowState {
     /// Opened by `guarded_paste` when the analyzer flags a payload, rendered
     /// every frame while open, and resolved when the user confirms or cancels.
     pub(super) paste_dialog: super::paste_guard::PasteDialog,
+
+    /// Broadcast-input confirmation dialog for this window (Task 74).
+    ///
+    /// Opened by the `ToggleBroadcastInput` dispatch when
+    /// `[tabs] confirm_broadcast` is set and broadcast is being turned on.
+    pub(super) broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog,
 }
