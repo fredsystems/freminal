@@ -803,6 +803,26 @@ pub(super) fn send_terminal_inputs(
     );
 }
 
+/// Mirror an already-encoded keyboard byte sequence to every broadcast target.
+///
+/// Used by Task 74 broadcast-input mode: the active pane's encoded
+/// `InputEvent::Key` payload is replayed to every other leaf pane in the tab.
+/// Each pane independently applies its own bracketed-paste / cursor-key mode,
+/// so we replay the raw encoded bytes rather than re-encoding per pane.
+///
+/// A failed send to one target is logged and skipped — it never aborts the
+/// fan-out to the remaining targets.
+fn broadcast_key_bytes(targets: &[Sender<InputEvent>], bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    for target in targets {
+        if let Err(e) = target.send(InputEvent::Key(bytes.to_vec())) {
+            error!("Failed to broadcast key input to a pane: {e}");
+        }
+    }
+}
+
 /// Handle mouse scroll when mouse tracking is off.
 ///
 /// On the **alternate screen** (less, vim, htop, ...) scroll events are
@@ -975,6 +995,15 @@ fn release_end_col(
 /// When `is_active_pane` is `false`, only primary left-click presses are detected (to support
 /// click-to-focus in the caller). All keyboard, text, paste, copy, scroll, and mouse-tracking
 /// events are suppressed — they are never forwarded to the inactive pane's PTY.
+///
+/// ## Broadcast input (Task 74)
+///
+/// `key_broadcast_targets` lists the input senders of the *other* panes in
+/// the tab when broadcast mode is active on the active pane. Genuine keyboard
+/// input (text, control keys, KKP press/release, synthesized control
+/// sequences, and paste payloads) is mirrored to every target. Mouse,
+/// scroll-derived, resize, focus, and selection events are never mirrored.
+/// The slice is empty when broadcast is off or this is not the active pane.
 pub(super) fn write_input_to_terminal(
     input: &InputState,
     snap: &TerminalSnapshot,
@@ -991,6 +1020,7 @@ pub(super) fn write_input_to_terminal(
     is_active_pane: bool,
     recording_ctx: Option<&RecordingContext<'_>>,
     placeholder_rects: &[(Rect, CommandBlockId)],
+    key_broadcast_targets: &[Sender<InputEvent>],
 ) -> (
     bool,
     Option<PreviousMouseState>,
@@ -1079,12 +1109,16 @@ pub(super) fn write_input_to_terminal(
                     event_type: KeyEventType::Release,
                     associated_text: None,
                 };
-                send_terminal_inputs(
-                    std::slice::from_ref(&ti),
-                    input_tx,
-                    &InputModes::from_snapshot(snap),
-                    &release_meta,
-                );
+                let modes = InputModes::from_snapshot(snap);
+                send_terminal_inputs(std::slice::from_ref(&ti), input_tx, &modes, &release_meta);
+                // Broadcast (Task 74): mirror the KKP release sequence to the
+                // other panes. Each pane shares the same KKP mode here, so
+                // re-encoding with the active pane's modes is correct.
+                if !key_broadcast_targets.is_empty() {
+                    let bytes =
+                        encode_terminal_inputs(std::slice::from_ref(&ti), &modes, &release_meta);
+                    broadcast_key_bytes(key_broadcast_targets, &bytes);
+                }
                 state_changed = true;
                 continue;
             }
@@ -1981,6 +2015,11 @@ pub(super) fn write_input_to_terminal(
                 error!("Failed to send key input to PTY consumer: {e}");
             }
 
+            // Broadcast (Task 74): mirror this keyboard/paste payload to every
+            // other pane in the tab. The encoded bytes already carry the
+            // active pane's bracketed-paste / cursor-key wrapping.
+            broadcast_key_bytes(key_broadcast_targets, &encoded);
+
             // Emit recording event for keyboard input.
             if let Some(ctx) = recording_ctx {
                 // For paste events, emit ClipboardPaste instead of KeyboardInput.
@@ -2374,5 +2413,61 @@ mod scroll_window_tests {
             late >= 90,
             "rows after the fold placeholder must skip the hidden span, got {late}"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod broadcast_tests {
+    //! Tests for [`broadcast_key_bytes`] — the Task 74 keyboard-input
+    //! fan-out helper. These verify the bytes are mirrored verbatim to
+    //! every target channel and that a closed/disconnected target does
+    //! not abort the fan-out to the remaining targets.
+
+    use super::*;
+
+    #[test]
+    fn broadcasts_bytes_to_every_target() {
+        let (tx1, rx1) = crossbeam_channel::unbounded();
+        let (tx2, rx2) = crossbeam_channel::unbounded();
+        let (tx3, rx3) = crossbeam_channel::unbounded();
+
+        broadcast_key_bytes(&[tx1, tx2, tx3], b"hello");
+
+        for rx in [&rx1, &rx2, &rx3] {
+            match rx.try_recv() {
+                Ok(InputEvent::Key(bytes)) => assert_eq!(bytes, b"hello"),
+                other => panic!("expected InputEvent::Key(b\"hello\"), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_bytes_sends_nothing() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        broadcast_key_bytes(std::slice::from_ref(&tx), b"");
+        assert!(rx.try_recv().is_err(), "empty payload must not be sent");
+    }
+
+    #[test]
+    fn empty_targets_is_a_noop() {
+        // Must not panic with no targets (the common broadcast-off case).
+        broadcast_key_bytes(&[], b"data");
+    }
+
+    #[test]
+    fn disconnected_target_does_not_abort_remaining_fanout() {
+        let (tx_dead, rx_dead) = crossbeam_channel::unbounded::<InputEvent>();
+        drop(rx_dead); // Make tx_dead's send fail.
+        let (tx_live, rx_live) = crossbeam_channel::unbounded();
+
+        // Dead target first, live target second: the live target must still
+        // receive the bytes even though the first send errored.
+        broadcast_key_bytes(&[tx_dead, tx_live], b"x");
+
+        match rx_live.try_recv() {
+            Ok(InputEvent::Key(bytes)) => assert_eq!(bytes, b"x"),
+            other => panic!("expected InputEvent::Key(b\"x\"), got {other:?}"),
+        }
     }
 }

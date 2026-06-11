@@ -732,6 +732,14 @@ impl super::FreminalGui {
             (false, false) => label.to_owned(),
         };
 
+        // Broadcast indicator (Task 74): prepend a satellite-antenna glyph
+        // when this tab is broadcasting keyboard input to all its panes.
+        let display_label = if tab.broadcast_input {
+            format!("\u{1f4e1} {display_label}")
+        } else {
+            display_label
+        };
+
         // Tab frame: active gets a gray fill, bell-active inactive tabs
         // get a warm amber tint, others use a transparent frame. A tab
         // that is currently being dragged renders as a translucent ghost

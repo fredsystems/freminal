@@ -1053,6 +1053,28 @@ impl freminal_windowing::App for FreminalGui {
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
+            // Broadcast input (Task 74): when the active tab has broadcast
+            // enabled, collect the (pane id, input sender) of every leaf pane
+            // up front. Senders are cheap to clone. The active pane's render
+            // call mirrors its keyboard input to every *other* pane in this
+            // list. Empty when broadcast is off (the common case).
+            let broadcast_senders: Vec<(panes::PaneId, crossbeam_channel::Sender<InputEvent>)> =
+                if win.tabs.active_tab().broadcast_input {
+                    win.tabs
+                        .active_tab()
+                        .pane_tree
+                        .iter_panes()
+                        .map(|panes| {
+                            panes
+                                .into_iter()
+                                .map(|p| (p.id, p.input_tx.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
             // When a pane is zoomed, render only that pane at full size.
             // Borders are hidden during zoom since there is only one visible pane.
             let (pane_layout, border_width) = if let Some(zoomed_id) = zoomed_pane {
@@ -1410,6 +1432,20 @@ impl freminal_windowing::App for FreminalGui {
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
 
+                // Broadcast input (Task 74): only the active pane fans out its
+                // keyboard input, and only to the *other* panes. Non-active
+                // panes and the broadcast-off case pass an empty slice.
+                let key_broadcast_targets: Vec<crossbeam_channel::Sender<InputEvent>> = if is_active
+                {
+                    broadcast_senders
+                        .iter()
+                        .filter(|(id, _)| *id != pane_id)
+                        .map(|(_, tx)| tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
                 // Build a RecordingContext for this pane if recording is active.
                 // Hold the Arc locally so the borrow in `RecordingContext.handle`
                 // remains valid for the lifetime of `rec_ctx`.
@@ -1452,6 +1488,7 @@ impl freminal_windowing::App for FreminalGui {
                             pane_id,
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
+                            &key_broadcast_targets,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
