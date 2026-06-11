@@ -1685,10 +1685,24 @@ impl freminal_windowing::App for FreminalGui {
             // the active pane's subtree is drawn in the active color; the
             // other half gets the inactive color. This makes it visually
             // clear which pane owns each shared edge.
+            let broadcast_active = win.tabs.active_tab().broadcast_input;
             if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
-                let inactive_color = egui::Color32::from_gray(80);
-                let active_color = egui::Color32::from_rgb(100, 160, 255);
+                // Broadcast mode (Task 74) tints every split border yellow so
+                // the user has a constant visual reminder that keystrokes are
+                // fanning out to every pane.  Otherwise the active pane's
+                // edges are blue and the rest gray.
+                let (inactive_color, active_color) = if broadcast_active {
+                    (
+                        egui::Color32::from_rgb(180, 150, 40),
+                        egui::Color32::from_rgb(240, 200, 60),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_gray(80),
+                        egui::Color32::from_rgb(100, 160, 255),
+                    )
+                };
 
                 let border_rects = win
                     .tabs
@@ -1744,6 +1758,34 @@ impl freminal_windowing::App for FreminalGui {
                             );
                         }
                     }
+                }
+            }
+
+            // Broadcast label (Task 74): when broadcast is active, paint a
+            // small "BROADCAST" tag in the top-right corner of every visible
+            // pane.  Top-right is chosen so it never collides with the
+            // password-prompt lock icon (which lives in the tab/menu bar, not
+            // the pane area).  Drawn for the zoomed pane too.
+            if broadcast_active {
+                let painter = ui.painter();
+                let label_color = egui::Color32::from_rgb(240, 200, 60);
+                let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
+                for (_pane_id, pane_rect) in &pane_layout {
+                    let anchor = egui::pos2(pane_rect.max.x - 4.0, pane_rect.min.y + 4.0);
+                    let galley = painter.layout_no_wrap(
+                        "BROADCAST".to_owned(),
+                        egui::FontId::monospace(10.0),
+                        label_color,
+                    );
+                    let text_rect = egui::Align2::RIGHT_TOP
+                        .anchor_size(anchor, galley.size())
+                        .expand(2.0);
+                    painter.rect_filled(text_rect, 2.0, bg);
+                    painter.galley(
+                        text_rect.left_top() + egui::vec2(2.0, 2.0),
+                        galley,
+                        label_color,
+                    );
                 }
             }
 
