@@ -2489,7 +2489,7 @@ existing `BellConfig`).
   72.6). There is no terminal-side notification "broadcast" to implement.
   `XTGETTCAP TN` / `XTVERSION` already have responders that 76.6 verifies
   and extends. OSC 99's `p=?` support query is out of scope (see
-  `PLAN_FULL_KITTY_SUPPORT.md`). Document detection in the shell
+  Task 99 in `PLAN_VERSION_100.md`). Document detection in the shell
   integration README.
 
 ### 76 Subtasks
@@ -2954,8 +2954,8 @@ mechanism for these sequences is the `TERM_PROGRAM` environment variable,
 which freminal already sets to `freminal` in subtask 72.6. So this subtask
 is mostly verification + documentation, not new capability machinery. The
 one genuine support handshake in the notification space is OSC 99's
-`p=?` — that is out of scope here and lives in
-`PLAN_FULL_KITTY_SUPPORT.md`.
+`p=?` — that is out of scope here and lives in Task 99
+(`PLAN_VERSION_100.md`).
 
 Work to do:
 
@@ -4036,14 +4036,14 @@ Every subtask completion requires:
 
 The following ideas surfaced during planning but are explicitly deferred:
 
-- **OSC 99 (kitty notifications)** — deferred to the full-kitty-support
-  plan (`PLAN_FULL_KITTY_SUPPORT.md`, working title "Plan 13"). OSC 99 is
-  a stateful protocol (chunked payloads, notification identity,
-  activation callbacks, buttons/icons/sounds) and does not belong in
-  Task 76's fire-and-forget OSC 9/777 path.
-- **Layout-wide / window-wide `[layout.env]`** — defer to v0.10.0 with
+- **OSC 99 (kitty notifications)** — deferred to v0.10.0 as Task 99
+  (`PLAN_VERSION_100.md`). OSC 99 is a stateful protocol (chunked
+  payloads, notification identity, activation callbacks,
+  buttons/icons/sounds) and does not belong in Task 76's fire-and-forget
+  OSC 9/777 path.
+- **Layout-wide / window-wide `[layout.env]`** — defer to v0.13.0 with
   Profiles (Task 78).
-- **Theme / font / profile binding per layout** — defer to v0.10.0 with
+- **Theme / font / profile binding per layout** — defer to v0.13.0 with
   Profiles.
 - **Cross-tab and cross-window broadcast** — defer; explicit-pane-selection
   is a v0.10.0 design question.

@@ -10,32 +10,58 @@ and plan document maintenance rules.
 
 ### Version Roadmap
 
-| Version | Codename                   | Plan Document                                                         | Tasks            | Status        |
-| ------- | -------------------------- | --------------------------------------------------------------------- | ---------------- | ------------- |
-| v0.2.0  | —                          | (Tasks 1–35 below)                                                    | 35               | Done          |
-| v0.3.0  | Daily Driver               | (retired — see DESIGN_DECISIONS.md)                                   | 36–44            | Complete      |
-| v0.4.0  | Search & Protocol          | (retired — see DESIGN_DECISIONS.md)                                   | 45–52            | Complete      |
-| v0.5.0  | Multi-Instance & Visual    | (retired — see DESIGN_DECISIONS.md)                                   | 53–58            | Complete      |
-| v0.6.0  | Foundation                 | (retired — see DESIGN_DECISIONS.md)                                   | 62–67            | Complete      |
-| v0.7.0  | Recording & Layouts        | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69      | Complete      |
-| v0.8.0  | Correctness & Polish       | `PLAN_VERSION_080.md`                                                 | 70–71            | Pending merge |
-| v0.9.0  | Modern Workflow Terminal   | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | In progress   |
-| v0.10.0 | Power-User Toolkit         | `PLAN_VERSION_100.md`                                                 | 78–83, 96–97     | Stub          |
-| v0.11.0 | Platform Play              | `PLAN_VERSION_110.md`                                                 | 84–87            | Stub          |
-| v0.12.0 | Completeness & Credibility | `PLAN_VERSION_120.md`                                                 | 88–93            | Stub          |
+| Version | Codename                        | Plan Document                                                         | Tasks            | Status        |
+| ------- | ------------------------------- | --------------------------------------------------------------------- | ---------------- | ------------- |
+| v0.2.0  | —                               | (Tasks 1–35 below)                                                    | 35               | Done          |
+| v0.3.0  | Daily Driver                    | (retired — see DESIGN_DECISIONS.md)                                   | 36–44            | Complete      |
+| v0.4.0  | Search & Protocol               | (retired — see DESIGN_DECISIONS.md)                                   | 45–52            | Complete      |
+| v0.5.0  | Multi-Instance & Visual         | (retired — see DESIGN_DECISIONS.md)                                   | 53–58            | Complete      |
+| v0.6.0  | Foundation                      | (retired — see DESIGN_DECISIONS.md)                                   | 62–67            | Complete      |
+| v0.7.0  | Recording & Layouts             | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69      | Complete      |
+| v0.8.0  | Correctness & Polish            | `PLAN_VERSION_080.md`                                                 | 70–71            | Pending merge |
+| v0.9.0  | Modern Workflow Terminal        | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | In progress   |
+| v0.10.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_100.md`                                                 | 99–101           | Planned       |
+| v0.11.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_110.md`                                                 | 102–103          | Planned       |
+| v0.12.0 | Kitty: Text Sizing              | `PLAN_VERSION_120.md`                                                 | 104              | Planned       |
+| v0.13.0 | Power-User Toolkit              | `PLAN_VERSION_130.md`                                                 | 78–83, 96–97     | Stub          |
+| v0.14.0 | Remote                          | `PLAN_VERSION_140.md`                                                 | 86               | Stub          |
+| v0.15.0 | Reach & Credibility             | `PLAN_VERSION_150.md`                                                 | 88, 89, 91, 93   | Stub          |
+| v0.16.0 | Status Bar                      | `PLAN_VERSION_160.md`                                                 | 85               | Stub          |
+| v0.17.0 | AI Assist — Advisory            | `PLAN_VERSION_170.md`                                                 | 87a              | Stub          |
+| v0.18.0 | AI Assist — Generative          | `PLAN_VERSION_180.md`                                                 | 87b              | Stub          |
+| v0.19.0 | Event Hook API                  | `PLAN_VERSION_190.md`                                                 | 84               | Stub          |
+| (later) | Kitty: Drag & Drop              | `PLAN_VERSION_DND.md`                                                 | 105              | Deferred      |
 
 **v0.8.0 is a hard gate.** No work on v0.9.0 or later begins until v0.8.0 (Tasks 70 and 71)
 is complete. v0.8.0 closes every correctness and hygiene gap identified in the post-v0.7.0
 senior-engineer audit, plus the full UX Top-20. This is non-negotiable: we do not build new
 features on top of latent correctness debt.
 
-v0.9.0–v0.12.0 plan documents currently contain **stub tasks only**. Each task has a summary,
-a scope estimate, and open design questions. Detailed subtask breakdown happens when the
-version is activated, not before.
+**Tiered planning.** Per the `freminal-version-activation` skill, plan documents are written
+in two tiers. The next-up kitty versions (v0.10.0–v0.12.0) carry a **full per-subtask
+breakdown** written against the current code. Everything from v0.13.0 onward is an **enriched
+stub**: goal, task summary, and every durable design decision captured, but **no subtask
+decomposition** — that happens in a dedicated session when the version is activated, against
+the code as it then exists. Capturing a durable decision in a far-term stub is expected;
+inventing its subtasks early is not.
+
+**Full kitty protocol coverage (v0.10.0–v0.12.0 + deferred DnD).** Freminal already ships the
+kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These three versions
+finish the remaining kitty protocol-extension surface: desktop notifications (OSC 99),
+graphics protocol completion (animation, unicode placeholders, relative placements, storage
+quotas), a keyboard-protocol completeness audit, file transfer over the TTY (OSC 5113),
+multiple cursors (CSI), and text sizing (OSC 66). The kitty **drag-and-drop** protocol (OSC
+72, Task 105) is **deferred**: its spec is still under active development upstream
+(kitty 0.47, issue #9984), so it stays a stub and is decomposed only once the spec stabilises.
+Colored/styled underlines — the seventh kitty extension — are already complete (no task).
+
+**Dropped tasks.** Task 90 (Windows Platform Quality Pass) and Task 92 (Terminfo Self-Install)
+were dropped during the post-v0.9.0 roadmap review. See the "Dropped Tasks" section below for
+rationale.
 
 See `FUTURE_PLANS.md` for deferred items (B.1, B.2, B.3, B.7, B.8 have now been absorbed
-into v0.10.0–v0.12.0) and remaining Category C housekeeping (Tasks 18, 19). A.2 (Split
-Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 61.
+into v0.13.0–v0.15.0 and v0.19.0) and remaining Category C housekeeping (Tasks 18, 19). A.2
+(Split Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 61.
 
 ---
 
@@ -108,28 +134,36 @@ Panes) was subsumed by Task 58. Task 56 (Session Restore) was subsumed by Task 6
 | 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub          | v0.8.0, Task 61        |
 | 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Pending merge | v0.8.0, Task 72        |
 | 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Pending merge | v0.8.0                 |
-| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_100.md` (Task 78)               | Stub          | v0.8.0                 |
-| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_100.md` (Task 79)               | Stub          | v0.8.0                 |
-| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_100.md` (Task 80)               | Stub          | Task 78                |
-| 81  | GPU-Accelerated Scrollback Regex Search  | `PLAN_VERSION_100.md` (Task 81)               | Stub          | v0.8.0                 |
-| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_100.md` (Task 82)               | Stub          | v0.8.0                 |
-| 83  | Command Palette                          | `PLAN_VERSION_100.md` (Task 83)               | Stub          | v0.8.0                 |
-| 83a | Expanded Auto-Detection (TENTATIVE)      | `PLAN_VERSION_100.md` (Task 83a)              | Tentative     | Task 71.7b             |
-| 84  | Scripting Layer (Lua or WASM)            | `PLAN_VERSION_110.md` (Task 84)               | Stub          | v0.10.0                |
-| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_110.md` (Task 85)               | Stub          | Task 84 preferred      |
-| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_110.md` (Task 86)               | Stub          | v0.10.0                |
-| 87  | AI Command Assist (opt-in)               | `PLAN_VERSION_110.md` (Task 87)               | Stub          | Tasks 72, 84           |
-| 88  | IME / CJK Input Support                  | `PLAN_VERSION_120.md` (Task 88)               | Stub          | v0.8.0                 |
-| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_120.md` (Task 89)               | Stub          | v0.8.0                 |
-| 90  | Windows Platform Quality Pass            | `PLAN_VERSION_120.md` (Task 90)               | Stub          | v0.8.0                 |
-| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_120.md` (Task 91)               | Stub          | Task 19                |
-| 92  | Terminfo Self-Install                    | `PLAN_VERSION_120.md` (Task 92)               | Stub          | None                   |
-| 93  | Config Import from Other Terminals       | `PLAN_VERSION_120.md` (Task 93)               | Stub          | None                   |
+| 78  | Profiles + Quick Profile Switching       | `PLAN_VERSION_130.md` (Task 78)               | Stub          | v0.8.0                 |
+| 79  | Theme Preview + Color Picker             | `PLAN_VERSION_130.md` (Task 79)               | Stub          | v0.8.0                 |
+| 80  | Font Ligatures Per-Profile Toggle        | `PLAN_VERSION_130.md` (Task 80)               | Stub          | Task 78                |
+| 81  | Regex Scrollback Search                  | `PLAN_VERSION_130.md` (Task 81)               | Stub          | v0.8.0, Task 45        |
+| 82  | Quick-Select / Hints Mode                | `PLAN_VERSION_130.md` (Task 82)               | Stub          | v0.8.0                 |
+| 83  | Command Palette                          | `PLAN_VERSION_130.md` (Task 83)               | Stub          | v0.8.0                 |
+| 83a | Expanded Auto-Detection (TENTATIVE)      | `PLAN_VERSION_130.md` (Task 83a)              | Tentative     | Task 71.7b             |
+| 84  | Event Hook API (Lua)                     | `PLAN_VERSION_190.md` (Task 84)               | Stub          | v0.18.0 (all features) |
+| 85  | Powerline-Capable Status Bar             | `PLAN_VERSION_160.md` (Task 85)               | Stub          | v0.8.0                 |
+| 86  | SSH Integration + Remote Mux             | `PLAN_VERSION_140.md` (Task 86)               | Stub          | v0.8.0                 |
+| 87a | AI Assist — Advisory (opt-in)            | `PLAN_VERSION_170.md` (Task 87a)              | Stub          | Task 72                |
+| 87b | AI Assist — Generative (opt-in)          | `PLAN_VERSION_180.md` (Task 87b)              | Stub          | Task 87a               |
+| 88  | IME / CJK Input Support                  | `PLAN_VERSION_150.md` (Task 88)               | Stub          | v0.8.0                 |
+| 89  | Accessibility Hooks (AT-SPI, NSA)        | `PLAN_VERSION_150.md` (Task 89)               | Stub          | v0.8.0                 |
+| 90  | Windows Platform Quality Pass            | (dropped)                                     | Dropped       | —                      |
+| 91  | Crash Reporting (opt-in)                 | `PLAN_VERSION_150.md` (Task 91)               | Stub          | Task 19                |
+| 92  | Terminfo Self-Install                    | (dropped)                                     | Dropped       | —                      |
+| 93  | Config Import from Other Terminals       | `PLAN_VERSION_150.md` (Task 93)               | Stub          | None                   |
 | 94  | Tab Title Precedence (OSC vs custom)     | `PLAN_VERSION_090.md` (Task 94)               | Complete      | v0.8.0 (71.1)          |
 | 95  | Persist Custom Tab Names in Layouts      | `PLAN_VERSION_090.md` (Task 95)               | Complete      | v0.8.0 (71.1), Task 61 |
-| 96  | Per-Pane Title Bar                       | `PLAN_VERSION_100.md` (Task 96)               | Stub          | Task 58                |
-| 97  | Dynamic Tab Width & Overflow             | `PLAN_VERSION_100.md` (Task 97)               | Stub          | v0.8.0 (71.1)          |
+| 96  | Per-Pane Title Bar                       | `PLAN_VERSION_130.md` (Task 96)               | Stub          | Task 58                |
+| 97  | Dynamic Tab Width & Overflow             | `PLAN_VERSION_130.md` (Task 97)               | Stub          | v0.8.0 (71.1)          |
 | 98  | Block Close on Running Commands          | `PLAN_VERSION_090.md` (Task 98)               | Stub          | Task 72                |
+| 99  | Kitty Desktop Notifications (OSC 99)     | `PLAN_VERSION_100.md` (Task 99)               | Planned       | v0.9.0 (Task 76)       |
+| 100 | Kitty Graphics Protocol Completion       | `PLAN_VERSION_100.md` (Task 100)              | Planned       | Task 13                |
+| 101 | Kitty Keyboard Protocol Verification     | `PLAN_VERSION_100.md` (Task 101)              | Planned       | Task 35                |
+| 102 | Kitty File Transfer (OSC 5113)           | `PLAN_VERSION_110.md` (Task 102)              | Planned       | Task 99                |
+| 103 | Multiple Cursors (CSI)                   | `PLAN_VERSION_110.md` (Task 103)              | Planned       | None                   |
+| 104 | Kitty Text Sizing (OSC 66)               | `PLAN_VERSION_120.md` (Task 104)              | Planned       | Task 13                |
+| 105 | Kitty Drag & Drop (OSC 72)               | `PLAN_VERSION_DND.md` (Task 105)              | Deferred      | Task 102 (consent UX)  |
 
 ---
 
@@ -367,6 +401,59 @@ reusability. Save current layout from running session (CWD via `/proc`), layout 
 `~/.config/freminal/layouts/`, auto-save/restore on exit/launch, and partial application (load
 layout into new tab). Large scope (12 subtasks).
 
+### Post-v0.9.0 dependency notes
+
+**Tasks 99–101 (v0.10.0, kitty notifications & graphics finish):** Task 99 (OSC 99) builds on
+the OSC 9/777 notification routing from Task 76 and extends it with a stateful identity map and
+a reverse-PTY-write activation path (which already exists via `write_to_pty` /
+`Pane::pty_write_tx`). Task 100 (graphics completion) extends the Task 13 kitty graphics
+handler — the control-data parser already types every key including animation, so the work is
+filling stubbed handler arms. Task 101 verifies the Task 35 keyboard protocol against the
+current spec. All three target stable kitty specs.
+
+**Tasks 102–103 (v0.11.0, file transfer & cursors):** Task 102 (OSC 5113) is a stateful
+bidirectional session machine with a mandatory user-consent prompt; it reuses the reverse-write
+path Task 99 establishes. Task 103 (multiple cursors) is a renderer-light addition
+(`TerminalSnapshot` gains a cursor list; `build_cursor_verts_only()` iterates). Both target
+stable specs. Cursors is the small safe win balancing the heavier transfer work.
+
+**Task 104 (v0.12.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
+blocks, fractional scaling, custom width algorithm). It is isolated in its own version. **A
+collision audit is the mandatory first subtask:** freminal currently treats OSC 66 as the
+Contour "ColorScheme Notification" (recognised, silently consumed) — the audit resolves the
+kitty-vs-Contour ambiguity before any implementation.
+
+**Task 105 (deferred, drag & drop):** OSC 72 is "extremely high" complexity and its spec is
+still under active development upstream (kitty 0.47, issue #9984). Per the
+`freminal-version-activation` skill, a version targeting an unstable spec is not decomposed.
+Task 105 stays a stub until kitty freezes the protocol.
+
+**AI assist (Tasks 87a/87b) no longer depends on the event hook API.** Earlier planning had
+AI assist driven by scripting (then Task 84). AI assist needs only OSC 133 command blocks
+(Task 72, complete) and a configured endpoint; the scripting dependency was aspirational and
+is dropped. The event hook API (Task 84) instead lands last (v0.19.0) and may _add_ an AI hook
+among its event integrations.
+
+**Status bar (Task 85) no longer depends on the event hook API.** It ships self-contained
+(built-in segments + a shell-out segment type) in v0.16.0 and gains hook-driven segments later
+when Task 84 lands.
+
+---
+
+## Dropped Tasks
+
+**Task 90 — Windows Platform Quality Pass (dropped).** Windows quality is handled ad hoc as
+issues surface (as Task 68 already did for the split-pane resize bug) rather than as a single
+gated version. There is no dedicated Windows-quality version; regressions are fixed inline.
+
+**Task 92 — Terminfo Self-Install (dropped).** The `+install-terminfo` subcommand presupposed a
+`TERM=freminal` entry that does not exist — freminal deliberately advertises
+`TERM=xterm-256color` and uses XTGETTCAP for extras (Task 12). Local terminfo distribution
+belongs to OS packaging (deb/rpm/Nix/Homebrew drop the entry into the system database); remote
+terminfo propagation, if a real `freminal` TERM is ever introduced, belongs to SSH integration
+(Task 86), mirroring kitty's `kitten ssh`. A standalone self-install subcommand solves neither
+case well and is dropped.
+
 ---
 
 ## Recommended Execution Order
@@ -410,6 +497,12 @@ v0.7.0:       ├── Task 59 (FREC v2 Recording)
   instructions. Appropriate for most implementation work within individual tasks.
 - **Claude Opus**: Use for orchestration, architectural decisions, complex cross-cutting work,
   and plan document creation/updates.
+
+The division of labour and the just-in-time planning policy are codified in the
+`freminal-version-activation` skill (planning time) and `freminal-orchestrator-protocol`
+(execution time): Opus decomposes a version into Sonnet-sized subtasks at activation, Sonnet
+implements one tightly-scoped subtask per pass, Opus code-reviews. Far-future versions stay
+enriched stubs — durable decisions captured, subtasks deferred until activation.
 
 ### Parallelism Strategy
 
@@ -528,11 +621,18 @@ Update this section as tasks complete:
 - `Documents/FREC_FORMAT.md` — FREC v2 recording format reference
 - `Documents/LAYOUT_FORMAT.md` — Saved layout TOML format reference
 - `Documents/PLAN_VERSION_080.md` — v0.8.0 "Correctness & Polish" roadmap (Tasks 70–71)
-- `Documents/PLAN_VERSION_090.md` — v0.9.0 "Modern Workflow Terminal" (stubs, Tasks 72–77)
-- `Documents/PLAN_VERSION_100.md` — v0.10.0 "Power-User Toolkit" (stubs, Tasks 78–83)
-- `Documents/PLAN_VERSION_110.md` — v0.11.0 "Platform Play" (stubs, Tasks 84–87)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Completeness & Credibility" (stubs, Tasks 88–93)
+- `Documents/PLAN_VERSION_090.md` — v0.9.0 "Modern Workflow Terminal" (Tasks 72–77, 94–95, 98)
+- `Documents/PLAN_VERSION_100.md` — v0.10.0 "Kitty: Notifications & Graphics" (Tasks 99–101, decomposed)
+- `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Transfer & Cursors" (Tasks 102–103, decomposed)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty: Text Sizing" (Task 104, decomposed)
+- `Documents/PLAN_VERSION_130.md` — v0.13.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
+- `Documents/PLAN_VERSION_140.md` — v0.14.0 "Remote" (stub, Task 86)
+- `Documents/PLAN_VERSION_150.md` — v0.15.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)
+- `Documents/PLAN_VERSION_160.md` — v0.16.0 "Status Bar" (stub, Task 85)
+- `Documents/PLAN_VERSION_170.md` — v0.17.0 "AI Assist — Advisory" (stub, Task 87a)
+- `Documents/PLAN_VERSION_180.md` — v0.18.0 "AI Assist — Generative" (stub, Task 87b)
+- `Documents/PLAN_VERSION_190.md` — v0.19.0 "Event Hook API" (stub, Task 84)
+- `Documents/PLAN_VERSION_DND.md` — Kitty Drag & Drop (deferred stub, Task 105)
 - `Documents/PLAN_18_UPDATE_MECHANISM.md` — Client-side update mechanism (pending)
 - `Documents/PLAN_19_UPDATE_SERVICE_AND_WEBSITE.md` — Update service and website (pending)
-- `Documents/PLAN_FULL_KITTY_SUPPORT.md` — Full kitty protocol support (stub, working title "Plan 13"; owns OSC 99 and the untriaged kitty extensions)
 - `config_example.toml` — Current config format
