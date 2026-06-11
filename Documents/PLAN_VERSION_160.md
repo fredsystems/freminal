@@ -1,4 +1,4 @@
-# PLAN_VERSION_160.md — v0.16.0 "Status Bar"
+# PLAN_VERSION_160.md — v0.16.0 "Reach & Credibility"
 
 > **STATUS: ENRICHED STUB.** Durable design decisions are captured below;
 > per-subtask decomposition happens at activation in a dedicated session,
@@ -7,50 +7,85 @@
 
 ## Goal
 
-A minimal, toggleable, powerline-capable status bar showing CWD, git branch, layout name,
-session clock, and custom segments.
+Close the credibility gaps that block adoption by specific user populations: CJK / IME
+users, accessibility users, users evaluating freminal against their existing terminal, and
+users who hit crashes. None glamorous; all high-leverage for growing the user base.
 
-Depends on v0.8.0. **Ships self-contained** (built-in segments + a shell-out segment type)
-— it does NOT wait for the event hook API. Hook-driven segments are added later when
-Task 84 lands (v0.19.0).
+Depends on v0.8.0 (and Task 19 for crash reporting's server side).
 
 ---
 
 ## Task Summary
 
-| #   | Feature                      | Scope  | Status | Depends On |
-| --- | ---------------------------- | ------ | ------ | ---------- |
-| 85  | Powerline-Capable Status Bar | Medium | Stub   | v0.8.0     |
+| #   | Feature                            | Scope  | Status | Depends On |
+| --- | ---------------------------------- | ------ | ------ | ---------- |
+| 88  | IME / CJK Input Support            | Large  | Stub   | v0.8.0     |
+| 89  | Accessibility Hooks (AT-SPI, NSA)  | Large  | Stub   | v0.8.0     |
+| 91  | Crash Reporting (opt-in)           | Medium | Stub   | Task 19    |
+| 93  | Config Import from Other Terminals | Medium | Stub   | None       |
+
+Task 88 absorbs `FUTURE_PLANS.md` item B.8. **Task 90 (Windows Platform Quality Pass) and
+Task 92 (Terminfo Self-Install) were dropped** — see `MASTER_PLAN.md` "Dropped Tasks".
 
 ---
 
-## Task 85 — Powerline-Capable Status Bar
+## Task 88 — IME / CJK Input Support
 
-A minimal, toggleable status bar (per-window or per-tab) with built-in segments (CWD, git
-branch, layout name, session clock) and a **shell-out segment type** (run a command, show
-its output) so users get dynamic content without scripting. Powerline glyphs via the font
-fallback chain.
+Absorbs `FUTURE_PLANS.md` B.8. Input Method Editor support for Chinese, Japanese, Korean —
+a blocking gap for a large part of the global developer population, required before 1.0.
 
-Coexists with the per-pane title bar (Task 96) — a different bar at a different scale; the
-two must not conflict.
+Scope: verify/extend IME event forwarding from `freminal-windowing` (winit), position the
+candidate window at the cursor, render pre-edit (composing) text, and handle fullwidth
+cells correctly in the buffer.
 
-Open questions (decide at activation):
+Open questions (decide at activation): pre-edit rendering (inline vs overlay popup); cell
+width for composing text; testing strategy (requires CJK testers — plan manual QA cycles).
 
-- Position: top vs. bottom, per-window vs. per-tab.
-- Powerline glyph requirements (font fallback chain).
-- Refresh rate and performance cost (especially for shell-out segments — must not block
-  the GUI thread; shell-out runs off-thread).
-- Segment config schema in `config.toml` (follow `freminal-config-options`).
+---
+
+## Task 89 — Accessibility Hooks
+
+AT-SPI on Linux and NSAccessibility on macOS so screen readers can surface terminal
+content to blind and low-vision users; Windows UI Automation if scope allows. None of the
+GPU-accelerated terminals do this well today — a modest investment is a genuine
+differentiator and an inclusivity win.
+
+Open questions (decide at activation): which surfaces are exposed (live region for new
+output, focusable cells, menu chrome); performance cost of continuous emission; testing
+with NVDA, JAWS, VoiceOver, Orca.
+
+---
+
+## Task 91 — Crash Reporting (opt-in)
+
+Local crash log dumps by default (always on, never sent anywhere). Optional, user-gated
+"send to updates.freminal.dev" that uploads a redacted dump. Piggybacks on the Task 19
+update-service infrastructure. Strictly opt-in, fully redacted (no env, no CWD, no command
+history), local-first.
+
+Open questions (decide at activation): dump format (minidump, backtrace-rs text, both);
+redaction policy; server-side aggregation and deduplication.
+
+---
+
+## Task 93 — Config Import from Other Terminals
+
+`freminal +import-config wezterm|alacritty|kitty|ghostty <path>` generates a best-effort
+`config.toml` from the source terminal's configuration. The single most effective
+acquisition feature for a new terminal: removes the "reconfiguring my terminal is an
+afternoon" objection.
+
+Open questions (decide at activation): import coverage (theme + keybindings + font + shell
+at minimum); handling of unsupported features (log and skip vs annotated TODOs in the
+generated config); export-to-other-terminal is out of scope.
 
 ---
 
 ## Design Decisions (provisional)
 
-- **Self-contained first, scriptable later.** The earlier plan made the status bar
-  "ideally driven by scripting". Since the event hook API (Task 84) now lands dead last,
-  the status bar ships with built-in segments + a shell-out segment type in v0.16.0 and
-  gains hook-driven segments when Task 84 lands. It is not blocked on scripting.
-- **Shell-out segments never block the frame.** Command execution for a segment runs
-  off the GUI thread; the bar renders the last known value.
-- **Built-in segments cover the common case** so non-scripting users get a useful bar out
-  of the box.
+- **Accessibility is not optional for 1.0.** Task 89 is a non-negotiable, not a
+  nice-to-have.
+- **Crash reporting is local-first and opt-in.** No data leaves the machine without an
+  explicit, per-incident user action; dumps are redacted.
+- **Windows quality stays ad hoc** (Task 90 dropped). Regressions are fixed inline as they
+  surface, as Task 68 already did.

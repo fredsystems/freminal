@@ -18,17 +18,22 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 
 ## Task Summary
 
-| #   | Feature                                 | Scope        | Status   | Depends On      | Branch                           |
-| --- | --------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
-| 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
-| 75  | Verify per-pane env round-trip          | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`      |
-| 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`      |
+| #   | Feature                                  | Scope        | Status   | Depends On      | Branch                           |
+| --- | ---------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
+| 72  | OSC 133 Command Blocks                   | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
+| 73  | Command Gutters (exit-status indicator)  | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
+| 74  | Broadcast Input to Panes                 | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
+| 75  | Verify per-pane env round-trip           | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`      |
+| 76  | Notification System (OSC 9 / OSC 777)    | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
+| 77  | Smart Paste Guard                        | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
+| 94  | Tab Title Precedence (prefix default)    | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
+| 95  | Persist Custom Tab Names in Layouts      | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
+| 98  | Block Close on Running Commands          | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`      |
+| 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                              |
+| 107 | Build Version Embedding                  | Small        | Stub     | None            | TBD                              |
+| 108 | About Modal & Attribution                | Small        | Stub     | Task 107        | TBD                              |
+| 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                              |
+| 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                              |
 
 ### Execution order
 
@@ -44,6 +49,19 @@ Sequential, one feature branch per task. Recommended ordering:
 8. **Task 75** — pane env round-trip verification (smallest, can also run in parallel)
 9. **Task 98** — block close on running commands (depends on Task 72's `CommandBlock`
    status; lands any time after Task 72)
+
+After the nine feature tasks above, the release-closing tasks run in this
+order:
+
+1. **Task 107** — build version embedding (feeds the About modal)
+2. **Task 108** — about modal & attribution (sequences after 107)
+3. **Task 110** — focus follows mouse (independent)
+4. **Task 109** — active-pane highlight correctness (**release gate**)
+5. **Task 106** — pre-0.9.0 bug closure (**release gate**, runs last)
+
+**Release gate:** v0.9.0 does not ship until Tasks 106 and 109 are green —
+the same correctness-before-features discipline as the v0.8.0 gate, applied
+one version on.
 
 Each task gets its own PR. Each subtask within a task is committed individually per
 `agents.md` ("Plan Subtask Commits"). `--no-verify` is forbidden.
@@ -68,8 +86,8 @@ in subtasks unless the user explicitly asks.
 - **Broadcast is per-tab.** All leaves in the active tab when the toggle is on. Mouse
   events are not broadcast.
 - **Paste guard default is multi-line only.** Pattern matching is opt-in.
-- **No scripting (Lua/WASM) in v0.9.0.** Deferred to v0.10.0.
-- **No remote features in v0.9.0.** Deferred to v0.11.0.
+- **No scripting (Lua/WASM) in v0.9.0.** Deferred to v0.20.0 (Task 84).
+- **No remote features in v0.9.0.** Deferred to v0.15.0 (Task 86).
 - **No fold/collapse persistence across scrollback trim.** Folds are a view-state-only
   concept; when the underlying rows scroll out of the buffer the fold is dropped.
 
@@ -2481,7 +2499,7 @@ already passed through PTY spawn (`freminal/src/gui/tab_spawning.rs:341`).
 The original Task 75 ("Workspace-Scoped Environment") asked for more
 ambitious workspace-level env + theme + font + profile binding, but the
 profile concept doesn't exist in v0.9.0 and per-pane env covers the realistic
-v0.9.0 use cases. **Defer broader workspace scoping to v0.10.0 alongside
+v0.9.0 use cases. **Defer broader workspace scoping to v0.14.0 alongside
 Profiles (Task 78).**
 
 Task 75 in v0.9.0 is reduced to: verify the round-trip works, document it,
@@ -2491,7 +2509,7 @@ and add explicit tests.
 
 - **Scope:** Per-pane env only. No layout-wide / window-wide / tab-wide env
   layering in v0.9.0.
-- **Defer to v0.10.0:** All of theme override, font override, profile
+- **Defer to v0.14.0:** All of theme override, font override, profile
   binding, layout-wide `[layout.env]` section.
 
 ### 75 Subtasks
@@ -2563,7 +2581,7 @@ existing `BellConfig`).
   72.6). There is no terminal-side notification "broadcast" to implement.
   `XTGETTCAP TN` / `XTVERSION` already have responders that 76.6 verifies
   and extends. OSC 99's `p=?` support query is out of scope (see
-  Task 99 in `PLAN_VERSION_100.md`). Document detection in the shell
+  Task 99 in `PLAN_VERSION_110.md`). Document detection in the shell
   integration README.
 
 ### 76 Subtasks
@@ -3029,7 +3047,7 @@ which freminal already sets to `freminal` in subtask 72.6. So this subtask
 is mostly verification + documentation, not new capability machinery. The
 one genuine support handshake in the notification space is OSC 99's
 `p=?` — that is out of scope here and lives in Task 99
-(`PLAN_VERSION_100.md`).
+(`PLAN_VERSION_110.md`).
 
 Work to do:
 
@@ -3189,7 +3207,7 @@ notification through the configured routing.
 ### 76 Open Questions Resolved
 
 - **Filtering:** Duration threshold (per-config) for command-finished
-  notifications. Per-tab filtering deferred to v0.10.0 with Profiles.
+  notifications. Per-tab filtering deferred to v0.14.0 with Profiles.
 - **OSC coverage:** OSC 9 + OSC 777. OSC 99 (kitty) deferred.
 - **Template:** Configurable string template with `{command}`, `{duration}`,
   `{exit_code}`, `{cwd}`, `{tab_name}` tokens.
@@ -3215,7 +3233,7 @@ for dangerous patterns. Per-config toggle to disable.
 - **Default trigger:** Multi-line content (contains `\n`).
 - **Optional trigger:** Dangerous pattern match — opt-in.
 - **Bypass:** `KeyAction::PasteUnsafe` skips the guard.
-- **Profile-level toggle:** Deferred to v0.10.0 (profiles don't exist yet).
+- **Profile-level toggle:** Deferred to v0.14.0 (profiles don't exist yet).
   Use a global config toggle in v0.9.0.
 
 ### 77 Subtasks
@@ -3609,7 +3627,7 @@ configurable.
 
 - **Default policy:** `prefix`, format `"{custom}: {osc}"`.
 - **Window title:** Follows the same policy as the active tab. (If user
-  prefers a separate policy in the future, that's a v0.10.0 question.)
+  prefers a separate policy in the future, that's a v0.14.0 question.)
 - **Empty rename:** Submitting an empty name clears `custom_name`,
   reverting to pure OSC behavior for that tab.
 
@@ -4110,26 +4128,26 @@ Every subtask completion requires:
 
 The following ideas surfaced during planning but are explicitly deferred:
 
-- **OSC 99 (kitty notifications)** — deferred to v0.10.0 as Task 99
-  (`PLAN_VERSION_100.md`). OSC 99 is a stateful protocol (chunked
+- **OSC 99 (kitty notifications)** — deferred to v0.11.0 as Task 99
+  (`PLAN_VERSION_110.md`). OSC 99 is a stateful protocol (chunked
   payloads, notification identity, activation callbacks,
   buttons/icons/sounds) and does not belong in Task 76's fire-and-forget
   OSC 9/777 path.
-- **Layout-wide / window-wide `[layout.env]`** — defer to v0.13.0 with
+- **Layout-wide / window-wide `[layout.env]`** — defer to v0.14.0 with
   Profiles (Task 78).
-- **Theme / font / profile binding per layout** — defer to v0.13.0 with
+- **Theme / font / profile binding per layout** — defer to v0.14.0 with
   Profiles.
 - **Cross-tab and cross-window broadcast** — defer; explicit-pane-selection
-  is a v0.10.0 design question.
-- **Per-tab notification filters** — defer to v0.10.0 with Profiles
+  is a v0.14.0 design question.
+- **Per-tab notification filters** — defer to v0.14.0 with Profiles
   (filters fit naturally as a profile attribute).
 - **Tmux-style command history search across all panes** — defer; v0.9.0
   ships per-pane history only (T3).
 - **Fold persistence across sessions** — folds are view-state only;
   reloading a layout does not restore fold state.
 - **Notification batching** (collapse five "command finished" notifications
-  into one) — defer to v0.10.0.
-- **Scripting hooks on command finished** — defer to v0.11.0 (Task 84
+  into one) — defer to v0.11.0.
+- **Scripting hooks on command finished** — defer to v0.20.0 (Task 84
   scripting layer).
 
 ---
@@ -4202,7 +4220,7 @@ emitted with no subsequent `OSC 133;D` to close it).
   Confirming there proceeds to close that window, then the next, etc.
 - **No timer / auto-confirm.** The dialog blocks until the user
   responds. (Future: optional "auto-confirm after N seconds" deferred
-  to v0.10.0.)
+  to v0.11.0.)
 
 ### 98 Pre-existing Infrastructure (Do Not Re-Implement)
 
@@ -4643,15 +4661,282 @@ When v0.9.0 is activated (after v0.8.0 merges), follow this order:
 
 ---
 
+## Task 106 — Pre-0.9.0 Bug Closure (Release Gate)
+
+### 106 Summary
+
+A bug-squash task closing every known bug surfaced during v0.9.0 development,
+gating the v0.9.0 release. Several of these are regressions introduced by the
+v0.9.0 command-block / gutter / notification work (Tasks 72, 73, 76); the rest
+are known longstanding bugs we squash before shipping. v0.9.0 does not ship
+until Tasks 106 and 109 are green.
+
+Source: `Documents/PLANNING.MD` "Current Bugs" (#1–6, #9, and the
+disconnected-channel errors at app close).
+
+### 106 Decisions (fixed)
+
+- **This is a release gate.** No v0.10.0 work begins until 106 + 109 are
+  complete, mirroring the v0.8.0 correctness-gate philosophy one version on.
+- **Split by domain, not bundled.** Each subtask is independently committable
+  and reviewable; teardown-ordering bugs are grouped so one owner sees the
+  whole shutdown path.
+- **Regression tests are mandatory.** Per `testing-mandate`, each fix lands
+  with a regression test that fails before and passes after.
+
+### 106 Subtasks
+
+#### 106.1 — Right-click paste in buffer (PLANNING #1)
+
+**Scope:** Right-click paste does not work in the terminal buffer. Diagnose
+the input path and restore paste-on-right-click.
+
+**Verification:** Right-click pastes clipboard contents into the buffer;
+regression test on the input-handling path.
+
+#### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4)
+
+**Scope:** Two OSC 133 / gutter (Task 72/73) regressions:
+
+- Excessive "command duration" in the gutter: when the prompt sits idle, a
+  command is typed, then Ctrl-C is pressed without execution, the duration is
+  measured from prompt-display to Ctrl-C rather than from actual command
+  start. Duration must measure executed-command time only (OSC 133 C→D), not
+  prompt-idle time.
+- Gutter coloring extends past the current command prompt to the bottom of the
+  pane. It must stop at the command prompt OR the last line of output of a
+  running command.
+
+**Verification:** Idle-prompt-then-Ctrl-C shows no/zero duration; gutter color
+terminates at the prompt / last output line. Regression tests on the gutter
+extent and duration computation.
+
+#### 106.3 — False Ctrl-C notification on unexecuted command (PLANNING #3)
+
+**Scope:** Related to 106.2. A toast / system notification fires when Ctrl-C is
+pressed on a prompt where no command ever executed. No notification should fire
+for a command that never ran (no OSC 133 C marker).
+
+**Verification:** Ctrl-C on an idle prompt produces no notification; a real
+finished command still notifies per Task 76. Regression test.
+
+#### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors)
+
+**Scope:** Shutdown-ordering defects, addressed as one unit:
+
+- `egui_glow::painter` "You forgot to call destroy()" warning at app close —
+  tear the painter down properly rather than leaking at exit.
+- Pane/tab close sequencing feels mis-ordered (PLANNING #6).
+- `Failed to send data to terminal: sending on a disconnected channel` errors
+  logged at close — the PTY write path races the channel teardown.
+
+**Verification:** Clean app exit with no painter-leak warning and no
+disconnected-channel errors in the log; pane/tab close ordering verified.
+Regression coverage where the close path is unit-testable.
+
+#### 106.5 — Command history palette sort order (PLANNING #9)
+
+**Scope:** The command-history palette lists oldest-first. It must sort
+most-recent-first.
+
+**Verification:** Most-recently-run command appears at the top; regression test
+on the palette ordering.
+
+---
+
+## Task 107 — Build Version Embedding
+
+### 107 Summary
+
+Cargo builds show `Build unknown` in the About modal; CI-distributed builds
+show `freminal 0.9.0-beta.N (unknown)` in tools like fastfetch. Embed a commit
+hash and/or build time at compile time so both surfaces report a real build
+identifier. This is a release-artifact requirement, not just a bug — the
+version string is part of what 0.9.0 ships.
+
+Source: `Documents/PLANNING.MD` #7, #8 (the same underlying gap).
+
+### 107 Decisions (fixed)
+
+- **Embed via `build.rs`** (vergen-style) — commit hash + build timestamp,
+  surfaced through a generated constant. No runtime git invocation.
+- **Graceful fallback:** if git metadata is unavailable (e.g. tarball build),
+  the build still succeeds with a documented placeholder, but CI builds (the
+  distributed path) must always carry real metadata.
+- **Feeds Task 108:** the embedded version string is consumed by the About
+  modal (sequence 107 → 108).
+
+### 107 Subtasks
+
+#### 107.1 — Build-time metadata generation
+
+**Scope:** Add `build.rs` metadata generation (commit hash, build time) exposed
+as compile-time constants. Add the build-tool dependency per
+`rust-best-practices` (alphabetical, full-semver-pinned).
+
+**Verification:** A debug `cargo build` and a CI build both produce
+non-`unknown` metadata; constant is readable from the binary.
+
+#### 107.2 — Surface metadata in version output
+
+**Scope:** Wire the embedded constant into the version string reported to
+fastfetch / `--version` and into the value the About modal will read.
+
+**Verification:** `freminal --version` and the fastfetch-visible string report
+real metadata; no `(unknown)`.
+
+---
+
+## Task 108 — About Modal & Attribution
+
+### 108 Summary
+
+Freminal vendors / bundles dependencies whose licenses are MIT-compatible but
+require attribution (portable-pty, the bundled fonts, others — an audit
+determines the full set). Add a dedicated attributions document, link it from
+`README.md`, and surface attribution + the embedded build version (Task 107) in
+the About modal. License compliance + credit, not pure polish.
+
+Source: `Documents/PLANNING.MD` #50–52.
+
+### 108 Decisions (fixed)
+
+- **Single source of truth:** one `ATTRIBUTIONS.md` (or `NOTICE`) document;
+  README links to it; About modal links to it. No duplicated license text
+  across surfaces.
+- **Audit is the first subtask.** The vendored/bundled set is determined by
+  audit, not guessed.
+- **About-modal edits respect `freminal-modal-input-suppression`** if any
+  focusable widget (e.g. a selectable/clickable link) is added.
+
+### 108 Subtasks
+
+#### 108.1 — Attribution audit
+
+**Scope:** Read-only audit of vendored code and bundled assets requiring
+attribution (portable-pty, bundled fonts, any other MIT/BSD/OFL dependency or
+asset). Produce the list in this plan document before writing the doc.
+
+**Verification:** Audit list posted; no code changes.
+
+#### 108.2 — Attributions document + README link
+
+**Scope:** Author `ATTRIBUTIONS.md` from the 108.1 audit; link it from
+`README.md`. Follows `markdown-lint-discipline`.
+
+**Verification:** Doc lists every attributed component with license + link;
+README links to it; markdownlint passes.
+
+#### 108.3 — About-modal attribution + build version
+
+**Scope:** Surface the embedded build version (Task 107) in the About modal and
+add a link/reference to the attributions doc.
+
+**Verification:** About modal shows a real build identifier and links to the
+attributions doc; modal input behavior unaffected.
+
+---
+
+## Task 109 — Active-Pane Highlight Correctness (Release Gate)
+
+### 109 Summary
+
+The active-pane highlight in a muxed session is misleading: it fills divider
+halves on the side of the focused pane rather than surrounding the active pane.
+The highlight should _surround_ the active pane, excluding the outer edges of
+the buffer window itself. Affects users now and is load-bearing for future
+muxing work; treated as a visual bug and gated pre-release alongside Task 106.
+
+Source: `Documents/PLANNING.MD` #54–68.
+
+### 109 Decisions (fixed)
+
+- **Surround semantics:** for the focused pane, every divider segment bordering
+  that pane is highlighted in full; outer window edges are never highlighted.
+  In the document's example, focusing Pane 1 fully highlights the horizontal
+  divider between top and bottom; focusing Pane 2 highlights the left half of
+  that horizontal divider _and_ the full vertical divider between Pane 2 and
+  Pane 3.
+- **Theming audit included:** confirm whether the highlight color is themed; if
+  not, theme it to the user's selected theme. (Open question resolved during
+  the task, recorded in completion notes.)
+- **Release gate:** v0.9.0 does not ship until 106 + 109 are green.
+
+### 109 Subtasks
+
+#### 109.1 — Highlight-geometry audit
+
+**Scope:** Read-only audit of the current pane-divider highlight rendering:
+where the half-fill logic lives, how divider segments map to the focused pane,
+and whether the color is themed.
+
+**Verification:** Report posted (current behavior + theming status); no code
+changes.
+
+#### 109.2 — Surround-the-active-pane highlight
+
+**Scope:** Replace the half-divider scheme with surround semantics per the
+109 Decisions; exclude outer window edges. Theme the color if the audit found
+it hardcoded.
+
+**Verification:** Each focus position in the document's 3-pane example
+highlights exactly the dividers bordering the active pane, full segments, no
+outer edges; color matches the active theme. Regression coverage on the
+divider-to-pane mapping where unit-testable.
+
+---
+
+## Task 110 — Focus Follows Mouse (Toggleable)
+
+### 110 Summary
+
+Active-pane focus should follow the mouse by default: mousing into a pane in a
+muxed session focuses it without a click. Tab switching remains click-to-focus.
+User-toggleable back to the current click-to-focus model via config.
+
+Source: `Documents/PLANNING.MD` #46–48.
+
+### 110 Decisions (fixed)
+
+- **Default changes to pane-focus-follows-mouse.** Tab switching stays
+  click-to-focus (only pane focus follows the mouse, not tab focus).
+- **Toggleable:** a config option restores click-to-focus. New config field —
+  follows the `freminal-config-options` wiring checklist
+  (`ConfigPartial` / `apply_partial`, settings UI, `config_example.toml`).
+- **Mouse events are not redirected.** Following the mouse changes the _focused_
+  pane (keyboard target); it does not retarget in-flight mouse input.
+
+### 110 Subtasks
+
+#### 110.1 — Config option + wiring
+
+**Scope:** Add the focus-follows-mouse config field with full
+`freminal-config-options` wiring (struct, `ConfigPartial`, `apply_partial`,
+settings UI, `config_example.toml` documentation).
+
+**Verification:** Setting the option in `config.toml` round-trips and is
+reflected in the settings UI; default is focus-follows-mouse.
+
+#### 110.2 — Pane focus on mouse-over
+
+**Scope:** When enabled, mousing over a pane sets it as the focused (keyboard
+target) pane. Tab switching unaffected (stays click-to-focus).
+
+**Verification:** Mousing across panes moves keyboard focus without a click
+when enabled; click-to-focus behavior restored when disabled. Regression test
+on the focus-selection path.
+
+---
+
 ## Design Decisions (provisional; revisit only with explicit user approval)
 
 - **OSC 133 is the anchor.** Tasks 73 and 76 both depend on it; Task 72 is
   therefore the keystone of v0.9.0 and lands first.
-- **No scripting in v0.9.0.** Scripting (Lua/WASM) is deferred to v0.11.0
+- **No scripting in v0.9.0.** Scripting (Lua/WASM) is deferred to v0.20.0
   Task 84.
 - **No remote features in v0.9.0.** SSH and remote mux remain deferred to
-  v0.11.0.
-- **No profile concept in v0.9.0.** Profiles arrive in v0.10.0 Task 78.
+  v0.15.0 Task 86.
+- **No profile concept in v0.9.0.** Profiles arrive in v0.14.0 Task 78.
 - **`notify-rust` is added in v0.9.0.** This is the first runtime
   dependency added since v0.8.0; agents must update `cargo deny` allowlists
   if needed.

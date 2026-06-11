@@ -1,316 +1,387 @@
-# PLAN_VERSION_110.md — v0.11.0 "Kitty: Transfer & Cursors"
+# PLAN_VERSION_110.md — v0.11.0 "Kitty: Notifications & Graphics"
 
 ## Goal
 
-Ship two stable-spec kitty protocols: file transfer over the TTY (OSC 5113) — a stateful
-bidirectional session machine with a mandatory user-consent prompt — and multiple cursors
-(CSI), a renderer-light addition. The heavy, consent-gated transfer work is balanced by
-the small, safe cursor win, so the version stays focused even if transfer expands.
+Close the first, lower-risk half of the remaining kitty terminal-protocol surface:
+stateful desktop notifications (OSC 99), completion of the kitty graphics protocol
+(animation, unicode placeholders, relative placements, storage quotas), and a
+verification pass over the existing kitty keyboard protocol (Task 35). Every protocol
+here targets a **stable** kitty spec, and all three reuse plumbing that already exists
+in the codebase.
 
-Depends on v0.10.0 (Task 99 establishes the reverse-PTY-write notification path that file
-transfer reuses) and the existing lock-free architecture.
+Depends on v0.9.0 (Task 76 notification routing for OSC 99; OSC 133 command blocks
+already shipped).
 
-**Decomposed** per the `freminal-version-activation` skill (next-up, stable specs).
-Re-confirm the seams at activation before executing.
+This version is **decomposed** (per the `freminal-version-activation` skill) because it
+is next-up and targets stable specs. The subtasks below are written against the current
+code seams. Re-confirm the seams at activation before executing — the codebase may have
+moved.
 
 ---
 
 ## Task Summary
 
-| #   | Feature                        | Scope     | Status  | Depends On |
-| --- | ------------------------------ | --------- | ------- | ---------- |
-| 102 | Kitty File Transfer (OSC 5113) | Very high | Planned | Task 99    |
-| 103 | Multiple Cursors (CSI)         | Medium    | Planned | None       |
+| #   | Feature                              | Scope       | Status  | Depends On       |
+| --- | ------------------------------------ | ----------- | ------- | ---------------- |
+| 99  | Kitty Desktop Notifications (OSC 99) | Medium-high | Planned | v0.9.0 (Task 76) |
+| 100 | Kitty Graphics Protocol Completion   | Medium      | Planned | Task 13          |
+| 101 | Kitty Keyboard Protocol Verification | Small       | Planned | Task 35          |
 
 ---
 
 ## Reference specs
 
-- File transfer — <https://sw.kovidgoyal.net/kitty/file-transfer-protocol/>
-- Multiple cursors — <https://sw.kovidgoyal.net/kitty/multiple-cursors-protocol/>
+- OSC 99 — <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
+- Graphics — <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
+- Keyboard — <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 
-Every escape-sequence change triggers the dual-document update
-(`ESCAPE_SEQUENCE_COVERAGE.md` + `ESCAPE_SEQUENCE_GAPS.md`) per
-`freminal-escape-sequence-docs`.
+Every escape-sequence change here triggers the mandatory dual-document update
+(`ESCAPE_SEQUENCE_COVERAGE.md` + `ESCAPE_SEQUENCE_GAPS.md`) per the
+`freminal-escape-sequence-docs` skill.
 
 ---
 
 ## Current-state map (from activation recon)
 
-- **OSC dispatch / reverse-write:** same seams as v0.10.0 — `dispatch_osc_target()`,
-  the 5-step OSC pattern, `write_to_pty` (PTY thread) and `Pane::pty_write_tx` (GUI
-  thread). File transfer's bidirectional acks reuse the path Task 99 exercised.
-- **Cursor rendering:** `freminal/src/gui/renderer/vertex.rs` `build_cursor_verts_only()`
-  emits a single quad from `TerminalSnapshot::cursor_pos` / `cursor_visual_style`.
-  Multiple cursors = the snapshot gains a cursor list and this function iterates.
-- **Consent modals:** any user-authorization dialog must follow the
-  `freminal-modal-input-suppression` skill (register in `ui_overlay_open`,
-  `lock_focus(true)`, per-frame `request_focus`) or it cannot be interacted with.
+These are the seams the subtasks target. Verify at activation.
+
+- **OSC dispatch:** `freminal-terminal-emulator/src/ansi_components/osc.rs`
+  `dispatch_osc_target()`; `OscTarget` enum in
+  `freminal-common/src/buffer_states/osc.rs`; per-feature handler modules
+  (`osc_notify.rs`, etc.). Adding an OSC is a mechanical 5-step pattern (variant →
+  `OscTarget::from()` → `AnsiOscType` variant → dispatch arm → `handle_osc()` arm).
+- **APC dispatch:** `ApcParser` (`ansi_components/apc.rs`) is protocol-agnostic;
+  `TerminalHandler::handle_application_program_command()` in `terminal_handler/osc.rs`
+  is the single dispatch point.
+- **Reverse PTY-write path (exists):** `TerminalHandler::write_to_pty()` /
+  `write_osc_response()` (`terminal_handler/pty_writer.rs`) on the PTY thread;
+  `Pane::pty_write_tx` + `send_pty_response()` (`gui/panes/`, `gui/.../rendering.rs`) on
+  the GUI thread. No new channel needed.
+- **Notification routing (exists, fire-and-forget):** `NotificationRouter` /
+  `NotificationRequest` (`freminal/src/gui/notifications.rs`); `notify-rust` `.show()`
+  spawned detached, handle dropped (no activation/close capture today);
+  `WindowManipulation::Notification` transports parse→GUI; `NotificationsConfig` in
+  `freminal-common/src/config.rs`.
+- **Kitty graphics (exists, partial):** `parse_kitty_graphics()` +
+  `KittyControlData`/`KittyAction` (`freminal-common/src/buffer_states/kitty_graphics.rs`)
+  already parse **every** control key including `a=f/a/c` (animation), `t=s` (shared
+  memory), `U=1` (unicode placeholder), `z` (z-index), source rects. Handler arms for
+  animation are warn-and-skip in `terminal_handler/graphics_kitty.rs`. `ImageStore` /
+  `InlineImage` in `freminal-buffer/src/image_store.rs`.
+- **Kitty keyboard (exists, believed complete):** `KittyKeyboardFlags` (5 bits) in
+  `freminal-common/src/buffer_states/modes/kitty_keyboard.rs`; per-screen stack in
+  `terminal_handler/mod.rs`; key encoding in `freminal-terminal-emulator/src/input.rs`.
 
 ---
 
-## Task 102 — Kitty File Transfer (OSC 5113)
+## Task 99 — Kitty Desktop Notifications (OSC 99)
 
-### 102 Summary
+### 99 Summary
 
-A stateful, bidirectional file-transfer session protocol over the TTY. Send/receive
-files (and directories, symlinks, hardlinks), with optional zlib compression, rsync-style
-binary deltas (signatures + deltas), quiet modes, and — critically — a **mandatory
-user-consent prompt** before any transfer proceeds. The terminal writes status/ack/error
-back to the application at every step (reverse path). Authorization bypass via
-`bypass=sha256:<hash>` is supported but off by default.
+OSC 99 is the **stateful** sibling of the OSC 9/777 fire-and-forget notifications
+shipped in Task 76. It adds: multi-chunk base64 payloads reassembled by notification id
+(`i=`, `d=` done flag), notification identity for update/close, **activation and close
+reports written back to the PTY** (reverse path), buttons, icons (by name and by
+transmitted/cached data), sounds, urgency, auto-expiry, and a `p=?` support-query
+handshake.
 
-This is the highest-complexity item in this version: a full session state machine plus
-filesystem I/O on the terminal side plus a consent UX. Decompose conservatively; isolate
-the state machine from the I/O from the UI.
+`notify-rust`'s one-shot `.show()` (used by Task 76) does not cover the
+update/close/activation half. This task captures the notification handle and its
+action/close events instead of discarding it.
 
-### 102 Escape-sequence shape (from spec)
+### 99 Escape-sequence shape (from spec)
 
-`ESC ] 5113 ; key=value ; ... ESC \` with short wire keys (`ac=` action, `id=` session,
-`n=` base64 name, `d=` base64 data, etc.). Flow: client `ac=send|receive id=<sid>` →
-terminal `ac=status id=<sid> status=OK|EPERM` → `ac=file` metadata → acks → `ac=data` /
-`ac=end_data` chunks with `PROGRESS`/`OK` → `ac=finish`/`ac=cancel`. Quiet: `quiet=1`
-(suppress OK), `quiet=2` (suppress all). Compression: `compression=zlib` per file.
+`ESC ] 99 ; <colon-separated key=value metadata> ; <payload> ST`. Key metadata keys:
+`a` (actions: `report`/`focus`), `c` (close events), `d` (done/chunking), `e` (base64),
+`f` (app name), `g` (icon cache key), `i` (id), `n` (icon name), `o` (occasion),
+`p` (payload type: `title`/`body`/`close`/`icon`/`?`/`alive`/`buttons`), `s` (sound),
+`t` (type), `u` (urgency 0/1/2), `w` (auto-expire ms). Reverse reports:
+activation `ESC ] 99 ; i=<id> ; <btn-index-or-empty> ST`; close
+`ESC ] 99 ; i=<id>:p=close ; ST`; alive `ESC ] 99 ; i=<id>:p=alive ; id1,id2 ST`.
+Support query `i=<id>:p=?` → response listing supported `a/c/o/p/s/u/w`.
 
-### 102 Subtasks
+### 99 Subtasks
 
-#### 102.1 — READ-ONLY design audit: session model + I/O boundary + consent placement
+#### 99.1 — OSC 99 metadata parser + types
 
-Scope: read-only across the OSC dispatch seams, the reverse-write path, the GUI overlay
-infrastructure (`freminal-modal-input-suppression` targets), and the pane/PTY ownership
-model (`freminal-architecture`).
+Scope: `freminal-common/src/buffer_states/osc.rs` (or a new
+`freminal-common/src/buffer_states/osc_notify_99.rs` module), `freminal-common` tests.
 
-What: produce the concrete design for: where the session state machine lives (PTY-thread
-`TerminalHandler` vs a dedicated type), how filesystem I/O is kept off any hot path and
-off the GUI thread, how the consent prompt is surfaced (GUI overlay) and how its result
-flows back to authorize/deny the session, and how status/ack/error bytes are written via
-the reverse path. Identify every file each later subtask will touch.
+What: add an `Osc99Command` type and a `parse_osc_99(metadata, payload)` function that
+parses the colon-separated `key=value` metadata into a typed struct (mirror the kitty
+spec key table: `Osc99Payload` enum for `p=`, `Osc99Action`, urgency enum, etc.) and
+decodes the payload (base64 when `e=1`). Pure parser — no handler, no state. Follow the
+existing `kitty_graphics.rs` parser style (typed enums, `KittyParseError`-style error).
 
-Deliverable: design report + the file-scoping for 102.2–102.7. No code.
+Deliverable: the parser + exhaustive unit tests (one per key, chunking flag, base64
+on/off, malformed metadata, the `p=?` query form).
 
-Verification: none (read-only).
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
-Prohibitions: do NOT edit files; do NOT begin implementation; do NOT proceed without
-maintainer review of the design (this is the riskiest task in the version).
+Prohibitions: do NOT wire it into dispatch yet; do NOT add reverse-write here; do NOT
+proceed to 99.2.
 
-Stop: report design; await explicit sign-off before 102.2.
+Stop: report files changed + verification; await review.
 
-#### 102.2 — OSC 5113 wire parser + typed command model
+#### 99.2 — OSC 99 dispatch wiring (parse path only)
 
-Scope: `freminal-common/src/buffer_states/` (new `osc_file_transfer.rs` or similar),
-`freminal-common` tests.
+Scope: `freminal-common/src/buffer_states/osc.rs` (`OscTarget`),
+`freminal-terminal-emulator/src/ansi_components/osc.rs` (`dispatch_osc_target`,
+`AnsiOscType`), `freminal-terminal-emulator/src/ansi_components/osc_notify.rs` (or a new
+`osc_notify_99.rs`).
 
-What: parse the `ac=`/`id=`/`n=`/`d=`/… wire format into a typed `FileTransferCommand`
-enum (send/receive/file/data/end_data/finish/cancel/status), with base64 decode and the
-quiet/compression flags. Pure parser, no state, no I/O.
+What: wire OSC number 99 through the 5-step OSC pattern so a parsed `Osc99Command`
+reaches a new `TerminalOutput`/`AnsiOscType` variant. No state machine yet — a single
+non-chunked title notification should reach the handler boundary.
 
-Deliverable: parser + exhaustive unit tests (each action, base64, quiet modes, malformed).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no dispatch, no state machine, no I/O; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.3 — Dispatch wiring (parse path only)
-
-Scope: `OscTarget` (`freminal-common`), `dispatch_osc_target` / `AnsiOscType`
-(`freminal-terminal-emulator`), a new handler module stub.
-
-What: route OSC 5113 through the 5-step pattern to a new `TerminalOutput`/`AnsiOscType`
-variant carrying the parsed command. No session logic yet.
-
-Deliverable: dispatch wiring + integration test (a `send` start reaches the handler
-boundary).
+Deliverable: dispatch wiring + a parser-to-dispatch integration test.
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: no state machine, no consent, no I/O; do NOT proceed.
+Prohibitions: do NOT implement chunk reassembly or reverse-write; do NOT touch the GUI
+notification router; do NOT proceed to 99.3.
 
 Stop: report + await review.
 
-#### 102.4 — Session state machine (no I/O, no UI)
+#### 99.3 — Notification identity + chunk reassembly state
 
-Scope: the file-transfer handler module (`freminal-terminal-emulator`), session state on
-`TerminalHandler`.
+Scope: `freminal-terminal-emulator/src/terminal_handler/` (new field on
+`TerminalHandler` for the in-flight notification map; handler for the dispatched OSC 99
+variant).
 
-What: implement the session lifecycle as a pure state machine: track sessions by `id=`,
-sequence the send/receive handshake, decide what status/ack/error each incoming command
-produces, gate everything behind an `Authorized`/`Pending`/`Denied` state. I/O is
-represented as effects/requests, not performed here. Reverse-write of status/ack/error
-goes through the existing path.
+What: add a `HashMap<NotificationId, PendingNotification>` to `TerminalHandler`. Reassemble
+multi-chunk payloads (`d=0` → accumulate, `d=1`/default → finalize). On finalize, emit a
+`WindowManipulation::Notification`-family command (extended in 99.4) carrying id, title,
+body, buttons, urgency, sound, icon, expiry, and the `a=`/`c=` flags that determine
+whether reports are expected. Update-existing (same `i=`) replaces in place.
 
-Deliverable: state machine + tests driving full send and receive handshakes with a
-stubbed authorization=granted and =denied, asserting the exact response bytes.
+Deliverable: reassembly + identity logic + unit tests (chunked title+body, update by id,
+unidentified-never-merged).
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: do NOT perform filesystem I/O; do NOT build the consent UI; do NOT proceed.
+Prohibitions: do NOT implement the reverse report path (99.6) or the GUI display (99.5);
+do NOT proceed.
 
 Stop: report + await review.
 
-#### 102.5 — Consent prompt (GUI overlay)
+#### 99.4 — Extend WindowManipulation::Notification for OSC 99 fields
 
-Scope: `freminal/src/gui/` (new overlay), wiring from the session's `Pending` state to
-the overlay and the user's decision back to the state machine.
+Scope: `freminal-common/src/buffer_states/window_manipulation.rs` (the
+`WindowManipulation::Notification` variant + `NotificationKind`), snapshot transport in
+`freminal-terminal-emulator/src/.../snapshot.rs`.
 
-What: a modal overlay that names the session (direction, file count/names, size) and
-offers Allow / Deny. MUST follow `freminal-modal-input-suppression` (register in
-`ui_overlay_open`, `lock_focus(true)`, per-frame `request_focus`) so it is actually
-interactable. The decision authorizes/denies the session via the reverse path.
+What: extend the notification command/snapshot payload to carry the OSC 99 superset
+(id, buttons, urgency, sound, icon spec, expiry, report-wanted flags) without breaking
+the existing OSC 9/777 producers (they fill `None`/defaults). This is a config-shaped
+change — follow `freminal-config-options` discipline if any new config field is implied
+(none expected here).
 
-Deliverable: overlay + the authorize/deny round-trip; unit-testable decision logic
-separated from egui where practical.
+Deliverable: the extended type + snapshot round-trip test; existing OSC 9/777 tests
+still green.
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: do NOT auto-authorize; do NOT skip the modal-input-suppression
-registration; do NOT proceed.
+Prohibitions: do NOT change GUI behaviour yet; do NOT proceed.
 
 Stop: report + await review.
 
-#### 102.6 — Filesystem I/O (off the hot path / off the GUI thread)
+#### 99.5 — GUI: render OSC 99 notifications with identity, buttons, icons, expiry
 
-Scope: the file-transfer I/O layer (new module), invoked by the state machine's effects.
+Scope: `freminal/src/gui/notifications.rs`, the notification drain site in `freminal/src/gui/`
+(where `WindowManipulation::Notification` is consumed).
 
-What: perform the actual reads/writes for authorized sessions on an appropriate thread
-(never the GUI frame thread, never a parser hot path). Honour POSIX-style error replies
-(EPERM/ENOENT/EFBIG/etc.) mapped to the protocol's status responses. Symlink/hardlink
-handling per spec.
+What: extend `NotificationRouter` to (a) track live notifications by id so update/close
+work, (b) pass buttons/urgency/sound/expiry/icon to `notify-rust`, (c) **retain the
+`notify-rust` handle** rather than dropping it, so action/close callbacks can be observed.
+Icon-by-name and icon-by-data (with `g=` cache) supported. Keep the existing toast leg
+working for notifications that want it.
 
-Deliverable: I/O layer + tests against a temp directory (round-trip a small file both
-directions; permission-error path).
+Deliverable: extended router + unit tests for routing/identity/expiry decisions (the OS
+display leg stays best-effort/unasserted as today).
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: do NOT block the GUI or PTY-parse threads; do NOT proceed.
+Prohibitions: do NOT wire the reverse-write yet (99.6); do NOT proceed.
 
 Stop: report + await review.
 
-#### 102.7 — Compression, deltas, bypass-auth; config + escape-sequence docs
+#### 99.6 — Reverse path: activation + close + alive reports to the PTY
 
-Scope: the I/O + session modules; `freminal-common/src/config.rs` (transfer config, full
-`freminal-config-options` wiring); `Documents/ESCAPE_SEQUENCE_COVERAGE.md` /
-`ESCAPE_SEQUENCE_GAPS.md`; `config_example.toml`.
+Scope: `freminal/src/gui/notifications.rs` (capture `notify-rust` action/close events),
+the GUI pane plumbing that owns `Pane::pty_write_tx`, and
+`freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` if a helper is needed.
 
-What: zlib compression per file; rsync signature/delta transfer; `bypass=sha256:<hash>`
-authorization bypass (default off, documented as a security tradeoff); any config keys
-fully wired (no `apply_partial` omission); dual-doc update.
+What: when a tracked notification is activated (whole-notification or a button) and
+`a=report` was set, write `ESC ] 99 ; i=<id> ; <btn-index-or-empty> ST` back via
+`Pane::pty_write_tx`. When closed and `c=1`, write the `p=close` report. Implement the
+`p=alive` poll response. This is the established reverse-write path — no new channel.
 
-Deliverable: features + tests (compressed round-trip, delta round-trip, bypass accepted
-when configured and rejected otherwise); docs.
+Deliverable: the write-back wiring + tests that assert the exact bytes written for
+activation/close/alive given a tracked notification.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT invent a new channel; do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.7 — Support-query handshake (`p=?`)
+
+Scope: the OSC 99 handler (`terminal_handler/`) + reverse-write helper.
+
+What: answer `i=<id>:p=?` with the response form listing exactly the actions/occasions/
+payload-types/sounds/urgencies/expiry freminal actually supports — **truthfully**, never
+advertising unimplemented capability (capability-advertisement rule from Task 76).
+
+Deliverable: handshake handler + test asserting the response string matches implemented
+capability.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT advertise unimplemented features; do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.8 — Config surface + escape-sequence docs
+
+Scope: `freminal-common/src/config.rs` (if OSC 99 needs any `[notifications]`
+additions — follow the `freminal-config-options` `ConfigPartial`/`apply_partial`
+checklist in full), `Documents/ESCAPE_SEQUENCE_COVERAGE.md`,
+`Documents/ESCAPE_SEQUENCE_GAPS.md`, `config_example.toml` if a key is added.
+
+What: any new config keys wired end to end (no silent-drop); dual-doc update marking OSC
+99 implemented with the supported-capability summary and "Last updated" header.
+
+Deliverable: docs updated; config (if any) fully wired with a partial-merge test.
 
 Verification: `cargo test --all`; clippy; markdownlint clean.
 
-Prohibitions: do NOT default bypass on; do NOT skip config wiring; do NOT proceed.
+Prohibitions: do NOT skip the `apply_partial` wiring if a config key is added.
 
 Stop: report + await review.
 
-### 102 Open questions (resolve at activation)
+### 99 Open questions (resolve at activation)
 
-- Thread model for I/O: a dedicated transfer thread per session, a shared worker, or
-  async on an existing runtime? (Decide in 102.1; must respect the lock-free
-  architecture.)
-- "Don't ask again" for a trusted peer: in scope, or always-prompt v1? (Lean:
-  always-prompt v1; the `bypass` mechanism is the escape hatch.)
-- Directory transfers: full recursive support v1, or files-only v1 with directories
-  deferred? (Decide in 102.1 based on state-machine complexity.)
+- Icon-by-data cache (`g=`): in-memory only, or persisted across runs? (Lean: in-memory.)
+- macOS close-tracking limitation (spec notes close is untracked) — emit the
+  `untracked` close form or suppress? (Spec says emit `untracked`.)
+- Do we surface OSC 99 notifications through the same `[notifications]` routing policy as
+  OSC 9/777, or does OSC 99's richer `o=` occasion model override it?
 
 ---
 
-## Task 103 — Multiple Cursors (CSI)
+## Task 100 — Kitty Graphics Protocol Completion
 
-### 103 Summary
+### 100 Summary
 
-Render extra cursors set by the application via `CSI > … SP q`. Stateful (the terminal
-persists the cursor set until cleared) but renderer-light: the snapshot gains a list of
-extra cursors, and `build_cursor_verts_only()` iterates. Supports shapes, per-set
-colours (cursor + text-under-cursor, with reverse-video modes), clear, and query.
+Finish the kitty graphics subset shipped in Task 13. The control-data parser
+(`kitty_graphics.rs`) already types every key; the work is filling stubbed handler arms
+and adding the storage-management policy. Scope: animation (frame transfer, control,
+compose), unicode placeholders (U+10EEEE + diacritics), relative placements
+(parent/child groups), and image persistence / storage quotas.
 
-### 103 Escape-sequence shape (from spec)
+### 100 Subtasks
 
-`CSI > SHAPE ; COORD_TYPE : COORDS ; … SP q`. Shapes: 0 none, 1 block, 2 beam,
-3 underline, 29 follow-main, 30 text-under-cursor colour, 40 cursor colour, 100 query
-cursors, 101 query colours. Coord types: 0 main, 2 point list `y:x`, 4 rect list
-`top:left:bottom:right`. Support query `CSI > SP q` → `CSI > 1;2;3;29;30;40;100;101 SP q`.
-Extra cursors clear on ED 2/3/22, reset, alt-screen switch; do NOT scroll with content.
+#### 100.1 — READ-ONLY audit of current graphics handler completeness
 
-### 103 Subtasks
+Scope: read-only across `terminal_handler/graphics_kitty.rs`,
+`freminal-buffer/src/image_store.rs`, `freminal-buffer/src/buffer/images.rs`,
+`freminal/src/gui/renderer/vertex.rs` (`build_image_verts`).
 
-#### 103.1 — Parser: CSI `> … SP q` multi-cursor commands
+What: enumerate exactly which `KittyAction` arms are warn-and-skip vs implemented; which
+control keys are parsed-but-ignored at handler level; the current image-store eviction
+behaviour (if any). Produce the precise gap list that 100.2–100.5 implement.
 
-Scope: `freminal-terminal-emulator/src/ansi_components/csi_commands/` (the CSI dispatch
-for the `SP q` final with `>` prefix), `freminal-common` types for the cursor set.
+Deliverable: a findings report (in chat / appended to this task's notes), not code.
 
-What: parse set/clear/colour/query forms into typed commands (`MultiCursorCommand`),
-including point-list and rect-list coordinate types and the colour-space sub-forms.
+Verification: none (read-only).
 
-Deliverable: parser + unit tests (each shape, each coord type, colour spaces, query
-forms, support query).
+Prohibitions: do NOT edit any files; do NOT proceed to implementation.
 
-Verification: `cargo test --all`; clippy.
+Stop: report findings; await review and scoping confirmation of 100.2–100.5.
 
-Prohibitions: no state, no render, no reverse-write; do NOT proceed.
+#### 100.2 — Animation: frame transfer + control + compose
 
-Stop: report + await review.
+Scope: `terminal_handler/graphics_kitty.rs`, `freminal-buffer/src/image_store.rs`
+(frame storage), `freminal-common/src/buffer_states/kitty_graphics.rs` (only if a typed
+gap is found in 100.1).
 
-#### 103.2 — State: extra-cursor set on the terminal, with clear semantics
+What: implement `a=f` (frame transfer, partial-frame rects, composition background
+`c=`/`Y=`, blend mode `X=`, edit `r=`, gap `z=`), `a=a` (control: current frame `c=`,
+stop/run/loop `s=`, loop count `v=`, per-frame gap), `a=c` (compose). Terminal-driven
+animation timing drives the existing frame-advance; reuse the snapshot/renderer image
+path. ACK/NACK responses via the existing `format_kitty_response` reverse path,
+respecting `q=` quiet modes.
 
-Scope: `freminal-terminal-emulator/src/terminal_handler/` (cursor-set field), the
-existing clear sites (ED 2/3/22, RIS, alt-screen switch).
-
-What: store the extra-cursor set + their colours; apply the clear rules at the right
-sites; expand rect lists to cell positions. Extra cursors do not scroll.
-
-Deliverable: state + tests (set then clear via each trigger; rect expansion).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no render, no reverse-write; do NOT proceed.
-
-Stop: report + await review.
-
-#### 103.3 — Snapshot transport + renderer iteration
-
-Scope: `TerminalSnapshot` (add the extra-cursor list + colours),
-`build_snapshot()`, `freminal/src/gui/renderer/vertex.rs` `build_cursor_verts_only()`.
-
-What: carry the extra-cursor list through the snapshot; iterate it in
-`build_cursor_verts_only()`, emitting a quad per extra cursor with its shape/colour,
-sharing blink state/opacity with the main cursor. Follow `freminal-architecture`
-(snapshot is the only transport; `ViewState` not involved).
-
-Deliverable: transport + render + a snapshot round-trip test and a vertex-count
-assertion for N extra cursors. If the snapshot-build path is benchmarked, a before/after
-capture per `performance-benchmarks` + `freminal-bench-table`.
+Deliverable: animation handling + tests (frame add, gap timing, loop count, compose
+rectangle).
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: do NOT route through `ViewState`; do NOT proceed.
+Prohibitions: do NOT touch unicode placeholders or relative placements; do NOT proceed.
 
 Stop: report + await review.
 
-#### 103.4 — Query responses + support handshake
+#### 100.3 — Unicode placeholders (U+10EEEE + diacritics)
 
-Scope: the multi-cursor handler + reverse-write helper.
+Scope: `terminal_handler/graphics_kitty.rs` (virtual placement on `a=p,U=1`), the cell
+write path that must recognise U+10EEEE + row/column diacritics, renderer
+`build_image_verts` (place image section per diacritics).
 
-What: answer `CSI > 100 SP q` (set cursors), `CSI > 101 SP q` (colours), and the support
-query `CSI > SP q` with exactly the supported shape list. FIFO ordering for multiplexer
-correctness. Truthful capability advertisement.
+What: create a virtual placement on `a=p,U=1,i=,c=,r=`; watch the character stream for
+U+10EEEE carrying image-id-in-foreground-color + row/column combining diacritics; render
+the indicated image section in that cell. Use the kitty `rowcolumn-diacritics` mapping.
 
-Deliverable: query/handshake handlers + tests asserting exact response bytes.
+Deliverable: placeholder handling + tests (virtual placement creation, diacritic decode,
+a small grid render assertion at the buffer level).
 
 Verification: `cargo test --all`; clippy.
 
-Prohibitions: do NOT advertise unsupported shapes; do NOT proceed.
+Prohibitions: do NOT touch animation or relative placements; do NOT proceed.
 
 Stop: report + await review.
 
-#### 103.5 — Escape-sequence docs
+#### 100.4 — Relative placements (parent/child groups)
+
+Scope: `terminal_handler/graphics_kitty.rs`, `image_store.rs` (placement group links).
+
+What: implement `P=`/`Q=` (parent image/placement) with optional `H`/`V` cell offsets;
+lifecycle tied to parent (cascade delete); chain depth limit (`ETOODEEP` past ≥8); cycle
+rejection (`ECYCLE`); missing parent (`ENOPARENT`). Error responses via the reverse path.
+
+Deliverable: relative-placement handling + tests (offset, cascade delete, depth/cycle
+errors).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT touch animation or placeholders; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.5 — Storage quotas + eviction policy
+
+Scope: `freminal-buffer/src/image_store.rs`.
+
+What: enforce a storage quota (base-image budget; larger budget for animation frames);
+on overflow evict oldest, preferring placement-less images. No I/O on hot paths beyond
+what Task 13 already does.
+
+Deliverable: quota + eviction + tests (eviction order, placement-less preference).
+
+Verification: `cargo test --all`; clippy; if the image hot path is benchmarked, a
+before/after capture per `performance-benchmarks` + `freminal-bench-table`.
+
+Prohibitions: do NOT change protocol parsing; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.6 — Escape-sequence docs
 
 Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
 
-What: add the multiple-cursors rows; refresh the "Last updated" header.
+What: update the graphics rows to reflect animation/placeholders/relative/quotas now
+implemented; refresh the "Last updated" header.
 
 Deliverable: dual-doc update.
 
@@ -320,28 +391,102 @@ Prohibitions: none beyond scope.
 
 Stop: report + await review.
 
-### 103 Open questions (resolve at activation)
+### 100 Open questions (resolve at activation)
 
-- Whether extra cursors blink in lockstep with the main cursor or independently. (Spec:
-  share blink state — confirm against the renderer's blink timer.)
-- Reverse-video / partial-reverse colour modes: full support v1 or sRGB+indexed first?
-  (Lean: full, the colour model is the bulk of the work and is small.)
+- Quota numbers: mirror kitty's defaults (≈320 MB base, 5× frames) or pick freminal
+  values? (Lean: mirror kitty, make it a constant.)
+- Shared-memory transmission (`t=s`): in scope for this version or deferred? (The parser
+  types it; the handler may stub it. Decide based on 100.1 findings.)
+
+---
+
+## Task 101 — Kitty Keyboard Protocol Verification
+
+### 101 Summary
+
+Task 35 shipped the kitty keyboard protocol; the 2026-06-10 fix closed the
+functional-key event-type defect. This task **verifies completeness** against the current
+spec rather than building new infrastructure: confirm all five progressive-enhancement
+flags are correctly encoded, the per-screen stack semantics are correct, and the
+detection handshake is right. Close any drift found; do not rebuild what works.
+
+### 101 Subtasks
+
+#### 101.1 — READ-ONLY conformance audit against current spec
+
+Scope: read-only across
+`freminal-common/src/buffer_states/modes/kitty_keyboard.rs`,
+`freminal-terminal-emulator/src/input.rs`, `terminal_handler/mod.rs` (stack),
+`ansi_components/csi_commands/` (`>u`/`<u`/`?u`/`=u`), and the existing
+`tests/kitty_keyboard_*.rs`.
+
+What: check each of the 5 flags (disambiguate, report-event-types, report-alternate-keys,
+report-all-keys-as-escape-codes, report-associated-text) against the spec encoding,
+including the `key:shifted:base` sub-fields, modifier bitmask, and the detection
+handshake (`CSI ? u` then DA1). Produce a precise drift list: conformant vs gap, each
+with the spec citation and the offending code location.
+
+Deliverable: findings report (chat / task notes), not code.
+
+Verification: none (read-only).
+
+Prohibitions: do NOT edit files; do NOT proceed to fixes without review.
+
+Stop: report findings; await scoping of 101.2 fixes (if any).
+
+#### 101.2 — Close any drift found (scoped from 101.1)
+
+Scope: defined by the 101.1 findings — strictly the files identified, nothing else.
+
+What: fix the specific encoding/stack/handshake drift items the audit found. If 101.1
+finds full conformance, this subtask is a no-op closed with "verified conformant; no
+changes" and the audit becomes the deliverable.
+
+Deliverable: targeted fixes + regression tests for each drift item, OR a documented
+"verified conformant" result.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT refactor beyond the drift list; do NOT change unrelated keyboard
+behaviour; do NOT proceed.
+
+Stop: report + await review.
+
+#### 101.3 — Escape-sequence docs
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+
+What: record the verification result (and any fixes); refresh the "Last updated" header.
+If conformant, state so explicitly so a future agent does not re-audit needlessly.
+
+Deliverable: dual-doc update.
+
+Verification: markdownlint clean.
+
+Prohibitions: none beyond scope.
+
+Stop: report + await review.
+
+### 101 Open questions (resolve at activation)
+
+- None expected; this is a verification task. If 101.1 surfaces a large gap (unlikely),
+  stop and re-scope with the maintainer rather than ballooning 101.2.
 
 ---
 
 ## Design Decisions (provisional, confirm at activation)
 
-- **File transfer and multiple cursors are deliberately mismatched in size.** The medium
-  cursor task is the safe win that lets the version ship something even if file transfer
-  expands. They are independent and parallelizable (different sub-agents).
-- **File transfer consent is never bypassed by default.** The `bypass=sha256` mechanism
-  exists per spec but defaults off and is documented as a security tradeoff. The default
-  path is always the user-consent overlay.
-- **The consent overlay is a real modal.** It MUST register under
-  `freminal-modal-input-suppression`; a transfer prompt the user cannot interact with is
-  a release blocker.
-- **Reverse-write reuses Task 99's path.** No new channel.
-- **Drag-and-drop (OSC 72) is NOT in this version.** It is deferred (Task 105,
-  `PLAN_VERSION_DND.md`) because its spec is still under active development upstream
-  (kitty 0.47, issue #9984). Building it against a moving target violates the
-  build-against-a-frozen-spec rule.
+- **0.10.0 ships full kitty notifications & graphics, not a subset.** The split across
+  three versions is about risk sequencing, not feature trimming. Within this version,
+  every protocol is finished to spec.
+- **Reverse-PTY-write reuses existing plumbing.** OSC 99 activation/close reports go
+  through `Pane::pty_write_tx` / `write_to_pty` — the same path DSR/DA responses and OSC
+  52 clipboard queries already use. No new channel without architecture sign-off
+  (`freminal-architecture`).
+- **Capability advertisement is truthful.** The OSC 99 `p=?` handshake (and any graphics
+  `a=q` response) advertises only what is actually implemented — never a half-supported
+  protocol. Carries forward the Task 76 capability-advertisement rule.
+- **Notifications & graphics are two workstreams in one version.** They share the APC/OSC
+  dispatch and reverse-write plumbing but are otherwise independent; they can be
+  implemented in parallel (Task 99 vs Task 100) by separate sub-agents, with Task 101
+  (verification) running independently of both.
