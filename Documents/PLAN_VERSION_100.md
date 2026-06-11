@@ -1,335 +1,492 @@
-# PLAN_VERSION_100.md — v0.10.0 "The Power-User Toolkit"
+# PLAN_VERSION_100.md — v0.10.0 "Kitty: Notifications & Graphics"
 
 ## Goal
 
-Ship the features that turn freminal into a power user's daily driver: named profiles,
-live theme preview, in-session ligature toggles, GPU-accelerated scrollback search, and
-quick-select / hint mode for keyboard-driven selection.
+Close the first, lower-risk half of the remaining kitty terminal-protocol surface:
+stateful desktop notifications (OSC 99), completion of the kitty graphics protocol
+(animation, unicode placeholders, relative placements, storage quotas), and a
+verification pass over the existing kitty keyboard protocol (Task 35). Every protocol
+here targets a **stable** kitty spec, and all three reuse plumbing that already exists
+in the codebase.
 
-Depends on v0.8.0 (correctness) and v0.9.0 (modern workflow primitives).
+Depends on v0.9.0 (Task 76 notification routing for OSC 99; OSC 133 command blocks
+already shipped).
+
+This version is **decomposed** (per the `freminal-version-activation` skill) because it
+is next-up and targets stable specs. The subtasks below are written against the current
+code seams. Re-confirm the seams at activation before executing — the codebase may have
+moved.
 
 ---
 
 ## Task Summary
 
-| #   | Feature                                 | Scope  | Status | Depends On    |
-| --- | --------------------------------------- | ------ | ------ | ------------- |
-| 78  | Profiles + Quick Profile Switching      | Medium | Stub   | v0.8.0        |
-| 79  | Theme Preview + Color Picker            | Medium | Stub   | v0.8.0        |
-| 80  | Font Ligatures Per-Profile Toggle       | Small  | Stub   | Task 78       |
-| 81  | GPU-Accelerated Scrollback Regex Search | Medium | Stub   | v0.8.0        |
-| 82  | Quick-Select / Hints Mode               | Medium | Stub   | v0.8.0        |
-| 83  | Command Palette                         | Medium | Stub   | v0.8.0        |
-| 83a | Expanded Auto-Detection (TENTATIVE)     | Medium | Stub   | 71.7b         |
-| 96  | Per-Pane Title Bar                      | Small  | Stub   | Task 58       |
-| 97  | Dynamic Tab Width & Overflow Behavior   | Small  | Stub   | v0.8.0 (71.1) |
-
-Tasks 82 and 83 absorb FUTURE_PLANS.md items B.3 and B.2 respectively.
-
-**Task 83a is TENTATIVE and may be removed.** It is a follow-up brainstorm from Task 71.7b
-(auto-detect plain URLs). A future agent MUST NOT begin work on Task 83a without the
-maintainer explicitly greenlighting it. Do not promote it to "Pending" or activate it
-autonomously.
+| #   | Feature                              | Scope       | Status  | Depends On       |
+| --- | ------------------------------------ | ----------- | ------- | ---------------- |
+| 99  | Kitty Desktop Notifications (OSC 99) | Medium-high | Planned | v0.9.0 (Task 76) |
+| 100 | Kitty Graphics Protocol Completion   | Medium      | Planned | Task 13          |
+| 101 | Kitty Keyboard Protocol Verification | Small       | Planned | Task 35          |
 
 ---
 
-## Task 78 — Profiles + Quick Profile Switching
+## Reference specs
 
-### 78 Summary
+- OSC 99 — <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
+- Graphics — <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
+- Keyboard — <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 
-A profile is a named bundle of (theme, font, shell, startup command, env vars, bell mode,
-ligature setting, opacity). Profiles live in `~/.config/freminal/profiles/*.toml`. The
-new-tab menu gains a profile picker; a configurable keybinding cycles profiles.
-
-### 78 Open Questions (decide at activation)
-
-- Relationship to Workspace Env (Task 75) — is a profile a subset of a workspace, or
-  orthogonal?
-- Profile inheritance / composition semantics.
-- Migration from current single-config users.
+Every escape-sequence change here triggers the mandatory dual-document update
+(`ESCAPE_SEQUENCE_COVERAGE.md` + `ESCAPE_SEQUENCE_GAPS.md`) per the
+`freminal-escape-sequence-docs` skill.
 
 ---
 
-## Task 79 — Theme Preview + Color Picker
+## Current-state map (from activation recon)
 
-### 79 Summary
+These are the seams the subtasks target. Verify at activation.
 
-Settings → Theme hovers produce a live preview of the terminal with that theme applied.
-For custom themes, a dedicated palette editor with a visible sample line beats hand-editing
-TOML. Applies immediately or on explicit Save.
-
-### 79 Open Questions (decide at activation)
-
-- Preview scope: preview the Settings panel only vs. preview the real active terminal.
-- Custom theme format / location (`~/.config/freminal/themes/*.toml`).
-- Color picker widget: egui-native, or custom for better accessibility.
-
----
-
-## Task 80 — Font Ligatures Per-Profile Toggle
-
-### 80 Summary
-
-Ligatures (Task 5) are currently a global toggle. Move to per-profile (Task 78) and add an
-in-session keybinding to toggle on/off without reloading config.
-
-### 80 Open Questions (decide at activation)
-
-- Default: on or off per new profile.
-- Whether to toggle individual ligature groups (`liga`, `calt`, `dlig`) independently.
-
----
-
-## Task 81 — GPU-Accelerated Scrollback Regex Search
-
-### 81 Summary
-
-Leverage the existing glyph atlas / GPU pipeline to run regex search across the entire
-scrollback buffer efficiently. Live highlight of matches as the user types the query. Jump
-to next/previous match with keybindings.
-
-### 81 Open Questions (decide at activation)
-
-- Regex engine: `regex` crate vs. `fancy-regex`.
-- Highlight rendering: quad overlay vs. cell background override.
-- Search scope: current pane, current tab, all panes in window.
+- **OSC dispatch:** `freminal-terminal-emulator/src/ansi_components/osc.rs`
+  `dispatch_osc_target()`; `OscTarget` enum in
+  `freminal-common/src/buffer_states/osc.rs`; per-feature handler modules
+  (`osc_notify.rs`, etc.). Adding an OSC is a mechanical 5-step pattern (variant →
+  `OscTarget::from()` → `AnsiOscType` variant → dispatch arm → `handle_osc()` arm).
+- **APC dispatch:** `ApcParser` (`ansi_components/apc.rs`) is protocol-agnostic;
+  `TerminalHandler::handle_application_program_command()` in `terminal_handler/osc.rs`
+  is the single dispatch point.
+- **Reverse PTY-write path (exists):** `TerminalHandler::write_to_pty()` /
+  `write_osc_response()` (`terminal_handler/pty_writer.rs`) on the PTY thread;
+  `Pane::pty_write_tx` + `send_pty_response()` (`gui/panes/`, `gui/.../rendering.rs`) on
+  the GUI thread. No new channel needed.
+- **Notification routing (exists, fire-and-forget):** `NotificationRouter` /
+  `NotificationRequest` (`freminal/src/gui/notifications.rs`); `notify-rust` `.show()`
+  spawned detached, handle dropped (no activation/close capture today);
+  `WindowManipulation::Notification` transports parse→GUI; `NotificationsConfig` in
+  `freminal-common/src/config.rs`.
+- **Kitty graphics (exists, partial):** `parse_kitty_graphics()` +
+  `KittyControlData`/`KittyAction` (`freminal-common/src/buffer_states/kitty_graphics.rs`)
+  already parse **every** control key including `a=f/a/c` (animation), `t=s` (shared
+  memory), `U=1` (unicode placeholder), `z` (z-index), source rects. Handler arms for
+  animation are warn-and-skip in `terminal_handler/graphics_kitty.rs`. `ImageStore` /
+  `InlineImage` in `freminal-buffer/src/image_store.rs`.
+- **Kitty keyboard (exists, believed complete):** `KittyKeyboardFlags` (5 bits) in
+  `freminal-common/src/buffer_states/modes/kitty_keyboard.rs`; per-screen stack in
+  `terminal_handler/mod.rs`; key encoding in `freminal-terminal-emulator/src/input.rs`.
 
 ---
 
-## Task 82 — Quick-Select / Hints Mode
+## Task 99 — Kitty Desktop Notifications (OSC 99)
 
-### 82 Summary
+### 99 Summary
 
-Absorbs `FUTURE_PLANS.md` item B.3. Enter hints mode (configurable keybinding), and every
-detected pattern (URL, file path, git hash, IP, number) is highlighted with a two-letter
-label. Typing the label copies or opens the target.
+OSC 99 is the **stateful** sibling of the OSC 9/777 fire-and-forget notifications
+shipped in Task 76. It adds: multi-chunk base64 payloads reassembled by notification id
+(`i=`, `d=` done flag), notification identity for update/close, **activation and close
+reports written back to the PTY** (reverse path), buttons, icons (by name and by
+transmitted/cached data), sounds, urgency, auto-expiry, and a `p=?` support-query
+handshake.
 
-### 82 Open Questions (decide at activation)
+`notify-rust`'s one-shot `.show()` (used by Task 76) does not cover the
+update/close/activation half. This task captures the notification handle and its
+action/close events instead of discarding it.
 
-- Pattern registry: built-in vs. user-configurable regex list.
-- Label alphabet (home-row Colemak-friendly vs. QWERTY).
-- Action per pattern type (open URL, copy path, open file, `$EDITOR file:line`).
+### 99 Escape-sequence shape (from spec)
+
+`ESC ] 99 ; <colon-separated key=value metadata> ; <payload> ST`. Key metadata keys:
+`a` (actions: `report`/`focus`), `c` (close events), `d` (done/chunking), `e` (base64),
+`f` (app name), `g` (icon cache key), `i` (id), `n` (icon name), `o` (occasion),
+`p` (payload type: `title`/`body`/`close`/`icon`/`?`/`alive`/`buttons`), `s` (sound),
+`t` (type), `u` (urgency 0/1/2), `w` (auto-expire ms). Reverse reports:
+activation `ESC ] 99 ; i=<id> ; <btn-index-or-empty> ST`; close
+`ESC ] 99 ; i=<id>:p=close ; ST`; alive `ESC ] 99 ; i=<id>:p=alive ; id1,id2 ST`.
+Support query `i=<id>:p=?` → response listing supported `a/c/o/p/s/u/w`.
+
+### 99 Subtasks
+
+#### 99.1 — OSC 99 metadata parser + types
+
+Scope: `freminal-common/src/buffer_states/osc.rs` (or a new
+`freminal-common/src/buffer_states/osc_notify_99.rs` module), `freminal-common` tests.
+
+What: add an `Osc99Command` type and a `parse_osc_99(metadata, payload)` function that
+parses the colon-separated `key=value` metadata into a typed struct (mirror the kitty
+spec key table: `Osc99Payload` enum for `p=`, `Osc99Action`, urgency enum, etc.) and
+decodes the payload (base64 when `e=1`). Pure parser — no handler, no state. Follow the
+existing `kitty_graphics.rs` parser style (typed enums, `KittyParseError`-style error).
+
+Deliverable: the parser + exhaustive unit tests (one per key, chunking flag, base64
+on/off, malformed metadata, the `p=?` query form).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT wire it into dispatch yet; do NOT add reverse-write here; do NOT
+proceed to 99.2.
+
+Stop: report files changed + verification; await review.
+
+#### 99.2 — OSC 99 dispatch wiring (parse path only)
+
+Scope: `freminal-common/src/buffer_states/osc.rs` (`OscTarget`),
+`freminal-terminal-emulator/src/ansi_components/osc.rs` (`dispatch_osc_target`,
+`AnsiOscType`), `freminal-terminal-emulator/src/ansi_components/osc_notify.rs` (or a new
+`osc_notify_99.rs`).
+
+What: wire OSC number 99 through the 5-step OSC pattern so a parsed `Osc99Command`
+reaches a new `TerminalOutput`/`AnsiOscType` variant. No state machine yet — a single
+non-chunked title notification should reach the handler boundary.
+
+Deliverable: dispatch wiring + a parser-to-dispatch integration test.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT implement chunk reassembly or reverse-write; do NOT touch the GUI
+notification router; do NOT proceed to 99.3.
+
+Stop: report + await review.
+
+#### 99.3 — Notification identity + chunk reassembly state
+
+Scope: `freminal-terminal-emulator/src/terminal_handler/` (new field on
+`TerminalHandler` for the in-flight notification map; handler for the dispatched OSC 99
+variant).
+
+What: add a `HashMap<NotificationId, PendingNotification>` to `TerminalHandler`. Reassemble
+multi-chunk payloads (`d=0` → accumulate, `d=1`/default → finalize). On finalize, emit a
+`WindowManipulation::Notification`-family command (extended in 99.4) carrying id, title,
+body, buttons, urgency, sound, icon, expiry, and the `a=`/`c=` flags that determine
+whether reports are expected. Update-existing (same `i=`) replaces in place.
+
+Deliverable: reassembly + identity logic + unit tests (chunked title+body, update by id,
+unidentified-never-merged).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT implement the reverse report path (99.6) or the GUI display (99.5);
+do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.4 — Extend WindowManipulation::Notification for OSC 99 fields
+
+Scope: `freminal-common/src/buffer_states/window_manipulation.rs` (the
+`WindowManipulation::Notification` variant + `NotificationKind`), snapshot transport in
+`freminal-terminal-emulator/src/.../snapshot.rs`.
+
+What: extend the notification command/snapshot payload to carry the OSC 99 superset
+(id, buttons, urgency, sound, icon spec, expiry, report-wanted flags) without breaking
+the existing OSC 9/777 producers (they fill `None`/defaults). This is a config-shaped
+change — follow `freminal-config-options` discipline if any new config field is implied
+(none expected here).
+
+Deliverable: the extended type + snapshot round-trip test; existing OSC 9/777 tests
+still green.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT change GUI behaviour yet; do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.5 — GUI: render OSC 99 notifications with identity, buttons, icons, expiry
+
+Scope: `freminal/src/gui/notifications.rs`, the notification drain site in `freminal/src/gui/`
+(where `WindowManipulation::Notification` is consumed).
+
+What: extend `NotificationRouter` to (a) track live notifications by id so update/close
+work, (b) pass buttons/urgency/sound/expiry/icon to `notify-rust`, (c) **retain the
+`notify-rust` handle** rather than dropping it, so action/close callbacks can be observed.
+Icon-by-name and icon-by-data (with `g=` cache) supported. Keep the existing toast leg
+working for notifications that want it.
+
+Deliverable: extended router + unit tests for routing/identity/expiry decisions (the OS
+display leg stays best-effort/unasserted as today).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT wire the reverse-write yet (99.6); do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.6 — Reverse path: activation + close + alive reports to the PTY
+
+Scope: `freminal/src/gui/notifications.rs` (capture `notify-rust` action/close events),
+the GUI pane plumbing that owns `Pane::pty_write_tx`, and
+`freminal-terminal-emulator/src/terminal_handler/pty_writer.rs` if a helper is needed.
+
+What: when a tracked notification is activated (whole-notification or a button) and
+`a=report` was set, write `ESC ] 99 ; i=<id> ; <btn-index-or-empty> ST` back via
+`Pane::pty_write_tx`. When closed and `c=1`, write the `p=close` report. Implement the
+`p=alive` poll response. This is the established reverse-write path — no new channel.
+
+Deliverable: the write-back wiring + tests that assert the exact bytes written for
+activation/close/alive given a tracked notification.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT invent a new channel; do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.7 — Support-query handshake (`p=?`)
+
+Scope: the OSC 99 handler (`terminal_handler/`) + reverse-write helper.
+
+What: answer `i=<id>:p=?` with the response form listing exactly the actions/occasions/
+payload-types/sounds/urgencies/expiry freminal actually supports — **truthfully**, never
+advertising unimplemented capability (capability-advertisement rule from Task 76).
+
+Deliverable: handshake handler + test asserting the response string matches implemented
+capability.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT advertise unimplemented features; do NOT proceed.
+
+Stop: report + await review.
+
+#### 99.8 — Config surface + escape-sequence docs
+
+Scope: `freminal-common/src/config.rs` (if OSC 99 needs any `[notifications]`
+additions — follow the `freminal-config-options` `ConfigPartial`/`apply_partial`
+checklist in full), `Documents/ESCAPE_SEQUENCE_COVERAGE.md`,
+`Documents/ESCAPE_SEQUENCE_GAPS.md`, `config_example.toml` if a key is added.
+
+What: any new config keys wired end to end (no silent-drop); dual-doc update marking OSC
+99 implemented with the supported-capability summary and "Last updated" header.
+
+Deliverable: docs updated; config (if any) fully wired with a partial-merge test.
+
+Verification: `cargo test --all`; clippy; markdownlint clean.
+
+Prohibitions: do NOT skip the `apply_partial` wiring if a config key is added.
+
+Stop: report + await review.
+
+### 99 Open questions (resolve at activation)
+
+- Icon-by-data cache (`g=`): in-memory only, or persisted across runs? (Lean: in-memory.)
+- macOS close-tracking limitation (spec notes close is untracked) — emit the
+  `untracked` close form or suppress? (Spec says emit `untracked`.)
+- Do we surface OSC 99 notifications through the same `[notifications]` routing policy as
+  OSC 9/777, or does OSC 99's richer `o=` occasion model override it?
 
 ---
 
-## Task 83 — Command Palette
+## Task 100 — Kitty Graphics Protocol Completion
 
-### 83 Summary
+### 100 Summary
 
-Absorbs `FUTURE_PLANS.md` item B.2. `Ctrl+Shift+P` (configurable) opens a fuzzy-search
-palette listing all `KeyAction`s with their current bindings. Selecting an action executes
-it.
+Finish the kitty graphics subset shipped in Task 13. The control-data parser
+(`kitty_graphics.rs`) already types every key; the work is filling stubbed handler arms
+and adding the storage-management policy. Scope: animation (frame transfer, control,
+compose), unicode placeholders (U+10EEEE + diacritics), relative placements
+(parent/child groups), and image persistence / storage quotas.
 
-### 83 Open Questions (decide at activation)
+### 100 Subtasks
 
-- Fuzzy-match algorithm (skim, fzf-style, simple substring).
-- Whether to include non-`KeyAction` commands (layout load, profile switch, theme picker).
-- History and frecency ordering.
+#### 100.1 — READ-ONLY audit of current graphics handler completeness
+
+Scope: read-only across `terminal_handler/graphics_kitty.rs`,
+`freminal-buffer/src/image_store.rs`, `freminal-buffer/src/buffer/images.rs`,
+`freminal/src/gui/renderer/vertex.rs` (`build_image_verts`).
+
+What: enumerate exactly which `KittyAction` arms are warn-and-skip vs implemented; which
+control keys are parsed-but-ignored at handler level; the current image-store eviction
+behaviour (if any). Produce the precise gap list that 100.2–100.5 implement.
+
+Deliverable: a findings report (in chat / appended to this task's notes), not code.
+
+Verification: none (read-only).
+
+Prohibitions: do NOT edit any files; do NOT proceed to implementation.
+
+Stop: report findings; await review and scoping confirmation of 100.2–100.5.
+
+#### 100.2 — Animation: frame transfer + control + compose
+
+Scope: `terminal_handler/graphics_kitty.rs`, `freminal-buffer/src/image_store.rs`
+(frame storage), `freminal-common/src/buffer_states/kitty_graphics.rs` (only if a typed
+gap is found in 100.1).
+
+What: implement `a=f` (frame transfer, partial-frame rects, composition background
+`c=`/`Y=`, blend mode `X=`, edit `r=`, gap `z=`), `a=a` (control: current frame `c=`,
+stop/run/loop `s=`, loop count `v=`, per-frame gap), `a=c` (compose). Terminal-driven
+animation timing drives the existing frame-advance; reuse the snapshot/renderer image
+path. ACK/NACK responses via the existing `format_kitty_response` reverse path,
+respecting `q=` quiet modes.
+
+Deliverable: animation handling + tests (frame add, gap timing, loop count, compose
+rectangle).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT touch unicode placeholders or relative placements; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.3 — Unicode placeholders (U+10EEEE + diacritics)
+
+Scope: `terminal_handler/graphics_kitty.rs` (virtual placement on `a=p,U=1`), the cell
+write path that must recognise U+10EEEE + row/column diacritics, renderer
+`build_image_verts` (place image section per diacritics).
+
+What: create a virtual placement on `a=p,U=1,i=,c=,r=`; watch the character stream for
+U+10EEEE carrying image-id-in-foreground-color + row/column combining diacritics; render
+the indicated image section in that cell. Use the kitty `rowcolumn-diacritics` mapping.
+
+Deliverable: placeholder handling + tests (virtual placement creation, diacritic decode,
+a small grid render assertion at the buffer level).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT touch animation or relative placements; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.4 — Relative placements (parent/child groups)
+
+Scope: `terminal_handler/graphics_kitty.rs`, `image_store.rs` (placement group links).
+
+What: implement `P=`/`Q=` (parent image/placement) with optional `H`/`V` cell offsets;
+lifecycle tied to parent (cascade delete); chain depth limit (`ETOODEEP` past ≥8); cycle
+rejection (`ECYCLE`); missing parent (`ENOPARENT`). Error responses via the reverse path.
+
+Deliverable: relative-placement handling + tests (offset, cascade delete, depth/cycle
+errors).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT touch animation or placeholders; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.5 — Storage quotas + eviction policy
+
+Scope: `freminal-buffer/src/image_store.rs`.
+
+What: enforce a storage quota (base-image budget; larger budget for animation frames);
+on overflow evict oldest, preferring placement-less images. No I/O on hot paths beyond
+what Task 13 already does.
+
+Deliverable: quota + eviction + tests (eviction order, placement-less preference).
+
+Verification: `cargo test --all`; clippy; if the image hot path is benchmarked, a
+before/after capture per `performance-benchmarks` + `freminal-bench-table`.
+
+Prohibitions: do NOT change protocol parsing; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.6 — Escape-sequence docs
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+
+What: update the graphics rows to reflect animation/placeholders/relative/quotas now
+implemented; refresh the "Last updated" header.
+
+Deliverable: dual-doc update.
+
+Verification: markdownlint clean.
+
+Prohibitions: none beyond scope.
+
+Stop: report + await review.
+
+### 100 Open questions (resolve at activation)
+
+- Quota numbers: mirror kitty's defaults (≈320 MB base, 5× frames) or pick freminal
+  values? (Lean: mirror kitty, make it a constant.)
+- Shared-memory transmission (`t=s`): in scope for this version or deferred? (The parser
+  types it; the handler may stub it. Decide based on 100.1 findings.)
 
 ---
 
-## Task 96 — Per-Pane Title Bar
+## Task 101 — Kitty Keyboard Protocol Verification
 
-### 96 Summary
+### 101 Summary
 
-Tabs already display a single title (the active pane's title). When a tab contains
-multiple panes (Task 58), the inactive panes' titles are invisible — a real loss when
-those panes are running things like `htop`, `cargo watch`, or a remote SSH session whose
-hostname matters at a glance.
+Task 35 shipped the kitty keyboard protocol; the 2026-06-10 fix closed the
+functional-key event-type defect. This task **verifies completeness** against the current
+spec rather than building new infrastructure: confirm all five progressive-enhancement
+flags are correctly encoded, the per-screen stack semantics are correct, and the
+detection handshake is right. Close any drift found; do not rebuild what works.
 
-Add an optional per-pane title bar rendered at the top of each split pane showing that
-pane's title (and possibly its running command, CWD basename, or PID). Toggleable
-globally and configurable per layout. Coexists with the existing tab bar — the tab bar
-still shows a single title (driven by Task 94's precedence rules) while each pane gets
-its own micro title bar.
+### 101 Subtasks
 
-### 96 Open Questions (decide at activation)
+#### 101.1 — READ-ONLY conformance audit against current spec
 
-- Always-on vs. only-when-multiple-panes vs. config-driven.
-- Bar height (cells reserved vs. pixel band rendered above the cell grid).
-- Whether the focused pane's bar is visually accented (matching theme accent color).
-- Whether the bar carries affordances (close, zoom, rename) or is read-only.
-- Coexistence with Task 85's powerline status bar (which is per-window/per-tab) — these
-  are different bars at different scales and should not conflict.
+Scope: read-only across
+`freminal-common/src/buffer_states/modes/kitty_keyboard.rs`,
+`freminal-terminal-emulator/src/input.rs`, `terminal_handler/mod.rs` (stack),
+`ansi_components/csi_commands/` (`>u`/`<u`/`?u`/`=u`), and the existing
+`tests/kitty_keyboard_*.rs`.
 
-### 96 Scope
+What: check each of the 5 flags (disambiguate, report-event-types, report-alternate-keys,
+report-all-keys-as-escape-codes, report-associated-text) against the spec encoding,
+including the `key:shifted:base` sub-fields, modifier bitmask, and the detection
+handshake (`CSI ? u` then DA1). Produce a precise drift list: conformant vs gap, each
+with the spec citation and the offending code location.
 
-Small to Medium. Touches `freminal/src/gui/terminal/` (pane rendering), `freminal/src/gui/panes/`
-(per-pane title field already exists), and `freminal-common/src/config.rs` (toggle).
+Deliverable: findings report (chat / task notes), not code.
 
-### 96 Dependencies
+Verification: none (read-only).
 
-- Task 58 (Built-in Multiplexer) — landed in v0.5.0.
+Prohibitions: do NOT edit files; do NOT proceed to fixes without review.
 
-### 96 Reference
+Stop: report findings; await scoping of 101.2 fixes (if any).
 
-Triaged from `bugs.txt` Idea 2 (2026-05-17).
+#### 101.2 — Close any drift found (scoped from 101.1)
 
----
+Scope: defined by the 101.1 findings — strictly the files identified, nothing else.
 
-## Task 97 — Dynamic Tab Width & Overflow Behavior
+What: fix the specific encoding/stack/handshake drift items the audit found. If 101.1
+finds full conformance, this subtask is a no-op closed with "verified conformant; no
+changes" and the audit becomes the deliverable.
 
-### 97 Summary
+Deliverable: targeted fixes + regression tests for each drift item, OR a documented
+"verified conformant" result.
 
-Today's tab bar uses fixed-width tabs. OSC-driven titles get visibly truncated, while
-user-set custom names render at full width — an inconsistency that surprises users. There
-is also no defined behavior when the tab bar overflows the window width (do tabs shrink,
-scroll, wrap, or do older tabs simply become inaccessible?).
+Verification: `cargo test --all`; clippy.
 
-Audit the current behavior, decide on a coherent model, and implement it. Likely target
-behavior:
+Prohibitions: do NOT refactor beyond the drift list; do NOT change unrelated keyboard
+behaviour; do NOT proceed.
 
-- Dynamic per-tab width based on title length, bounded by a minimum (`~12 cells` of glyph
-  width so a tab with no title is still clickable) and a maximum (`~32 cells`).
-- Equal-share shrinking when the total natural width exceeds the available bar width,
-  down to the per-tab minimum.
-- Below that minimum, overflow handling: horizontal scroll with chevrons, dropdown menu
-  of overflow tabs, or both. (WezTerm and Alacritty have different answers here —
-  decide at activation.)
-- Consistent truncation (single character ellipsis, left- or right-truncated based on
-  whether the prefix or suffix is more informative).
+Stop: report + await review.
 
-### 97 Open Questions (decide at activation)
+#### 101.3 — Escape-sequence docs
 
-- Min/max tab widths (cell-based vs. pixel-based — currently the renderer is glyph-cell
-  oriented, so cells are likely the right unit).
-- Overflow strategy (scroll vs. dropdown vs. hybrid).
-- Whether to introduce an explicit "tab pinning" affordance so important tabs stay
-  visible during overflow.
-- Whether OSC titles get truncated to a different limit than custom names (current state)
-  or whether both follow the same rules (proposed).
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
 
-### 97 Scope
+What: record the verification result (and any fixes); refresh the "Last updated" header.
+If conformant, state so explicitly so a future agent does not re-audit needlessly.
 
-Small to Medium. Concentrated in `freminal/src/gui/menu.rs` (tab bar rendering) and
-`freminal/src/gui/window.rs` (tab rect computation).
+Deliverable: dual-doc update.
 
-### 97 Dependencies
+Verification: markdownlint clean.
 
-- 71.1 (custom tab rename) — landed in v0.8.0.
-- Interacts with Task 94 (tab title precedence): the truncation policy may differ when
-  a custom name is set vs. when OSC asserts the title.
+Prohibitions: none beyond scope.
 
-### 97 Reference
+Stop: report + await review.
 
-Triaged from `bugs.txt` Idea 4 (2026-05-17). Note from the bug report: OSC-set titles
-appear visibly truncated where manually-set titles of the same length do not — confirm
-during activation that the truncation logic is consistent across both sources before
-designing the dynamic-width replacement.
+### 101 Open questions (resolve at activation)
+
+- None expected; this is a verification task. If 101.1 surfaces a large gap (unlikely),
+  stop and re-scope with the maintainer rather than ballooning 101.2.
 
 ---
 
-## Design Decisions (provisional)
+## Design Decisions (provisional, confirm at activation)
 
-- **v0.10.0 is keyboard-first.** Every feature has a keybinding and is usable without the
-  mouse.
-- **No scripting yet.** Scripting is the backbone of v0.11.0; we do not introduce it
-  halfway here.
-
----
-
-## Task 83a — Expanded Auto-Detection (TENTATIVE)
-
-**STATUS: TENTATIVE. May be removed. Do not start without maintainer approval.**
-
-This task is a brainstorm follow-up to Task 71.7b, which landed auto-detection of plain
-`http`/`https`/`file`/`ftp`/`mailto` URLs in terminal output. The maintainer has not
-committed to shipping any of the expansions below. A future agent encountering this task
-MUST stop and ask before doing any implementation work. It exists here so the ideas are
-not lost, not as a commitment to build them.
-
-### 83a Summary
-
-Extend the existing `freminal-buffer/src/url_detect.rs` machinery to recognize more
-clickable patterns beyond fully-qualified URLs. Three independent sub-features, each
-shippable on its own:
-
-1. **Absolute file paths** — `/etc/nginx/nginx.conf`, `/Users/fred/src/foo.rs:42:8`
-2. **Schemeless URLs** — `github.com`, `docs.rs/regex`, `localhost:8080`
-3. **Explicit relative paths** — `./src/main.rs`, `../Cargo.toml`
-
-All of these fit into the existing flatten-cache overlay architecture with no new PTY
-hot-path work. `UrlMatch` would gain a `kind: UrlKind` field so click dispatch can branch
-on the match type.
-
-### 83a.1 Absolute file paths with optional `:LINE[:COL]` suffix
-
-Detection via `(?:^|[\s("'\[])(/[^\s"'<>()\[\]]+)` with trailing-punctuation stripping and
-an optional `:NNN` or `:NNN:NNN` tail.
-
-**Existence checking:** optimistic detection, no `stat()` during flatten. Filesystem I/O
-on the flatten path is forbidden (blocking NFS, stalled mounts). Click attempts `xdg-open`
-or spawns `$EDITOR +LINE path` for paths with a line suffix; failure shows an error toast.
-
-Highest-value of the three — covers rustc/clippy/grep/cargo output. Low risk. Main false
-positive is `/etc/passwd`-style references in prose, which users can live with.
-
-### 83a.2 Schemeless URLs
-
-Detection via `\b([a-z0-9-]+\.)+[a-z]{2,}(:\d+)?(/[^\s]*)?\b` gated on a TLD allow-list
-(~30 entries from the Public Suffix List — `com`, `org`, `io`, `dev`, `net`, `rs`, `gov`,
-`edu`, …).
-
-**Critical caveat:** the `.rs` / `.io` / `.sh` / `.dev` TLDs collide with common Rust/shell
-filenames. Mitigation: for ambiguous TLDs, require either a path segment (`/foo`) or port
-(`:8080`) after the host. Drops bare `module.rs` but keeps `docs.rs/regex`.
-
-Click behavior prepends `https://` (configurable).
-
-**Opt-in only.** Default `false` in config. The false-positive risk on `.rs` files in a
-Rust-first terminal is bad enough that it must not be default-on.
-
-Config surface:
-
-```toml
-[ui]
-auto_detect_schemeless_urls = false
-auto_detect_schemeless_scheme = "https"
-```
-
-### 83a.3 Explicit relative paths (`./` and `../` only)
-
-Detection via `(?:^|\s)(\.{1,2}/[^\s"'<>()\[\]]+)`. Nearly zero false positives. Cheap.
-
-**Requires OSC 7** for click-to-open. Relative paths only resolve cleanly when the pane's
-CWD is known. Freminal already tracks CWD via `/proc/PID/cwd` for layout save, but many
-shells need configuration to emit OSC 7 reliably. If OSC 7 is absent and `/proc` lookup
-fails, the path is still detected (styled) but click surfaces an error.
-
-**Bare relative paths** (`src/buffer/flatten.rs` with no leading `./`) are explicitly
-**out of scope.** False-positive risk is too high and every token containing a `/` would
-light up.
-
-### 83a Open Questions (decide at activation)
-
-- Should `UrlMatch.kind` be exposed to the Settings UI for per-kind enable/disable, or is
-  one global `auto_detect_urls` toggle enough?
-- `$EDITOR` vs `$VISUAL` vs a config-driven `editor_command` template for file:line clicks.
-- TLD allow-list: hardcoded static list vs. embedded PSL subset vs. user-configurable.
-- Do we also want git SHA detection (`abc1234` → `$BROWSER origin/tree/abc1234`) and issue
-  references (`#1234`, `JIRA-123`)? Both would need their own config schema. Out of scope
-  for 83a but natural extensions.
-- Behavior when OSC 7 is unavailable: silently skip relative path detection, or detect
-  with a "missing CWD" hover tooltip?
-
-### 83a Non-goals
-
-- No filesystem I/O on the flatten path. Ever.
-- No bare relative path detection (too lossy).
-- No hover-time existence verification in v1 (possible polish pass later).
-- No integration with scripting (v0.11.0 Task 84).
-
-### 83a Effort estimate (rough, for planning only)
-
-| Sub-feature                          | Effort | Risk                              |
-| ------------------------------------ | ------ | --------------------------------- |
-| 83a.1 Absolute paths + `:LINE[:COL]` | 1–2 d  | Prose false positives (tolerable) |
-| 83a.2 Schemeless URLs                | 2 d    | `.rs`/`.io` TLD collisions        |
-| 83a.3 Explicit relative paths        | 1 d    | OSC 7 dependency, CWD plumbing    |
-
-Total: ~5 days if all three ship together. Each is independently landable.
-
-### 83a Reminder
-
-**This task is TENTATIVE.** It exists as captured thinking, not a commitment. Do not start
-work without explicit maintainer approval.
+- **0.10.0 ships full kitty notifications & graphics, not a subset.** The split across
+  three versions is about risk sequencing, not feature trimming. Within this version,
+  every protocol is finished to spec.
+- **Reverse-PTY-write reuses existing plumbing.** OSC 99 activation/close reports go
+  through `Pane::pty_write_tx` / `write_to_pty` — the same path DSR/DA responses and OSC
+  52 clipboard queries already use. No new channel without architecture sign-off
+  (`freminal-architecture`).
+- **Capability advertisement is truthful.** The OSC 99 `p=?` handshake (and any graphics
+  `a=q` response) advertises only what is actually implemented — never a half-supported
+  protocol. Carries forward the Task 76 capability-advertisement rule.
+- **Notifications & graphics are two workstreams in one version.** They share the APC/OSC
+  dispatch and reverse-write plumbing but are otherwise independent; they can be
+  implemented in parallel (Task 99 vs Task 100) by separate sub-agents, with Task 101
+  (verification) running independently of both.
