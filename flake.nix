@@ -96,12 +96,25 @@
               exec = "freminal";
             };
           };
+
+          version = "0.9.0-beta.6";
+
+          # The build sandbox strips `.git`, so the crate's build.rs `git
+          # describe` can only ever yield "unknown".  Feed it a real value via
+          # the `VERGEN_GIT_DESCRIBE` env override (build.rs honours a pre-set
+          # value verbatim).  `self.shortRev` is defined for a clean flake
+          # source; `self.dirtyShortRev` covers a dirty working tree; "nix" is
+          # the last-resort fallback when neither is available.
+          gitDescribe = "v${version}-${self.shortRev or self.dirtyShortRev or "nix"}";
         in
         {
           freminal = rustPlatform.buildRustPackage {
             pname = "freminal";
-            version = "0.9.0-beta.5";
+            inherit version;
             src = pkgs.lib.cleanSource ./.;
+
+            # Embedded build version — see `gitDescribe` above.
+            env.VERGEN_GIT_DESCRIBE = gitDescribe;
 
             cargoLock.lockFile = ./Cargo.lock;
 
@@ -148,9 +161,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.9.0-beta.5</string>
+                    <string>0.9.0-beta.6</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.9.0-beta.5</string>
+                    <string>0.9.0-beta.6</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>

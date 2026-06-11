@@ -18,22 +18,22 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 
 ## Task Summary
 
-| #   | Feature                                  | Scope        | Status   | Depends On      | Branch                           |
-| --- | ---------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
-| 72  | OSC 133 Command Blocks                   | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
-| 73  | Command Gutters (exit-status indicator)  | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                 | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
-| 75  | Verify per-pane env round-trip           | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`      |
-| 76  | Notification System (OSC 9 / OSC 777)    | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
-| 77  | Smart Paste Guard                        | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
-| 94  | Tab Title Precedence (prefix default)    | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
-| 95  | Persist Custom Tab Names in Layouts      | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands          | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`      |
-| 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                              |
-| 107 | Build Version Embedding                  | Small        | Stub     | None            | TBD                              |
-| 108 | About Modal & Attribution                | Small        | Stub     | Task 107        | TBD                              |
-| 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                              |
-| 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                              |
+| #   | Feature                                  | Scope        | Status   | Depends On      | Branch                             |
+| --- | ---------------------------------------- | ------------ | -------- | --------------- | ---------------------------------- |
+| 72  | OSC 133 Command Blocks                   | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks`   |
+| 73  | Command Gutters (exit-status indicator)  | Medium       | Complete | Task 72         | `task-73/command-gutters`          |
+| 74  | Broadcast Input to Panes                 | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`        |
+| 75  | Verify per-pane env round-trip           | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`        |
+| 76  | Notification System (OSC 9 / OSC 777)    | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`            |
+| 77  | Smart Paste Guard                        | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`              |
+| 94  | Tab Title Precedence (prefix default)    | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`     |
+| 95  | Persist Custom Tab Names in Layouts      | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`        |
+| 98  | Block Close on Running Commands          | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`        |
+| 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                                |
+| 107 | Build Version Embedding                  | Small        | Complete | None            | `task-107/build-version-embedding` |
+| 108 | About Modal & Attribution                | Small        | Stub     | Task 107        | TBD                                |
+| 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                                |
+| 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                                |
 
 ### Execution order
 
@@ -4744,7 +4744,7 @@ on the palette ordering.
 
 ---
 
-## Task 107 — Build Version Embedding
+## Task 107 — Build Version Embedding ✅ Complete (2026-06-11)
 
 ### 107 Summary
 
@@ -4766,9 +4766,31 @@ Source: `Documents/PLANNING.MD` #7, #8 (the same underlying gap).
 - **Feeds Task 108:** the embedded version string is consumed by the About
   modal (sequence 107 → 108).
 
+### 107 Activation findings (2026-06-11)
+
+The vergen + `git describe` infrastructure already existed before activation
+(`freminal-terminal-emulator/build.rs` → `VERGEN_GIT_DESCRIBE` →
+`freminal_terminal_emulator::GIT_DESCRIBE`, consumed by the About modal at
+`menu.rs:374` and by `TERM_PROGRAM_VERSION` at `io/pty.rs`). Both PLANNING #7
+and #8 share **one root cause**: `VERGEN_GIT_DESCRIBE` resolving to `"unknown"`.
+There are **three** build paths that each independently produce `"unknown"`,
+not the two the summary implies:
+
+1. **Local `cargo build`** — `build.rs` had only `rerun-if-changed=build.rs`,
+   no trigger tied to git HEAD/refs, so the describe value cached and went
+   stale (could stick at `"unknown"` from a first build before tags existed).
+   Fixed by 107.1.
+2. **CI-distributed binaries** — `deploy.yaml` checkouts used
+   `actions/checkout@v6` with no `fetch-depth: 0` / `fetch-tags: true`, so
+   `git describe --tags` failed in the shallow, tagless clone. Fixed by 107.2.
+3. **Nix flake** — `src = pkgs.lib.cleanSource ./.` strips `.git`, and the
+   build sandbox is git-less, so `git describe` can only yield `"unknown"`.
+   This is how the NixOS desktop actually installs freminal. Fixed by 107.3
+   (a third subtask added at activation).
+
 ### 107 Subtasks
 
-#### 107.1 — Build-time metadata generation
+#### 107.1 — Build-time metadata generation ✅
 
 **Scope:** Add `build.rs` metadata generation (commit hash, build time) exposed
 as compile-time constants. Add the build-tool dependency per
@@ -4777,13 +4799,74 @@ as compile-time constants. Add the build-tool dependency per
 **Verification:** A debug `cargo build` and a CI build both produce
 non-`unknown` metadata; constant is readable from the binary.
 
-#### 107.2 — Surface metadata in version output
+**Completion notes (2026-06-11):**
+
+- vergen and the `git describe --tags --always --dirty` shell-out already
+  existed in `freminal-terminal-emulator/build.rs`; no new build-tool
+  dependency was needed. The actual fix was that `build.rs` had no
+  `rerun-if-changed` trigger tied to git state, so the emitted
+  `VERGEN_GIT_DESCRIBE` cached and went stale.
+- Added `emit_git_rerun_directives()`: resolves `HEAD`, `packed-refs`, and
+  `refs` via `git rev-parse --git-path <name>` (worktree- and
+  submodule-correct, not a hardcoded `../.git/...`) and emits
+  `cargo:rerun-if-changed` for each. Best-effort: missing `git` / `.git`
+  skips the directive (only costs a stale value, never a failed build).
+- Verified by clean rebuilds: directives emitted (`../.git/HEAD`,
+  `../.git/packed-refs`, `../.git/refs`) and the value resolves to the real
+  `git describe` output instead of `"unknown"`.
+
+#### 107.2 — Surface metadata in version output ✅
 
 **Scope:** Wire the embedded constant into the version string reported to
 fastfetch / `--version` and into the value the About modal will read.
 
 **Verification:** `freminal --version` and the fastfetch-visible string report
 real metadata; no `(unknown)`.
+
+**Completion notes (2026-06-11):**
+
+- The surfacing wiring already existed and is correct: the About modal reads
+  `freminal_terminal_emulator::GIT_DESCRIBE` (`menu.rs:374`) and
+  `TERM_PROGRAM_VERSION` (what fastfetch reads) is
+  `"<cargo-version> (<git-describe>)"` (`io/pty.rs`). The `(unknown)` was the
+  describe value, not the wiring.
+- The distributed-binary `"unknown"` was fixed in the build pipeline: all four
+  build-job checkouts in `.github/workflows/deploy.yaml` (linux-amd64,
+  linux-arm64, windows, macos) now carry `fetch-depth: 0` + `fetch-tags: true`,
+  mirroring the already-correct `nightly.yml`. The `release` job downloads
+  artifacts only and needs no checkout change.
+
+#### 107.3 — Nix flake version embedding ✅
+
+**Why this subtask exists:** added at activation (2026-06-11). The Nix flake is
+the third `"unknown"` source (see Activation findings). `cleanSource` strips
+`.git` and the sandbox is git-less, so the in-build `git describe` can never
+succeed. This is the install path for the NixOS desktop, so it must carry a
+real version too.
+
+**Scope:** `freminal-terminal-emulator/build.rs`, `flake.nix`.
+
+- `build.rs` gains an **override layer**: if `VERGEN_GIT_DESCRIBE` is already
+  set and non-empty in the build environment, honour it verbatim and skip the
+  git shell-out (with `cargo:rerun-if-env-changed=VERGEN_GIT_DESCRIBE`). The
+  git shell-out remains the fallback when the env var is absent, so cargo and
+  CI builds are unaffected.
+- `flake.nix` sets `env.VERGEN_GIT_DESCRIBE = "v${version}-${self.shortRev or
+self.dirtyShortRev or "nix"}"`. `self.shortRev` is defined for a clean flake
+  source (the consumed-as-input desktop case), `self.dirtyShortRev` covers a
+  dirty working tree, `"nix"` is the last-resort fallback. `self`'s rev fields
+  survive `cleanSource` because they derive from the flake source path, not
+  from `src`.
+
+**Verification:**
+
+- `cargo build` with `VERGEN_GIT_DESCRIBE` set → value honoured verbatim,
+  git skipped; without it → git fallback. Both confirmed.
+- `nix build .#freminal` → the wrapped binary embeds
+  `Version 0.9.0-beta.6` / `Build v0.9.0-beta.6-<rev>-dirty` and
+  `TERM_PROGRAM_VERSION = "0.9.0-beta.6 (v0.9.0-beta.6-<rev>-dirty)"`. No
+  `(unknown)`.
+- `nixfmt`, `statix check`, `deadnix --fail` all clean on `flake.nix`.
 
 ---
 
