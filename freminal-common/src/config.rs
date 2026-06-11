@@ -36,6 +36,7 @@ pub struct Config {
     pub bell: BellConfig,
     pub security: SecurityConfig,
     pub paste_guard: PasteGuardConfig,
+    pub close_guard: CloseGuardConfig,
     pub shell_integration: ShellIntegrationConfig,
     pub command_blocks: CommandBlocksConfig,
     pub notifications: NotificationsConfig,
@@ -80,6 +81,7 @@ impl Default for Config {
             bell: BellConfig::default(),
             security: SecurityConfig::default(),
             paste_guard: PasteGuardConfig::default(),
+            close_guard: CloseGuardConfig::default(),
             shell_integration: ShellIntegrationConfig::default(),
             command_blocks: CommandBlocksConfig::default(),
             notifications: NotificationsConfig::default(),
@@ -650,6 +652,63 @@ impl PasteGuardConfig {
                 Err(err) => Some((pattern.clone(), err.to_string())),
             })
             .collect()
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+//  Close Guard
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for the close-on-running-command guard (Task 98).
+///
+/// When the user attempts to close a pane, tab, or window while one or more
+/// shells in the affected scope have a running foreground command — as
+/// reported by OSC 133 command markers — a confirmation dialog lists what is
+/// running and lets the user cancel or force-close.
+///
+/// "Running" means a [`crate::buffer_states::command_block::CommandStatus::Running`]
+/// command block: an `OSC 133 C` marker was emitted with no matching
+/// `OSC 133 D`. `Success`, `Failure`, and `Unknown` blocks do **not** block
+/// close. A pane that has never received an OSC 133 prompt marker is treated
+/// as "unknown" and only blocks close when [`unknown_blocks`](Self::unknown_blocks)
+/// is `true`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+// Three independent TOML toggles, each mapping directly to a documented
+// `[close_guard]` key; collapsing them into an enum would distort the schema.
+#[allow(clippy::struct_excessive_bools)]
+pub struct CloseGuardConfig {
+    /// Master switch. When `false`, no close-guard checks run and every close
+    /// proceeds immediately.
+    ///
+    /// Default: `true`.
+    pub enabled: bool,
+
+    /// When `true`, also block close for panes whose command status is unknown
+    /// (no OSC 133 markers ever received — e.g. a raw `sh` without shell
+    /// integration, or a directly-launched `vim`).
+    ///
+    /// Default: `false` (matches pre-v0.9.0 behavior — unknown panes close
+    /// freely).
+    pub unknown_blocks: bool,
+
+    /// When `true`, the app-quit path runs the guard. When `false`, app quit
+    /// bypasses the guard and only individual close-window / close-tab /
+    /// close-pane actions are guarded.
+    ///
+    /// Default: `true`. Note: freminal's "Quit" closes only the focused
+    /// window (there is no multi-window quit), so in practice every exit
+    /// already routes through the window-close guard regardless of this flag.
+    pub guard_app_quit: bool,
+}
+
+impl Default for CloseGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            unknown_blocks: false,
+            guard_app_quit: true,
+        }
     }
 }
 
@@ -1325,6 +1384,7 @@ struct ConfigPartial {
     pub bell: Option<BellConfig>,
     pub security: Option<SecurityConfig>,
     pub paste_guard: Option<PasteGuardConfig>,
+    pub close_guard: Option<CloseGuardConfig>,
     pub shell_integration: Option<ShellIntegrationConfig>,
     pub command_blocks: Option<CommandBlocksConfig>,
     pub notifications: Option<NotificationsConfig>,
@@ -1377,6 +1437,9 @@ impl Config {
         }
         if let Some(paste_guard) = partial.paste_guard {
             self.paste_guard = paste_guard;
+        }
+        if let Some(close_guard) = partial.close_guard {
+            self.close_guard = close_guard;
         }
         if let Some(shell_integration) = partial.shell_integration {
             self.shell_integration = shell_integration;
@@ -2834,6 +2897,7 @@ mode = "none"
         original.bell.mode = BellMode::None;
         original.security.allow_clipboard_read = !Config::default().security.allow_clipboard_read;
         original.paste_guard.patterns = !Config::default().paste_guard.patterns;
+        original.close_guard.unknown_blocks = !Config::default().close_guard.unknown_blocks;
         original.shell_integration.set_term_program =
             !Config::default().shell_integration.set_term_program;
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
@@ -2903,6 +2967,10 @@ mode = "none"
             "paste_guard section dropped"
         );
         assert_eq!(
+            loaded.close_guard.unknown_blocks, original.close_guard.unknown_blocks,
+            "close_guard section dropped"
+        );
+        assert_eq!(
             loaded.shell_integration.set_term_program, original.shell_integration.set_term_program,
             "shell_integration section dropped"
         );
@@ -2951,6 +3019,7 @@ mode = "none"
             bell: _,
             security: _,
             paste_guard: _,
+            close_guard: _,
             shell_integration: _,
             command_blocks: _,
             notifications: _,
@@ -2959,6 +3028,49 @@ mode = "none"
             startup: _,
             onboarding: _,
         } = loaded;
+    }
+
+    #[test]
+    fn close_guard_config_round_trips_through_toml() {
+        let mut cfg = CloseGuardConfig::default();
+        assert!(cfg.enabled, "default enabled is true");
+        assert!(!cfg.unknown_blocks, "default unknown_blocks is false");
+        assert!(cfg.guard_app_quit, "default guard_app_quit is true");
+
+        // Flip every field and confirm the round trip preserves them.
+        cfg.enabled = false;
+        cfg.unknown_blocks = true;
+        cfg.guard_app_quit = false;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialize CloseGuardConfig");
+        let parsed: CloseGuardConfig = toml::from_str(&toml).expect("deserialize CloseGuardConfig");
+        assert!(!parsed.enabled);
+        assert!(parsed.unknown_blocks);
+        assert!(!parsed.guard_app_quit);
+    }
+
+    #[test]
+    fn close_guard_apply_partial_merges_from_toml() {
+        // Regression guard: [close_guard] must survive the ConfigPartial merge.
+        let mut cfg = Config::default();
+        assert!(cfg.close_guard.enabled, "default enabled");
+        assert!(!cfg.close_guard.unknown_blocks, "default unknown_blocks");
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[close_guard]
+unknown_blocks = true
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(
+            cfg.close_guard.unknown_blocks,
+            "[close_guard] unknown_blocks must merge through ConfigPartial"
+        );
+        // Untouched keys keep their defaults.
+        assert!(cfg.close_guard.enabled);
+        assert!(cfg.close_guard.guard_app_quit);
     }
 
     #[test]

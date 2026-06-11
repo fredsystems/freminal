@@ -386,6 +386,30 @@ limit = 4000
 # command_finished_template = "{command} finished in {duration} (exit {exit_code})"
 
 ## ##############################################################################
+# CLOSE GUARD (block close on running commands)
+## ##############################################################################
+[close_guard]
+# Master switch. When false, no close-guard checks run and every pane / tab /
+# window close proceeds immediately. When true, closing a scope that contains
+# a running foreground command (per OSC 133 markers) shows a confirmation
+# dialog listing what is running.
+# Default: true.
+# enabled = true
+
+# When true, also block close for panes whose command status is unknown
+# (no OSC 133 markers ever received — e.g. a raw `sh` without shell
+# integration, or a directly-launched `vim`).
+# Default: false (unknown panes close freely, matching pre-v0.9.0 behavior).
+# unknown_blocks = false
+
+# When true, the app-quit path runs the guard. When false, app quit bypasses
+# it and only individual close-window / close-tab / close-pane actions are
+# guarded. Note: Freminal's "Quit" closes only the focused window, so every
+# exit already routes through the window-close guard regardless of this flag.
+# Default: true.
+# guard_app_quit = true
+
+## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################
 

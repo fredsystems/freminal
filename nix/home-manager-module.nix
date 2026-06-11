@@ -115,6 +115,14 @@ let
           ;
       };
 
+      closeGuardSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.close_guard)
+          enabled
+          unknown_blocks
+          guard_app_quit
+          ;
+      };
+
       tabTitleSection = lib.filterAttrs (_: v: v != null) {
         inherit (s.tab_title) policy separator;
       };
@@ -175,6 +183,7 @@ let
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
       // lib.optionalAttrs (securitySection != { }) { security = securitySection; }
       // lib.optionalAttrs (pasteGuardSection != { }) { paste_guard = pasteGuardSection; }
+      // lib.optionalAttrs (closeGuardSection != { }) { close_guard = closeGuardSection; }
       // lib.optionalAttrs (tabTitleSection != { }) { tab_title = tabTitleSection; }
       // lib.optionalAttrs (shellIntegrationSection != { }) {
         shell_integration = shellIntegrationSection;
@@ -617,6 +626,39 @@ in
             only when patterns is true. Malformed patterns are reported and
             skipped at match time.
             Null uses the default dangerous-command pattern set.
+          '';
+        };
+      };
+
+      close_guard = {
+        enabled = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Master switch for the close-on-running-command guard. When true,
+            closing a pane / tab / window that contains a running foreground
+            command (per OSC 133 markers) shows a confirmation dialog.
+            Null uses the default (true).
+          '';
+        };
+
+        unknown_blocks = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, also block close for panes whose command status is
+            unknown (no OSC 133 markers ever received).
+            Null uses the default (false).
+          '';
+        };
+
+        guard_app_quit = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, the app-quit path runs the close guard. When false, app
+            quit bypasses it and only individual close actions are guarded.
+            Null uses the default (true).
           '';
         };
       };

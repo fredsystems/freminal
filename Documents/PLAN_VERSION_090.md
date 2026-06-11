@@ -4297,6 +4297,29 @@ egui::ViewportCommand::Close)` routes back through
 
 **Verification:** Round-trip TOML test in `config.rs` tests.
 
+**Completion notes (2026-06-11):**
+
+- Added `CloseGuardConfig { enabled, unknown_blocks, guard_app_quit }`
+  with a `Default` impl (`true`, `false`, `true`) and the full
+  `#[serde(default)]` + per-field doc comments documenting that only
+  `CommandStatus::Running` counts as "running".
+- Full new-section wiring per `freminal-config-options`: field on
+  `Config`, `Default` impl, `ConfigPartial::close_guard`,
+  `apply_partial` merge arm, and the
+  `every_config_section_survives_partial_merge` guard test (mutation,
+  assertion, and the no-`..` destructure entry).
+- Two dedicated tests: `close_guard_config_round_trips_through_toml`
+  and `close_guard_apply_partial_merges_from_toml`.
+- `config_example.toml` gained a `[close_guard]` section.
+- Nix home-manager module mirrored: `closeGuardSection` let-binding,
+  `optionalAttrs` merge arm, and three `mkOption`s. `nixfmt --check`,
+  `statix check`, `deadnix --fail` all clean.
+- **Deviation:** `guard_app_quit` is retained in the schema for
+  forward-compatibility but has no distinct gate in v0.9.0 — there is
+  no multi-window app-quit path (Quit closes only the focused window),
+  so window-close guarding already covers every exit. Documented in the
+  98.1 audit notes and in the field's doc comment.
+
 #### 98.3 — Running-command detection helper
 
 **Scope:** New module `freminal/src/gui/close_guard.rs`.
