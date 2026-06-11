@@ -4219,6 +4219,56 @@ or window, and every path that triggers app quit.
 
 **Verification:** Report posted; no code changes.
 
+**Completion notes (2026-06-11) — close-path audit:**
+
+Every close entry point and its current guard status (none are guarded
+today except the settings-window unsaved-changes case):
+
+| Entry point                    | Location                                 | Mechanism                                                                        |
+| ------------------------------ | ---------------------------------------- | -------------------------------------------------------------------------------- |
+| Keybinding `ClosePane`         | `input.rs` → `actions.rs` (deferred arm) | sets `win.pending_close_pane = true`; drained in `app_impl.rs update()`          |
+| Menu "Pane > Close Pane"       | `menu.rs`                                | sets `win.pending_close_pane = true`; same drain                                 |
+| Keybinding `CloseTab`          | `actions.rs` deferred dispatch           | `win.tabs.close_active_tab()` directly                                           |
+| Menu "Tab > Close Tab"         | `menu.rs`                                | `TabBarAction::Close(active)` → `dispatch_tab_bar_action` → `win.close_tab(i)`   |
+| Tab-bar "×" button             | `actions.rs` `dispatch_tab_bar_action`   | `TabBarAction::Close(i)` → `win.close_tab(i)`                                    |
+| `close_focused_pane` last-pane | `actions.rs`                             | `ViewportCommand::Close` (closes window) or `win.close_tab(idx)`                 |
+| PTY-death last-pane            | `app_impl.rs`                            | `ViewportCommand::Close` or `win.close_tab(tab_idx)` (NOT user-initiated)        |
+| Menu "Quit"                    | `menu.rs`                                | `ViewportCommand::Close` (closes only the current window — no multi-window quit) |
+| OS window-close button         | `event_loop.rs` → `on_close_requested`   | returns `bool`; `false` vetoes                                                   |
+| `ViewportCommand::Close` (all) | `event_loop.rs` → `on_close_requested`   | programmatic closes route through `on_close_requested`                           |
+
+Key architectural facts driving the implementation:
+
+- **There is no `KeyAction::Quit` and no multi-window app-quit path.**
+  "Quit" closes only the focused window via `ViewportCommand::Close`.
+  This simplifies 98.7: there is no cross-window quit to guard — each
+  window's close is independently guarded through `on_close_requested`.
+  98.2's `guard_app_quit` key is therefore retained in the schema (for
+  forward-compatibility / documentation) but has no distinct code path
+  to gate in v0.9.0; window-close guarding covers every real exit.
+- **`close_focused_pane(ui, win)` in `actions.rs` is the single
+  user-intent pane-close function.** Both the keybinding and the menu
+  set `win.pending_close_pane`, drained once per frame in `update()`.
+  98.5 guards this drain site.
+- **`PerWindowState` (`window.rs`) is the dialog home**, exactly like
+  `paste_dialog` and `broadcast_dialog`. A new `close_dialog:
+CloseGuardDialog` field plus a `pending_close: Option<PendingClose>`
+  carry the suspended close intent.
+- **Snapshot read:** `pane.arc_swap.load()` → `Arc<TerminalSnapshot>`;
+  `snap.command_blocks: Arc<[CommandBlock]>`; a pane has a running
+  command iff any block's `status() == CommandStatus::Running`.
+- **Modal pattern (5 steps):** state struct on `PerWindowState`;
+  register `.is_open()` in `ui_overlay_open` (`app_impl.rs`); call
+  `dialog.show(ctx)` each frame in `update()`; open on trigger; resolve
+  outcome. `broadcast_guard.rs` is the closest template (no text field).
+- **Force Close → window:** `ui.ctx().send_viewport_cmd(
+egui::ViewportCommand::Close)` routes back through
+  `on_close_requested`. To avoid re-prompting, the resolved
+  `pending_close` must carry a "user already confirmed" flag so
+  `on_close_requested` lets it through.
+- **IDs:** `PaneId(u64)` (global), `TabId(u64)` (per-window),
+  `WindowId(winit id)` (process-global).
+
 #### 98.2 — Config schema
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`.
