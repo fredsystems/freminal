@@ -154,4 +154,11 @@ pub(super) struct PerWindowState {
     /// Opened by the `ToggleBroadcastInput` dispatch when
     /// `[tabs] confirm_broadcast` is set and broadcast is being turned on.
     pub(super) broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog,
+
+    /// Close-on-running-command confirmation dialog for this window (Task 98).
+    ///
+    /// Opened by a guarded pane / tab / window close when the affected scope
+    /// contains a running foreground command, rendered every frame while open,
+    /// and resolved to Cancel or Force Close.
+    pub(super) close_dialog: super::close_guard::CloseGuardDialog,
 }

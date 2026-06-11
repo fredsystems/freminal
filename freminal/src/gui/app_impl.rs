@@ -224,6 +224,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_menu_actions: Vec::new(),
                         paste_dialog: super::paste_guard::PasteDialog::default(),
                         broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
+                        close_dialog: super::close_guard::CloseGuardDialog::default(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -281,6 +282,27 @@ impl freminal_windowing::App for FreminalGui {
             let _ = self.settings_modal.request_close();
             self.settings_modal.is_open = false;
             self.settings_owner = None;
+        }
+
+        // Close-on-running-command guard (Task 98.7).  If the user already
+        // confirmed a force-close for this window, let it through and clear
+        // the flag.  Otherwise, if any pane in the window has a running
+        // foreground command, open the confirmation dialog and veto the OS
+        // close (return false); the dialog's Force Close re-issues the close
+        // with this flag set.
+        if self.force_close_windows.remove(&window_id) {
+            // User-confirmed force close — fall through to the close logic.
+        } else if let Some(win) = self.windows.get(&window_id) {
+            let running = self.window_close_running(win);
+            if !running.is_empty()
+                && let Some(win) = self.windows.get_mut(&window_id)
+            {
+                win.close_dialog.open(super::close_guard::PendingClose {
+                    scope: super::close_guard::CloseScope::Window,
+                    running,
+                });
+                return false;
+            }
         }
 
         // Auto-save session before the last terminal window is removed.
@@ -1134,6 +1156,32 @@ impl freminal_windowing::App for FreminalGui {
                 | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
             }
 
+            // Close-on-running-command guard dialog (Task 98).  Shown while a
+            // pane / tab / window close is suspended pending confirmation.  On
+            // Force Close the original close is executed with the guard
+            // bypassed; on Cancel the close is abandoned.
+            if let Some(scope) = win.close_dialog.scope() {
+                match win.close_dialog.show(ctx) {
+                    super::close_guard::CloseDialogOutcome::ForceClose => match scope {
+                        super::close_guard::CloseScope::Pane => {
+                            Self::close_focused_pane(ui, &mut win);
+                        }
+                        super::close_guard::CloseScope::Tab(index) => {
+                            win.close_tab(index);
+                        }
+                        super::close_guard::CloseScope::Window => {
+                            // Mark this window as user-confirmed so the
+                            // on_close_requested guard lets the resulting
+                            // ViewportCommand::Close through without re-prompting.
+                            self.force_close_windows.insert(window_id);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    },
+                    super::close_guard::CloseDialogOutcome::Cancelled
+                    | super::close_guard::CloseDialogOutcome::Idle => {}
+                }
+            }
+
             // Floating "About Freminal" dialog.  Shown whenever the user
             // clicked "About Freminal" in the Help menu.  Self-dismissing
             // via its own Close button or title-bar X.
@@ -1167,7 +1215,8 @@ impl freminal_windowing::App for FreminalGui {
                 || self.welcome.is_open()
                 || win.renaming_tab.is_some()
                 || win.paste_dialog.is_open()
-                || win.broadcast_dialog.is_open();
+                || win.broadcast_dialog.is_open()
+                || win.close_dialog.is_open();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -1835,9 +1884,11 @@ impl freminal_windowing::App for FreminalGui {
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
+            // Routed through the close guard (Task 98): a running foreground
+            // command opens the confirmation dialog instead of closing.
             if win.pending_close_pane {
                 win.pending_close_pane = false;
-                Self::close_focused_pane(ui, &mut win);
+                self.guarded_close_pane(ui, &mut win);
             }
 
             // Handle deferred directional focus (needs layout rects).
@@ -2072,6 +2123,7 @@ impl FreminalGui {
             pending_menu_actions: Vec::new(),
             paste_dialog: super::paste_guard::PasteDialog::default(),
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
+            close_dialog: super::close_guard::CloseGuardDialog::default(),
         }
     }
 

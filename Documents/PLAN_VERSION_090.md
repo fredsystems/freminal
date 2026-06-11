@@ -4407,6 +4407,70 @@ plus any app-quit dispatch path identified in 98.1.
 running command, trigger app quit, verify dialog appears and
 cancel preserves both windows.
 
+**Completion notes for 98.3–98.7 (2026-06-11, committed together):**
+
+These five subtasks are tightly intertwined (the dialog consumes the
+detection output; every wiring point opens the same dialog and resolves
+the same outcome enum), so they ship in one commit per
+`commit-discipline`'s "tightly intertwined subtasks" allowance.
+
+- **New module `freminal/src/gui/close_guard.rs`** holding the pure
+  detection helpers, the `RunningCommandInfo` descriptor, the
+  `CloseGuardDialog` modal, the `PendingClose` / `CloseScope` /
+  `CloseDialogOutcome` types, and the `FreminalGui` orchestration
+  methods (`guarded_close_pane`, `guarded_close_tab`,
+  `window_close_running`, and the per-scope `gather_*` helpers).
+- **Detection (98.3):** `pane_running_command` reads the pane's
+  `ArcSwap` snapshot (lock-free) and reports a running command iff the
+  most recent block is `CommandStatus::Running` **and** has an
+  `output_start_row` (OSC 133 C seen). A block with only `A` (idle
+  prompt, then Ctrl-C) is deliberately **not** counted — this is the
+  precise behavior the planning notes asked for (no spurious
+  "command running" prompt on an idle prompt). `pane_is_unknown` reports
+  panes that never saw a prompt marker, gated by `unknown_blocks`.
+  **Naming deviation:** the plan named the aggregate
+  `panes_with_running_commands(&[&Pane])` / `unknown_command_panes`;
+  the implemented surface is `gather_tab_running(panes, tab_id,
+tab_name, unknown_blocks)` plus the per-scope `FreminalGui` methods,
+  because the dialog needs the tab id/name alongside each pane and the
+  pane alone does not carry that context.
+- **Dialog (98.4):** `CloseGuardDialog` mirrors `broadcast_guard.rs`:
+  state on `PerWindowState`, registered in `ui_overlay_open`, rendered
+  every frame, Esc = Cancel, Ctrl+Enter = Force Close. List entries are
+  `"<tab name> · <command> (<elapsed>)"`. **Command label deviation:**
+  `CommandBlock` does not capture the command-line text, so the label
+  is the pane title (often the running program via OSC 0/2) or
+  `"<unknown command>"`, not the literal command. **"Close Other Panes"
+  deferred:** the optional third button is not implemented in v0.9.0 —
+  Cancel / Force Close cover the requirement; partial close is logged
+  here as a future enhancement.
+- **Pane close (98.5):** the deferred-close drain site in
+  `app_impl.rs update()` now calls `guarded_close_pane` instead of
+  `close_focused_pane`. `close_focused_pane` is unchanged and is the
+  Force Close executor.
+- **Tab close (98.6):** both the `CloseTab` keybinding deferred arm and
+  the tab-bar / menu `TabBarAction::Close(i)` route through
+  `guarded_close_tab`. Force Close calls the raw `win.close_tab(idx)`.
+- **Window close + app quit (98.7):** `on_close_requested` consults the
+  guard. A confirmed force-close is tracked in
+  `FreminalGui::force_close_windows: HashSet<WindowId>`; on the
+  `ViewportCommand::Close` round trip the entry is removed and the close
+  proceeds. Otherwise, running commands open the dialog (scope
+  `Window`) and the function returns `false` to veto the OS close.
+  **App-quit deviation:** there is no multi-window quit path in freminal
+  (see 98.1) — "Quit" closes only the focused window via
+  `ViewportCommand::Close`, which already routes through
+  `on_close_requested`. So `guard_app_quit` has no separate code path;
+  window-close guarding covers every exit. Documented in 98.1 + 98.2.
+- **Tests:** 13 unit tests in `close_guard.rs` covering the running /
+  not-running / prompt-only / finished / most-recent-only detection
+  cases, unknown detection, elapsed computation, the
+  duration/entry formatters, and the dialog open/scope. Full GUI
+  integration (real `Pane` with channels) is exercised manually; the
+  pure helpers are unit-tested directly.
+- `cargo test --all`, workspace `cargo clippy --all-targets
+--all-features -- -D warnings`, and `cargo machete` all clean.
+
 #### 98.8 — `KeyAction::ForceClose`
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.

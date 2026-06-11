@@ -195,7 +195,7 @@ impl super::FreminalGui {
                     warn!("TabBarAction::SwitchTo: active tab has no active pane");
                 }
             }
-            super::TabBarAction::Close(i) => win.close_tab(i),
+            super::TabBarAction::Close(i) => self.guarded_close_tab(win, i),
             super::TabBarAction::BeginRename(i) => {
                 // Start inline rename: seed the buffer with the current
                 // display name and mark the tab as renaming.  Clamp to a
@@ -359,17 +359,21 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::NewTab => self.spawn_new_tab(win),
-            KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
-                trace!("Cannot close tab: {e}");
+            KeyAction::CloseTab => {
+                // Route through the close guard, which either opens the
+                // confirmation dialog (running command present) or closes the
+                // active tab immediately.  `guarded_close_tab` handles the
+                // last-tab case (the close silently no-ops there, matching the
+                // previous `close_active_tab` behavior).
+                let idx = win.tabs.active_index();
+                self.guarded_close_tab(win, idx);
             }
-            // `CloseTab` with no error is a no-op here; `ClearScrollback`
-            // and the fold actions are fully handled synchronously in
-            // `dispatch_binding_action` (the former resets view scroll
-            // offset and sends `InputEvent::ClearScrollback`; the latter
-            // mutate `ViewState::folded_blocks` directly) so they need no
-            // deferred-action work.
-            KeyAction::CloseTab
-            | KeyAction::ClearScrollback
+            // `ClearScrollback` and the fold actions are fully handled
+            // synchronously in `dispatch_binding_action` (the former resets
+            // view scroll offset and sends `InputEvent::ClearScrollback`; the
+            // latter mutate `ViewState::folded_blocks` directly) so they need
+            // no deferred-action work.
+            KeyAction::ClearScrollback
             | KeyAction::FoldPreviousCommand
             | KeyAction::FoldAll
             | KeyAction::UnfoldAll
