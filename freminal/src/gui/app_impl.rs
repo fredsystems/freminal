@@ -223,6 +223,9 @@ impl freminal_windowing::App for FreminalGui {
                         last_tab_rects: Vec::new(),
                         pending_menu_actions: Vec::new(),
                         paste_dialog: super::paste_guard::PasteDialog::default(),
+                        broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
+                        close_dialog: super::close_guard::CloseGuardDialog::default(),
+                        pending_force_close: false,
                     };
                     self.windows.insert(window_id, win);
 
@@ -280,6 +283,27 @@ impl freminal_windowing::App for FreminalGui {
             let _ = self.settings_modal.request_close();
             self.settings_modal.is_open = false;
             self.settings_owner = None;
+        }
+
+        // Close-on-running-command guard (Task 98.7).  If the user already
+        // confirmed a force-close for this window, let it through and clear
+        // the flag.  Otherwise, if any pane in the window has a running
+        // foreground command, open the confirmation dialog and veto the OS
+        // close (return false); the dialog's Force Close re-issues the close
+        // with this flag set.
+        if self.force_close_windows.remove(&window_id) {
+            // User-confirmed force close — fall through to the close logic.
+        } else if let Some(win) = self.windows.get(&window_id) {
+            let running = self.window_close_running(win);
+            if !running.is_empty()
+                && let Some(win) = self.windows.get_mut(&window_id)
+            {
+                win.close_dialog.open(super::close_guard::PendingClose {
+                    scope: super::close_guard::CloseScope::Window,
+                    running,
+                });
+                return false;
+            }
         }
 
         // Auto-save session before the last terminal window is removed.
@@ -1053,6 +1077,28 @@ impl freminal_windowing::App for FreminalGui {
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
+            // Broadcast input (Task 74): when the active tab has broadcast
+            // enabled, collect the (pane id, input sender) of every leaf pane
+            // up front. Senders are cheap to clone. The active pane's render
+            // call mirrors its keyboard input to every *other* pane in this
+            // list. Empty when broadcast is off (the common case).
+            let broadcast_senders: Vec<(panes::PaneId, crossbeam_channel::Sender<InputEvent>)> =
+                if win.tabs.active_tab().broadcast_input {
+                    win.tabs
+                        .active_tab()
+                        .pane_tree
+                        .iter_panes()
+                        .map(|panes| {
+                            panes
+                                .into_iter()
+                                .map(|p| (p.id, p.input_tx.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
             // When a pane is zoomed, render only that pane at full size.
             // Borders are hidden during zoom since there is only one visible pane.
             let (pane_layout, border_width) = if let Some(zoomed_id) = zoomed_pane {
@@ -1091,6 +1137,61 @@ impl freminal_windowing::App for FreminalGui {
                 | super::paste_guard::PasteDialogOutcome::Idle => {}
             }
 
+            // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
+            // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
+            // On confirm, broadcast is enabled on the dialog's target tab.
+            match win.broadcast_dialog.show(ctx) {
+                super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
+                    if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.broadcast_input = true;
+                        let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                        self.push_info_toast(
+                            "Broadcast input enabled",
+                            Some(format!(
+                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                            )),
+                        );
+                    }
+                }
+                super::broadcast_guard::BroadcastDialogOutcome::Cancelled
+                | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
+            }
+
+            // Close-on-running-command guard dialog (Task 98).  Shown while a
+            // pane / tab / window close is suspended pending confirmation.  On
+            // Force Close the original close is executed with the guard
+            // bypassed; on Cancel the close is abandoned.
+            // A pending ForceClose key action resolves an open close-guard
+            // dialog as Force Close; harmless no-op when nothing is open.
+            let force_close_requested = std::mem::take(&mut win.pending_force_close);
+            if let Some(scope) = win.close_dialog.scope() {
+                let outcome = if force_close_requested {
+                    win.close_dialog.force_close_now();
+                    super::close_guard::CloseDialogOutcome::ForceClose
+                } else {
+                    win.close_dialog.show(ctx)
+                };
+                match outcome {
+                    super::close_guard::CloseDialogOutcome::ForceClose => match scope {
+                        super::close_guard::CloseScope::Pane => {
+                            Self::close_focused_pane(ui, &mut win);
+                        }
+                        super::close_guard::CloseScope::Tab(index) => {
+                            win.close_tab(index);
+                        }
+                        super::close_guard::CloseScope::Window => {
+                            // Mark this window as user-confirmed so the
+                            // on_close_requested guard lets the resulting
+                            // ViewportCommand::Close through without re-prompting.
+                            self.force_close_windows.insert(window_id);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    },
+                    super::close_guard::CloseDialogOutcome::Cancelled
+                    | super::close_guard::CloseDialogOutcome::Idle => {}
+                }
+            }
+
             // Floating "About Freminal" dialog.  Shown whenever the user
             // clicked "About Freminal" in the Help menu.  Self-dismissing
             // via its own Close button or title-bar X.
@@ -1123,7 +1224,9 @@ impl freminal_windowing::App for FreminalGui {
                 || self.about_window_open
                 || self.welcome.is_open()
                 || win.renaming_tab.is_some()
-                || win.paste_dialog.is_open();
+                || win.paste_dialog.is_open()
+                || win.broadcast_dialog.is_open()
+                || win.close_dialog.is_open();
 
             // ── Pane border drag-to-resize ───────────────────────────
             //
@@ -1410,6 +1513,20 @@ impl freminal_windowing::App for FreminalGui {
                     && pane.echo_off.load(std::sync::atomic::Ordering::Relaxed);
                 let is_active = pane_id == active_pane_id;
 
+                // Broadcast input (Task 74): only the active pane fans out its
+                // keyboard input, and only to the *other* panes. Non-active
+                // panes and the broadcast-off case pass an empty slice.
+                let key_broadcast_targets: Vec<crossbeam_channel::Sender<InputEvent>> = if is_active
+                {
+                    broadcast_senders
+                        .iter()
+                        .filter(|(id, _)| *id != pane_id)
+                        .map(|(_, tx)| tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
                 // Build a RecordingContext for this pane if recording is active.
                 // Hold the Arc locally so the borrow in `RecordingContext.handle`
                 // remains valid for the lifetime of `rec_ctx`.
@@ -1452,6 +1569,7 @@ impl freminal_windowing::App for FreminalGui {
                             pane_id,
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
+                            &key_broadcast_targets,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
@@ -1648,10 +1766,24 @@ impl freminal_windowing::App for FreminalGui {
             // the active pane's subtree is drawn in the active color; the
             // other half gets the inactive color. This makes it visually
             // clear which pane owns each shared edge.
+            let broadcast_active = win.tabs.active_tab().broadcast_input;
             if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
-                let inactive_color = egui::Color32::from_gray(80);
-                let active_color = egui::Color32::from_rgb(100, 160, 255);
+                // Broadcast mode (Task 74) tints every split border yellow so
+                // the user has a constant visual reminder that keystrokes are
+                // fanning out to every pane.  Otherwise the active pane's
+                // edges are blue and the rest gray.
+                let (inactive_color, active_color) = if broadcast_active {
+                    (
+                        egui::Color32::from_rgb(180, 150, 40),
+                        egui::Color32::from_rgb(240, 200, 60),
+                    )
+                } else {
+                    (
+                        egui::Color32::from_gray(80),
+                        egui::Color32::from_rgb(100, 160, 255),
+                    )
+                };
 
                 let border_rects = win
                     .tabs
@@ -1710,6 +1842,34 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
+            // Broadcast label (Task 74): when broadcast is active, paint a
+            // small "BROADCAST" tag in the top-right corner of every visible
+            // pane.  Top-right is chosen so it never collides with the
+            // password-prompt lock icon (which lives in the tab/menu bar, not
+            // the pane area).  Drawn for the zoomed pane too.
+            if broadcast_active {
+                let painter = ui.painter();
+                let label_color = egui::Color32::from_rgb(240, 200, 60);
+                let bg = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160);
+                for (_pane_id, pane_rect) in &pane_layout {
+                    let anchor = egui::pos2(pane_rect.max.x - 4.0, pane_rect.min.y + 4.0);
+                    let galley = painter.layout_no_wrap(
+                        "BROADCAST".to_owned(),
+                        egui::FontId::monospace(10.0),
+                        label_color,
+                    );
+                    let text_rect = egui::Align2::RIGHT_TOP
+                        .anchor_size(anchor, galley.size())
+                        .expand(2.0);
+                    painter.rect_filled(text_rect, 2.0, bg);
+                    painter.galley(
+                        text_rect.left_top() + egui::vec2(2.0, 2.0),
+                        galley,
+                        label_color,
+                    );
+                }
+            }
+
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
             for action in all_deferred_actions {
@@ -1734,9 +1894,11 @@ impl freminal_windowing::App for FreminalGui {
             }
 
             // Handle deferred close-pane (needs `ui` for ViewportCommand::Close).
+            // Routed through the close guard (Task 98): a running foreground
+            // command opens the confirmation dialog instead of closing.
             if win.pending_close_pane {
                 win.pending_close_pane = false;
-                Self::close_focused_pane(ui, &mut win);
+                self.guarded_close_pane(ui, &mut win);
             }
 
             // Handle deferred directional focus (needs layout rects).
@@ -1970,6 +2132,9 @@ impl FreminalGui {
             last_tab_rects: Vec::new(),
             pending_menu_actions: Vec::new(),
             paste_dialog: super::paste_guard::PasteDialog::default(),
+            broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
+            close_dialog: super::close_guard::CloseGuardDialog::default(),
+            pending_force_close: false,
         }
     }
 

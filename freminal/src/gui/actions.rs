@@ -195,7 +195,7 @@ impl super::FreminalGui {
                     warn!("TabBarAction::SwitchTo: active tab has no active pane");
                 }
             }
-            super::TabBarAction::Close(i) => win.close_tab(i),
+            super::TabBarAction::Close(i) => self.guarded_close_tab(win, i),
             super::TabBarAction::BeginRename(i) => {
                 // Start inline rename: seed the buffer with the current
                 // display name and mark the tab as renaming.  Clamp to a
@@ -359,17 +359,26 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::NewTab => self.spawn_new_tab(win),
-            KeyAction::CloseTab if let Err(e) = win.tabs.close_active_tab() => {
-                trace!("Cannot close tab: {e}");
+            KeyAction::ForceClose => {
+                // Resolve an open close-guard dialog as Force Close. No-op
+                // when no dialog is open (handled where the flag is drained).
+                win.pending_force_close = true;
             }
-            // `CloseTab` with no error is a no-op here; `ClearScrollback`
-            // and the fold actions are fully handled synchronously in
-            // `dispatch_binding_action` (the former resets view scroll
-            // offset and sends `InputEvent::ClearScrollback`; the latter
-            // mutate `ViewState::folded_blocks` directly) so they need no
-            // deferred-action work.
-            KeyAction::CloseTab
-            | KeyAction::ClearScrollback
+            KeyAction::CloseTab => {
+                // Route through the close guard, which either opens the
+                // confirmation dialog (running command present) or closes the
+                // active tab immediately.  `guarded_close_tab` handles the
+                // last-tab case (the close silently no-ops there, matching the
+                // previous `close_active_tab` behavior).
+                let idx = win.tabs.active_index();
+                self.guarded_close_tab(win, idx);
+            }
+            // `ClearScrollback` and the fold actions are fully handled
+            // synchronously in `dispatch_binding_action` (the former resets
+            // view scroll offset and sends `InputEvent::ClearScrollback`; the
+            // latter mutate `ViewState::folded_blocks` directly) so they need
+            // no deferred-action work.
+            KeyAction::ClearScrollback
             | KeyAction::FoldPreviousCommand
             | KeyAction::FoldAll
             | KeyAction::UnfoldAll
@@ -584,6 +593,33 @@ impl super::FreminalGui {
                 if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
                     for pane in panes {
                         pane.view_state.last_sent_size = (0, 0);
+                    }
+                }
+            }
+            KeyAction::ToggleBroadcastInput => {
+                let confirm = self.config.tabs.confirm_broadcast;
+                let tab = win.tabs.active_tab_mut();
+                let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                let currently_on = tab.broadcast_input;
+
+                // Turning broadcast ON with confirmation enabled defers the
+                // toggle to the confirm dialog. Turning it OFF (or with
+                // confirmation disabled) toggles immediately. Disabling never
+                // prompts.
+                if !currently_on && confirm {
+                    let tab_id = tab.id;
+                    win.broadcast_dialog.open(tab_id, pane_count);
+                } else {
+                    let now_on = tab.toggle_broadcast();
+                    if now_on {
+                        self.push_info_toast(
+                            "Broadcast input enabled",
+                            Some(format!(
+                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                            )),
+                        );
+                    } else {
+                        self.push_info_toast("Broadcast input disabled", None);
                     }
                 }
             }

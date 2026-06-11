@@ -197,6 +197,12 @@ limit = 4000
 # Default: "top"
 # position = "top"
 
+# Whether enabling broadcast input (Ctrl+Shift+I — send keystrokes to every
+# pane in the tab) requires a confirmation dialog the first time it is turned
+# on for a tab. Disabling broadcast never prompts.
+# Default: false
+# confirm_broadcast = false
+
 ## ##############################################################################
 # TAB TITLE SETTINGS
 ## ##############################################################################
@@ -380,6 +386,30 @@ limit = 4000
 # command_finished_template = "{command} finished in {duration} (exit {exit_code})"
 
 ## ##############################################################################
+# CLOSE GUARD (block close on running commands)
+## ##############################################################################
+[close_guard]
+# Master switch. When false, no close-guard checks run and every pane / tab /
+# window close proceeds immediately. When true, closing a scope that contains
+# a running foreground command (per OSC 133 markers) shows a confirmation
+# dialog listing what is running.
+# Default: true.
+# enabled = true
+
+# When true, also block close for panes whose command status is unknown
+# (no OSC 133 markers ever received — e.g. a raw `sh` without shell
+# integration, or a directly-launched `vim`).
+# Default: false (unknown panes close freely, matching pre-v0.9.0 behavior).
+# unknown_blocks = false
+
+# When true, the app-quit path runs the guard. When false, app quit bypasses
+# it and only individual close-window / close-tab / close-pane actions are
+# guarded. Note: Freminal's "Quit" closes only the focused window, so every
+# exit already routes through the window-close guard regardless of this flag.
+# Default: true.
+# guard_app_quit = true
+
+## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################
 
@@ -486,6 +516,8 @@ limit = 4000
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
 #     split_horizontal = "Ctrl+Shift+Minus"  (split focused pane top / bottom)
 #     close_pane       = "Ctrl+Shift+W"      (close focused pane; last pane closes tab)
+#     force_close      = (unbound)           (resolve the close-on-running-command
+#                                             guard dialog as "Force Close")
 #     focus_pane_left  = "Ctrl+Shift+H"      (move focus left)
 #     focus_pane_down  = "Ctrl+Shift+J"      (move focus down)
 #     focus_pane_up    = "Ctrl+Shift+K"      (move focus up)
@@ -495,6 +527,8 @@ limit = 4000
 #     resize_pane_up    = "Ctrl+Alt+K"       (shrink pane upward)
 #     resize_pane_right = "Ctrl+Alt+L"       (grow pane rightward)
 #     zoom_pane        = "Ctrl+Shift+Z"      (toggle zoom on focused pane)
+#     toggle_broadcast_input = "Ctrl+Shift+I" (broadcast keyboard input to every
+#                                              pane in the active tab)
 #
 #   Session:
 #     toggle_recording = "Ctrl+Shift+R"      (start/stop FREC v2 session recording)

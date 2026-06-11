@@ -217,6 +217,23 @@ freminal --layout dev.toml ~/projects/backend
 Without variables, layouts would be project-specific (hardcoded paths). The
 `$1` positional convention follows shell scripting.
 
+### Per-Pane Environment Variables
+
+The `env` table on a leaf pane supports the same substitution forms as
+`directory`, `command`, `shell`, and `title`. Each value is substituted
+independently before the pane is spawned. This lets one layout target many
+projects while still exporting project-scoped environment variables:
+
+```toml
+[[windows.tabs.panes]]
+directory = "$1"
+env = { PROJECT_ROOT = "$1", AWS_PROFILE = "$ENV{AWS_PROFILE}" }
+```
+
+The resolved env map is layered into the pane's PTY environment beneath the
+spawn-time defaults (`TERM_PROGRAM`, etc.), so a layout can override those by
+naming the same key.
+
 ---
 
 ## Save Current Layout

@@ -1280,6 +1280,9 @@ impl FreminalTerminalWidget {
     /// - `bg_image_mode` — background image fit mode from config.
     /// - `binding_map` — user key-binding map; bound combos are intercepted before PTY dispatch.
     /// - `is_active_pane` — whether this pane currently has keyboard focus.
+    /// - `key_broadcast_targets` — input senders of the other panes to mirror
+    ///   keyboard input to when broadcast mode is active (Task 74); empty when
+    ///   broadcast is off or this is not the active pane.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
@@ -1308,6 +1311,7 @@ impl FreminalTerminalWidget {
         pane_id: crate::gui::panes::PaneId,
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
+        key_broadcast_targets: &[Sender<InputEvent>],
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1579,6 +1583,7 @@ impl FreminalTerminalWidget {
                     is_active_pane,
                     recording_ctx,
                     &cache.placeholder_hit_rects,
+                    key_broadcast_targets,
                 )
             });
             left_mouse_button_pressed |= left_mouse_button_pressed_inner;

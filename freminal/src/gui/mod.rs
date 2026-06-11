@@ -36,6 +36,8 @@ pub mod view_state;
 
 mod actions;
 mod app_impl;
+mod broadcast_guard;
+mod close_guard;
 mod command_blocks;
 mod command_history;
 mod hot_reload;
@@ -283,6 +285,13 @@ struct FreminalGui {
     /// cascade of `&mut self` through otherwise-read-only call sites.  The
     /// entire GUI runs on a single thread, so `RefCell` is sufficient.
     toasts: std::cell::RefCell<toast::ToastStack>,
+
+    /// Windows for which the user has already confirmed a force-close in the
+    /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
+    /// window in this set it skips the running-command guard and lets the
+    /// close through, then removes the entry.  Avoids re-prompting on the
+    /// `ViewportCommand::Close` round trip a Force Close triggers.
+    force_close_windows: std::collections::HashSet<WindowId>,
 }
 
 impl FreminalGui {
@@ -408,6 +417,7 @@ impl FreminalGui {
             welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
+            force_close_windows: std::collections::HashSet::new(),
         };
 
         if !layout_errors.is_empty() {

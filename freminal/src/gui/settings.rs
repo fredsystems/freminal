@@ -1322,6 +1322,50 @@ impl SettingsModal {
             &self.draft.tab_title.separator,
         );
         ui.colored_label(egui::Color32::GRAY, format!("Preview:  {preview}"));
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        self.show_broadcast_input_section(ui);
+    }
+
+    /// Render the "Broadcast Input" section of the Tabs settings tab
+    /// (Task 74.5): the read-only shortcut display with a jump-to-keybindings
+    /// button, and the confirm-before-enabling toggle.
+    fn show_broadcast_input_section(&mut self, ui: &mut Ui) {
+        ui.label("Broadcast Input:");
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled for a tab, keystrokes are sent to every pane in the \
+             tab at once. Toggle it per-tab with the keybinding below.",
+        );
+        ui.add_space(4.0);
+
+        let effective_map = self.draft.build_binding_map().unwrap_or_default();
+        let binding_text = effective_map
+            .combo_for(KeyAction::ToggleBroadcastInput)
+            .map_or_else(|| "unbound".to_owned(), |c| c.to_string());
+        ui.horizontal(|ui| {
+            ui.label("Shortcut:");
+            ui.monospace(&binding_text);
+            if ui.button("Change…").clicked() {
+                self.active_tab = SettingsTab::Keybindings;
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.draft.tabs.confirm_broadcast,
+            "Confirm before enabling broadcast",
+        );
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When on, the first time you enable broadcast in a tab a dialog \
+             asks you to confirm. Disabling broadcast never prompts.",
+        );
     }
 
     // Renders both the Shell Integration section and the Command Blocks
@@ -1638,6 +1682,38 @@ impl SettingsModal {
         ui.separator();
         ui.add_space(8.0);
         self.show_paste_guard_section(ui);
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+        self.show_close_guard_section(ui);
+    }
+
+    /// The Close Guard subsection of the Security tab (Task 98.9).
+    fn show_close_guard_section(&mut self, ui: &mut Ui) {
+        ui.heading("Close Guard");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Confirm before closing a pane, tab, or window that has a running \
+             foreground command (detected via OSC 133 shell integration).",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard");
+
+        // The remaining toggles are only meaningful while the guard is on.
+        ui.add_enabled_ui(self.draft.close_guard.enabled, |ui| {
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.draft.close_guard.unknown_blocks,
+                "Also guard panes with unknown status (no shell integration)",
+            );
+            ui.checkbox(
+                &mut self.draft.close_guard.guard_app_quit,
+                "Guard application quit",
+            );
+        });
     }
 
     /// The Paste Guard subsection of the Security tab (Task 77).

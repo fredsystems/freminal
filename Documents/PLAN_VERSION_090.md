@@ -22,13 +22,13 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | --- | --------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
 | 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
 | 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Pending  | v0.8.0, Task 58 | `task-74/broadcast-input`        |
-| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-75/pane-env-roundtrip`     |
+| 74  | Broadcast Input to Panes                | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
+| 75  | Verify per-pane env round-trip          | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`      |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-98/block-close-on-running` |
+| 98  | Block Close on Running Commands         | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`      |
 
 ### Execution order
 
@@ -2287,7 +2287,56 @@ All resolved.
 
 ---
 
-## Task 74 — Broadcast Input to Panes
+## Task 74 — Broadcast Input to Panes ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** All five subtasks
+> implemented and committed individually. Tasks 74, 75, and 98 ship in a
+> single PR off this combined branch (per user direction); Task 74 was
+> managed end-to-end, Tasks 75 and 98 follow on the same branch.
+>
+> - **74.1** (`4b99b10c`): `Tab::broadcast_input` flag (default false),
+>   `Tab::toggle_broadcast()`, Debug field, two unit tests.
+> - **74.2** (`0a1e6aa8`): `KeyAction::ToggleBroadcastInput` with default
+>   `Ctrl+Shift+I` in `register_tab_bindings`. Dispatched in `actions.rs`
+>   (deferred path) toggling the active tab + info toast.
+>   `config_example.toml` documented. `ALL` count 60→61, default-binding
+>   count 47→48; round-trip + default-binding tests added.
+> - **74.3** (`438b197d`): fan-out. `write_input_to_terminal` and
+>   `widget.rs::show()` gain a `key_broadcast_targets: &[Sender<InputEvent>]`
+>   slice; a `broadcast_key_bytes` helper mirrors each encoded
+>   `InputEvent::Key` at the two genuine keyboard send sites (KKP release +
+>   main text/key/paste encode). Scroll-derived `send_terminal_inputs` calls
+>   are deliberately NOT broadcast. The `app_impl` render loop collects
+>   per-pane senders once per frame (senders are cheap to clone) and passes
+>   the _other_ panes' senders only to the active pane's `show()`. Tab bar
+>   prepends a satellite-antenna glyph when broadcast is on. 4 unit tests on
+>   the fan-out helper.
+> - **74.4** (`d9f576c1`): split borders tint yellow and a "BROADCAST" tag
+>   paints in each pane's top-right (avoids the password-lock icon, which
+>   lives in the tab/menu bar). Visual; verified manually.
+> - **74.5** (`544eb624`): `confirm_broadcast` bool on `TabsConfig`
+>   (default false) wired through `config_example.toml`, the Tabs settings
+>   panel (new "Broadcast Input" section: read-only shortcut +
+>   jump-to-keybindings button + confirm toggle), the Nix home-manager
+>   module, and a round-trip test. New `broadcast_guard` module provides a
+>   per-window confirm dialog (mirrors paste-guard); registered in
+>   `ui_overlay_open`. Enabling broadcast with confirmation on opens the
+>   dialog; disabling never prompts.
+>
+> **Design notes (decided during implementation):**
+>
+> - Broadcast is keyboard-only. The two real keyboard send sites are
+>   mirrored; mouse, scroll-to-arrow, mouse-tracking escapes, resize, focus,
+>   and selection events are pane-local and never fan out.
+> - Paste payloads broadcast the active pane's mode-encoded (bracketed-paste-
+>   wrapped) bytes verbatim to every pane, rather than re-deriving each
+>   pane's wrap. This is the simple, documented semantic.
+> - Tab-bar indicator glyph: `📡` (U+1F4E1). Pane label: literal
+>   "BROADCAST" tag, top-right. Both documented here per 74.3/74.4's
+>   "agent chooses, document the choice" instruction.
+> - Full verification green: `cargo test --all`, workspace clippy
+>   (`-D warnings`), `cargo fmt --all --check`, `cargo machete`, and the Nix
+>   lint stack (`nixfmt`/`statix`/`deadnix`) on the home-manager module.
 
 ### 74 Summary
 
@@ -2398,7 +2447,32 @@ per-frame work.
 
 ---
 
-## Task 75 — Verify Per-Pane Env Round-Trip
+## Task 75 — Verify Per-Pane Env Round-Trip ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** Verified the existing
+> per-pane `env` plumbing round-trips through load → substitute → resolve and
+> through serialize → reparse, with explicit regression tests; documented the
+> `env` substitution behavior in `LAYOUT_FORMAT.md`. No production code
+> changed — Task 75 is verification + documentation only, exactly as the
+> reduced v0.9.0 scope intended.
+>
+> - **75.1** — three new tests in `freminal-common/src/layout.rs`:
+>   `per_pane_env_round_trips_through_load_and_resolve` (two panes, each with
+>   an `env` map mixing literal, `${named}`, and `$1` positional values;
+>   asserts the resolved leaves carry the substituted maps),
+>   `per_pane_env_appears_in_serialized_toml` (in-memory layout → TOML →
+>   reparse, confirms env keys/values survive), and
+>   `empty_pane_env_is_omitted_from_serialized_toml` (confirms the
+>   `skip_serializing_if = "HashMap::is_empty"` attribute).
+> - **75.2** — added a "Per-Pane Environment Variables" subsection to
+>   `Documents/LAYOUT_FORMAT.md` with the `env = { PROJECT_ROOT = "$1",
+AWS_PROFILE = "$ENV{AWS_PROFILE}" }` example and a note that env layers
+>   beneath spawn-time defaults.
+>
+> **Deviation:** the plan said "Update the 'Last updated' header line" in
+> `LAYOUT_FORMAT.md`, but that document has no such line (it opens directly
+> with the H1 and intro). No header line was added — introducing one solely
+> for this task would be out of step with the document's existing style.
 
 ### 75 Summary
 
@@ -4060,7 +4134,24 @@ The following ideas surfaced during planning but are explicitly deferred:
 
 ---
 
-## Task 98 — Block Close on Running Commands
+## Task 98 — Block Close on Running Commands ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** All nine subtasks
+> (98.1 audit → 98.9 settings UI) implemented and committed. Tasks 74, 75,
+> and 98 ship in a single PR off this combined branch per user direction.
+> Key deviations, each documented in the relevant subtask notes:
+>
+> - No multi-window app-quit path exists in freminal (Quit closes the
+>   focused window), so `guard_app_quit` has no separate gate — window-close
+>   guarding via `on_close_requested` covers every exit (98.1, 98.7).
+> - The dialog command label is the pane title (or `"<unknown command>"`),
+>   because `CommandBlock` does not capture the command-line text (98.4).
+> - The optional "Close Other Panes" dialog button is deferred — Cancel /
+>   Force Close cover the requirement (98.4).
+> - A pane counts as "running" only when its most recent OSC 133 block has
+>   seen C (output start) and not D; an idle prompt with no executed command
+>   never blocks close (98.3) — this matches the planning-notes concern
+>   about Ctrl-C on an idle prompt.
 
 ### 98 Summary
 
@@ -4145,6 +4236,56 @@ or window, and every path that triggers app quit.
 
 **Verification:** Report posted; no code changes.
 
+**Completion notes (2026-06-11) — close-path audit:**
+
+Every close entry point and its current guard status (none are guarded
+today except the settings-window unsaved-changes case):
+
+| Entry point                    | Location                                 | Mechanism                                                                        |
+| ------------------------------ | ---------------------------------------- | -------------------------------------------------------------------------------- |
+| Keybinding `ClosePane`         | `input.rs` → `actions.rs` (deferred arm) | sets `win.pending_close_pane = true`; drained in `app_impl.rs update()`          |
+| Menu "Pane > Close Pane"       | `menu.rs`                                | sets `win.pending_close_pane = true`; same drain                                 |
+| Keybinding `CloseTab`          | `actions.rs` deferred dispatch           | `win.tabs.close_active_tab()` directly                                           |
+| Menu "Tab > Close Tab"         | `menu.rs`                                | `TabBarAction::Close(active)` → `dispatch_tab_bar_action` → `win.close_tab(i)`   |
+| Tab-bar "×" button             | `actions.rs` `dispatch_tab_bar_action`   | `TabBarAction::Close(i)` → `win.close_tab(i)`                                    |
+| `close_focused_pane` last-pane | `actions.rs`                             | `ViewportCommand::Close` (closes window) or `win.close_tab(idx)`                 |
+| PTY-death last-pane            | `app_impl.rs`                            | `ViewportCommand::Close` or `win.close_tab(tab_idx)` (NOT user-initiated)        |
+| Menu "Quit"                    | `menu.rs`                                | `ViewportCommand::Close` (closes only the current window — no multi-window quit) |
+| OS window-close button         | `event_loop.rs` → `on_close_requested`   | returns `bool`; `false` vetoes                                                   |
+| `ViewportCommand::Close` (all) | `event_loop.rs` → `on_close_requested`   | programmatic closes route through `on_close_requested`                           |
+
+Key architectural facts driving the implementation:
+
+- **There is no `KeyAction::Quit` and no multi-window app-quit path.**
+  "Quit" closes only the focused window via `ViewportCommand::Close`.
+  This simplifies 98.7: there is no cross-window quit to guard — each
+  window's close is independently guarded through `on_close_requested`.
+  98.2's `guard_app_quit` key is therefore retained in the schema (for
+  forward-compatibility / documentation) but has no distinct code path
+  to gate in v0.9.0; window-close guarding covers every real exit.
+- **`close_focused_pane(ui, win)` in `actions.rs` is the single
+  user-intent pane-close function.** Both the keybinding and the menu
+  set `win.pending_close_pane`, drained once per frame in `update()`.
+  98.5 guards this drain site.
+- **`PerWindowState` (`window.rs`) is the dialog home**, exactly like
+  `paste_dialog` and `broadcast_dialog`. A new `close_dialog:
+CloseGuardDialog` field plus a `pending_close: Option<PendingClose>`
+  carry the suspended close intent.
+- **Snapshot read:** `pane.arc_swap.load()` → `Arc<TerminalSnapshot>`;
+  `snap.command_blocks: Arc<[CommandBlock]>`; a pane has a running
+  command iff any block's `status() == CommandStatus::Running`.
+- **Modal pattern (5 steps):** state struct on `PerWindowState`;
+  register `.is_open()` in `ui_overlay_open` (`app_impl.rs`); call
+  `dialog.show(ctx)` each frame in `update()`; open on trigger; resolve
+  outcome. `broadcast_guard.rs` is the closest template (no text field).
+- **Force Close → window:** `ui.ctx().send_viewport_cmd(
+egui::ViewportCommand::Close)` routes back through
+  `on_close_requested`. To avoid re-prompting, the resolved
+  `pending_close` must carry a "user already confirmed" flag so
+  `on_close_requested` lets it through.
+- **IDs:** `PaneId(u64)` (global), `TabId(u64)` (per-window),
+  `WindowId(winit id)` (process-global).
+
 #### 98.2 — Config schema
 
 **Scope:** `freminal-common/src/config.rs`, `config_example.toml`.
@@ -4172,6 +4313,29 @@ or window, and every path that triggers app quit.
   do not).
 
 **Verification:** Round-trip TOML test in `config.rs` tests.
+
+**Completion notes (2026-06-11):**
+
+- Added `CloseGuardConfig { enabled, unknown_blocks, guard_app_quit }`
+  with a `Default` impl (`true`, `false`, `true`) and the full
+  `#[serde(default)]` + per-field doc comments documenting that only
+  `CommandStatus::Running` counts as "running".
+- Full new-section wiring per `freminal-config-options`: field on
+  `Config`, `Default` impl, `ConfigPartial::close_guard`,
+  `apply_partial` merge arm, and the
+  `every_config_section_survives_partial_merge` guard test (mutation,
+  assertion, and the no-`..` destructure entry).
+- Two dedicated tests: `close_guard_config_round_trips_through_toml`
+  and `close_guard_apply_partial_merges_from_toml`.
+- `config_example.toml` gained a `[close_guard]` section.
+- Nix home-manager module mirrored: `closeGuardSection` let-binding,
+  `optionalAttrs` merge arm, and three `mkOption`s. `nixfmt --check`,
+  `statix check`, `deadnix --fail` all clean.
+- **Deviation:** `guard_app_quit` is retained in the schema for
+  forward-compatibility but has no distinct gate in v0.9.0 — there is
+  no multi-window app-quit path (Quit closes only the focused window),
+  so window-close guarding already covers every exit. Documented in the
+  98.1 audit notes and in the field's doc comment.
 
 #### 98.3 — Running-command detection helper
 
@@ -4260,6 +4424,70 @@ plus any app-quit dispatch path identified in 98.1.
 running command, trigger app quit, verify dialog appears and
 cancel preserves both windows.
 
+**Completion notes for 98.3–98.7 (2026-06-11, committed together):**
+
+These five subtasks are tightly intertwined (the dialog consumes the
+detection output; every wiring point opens the same dialog and resolves
+the same outcome enum), so they ship in one commit per
+`commit-discipline`'s "tightly intertwined subtasks" allowance.
+
+- **New module `freminal/src/gui/close_guard.rs`** holding the pure
+  detection helpers, the `RunningCommandInfo` descriptor, the
+  `CloseGuardDialog` modal, the `PendingClose` / `CloseScope` /
+  `CloseDialogOutcome` types, and the `FreminalGui` orchestration
+  methods (`guarded_close_pane`, `guarded_close_tab`,
+  `window_close_running`, and the per-scope `gather_*` helpers).
+- **Detection (98.3):** `pane_running_command` reads the pane's
+  `ArcSwap` snapshot (lock-free) and reports a running command iff the
+  most recent block is `CommandStatus::Running` **and** has an
+  `output_start_row` (OSC 133 C seen). A block with only `A` (idle
+  prompt, then Ctrl-C) is deliberately **not** counted — this is the
+  precise behavior the planning notes asked for (no spurious
+  "command running" prompt on an idle prompt). `pane_is_unknown` reports
+  panes that never saw a prompt marker, gated by `unknown_blocks`.
+  **Naming deviation:** the plan named the aggregate
+  `panes_with_running_commands(&[&Pane])` / `unknown_command_panes`;
+  the implemented surface is `gather_tab_running(panes, tab_id,
+tab_name, unknown_blocks)` plus the per-scope `FreminalGui` methods,
+  because the dialog needs the tab id/name alongside each pane and the
+  pane alone does not carry that context.
+- **Dialog (98.4):** `CloseGuardDialog` mirrors `broadcast_guard.rs`:
+  state on `PerWindowState`, registered in `ui_overlay_open`, rendered
+  every frame, Esc = Cancel, Ctrl+Enter = Force Close. List entries are
+  `"<tab name> · <command> (<elapsed>)"`. **Command label deviation:**
+  `CommandBlock` does not capture the command-line text, so the label
+  is the pane title (often the running program via OSC 0/2) or
+  `"<unknown command>"`, not the literal command. **"Close Other Panes"
+  deferred:** the optional third button is not implemented in v0.9.0 —
+  Cancel / Force Close cover the requirement; partial close is logged
+  here as a future enhancement.
+- **Pane close (98.5):** the deferred-close drain site in
+  `app_impl.rs update()` now calls `guarded_close_pane` instead of
+  `close_focused_pane`. `close_focused_pane` is unchanged and is the
+  Force Close executor.
+- **Tab close (98.6):** both the `CloseTab` keybinding deferred arm and
+  the tab-bar / menu `TabBarAction::Close(i)` route through
+  `guarded_close_tab`. Force Close calls the raw `win.close_tab(idx)`.
+- **Window close + app quit (98.7):** `on_close_requested` consults the
+  guard. A confirmed force-close is tracked in
+  `FreminalGui::force_close_windows: HashSet<WindowId>`; on the
+  `ViewportCommand::Close` round trip the entry is removed and the close
+  proceeds. Otherwise, running commands open the dialog (scope
+  `Window`) and the function returns `false` to veto the OS close.
+  **App-quit deviation:** there is no multi-window quit path in freminal
+  (see 98.1) — "Quit" closes only the focused window via
+  `ViewportCommand::Close`, which already routes through
+  `on_close_requested`. So `guard_app_quit` has no separate code path;
+  window-close guarding covers every exit. Documented in 98.1 + 98.2.
+- **Tests:** 13 unit tests in `close_guard.rs` covering the running /
+  not-running / prompt-only / finished / most-recent-only detection
+  cases, unknown detection, elapsed computation, the
+  duration/entry formatters, and the dialog open/scope. Full GUI
+  integration (real `Pane` with channels) is exercised manually; the
+  pure helpers are unit-tested directly.
+- `cargo test --all`, workspace `cargo clippy --all-targets
+--all-features -- -D warnings`, and `cargo machete` all clean.
+
 #### 98.8 — `KeyAction::ForceClose`
 
 **Scope:** `freminal-common/src/keybindings.rs`, dispatch.
@@ -4274,6 +4502,27 @@ cancel preserves both windows.
 **Verification:** Round-trip keybinding test; manual test of the
 key path.
 
+**Completion notes (2026-06-11):**
+
+- Added `KeyAction::ForceClose` with the full four-step ritual: variant
+  - doc comment, `name()` (`"force_close"`), `display_label()`
+    (`"Force Close"`), `ALL` entry, `FromStr` arm, and a
+    `config_example.toml` keybindings doc line. No default binding (per
+    the plan — force close must be deliberate).
+- `ALL.len()` count test bumped 61 → 62; `ForceClose` added to the
+  `unbound_actions_not_in_default_map` test. Default-binding total
+  unchanged (still 48).
+- Dispatch: the `ForceClose` deferred-action arm sets a new
+  `PerWindowState::pending_force_close` flag. The flag is drained where
+  the close dialog is resolved in `update()`: if a dialog is open it is
+  resolved as Force Close (via the new `CloseGuardDialog::force_close_now`),
+  and the captured scope's close is executed; if nothing is open the flag
+  is a harmless no-op.
+- `PerWindowState` gained a documented `#[allow(clippy::struct_excessive_bools)]`
+  (it now holds >3 independent per-frame intent flags, same rationale as
+  the `FreminalGui` aggregator).
+- `cargo test --all`, workspace clippy, and `cargo machete` clean.
+
 #### 98.9 — Settings UI
 
 **Scope:** Security settings tab (`freminal/src/gui/settings.rs`).
@@ -4285,6 +4534,22 @@ key path.
 
 **Verification:** Round-trip persistence; modal opens and reflects
 config state.
+
+**Completion notes (2026-06-11):**
+
+- Added `show_close_guard_section` to the Security tab in
+  `freminal/src/gui/settings.rs`, rendered after the Paste Guard
+  subsection. Three checkboxes bound to `self.draft.close_guard`:
+  `enabled`, `unknown_blocks`, and `guard_app_quit`. The latter two are
+  wrapped in `add_enabled_ui(self.draft.close_guard.enabled, ...)` so
+  they grey out when the guard is off, mirroring the Paste Guard
+  section's pattern.
+- No `settings_dispatch.rs` arm needed: the guard reads
+  `self.config.close_guard` fresh at each close check, so it takes
+  effect live the moment Apply writes the draft into `self.config`.
+  Persistence is covered by the 98.2 config round-trip tests.
+- No new `SettingsTab` (reuses the existing Security tab), so the tab
+  count / `ALL` assertions are unchanged.
 
 ### 98 Open Questions Resolved
 

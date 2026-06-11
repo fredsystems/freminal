@@ -92,6 +92,15 @@ pub struct Tab {
     /// Cleared by [`TabManager::switch_to`], [`TabManager::next_tab`], and
     /// [`TabManager::prev_tab`] when the tab becomes active again.
     pub has_pending_event: bool,
+
+    /// When `true`, keyboard input directed at the active pane is also
+    /// fanned out to every other leaf pane in this tab (Task 74).
+    ///
+    /// Mouse events, resize events, and per-pane window commands are never
+    /// broadcast.  The flag is per-tab (not per-pane) and defaults to
+    /// `false`.  Toggled via `KeyAction::ToggleBroadcastInput` or
+    /// [`Tab::toggle_broadcast`].
+    pub broadcast_input: bool,
 }
 
 impl Tab {
@@ -106,7 +115,16 @@ impl Tab {
             zoomed_pane: None,
             custom_name: None,
             has_pending_event: false,
+            broadcast_input: false,
         }
+    }
+
+    /// Toggle whether keyboard input is broadcast to all panes in this tab.
+    ///
+    /// Returns the new state of the flag.
+    pub const fn toggle_broadcast(&mut self) -> bool {
+        self.broadcast_input = !self.broadcast_input;
+        self.broadcast_input
     }
 
     /// Return the name to display for this tab under the given title policy.
@@ -199,6 +217,7 @@ impl std::fmt::Debug for Tab {
             .field("active_pane", &self.active_pane)
             .field("zoomed_pane", &self.zoomed_pane)
             .field("custom_name", &self.custom_name)
+            .field("broadcast_input", &self.broadcast_input)
             .finish_non_exhaustive()
     }
 }
@@ -520,6 +539,24 @@ mod tests {
         let mut tab = dummy_tab(TabId(0), osc);
         tab.custom_name = custom.map(str::to_owned);
         tab.display_name(policy, ": ").into_owned()
+    }
+
+    #[test]
+    fn new_tab_broadcast_input_defaults_to_false() {
+        let tab = dummy_tab(TabId(0), "Tab 1");
+        assert!(!tab.broadcast_input);
+    }
+
+    #[test]
+    fn toggle_broadcast_flips_flag_and_returns_new_state() {
+        let mut tab = dummy_tab(TabId(0), "Tab 1");
+        assert!(!tab.broadcast_input);
+
+        assert!(tab.toggle_broadcast());
+        assert!(tab.broadcast_input);
+
+        assert!(!tab.toggle_broadcast());
+        assert!(!tab.broadcast_input);
     }
 
     #[test]

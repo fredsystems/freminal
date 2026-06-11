@@ -818,6 +818,9 @@ pub enum KeyAction {
     SplitHorizontal,
     /// Close the focused pane (last pane closes the tab).
     ClosePane,
+    /// Resolve the close-on-running-command guard dialog as "Force Close",
+    /// bypassing the running-command check. No-op when no dialog is open.
+    ForceClose,
     /// Move focus to the pane to the left.
     FocusPaneLeft,
     /// Move focus to the pane below.
@@ -836,6 +839,15 @@ pub enum KeyAction {
     ResizePaneRight,
     /// Toggle zoom on the focused pane (full-tab or restore).
     ZoomPane,
+    /// Toggle broadcasting keyboard input to every pane in the active tab.
+    ///
+    /// When on, each `InputEvent::Key` payload directed at the focused pane
+    /// is also fanned out to every other leaf pane in the tab.  Mouse
+    /// events, resize events, and per-pane window commands are never
+    /// broadcast.  The toggle is per-tab and defaults to off.
+    ///
+    /// Default binding: `Ctrl+Shift+I` (mnemonic: "Input to all panes").
+    ToggleBroadcastInput,
 
     // -- Layout actions ---------------------------------------------------
     /// Open the Load Layout dialog.
@@ -909,6 +921,7 @@ impl KeyAction {
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
+            Self::ForceClose => "force_close",
             Self::FocusPaneLeft => "focus_pane_left",
             Self::FocusPaneDown => "focus_pane_down",
             Self::FocusPaneUp => "focus_pane_up",
@@ -918,6 +931,7 @@ impl KeyAction {
             Self::ResizePaneUp => "resize_pane_up",
             Self::ResizePaneRight => "resize_pane_right",
             Self::ZoomPane => "zoom_pane",
+            Self::ToggleBroadcastInput => "toggle_broadcast_input",
             Self::LoadLayout => "load_layout",
             Self::SaveLayout => "save_layout",
             Self::ReloadConfig => "reload_config",
@@ -980,6 +994,7 @@ impl KeyAction {
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
+            Self::ForceClose => "Force Close",
             Self::FocusPaneLeft => "Focus Pane Left",
             Self::FocusPaneDown => "Focus Pane Down",
             Self::FocusPaneUp => "Focus Pane Up",
@@ -989,6 +1004,7 @@ impl KeyAction {
             Self::ResizePaneUp => "Resize Pane Up",
             Self::ResizePaneRight => "Resize Pane Right",
             Self::ZoomPane => "Zoom Pane",
+            Self::ToggleBroadcastInput => "Toggle Broadcast Input",
             Self::LoadLayout => "Load Layout",
             Self::SaveLayout => "Save Layout",
             Self::ReloadConfig => "Reload Config",
@@ -1048,6 +1064,7 @@ impl KeyAction {
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
+        Self::ForceClose,
         Self::FocusPaneLeft,
         Self::FocusPaneDown,
         Self::FocusPaneUp,
@@ -1057,6 +1074,7 @@ impl KeyAction {
         Self::ResizePaneUp,
         Self::ResizePaneRight,
         Self::ZoomPane,
+        Self::ToggleBroadcastInput,
         Self::LoadLayout,
         Self::SaveLayout,
         Self::ReloadConfig,
@@ -1128,6 +1146,7 @@ impl FromStr for KeyAction {
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
+            "force_close" => Ok(Self::ForceClose),
             "focus_pane_left" => Ok(Self::FocusPaneLeft),
             "focus_pane_down" => Ok(Self::FocusPaneDown),
             "focus_pane_up" => Ok(Self::FocusPaneUp),
@@ -1137,6 +1156,7 @@ impl FromStr for KeyAction {
             "resize_pane_up" => Ok(Self::ResizePaneUp),
             "resize_pane_right" => Ok(Self::ResizePaneRight),
             "zoom_pane" => Ok(Self::ZoomPane),
+            "toggle_broadcast_input" => Ok(Self::ToggleBroadcastInput),
             "load_layout" => Ok(Self::LoadLayout),
             "save_layout" => Ok(Self::SaveLayout),
             "reload_config" => Ok(Self::ReloadConfig),
@@ -1316,6 +1336,13 @@ fn register_tab_bindings(map: &mut BindingMap) {
     for (key, action) in digit_actions {
         map.bind(KeyCombo::new(key, BindingModifiers::CTRL_SHIFT), action);
     }
+
+    // Broadcast keyboard input to every pane in the active tab.
+    // Ctrl+Shift+I is free on all platforms (mnemonic: "Input to all panes").
+    map.bind(
+        KeyCombo::new(BindingKey::I, BindingModifiers::CTRL_SHIFT),
+        KeyAction::ToggleBroadcastInput,
+    );
 }
 
 /// Register clipboard, zoom, UI, and scrollback bindings.
@@ -1850,7 +1877,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            60,
+            62,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -1901,6 +1928,25 @@ mod tests {
         let map = BindingMap::default();
         let combo = KeyCombo::new(BindingKey::T, BindingModifiers::CTRL_SHIFT);
         assert_eq!(map.lookup(&combo), Some(KeyAction::NewTab));
+    }
+
+    #[test]
+    fn default_toggle_broadcast_input_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::I, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::ToggleBroadcastInput));
+    }
+
+    #[test]
+    fn toggle_broadcast_input_name_round_trips() {
+        assert_eq!(
+            KeyAction::ToggleBroadcastInput.name(),
+            "toggle_broadcast_input"
+        );
+        assert_eq!(
+            "toggle_broadcast_input".parse::<KeyAction>(),
+            Ok(KeyAction::ToggleBroadcastInput)
+        );
     }
 
     #[test]
@@ -2233,11 +2279,12 @@ mod tests {
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
         //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
         //        + ToggleRecording(1) + UnfoldAll(1)
-        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1) = 47
+        //        + CopyLastCommandOutput(1) + ShowCommandHistory(1)
+        //        + ToggleBroadcastInput(1) = 48
         assert_eq!(
             map.len(),
-            47,
-            "default binding map should have exactly 47 bindings"
+            48,
+            "default binding map should have exactly 48 bindings"
         );
     }
 
@@ -2257,6 +2304,7 @@ mod tests {
             KeyAction::FoldPreviousCommand,
             KeyAction::FoldAll,
             KeyAction::CopyCommandOutputAtCursor,
+            KeyAction::ForceClose,
         ];
         for action in unbound {
             assert!(
