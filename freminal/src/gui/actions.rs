@@ -359,6 +359,11 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::NewTab => self.spawn_new_tab(win),
+            KeyAction::ForceClose => {
+                // Resolve an open close-guard dialog as Force Close. No-op
+                // when no dialog is open (handled where the flag is drained).
+                win.pending_force_close = true;
+            }
             KeyAction::CloseTab => {
                 // Route through the close guard, which either opens the
                 // confirmation dialog (running command present) or closes the

@@ -4485,6 +4485,27 @@ tab_name, unknown_blocks)` plus the per-scope `FreminalGui` methods,
 **Verification:** Round-trip keybinding test; manual test of the
 key path.
 
+**Completion notes (2026-06-11):**
+
+- Added `KeyAction::ForceClose` with the full four-step ritual: variant
+  - doc comment, `name()` (`"force_close"`), `display_label()`
+    (`"Force Close"`), `ALL` entry, `FromStr` arm, and a
+    `config_example.toml` keybindings doc line. No default binding (per
+    the plan — force close must be deliberate).
+- `ALL.len()` count test bumped 61 → 62; `ForceClose` added to the
+  `unbound_actions_not_in_default_map` test. Default-binding total
+  unchanged (still 48).
+- Dispatch: the `ForceClose` deferred-action arm sets a new
+  `PerWindowState::pending_force_close` flag. The flag is drained where
+  the close dialog is resolved in `update()`: if a dialog is open it is
+  resolved as Force Close (via the new `CloseGuardDialog::force_close_now`),
+  and the captured scope's close is executed; if nothing is open the flag
+  is a harmless no-op.
+- `PerWindowState` gained a documented `#[allow(clippy::struct_excessive_bools)]`
+  (it now holds >3 independent per-frame intent flags, same rationale as
+  the `FreminalGui` aggregator).
+- `cargo test --all`, workspace clippy, and `cargo machete` clean.
+
 #### 98.9 — Settings UI
 
 **Scope:** Security settings tab (`freminal/src/gui/settings.rs`).

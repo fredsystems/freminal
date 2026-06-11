@@ -25,6 +25,12 @@ pub(super) type PendingGeometry = (Option<[u32; 2]>, Option<[i32; 2]>);
 /// owns one of these. All windows are peers — there is no root/secondary
 /// distinction. Shared state (config, args, binding map, settings modal)
 /// lives on [`super::FreminalGui`].
+// Each bool is an independent, short-lived per-frame UI intent flag
+// (pending close-pane / new-window / force-close, etc.) drained at the end of
+// the frame. They are unrelated and combining them into a state machine would
+// couple distinct intents and obscure meaning -- same rationale as the
+// `FreminalGui` aggregator's allow.
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct PerWindowState {
     /// All open terminal tabs for this window.
     pub(super) tabs: TabManager,
@@ -161,4 +167,9 @@ pub(super) struct PerWindowState {
     /// contains a running foreground command, rendered every frame while open,
     /// and resolved to Cancel or Force Close.
     pub(super) close_dialog: super::close_guard::CloseGuardDialog,
+
+    /// Set by the `ForceClose` key action; consumed in `update()` where the
+    /// close dialog is resolved.  Resolves an open close-guard dialog as
+    /// "Force Close" without the user reaching for the mouse or Ctrl+Enter.
+    pub(super) pending_force_close: bool,
 }

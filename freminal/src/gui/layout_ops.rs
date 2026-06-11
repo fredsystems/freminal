@@ -633,6 +633,7 @@ impl FreminalGui {
             paste_dialog: super::paste_guard::PasteDialog::default(),
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
+            pending_force_close: false,
         };
         self.windows.insert(window_id, win);
 

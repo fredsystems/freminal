@@ -195,6 +195,13 @@ impl CloseGuardDialog {
         self.pending.as_ref().map(|p| p.scope)
     }
 
+    /// Close the dialog immediately, as if the user chose Force Close. Used by
+    /// the `ForceClose` key action; the caller performs the actual close based
+    /// on the [`scope`](Self::scope) it captured before calling this.
+    pub(in crate::gui) fn force_close_now(&mut self) {
+        self.pending = None;
+    }
+
     /// Render the dialog for one frame and return the outcome. On a resolved
     /// outcome (`Cancelled` / `ForceClose`) the dialog closes itself.
     ///

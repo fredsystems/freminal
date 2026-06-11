@@ -516,6 +516,8 @@ limit = 4000
 #     split_vertical   = "Ctrl+Shift+Pipe"   (split focused pane left | right)
 #     split_horizontal = "Ctrl+Shift+Minus"  (split focused pane top / bottom)
 #     close_pane       = "Ctrl+Shift+W"      (close focused pane; last pane closes tab)
+#     force_close      = (unbound)           (resolve the close-on-running-command
+#                                             guard dialog as "Force Close")
 #     focus_pane_left  = "Ctrl+Shift+H"      (move focus left)
 #     focus_pane_down  = "Ctrl+Shift+J"      (move focus down)
 #     focus_pane_up    = "Ctrl+Shift+K"      (move focus up)

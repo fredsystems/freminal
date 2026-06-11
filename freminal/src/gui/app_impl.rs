@@ -225,6 +225,7 @@ impl freminal_windowing::App for FreminalGui {
                         paste_dialog: super::paste_guard::PasteDialog::default(),
                         broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
                         close_dialog: super::close_guard::CloseGuardDialog::default(),
+                        pending_force_close: false,
                     };
                     self.windows.insert(window_id, win);
 
@@ -1160,8 +1161,17 @@ impl freminal_windowing::App for FreminalGui {
             // pane / tab / window close is suspended pending confirmation.  On
             // Force Close the original close is executed with the guard
             // bypassed; on Cancel the close is abandoned.
+            // A pending ForceClose key action resolves an open close-guard
+            // dialog as Force Close; harmless no-op when nothing is open.
+            let force_close_requested = std::mem::take(&mut win.pending_force_close);
             if let Some(scope) = win.close_dialog.scope() {
-                match win.close_dialog.show(ctx) {
+                let outcome = if force_close_requested {
+                    win.close_dialog.force_close_now();
+                    super::close_guard::CloseDialogOutcome::ForceClose
+                } else {
+                    win.close_dialog.show(ctx)
+                };
+                match outcome {
                     super::close_guard::CloseDialogOutcome::ForceClose => match scope {
                         super::close_guard::CloseScope::Pane => {
                             Self::close_focused_pane(ui, &mut win);
@@ -2124,6 +2134,7 @@ impl FreminalGui {
             paste_dialog: super::paste_guard::PasteDialog::default(),
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
+            pending_force_close: false,
         }
     }
 

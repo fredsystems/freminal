@@ -818,6 +818,9 @@ pub enum KeyAction {
     SplitHorizontal,
     /// Close the focused pane (last pane closes the tab).
     ClosePane,
+    /// Resolve the close-on-running-command guard dialog as "Force Close",
+    /// bypassing the running-command check. No-op when no dialog is open.
+    ForceClose,
     /// Move focus to the pane to the left.
     FocusPaneLeft,
     /// Move focus to the pane below.
@@ -918,6 +921,7 @@ impl KeyAction {
             Self::SplitVertical => "split_vertical",
             Self::SplitHorizontal => "split_horizontal",
             Self::ClosePane => "close_pane",
+            Self::ForceClose => "force_close",
             Self::FocusPaneLeft => "focus_pane_left",
             Self::FocusPaneDown => "focus_pane_down",
             Self::FocusPaneUp => "focus_pane_up",
@@ -990,6 +994,7 @@ impl KeyAction {
             Self::SplitVertical => "Split Vertical",
             Self::SplitHorizontal => "Split Horizontal",
             Self::ClosePane => "Close Pane",
+            Self::ForceClose => "Force Close",
             Self::FocusPaneLeft => "Focus Pane Left",
             Self::FocusPaneDown => "Focus Pane Down",
             Self::FocusPaneUp => "Focus Pane Up",
@@ -1059,6 +1064,7 @@ impl KeyAction {
         Self::SplitVertical,
         Self::SplitHorizontal,
         Self::ClosePane,
+        Self::ForceClose,
         Self::FocusPaneLeft,
         Self::FocusPaneDown,
         Self::FocusPaneUp,
@@ -1140,6 +1146,7 @@ impl FromStr for KeyAction {
             "split_vertical" => Ok(Self::SplitVertical),
             "split_horizontal" => Ok(Self::SplitHorizontal),
             "close_pane" => Ok(Self::ClosePane),
+            "force_close" => Ok(Self::ForceClose),
             "focus_pane_left" => Ok(Self::FocusPaneLeft),
             "focus_pane_down" => Ok(Self::FocusPaneDown),
             "focus_pane_up" => Ok(Self::FocusPaneUp),
@@ -1870,7 +1877,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            61,
+            62,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2297,6 +2304,7 @@ mod tests {
             KeyAction::FoldPreviousCommand,
             KeyAction::FoldAll,
             KeyAction::CopyCommandOutputAtCursor,
+            KeyAction::ForceClose,
         ];
         for action in unbound {
             assert!(
