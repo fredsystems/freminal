@@ -28,7 +28,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-74-75-98/v090-finish`      |
+| 98  | Block Close on Running Commands         | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`      |
 
 ### Execution order
 
@@ -4134,7 +4134,24 @@ The following ideas surfaced during planning but are explicitly deferred:
 
 ---
 
-## Task 98 — Block Close on Running Commands
+## Task 98 — Block Close on Running Commands ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** All nine subtasks
+> (98.1 audit → 98.9 settings UI) implemented and committed. Tasks 74, 75,
+> and 98 ship in a single PR off this combined branch per user direction.
+> Key deviations, each documented in the relevant subtask notes:
+>
+> - No multi-window app-quit path exists in freminal (Quit closes the
+>   focused window), so `guard_app_quit` has no separate gate — window-close
+>   guarding via `on_close_requested` covers every exit (98.1, 98.7).
+> - The dialog command label is the pane title (or `"<unknown command>"`),
+>   because `CommandBlock` does not capture the command-line text (98.4).
+> - The optional "Close Other Panes" dialog button is deferred — Cancel /
+>   Force Close cover the requirement (98.4).
+> - A pane counts as "running" only when its most recent OSC 133 block has
+>   seen C (output start) and not D; an idle prompt with no executed command
+>   never blocks close (98.3) — this matches the planning-notes concern
+>   about Ctrl-C on an idle prompt.
 
 ### 98 Summary
 
@@ -4517,6 +4534,22 @@ key path.
 
 **Verification:** Round-trip persistence; modal opens and reflects
 config state.
+
+**Completion notes (2026-06-11):**
+
+- Added `show_close_guard_section` to the Security tab in
+  `freminal/src/gui/settings.rs`, rendered after the Paste Guard
+  subsection. Three checkboxes bound to `self.draft.close_guard`:
+  `enabled`, `unknown_blocks`, and `guard_app_quit`. The latter two are
+  wrapped in `add_enabled_ui(self.draft.close_guard.enabled, ...)` so
+  they grey out when the guard is off, mirroring the Paste Guard
+  section's pattern.
+- No `settings_dispatch.rs` arm needed: the guard reads
+  `self.config.close_guard` fresh at each close check, so it takes
+  effect live the moment Apply writes the draft into `self.config`.
+  Persistence is covered by the 98.2 config round-trip tests.
+- No new `SettingsTab` (reuses the existing Security tab), so the tab
+  count / `ALL` assertions are unchanged.
 
 ### 98 Open Questions Resolved
 

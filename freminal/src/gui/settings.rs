@@ -1682,6 +1682,38 @@ impl SettingsModal {
         ui.separator();
         ui.add_space(8.0);
         self.show_paste_guard_section(ui);
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+        self.show_close_guard_section(ui);
+    }
+
+    /// The Close Guard subsection of the Security tab (Task 98.9).
+    fn show_close_guard_section(&mut self, ui: &mut Ui) {
+        ui.heading("Close Guard");
+        ui.add_space(4.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "Confirm before closing a pane, tab, or window that has a running \
+             foreground command (detected via OSC 133 shell integration).",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard");
+
+        // The remaining toggles are only meaningful while the guard is on.
+        ui.add_enabled_ui(self.draft.close_guard.enabled, |ui| {
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.draft.close_guard.unknown_blocks,
+                "Also guard panes with unknown status (no shell integration)",
+            );
+            ui.checkbox(
+                &mut self.draft.close_guard.guard_app_quit,
+                "Guard application quit",
+            );
+        });
     }
 
     /// The Paste Guard subsection of the Security tab (Task 77).
