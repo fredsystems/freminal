@@ -1472,6 +1472,185 @@ size = [640, 480]
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
+    // -----------------------------------------------------------------
+    //  Task 75.1 — per-pane env round-trip
+    // -----------------------------------------------------------------
+
+    const TWO_PANE_ENV_LAYOUT: &str = r#"
+[layout]
+name = "EnvRoundTrip"
+
+[layout.variables]
+project_dir = "/srv/project"
+
+[[tabs]]
+title = "Work"
+
+  [[tabs.panes]]
+  id = "root"
+  split = "vertical"
+  ratio = 0.5
+
+  [[tabs.panes]]
+  id = "left"
+  parent = "root"
+  position = "first"
+  active = true
+  env = { FOO = "bar", PROJECT_ROOT = "${project_dir}" }
+
+  [[tabs.panes]]
+  id = "right"
+  parent = "root"
+  position = "second"
+  env = { LANG = "en_US.UTF-8", FROM_POS = "$1" }
+"#;
+
+    /// Collect every leaf in a resolved tree, in depth-first order.
+    fn collect_leaves(node: &ResolvedNode, out: &mut Vec<ResolvedLeaf>) {
+        match node {
+            ResolvedNode::Leaf(leaf) => out.push(leaf.clone()),
+            ResolvedNode::Split { first, second, .. } => {
+                collect_leaves(first, out);
+                collect_leaves(second, out);
+            }
+        }
+    }
+
+    #[test]
+    fn per_pane_env_round_trips_through_load_and_resolve() {
+        let layout = Layout::from_str_content(Path::new("env.toml"), TWO_PANE_ENV_LAYOUT)
+            .expect("parse failed");
+
+        // Substitute with a positional arg so `$1` resolves.
+        let positional = vec!["positional-value".to_owned()];
+        let substituted = layout.apply_variables(&positional, &HashMap::new());
+        let resolved = substituted.resolve().expect("resolve failed");
+
+        let root = resolved.windows[0].tabs[0]
+            .root
+            .as_ref()
+            .expect("root should exist");
+        let mut leaves = Vec::new();
+        collect_leaves(root, &mut leaves);
+        assert_eq!(leaves.len(), 2, "expected two leaf panes");
+
+        let left = leaves
+            .iter()
+            .find(|l| l.id == "left")
+            .expect("left leaf missing");
+        assert_eq!(left.env.get("FOO").map(String::as_str), Some("bar"));
+        // `${project_dir}` resolves to the named variable's value.
+        assert_eq!(
+            left.env.get("PROJECT_ROOT").map(String::as_str),
+            Some("/srv/project")
+        );
+
+        let right = leaves
+            .iter()
+            .find(|l| l.id == "right")
+            .expect("right leaf missing");
+        assert_eq!(
+            right.env.get("LANG").map(String::as_str),
+            Some("en_US.UTF-8")
+        );
+        // `$1` resolves to the supplied positional argument.
+        assert_eq!(
+            right.env.get("FROM_POS").map(String::as_str),
+            Some("positional-value")
+        );
+    }
+
+    #[test]
+    fn per_pane_env_appears_in_serialized_toml() {
+        // Build an in-memory layout (mirrors the save path) with two panes,
+        // each carrying an env map, then serialize and confirm the keys and
+        // values survive into the TOML output and re-parse identically.
+        let layout = Layout {
+            layout: LayoutMeta {
+                name: Some("SaveEnv".to_owned()),
+                ..LayoutMeta::default()
+            },
+            windows: Vec::new(),
+            tabs: vec![LayoutTab {
+                title: Some("T".to_owned()),
+                custom_name: None,
+                active: true,
+                panes: vec![
+                    LayoutPane {
+                        id: "root".to_owned(),
+                        parent: None,
+                        position: None,
+                        split: Some(LayoutSplitDirection::Horizontal),
+                        ratio: 0.5,
+                        directory: None,
+                        command: None,
+                        shell: None,
+                        env: HashMap::new(),
+                        title: None,
+                        active: false,
+                    },
+                    LayoutPane {
+                        id: "top".to_owned(),
+                        parent: Some("root".to_owned()),
+                        position: Some(LayoutPanePosition::First),
+                        split: None,
+                        ratio: 0.5,
+                        directory: None,
+                        command: None,
+                        shell: None,
+                        env: HashMap::from([("ALPHA".to_owned(), "one".to_owned())]),
+                        title: None,
+                        active: true,
+                    },
+                    LayoutPane {
+                        id: "bottom".to_owned(),
+                        parent: Some("root".to_owned()),
+                        position: Some(LayoutPanePosition::Second),
+                        split: None,
+                        ratio: 0.5,
+                        directory: None,
+                        command: None,
+                        shell: None,
+                        env: HashMap::from([("BETA".to_owned(), "two".to_owned())]),
+                        title: None,
+                        active: false,
+                    },
+                ],
+            }],
+        };
+
+        let toml_str = layout.to_toml_string().expect("serialize failed");
+        assert!(toml_str.contains("ALPHA"), "ALPHA key missing: {toml_str}");
+        assert!(toml_str.contains("\"one\""), "ALPHA value missing");
+        assert!(toml_str.contains("BETA"), "BETA key missing");
+        assert!(toml_str.contains("\"two\""), "BETA value missing");
+
+        // Re-parse and confirm the env maps survive.
+        let reparsed =
+            Layout::from_str_content(Path::new("save_env.toml"), &toml_str).expect("reparse");
+        let panes = &reparsed.tabs[0].panes;
+        let top = panes.iter().find(|p| p.id == "top").expect("top missing");
+        assert_eq!(top.env.get("ALPHA").map(String::as_str), Some("one"));
+        let bottom = panes
+            .iter()
+            .find(|p| p.id == "bottom")
+            .expect("bottom missing");
+        assert_eq!(bottom.env.get("BETA").map(String::as_str), Some("two"));
+    }
+
+    #[test]
+    fn empty_pane_env_is_omitted_from_serialized_toml() {
+        // A leaf with no env should not emit an empty `env = {}` table,
+        // confirming the `skip_serializing_if = "HashMap::is_empty"` attr.
+        let layout =
+            Layout::from_str_content(Path::new("simple.toml"), SIMPLE_LAYOUT).expect("parse");
+        let toml_str = layout.to_toml_string().expect("serialize failed");
+        assert!(
+            !toml_str.contains("env"),
+            "empty env should be skipped: {toml_str}"
+        );
+    }
+
     #[test]
     fn validation_rejects_cycle() {
         let bad = r#"

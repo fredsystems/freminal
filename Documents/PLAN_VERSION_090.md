@@ -23,7 +23,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
 | 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
 | 74  | Broadcast Input to Panes                | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
-| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-74-75-98/v090-finish`      |
+| 75  | Verify per-pane env round-trip          | Small        | Complete | v0.8.0          | `task-74-75-98/v090-finish`      |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
@@ -2447,7 +2447,32 @@ per-frame work.
 
 ---
 
-## Task 75 — Verify Per-Pane Env Round-Trip
+## Task 75 — Verify Per-Pane Env Round-Trip ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** Verified the existing
+> per-pane `env` plumbing round-trips through load → substitute → resolve and
+> through serialize → reparse, with explicit regression tests; documented the
+> `env` substitution behavior in `LAYOUT_FORMAT.md`. No production code
+> changed — Task 75 is verification + documentation only, exactly as the
+> reduced v0.9.0 scope intended.
+>
+> - **75.1** — three new tests in `freminal-common/src/layout.rs`:
+>   `per_pane_env_round_trips_through_load_and_resolve` (two panes, each with
+>   an `env` map mixing literal, `${named}`, and `$1` positional values;
+>   asserts the resolved leaves carry the substituted maps),
+>   `per_pane_env_appears_in_serialized_toml` (in-memory layout → TOML →
+>   reparse, confirms env keys/values survive), and
+>   `empty_pane_env_is_omitted_from_serialized_toml` (confirms the
+>   `skip_serializing_if = "HashMap::is_empty"` attribute).
+> - **75.2** — added a "Per-Pane Environment Variables" subsection to
+>   `Documents/LAYOUT_FORMAT.md` with the `env = { PROJECT_ROOT = "$1",
+AWS_PROFILE = "$ENV{AWS_PROFILE}" }` example and a note that env layers
+>   beneath spawn-time defaults.
+>
+> **Deviation:** the plan said "Update the 'Last updated' header line" in
+> `LAYOUT_FORMAT.md`, but that document has no such line (it opens directly
+> with the H1 and intro). No header line was added — introducing one solely
+> for this task would be out of step with the document's existing style.
 
 ### 75 Summary
 
