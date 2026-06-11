@@ -587,6 +587,21 @@ impl super::FreminalGui {
                     }
                 }
             }
+            KeyAction::ToggleBroadcastInput => {
+                let tab = win.tabs.active_tab_mut();
+                let now_on = tab.toggle_broadcast();
+                let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                if now_on {
+                    self.push_info_toast(
+                        "Broadcast input enabled",
+                        Some(format!(
+                            "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                        )),
+                    );
+                } else {
+                    self.push_info_toast("Broadcast input disabled", None);
+                }
+            }
             KeyAction::Paste => self.guarded_paste(win),
             KeyAction::PasteUnsafe => Self::unguarded_paste(win),
             KeyAction::Copy

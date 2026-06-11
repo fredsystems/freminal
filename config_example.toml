@@ -495,6 +495,8 @@ limit = 4000
 #     resize_pane_up    = "Ctrl+Alt+K"       (shrink pane upward)
 #     resize_pane_right = "Ctrl+Alt+L"       (grow pane rightward)
 #     zoom_pane        = "Ctrl+Shift+Z"      (toggle zoom on focused pane)
+#     toggle_broadcast_input = "Ctrl+Shift+I" (broadcast keyboard input to every
+#                                              pane in the active tab)
 #
 #   Session:
 #     toggle_recording = "Ctrl+Shift+R"      (start/stop FREC v2 session recording)
