@@ -22,13 +22,13 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | --- | --------------------------------------- | ------------ | -------- | --------------- | -------------------------------- |
 | 72  | OSC 133 Command Blocks                  | Large        | Complete | v0.8.0          | `task-72/osc-133-command-blocks` |
 | 73  | Command Gutters (exit-status indicator) | Medium       | Complete | Task 72         | `task-73/command-gutters`        |
-| 74  | Broadcast Input to Panes                | Medium       | Pending  | v0.8.0, Task 58 | `task-74/broadcast-input`        |
-| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-75/pane-env-roundtrip`     |
+| 74  | Broadcast Input to Panes                | Medium       | Complete | v0.8.0, Task 58 | `task-74-75-98/v090-finish`      |
+| 75  | Verify per-pane env round-trip          | Small        | Pending  | v0.8.0          | `task-74-75-98/v090-finish`      |
 | 76  | Notification System (OSC 9 / OSC 777)   | Medium       | Complete | v0.8.0, Task 72 | `task-76/notifications`          |
 | 77  | Smart Paste Guard                       | Small–Medium | Complete | v0.8.0          | `task-77/paste-guard`            |
 | 94  | Tab Title Precedence (prefix default)   | Small        | Complete | v0.8.0 (71.1)   | `task-94/tab-title-precedence`   |
 | 95  | Persist Custom Tab Names in Layouts     | Small        | Complete | v0.8.0, Task 61 | `task-95/persist-tab-names`      |
-| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-98/block-close-on-running` |
+| 98  | Block Close on Running Commands         | Small–Medium | Pending  | Task 72         | `task-74-75-98/v090-finish`      |
 
 ### Execution order
 
@@ -2287,7 +2287,56 @@ All resolved.
 
 ---
 
-## Task 74 — Broadcast Input to Panes
+## Task 74 — Broadcast Input to Panes ✅ Complete (2026-06-11)
+
+> **Completion (branch `task-74-75-98/v090-finish`).** All five subtasks
+> implemented and committed individually. Tasks 74, 75, and 98 ship in a
+> single PR off this combined branch (per user direction); Task 74 was
+> managed end-to-end, Tasks 75 and 98 follow on the same branch.
+>
+> - **74.1** (`4b99b10c`): `Tab::broadcast_input` flag (default false),
+>   `Tab::toggle_broadcast()`, Debug field, two unit tests.
+> - **74.2** (`0a1e6aa8`): `KeyAction::ToggleBroadcastInput` with default
+>   `Ctrl+Shift+I` in `register_tab_bindings`. Dispatched in `actions.rs`
+>   (deferred path) toggling the active tab + info toast.
+>   `config_example.toml` documented. `ALL` count 60→61, default-binding
+>   count 47→48; round-trip + default-binding tests added.
+> - **74.3** (`438b197d`): fan-out. `write_input_to_terminal` and
+>   `widget.rs::show()` gain a `key_broadcast_targets: &[Sender<InputEvent>]`
+>   slice; a `broadcast_key_bytes` helper mirrors each encoded
+>   `InputEvent::Key` at the two genuine keyboard send sites (KKP release +
+>   main text/key/paste encode). Scroll-derived `send_terminal_inputs` calls
+>   are deliberately NOT broadcast. The `app_impl` render loop collects
+>   per-pane senders once per frame (senders are cheap to clone) and passes
+>   the _other_ panes' senders only to the active pane's `show()`. Tab bar
+>   prepends a satellite-antenna glyph when broadcast is on. 4 unit tests on
+>   the fan-out helper.
+> - **74.4** (`d9f576c1`): split borders tint yellow and a "BROADCAST" tag
+>   paints in each pane's top-right (avoids the password-lock icon, which
+>   lives in the tab/menu bar). Visual; verified manually.
+> - **74.5** (`544eb624`): `confirm_broadcast` bool on `TabsConfig`
+>   (default false) wired through `config_example.toml`, the Tabs settings
+>   panel (new "Broadcast Input" section: read-only shortcut +
+>   jump-to-keybindings button + confirm toggle), the Nix home-manager
+>   module, and a round-trip test. New `broadcast_guard` module provides a
+>   per-window confirm dialog (mirrors paste-guard); registered in
+>   `ui_overlay_open`. Enabling broadcast with confirmation on opens the
+>   dialog; disabling never prompts.
+>
+> **Design notes (decided during implementation):**
+>
+> - Broadcast is keyboard-only. The two real keyboard send sites are
+>   mirrored; mouse, scroll-to-arrow, mouse-tracking escapes, resize, focus,
+>   and selection events are pane-local and never fan out.
+> - Paste payloads broadcast the active pane's mode-encoded (bracketed-paste-
+>   wrapped) bytes verbatim to every pane, rather than re-deriving each
+>   pane's wrap. This is the simple, documented semantic.
+> - Tab-bar indicator glyph: `📡` (U+1F4E1). Pane label: literal
+>   "BROADCAST" tag, top-right. Both documented here per 74.3/74.4's
+>   "agent chooses, document the choice" instruction.
+> - Full verification green: `cargo test --all`, workspace clippy
+>   (`-D warnings`), `cargo fmt --all --check`, `cargo machete`, and the Nix
+>   lint stack (`nixfmt`/`statix`/`deadnix`) on the home-manager module.
 
 ### 74 Summary
 

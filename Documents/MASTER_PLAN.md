@@ -130,7 +130,7 @@ into v0.13.0–v0.15.0 and v0.19.0) and remaining Category C housekeeping (Tasks
 | 71  | UX Completeness & Polish Sweep           | `PLAN_VERSION_080.md` (Task 71)               | Pending merge | None                   |
 | 72  | OSC 133 Command Blocks                   | `PLAN_VERSION_090.md` (Task 72)               | Pending merge | v0.8.0                 |
 | 73  | Command Gutters                          | `PLAN_VERSION_090.md` (Task 73)               | Stub          | Task 72                |
-| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Stub          | v0.8.0, Task 58        |
+| 74  | Broadcast Input to Panes                 | `PLAN_VERSION_090.md` (Task 74)               | Pending merge | v0.8.0, Task 58        |
 | 75  | Workspace-Scoped Environment             | `PLAN_VERSION_090.md` (Task 75)               | Stub          | v0.8.0, Task 61        |
 | 76  | Notification System (OSC 9 / OSC 777)    | `PLAN_VERSION_090.md` (Task 76)               | Pending merge | v0.8.0, Task 72        |
 | 77  | Smart Paste Guard                        | `PLAN_VERSION_090.md` (Task 77)               | Pending merge | v0.8.0                 |
@@ -610,6 +610,7 @@ Update this section as tasks complete:
 | 95   | 2026-06-04 | 2026-06-04 | All 5 subtasks complete; merged via PR #343                                      |
 | 76   | 2026-06-09 | 2026-06-09 | All subtasks (76.1-76.8) complete on task-76/notifications; PR pending           |
 | 77   | 2026-06-09 | 2026-06-10 | All subtasks (77.1-77.6) + benchmark complete on task-77/paste-guard; PR pending |
+| 74   | 2026-06-11 | 2026-06-11 | All subtasks (74.1-74.5) on task-74-75-98/v090-finish (combined PR); PR pending  |
 
 ---
 
