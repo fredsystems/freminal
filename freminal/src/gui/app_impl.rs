@@ -1776,29 +1776,53 @@ impl freminal_windowing::App for FreminalGui {
 
             // ── Pane borders ─────────────────────────────────────────
             //
-            // Draw tmux-style half-highlighted borders: each split border is
-            // divided at the midpoint along its length. The half adjacent to
-            // the active pane's subtree is drawn in the active color; the
-            // other half gets the inactive color. This makes it visually
-            // clear which pane owns each shared edge.
+            // Draw "surround the active pane" highlighted borders (Task 109).
+            // Every edge of the active pane that is an interior divider is
+            // highlighted full-length in the active color; the rest of each
+            // divider is inactive. Outer window edges are never dividers, so
+            // they are never highlighted. Each pane's own edges light up, so
+            // stacked / nested panes stay distinguishable (a middle stacked
+            // pane lights its top AND bottom; its neighbours light only the
+            // shared edge).
+            //
+            // The one exception is a tab with EXACTLY two panes: they share a
+            // single full-span divider, so surrounding either pane lights the
+            // same line and the focused pane is indistinguishable. In that
+            // case the divider is half-filled on the active pane's side
+            // (the classic tmux behaviour).
             let broadcast_active = win.tabs.active_tab().broadcast_input;
             if has_multiple_panes && zoomed_pane.is_none() {
                 let painter = ui.painter();
                 // Broadcast mode (Task 74) tints every split border yellow so
                 // the user has a constant visual reminder that keystrokes are
                 // fanning out to every pane.  Otherwise the active pane's
-                // edges are blue and the rest gray.
+                // edges use the theme's bright-blue (ansi[12]) — the themed
+                // equivalent of the original hardcoded blue, distinct from the
+                // command-block status-gutter colors (green/red/yellow) — and
+                // the rest are gray.
                 let (inactive_color, active_color) = if broadcast_active {
                     (
                         egui::Color32::from_rgb(180, 150, 40),
                         egui::Color32::from_rgb(240, 200, 60),
                     )
                 } else {
+                    let theme = freminal_common::themes::by_slug(
+                        self.config.theme.active_slug(win.os_dark_mode),
+                    )
+                    .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+                    let (br, bg, bb) = theme.ansi[12];
                     (
                         egui::Color32::from_gray(80),
-                        egui::Color32::from_rgb(100, 160, 255),
+                        egui::Color32::from_rgb(br, bg, bb),
                     )
                 };
+
+                // Rect of the currently focused pane; used to decide which
+                // divider segments border it.
+                let active_rect = pane_layout
+                    .iter()
+                    .find(|(id, _)| *id == active_pane_id)
+                    .map(|(_, r)| *r);
 
                 let border_rects = win
                     .tabs
@@ -1807,51 +1831,71 @@ impl freminal_windowing::App for FreminalGui {
                     .split_borders(available_rect, active_pane_id)
                     .unwrap_or_default();
 
+                // Tolerance for matching a divider coordinate to a pane edge.
+                let edge_epsilon: f32 = 1.0;
+
+                // Exactly-two-pane tabs share a single divider; half-fill it
+                // on the active pane's side rather than surrounding (which
+                // would be ambiguous). `pane_layout` holds every leaf rect.
+                let exactly_two_panes = pane_layout.len() == 2;
+
+                let stroke = |from, to, color| {
+                    painter.line_segment([from, to], egui::Stroke::new(border_width, color));
+                };
+
                 for border in &border_rects {
                     let r = border.rect;
 
-                    // Determine which halves are active/inactive.
-                    // active_in_first == Some(true)  → first half active
-                    // active_in_first == Some(false) → second half active
-                    // active_in_first == None        → both inactive
-                    let (first_color, second_color) = match border.active_in_first {
-                        Some(true) => (active_color, inactive_color),
-                        Some(false) => (inactive_color, active_color),
-                        None => (inactive_color, inactive_color),
-                    };
+                    if exactly_two_panes {
+                        // Half-fill: the active pane's side gets the active
+                        // color; the other half stays inactive. `active_in_first`
+                        // is true when the active pane is the first child
+                        // (top for a vertical line, left for a horizontal line).
+                        let (first_color, second_color) = match border.active_in_first {
+                            Some(true) => (active_color, inactive_color),
+                            Some(false) => (inactive_color, active_color),
+                            None => (inactive_color, inactive_color),
+                        };
+                        match border.direction {
+                            panes::SplitDirection::Horizontal => {
+                                // Vertical line — split top/bottom.
+                                let mid_y = f32::midpoint(r.min.y, r.max.y);
+                                stroke(r.left_top(), egui::pos2(r.min.x, mid_y), first_color);
+                                stroke(egui::pos2(r.min.x, mid_y), r.left_bottom(), second_color);
+                            }
+                            panes::SplitDirection::Vertical => {
+                                // Horizontal line — split left/right.
+                                let mid_x = f32::midpoint(r.min.x, r.max.x);
+                                stroke(r.left_top(), egui::pos2(mid_x, r.min.y), first_color);
+                                stroke(egui::pos2(mid_x, r.min.y), r.right_top(), second_color);
+                            }
+                        }
+                        continue;
+                    }
 
+                    // 3+ panes: surround. The whole divider is drawn inactive
+                    // first…
                     match border.direction {
                         panes::SplitDirection::Horizontal => {
-                            // Vertical dividing line — split top/bottom.
-                            // First child is left → "first half" = top.
-                            let mid_y = f32::midpoint(r.min.y, r.max.y);
-                            let top = egui::Rect::from_min_max(r.min, egui::pos2(r.max.x, mid_y));
-                            let bot = egui::Rect::from_min_max(egui::pos2(r.min.x, mid_y), r.max);
-
-                            painter.line_segment(
-                                [top.left_top(), top.left_bottom()],
-                                egui::Stroke::new(border_width, first_color),
-                            );
-                            painter.line_segment(
-                                [bot.left_top(), bot.left_bottom()],
-                                egui::Stroke::new(border_width, second_color),
-                            );
+                            stroke(r.left_top(), r.left_bottom(), inactive_color);
                         }
                         panes::SplitDirection::Vertical => {
-                            // Horizontal dividing line — split left/right.
-                            // First child is top → "first half" = left.
-                            let mid_x = f32::midpoint(r.min.x, r.max.x);
-                            let left = egui::Rect::from_min_max(r.min, egui::pos2(mid_x, r.max.y));
-                            let right = egui::Rect::from_min_max(egui::pos2(mid_x, r.min.y), r.max);
+                            stroke(r.left_top(), r.right_top(), inactive_color);
+                        }
+                    }
 
-                            painter.line_segment(
-                                [left.left_top(), left.right_top()],
-                                egui::Stroke::new(border_width, first_color),
-                            );
-                            painter.line_segment(
-                                [right.left_top(), right.right_top()],
-                                egui::Stroke::new(border_width, second_color),
-                            );
+                    // …then the segment along the active pane's edge is
+                    // redrawn full-length in the active color.
+                    if let Some(seg) = active_rect
+                        .and_then(|ar| panes::active_highlight_segment(border, ar, edge_epsilon))
+                    {
+                        match border.direction {
+                            panes::SplitDirection::Horizontal => {
+                                stroke(seg.left_top(), seg.left_bottom(), active_color);
+                            }
+                            panes::SplitDirection::Vertical => {
+                                stroke(seg.left_top(), seg.right_top(), active_color);
+                            }
                         }
                     }
                 }
