@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "cargo-bundle-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780169337,
+        "narHash": "sha256-jYSYR430gKJDcKKu+Kmc3VzpuQBvU80ydNRvJBTeFec=",
+        "owner": "burtonageo",
+        "repo": "cargo-bundle",
+        "rev": "739f92c37c789b5511a448a389cbc76fcebd99df",
+        "type": "github"
+      },
+      "original": {
+        "owner": "burtonageo",
+        "repo": "cargo-bundle",
+        "type": "github"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -150,6 +166,7 @@
     },
     "root": {
       "inputs": {
+        "cargo-bundle-src": "cargo-bundle-src",
         "nixpkgs": "nixpkgs",
         "precommit": "precommit",
         "rust-overlay": "rust-overlay_2"
