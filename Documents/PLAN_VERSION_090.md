@@ -4800,7 +4800,7 @@ finished command still notifies per Task 76. Regression test.
   Existing executed-command notification tests are unaffected (their fixtures
   already set `executed_at`).
 
-#### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors)
+#### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors) ✅ 2026-06-15
 
 **Scope:** Shutdown-ordering defects, addressed as one unit:
 
@@ -4813,6 +4813,52 @@ finished command still notifies per Task 76. Regression test.
 **Verification:** Clean app exit with no painter-leak warning and no
 disconnected-channel errors in the log; pane/tab close ordering verified.
 Regression coverage where the close path is unit-testable.
+
+**Completion notes (branch `task-106/bug-closure`; three commits):**
+
+- **Painter teardown (commit `d19dd06`):** the `egui_glow::Painter` (held on
+  `EguiState` in `freminal-windowing`) owns GPU objects freed only by
+  `destroy()`; the close path merely dropped it, firing the painter's
+  `Drop`-impl leak warning. The warning fired not only at app exit but on
+  every standalone-settings-window close (the settings modal is its own
+  winit window). `WindowState::destroy_egui()` now makes the window's GL
+  context current and calls `painter.destroy()` before the drop; it runs from
+  both `close_window()` (per-window close) and a new `exiting()`
+  `ApplicationHandler` hook (windows still present at irreversible event-loop
+  shutdown). `destroy()` is idempotent, so the two paths cannot double-free.
+- **Channel-shutdown classification (commit `7149c09`):** at close the PTY
+  consumer thread (owner of the `PtyRead` receiver) exits first when the GUI
+  drops the pane's input channel, while the reader thread may still receive
+  one last chunk of shell output. Its `send()` then failed and was logged
+  unconditionally at `error`. A shared `reader_shutdown: Arc<AtomicBool>` is
+  now set by the consumer thread immediately before it exits via the
+  input-channel-disconnect path; the reader consults it on send failure. Flag
+  set = expected teardown (`debug`); flag clear = the receiver vanished while
+  the reader should have kept running, a genuine ordering bug (`error`). The
+  decision is factored into a pure `classify_reader_send_failure()` helper
+  with unit tests, so demoting the log does NOT mask real anomalies. Plumbing
+  mirrors `echo_off`: `RunTerminalResult` → `FreminalPtyInputOutput` →
+  `TerminalEmulator::reader_shutdown_atomic()` → consumer thread.
+- **Close sequencing (commit `d752acc`, PLANNING #6):** two defects. (1)
+  Closing the active tab dropped its panes without sending `FocusChange(true)`
+  to the newly-visible tab's pane, unlike the close-pane and PTY-death paths —
+  a pane using focus reporting (`?1004`) was left believing it was unfocused.
+  `PerWindowState::close_tab` now notifies via `notify_active_pane_focused`,
+  but only when the closed tab was the active one (closing a background tab
+  must not move focus). (2) When a background tab's last pane died, the
+  dead-pane handler in `app_impl.rs` restored the active tab by the dead pane's
+  index rather than the user's original active tab, selecting the wrong tab
+  after a lower-indexed tab was removed. It now captures the original active
+  tab's stable `TabId` and restores by id.
+- **Tests:** `classify_reader_send_failure` (2 cases),
+  `notify_active_pane_focused_sends_focus_gained` (focus event reaches the
+  pane). The painter teardown needs a live GL context and is not unit-testable;
+  the restore-by-id invariant rests on `TabManager::close_tab`'s already-tested
+  active-index adjustment.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean. No
+  escape-sequence support changed (the OSC parser is untouched), so no
+  coverage-doc update.
 
 #### 106.5 — Command history palette sort order (PLANNING #9)
 
