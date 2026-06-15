@@ -1327,6 +1327,24 @@ impl SettingsModal {
         ui.separator();
         ui.add_space(4.0);
 
+        ui.label("Pane Focus:");
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.draft.tabs.focus_follows_mouse,
+            "Focus follows mouse",
+        );
+        ui.add_space(2.0);
+        ui.colored_label(
+            egui::Color32::GRAY,
+            "When enabled, mousing into a split pane gives it keyboard focus \
+             without a click. When disabled, panes are focused only by \
+             clicking. Tab switching is always click-to-focus.",
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
         self.show_broadcast_input_section(ui);
     }
 
