@@ -377,6 +377,18 @@ impl super::FreminalGui {
                     ui.label("A modern terminal emulator written in Rust.");
                     ui.add_space(2.0);
                     ui.label("Licensed under the MIT License.");
+                    ui.add_space(2.0);
+                    // Attribution for vendored code and bundled fonts/assets
+                    // lives in ATTRIBUTIONS.md (the single source of truth);
+                    // link to it rather than duplicating license text here.
+                    // A hyperlink opens the system browser and needs no
+                    // keyboard focus, so it does not affect modal input
+                    // suppression (the About window is already registered in
+                    // `ui_overlay_open`).
+                    ui.hyperlink_to(
+                        "Third-party attributions",
+                        "https://github.com/fredsystems/freminal/blob/main/ATTRIBUTIONS.md",
+                    );
                     ui.add_space(10.0);
                     if ui.button("Close").clicked() {
                         self.about_window_open = false;

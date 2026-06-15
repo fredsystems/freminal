@@ -31,7 +31,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 98  | Block Close on Running Commands          | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`        |
 | 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                                |
 | 107 | Build Version Embedding                  | Small        | Complete | None            | `task-107/build-version-embedding` |
-| 108 | About Modal & Attribution                | Small        | Stub     | Task 107        | TBD                                |
+| 108 | About Modal & Attribution                | Small        | Complete | Task 107        | `task-108/about-modal-attribution` |
 | 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                                |
 | 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                                |
 
@@ -4870,7 +4870,7 @@ self.dirtyShortRev or "nix"}"`. `self.shortRev` is defined for a clean flake
 
 ---
 
-## Task 108 — About Modal & Attribution
+## Task 108 — About Modal & Attribution ✅ Complete (2026-06-11)
 
 ### 108 Summary
 
@@ -4983,13 +4983,30 @@ README links to it; markdownlint passes.
 - markdownlint clean on all new/changed markdown (repo config). No code
   changes; `cargo` verification is unaffected (docs/assets only).
 
-#### 108.3 — About-modal attribution + build version
+#### 108.3 — About-modal attribution + build version ✅ (2026-06-11)
 
 **Scope:** Surface the embedded build version (Task 107) in the About modal and
 add a link/reference to the attributions doc.
 
 **Verification:** About modal shows a real build identifier and links to the
 attributions doc; modal input behavior unaffected.
+
+**Completion notes:**
+
+- The build identifier was already surfaced in the About modal by Task 107:
+  `show_about_window` (`freminal/src/gui/menu.rs`) shows `Version` (cargo
+  version) and `Build` (`freminal_terminal_emulator::GIT_DESCRIBE`), which now
+  resolves to a real value on all three build paths after Task 107. No change
+  needed for the version half of 108.3.
+- Added a `ui.hyperlink_to("Third-party attributions", …)` line pointing at
+  `ATTRIBUTIONS.md` on the project GitHub. A hyperlink opens the system browser
+  and needs no keyboard focus, so `freminal-modal-input-suppression` does not
+  apply beyond what already exists — the About window is already registered in
+  `ui_overlay_open` (`app_impl.rs:1224`) and adds no `TextEdit`/typing widget.
+- `cargo clippy -p freminal --all-targets --all-features -- -D warnings` clean;
+  `cargo test -p freminal` green. The live-egui focus path has no automated
+  test (per the skill); the modal behavior is unchanged because no focusable
+  text widget was added.
 
 ---
 
