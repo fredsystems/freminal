@@ -27,7 +27,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev squashfs-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -43,6 +43,16 @@ jobs:
 
       - name: Generate RPM package
         run: cargo generate-rpm -p freminal
+
+      # cargo-bundle omits StartupWMClass from the generated desktop entry, so
+      # taskbars cannot match the running window to its icon.  Inject the
+      # canonical desktop file (with StartupWMClass=freminal) into the .deb and
+      # .AppImage.  The RPM already carries it via Cargo.toml assets.
+      - name: Inject desktop entry into deb/appimage
+        run: |
+          bash assets/ci/fix-linux-icon-metadata.sh \
+            target/release/bundle/deb/*.deb \
+            target/release/bundle/appimage/*.AppImage
 
       - name: Extract version
         run: |
@@ -82,7 +92,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev squashfs-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -98,6 +108,16 @@ jobs:
 
       - name: Generate RPM package
         run: cargo generate-rpm -p freminal
+
+      # cargo-bundle omits StartupWMClass from the generated desktop entry, so
+      # taskbars cannot match the running window to its icon.  Inject the
+      # canonical desktop file (with StartupWMClass=freminal) into the .deb and
+      # .AppImage.  The RPM already carries it via Cargo.toml assets.
+      - name: Inject desktop entry into deb/appimage
+        run: |
+          bash assets/ci/fix-linux-icon-metadata.sh \
+            target/release/bundle/deb/*.deb \
+            target/release/bundle/appimage/*.AppImage
 
       - name: Extract version
         run: |

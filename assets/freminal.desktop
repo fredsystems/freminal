@@ -1,0 +1,10 @@
+[Desktop Entry]
+Encoding=UTF-8
+Categories=Development;System;TerminalEmulator;
+Comment=A terminal emulator written in Rust
+Exec=freminal
+Icon=freminal
+Name=Freminal
+Terminal=false
+Type=Application
+StartupWMClass=freminal

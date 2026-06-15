@@ -8,6 +8,15 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # cargo-bundle is only used inside the dev shell to produce the Linux
+    # deb/appimage artifacts locally.  nixpkgs is pinned at 0.9.0, which predates
+    # SVG-icon and `appimage` support; we build from upstream master so the dev
+    # shell matches the 0.11.0+ the release CI installs via `cargo install`.
+    # `nix flake update cargo-bundle-src` picks up new upstream commits.
+    cargo-bundle-src = {
+      url = "github:burtonageo/cargo-bundle";
+      flake = false;
+    };
   };
 
   outputs =
@@ -16,6 +25,7 @@
       precommit,
       nixpkgs,
       rust-overlay,
+      cargo-bundle-src,
       ...
     }:
     let
@@ -186,8 +196,17 @@
                   wrapProgram $out/bin/freminal \
                     --prefix LD_LIBRARY_PATH : ${runtimeLibPath}
 
-                  install -Dm644 assets/icon.png \
-                    $out/share/icons/hicolor/256x256/apps/freminal.png
+                  # Install the full hicolor icon tree: square anti-aliased
+                  # PNGs at every standard size plus a scalable SVG.  Sized PNGs
+                  # are required because some taskbars (e.g. wayle) resolve a
+                  # window's icon by app_id and only consult sized PNG
+                  # directories, skipping scalable/.  The previous single
+                  # 301x289 PNG dropped into a "256x256" directory was both
+                  # malformed (wrong dimensions for the directory) and jagged
+                  # (1-bit alpha), so loaders fell back to the generic icon.
+                  mkdir -p $out/share/icons/hicolor
+                  cp -r assets/icons/hicolor/. \
+                    $out/share/icons/hicolor/
                 '';
           };
         }
@@ -280,29 +299,80 @@
             let
               pkgs = import nixpkgs { inherit system; };
 
+              # cargo-bundle built from upstream master (see the cargo-bundle-src
+              # input).  nixpkgs ships 0.9.0, which cannot bundle SVG icons or
+              # produce appimages; this matches the 0.11.0+ the release CI uses.
+              # Mirrors the nixpkgs recipe (squashfsTools wrap for appimage).
+              cargoBundleLatest = pkgs.rustPlatform.buildRustPackage {
+                pname = "cargo-bundle";
+                version = "unstable-${cargo-bundle-src.shortRev or "dirty"}";
+                src = cargo-bundle-src;
+                # Upstream stopped committing Cargo.lock after v0.9.0, so we
+                # vendor one here (regenerate with `cargo generate-lockfile`
+                # against the input source after a `nix flake update`).  The
+                # source tree has no lockfile, so copy ours in for the build's
+                # own cargo invocation too.
+                cargoLock.lockFile = ./nix/cargo-bundle.lock;
+                postPatch = ''
+                  cp ${./nix/cargo-bundle.lock} Cargo.lock
+                '';
+                nativeBuildInputs = [
+                  pkgs.pkg-config
+                ]
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                  pkgs.makeBinaryWrapper
+                ];
+                buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                  pkgs.libxkbcommon
+                  pkgs.wayland
+                  pkgs.openssl
+                ];
+                # squashfs tools are needed to build appimages for Linux.
+                postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  wrapProgram $out/bin/cargo-bundle \
+                    --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.squashfsTools ]}
+                '';
+                doCheck = false;
+              };
+
               # Unified check result (base + rust)
               chk = self.checks.${system}."pre-commit-check";
 
               # Packages that git-hooks.nix / mkCheck say we need
               corePkgs = chk.enabledPackages or [ ];
 
-              # Extra Rust / tooling packages (NO extra rustc here)
-              extraRustTools = [
+              # Tooling needed by the CI checks (lint / test / machete / deny /
+              # coverage / docs lint).  Kept deliberately lean so the CI `ci`
+              # devShell does not build heavy dev-only tools.
+              ciRustTools = [
                 pkgs.tombi
                 pkgs.cargo-deny
                 pkgs.cargo-machete
                 pkgs.cargo-make
-                pkgs.cargo-profiler
-                pkgs.cargo-bundle
                 pkgs.typos
-                pkgs.vttest
                 pkgs.markdownlint-cli2
-                pkgs.cargo-flamegraph
                 pkgs.python313Packages.msgpack # For sequence decoder
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.cargo-llvm-cov
                 pkgs.cachix
+              ];
+
+              # Interactive-only extras.  These are excluded from the `ci`
+              # devShell: cargoBundleLatest is built from source (expensive) and
+              # is only needed to produce local deb/appimage artifacts; the
+              # profilers, vttest, dpkg and squashfsTools are likewise unused by
+              # CI lint/test.  squashfsTools + dpkg let the local artifact patch
+              # script (assets/ci/fix-linux-icon-metadata.sh) run by hand.
+              devOnlyTools = [
+                pkgs.cargo-profiler
+                cargoBundleLatest
+                pkgs.vttest
+                pkgs.cargo-flamegraph
+                pkgs.dpkg
+                pkgs.squashfsTools
+              ]
+              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.perf
                 pkgs.fish
               ];
@@ -320,23 +390,35 @@
                 ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                   pkgs.wayland
                 ];
+
+              # Shared shell builder.  `extraTools` is the only axis on which
+              # the `default` and `ci` shells differ.
+              mkFreminalShell =
+                extraTools:
+                pkgs.mkShell {
+                  buildInputs = extraDev ++ corePkgs ++ ciRustTools ++ extraTools;
+
+                  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
+
+                  # Enable the `playback` feature by default in the devshell so
+                  # developers get recording/playback support without extra flags.
+                  CARGO_BUILD_FEATURES = "playback";
+
+                  shellHook = ''
+                    ${chk.shellHook}
+
+                    alias pre-commit="pre-commit run --all-files"
+                  '';
+                };
             in
             {
-              default = pkgs.mkShell {
-                buildInputs = extraDev ++ corePkgs ++ extraRustTools;
+              # Full interactive shell: lint/test tooling plus the dev-only
+              # extras (cargo-bundle, profilers, vttest, ...).
+              default = mkFreminalShell devOnlyTools;
 
-                LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
-
-                # Enable the `playback` feature by default in the devshell so
-                # developers get recording/playback support without extra flags.
-                CARGO_BUILD_FEATURES = "playback";
-
-                shellHook = ''
-                  ${chk.shellHook}
-
-                  alias pre-commit="pre-commit run --all-files"
-                '';
-              };
+              # Lean shell for CI lint/test gates.  Omits devOnlyTools so CI
+              # never builds cargo-bundle from source.  Used by nightly.yml.
+              ci = mkFreminalShell [ ];
             };
         }) systems
       );

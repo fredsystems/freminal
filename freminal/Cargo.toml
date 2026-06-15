@@ -17,7 +17,13 @@ name = "Freminal"
 identifier = "io.github.fredclausen.freminal"
 copyright = "Copyright (c) 2024-2026 Fred Clausen"
 category = "Developer Tools"
-icon = ["assets/icon.png"]
+# A square SVG is listed first so the Linux deb/appimage/rpm bundlers install
+# it to `hicolor/scalable/apps/freminal.svg` -- the only icon-theme location
+# that every desktop scales from at any size.  The original `icon.png` is
+# 301x289 (non-square, non-standard), which cargo-bundle would otherwise drop
+# into a `hicolor/301x289/apps/` directory that no icon-theme lookup ever
+# scans, leaving the taskbar/launcher with the generic fallback icon.
+icon = ["assets/icon.svg", "assets/icon.png"]
 short_description = "A terminal emulator written in Rust"
 long_description = """
 Freminal is a terminal emulator written in Rust, designed to provide a fast, efficient, and customizable terminal experience. It leverages modern Rust libraries and technologies to deliver a robust and user-friendly interface for developers and power users.
@@ -37,6 +43,14 @@ deb_depends = ["libgl1-mesa-glx"]
 version = "0.9.0"
 assets = [
   { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
+  # Ship the desktop entry (carrying StartupWMClass=freminal, which matches the
+  # runtime app_id/WM_CLASS set in freminal/src/gui/run.rs) and a square SVG
+  # icon in hicolor/scalable so the installed RPM shows the Freminal logo in
+  # the taskbar/launcher instead of the generic fallback.  cargo-generate-rpm
+  # does not synthesise these the way cargo-bundle does for deb/appimage, so
+  # they are listed explicitly here.
+  { source = "assets/freminal.desktop", dest = "/usr/share/applications/freminal.desktop", mode = "644" },
+  { source = "assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/freminal.svg", mode = "644" },
 ]
 
 [[bench]]
