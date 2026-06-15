@@ -4860,13 +4860,62 @@ warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean. No
   escape-sequence support changed (the OSC parser is untouched), so no
   coverage-doc update.
 
-#### 106.5 — Command history palette sort order (PLANNING #9)
+#### 106.5 — Command history palette sort order (PLANNING #9) ✅ 2026-06-15
 
-**Scope:** The command-history palette lists oldest-first. It must sort
-most-recent-first.
+**Scope:** The command-history palette (Ctrl+Shift+M, Task 72.15) lists
+oldest-first. It must sort most-recent-first.
 
-**Verification:** Most-recently-run command appears at the top; regression test
-on the palette ordering.
+**Symptom that prompted the fix:** a command typed in the current session
+never appeared in the palette's _unfiltered_ list, yet searching for that
+exact command's text surfaced it. Diagnosis: the bug is the sort order
+itself, not a dedup/classification miss.
+
+- `merge_entries` (`freminal/src/gui/command_history.rs`) emitted the
+  shell-history seed first (oldest→newest, up to
+  `shell_history::HISTORY_SEED_CAP = 1000` entries), then this session's
+  live OSC 133 commands appended at the tail.
+- `filter_entries` caps the _rendered_ list at `MAX_VISIBLE_ENTRIES = 200`
+  via `take(200)` — but only after filtering. With an empty query the cap
+  sliced off the tail, so with a typical ≥200-entry history the live
+  entries (and the most-recent seed entries) were never reached. A
+  non-empty query scans the whole merged list before the cap, which is why
+  searching found the command.
+
+**Fix:** reverse the merge to most-recent-first. Live entries are emitted
+newest-first (this session's commands), then the seed newest-first. This
+puts recent commands at the top, inside the 200-entry cap, and pairs with
+the palette's existing default selection of index `0` (Enter recalls the
+most-recent command). Dedup was also changed from "collapse consecutive
+duplicates" to a global text dedup (first/newest occurrence wins), so a
+command both run this session and present in the history file appears
+exactly once near the top as the Live variant (carrying its exit-code
+badge) rather than twice.
+
+**Verification:** Most-recently-run command appears at the top; regression
+test on the palette ordering.
+
+**Completion notes (branch `task-106/bug-closure`):**
+
+- Single-file production change: `freminal/src/gui/command_history.rs`
+  `merge_entries`. No signature change (the `seed` / `recent` / `texts`
+  inputs are stored oldest-first and iterated `.rev()`); no `ViewState`,
+  renderer, config, or escape-sequence change.
+- Updated the `merge_entries` doc comment to describe the newest-first
+  ordering, the cap interaction, and the global dedup rationale.
+- Tests: flipped the three order-asserting tests to newest-first
+  (`merge_entries_seed_only_is_newest_first`,
+  `merge_entries_collapses_duplicates_in_seed`,
+  `merge_entries_live_newest_first_then_seed_newest_first`); added
+  `merge_entries_dedups_non_consecutive_duplicates_in_seed` (global-dedup
+  behaviour), `merge_entries_live_command_also_in_seed_appears_once_as_live`
+  (the duplicate-across-sources case), and the explicit regression guard
+  `merge_entries_recent_command_is_visible_within_cap_regression` (seed
+  larger than `MAX_VISIBLE_ENTRIES`, asserts the live command is first and
+  survives the empty-query cap).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean.
+  (One `clippy::pedantic similar_names` fired on a `seen` local adjacent to
+  the `seed` parameter; renamed to `seen_texts`.)
 
 #### 106.6 — Paste-guard modal routes to wrong pane under focus-follows-mouse ✅ 2026-06-15
 
