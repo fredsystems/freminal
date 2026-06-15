@@ -4773,6 +4773,35 @@ most-recent-first.
 **Verification:** Most-recently-run command appears at the top; regression test
 on the palette ordering.
 
+#### 106.6 — Paste-guard modal routes to wrong pane under focus-follows-mouse ✅ 2026-06-15
+
+**Why this subtask exists:** surfaced during 106.1 review. A regression from
+the interaction of the v0.9.0 focus-follows-mouse work (Task 110) and the
+smart paste guard (Task 77).
+
+**Scope:** With focus-follows-mouse enabled, pasting flagged content into pane A
+opens the confirm-paste modal whose buttons may overlap a different pane B.
+Moving the cursor onto "Paste Anyway"/"Cancel" changes the active pane to B
+(focus follows mouse), and confirming pasted into B instead of A, because
+`send_paste_to_active_pane` resolved the _current_ active pane at confirm time.
+
+**Fix:** Capture the destination pane `(TabId, PaneId)` at dialog-open time in
+`guarded_paste_text` (mirroring how the broadcast-confirm dialog already
+carries its target tab), thread it through `PasteDialogState` /
+`PasteDialogOutcome::Paste { payload, target }`, and route the confirmed paste
+via a new `send_paste_to_target` that looks the pane up by id. If the target
+pane was closed while the modal was open the paste is dropped with a log rather
+than landing in the wrong pane. The Settings "Test Paste" preview captures the
+settings-owner window's active pane the same way. The `Safe` fast path is
+unchanged (it sends in the same frame the paste is initiated, so active == target
+by construction).
+
+**Verification:** New `dialog_preserves_target_across_open` regression test in
+`paste_guard.rs` asserts the captured target round-trips through dialog state.
+Existing dialog tests updated for the new `open`/`Paste` signatures.
+`cargo test --all`, clippy `-D warnings`, `cargo fmt --check`, and
+`cargo machete` all clean.
+
 ---
 
 ## Task 107 — Build Version Embedding ✅ Complete (2026-06-11)

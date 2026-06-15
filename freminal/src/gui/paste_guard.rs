@@ -25,6 +25,24 @@ use std::fmt::Write as _;
 use freminal_common::config::PasteGuardConfig;
 use regex::Regex;
 
+use super::panes::PaneId;
+use super::tabs::TabId;
+
+/// Identifies the pane a flagged paste was destined for when its confirmation
+/// dialog opened.
+///
+/// Captured at dialog-open time and carried through to confirmation so the
+/// payload lands in the originating pane even if focus moved in the meantime
+/// — e.g. with focus-follows-mouse enabled, moving the cursor onto the
+/// dialog's "Paste Anyway" button changes the active pane (Task 106 bug).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::gui) struct PasteTarget {
+    /// The tab that owned the paste when the dialog opened.
+    pub tab_id: TabId,
+    /// The pane within that tab that the paste was destined for.
+    pub pane_id: PaneId,
+}
+
 /// The classification of a paste payload produced by [`analyze`].
 ///
 /// `Safe` means no enabled trigger fired and the payload may be sent
@@ -238,8 +256,15 @@ pub(in crate::gui) enum PasteDialogOutcome {
     Cancelled,
     /// The user confirmed. The carried payload (original or edited) must be
     /// sent to the PTY by the caller (77.4), which owns bracketed-paste
-    /// wrapping and PTY routing.
-    Paste(String),
+    /// wrapping and PTY routing. `target` identifies the pane the paste was
+    /// destined for when the dialog opened, so the caller routes there rather
+    /// than to whatever pane is active at confirmation time.
+    Paste {
+        /// The paste payload (original or edited content).
+        payload: String,
+        /// The pane the paste was originally destined for.
+        target: PasteTarget,
+    },
 }
 
 /// State for a single open confirm-paste dialog.
@@ -254,6 +279,8 @@ struct PasteDialogState {
     editing: bool,
     /// Scratch buffer for the edit mode, initialised from `payload`.
     edit_buffer: String,
+    /// The pane the paste was destined for when the dialog opened.
+    target: PasteTarget,
 }
 
 /// The confirm-paste modal dialog (Task 77.3).
@@ -269,10 +296,16 @@ pub(in crate::gui) struct PasteDialog {
 }
 
 impl PasteDialog {
-    /// Open the dialog for `payload` with its precomputed `analysis`.
+    /// Open the dialog for `payload` with its precomputed `analysis`,
+    /// destined for `target`.
     ///
     /// A `Safe` analysis is ignored — the dialog is only for flagged pastes.
-    pub(in crate::gui) fn open(&mut self, payload: String, analysis: PasteAnalysis) {
+    pub(in crate::gui) fn open(
+        &mut self,
+        payload: String,
+        analysis: PasteAnalysis,
+        target: PasteTarget,
+    ) {
         if analysis.is_safe() {
             return;
         }
@@ -281,6 +314,7 @@ impl PasteDialog {
             payload,
             analysis,
             editing: false,
+            target,
         });
     }
 
@@ -374,7 +408,10 @@ impl PasteDialog {
                         } else {
                             state.payload.clone()
                         };
-                        outcome = PasteDialogOutcome::Paste(payload);
+                        outcome = PasteDialogOutcome::Paste {
+                            payload,
+                            target: state.target,
+                        };
                     }
                     if !state.editing && ui.button("Edit and Paste").clicked() {
                         state.editing = true;
@@ -393,7 +430,10 @@ impl PasteDialog {
                 } else {
                     state.payload.clone()
                 };
-                outcome = PasteDialogOutcome::Paste(payload);
+                outcome = PasteDialogOutcome::Paste {
+                    payload,
+                    target: state.target,
+                };
             }
         }
 
@@ -657,6 +697,15 @@ mod tests {
         );
     }
 
+    /// A throwaway `PasteTarget` for dialog tests. The concrete ids are
+    /// irrelevant to the open/ignore/equality assertions.
+    fn test_target() -> PasteTarget {
+        PasteTarget {
+            tab_id: TabId::first(),
+            pane_id: PaneId::first(),
+        }
+    }
+
     #[test]
     fn dialog_opens_on_flagged_analysis() {
         let mut dialog = PasteDialog::default();
@@ -667,6 +716,7 @@ mod tests {
             PasteAnalysis::Patterns {
                 matched: vec![r"\bsudo\b".to_owned()],
             },
+            test_target(),
         );
         assert!(dialog.is_open());
     }
@@ -674,7 +724,7 @@ mod tests {
     #[test]
     fn dialog_ignores_safe_analysis() {
         let mut dialog = PasteDialog::default();
-        dialog.open("harmless".to_owned(), PasteAnalysis::Safe);
+        dialog.open("harmless".to_owned(), PasteAnalysis::Safe, test_target());
         assert!(
             !dialog.is_open(),
             "a Safe analysis must never open the dialog"
@@ -686,9 +736,39 @@ mod tests {
         // Sanity-check the outcome enum used by 77.4's wire-in.
         assert_eq!(PasteDialogOutcome::Idle, PasteDialogOutcome::Idle);
         assert_ne!(
-            PasteDialogOutcome::Paste("a".to_owned()),
-            PasteDialogOutcome::Paste("b".to_owned())
+            PasteDialogOutcome::Paste {
+                payload: "a".to_owned(),
+                target: test_target(),
+            },
+            PasteDialogOutcome::Paste {
+                payload: "b".to_owned(),
+                target: test_target(),
+            }
         );
         assert_ne!(PasteDialogOutcome::Cancelled, PasteDialogOutcome::Idle);
+    }
+
+    #[test]
+    fn dialog_preserves_target_across_open() {
+        // Regression (Task 106): the destination pane is captured at open time
+        // so a confirmed paste routes to the originating pane even if focus
+        // moved (e.g. focus-follows-mouse onto the dialog buttons). A distinct
+        // target must round-trip through the dialog state unchanged.
+        let target = PasteTarget {
+            tab_id: TabId::first(),
+            pane_id: PaneId::first(),
+        };
+        let mut dialog = PasteDialog::default();
+        dialog.open(
+            "sudo rm -rf /".to_owned(),
+            PasteAnalysis::Patterns {
+                matched: vec![r"\bsudo\b".to_owned()],
+            },
+            target,
+        );
+        match dialog.state.as_ref() {
+            Some(state) => assert_eq!(state.target, target),
+            None => panic!("dialog should be open after a flagged paste"),
+        }
     }
 }

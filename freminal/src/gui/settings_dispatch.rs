@@ -361,7 +361,14 @@ impl FreminalGui {
                 } else if let Some(owner) = self.settings_owner
                     && let Some(win) = self.windows.get_mut(&owner)
                 {
-                    win.paste_dialog.open(SAMPLE.to_owned(), analysis);
+                    // Test Paste is a preview only; target the window's active
+                    // pane so a confirm would route there like a real paste.
+                    let tab = win.tabs.active_tab();
+                    let target = crate::gui::paste_guard::PasteTarget {
+                        tab_id: tab.id,
+                        pane_id: tab.active_pane,
+                    };
+                    win.paste_dialog.open(SAMPLE.to_owned(), analysis, target);
                     handle.request_repaint(owner);
                 } else {
                     self.push_error_toast(

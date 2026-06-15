@@ -785,7 +785,16 @@ impl super::FreminalGui {
         if analysis.is_safe() {
             Self::send_paste_to_active_pane(win, text);
         } else {
-            win.paste_dialog.open(text, analysis);
+            // Capture the destination pane *now*, before the confirm dialog
+            // opens. With focus-follows-mouse enabled the user moving the
+            // cursor onto the dialog's buttons changes the active pane, so we
+            // must remember where the paste was headed (Task 106 bug).
+            let tab = win.tabs.active_tab();
+            let target = super::paste_guard::PasteTarget {
+                tab_id: tab.id,
+                pane_id: tab.active_pane,
+            };
+            win.paste_dialog.open(text, analysis, target);
         }
     }
 
@@ -795,12 +804,42 @@ impl super::FreminalGui {
     /// Used both for the `Safe` fast path and when the user confirms a flagged
     /// paste via the dialog. A send failure (dead PTY) is logged, not fatal.
     pub(super) fn send_paste_to_active_pane(win: &mut PerWindowState, payload: String) {
-        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
-
         let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
             warn!("Paste: active tab has no active pane");
             return;
         };
+        Self::send_paste_to_pane_ref(pane, payload);
+    }
+
+    /// Send `payload` to the specific pane identified by `target`, regardless
+    /// of which pane is currently active.
+    ///
+    /// Used to resolve a confirmed flagged paste (Task 77 dialog): the target
+    /// is captured when the dialog opens so that focus moving to the dialog
+    /// buttons (e.g. under focus-follows-mouse) cannot redirect the paste to
+    /// the wrong pane (Task 106 bug). If the target pane no longer exists (it
+    /// was closed while the dialog was open) the paste is dropped with a log.
+    pub(super) fn send_paste_to_target(
+        win: &mut PerWindowState,
+        target: super::paste_guard::PasteTarget,
+        payload: String,
+    ) {
+        let Some(tab) = win.tabs.iter_mut().find(|t| t.id == target.tab_id) else {
+            warn!("Paste: target tab no longer exists; dropping paste");
+            return;
+        };
+        let Some(pane) = tab.pane_tree.find_mut(target.pane_id) else {
+            warn!("Paste: target pane no longer exists; dropping paste");
+            return;
+        };
+        Self::send_paste_to_pane_ref(pane, payload);
+    }
+
+    /// Wrap `payload` for bracketed paste (when `pane` has it enabled) and
+    /// send it to `pane`'s PTY. Shared by the active-pane and targeted paths.
+    fn send_paste_to_pane_ref(pane: &super::panes::Pane, payload: String) {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+
         let snap = pane.arc_swap.load();
         let wrapped = if snap.bracketed_paste == RlBracket::Enabled {
             format!("\x1b[200~{payload}\x1b[201~")

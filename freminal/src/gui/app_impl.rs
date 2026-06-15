@@ -1130,8 +1130,12 @@ impl freminal_windowing::App for FreminalGui {
             // resolved (possibly edited) payload is sent to the active pane;
             // on cancel the paste is discarded.
             match win.paste_dialog.show(ctx) {
-                super::paste_guard::PasteDialogOutcome::Paste(payload) => {
-                    Self::send_paste_to_active_pane(&mut win, payload);
+                super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
+                    // Route to the pane captured when the dialog opened, not
+                    // the currently-active pane: focus-follows-mouse can change
+                    // the active pane when the cursor moves onto the dialog
+                    // buttons (Task 106 bug).
+                    Self::send_paste_to_target(&mut win, target, payload);
                 }
                 super::paste_guard::PasteDialogOutcome::Cancelled
                 | super::paste_guard::PasteDialogOutcome::Idle => {}
