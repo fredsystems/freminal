@@ -4686,13 +4686,44 @@ disconnected-channel errors at app close).
 
 ### 106 Subtasks
 
-#### 106.1 — Right-click paste in buffer (PLANNING #1)
+#### 106.1 — Right-click paste in buffer (PLANNING #1) ✅ 2026-06-15
 
 **Scope:** Right-click paste does not work in the terminal buffer. Diagnose
 the input path and restore paste-on-right-click.
 
 **Verification:** Right-click pastes clipboard contents into the buffer;
 regression test on the input-handling path.
+
+**Completion notes (branch `task-106/bug-closure`):**
+
+- **Root cause:** the right-click context-menu "Paste" entry sends
+  `egui::ViewportCommand::RequestPaste`
+  (`freminal/src/gui/terminal/widget.rs:775`). In the custom winit/glutin
+  integration that replaced eframe (Task 66), `process_viewport_command`
+  (`freminal-windowing/src/event_loop.rs`) routed `RequestPaste` into the
+  catch-all `_ => trace!("Unhandled …")` arm, so nothing happened. Keyboard
+  paste worked because it goes through a separate keypress interceptor that
+  reads the clipboard and calls `inject_paste`.
+- **Fix:** `RequestPaste` now sets a deferred `paste_requested` flag (mirroring
+  the existing `should_close` flag). After the per-frame command loop, the
+  `RedrawRequested` handler reads the clipboard via the same cross-window
+  `windows.values_mut().find_map(state.egui.clipboard_text())` fallback the
+  keyboard interceptor uses (Wayland per-window clipboard quirk) and injects
+  `Event::Paste` into the target window. From there the existing
+  `Event::Paste` → `pending_paste` → `guarded_paste_text` path (Task 77)
+  handles bracketed-paste wrapping and the paste guard.
+- **Testability:** flag classification extracted into a pure, window-free
+  `viewport_command_flags(&cmd) -> ViewportCommandFlags` helper so it can be
+  unit-tested without a live event loop. The window-affecting arms still run
+  inline in `process_viewport_command`.
+- 3 regression tests added in `event_loop.rs::tests`:
+  `request_paste_command_sets_only_paste_flag` (the bug guard),
+  `close_command_sets_only_close_flag`, and
+  `window_affecting_commands_raise_no_flags`.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, and `cargo machete` all clean.
+- No escape-sequence, config, or new-dependency changes — purely a windowing
+  command-dispatch fix.
 
 #### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4)
 
