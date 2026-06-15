@@ -4948,6 +4948,56 @@ Existing dialog tests updated for the new `open`/`Paste` signatures.
 
 ---
 
+#### 106.7 — Blank window on bash shell spawn + no visible failure mode ✅ 2026-06-15
+
+**Why this subtask exists:** reported from a Bazzite user running the AppImage
+nightly. Freminal opened a blank, unusable window; the log ended at
+`tab_spawning: layout: failed to spawn pane 'Pane(1)': failed to initialize
+PTY`. v0.8.0 worked on the same machine, so this was a v0.9.0 regression.
+
+**Root cause (two distinct bugs):**
+
+1. **Spawn failure (bash-only, deterministic).** The Task 72.8b spawn-time
+   shell-integration injection adds `--posix` for bash via
+   `cmd.arg("--posix")` on a `portable_pty` `new_default_prog()` builder. The
+   moment any arg is pushed the builder stops being a default-prog builder, so
+   `as_command()` treats `args[0]` (`"--posix"`) as the **executable** and
+   tries to resolve it on `PATH` — which fails, so no shell spawns. zsh/fish
+   users were unaffected because their injection branches add no args (the
+   bug went unnoticed because the maintainer runs zsh). Not sandboxing: the
+   reporter simply runs bash, the Bazzite/Fedora default.
+2. **No visible failure mode.** When the only/last pane's spawn fails, the
+   layout/session-restore path produced no `TabManager`, so
+   `build_window_from_pending_layout` returned before inserting a
+   `PerWindowState`. A window with no `PerWindowState` renders nothing —
+   `update()` early-returns — leaving a blank, unrecoverable surface (the
+   error toast it tried to push had no window to render in). The default-PTY
+   path instead closed the only window, abruptly quitting with no explanation.
+
+**Fix:**
+
+- `inject_shell_integration_env` now takes the resolved shell program and, for
+  bash, promotes the builder to `[shell, "--posix"]` via
+  `CommandBuilder::replace_default_prog` instead of `cmd.arg("--posix")`, so
+  the shell stays `args[0]`.
+- New app-level `fatal_error: Option<(String, String)>` on `FreminalGui` with
+  `set_fatal_error` / `has_live_window` / `render_fatal_error`. When the
+  only/last shell fails (no live panes anywhere), `update()` renders a centered
+  error panel (title + detail + single **Exit** button) for the
+  `PerWindowState`-less window instead of returning blank. Both the default-PTY
+  and layout/session-restore first-window paths set it. The detail text points
+  the user at `[shell_integration] set_term_program = false` as a workaround.
+- Non-fatal sub-pane failures (other shells alive) keep the existing behavior:
+  error toast + skip the broken pane (verified no half-built pane leaks).
+
+**Verification:** New `shell_integration_injection_tests` in `io/pty.rs` prove
+bash keeps the shell as `args[0]` (never the `--posix` flag) and zsh/fish stay
+default-prog builders — the test fails against the pre-fix `&["--posix"]`
+behavior. `cargo test --all`, clippy `-D warnings`, and `cargo machete` all
+clean.
+
+---
+
 ## Task 107 — Build Version Embedding ✅ Complete (2026-06-11)
 
 ### 107 Summary

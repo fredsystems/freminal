@@ -292,6 +292,19 @@ struct FreminalGui {
     /// close through, then removes the entry.  Avoids re-prompting on the
     /// `ViewportCommand::Close` round trip a Force Close triggers.
     force_close_windows: std::collections::HashSet<WindowId>,
+
+    /// Set when the application's only/last shell failed to spawn and there
+    /// are no live panes anywhere, leaving nothing to render.
+    ///
+    /// When `Some`, every window without a [`PerWindowState`] renders a
+    /// centered fatal-error panel (title + detail + an "Exit" button)
+    /// instead of a blank surface.  This prevents the "blank window on a
+    /// failed shell spawn" failure mode: a window whose tabs could not be
+    /// built is otherwise unrenderable and unrecoverable.
+    ///
+    /// `(title, detail)` — `title` is a short headline, `detail` carries
+    /// the underlying spawn error for the user to act on.
+    fatal_error: Option<(String, String)>,
 }
 
 impl FreminalGui {
@@ -418,6 +431,7 @@ impl FreminalGui {
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
             force_close_windows: std::collections::HashSet::new(),
+            fatal_error: None,
         };
 
         if !layout_errors.is_empty() {
@@ -460,6 +474,29 @@ impl FreminalGui {
             Err(_) => {
                 tracing::warn!("toast stack was already borrowed; dropping error toast");
             }
+        }
+    }
+
+    /// Returns `true` when at least one open window currently holds a live
+    /// [`PerWindowState`] (i.e. there is something renderable with a PTY).
+    ///
+    /// Used to decide whether a failed shell spawn is *fatal* (no panes
+    /// anywhere -> show the fatal-error panel) or merely *non-fatal* (other
+    /// shells alive -> show a toast and skip the broken pane).  The
+    /// settings window is intentionally not a `PerWindowState`, so it does
+    /// not count as a live terminal window here.
+    pub(super) fn has_live_window(&self) -> bool {
+        !self.windows.is_empty()
+    }
+
+    /// Record a fatal startup failure so the next frame renders the
+    /// fatal-error panel (title + detail + Exit) instead of a blank window.
+    ///
+    /// Only the first failure is retained; subsequent calls are ignored so
+    /// the earliest, most actionable message survives.
+    pub(super) fn set_fatal_error(&mut self, title: impl Into<String>, detail: impl Into<String>) {
+        if self.fatal_error.is_none() {
+            self.fatal_error = Some((title.into(), detail.into()));
         }
     }
 

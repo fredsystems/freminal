@@ -319,23 +319,49 @@ fn detect_shell(program: &str) -> Option<Shell> {
 /// passed, (b) `set_term_program` is enabled, and (c) the program path
 /// matches a recognised shell.
 ///
-/// Returns the list of additional args (if any) that must be appended
-/// to `cmd` BEFORE spawning — currently only bash needs this (`--posix`).
-/// Args are returned rather than applied directly so callers retain
-/// control over `cmd.args()` error propagation.
+/// `shell_program` is the resolved shell executable path (from `--shell`,
+/// a layout override, or `$SHELL`).  It is required so that shells which
+/// need extra spawn-time arguments (currently only bash, which needs
+/// `--posix`) can be promoted from a *default-prog* builder to an explicit
+/// `[shell, args...]` builder.
+///
+/// # The default-prog / explicit-arg trap
+///
+/// A [`CommandBuilder`] created via `new_default_prog()` resolves its
+/// program lazily at spawn time (it runs `$SHELL` as a login shell).  The
+/// moment any argument is pushed via `arg()`, the builder is no longer a
+/// default-prog builder and `args[0]` is treated as the *executable*.  So
+/// naively calling `cmd.arg("--posix")` makes `portable_pty` try to spawn
+/// a program literally named `--posix`, which fails with "doesn't exist on
+/// the filesystem" — producing a blank window for every bash user.  To add
+/// args we must therefore seed `args[0]` with the real shell path via
+/// [`CommandBuilder::replace_default_prog`].
 fn inject_shell_integration_env(
     cmd: &mut CommandBuilder,
     shell: Shell,
     resources: &Path,
-) -> &'static [&'static str] {
+    shell_program: &str,
+) {
     match shell {
         Shell::Bash => {
             // bash sources `$ENV` when invoked in POSIX mode but not in
             // its normal interactive mode.  We launch with `--posix` so
             // the file is sourced; the script's first action is to
             // disable POSIX mode again.
+            //
+            // `--posix` is an *argument*, so the builder must carry the
+            // resolved shell as `args[0]`.  Use `replace_default_prog`
+            // (not `arg`) so `args[0]` is the shell, not the flag.  If the
+            // builder is somehow no longer a default-prog builder, fall
+            // back to appending the flag to whatever program is set.
             cmd.env("ENV", resources.join("bash").join("freminal-init.bash"));
-            &["--posix"]
+            if cmd.is_default_prog() {
+                if let Err(e) = cmd.replace_default_prog([shell_program, "--posix"]) {
+                    error!("failed to set bash shell-integration argv: {e}");
+                }
+            } else if let Err(e) = cmd.arg("--posix") {
+                error!("failed to append --posix to bash argv: {e}");
+            }
         }
         Shell::Zsh => {
             // Preserve any existing $ZDOTDIR via a sentinel env var.
@@ -348,7 +374,6 @@ fn inject_shell_integration_env(
                 cmd.env("__FREMINAL_ZSH_ZDOTDIR", existing);
             }
             cmd.env("ZDOTDIR", resources.join("zsh"));
-            &[]
         }
         Shell::Fish => {
             // Prepend our resources directory to $XDG_DATA_DIRS so fish
@@ -357,7 +382,6 @@ fn inject_shell_integration_env(
                 .unwrap_or_else(|_| String::from("/usr/local/share:/usr/share"));
             let combined = format!("{}:{existing}", resources.display());
             cmd.env("XDG_DATA_DIRS", combined);
-            &[]
         }
     }
 }
@@ -475,25 +499,21 @@ pub fn run_terminal(
     //
     // Falls back silently when the resources directory can't be resolved
     // (e.g. unusual platforms or stripped installs).
-    let injected_extra_args: &'static [&'static str] = if spawning_shell && set_term_program {
-        if let (Some(prog), Some(resources)) = (
+    //
+    // `inject_shell_integration_env` mutates `cmd` directly — for bash it
+    // must promote the default-prog builder to `[shell, "--posix"]` rather
+    // than appending `--posix` as a bare arg (which would make
+    // `portable_pty` spawn a program literally named `--posix`; see the
+    // function's docs).
+    if spawning_shell
+        && set_term_program
+        && let (Some(prog), Some(resources)) = (
             shell_program.as_deref(),
             freminal_common::config::shell_integration_dir(),
-        ) {
-            if let Some(shell) = detect_shell(prog) {
-                inject_shell_integration_env(&mut cmd, shell, resources.path())
-            } else {
-                &[]
-            }
-        } else {
-            &[]
-        }
-    } else {
-        &[]
-    };
-    for arg in injected_extra_args {
-        cmd.arg(arg)
-            .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
+        )
+        && let Some(shell) = detect_shell(prog)
+    {
+        inject_shell_integration_env(&mut cmd, shell, resources.path(), prog);
     }
     cmd.env("__CFBundleIdentifier", "io.github.fredclausen.freminal");
 
@@ -981,6 +1001,104 @@ mod reader_send_failure_tests {
         assert_eq!(
             classify_reader_send_failure(false),
             ReaderSendFailure::Anomalous
+        );
+    }
+}
+
+#[cfg(test)]
+mod shell_integration_injection_tests {
+    use super::{Shell, detect_shell, inject_shell_integration_env};
+    use portable_pty::CommandBuilder;
+    use std::path::Path;
+
+    #[test]
+    fn detect_shell_matches_basename() {
+        assert_eq!(detect_shell("/usr/bin/bash"), Some(Shell::Bash));
+        assert_eq!(detect_shell("/bin/bash"), Some(Shell::Bash));
+        assert_eq!(detect_shell("/usr/bin/zsh"), Some(Shell::Zsh));
+        assert_eq!(detect_shell("/usr/bin/fish"), Some(Shell::Fish));
+        assert_eq!(detect_shell("/bin/sh"), None);
+        assert_eq!(detect_shell("/usr/bin/nu"), None);
+    }
+
+    /// Regression test for the blank-window-on-bash bug.
+    ///
+    /// bash needs `--posix` as a spawn-time argument.  The naive
+    /// implementation called `cmd.arg("--posix")` on a default-prog
+    /// builder, which makes `args[0] == "--posix"` — `portable_pty` then
+    /// tries to spawn a program literally named `--posix`, fails with
+    /// "doesn't exist on the filesystem", and the pane never starts (blank
+    /// window).  zsh users were unaffected because their branch adds no
+    /// args.  The fix promotes the builder to `[shell, "--posix"]` so the
+    /// shell stays `args[0]`.
+    #[test]
+    fn bash_injection_keeps_shell_as_argv0_not_posix_flag() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        assert!(cmd.is_default_prog());
+
+        inject_shell_integration_env(
+            &mut cmd,
+            Shell::Bash,
+            Path::new("/tmp/freminal-resources"),
+            "/usr/bin/bash",
+        );
+
+        let argv = cmd.get_argv();
+        assert_eq!(
+            argv.first().map(|a| a.to_str()),
+            Some(Some("/usr/bin/bash")),
+            "args[0] must be the shell executable, never the --posix flag"
+        );
+        assert_eq!(
+            argv.get(1).map(|a| a.to_str()),
+            Some(Some("--posix")),
+            "--posix must be the second argv element"
+        );
+        // The ENV var that makes the integration script auto-load must be set.
+        assert!(
+            cmd.get_env("ENV").is_some(),
+            "bash integration must set $ENV to the init script"
+        );
+    }
+
+    /// zsh injection must not add any args (so the builder remains a
+    /// default-prog builder and spawns the login shell normally).
+    #[test]
+    fn zsh_injection_adds_no_args_and_sets_zdotdir() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        inject_shell_integration_env(
+            &mut cmd,
+            Shell::Zsh,
+            Path::new("/tmp/freminal-resources"),
+            "/usr/bin/zsh",
+        );
+        assert!(
+            cmd.is_default_prog(),
+            "zsh injection must leave the builder as a default-prog builder"
+        );
+        assert!(
+            cmd.get_env("ZDOTDIR").is_some(),
+            "zsh integration must set $ZDOTDIR"
+        );
+    }
+
+    /// fish injection must not add any args either.
+    #[test]
+    fn fish_injection_adds_no_args_and_sets_xdg_data_dirs() {
+        let mut cmd = CommandBuilder::new_default_prog();
+        inject_shell_integration_env(
+            &mut cmd,
+            Shell::Fish,
+            Path::new("/tmp/freminal-resources"),
+            "/usr/bin/fish",
+        );
+        assert!(
+            cmd.is_default_prog(),
+            "fish injection must leave the builder as a default-prog builder"
+        );
+        assert!(
+            cmd.get_env("XDG_DATA_DIRS").is_some(),
+            "fish integration must set $XDG_DATA_DIRS"
         );
     }
 }
