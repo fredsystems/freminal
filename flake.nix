@@ -97,7 +97,7 @@
             };
           };
 
-          version = "0.9.0-beta.6";
+          version = "0.9.0";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -161,9 +161,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.9.0-beta.6</string>
+                    <string>0.9.0</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.9.0-beta.6</string>
+                    <string>0.9.0</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
