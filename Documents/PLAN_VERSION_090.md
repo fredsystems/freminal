@@ -5010,7 +5010,7 @@ attributions doc; modal input behavior unaffected.
 
 ---
 
-## Task 109 — Active-Pane Highlight Correctness (Release Gate)
+## Task 109 — Active-Pane Highlight Correctness (Release Gate) ✅ Complete (2026-06-14)
 
 ### 109 Summary
 
@@ -5037,7 +5037,7 @@ Source: `Documents/PLANNING.MD` #54–68.
 
 ### 109 Subtasks
 
-#### 109.1 — Highlight-geometry audit
+#### 109.1 — Highlight-geometry audit ✅
 
 **Scope:** Read-only audit of the current pane-divider highlight rendering:
 where the half-fill logic lives, how divider segments map to the focused pane,
@@ -5046,7 +5046,21 @@ and whether the color is themed.
 **Verification:** Report posted (current behavior + theming status); no code
 changes.
 
-#### 109.2 — Surround-the-active-pane highlight
+**Findings:**
+
+- The highlight was computed per _split node_ in
+  `PaneNode::split_borders` (`freminal/src/gui/panes/mod.rs`), emitting one
+  `SplitBorder` per split with `active_in_first: Option<bool>` (active pane
+  in first / second / neither subtree).
+- The renderer (`freminal/src/gui/app_impl.rs`, "tmux-style half-highlighted
+  borders") split each divider rect at its midpoint and coloured the half on
+  the active subtree's side. This is the misleading half-fill heuristic: e.g.
+  focusing Pane 1 in the 3-pane example highlighted only the _left half_ of
+  the horizontal divider, not the full segment bordering Pane 1.
+- **Theming status: hardcoded.** Active = `Color32::from_rgb(100, 160, 255)`,
+  inactive = `Color32::from_gray(80)`, broadcast = a yellow pair. Not themed.
+
+#### 109.2 — Surround-the-active-pane highlight ✅
 
 **Scope:** Replace the half-divider scheme with surround semantics per the
 109 Decisions; exclude outer window edges. Theme the color if the audit found
@@ -5056,6 +5070,48 @@ it hardcoded.
 highlights exactly the dividers bordering the active pane, full segments, no
 outer edges; color matches the active theme. Regression coverage on the
 divider-to-pane mapping where unit-testable.
+
+**Completion notes (2026-06-14):**
+
+- **Final rule: surround for 3+ panes; half-fill the single divider for
+  exactly-two-pane tabs.**
+  - **3+ panes:** every edge of the active pane that is an interior divider is
+    highlighted full-length; the rest of each divider is inactive. Each pane's
+    own edges light up, so adjacent panes stay distinguishable. 3 stacked
+    full-width panes: top active → only its bottom edge; middle active → its
+    top AND bottom edges; bottom active → only its top edge. 3-pane example
+    (Pane 1 full-width on top, Panes 2/3 side-by-side below): Pane 1 → full
+    horizontal divider; Pane 2 → left portion of the horizontal divider + full
+    vertical divider; Pane 3 → right portion + full vertical divider.
+  - **Exactly 2 panes:** the two panes share one full-span divider, so
+    surrounding either lights the same line and the focused pane would be
+    indistinguishable. That single divider is **half-filled** on the active
+    pane's side (the classic tmux behaviour) — top/bottom halves for a
+    side-by-side split (vertical line), left/right halves for a stacked split
+    (horizontal line), selected by `SplitBorder::active_in_first`. The
+    exactly-two-pane test is `pane_layout.len() == 2` in the renderer.
+  - Outer window edges are never dividers, so they are never highlighted (the
+    "exclude outer edges" requirement holds by construction).
+  - (Interim attempts: pure surround everywhere left the two-side-by-side case
+    ambiguous; a per-divider "simple two-pane" classifier wrongly split the
+    3-pane P2/P3 vertical bar. The agreed trigger is whole-tab pane count == 2.)
+- **Theming:** the active-pane highlight uses the active theme's bright-blue
+  (`ThemePalette.ansi[12]`) — the themed equivalent of the original hardcoded
+  `(100, 160, 255)`, kept distinct from the command-block status-gutter colors
+  (green/red/yellow). Inactive stays gray. Broadcast mode keeps its yellow
+  pair.
+- **New API** in `freminal/src/gui/panes/mod.rs`:
+  - `active_highlight_segment(border, active_rect, epsilon) -> Option<Rect>` —
+    pure function returning the sub-segment of the divider along the active
+    pane's edge (or `None`).
+- **Renderer:** `app_impl.rs` per-divider loop draws each divider inactive,
+  then redraws the active-pane edge segment in the active color.
+- **Tests:** 7 unit tests in `panes::tests` covering the 3-pane example
+  (Pane 1 full / Pane 2 left-segment+full-vertical / Pane 3 right-segment+
+  full-vertical / None), and the 3-stacked worked example (top → bottom edge
+  only; middle → both edges; bottom → top edge only).
+- **Verification:** `cargo test --all` green; `cargo clippy --all-targets
+--all-features -- -D warnings` clean; `cargo machete` clean.
 
 ---
 

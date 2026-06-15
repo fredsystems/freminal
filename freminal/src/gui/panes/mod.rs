@@ -476,6 +476,84 @@ pub struct SplitBorder {
     pub active_in_first: Option<bool>,
 }
 
+/// The sub-segment of a split divider that should be highlighted to
+/// _surround_ the active pane (Task 109).
+///
+/// Returns the portion of `border.rect` that lies along an edge of
+/// `active_rect`, drawn full-length in the active color, or `None` when the
+/// divider does not border the active pane.
+///
+/// The semantics are "surround the active pane": every edge of the active
+/// pane that is an interior divider is highlighted, full segment. A stacked
+/// pane's bottom edge, a middle pane's top AND bottom edges, etc. each light
+/// up independently, which is what makes adjacent panes distinguishable. A
+/// divider shared between a full-width pane and a subdivided region below
+/// highlights the full divider when the full-width pane is active, but only
+/// the overlapping sub-segment when one of the smaller panes is active.
+///
+/// This is used for tabs with 3+ panes. The exactly-two-pane case is handled
+/// separately by the renderer (see `app_impl.rs`): two panes share a single
+/// full-span divider, so surrounding either lights the same line — the
+/// renderer half-fills that one divider on the active pane's side instead.
+///
+/// Because dividers are emitted only for interior split nodes, the outer
+/// edges of the window are never dividers and so are never highlighted —
+/// satisfying the "exclude the outer window edges" requirement implicitly.
+///
+/// `epsilon` absorbs sub-pixel rounding between the split-line coordinate
+/// and the active pane's edge coordinate (both derive from the same
+/// `split_rect` math, but float rounding can differ by a fraction).
+#[must_use]
+pub fn active_highlight_segment(
+    border: &SplitBorder,
+    active_rect: Rect,
+    epsilon: f32,
+) -> Option<Rect> {
+    let r = border.rect;
+    match border.direction {
+        // Vertical dividing line (Horizontal split): the divider runs along
+        // the y axis. It borders the active pane only when the divider's x
+        // sits on the pane's left or right edge.
+        SplitDirection::Horizontal => {
+            let divider_x = r.center().x;
+            let borders_pane = (divider_x - active_rect.min.x).abs() <= epsilon
+                || (divider_x - active_rect.max.x).abs() <= epsilon;
+            if !borders_pane {
+                return None;
+            }
+            let top = r.min.y.max(active_rect.min.y);
+            let bottom = r.max.y.min(active_rect.max.y);
+            if bottom - top <= epsilon {
+                return None;
+            }
+            Some(Rect::from_min_max(
+                egui::pos2(r.min.x, top),
+                egui::pos2(r.max.x, bottom),
+            ))
+        }
+        // Horizontal dividing line (Vertical split): the divider runs along
+        // the x axis. It borders the active pane only when the divider's y
+        // sits on the pane's top or bottom edge.
+        SplitDirection::Vertical => {
+            let divider_y = r.center().y;
+            let borders_pane = (divider_y - active_rect.min.y).abs() <= epsilon
+                || (divider_y - active_rect.max.y).abs() <= epsilon;
+            if !borders_pane {
+                return None;
+            }
+            let left = r.min.x.max(active_rect.min.x);
+            let right = r.max.x.min(active_rect.max.x);
+            if right - left <= epsilon {
+                return None;
+            }
+            Some(Rect::from_min_max(
+                egui::pos2(left, r.min.y),
+                egui::pos2(right, r.max.y),
+            ))
+        }
+    }
+}
+
 // ── PaneNode (internal) ─────────────────────────────────────────────
 
 /// Minimum fraction for a split ratio, preventing invisible panes.
@@ -2463,5 +2541,169 @@ mod tests {
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
         assert_eq!(v_border.active_in_first, Some(false));
+    }
+
+    // ── active_highlight_segment (Task 109) ──────────────────────────
+    //
+    // The 3-pane example from the plan:
+    //   |----------------|
+    //   | Pane 1         |   (top, full width)
+    //   |----------------|   <- horizontal divider H at y=300
+    //   | Pane 2 | Pane 3|   (bottom, split by vertical divider V at x=400)
+    //   |----------------|
+    //
+    // Window 800x600, top/bottom split at y=300, bottom split at x=400.
+    //   Pane 1 rect: (0,0)-(800,300)
+    //   Pane 2 rect: (0,300)-(400,600)
+    //   Pane 3 rect: (400,300)-(800,600)
+    //   H divider rect: (0,299.5)-(800,300.5)  direction Vertical
+    //   V divider rect: (399.5,300)-(400.5,600) direction Horizontal
+
+    fn h_divider() -> SplitBorder {
+        SplitBorder {
+            direction: SplitDirection::Vertical,
+            first_child_pane: PaneId(1),
+            rect: Rect::from_min_max(egui::pos2(0.0, 299.5), egui::pos2(800.0, 300.5)),
+            parent_extent: 600.0,
+            active_in_first: None,
+        }
+    }
+
+    fn v_divider() -> SplitBorder {
+        SplitBorder {
+            direction: SplitDirection::Horizontal,
+            first_child_pane: PaneId(2),
+            rect: Rect::from_min_max(egui::pos2(399.5, 300.0), egui::pos2(400.5, 600.0)),
+            parent_extent: 800.0,
+            active_in_first: None,
+        }
+    }
+
+    const PANE1: fn() -> Rect =
+        || Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 300.0));
+    const PANE2: fn() -> Rect =
+        || Rect::from_min_max(egui::pos2(0.0, 300.0), egui::pos2(400.0, 600.0));
+    const PANE3: fn() -> Rect =
+        || Rect::from_min_max(egui::pos2(400.0, 300.0), egui::pos2(800.0, 600.0));
+
+    #[test]
+    fn highlight_pane1_full_horizontal_divider() {
+        // Focusing Pane 1: full horizontal divider (its bottom edge, full
+        // width). The vertical divider does not border P1.
+        let seg = active_highlight_segment(&h_divider(), PANE1(), 1.0).unwrap();
+        assert!((seg.min.x - 0.0).abs() < 0.01);
+        assert!((seg.max.x - 800.0).abs() < 0.01, "full width expected");
+
+        assert!(
+            active_highlight_segment(&v_divider(), PANE1(), 1.0).is_none(),
+            "V divider must not be highlighted for Pane 1"
+        );
+    }
+
+    #[test]
+    fn highlight_pane2_left_segment_and_full_vertical() {
+        // Focusing Pane 2 (bottom-left): the horizontal divider only borders
+        // its top-left, so the highlighted segment is the left portion; the
+        // vertical divider is its full right edge.
+        let h = active_highlight_segment(&h_divider(), PANE2(), 1.0).unwrap();
+        assert!((h.min.x - 0.0).abs() < 0.01);
+        assert!((h.max.x - 400.0).abs() < 0.01, "left segment expected");
+
+        let v = active_highlight_segment(&v_divider(), PANE2(), 1.0).unwrap();
+        assert!((v.min.y - 300.0).abs() < 0.01);
+        assert!((v.max.y - 600.0).abs() < 0.01, "full height expected");
+    }
+
+    #[test]
+    fn highlight_pane3_right_segment_and_full_vertical() {
+        // Focusing Pane 3 (bottom-right): right portion of the horizontal
+        // divider + the full vertical divider (its left edge).
+        let h = active_highlight_segment(&h_divider(), PANE3(), 1.0).unwrap();
+        assert!((h.min.x - 400.0).abs() < 0.01, "right segment expected");
+        assert!((h.max.x - 800.0).abs() < 0.01);
+
+        let v = active_highlight_segment(&v_divider(), PANE3(), 1.0).unwrap();
+        assert!((v.min.y - 300.0).abs() < 0.01);
+        assert!((v.max.y - 600.0).abs() < 0.01, "full height expected");
+    }
+
+    #[test]
+    fn highlight_returns_none_when_divider_does_not_touch_pane() {
+        let detached = Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(100.0, 100.0));
+        assert!(active_highlight_segment(&h_divider(), detached, 1.0).is_none());
+        assert!(active_highlight_segment(&v_divider(), detached, 1.0).is_none());
+    }
+
+    // ── Three stacked full-width panes (the user's worked example) ───
+    //
+    // Window 800x600, two horizontal dividers at y=200 and y=400:
+    //   Top:    (0,0)-(800,200)
+    //   Middle: (0,200)-(800,400)
+    //   Bottom: (0,400)-(800,600)
+    //   Upper divider: (0,199.5)-(800,200.5), direction Vertical
+    //   Lower divider: (0,399.5)-(800,400.5), direction Vertical
+    //
+    // Expectation: top active -> only its bottom edge (upper divider);
+    // middle active -> both edges (upper AND lower divider); bottom active ->
+    // only its top edge (lower divider).
+
+    fn three_stacked() -> (SplitBorder, SplitBorder, Rect, Rect, Rect) {
+        let upper = SplitBorder {
+            direction: SplitDirection::Vertical,
+            first_child_pane: PaneId(0),
+            rect: Rect::from_min_max(egui::pos2(0.0, 199.5), egui::pos2(800.0, 200.5)),
+            parent_extent: 600.0,
+            active_in_first: None,
+        };
+        let lower = SplitBorder {
+            direction: SplitDirection::Vertical,
+            first_child_pane: PaneId(1),
+            rect: Rect::from_min_max(egui::pos2(0.0, 399.5), egui::pos2(800.0, 400.5)),
+            parent_extent: 600.0,
+            active_in_first: None,
+        };
+        let top = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 200.0));
+        let middle = Rect::from_min_max(egui::pos2(0.0, 200.0), egui::pos2(800.0, 400.0));
+        let bottom = Rect::from_min_max(egui::pos2(0.0, 400.0), egui::pos2(800.0, 600.0));
+        (upper, lower, top, middle, bottom)
+    }
+
+    #[test]
+    fn three_stacked_top_active_lights_only_bottom_edge() {
+        let (upper, lower, top, _m, _b) = three_stacked();
+        assert!(
+            active_highlight_segment(&upper, top, 1.0).is_some(),
+            "top pane's bottom edge (upper divider) must light"
+        );
+        assert!(
+            active_highlight_segment(&lower, top, 1.0).is_none(),
+            "top pane does not border the lower divider"
+        );
+    }
+
+    #[test]
+    fn three_stacked_middle_active_lights_both_edges() {
+        let (upper, lower, _t, middle, _b) = three_stacked();
+        assert!(
+            active_highlight_segment(&upper, middle, 1.0).is_some(),
+            "middle pane's top edge (upper divider) must light"
+        );
+        assert!(
+            active_highlight_segment(&lower, middle, 1.0).is_some(),
+            "middle pane's bottom edge (lower divider) must light"
+        );
+    }
+
+    #[test]
+    fn three_stacked_bottom_active_lights_only_top_edge() {
+        let (upper, lower, _t, _m, bottom) = three_stacked();
+        assert!(
+            active_highlight_segment(&upper, bottom, 1.0).is_none(),
+            "bottom pane does not border the upper divider"
+        );
+        assert!(
+            active_highlight_segment(&lower, bottom, 1.0).is_some(),
+            "bottom pane's top edge (lower divider) must light"
+        );
     }
 }
