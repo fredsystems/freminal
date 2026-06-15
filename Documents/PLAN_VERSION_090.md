@@ -31,7 +31,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 98  | Block Close on Running Commands          | Small–Medium | Complete | Task 72         | `task-74-75-98/v090-finish`        |
 | 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                                |
 | 107 | Build Version Embedding                  | Small        | Complete | None            | `task-107/build-version-embedding` |
-| 108 | About Modal & Attribution                | Small        | Stub     | Task 107        | TBD                                |
+| 108 | About Modal & Attribution                | Small        | Complete | Task 107        | `task-108/about-modal-attribution` |
 | 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                                |
 | 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                                |
 
@@ -4870,7 +4870,7 @@ self.dirtyShortRev or "nix"}"`. `self.shortRev` is defined for a clean flake
 
 ---
 
-## Task 108 — About Modal & Attribution
+## Task 108 — About Modal & Attribution ✅ Complete (2026-06-11)
 
 ### 108 Summary
 
@@ -4894,7 +4894,7 @@ Source: `Documents/PLANNING.MD` #50–52.
 
 ### 108 Subtasks
 
-#### 108.1 — Attribution audit
+#### 108.1 — Attribution audit ✅ (2026-06-11)
 
 **Scope:** Read-only audit of vendored code and bundled assets requiring
 attribution (portable-pty, bundled fonts, any other MIT/BSD/OFL dependency or
@@ -4902,7 +4902,61 @@ asset). Produce the list in this plan document before writing the doc.
 
 **Verification:** Audit list posted; no code changes.
 
-#### 108.2 — Attributions document + README link
+**Audit findings.** Three classes of attributable material ship inside the
+freminal binary or repo. Whole-crate-tree permissive dependencies (the MIT/
+BSD/ISC/etc. graph resolved through Cargo) are governed by `deny.toml`'s
+license allowlist and are out of scope for a hand-maintained NOTICE — the
+attribution doc covers the **deliberately vendored / bundled** set below.
+
+**(a) Vendored source code:**
+
+- **`portable-pty`** — upstream WezTerm (`wezterm/wezterm`, `pty/`), version
+  0.9.1, **MIT**, © 2018 Wez Furlong. Vendored in-tree at `portable-pty/`;
+  local changes logged in `portable-pty/vendored.md`; `LICENSE` present.
+
+**(b) Bundled font assets** (embedded via `include_bytes!`, no license file
+currently shipped alongside — **gap: 108.2 must add the license texts**):
+
+- **Hack** — `res/Hack-{Regular,Bold,Italic,BoldItalic}.ttf`, upstream
+  `source-foundry/Hack`, **MIT-style** (Hack Open Font License: MIT for the
+  font software, with a bitmap-rendering exception).
+- **MesloLGS Nerd Font Mono** —
+  `res/MesloLGSNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf`, upstream
+  `ryanoasis/nerd-fonts` (Meslo patched). The bundled patched font files are
+  **OFL-1.1** (as distributed by Nerd Fonts); the underlying Meslo LG typeface
+  is Apache-2.0; the Nerd Fonts patcher source (not bundled) is MIT.
+  Corrected from the initial audit guess of "Apache-2.0 + MIT" after reading
+  the upstream `nerd-fonts/LICENSE` — patched font files are OFL-1.1, which is
+  why `deny.toml` already allows OFL-1.1.
+
+**(c) Bundled image assets** (all first-party to the freminal project, MIT):
+
+- Application/window icon — `assets/icon.png`.
+- Logo — `assets/logo.png`.
+- macOS bundle icon — `assets/macos/freminal.icns`.
+
+**(d) Color theme palettes** — already attributed inline in
+`freminal-common/src/themes.rs` with `Source:` / `License:` doc comments
+(Catppuccin, Dracula, Nord, Solarized, Gruvbox, Tokyo Night, Kanagawa,
+Rosé Pine, Everforest, Ayu, One Dark/Light, Material, Monokai Pro, WezTerm,
+Ghostty, xterm). Most are MIT; a few are "color values widely published for
+terminal use". 108.2 should consolidate these into the attributions doc by
+reference rather than re-listing every palette.
+
+**Decisions for 108.2 (from this audit):**
+
+- The attributions doc lists (a), (b), (c) explicitly with license + upstream
+  link; (d) is covered by a single paragraph pointing at the inline
+  `themes.rs` attributions (single source of truth — no duplication).
+- **The font license texts are not currently bundled.** 108.2 must add the
+  upstream `LICENSE.md` (Hack) and `LICENSE` (Nerd Fonts / Meslo) under `res/`
+  (e.g. `res/fonts/`) so the distributed binary's source tree carries them, and
+  reference them from `ATTRIBUTIONS.md`.
+- Crate-tree transitive deps are NOT enumerated by hand; the doc states they
+  are permissive-licensed and governed by `deny.toml`, with a note that a full
+  SBOM can be produced via `cargo deny`/`cargo license`.
+
+#### 108.2 — Attributions document + README link ✅ (2026-06-11)
 
 **Scope:** Author `ATTRIBUTIONS.md` from the 108.1 audit; link it from
 `README.md`. Follows `markdown-lint-discipline`.
@@ -4910,13 +4964,49 @@ asset). Produce the list in this plan document before writing the doc.
 **Verification:** Doc lists every attributed component with license + link;
 README links to it; markdownlint passes.
 
-#### 108.3 — About-modal attribution + build version
+**Completion notes:**
+
+- Authored `ATTRIBUTIONS.md` at the repo root covering: portable-pty (MIT,
+  vendored), the two bundled fonts (with bundled license texts), the
+  first-party image assets (MIT), the theme palettes (by reference to the
+  inline `themes.rs` attributions, no duplication), and a note that the Rust
+  dependency graph is permissive and governed by `deny.toml`.
+- Bundled the upstream font license texts under `res/fonts/`:
+  `Hack-LICENSE.md` (MIT + Bitstream Vera, fetched verbatim from
+  `source-foundry/Hack`) and `MesloLGS-NerdFont-LICENSE.md` (SIL OFL 1.1,
+  fetched verbatim from `ryanoasis/nerd-fonts`, with an Apache-2.0/MIT
+  provenance note). This closes the "no font license shipped" gap from 108.1.
+- README "License" section now links to `ATTRIBUTIONS.md`.
+- The 108.1 Meslo license note was corrected (OFL-1.1 for the bundled patched
+  files, not the originally-guessed "Apache-2.0 + MIT") after reading the
+  upstream `nerd-fonts/LICENSE`.
+- markdownlint clean on all new/changed markdown (repo config). No code
+  changes; `cargo` verification is unaffected (docs/assets only).
+
+#### 108.3 — About-modal attribution + build version ✅ (2026-06-11)
 
 **Scope:** Surface the embedded build version (Task 107) in the About modal and
 add a link/reference to the attributions doc.
 
 **Verification:** About modal shows a real build identifier and links to the
 attributions doc; modal input behavior unaffected.
+
+**Completion notes:**
+
+- The build identifier was already surfaced in the About modal by Task 107:
+  `show_about_window` (`freminal/src/gui/menu.rs`) shows `Version` (cargo
+  version) and `Build` (`freminal_terminal_emulator::GIT_DESCRIBE`), which now
+  resolves to a real value on all three build paths after Task 107. No change
+  needed for the version half of 108.3.
+- Added a `ui.hyperlink_to("Third-party attributions", …)` line pointing at
+  `ATTRIBUTIONS.md` on the project GitHub. A hyperlink opens the system browser
+  and needs no keyboard focus, so `freminal-modal-input-suppression` does not
+  apply beyond what already exists — the About window is already registered in
+  `ui_overlay_open` (`app_impl.rs:1224`) and adds no `TextEdit`/typing widget.
+- `cargo clippy -p freminal --all-targets --all-features -- -D warnings` clean;
+  `cargo test -p freminal` green. The live-egui focus path has no automated
+  test (per the skill); the modal behavior is unchanged because no focusable
+  text widget was added.
 
 ---
 

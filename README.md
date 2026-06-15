@@ -209,6 +209,10 @@ Pre-commit hooks run these automatically. `--no-verify` is forbidden.
 
 Licensed under the [MIT License](LICENSE).
 
+Freminal vendors and bundles third-party code, fonts, and assets whose
+licenses require attribution. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for the
+full list.
+
 ---
 
 © 2024–2026 Fred Clausen — MIT License.
