@@ -20,8 +20,38 @@ impl PerWindowState {
             self.renaming_tab = None;
             self.rename_buffer.clear();
         }
-        if let Err(e) = self.tabs.close_tab(index) {
-            trace!("Cannot close tab: {e}");
+        // Only the active (visible) tab closing actually transfers focus to a
+        // newly-visible pane. Closing a background tab leaves the visible pane
+        // unchanged, so it must NOT receive a spurious focus event.
+        let closing_active_tab = index == self.tabs.active_index();
+
+        match self.tabs.close_tab(index) {
+            Ok(_removed) => {
+                // The removed tab's panes are dropped here, closing their PTY
+                // channels naturally. When the active tab is closed, the tab
+                // that slides into the active slot becomes visible, so its
+                // active pane must receive focus — mirroring the close-pane and
+                // PTY-death paths. Without this, a pane whose app uses focus
+                // reporting (?1004) is left believing it is unfocused.
+                if closing_active_tab {
+                    Self::notify_active_pane_focused(self.tabs.active_tab_mut());
+                }
+            }
+            Err(e) => trace!("Cannot close tab: {e}"),
+        }
+    }
+
+    /// Send `FocusChange(true)` to the active pane of `tab`.
+    ///
+    /// Used by the tab-close path so the pane that becomes visible learns it
+    /// is focused. A send failure is logged but non-fatal (the pane may be
+    /// mid-teardown).
+    fn notify_active_pane_focused(tab: &mut super::tabs::Tab) {
+        if let Some(pane) = tab.active_pane_mut() {
+            let pane_id = pane.id;
+            if let Err(e) = pane.input_tx.send(InputEvent::FocusChange(true)) {
+                error!("Failed to send FocusChange(true) to pane {pane_id} on tab close: {e}");
+            }
         }
     }
 
@@ -785,7 +815,16 @@ impl super::FreminalGui {
         if analysis.is_safe() {
             Self::send_paste_to_active_pane(win, text);
         } else {
-            win.paste_dialog.open(text, analysis);
+            // Capture the destination pane *now*, before the confirm dialog
+            // opens. With focus-follows-mouse enabled the user moving the
+            // cursor onto the dialog's buttons changes the active pane, so we
+            // must remember where the paste was headed (Task 106 bug).
+            let tab = win.tabs.active_tab();
+            let target = super::paste_guard::PasteTarget {
+                tab_id: tab.id,
+                pane_id: tab.active_pane,
+            };
+            win.paste_dialog.open(text, analysis, target);
         }
     }
 
@@ -795,12 +834,42 @@ impl super::FreminalGui {
     /// Used both for the `Safe` fast path and when the user confirms a flagged
     /// paste via the dialog. A send failure (dead PTY) is logged, not fatal.
     pub(super) fn send_paste_to_active_pane(win: &mut PerWindowState, payload: String) {
-        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
-
         let Some(pane) = win.tabs.active_tab_mut().active_pane_mut() else {
             warn!("Paste: active tab has no active pane");
             return;
         };
+        Self::send_paste_to_pane_ref(pane, payload);
+    }
+
+    /// Send `payload` to the specific pane identified by `target`, regardless
+    /// of which pane is currently active.
+    ///
+    /// Used to resolve a confirmed flagged paste (Task 77 dialog): the target
+    /// is captured when the dialog opens so that focus moving to the dialog
+    /// buttons (e.g. under focus-follows-mouse) cannot redirect the paste to
+    /// the wrong pane (Task 106 bug). If the target pane no longer exists (it
+    /// was closed while the dialog was open) the paste is dropped with a log.
+    pub(super) fn send_paste_to_target(
+        win: &mut PerWindowState,
+        target: super::paste_guard::PasteTarget,
+        payload: String,
+    ) {
+        let Some(tab) = win.tabs.iter_mut().find(|t| t.id == target.tab_id) else {
+            warn!("Paste: target tab no longer exists; dropping paste");
+            return;
+        };
+        let Some(pane) = tab.pane_tree.find_mut(target.pane_id) else {
+            warn!("Paste: target pane no longer exists; dropping paste");
+            return;
+        };
+        Self::send_paste_to_pane_ref(pane, payload);
+    }
+
+    /// Wrap `payload` for bracketed paste (when `pane` has it enabled) and
+    /// send it to `pane`'s PTY. Shared by the active-pane and targeted paths.
+    fn send_paste_to_pane_ref(pane: &super::panes::Pane, payload: String) {
+        use freminal_common::buffer_states::modes::rl_bracket::RlBracket;
+
         let snap = pane.arc_swap.load();
         let wrapped = if snap.bracketed_paste == RlBracket::Enabled {
             format!("\x1b[200~{payload}\x1b[201~")
@@ -810,5 +879,82 @@ impl super::FreminalGui {
         if let Err(e) = pane.input_tx.send(InputEvent::Key(wrapped.into_bytes())) {
             error!("Paste: failed to send paste to PTY: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::gui::panes::{Pane, PaneId};
+    use crate::gui::tabs::{Tab, TabId};
+    use crate::gui::view_state::ViewState;
+    use arc_swap::ArcSwap;
+    use crossbeam_channel::Receiver;
+    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    /// Build a `Tab` whose active pane's `input_rx` is returned to the caller
+    /// so emitted `InputEvent`s can be observed.
+    fn tab_with_input_rx(id: TabId, pane_id: PaneId) -> (Tab, Receiver<InputEvent>) {
+        let arc_swap = Arc::new(ArcSwap::from_pointee(TerminalSnapshot::empty()));
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
+        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
+        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) =
+            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
+
+        let pane = Pane {
+            id: pane_id,
+            arc_swap,
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
+            command_texts: std::collections::HashMap::new(),
+            title: format!("pane-{pane_id}"),
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: ViewState::new(),
+            echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
+                crate::gui::renderer::WindowPostRenderer::new(),
+            ))),
+            render_cache: crate::gui::terminal::PaneRenderCache::new(),
+        };
+
+        (Tab::new(id, pane), input_rx)
+    }
+
+    #[test]
+    fn notify_active_pane_focused_sends_focus_gained() {
+        // Regression (106.4): closing the active tab must hand focus to the
+        // pane that becomes visible, mirroring the close-pane / PTY-death
+        // paths. Verify the focus-gained event actually reaches the pane.
+        let (mut tab, rx) = tab_with_input_rx(TabId::first(), PaneId::first());
+
+        PerWindowState::notify_active_pane_focused(&mut tab);
+
+        match rx.try_recv() {
+            Ok(InputEvent::FocusChange(true)) => {}
+            other => panic!("expected FocusChange(true), got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one focus event should be sent"
+        );
     }
 }

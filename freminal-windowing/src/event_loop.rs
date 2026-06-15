@@ -63,6 +63,26 @@ struct WindowState {
     repaint_at: Option<Instant>,
 }
 
+impl WindowState {
+    /// Release the egui-glow painter's GPU resources before this window's
+    /// state is dropped.
+    ///
+    /// `egui_glow::Painter` owns OpenGL objects (program, textures, VBO/EBO)
+    /// that must be freed with `destroy()` while the owning GL context is
+    /// current; otherwise the painter's `Drop` impl logs a "you forgot to call
+    /// `destroy()`" resource-leak warning. This runs on every window close
+    /// (including the standalone settings window) and at event-loop exit.
+    fn destroy_egui(&mut self) {
+        if let Err(e) = self.gl.make_current() {
+            // If the context can't be made current we still call destroy()
+            // below — it is a no-op-safe GL teardown — but the GL calls may
+            // not take effect. Log so the cause is visible.
+            tracing::warn!("make_current failed during painter teardown: {e}");
+        }
+        self.egui.destroy_painter();
+    }
+}
+
 /// Main application handler that owns the `App` and all window state.
 struct Handler<A: App> {
     app: A,
@@ -202,8 +222,11 @@ impl<A: App> Handler<A> {
     }
 
     fn close_window(&mut self, winit_id: winit::window::WindowId) {
-        if let Some(state) = self.windows.remove(&winit_id) {
-            // Destroy painter before GL context
+        if let Some(mut state) = self.windows.remove(&winit_id) {
+            // Free the egui-glow painter's GPU resources while this window's
+            // GL context is still current, then drop in dependency order:
+            // egui (painter) -> gl context -> window.
+            state.destroy_egui();
             drop(state.egui);
             drop(state.gl);
             drop(state.window);
@@ -482,10 +505,42 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
 
                 // Process egui viewport commands.
                 let mut should_close = false;
+                let mut paste_requested = false;
                 for cmd in frame_output.commands {
-                    process_viewport_command(&state.window, cmd, &mut should_close);
+                    process_viewport_command(
+                        &state.window,
+                        cmd,
+                        &mut should_close,
+                        &mut paste_requested,
+                    );
                 }
 
+                // Honour `ViewportCommand::RequestPaste` (e.g. the terminal
+                // right-click "Paste" menu entry). egui-winit does not action
+                // this command itself in our custom integration — unlike
+                // eframe, which we replaced — so we read the clipboard and
+                // inject `Event::Paste` here, mirroring the keyboard paste
+                // interceptor. The cross-window `find_map` works around the
+                // Wayland per-window clipboard quirk documented there.
+                if paste_requested {
+                    let text = windows
+                        .values_mut()
+                        .find_map(|state| state.egui.clipboard_text());
+                    if let Some(text) = text {
+                        let text = text.replace("\r\n", "\n");
+                        if !text.is_empty()
+                            && let Some(state) = windows.get_mut(&winit_id)
+                        {
+                            state.egui.inject_paste(text);
+                            state.repaint_at = Some(Instant::now());
+                        }
+                    }
+                }
+
+                let Some(state) = windows.get_mut(&winit_id) else {
+                    self.update_control_flow(event_loop);
+                    return;
+                };
                 state.repaint_at = None;
 
                 // Honour egui's repaint_delay but clamp to a minimum of 16ms
@@ -580,6 +635,54 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
 
         self.update_control_flow(event_loop);
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // The event loop is shutting down irreversibly. Any windows still in
+        // the map (e.g. when `exit()` was called without routing every window
+        // through `close_window`) must have their egui-glow painters torn down
+        // so they don't leak / warn on drop.
+        let ids: Vec<winit::window::WindowId> = self.windows.keys().copied().collect();
+        for winit_id in ids {
+            if let Some(state) = self.windows.get_mut(&winit_id) {
+                state.destroy_egui();
+            }
+        }
+        self.windows.clear();
+        debug!("Event loop exiting; all painters destroyed");
+    }
+}
+
+/// Side-effect flags a viewport command raises that the caller must action
+/// after the per-frame command loop completes (rather than inline, because
+/// each needs `&mut` access to state the command loop has borrowed).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ViewportCommandFlags {
+    /// The window should be closed (via `on_close_requested`).
+    should_close: bool,
+    /// A clipboard paste was requested (e.g. the right-click "Paste" menu).
+    paste_requested: bool,
+}
+
+/// Classify a viewport command into the deferred side-effect flags it raises.
+///
+/// Pure and window-free so it is unit-testable without a live event loop. The
+/// window-affecting commands (title, size, focus, …) return the default
+/// (no flags) and are actioned by [`process_viewport_command`].
+const fn viewport_command_flags(cmd: &egui::ViewportCommand) -> ViewportCommandFlags {
+    match cmd {
+        egui::ViewportCommand::Close => ViewportCommandFlags {
+            should_close: true,
+            paste_requested: false,
+        },
+        egui::ViewportCommand::RequestPaste => ViewportCommandFlags {
+            should_close: false,
+            paste_requested: true,
+        },
+        _ => ViewportCommandFlags {
+            should_close: false,
+            paste_requested: false,
+        },
+    }
 }
 
 /// Process a single egui `ViewportCommand` by mapping it to the corresponding
@@ -588,15 +691,31 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
 /// Commands that require closing the window set `*should_close = true`; the
 /// caller is responsible for actually closing the window after the frame
 /// completes (to avoid mutating the window map during iteration).
-fn process_viewport_command(window: &Window, cmd: egui::ViewportCommand, should_close: &mut bool) {
+///
+/// `ViewportCommand::RequestPaste` sets `*paste_requested = true` instead of
+/// being handled inline: clipboard reads need cross-window fallback on Wayland
+/// (see the keyboard paste interceptor in [`Handler::window_event`]), which
+/// requires `&mut` access to the whole window map. The caller injects the
+/// paste after the command loop completes.
+fn process_viewport_command(
+    window: &Window,
+    cmd: egui::ViewportCommand,
+    should_close: &mut bool,
+    paste_requested: &mut bool,
+) {
+    let flags = viewport_command_flags(&cmd);
+    *should_close |= flags.should_close;
+    *paste_requested |= flags.paste_requested;
+
     match cmd {
-        egui::ViewportCommand::Close => {
-            *should_close = true;
-        }
-        egui::ViewportCommand::CancelClose => {
-            // In our model, close is synchronous via on_close_requested.
-            // CancelClose is a no-op since we don't queue deferred closes.
-        }
+        // No-op inline:
+        // - `Close` / `RequestPaste` are deferred via `viewport_command_flags`
+        //   above and actioned by the caller after the command loop.
+        // - `CancelClose`: close is synchronous via `on_close_requested`, so
+        //   there is no queued deferred close to cancel.
+        egui::ViewportCommand::Close
+        | egui::ViewportCommand::RequestPaste
+        | egui::ViewportCommand::CancelClose => {}
         egui::ViewportCommand::Title(title) => {
             window.set_title(&title);
         }
@@ -680,7 +799,53 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{logical_coord_to_i32, logical_dim_to_u32};
+    use super::{
+        ViewportCommandFlags, logical_coord_to_i32, logical_dim_to_u32, viewport_command_flags,
+    };
+
+    #[test]
+    fn request_paste_command_sets_only_paste_flag() {
+        // Regression (PLANNING #1 / Task 106.1): the terminal right-click
+        // "Paste" menu sends `ViewportCommand::RequestPaste`. Before the fix
+        // this command fell through to the catch-all log-and-ignore arm, so
+        // right-click paste silently did nothing.
+        assert_eq!(
+            viewport_command_flags(&egui::ViewportCommand::RequestPaste),
+            ViewportCommandFlags {
+                should_close: false,
+                paste_requested: true,
+            }
+        );
+    }
+
+    #[test]
+    fn close_command_sets_only_close_flag() {
+        assert_eq!(
+            viewport_command_flags(&egui::ViewportCommand::Close),
+            ViewportCommandFlags {
+                should_close: true,
+                paste_requested: false,
+            }
+        );
+    }
+
+    #[test]
+    fn window_affecting_commands_raise_no_flags() {
+        // Title / focus / etc. are actioned inline against the winit window
+        // and must not set the deferred flags.
+        assert_eq!(
+            viewport_command_flags(&egui::ViewportCommand::Title("x".to_owned())),
+            ViewportCommandFlags::default()
+        );
+        assert_eq!(
+            viewport_command_flags(&egui::ViewportCommand::Focus),
+            ViewportCommandFlags::default()
+        );
+        assert_eq!(
+            viewport_command_flags(&egui::ViewportCommand::CancelClose),
+            ViewportCommandFlags::default()
+        );
+    }
 
     #[test]
     fn logical_dim_to_u32_clamps_non_positive_and_non_finite() {

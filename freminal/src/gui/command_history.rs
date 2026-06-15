@@ -228,28 +228,39 @@ fn append_row_text(row: &[TChar], out: &mut String) {
 //  Entry merging and filtering
 // ---------------------------------------------------------------------------
 
-/// Merge the shell-history seed (oldest first) with the live recent
-/// commands (oldest first) into a single de-duplicated entry list.
+/// Merge the live recent commands with the shell-history seed into a
+/// single de-duplicated, **most-recent-first** entry list.
 ///
-/// **Ordering:** seed entries come first in the order they were loaded,
-/// followed by live entries in insertion order.  This puts the most
-/// recent live commands at the bottom of the list -- closest to where
-/// the user's eye naturally lands when the modal opens with selection
-/// `0`.  Commit 3 polish may invert this; commit 2 keeps the data flow
-/// trivially predictable.
+/// **Ordering (106.5):** the most recently run command appears first.
+/// Live OSC 133 entries are emitted newest-first (this session's
+/// commands), followed by the shell-history seed newest-first.  This
+/// matters for more than aesthetics: the rendered list is capped at
+/// [`MAX_VISIBLE_ENTRIES`], and the seed can hold up to
+/// [`crate::gui::shell_history::HISTORY_SEED_CAP`] entries.  With the
+/// old oldest-first ordering, the cap sliced off the tail where this
+/// session's live commands lived, so a command just typed never
+/// appeared in the unfiltered list (it surfaced only when searched for,
+/// because filtering scans the whole list before the cap is applied).
+/// Newest-first puts recent commands at the top, inside the cap, and
+/// pairs with the palette's default selection of index `0`.
 ///
-/// **De-duplication:** a live entry whose text matches a seed entry is
-/// kept (the live variant carries an exit-code badge that the seed does
-/// not).  Consecutive duplicates within either source are collapsed,
-/// matching the spirit of `HISTCONTROL=ignoredups` -- two identical
-/// invocations back-to-back are noise.
+/// **De-duplication:** dedup is global by command text, first
+/// occurrence wins.  Because live entries are walked before seed
+/// entries, the most-recent (live) variant of a repeated command is the
+/// one kept -- it carries the exit-code badge the seed lacks -- and a
+/// command that was both run this session and present in the history
+/// file appears exactly once, near the top, rather than twice.  This
+/// also subsumes the previous `HISTCONTROL=ignoredups`-style collapse of
+/// back-to-back duplicates.
 ///
 /// `seed` is the optional shell-history seed (`None` = loader thread
-/// has not finished yet, or the shell has no recognised history file).
-/// `recent` is the pane's live `recent_commands` ring buffer.
-/// `texts` is the per-pane text cache keyed by [`CommandBlockId`];
-/// live entries without a cache hit are dropped (their text could not
-/// be extracted from the snapshot at finish time).
+/// has not finished yet, or the shell has no recognised history file);
+/// it is stored oldest-first, so it is iterated in reverse here.
+/// `recent` is the pane's live `recent_commands` ring buffer (stored
+/// oldest-first, also iterated in reverse).  `texts` is the per-pane
+/// text cache keyed by [`CommandBlockId`]; live entries without a cache
+/// hit are dropped (their text could not be extracted from the snapshot
+/// at finish time).
 #[must_use]
 pub fn merge_entries(
     seed: Option<&Vec<String>>,
@@ -257,26 +268,10 @@ pub fn merge_entries(
     texts: &HashMap<CommandBlockId, String>,
 ) -> Vec<PaletteEntry> {
     let mut out: Vec<PaletteEntry> = Vec::new();
-    let mut last_text: Option<String> = None;
+    let mut seen_texts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    if let Some(seed_vec) = seed {
-        for cmd in seed_vec {
-            let trimmed = cmd.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if last_text.as_deref() == Some(trimmed) {
-                continue;
-            }
-            last_text = Some(trimmed.to_owned());
-            out.push(PaletteEntry {
-                text: trimmed.to_owned(),
-                kind: EntryKind::Seed,
-            });
-        }
-    }
-
-    for block in recent {
+    // Live entries first, newest-first (the ring is stored oldest-first).
+    for block in recent.iter().rev() {
         let Some(text) = texts.get(&block.id) else {
             continue;
         };
@@ -284,10 +279,9 @@ pub fn merge_entries(
         if trimmed.is_empty() {
             continue;
         }
-        if last_text.as_deref() == Some(trimmed) {
+        if !seen_texts.insert(trimmed.to_owned()) {
             continue;
         }
-        last_text = Some(trimmed.to_owned());
         out.push(PaletteEntry {
             text: trimmed.to_owned(),
             kind: EntryKind::Live {
@@ -295,6 +289,23 @@ pub fn merge_entries(
                 status: block.status(),
             },
         });
+    }
+
+    // Then the shell-history seed, newest-first (stored oldest-first).
+    if let Some(seed_vec) = seed {
+        for cmd in seed_vec.iter().rev() {
+            let trimmed = cmd.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !seen_texts.insert(trimmed.to_owned()) {
+                continue;
+            }
+            out.push(PaletteEntry {
+                text: trimmed.to_owned(),
+                kind: EntryKind::Seed,
+            });
+        }
     }
 
     out
@@ -711,25 +722,46 @@ mod tests {
     }
 
     #[test]
-    fn merge_entries_seed_only_preserves_order() {
+    fn merge_entries_seed_only_is_newest_first() {
+        // Seed is stored oldest-first; the palette presents it
+        // newest-first (106.5).
         let seed = vec!["ls".to_owned(), "pwd".to_owned(), "echo hi".to_owned()];
         let recent = VecDeque::new();
         let texts = HashMap::new();
         let merged = merge_entries(Some(&seed), &recent, &texts);
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].text, "ls");
+        assert_eq!(merged[0].text, "echo hi");
         assert_eq!(merged[1].text, "pwd");
-        assert_eq!(merged[2].text, "echo hi");
+        assert_eq!(merged[2].text, "ls");
         assert!(matches!(merged[0].kind, EntryKind::Seed));
     }
 
     #[test]
-    fn merge_entries_collapses_consecutive_duplicates_in_seed() {
+    fn merge_entries_collapses_duplicates_in_seed() {
+        // Global text dedup keeps the first (newest) occurrence.
         let seed = vec!["ls".to_owned(), "ls".to_owned(), "pwd".to_owned()];
         let recent = VecDeque::new();
         let texts = HashMap::new();
         let merged = merge_entries(Some(&seed), &recent, &texts);
         assert_eq!(merged.len(), 2);
+        // Newest-first: pwd (newest) then the single surviving ls.
+        assert_eq!(merged[0].text, "pwd");
+        assert_eq!(merged[1].text, "ls");
+    }
+
+    #[test]
+    fn merge_entries_dedups_non_consecutive_duplicates_in_seed() {
+        // Old behaviour only collapsed *consecutive* duplicates; the
+        // 106.5 global dedup also collapses an entry repeated later in
+        // history, keeping the most-recent (first-seen, newest-first)
+        // occurrence.
+        let seed = vec!["ls".to_owned(), "pwd".to_owned(), "ls".to_owned()];
+        let recent = VecDeque::new();
+        let texts = HashMap::new();
+        let merged = merge_entries(Some(&seed), &recent, &texts);
+        assert_eq!(merged.len(), 2);
+        // Walking newest-first: the trailing "ls" is seen first and kept;
+        // "pwd" next; the leading "ls" is a duplicate and dropped.
         assert_eq!(merged[0].text, "ls");
         assert_eq!(merged[1].text, "pwd");
     }
@@ -776,10 +808,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_entries_seed_first_then_live_in_insertion_order() {
+    fn merge_entries_live_newest_first_then_seed_newest_first() {
+        // 106.5: live commands (this session) come first, newest-first;
+        // then the seed, newest-first.
         let seed = vec!["ls".to_owned()];
         let mut recent = VecDeque::new();
         let mut texts = HashMap::new();
+        // Pushed oldest-first into the ring: "pwd" then "make".
         for cmd in ["pwd", "make"] {
             let block = finished_block(0, Some(1), Some(2), Some(0));
             texts.insert(block.id, cmd.to_owned());
@@ -788,9 +823,64 @@ mod tests {
 
         let merged = merge_entries(Some(&seed), &recent, &texts);
         assert_eq!(merged.len(), 3);
-        assert_eq!(merged[0].text, "ls");
+        // Live newest-first: "make" (most recent), then "pwd".
+        assert_eq!(merged[0].text, "make");
+        assert!(matches!(merged[0].kind, EntryKind::Live { .. }));
         assert_eq!(merged[1].text, "pwd");
-        assert_eq!(merged[2].text, "make");
+        assert!(matches!(merged[1].kind, EntryKind::Live { .. }));
+        // Then the seed.
+        assert_eq!(merged[2].text, "ls");
+        assert!(matches!(merged[2].kind, EntryKind::Seed));
+    }
+
+    #[test]
+    fn merge_entries_live_command_also_in_seed_appears_once_as_live() {
+        // A command run this session that is also present in the history
+        // file must appear exactly once, near the top, as the Live
+        // variant (carrying the exit-code badge) -- not twice.
+        let seed = vec!["git status".to_owned(), "ls".to_owned()];
+        let mut recent = VecDeque::new();
+        let block = finished_block(0, Some(1), Some(2), Some(0));
+        let id = block.id;
+        recent.push_back(block);
+        let mut texts = HashMap::new();
+        texts.insert(id, "git status".to_owned());
+
+        let merged = merge_entries(Some(&seed), &recent, &texts);
+        // "git status" (live, newest), then seed "ls". The seed copy of
+        // "git status" is deduplicated away.
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].text, "git status");
+        assert!(matches!(merged[0].kind, EntryKind::Live { .. }));
+        assert_eq!(merged[1].text, "ls");
+        assert!(matches!(merged[1].kind, EntryKind::Seed));
+    }
+
+    #[test]
+    fn merge_entries_recent_command_is_visible_within_cap_regression() {
+        // 106.5 regression guard: a command typed this session must be
+        // visible in the *unfiltered* list even when the seed is larger
+        // than MAX_VISIBLE_ENTRIES. Previously the oldest-first ordering
+        // pushed live entries past the cap so they only surfaced when
+        // explicitly searched for.
+        let seed: Vec<String> = (0..(MAX_VISIBLE_ENTRIES * 3))
+            .map(|i| format!("old-cmd-{i}"))
+            .collect();
+        let mut recent = VecDeque::new();
+        let block = finished_block(0, Some(1), Some(2), Some(0));
+        let id = block.id;
+        recent.push_back(block);
+        let mut texts = HashMap::new();
+        texts.insert(id, "random command".to_owned());
+
+        let merged = merge_entries(Some(&seed), &recent, &texts);
+        // The live command is the very first entry...
+        assert_eq!(merged[0].text, "random command");
+        // ...and an empty-query filter (which applies the cap) still
+        // includes it.
+        let filtered = filter_entries(&merged, "");
+        assert_eq!(filtered.len(), MAX_VISIBLE_ENTRIES);
+        assert_eq!(filtered[0].text, "random command");
     }
 
     #[test]

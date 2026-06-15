@@ -42,7 +42,7 @@ use super::{
             show_search_bar,
         },
     },
-    coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, visible_window_start},
+    coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, running_block_extent},
     input::write_input_to_terminal,
 };
 
@@ -207,9 +207,9 @@ fn gutter_block_id_at_pos(
     // Build the same fold-aware layout the renderer uses this frame.
     let layout = FoldLayout::new(snap, &view_state.folded_blocks);
     let rendered_row = layout.screen_to_rendered(screen_row);
-    // Running blocks extend to the live bottom row (last normally-visible row).
-    let running_extent =
-        super::coords::visible_window_start(snap) + snap.term_height.saturating_sub(1);
+    // Running blocks extend only to the cursor's row (last output line so far),
+    // not the bottom of the pane (106.2b).
+    let running_extent = super::coords::running_block_extent(snap);
 
     match layout.row_map.rendered_to_snapshot(rendered_row) {
         // A live snapshot row → containment hit-test against the blocks.
@@ -2509,8 +2509,9 @@ impl FreminalTerminalWidget {
             && !snap.command_blocks.is_empty()
         {
             let win_start = flat_window_start;
-            // Running blocks extend to the live bottom row.
-            let running_extent = visible_window_start(snap) + snap.term_height.saturating_sub(1);
+            // Running blocks extend only to the cursor's row (the last line of
+            // output produced so far), not the bottom of the pane (106.2b).
+            let running_extent = running_block_extent(snap);
             // Iterate on-screen rows (bottom-anchored); map each back through
             // rendered → snapshot → buffer.
             for screen_row_idx in 0..snap.term_height {
@@ -2583,7 +2584,7 @@ impl FreminalTerminalWidget {
                 Duration::from_secs_f32(command_blocks_config.duration_threshold_secs.max(0.0));
             let win_start = flat_window_start;
             let win_end = win_start + snap.term_height.saturating_add(snap.window_extra_rows);
-            let running_extent = visible_window_start(snap) + snap.term_height.saturating_sub(1);
+            let running_extent = running_block_extent(snap);
             let (fg_r, fg_g, fg_b) = snap.theme.foreground;
             // Muted: ~60% alpha so the label reads without overpowering
             // the underlying cell content.

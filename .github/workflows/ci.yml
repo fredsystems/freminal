@@ -107,9 +107,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
-        # We target the MSRV (currently 1.95.0, matching stable) plus nightly.
-        # When stable advances beyond MSRV, add the explicit MSRV version back to avoid double-compiling.
-        toolchain: ["stable", "nightly"]
+        toolchain: ["stable", "nightly", "1.95.0"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

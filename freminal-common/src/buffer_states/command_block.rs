@@ -156,21 +156,43 @@ impl CommandBlock {
         }
     }
 
-    /// Command execution duration if finished; `None` while still running or
-    /// if `SystemTime` arithmetic fails (clock skew).
+    /// Whether a command actually executed in this block.
+    ///
+    /// True iff `OSC 133 C` (output/execution start) was received, i.e.
+    /// [`Self::executed_at`] is `Some`.  A block where the user pressed
+    /// Ctrl-C at an idle prompt — `OSC 133 A` then `OSC 133 D` with no
+    /// intervening `C` — never executed a command and reports `false`.
+    ///
+    /// This is the signal that distinguishes a real (possibly instant)
+    /// command from an aborted prompt: the duration overlay and the
+    /// command-finished notification are both suppressed when this is
+    /// `false`.
+    #[must_use]
+    pub const fn executed(&self) -> bool {
+        self.executed_at.is_some()
+    }
+
+    /// Command execution duration if a command executed and finished; `None`
+    /// while still running, if no command executed, or if `SystemTime`
+    /// arithmetic fails (clock skew).
     ///
     /// Measured from [`Self::executed_at`] (`OSC 133 C`, command-execution
     /// start) to [`Self::finished_at`] (`OSC 133 D`).  This deliberately
     /// excludes the time the user spent typing the command at the prompt
     /// (`started_at` -> `executed_at`); measuring from `started_at` would
     /// report multi-second durations for instant commands whenever the user
-    /// paused at the prompt.  Falls back to `started_at` only when
-    /// `executed_at` is unknown (no `C` marker was received).
+    /// paused at the prompt.
+    ///
+    /// Returns `None` when no `OSC 133 C` was received ([`Self::executed`] is
+    /// `false`): such a block represents a prompt that was aborted (Ctrl-C)
+    /// before any command ran, so there is no execution interval to report.
+    /// Reporting a duration here would measure prompt-idle time, not command
+    /// time — the bug 106.2 fixes.
     #[must_use]
     pub fn duration(&self) -> Option<Duration> {
         let finished = self.finished_at?;
-        let anchor = self.executed_at.unwrap_or(self.started_at);
-        finished.duration_since(anchor).ok()
+        let executed = self.executed_at?;
+        finished.duration_since(executed).ok()
     }
 
     /// Row range covered by this block: `(start, end)`.  `end` is `None`
@@ -321,6 +343,8 @@ mod tests {
     #[test]
     fn duration_finished_after_start_is_some_positive() {
         let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        // A command executed (C received) right at prompt start, ran 500ms.
+        block.executed_at = Some(block.started_at);
         block.finished_at = Some(block.started_at + Duration::from_millis(500));
         match block.duration() {
             Some(dur) => {
@@ -334,7 +358,8 @@ mod tests {
     #[test]
     fn duration_clock_skew_is_none() {
         let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
-        // finished_at before started_at — clock skew
+        // Command executed, but finished_at is before executed_at — clock skew.
+        block.executed_at = Some(block.started_at);
         block.finished_at = Some(block.started_at - Duration::from_secs(1));
         assert!(
             block.duration().is_none(),
@@ -364,13 +389,48 @@ mod tests {
     }
 
     #[test]
-    fn duration_falls_back_to_started_at_when_executed_at_missing() {
-        // When no `OSC 133 C` was received (executed_at is None), fall back
-        // to started_at so a duration is still reported.
+    fn duration_is_none_when_executed_at_missing() {
+        // Regression for 106.2: when no `OSC 133 C` was received
+        // (executed_at is None) the prompt was aborted (Ctrl-C) before any
+        // command ran.  There is no execution interval, so duration() must
+        // report None rather than measuring prompt-idle time from
+        // started_at.
         let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
         assert!(block.executed_at.is_none());
-        block.finished_at = Some(block.started_at + Duration::from_millis(250));
-        assert_eq!(block.duration(), Some(Duration::from_millis(250)));
+        // User idled 30s at the prompt then pressed Ctrl-C.
+        block.finished_at = Some(block.started_at + Duration::from_secs(30));
+        assert!(
+            block.duration().is_none(),
+            "an unexecuted (Ctrl-C) block must not report a duration"
+        );
+    }
+
+    // ── executed() ──────────────────────────────────────────────────────
+
+    #[test]
+    fn executed_false_until_output_start_received() {
+        // Fresh block: only A received.
+        let block = CommandBlock::new_running(0, None, "f1".to_owned());
+        assert!(!block.executed(), "block with no C marker has not executed");
+    }
+
+    #[test]
+    fn executed_true_once_executed_at_set() {
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        block.executed_at = Some(block.started_at + Duration::from_secs(1));
+        assert!(block.executed(), "block with a C marker has executed");
+    }
+
+    #[test]
+    fn executed_unaffected_by_finish_without_c() {
+        // A -> D with no C (Ctrl-C on idle prompt) stays "not executed".
+        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        block.finished_at = Some(block.started_at + Duration::from_secs(5));
+        block.exit_code = Some(130);
+        assert!(
+            !block.executed(),
+            "finishing without a C marker does not mark a block as executed"
+        );
     }
 
     #[test]

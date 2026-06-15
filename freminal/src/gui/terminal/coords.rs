@@ -43,6 +43,23 @@ pub(super) const fn visible_window_start_for(
         .saturating_sub(scroll_offset)
 }
 
+/// Buffer-absolute row at which a still-running command block's gutter color
+/// should stop (106.2b): the cursor's current row, i.e. the last line of
+/// output the running command has produced so far.
+///
+/// A running block has no `end_row`; the gutter / duration-anchor helpers
+/// substitute this value for the missing end.  Previously this was the bottom
+/// row of the pane (`visible_window_start + term_height - 1`), which painted
+/// the gutter all the way down even when the running command's output only
+/// reached partway down the screen.  Anchoring on the cursor row stops the
+/// coloring at the last output line, as the spec requires.
+///
+/// The cursor row is screen-relative (`0..term_height`); the buffer-absolute
+/// row is `visible_window_start + cursor_pos.y`.
+pub(super) const fn running_block_extent(snap: &TerminalSnapshot) -> usize {
+    visible_window_start(snap) + snap.cursor_pos.y
+}
+
 /// Convert a screen-relative `(row, col)` — where `col` is a **display
 /// column** (a wide character occupies two columns) — to a flat index into
 /// the `visible_chars` slice.
@@ -213,6 +230,40 @@ mod visible_window_start_tests {
         // Edge case: buffer has fewer rows than visible height.
         let snap = snap_with(10, 24, 0);
         assert_eq!(visible_window_start(&snap), 0);
+    }
+
+    // ── running_block_extent (106.2b) ────────────────────────────────────
+
+    #[test]
+    fn running_extent_is_cursor_row_not_pane_bottom() {
+        // 100 total rows, 24 visible at the live bottom (window starts at 76).
+        // A running command whose cursor sits on screen row 5 has output only
+        // up to buffer row 81 — the gutter must stop there, NOT at the pane
+        // bottom (buffer row 99).
+        let mut snap = snap_with(100, 24, 0);
+        snap.cursor_pos.y = 5;
+        assert_eq!(running_block_extent(&snap), 81);
+        // Regression guard: the old (buggy) formula would have produced the
+        // pane bottom row.
+        let pane_bottom = visible_window_start(&snap) + snap.term_height - 1;
+        assert_eq!(pane_bottom, 99);
+        assert_ne!(running_block_extent(&snap), pane_bottom);
+    }
+
+    #[test]
+    fn running_extent_cursor_at_top_of_window() {
+        // Cursor on the first visible row → extent equals the window start.
+        let mut snap = snap_with(100, 24, 0);
+        snap.cursor_pos.y = 0;
+        assert_eq!(running_block_extent(&snap), visible_window_start(&snap));
+    }
+
+    #[test]
+    fn running_extent_accounts_for_scrollback() {
+        // Scrolled back 10 rows: window start is 66, cursor on screen row 3.
+        let mut snap = snap_with(100, 24, 10);
+        snap.cursor_pos.y = 3;
+        assert_eq!(running_block_extent(&snap), 69);
     }
 }
 

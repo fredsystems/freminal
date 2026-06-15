@@ -4686,7 +4686,7 @@ disconnected-channel errors at app close).
 
 ### 106 Subtasks
 
-#### 106.1 — Right-click paste in buffer (PLANNING #1)
+#### 106.1 — Right-click paste in buffer (PLANNING #1) ✅ 2026-06-15
 
 **Scope:** Right-click paste does not work in the terminal buffer. Diagnose
 the input path and restore paste-on-right-click.
@@ -4694,7 +4694,38 @@ the input path and restore paste-on-right-click.
 **Verification:** Right-click pastes clipboard contents into the buffer;
 regression test on the input-handling path.
 
-#### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4)
+**Completion notes (branch `task-106/bug-closure`):**
+
+- **Root cause:** the right-click context-menu "Paste" entry sends
+  `egui::ViewportCommand::RequestPaste`
+  (`freminal/src/gui/terminal/widget.rs:775`). In the custom winit/glutin
+  integration that replaced eframe (Task 66), `process_viewport_command`
+  (`freminal-windowing/src/event_loop.rs`) routed `RequestPaste` into the
+  catch-all `_ => trace!("Unhandled …")` arm, so nothing happened. Keyboard
+  paste worked because it goes through a separate keypress interceptor that
+  reads the clipboard and calls `inject_paste`.
+- **Fix:** `RequestPaste` now sets a deferred `paste_requested` flag (mirroring
+  the existing `should_close` flag). After the per-frame command loop, the
+  `RedrawRequested` handler reads the clipboard via the same cross-window
+  `windows.values_mut().find_map(state.egui.clipboard_text())` fallback the
+  keyboard interceptor uses (Wayland per-window clipboard quirk) and injects
+  `Event::Paste` into the target window. From there the existing
+  `Event::Paste` → `pending_paste` → `guarded_paste_text` path (Task 77)
+  handles bracketed-paste wrapping and the paste guard.
+- **Testability:** flag classification extracted into a pure, window-free
+  `viewport_command_flags(&cmd) -> ViewportCommandFlags` helper so it can be
+  unit-tested without a live event loop. The window-affecting arms still run
+  inline in `process_viewport_command`.
+- 3 regression tests added in `event_loop.rs::tests`:
+  `request_paste_command_sets_only_paste_flag` (the bug guard),
+  `close_command_sets_only_close_flag`, and
+  `window_affecting_commands_raise_no_flags`.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all -- --check`, and `cargo machete` all clean.
+- No escape-sequence, config, or new-dependency changes — purely a windowing
+  command-dispatch fix.
+
+#### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4) ✅ 2026-06-15
 
 **Scope:** Two OSC 133 / gutter (Task 72/73) regressions:
 
@@ -4711,7 +4742,40 @@ regression test on the input-handling path.
 terminates at the prompt / last output line. Regression tests on the gutter
 extent and duration computation.
 
-#### 106.3 — False Ctrl-C notification on unexecuted command (PLANNING #3)
+**Completion notes (branch `task-106/bug-closure`; landed with 106.3):**
+
+- **Duration (106.2a):** `CommandBlock::duration()`
+  (`freminal-common/src/buffer_states/command_block.rs`) previously fell back
+  to `started_at` (OSC 133 A, prompt-draw time) when `executed_at` (OSC 133 C)
+  was `None`. For a Ctrl-C-on-idle-prompt block (A→D, no C) that measured
+  prompt-idle time. It now requires `executed_at` and returns `None` when no
+  `C` marker was received — there is no execution interval to report. Our own
+  bash/zsh/fish integration scripts always emit `C` before a real command, so
+  the only A→D-without-C case is an aborted prompt. Added a
+  `CommandBlock::executed()` predicate (`executed_at.is_some()`) used by both
+  the duration suppression and the notification guard.
+- **Gutter extent (106.2b):** a still-running block has no `end_row`; the
+  gutter / duration-anchor helpers substituted `running_extent`, which was
+  `visible_window_start + term_height - 1` (the pane bottom). That painted the
+  status bar all the way down even when the running command's output reached
+  only partway. New `coords::running_block_extent(snap)` returns
+  `visible_window_start + cursor_pos.y` (the cursor row = last output line so
+  far). All three `running_extent` sites in `terminal/widget.rs` (gutter fill,
+  duration-label anchor, gutter hover hit-test) now use it. A _finished_ Ctrl-C
+  block already stopped correctly because `finish_command_block` sets
+  `end_row = cursor.pos.y`; only running blocks were affected.
+- **Tests:** updated `duration_*` fixtures in `command_block.rs` to set
+  `executed_at` (so they test the C→D interval, not the removed fallback);
+  replaced `duration_falls_back_to_started_at_when_executed_at_missing` with
+  `duration_is_none_when_executed_at_missing`; added three `executed()` tests;
+  added three `running_block_extent` tests in `coords.rs` (cursor mid-screen
+  vs. pane-bottom regression guard, cursor at window top, scrolled-back).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean. No
+  escape-sequence support changed (OSC 133 parsing is identical); this is a
+  renderer-side / notification-side consumption fix, so no coverage-doc update.
+
+#### 106.3 — False Ctrl-C notification on unexecuted command (PLANNING #3) ✅ 2026-06-15
 
 **Scope:** Related to 106.2. A toast / system notification fires when Ctrl-C is
 pressed on a prompt where no command ever executed. No notification should fire
@@ -4720,7 +4784,23 @@ for a command that never ran (no OSC 133 C marker).
 **Verification:** Ctrl-C on an idle prompt produces no notification; a real
 finished command still notifies per Task 76. Regression test.
 
-#### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors)
+**Completion notes (branch `task-106/bug-closure`; landed with 106.2):**
+
+- As 106.2 anticipated, the fix is intertwined with the duration fix and shares
+  the `CommandBlock::executed()` predicate. `command_finished_request`
+  (`freminal/src/gui/notifications.rs`) gained an explicit
+  `if !block.executed() { return None; }` guard placed _before_ the
+  `block.duration()?` threshold check. The duration change alone would suppress
+  the notification (since `duration()` now returns `None` for unexecuted
+  blocks), but the explicit guard is robust against a zero/low
+  `command_finished_threshold_secs` and documents the intent at the call site.
+- Regression test `command_finished_request_unexecuted_ctrl_c_block_is_none`
+  builds an A→D block with `output_start_row = None` / `executed_at = None`,
+  a 30 s idle gap, and a `0.0` threshold, asserting no request is produced.
+  Existing executed-command notification tests are unaffected (their fixtures
+  already set `executed_at`).
+
+#### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors) ✅ 2026-06-15
 
 **Scope:** Shutdown-ordering defects, addressed as one unit:
 
@@ -4734,13 +4814,137 @@ finished command still notifies per Task 76. Regression test.
 disconnected-channel errors in the log; pane/tab close ordering verified.
 Regression coverage where the close path is unit-testable.
 
-#### 106.5 — Command history palette sort order (PLANNING #9)
+**Completion notes (branch `task-106/bug-closure`; three commits):**
 
-**Scope:** The command-history palette lists oldest-first. It must sort
-most-recent-first.
+- **Painter teardown (commit `d19dd06`):** the `egui_glow::Painter` (held on
+  `EguiState` in `freminal-windowing`) owns GPU objects freed only by
+  `destroy()`; the close path merely dropped it, firing the painter's
+  `Drop`-impl leak warning. The warning fired not only at app exit but on
+  every standalone-settings-window close (the settings modal is its own
+  winit window). `WindowState::destroy_egui()` now makes the window's GL
+  context current and calls `painter.destroy()` before the drop; it runs from
+  both `close_window()` (per-window close) and a new `exiting()`
+  `ApplicationHandler` hook (windows still present at irreversible event-loop
+  shutdown). `destroy()` is idempotent, so the two paths cannot double-free.
+- **Channel-shutdown classification (commit `7149c09`):** at close the PTY
+  consumer thread (owner of the `PtyRead` receiver) exits first when the GUI
+  drops the pane's input channel, while the reader thread may still receive
+  one last chunk of shell output. Its `send()` then failed and was logged
+  unconditionally at `error`. A shared `reader_shutdown: Arc<AtomicBool>` is
+  now set by the consumer thread immediately before it exits via the
+  input-channel-disconnect path; the reader consults it on send failure. Flag
+  set = expected teardown (`debug`); flag clear = the receiver vanished while
+  the reader should have kept running, a genuine ordering bug (`error`). The
+  decision is factored into a pure `classify_reader_send_failure()` helper
+  with unit tests, so demoting the log does NOT mask real anomalies. Plumbing
+  mirrors `echo_off`: `RunTerminalResult` → `FreminalPtyInputOutput` →
+  `TerminalEmulator::reader_shutdown_atomic()` → consumer thread.
+- **Close sequencing (commit `d752acc`, PLANNING #6):** two defects. (1)
+  Closing the active tab dropped its panes without sending `FocusChange(true)`
+  to the newly-visible tab's pane, unlike the close-pane and PTY-death paths —
+  a pane using focus reporting (`?1004`) was left believing it was unfocused.
+  `PerWindowState::close_tab` now notifies via `notify_active_pane_focused`,
+  but only when the closed tab was the active one (closing a background tab
+  must not move focus). (2) When a background tab's last pane died, the
+  dead-pane handler in `app_impl.rs` restored the active tab by the dead pane's
+  index rather than the user's original active tab, selecting the wrong tab
+  after a lower-indexed tab was removed. It now captures the original active
+  tab's stable `TabId` and restores by id.
+- **Tests:** `classify_reader_send_failure` (2 cases),
+  `notify_active_pane_focused_sends_focus_gained` (focus event reaches the
+  pane). The painter teardown needs a live GL context and is not unit-testable;
+  the restore-by-id invariant rests on `TabManager::close_tab`'s already-tested
+  active-index adjustment.
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean. No
+  escape-sequence support changed (the OSC parser is untouched), so no
+  coverage-doc update.
 
-**Verification:** Most-recently-run command appears at the top; regression test
-on the palette ordering.
+#### 106.5 — Command history palette sort order (PLANNING #9) ✅ 2026-06-15
+
+**Scope:** The command-history palette (Ctrl+Shift+M, Task 72.15) lists
+oldest-first. It must sort most-recent-first.
+
+**Symptom that prompted the fix:** a command typed in the current session
+never appeared in the palette's _unfiltered_ list, yet searching for that
+exact command's text surfaced it. Diagnosis: the bug is the sort order
+itself, not a dedup/classification miss.
+
+- `merge_entries` (`freminal/src/gui/command_history.rs`) emitted the
+  shell-history seed first (oldest→newest, up to
+  `shell_history::HISTORY_SEED_CAP = 1000` entries), then this session's
+  live OSC 133 commands appended at the tail.
+- `filter_entries` caps the _rendered_ list at `MAX_VISIBLE_ENTRIES = 200`
+  via `take(200)` — but only after filtering. With an empty query the cap
+  sliced off the tail, so with a typical ≥200-entry history the live
+  entries (and the most-recent seed entries) were never reached. A
+  non-empty query scans the whole merged list before the cap, which is why
+  searching found the command.
+
+**Fix:** reverse the merge to most-recent-first. Live entries are emitted
+newest-first (this session's commands), then the seed newest-first. This
+puts recent commands at the top, inside the 200-entry cap, and pairs with
+the palette's existing default selection of index `0` (Enter recalls the
+most-recent command). Dedup was also changed from "collapse consecutive
+duplicates" to a global text dedup (first/newest occurrence wins), so a
+command both run this session and present in the history file appears
+exactly once near the top as the Live variant (carrying its exit-code
+badge) rather than twice.
+
+**Verification:** Most-recently-run command appears at the top; regression
+test on the palette ordering.
+
+**Completion notes (branch `task-106/bug-closure`):**
+
+- Single-file production change: `freminal/src/gui/command_history.rs`
+  `merge_entries`. No signature change (the `seed` / `recent` / `texts`
+  inputs are stored oldest-first and iterated `.rev()`); no `ViewState`,
+  renderer, config, or escape-sequence change.
+- Updated the `merge_entries` doc comment to describe the newest-first
+  ordering, the cap interaction, and the global dedup rationale.
+- Tests: flipped the three order-asserting tests to newest-first
+  (`merge_entries_seed_only_is_newest_first`,
+  `merge_entries_collapses_duplicates_in_seed`,
+  `merge_entries_live_newest_first_then_seed_newest_first`); added
+  `merge_entries_dedups_non_consecutive_duplicates_in_seed` (global-dedup
+  behaviour), `merge_entries_live_command_also_in_seed_appears_once_as_live`
+  (the duplicate-across-sources case), and the explicit regression guard
+  `merge_entries_recent_command_is_visible_within_cap_regression` (seed
+  larger than `MAX_VISIBLE_ENTRIES`, asserts the live command is first and
+  survives the empty-query cap).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean.
+  (One `clippy::pedantic similar_names` fired on a `seen` local adjacent to
+  the `seed` parameter; renamed to `seen_texts`.)
+
+#### 106.6 — Paste-guard modal routes to wrong pane under focus-follows-mouse ✅ 2026-06-15
+
+**Why this subtask exists:** surfaced during 106.1 review. A regression from
+the interaction of the v0.9.0 focus-follows-mouse work (Task 110) and the
+smart paste guard (Task 77).
+
+**Scope:** With focus-follows-mouse enabled, pasting flagged content into pane A
+opens the confirm-paste modal whose buttons may overlap a different pane B.
+Moving the cursor onto "Paste Anyway"/"Cancel" changes the active pane to B
+(focus follows mouse), and confirming pasted into B instead of A, because
+`send_paste_to_active_pane` resolved the _current_ active pane at confirm time.
+
+**Fix:** Capture the destination pane `(TabId, PaneId)` at dialog-open time in
+`guarded_paste_text` (mirroring how the broadcast-confirm dialog already
+carries its target tab), thread it through `PasteDialogState` /
+`PasteDialogOutcome::Paste { payload, target }`, and route the confirmed paste
+via a new `send_paste_to_target` that looks the pane up by id. If the target
+pane was closed while the modal was open the paste is dropped with a log rather
+than landing in the wrong pane. The Settings "Test Paste" preview captures the
+settings-owner window's active pane the same way. The `Safe` fast path is
+unchanged (it sends in the same frame the paste is initiated, so active == target
+by construction).
+
+**Verification:** New `dialog_preserves_target_across_open` regression test in
+`paste_guard.rs` asserts the captured target round-trips through dialog state.
+Existing dialog tests updated for the new `open`/`Paste` signatures.
+`cargo test --all`, clippy `-D warnings`, `cargo fmt --check`, and
+`cargo machete` all clean.
 
 ---
 

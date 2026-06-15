@@ -63,6 +63,13 @@ pub struct FreminalPtyInputOutput {
     /// Used by the GUI layer for CWD discovery (via a platform-specific path readback) when saving layouts and recording snapshots.
     /// `None` on platforms where `portable_pty` cannot report the PID.
     pub child_pid: Option<u32>,
+    /// Shared shutdown flag for the PTY reader thread.
+    ///
+    /// Set to `true` by the PTY consumer thread immediately before it exits
+    /// because the GUI dropped its input channel. The reader thread reads it
+    /// to classify a failed `send` as an expected teardown rather than an
+    /// error. See [`RunTerminalResult::reader_shutdown`].
+    pub reader_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Return a safe temp directory path, bypassing `TMPDIR` which may be poisoned
@@ -171,6 +178,43 @@ pub struct RunTerminalResult {
     /// `None` on platforms where `portable_pty` cannot report the PID.
     /// Used by the GUI layer for CWD discovery (via a platform-specific path readback) when saving layouts and recording snapshots.
     pub child_pid: Option<u32>,
+    /// Shared shutdown flag for the PTY reader thread.
+    ///
+    /// The PTY consumer thread sets this to `true` immediately before it
+    /// exits due to the GUI dropping its input channel (pane/tab/window
+    /// teardown while the child is still alive). The reader thread reads it
+    /// when a `send` fails to distinguish an expected teardown (logged at
+    /// `debug`) from an anomalous receiver disappearance (logged at `error`).
+    pub reader_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// How the PTY reader thread should treat a failed `send` of PTY output.
+///
+/// The `PtyRead` receiver is owned by the PTY consumer thread. When a `send`
+/// fails the receiver is gone, but there are two very different reasons for
+/// that, and they must not be conflated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReaderSendFailure {
+    /// The consumer thread set the shutdown flag before exiting because the
+    /// GUI dropped the pane (pane/tab/window teardown while the child is
+    /// still alive). This is expected and should be logged at `debug`.
+    ExpectedShutdown,
+    /// The receiver disappeared while the reader was supposed to keep
+    /// running. This signals a real teardown-ordering bug and is logged at
+    /// `error`.
+    Anomalous,
+}
+
+/// Classify a failed PTY-output `send` using the shared shutdown flag.
+///
+/// Pure decision function so the reader thread's error-vs-debug branch is
+/// unit-testable without spawning a PTY.
+const fn classify_reader_send_failure(shutdown_signalled: bool) -> ReaderSendFailure {
+    if shutdown_signalled {
+        ReaderSendFailure::ExpectedShutdown
+    } else {
+        ReaderSendFailure::Anomalous
+    }
 }
 
 /// Process a single `PtyWrite` message: either write data or resize the PTY.
@@ -554,6 +598,16 @@ pub fn run_terminal(
         .try_clone_reader()
         .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
 
+    // Shared shutdown flag. The PTY consumer thread (which owns the
+    // `PtyRead` receiver) sets this to `true` immediately before it exits
+    // because the GUI dropped its input channel — i.e. the pane/tab/window
+    // is being torn down while the child shell is still alive. When the
+    // reader's `send_tx.send()` then fails (the receiver is gone), this flag
+    // tells the reader the disconnect is an expected teardown rather than an
+    // anomaly, so it can exit quietly instead of logging an error.
+    let reader_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_shutdown_thread = std::sync::Arc::clone(&reader_shutdown);
+
     std::thread::Builder::new()
         .name(format!("freminal-pty-read-{pane_id}"))
         .spawn(move || {
@@ -580,7 +634,18 @@ pub fn run_terminal(
                     buf: data,
                     read_amount: amount_read,
                 }) {
-                    error!("Failed to send data to terminal: {e}");
+                    let signalled =
+                        reader_shutdown_thread.load(std::sync::atomic::Ordering::Acquire);
+                    match classify_reader_send_failure(signalled) {
+                        ReaderSendFailure::ExpectedShutdown => {
+                            debug!(
+                                "PTY read channel closed during shutdown; reader thread exiting"
+                            );
+                        }
+                        ReaderSendFailure::Anomalous => {
+                            error!("Failed to send data to terminal: {e}");
+                        }
+                    }
                     return;
                 }
             }
@@ -695,6 +760,7 @@ pub fn run_terminal(
         child_exit_rx,
         echo_off,
         child_pid,
+        reader_shutdown,
     })
 }
 
@@ -734,6 +800,7 @@ impl FreminalPtyInputOutput {
             child_exit_rx: result.child_exit_rx,
             echo_off: result.echo_off,
             child_pid: result.child_pid,
+            reader_shutdown: result.reader_shutdown,
         })
     }
 
@@ -889,5 +956,31 @@ mod locale_tests {
     #[test]
     fn locale_with_codeset_and_modifier_returned_unchanged() {
         assert_eq!(normalize_locale("en_US.UTF-8@euro"), "en_US.UTF-8@euro");
+    }
+}
+
+#[cfg(test)]
+mod reader_send_failure_tests {
+    use super::{ReaderSendFailure, classify_reader_send_failure};
+
+    #[test]
+    fn shutdown_signalled_is_expected_teardown() {
+        // The consumer thread set the flag before exiting (GUI dropped the
+        // pane). A failed send is the expected end-of-life event, not an
+        // error.
+        assert_eq!(
+            classify_reader_send_failure(true),
+            ReaderSendFailure::ExpectedShutdown
+        );
+    }
+
+    #[test]
+    fn no_shutdown_signal_is_anomalous() {
+        // The receiver vanished while the reader was supposed to keep
+        // running — a real teardown-ordering bug worth an error log.
+        assert_eq!(
+            classify_reader_send_failure(false),
+            ReaderSendFailure::Anomalous
+        );
     }
 }

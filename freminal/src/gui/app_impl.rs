@@ -730,6 +730,12 @@ impl freminal_windowing::App for FreminalGui {
             // Try to close just the dead pane within its tab.
             let is_active_tab = tab_idx == win.tabs.active_index();
 
+            // Capture the originally-active tab's stable id so we can restore
+            // focus to *that* tab afterwards. Restoring by index is wrong:
+            // closing a tab at a lower index shifts the active tab left, and
+            // the dead pane's `tab_idx` is not the user's active tab.
+            let original_active_tab_id = win.tabs.active_tab().id;
+
             // Switch to the dead pane's tab temporarily if needed so we can
             // operate on it.
             if !is_active_tab && let Err(e) = win.tabs.switch_to(tab_idx) {
@@ -793,11 +799,16 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // Restore the original active tab if we switched away.
+            // Restore the originally-active tab if we switched away. Look it
+            // up by stable id rather than by index, since a tab close during
+            // this iteration may have shifted indices. If the originally-active
+            // tab was itself closed, leave the active index where `close_tab`
+            // placed it.
             if !is_active_tab {
-                // The tab we were on may have been removed, so saturate.
-                let restore_idx = tab_idx.min(win.tabs.tab_count().saturating_sub(1));
-                let _ = win.tabs.switch_to(restore_idx);
+                let restore_idx = win.tabs.iter().position(|t| t.id == original_active_tab_id);
+                if let Some(restore_idx) = restore_idx {
+                    let _ = win.tabs.switch_to(restore_idx);
+                }
             }
         }
 
@@ -1130,8 +1141,12 @@ impl freminal_windowing::App for FreminalGui {
             // resolved (possibly edited) payload is sent to the active pane;
             // on cancel the paste is discarded.
             match win.paste_dialog.show(ctx) {
-                super::paste_guard::PasteDialogOutcome::Paste(payload) => {
-                    Self::send_paste_to_active_pane(&mut win, payload);
+                super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
+                    // Route to the pane captured when the dialog opened, not
+                    // the currently-active pane: focus-follows-mouse can change
+                    // the active pane when the cursor moves onto the dialog
+                    // buttons (Task 106 bug).
+                    Self::send_paste_to_target(&mut win, target, payload);
                 }
                 super::paste_guard::PasteDialogOutcome::Cancelled
                 | super::paste_guard::PasteDialogOutcome::Idle => {}
