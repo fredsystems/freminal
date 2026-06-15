@@ -154,4 +154,13 @@ impl EguiState {
     pub(crate) fn modifiers(&self) -> egui::Modifiers {
         self.winit_state.egui_input().modifiers
     }
+
+    /// Free the painter's OpenGL resources.
+    ///
+    /// Must be called while this window's GL context is current and before the
+    /// painter is dropped. `egui_glow::Painter::destroy` is idempotent (guarded
+    /// by an internal `destroyed` flag), so calling it more than once is safe.
+    pub(crate) fn destroy_painter(&mut self) {
+        self.painter.destroy();
+    }
 }

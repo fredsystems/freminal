@@ -63,6 +63,26 @@ struct WindowState {
     repaint_at: Option<Instant>,
 }
 
+impl WindowState {
+    /// Release the egui-glow painter's GPU resources before this window's
+    /// state is dropped.
+    ///
+    /// `egui_glow::Painter` owns OpenGL objects (program, textures, VBO/EBO)
+    /// that must be freed with `destroy()` while the owning GL context is
+    /// current; otherwise the painter's `Drop` impl logs a "you forgot to call
+    /// `destroy()`" resource-leak warning. This runs on every window close
+    /// (including the standalone settings window) and at event-loop exit.
+    fn destroy_egui(&mut self) {
+        if let Err(e) = self.gl.make_current() {
+            // If the context can't be made current we still call destroy()
+            // below — it is a no-op-safe GL teardown — but the GL calls may
+            // not take effect. Log so the cause is visible.
+            tracing::warn!("make_current failed during painter teardown: {e}");
+        }
+        self.egui.destroy_painter();
+    }
+}
+
 /// Main application handler that owns the `App` and all window state.
 struct Handler<A: App> {
     app: A,
@@ -202,8 +222,11 @@ impl<A: App> Handler<A> {
     }
 
     fn close_window(&mut self, winit_id: winit::window::WindowId) {
-        if let Some(state) = self.windows.remove(&winit_id) {
-            // Destroy painter before GL context
+        if let Some(mut state) = self.windows.remove(&winit_id) {
+            // Free the egui-glow painter's GPU resources while this window's
+            // GL context is still current, then drop in dependency order:
+            // egui (painter) -> gl context -> window.
+            state.destroy_egui();
             drop(state.egui);
             drop(state.gl);
             drop(state.window);
@@ -611,6 +634,21 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         }
 
         self.update_control_flow(event_loop);
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // The event loop is shutting down irreversibly. Any windows still in
+        // the map (e.g. when `exit()` was called without routing every window
+        // through `close_window`) must have their egui-glow painters torn down
+        // so they don't leak / warn on drop.
+        let ids: Vec<winit::window::WindowId> = self.windows.keys().copied().collect();
+        for winit_id in ids {
+            if let Some(state) = self.windows.get_mut(&winit_id) {
+                state.destroy_egui();
+            }
+        }
+        self.windows.clear();
+        debug!("Event loop exiting; all painters destroyed");
     }
 }
 
