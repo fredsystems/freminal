@@ -178,7 +178,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 107 | Build Version Embedding                  | `PLAN_VERSION_090.md` (Task 107)              | Complete      | None                   |
 | 108 | About Modal & Attribution                | `PLAN_VERSION_090.md` (Task 108)              | Complete      | Task 107               |
 | 109 | Active-Pane Highlight Correctness (Gate) | `PLAN_VERSION_090.md` (Task 109)              | Stub          | Task 58                |
-| 110 | Focus Follows Mouse (Toggleable)         | `PLAN_VERSION_090.md` (Task 110)              | Stub          | Task 58                |
+| 110 | Focus Follows Mouse (Toggleable)         | `PLAN_VERSION_090.md` (Task 110)              | Complete      | Task 58                |
 
 ---
 
@@ -630,6 +630,7 @@ Update this section as tasks complete:
 | 98   | 2026-06-11 | 2026-06-11 | All subtasks (98.1-98.9) on task-74-75-98/v090-finish (combined PR); PR pending  |
 | 107  | 2026-06-11 | 2026-06-11 | 107.1-107.3 (cargo/CI/Nix version embed) on task-107/build-version-embedding     |
 | 108  | 2026-06-11 | 2026-06-11 | 108.1-108.3 (audit, ATTRIBUTIONS.md, About link) on task-108/about-modal-at      |
+| 110  | 2026-06-14 | 2026-06-14 | 110.1-110.2 on task-110/focus-follows-mouse; PR pending                          |
 
 ---
 

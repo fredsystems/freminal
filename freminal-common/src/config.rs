@@ -413,6 +413,12 @@ pub struct TabsConfig {
     /// prompts "You are about to broadcast keyboard input to N panes.
     /// Continue?". Disabling broadcast never prompts. Default: `false`.
     pub confirm_broadcast: bool,
+    /// Whether keyboard focus follows the mouse across split panes (Task
+    /// 110). When `true` (default), mousing into a pane in a muxed session
+    /// focuses it without a click. When `false`, panes are focused only by
+    /// clicking (the legacy behavior). Tab switching is always click-to-focus
+    /// regardless of this setting.
+    pub focus_follows_mouse: bool,
 }
 
 impl Default for TabsConfig {
@@ -421,6 +427,7 @@ impl Default for TabsConfig {
             show_single_tab: false,
             position: TabBarPosition::Top,
             confirm_broadcast: false,
+            focus_follows_mouse: true,
         }
     }
 }
@@ -2737,6 +2744,10 @@ copy = "Ctrl+Shift+C"
         let cfg = Config::default();
         assert!(!cfg.tabs.show_single_tab);
         assert_eq!(cfg.tabs.position, TabBarPosition::Top);
+        assert!(
+            cfg.tabs.focus_follows_mouse,
+            "focus_follows_mouse should default to true (Task 110)"
+        );
     }
 
     #[test]
@@ -2782,6 +2793,8 @@ position = "bottom"
         cfg.tabs.show_single_tab = true;
         cfg.tabs.position = TabBarPosition::Bottom;
         cfg.tabs.confirm_broadcast = true;
+        // Flip away from the `true` default to prove the field round-trips.
+        cfg.tabs.focus_follows_mouse = false;
 
         let toml_str = toml::to_string_pretty(&cfg).expect("Config should serialize");
         let deserialized: Config =
@@ -2789,6 +2802,7 @@ position = "bottom"
         assert!(deserialized.tabs.show_single_tab);
         assert_eq!(deserialized.tabs.position, TabBarPosition::Bottom);
         assert!(deserialized.tabs.confirm_broadcast);
+        assert!(!deserialized.tabs.focus_follows_mouse);
     }
 
     #[test]

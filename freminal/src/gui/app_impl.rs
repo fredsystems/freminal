@@ -1623,9 +1623,24 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 }
 
-                // Click-to-focus: if a non-active pane was left-clicked, transfer
-                // keyboard focus to it and send FocusChange events to both panes.
-                if left_clicked && !is_active {
+                // Focus transfer (Task 110): a non-active pane is focused either
+                // by an explicit left-click or (when focus-follows-mouse is
+                // enabled) by the mouse hovering it. Following the mouse only
+                // changes the *focused* (keyboard target) pane; it does not
+                // retarget in-flight mouse input. Tab switching is unaffected.
+                // The pointer is over at most one pane at a time, so this cannot
+                // flicker between panes within a frame.
+                let pointer_over_content = ui
+                    .ctx()
+                    .pointer_hover_pos()
+                    .is_some_and(|pos| content_rect.contains(pos));
+                let should_focus = !is_active
+                    && crate::gui::panes::should_focus_inactive_pane(
+                        left_clicked,
+                        self.config.tabs.focus_follows_mouse,
+                        pointer_over_content,
+                    );
+                if should_focus {
                     let tab = win.tabs.active_tab_mut();
                     let old_active = tab.active_pane;
                     // Notify the previously-active pane that it lost focus.

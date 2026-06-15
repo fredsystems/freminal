@@ -94,7 +94,12 @@ let
       };
 
       tabsSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.tabs) show_single_tab position confirm_broadcast;
+        inherit (s.tabs)
+          show_single_tab
+          position
+          confirm_broadcast
+          focus_follows_mouse
+          ;
       };
 
       bellSection = lib.filterAttrs (_: v: v != null) {
@@ -544,6 +549,17 @@ in
             Whether enabling broadcast input (sending keystrokes to every
             pane in a tab) requires a confirmation dialog the first time it
             is turned on for a tab. Null uses the default (false).
+          '';
+        };
+
+        focus_follows_mouse = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Whether keyboard focus follows the mouse across split panes.
+            When true, mousing into a pane focuses it without a click; when
+            false, panes are focused only by clicking. Tab switching is
+            always click-to-focus. Null uses the default (true).
           '';
         };
       };

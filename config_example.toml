@@ -203,6 +203,13 @@ limit = 4000
 # Default: false
 # confirm_broadcast = false
 
+# Whether keyboard focus follows the mouse across split panes. When true,
+# mousing into a pane in a split-pane session focuses it (makes it the keyboard
+# target) without requiring a click. When false, panes are focused only by
+# clicking. Tab switching is always click-to-focus regardless of this setting.
+# Default: true
+# focus_follows_mouse = true
+
 ## ##############################################################################
 # TAB TITLE SETTINGS
 ## ##############################################################################

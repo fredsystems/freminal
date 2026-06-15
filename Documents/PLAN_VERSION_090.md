@@ -33,7 +33,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 107 | Build Version Embedding                  | Small        | Complete | None            | `task-107/build-version-embedding` |
 | 108 | About Modal & Attribution                | Small        | Complete | Task 107        | `task-108/about-modal-attribution` |
 | 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                                |
-| 110 | Focus Follows Mouse (Toggleable)         | Small        | Stub     | Task 58         | TBD                                |
+| 110 | Focus Follows Mouse (Toggleable)         | Small        | Complete | Task 58         | `task-110/focus-follows-mouse`     |
 
 ### Execution order
 
@@ -5059,7 +5059,7 @@ divider-to-pane mapping where unit-testable.
 
 ---
 
-## Task 110 — Focus Follows Mouse (Toggleable)
+## Task 110 — Focus Follows Mouse (Toggleable) ✅ Complete (2026-06-14)
 
 ### 110 Summary
 
@@ -5090,6 +5090,23 @@ settings UI, `config_example.toml` documentation).
 **Verification:** Setting the option in `config.toml` round-trips and is
 reflected in the settings UI; default is focus-follows-mouse.
 
+**Completion notes (commit `1b605fd2`, 2026-06-14):**
+
+- Added `focus_follows_mouse: bool` to `TabsConfig` (`[tabs]` section),
+  defaulting to `true`. No `ConfigPartial`/`apply_partial` change needed —
+  `[tabs]` is an existing section deserialized as a unit with
+  `#[serde(default)]`.
+- Placed in `[tabs]` alongside `confirm_broadcast` (the other pane/tab
+  behavior toggle); there is no `[mouse]`/`[panes]`/`[behavior]` section.
+- Full `freminal-config-options` wiring: struct field + `Default`,
+  `config_example.toml` documentation, settings UI checkbox in the Tabs
+  tab ("Pane Focus" section), and the Nix home-manager module mirror
+  (`tabsSection` inherit + `mkOption`).
+- `default_tabs_config` and `tabs_config_roundtrip` tests extended to
+  cover the new field.
+- `cargo test -p freminal-common`, workspace clippy, `nixfmt`/`statix`/
+  `deadnix` all clean.
+
 #### 110.2 — Pane focus on mouse-over
 
 **Scope:** When enabled, mousing over a pane sets it as the focused (keyboard
@@ -5098,6 +5115,26 @@ target) pane. Tab switching unaffected (stays click-to-focus).
 **Verification:** Mousing across panes moves keyboard focus without a click
 when enabled; click-to-focus behavior restored when disabled. Regression test
 on the focus-selection path.
+
+**Completion notes (commit `1f689e97`, 2026-06-14):**
+
+- Extended the existing click-to-focus block in `app_impl.rs` (per-pane
+  render loop) so a non-active pane is focused either by a left-click or
+  (when `focus_follows_mouse` is enabled) by the pointer hovering its
+  content rect. Hover is detected via
+  `ui.ctx().pointer_hover_pos()` tested against `content_rect`.
+- The focus transfer reuses the exact same `FocusChange` channel sends as
+  click-to-focus; only the _focused_ (keyboard target) pane changes — no
+  in-flight mouse input is retargeted. Tab switching is unaffected.
+- Single-pane sessions are naturally a no-op (the sole pane is always
+  active). The pointer is over at most one pane at a time, so no intra-frame
+  flicker.
+- The decision is factored into a pure `should_focus_inactive_pane(...)`
+  helper in `freminal/src/gui/panes/mod.rs` with 3 unit tests (click,
+  hover-gated-by-ffm, no-interaction). `is_active` is checked at the call
+  site to keep the helper to three bool params (avoids
+  `fn_params_excessive_bools`/`struct_excessive_bools`).
+- `cargo test --all`, workspace clippy, and `cargo machete` all clean.
 
 ---
 

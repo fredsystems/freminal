@@ -1450,12 +1450,59 @@ fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect)
     }
 }
 
+/// Decide whether a **non-active** pane should receive keyboard focus this
+/// frame (Task 110).
+///
+/// The caller is responsible for only invoking this for non-active panes (the
+/// active pane never re-focuses itself). A non-active pane is focused when
+/// either:
+///
+/// - it was explicitly left-clicked (`left_clicked`), or
+/// - focus-follows-mouse is enabled (`focus_follows_mouse`) and the pointer is
+///   currently over the pane's content rect (`pointer_over_content`).
+///
+/// Following the mouse only changes the *focused* (keyboard target) pane; it
+/// never retargets in-flight mouse input.
+#[must_use]
+pub const fn should_focus_inactive_pane(
+    left_clicked: bool,
+    focus_follows_mouse: bool,
+    pointer_over_content: bool,
+) -> bool {
+    left_clicked || (focus_follows_mouse && pointer_over_content)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // ── should_focus_pane tests (Task 110) ───────────────────────────
+
+    #[test]
+    fn click_focuses_inactive_pane_regardless_of_ffm() {
+        // A left-click on a non-active pane always transfers focus, even when
+        // focus-follows-mouse is disabled and the pointer is not over it.
+        assert!(should_focus_inactive_pane(true, false, false));
+        assert!(should_focus_inactive_pane(true, true, true));
+    }
+
+    #[test]
+    fn hover_focuses_inactive_pane_only_when_ffm_enabled() {
+        // Hover over a non-active pane focuses it only when focus-follows-mouse
+        // is enabled.
+        assert!(should_focus_inactive_pane(false, true, true));
+        assert!(!should_focus_inactive_pane(false, false, true));
+    }
+
+    #[test]
+    fn no_focus_when_inactive_and_no_interaction() {
+        // A non-active pane with no click and no pointer-over does not focus.
+        assert!(!should_focus_inactive_pane(false, true, false));
+        assert!(!should_focus_inactive_pane(false, false, false));
+    }
 
     // ── PaneId tests ─────────────────────────────────────────────────
 
