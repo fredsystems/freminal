@@ -558,3 +558,8 @@ profile_export*.xml
 
 *.frec
 *.frec2
+
+# Cargo workspaces have exactly one Cargo.lock at the root. A lockfile inside a
+# member crate is invalid and breaks tooling (e.g. Dependabot's resolver). Guard
+# against re-committing a stray nested lockfile.
+*/Cargo.lock
