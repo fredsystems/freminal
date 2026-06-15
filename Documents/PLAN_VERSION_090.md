@@ -4922,8 +4922,12 @@ currently shipped alongside — **gap: 108.2 must add the license texts**):
   font software, with a bitmap-rendering exception).
 - **MesloLGS Nerd Font Mono** —
   `res/MesloLGSNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf`, upstream
-  `ryanoasis/nerd-fonts` (Meslo patched), **Apache-2.0** (base Meslo /
-  Apple-derived) **+ MIT** (Nerd Fonts glyph patches).
+  `ryanoasis/nerd-fonts` (Meslo patched). The bundled patched font files are
+  **OFL-1.1** (as distributed by Nerd Fonts); the underlying Meslo LG typeface
+  is Apache-2.0; the Nerd Fonts patcher source (not bundled) is MIT.
+  Corrected from the initial audit guess of "Apache-2.0 + MIT" after reading
+  the upstream `nerd-fonts/LICENSE` — patched font files are OFL-1.1, which is
+  why `deny.toml` already allows OFL-1.1.
 
 **(c) Bundled image assets** (all first-party to the freminal project, MIT):
 
@@ -4952,13 +4956,32 @@ reference rather than re-listing every palette.
   are permissive-licensed and governed by `deny.toml`, with a note that a full
   SBOM can be produced via `cargo deny`/`cargo license`.
 
-#### 108.2 — Attributions document + README link
+#### 108.2 — Attributions document + README link ✅ (2026-06-11)
 
 **Scope:** Author `ATTRIBUTIONS.md` from the 108.1 audit; link it from
 `README.md`. Follows `markdown-lint-discipline`.
 
 **Verification:** Doc lists every attributed component with license + link;
 README links to it; markdownlint passes.
+
+**Completion notes:**
+
+- Authored `ATTRIBUTIONS.md` at the repo root covering: portable-pty (MIT,
+  vendored), the two bundled fonts (with bundled license texts), the
+  first-party image assets (MIT), the theme palettes (by reference to the
+  inline `themes.rs` attributions, no duplication), and a note that the Rust
+  dependency graph is permissive and governed by `deny.toml`.
+- Bundled the upstream font license texts under `res/fonts/`:
+  `Hack-LICENSE.md` (MIT + Bitstream Vera, fetched verbatim from
+  `source-foundry/Hack`) and `MesloLGS-NerdFont-LICENSE.md` (SIL OFL 1.1,
+  fetched verbatim from `ryanoasis/nerd-fonts`, with an Apache-2.0/MIT
+  provenance note). This closes the "no font license shipped" gap from 108.1.
+- README "License" section now links to `ATTRIBUTIONS.md`.
+- The 108.1 Meslo license note was corrected (OFL-1.1 for the bundled patched
+  files, not the originally-guessed "Apache-2.0 + MIT") after reading the
+  upstream `nerd-fonts/LICENSE`.
+- markdownlint clean on all new/changed markdown (repo config). No code
+  changes; `cargo` verification is unaffected (docs/assets only).
 
 #### 108.3 — About-modal attribution + build version
 
