@@ -100,6 +100,16 @@ pub(super) fn command_finished_request(
         return None;
     }
 
+    // 106.3: a block that finished without ever executing a command (no
+    // `OSC 133 C` — e.g. Ctrl-C on an idle prompt) must not notify.  No
+    // command ran, so there is nothing to report.  This is explicit rather
+    // than relying on `duration()` returning `None` for the same case, so a
+    // zero/low `command_finished_threshold_secs` cannot resurrect the
+    // spurious notification.
+    if !block.executed() {
+        return None;
+    }
+
     let duration = block.duration()?;
     if duration.as_secs_f32() < config.command_finished_threshold_secs {
         return None;
@@ -507,6 +517,38 @@ mod tests {
         };
         let config = enabled_config(0.0);
         assert!(command_finished_request(&running, "ls", "tab", &config).is_none());
+    }
+
+    #[test]
+    fn command_finished_request_unexecuted_ctrl_c_block_is_none() {
+        // Regression for 106.3: Ctrl-C on an idle prompt produces a finished
+        // block (A -> D) that never executed a command (no `OSC 133 C`, so
+        // executed_at / output_start_row are None).  Even at a zero threshold
+        // — which would let `duration()` of an executed instant command
+        // through — no notification must fire.
+        use freminal_common::buffer_states::command_block::CommandBlockId;
+        use std::time::{Duration, SystemTime};
+        let started = SystemTime::now();
+        let ctrl_c = CommandBlock {
+            id: CommandBlockId::next(),
+            fid: "t".to_owned(),
+            prompt_start_row: 0,
+            command_start_row: Some(0),
+            // No C marker: the user aborted before any command ran.
+            output_start_row: None,
+            end_row: Some(0),
+            exit_code: Some(130),
+            cwd: None,
+            // User idled 30s at the prompt before Ctrl-C.
+            started_at: started,
+            executed_at: None,
+            finished_at: Some(started + Duration::from_secs(30)),
+        };
+        let config = enabled_config(0.0);
+        assert!(
+            command_finished_request(&ctrl_c, "", "tab", &config).is_none(),
+            "an aborted prompt that never executed a command must not notify"
+        );
     }
 
     #[test]

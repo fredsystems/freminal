@@ -4725,7 +4725,7 @@ regression test on the input-handling path.
 - No escape-sequence, config, or new-dependency changes — purely a windowing
   command-dispatch fix.
 
-#### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4)
+#### 106.2 — Command-duration & gutter-extent bugs (PLANNING #2, #4) ✅ 2026-06-15
 
 **Scope:** Two OSC 133 / gutter (Task 72/73) regressions:
 
@@ -4742,7 +4742,40 @@ regression test on the input-handling path.
 terminates at the prompt / last output line. Regression tests on the gutter
 extent and duration computation.
 
-#### 106.3 — False Ctrl-C notification on unexecuted command (PLANNING #3)
+**Completion notes (branch `task-106/bug-closure`; landed with 106.3):**
+
+- **Duration (106.2a):** `CommandBlock::duration()`
+  (`freminal-common/src/buffer_states/command_block.rs`) previously fell back
+  to `started_at` (OSC 133 A, prompt-draw time) when `executed_at` (OSC 133 C)
+  was `None`. For a Ctrl-C-on-idle-prompt block (A→D, no C) that measured
+  prompt-idle time. It now requires `executed_at` and returns `None` when no
+  `C` marker was received — there is no execution interval to report. Our own
+  bash/zsh/fish integration scripts always emit `C` before a real command, so
+  the only A→D-without-C case is an aborted prompt. Added a
+  `CommandBlock::executed()` predicate (`executed_at.is_some()`) used by both
+  the duration suppression and the notification guard.
+- **Gutter extent (106.2b):** a still-running block has no `end_row`; the
+  gutter / duration-anchor helpers substituted `running_extent`, which was
+  `visible_window_start + term_height - 1` (the pane bottom). That painted the
+  status bar all the way down even when the running command's output reached
+  only partway. New `coords::running_block_extent(snap)` returns
+  `visible_window_start + cursor_pos.y` (the cursor row = last output line so
+  far). All three `running_extent` sites in `terminal/widget.rs` (gutter fill,
+  duration-label anchor, gutter hover hit-test) now use it. A _finished_ Ctrl-C
+  block already stopped correctly because `finish_command_block` sets
+  `end_row = cursor.pos.y`; only running blocks were affected.
+- **Tests:** updated `duration_*` fixtures in `command_block.rs` to set
+  `executed_at` (so they test the C→D interval, not the removed fallback);
+  replaced `duration_falls_back_to_started_at_when_executed_at_missing` with
+  `duration_is_none_when_executed_at_missing`; added three `executed()` tests;
+  added three `running_block_extent` tests in `coords.rs` (cursor mid-screen
+  vs. pane-bottom regression guard, cursor at window top, scrolled-back).
+- `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, `cargo fmt --all -- --check`, and `cargo machete` all clean. No
+  escape-sequence support changed (OSC 133 parsing is identical); this is a
+  renderer-side / notification-side consumption fix, so no coverage-doc update.
+
+#### 106.3 — False Ctrl-C notification on unexecuted command (PLANNING #3) ✅ 2026-06-15
 
 **Scope:** Related to 106.2. A toast / system notification fires when Ctrl-C is
 pressed on a prompt where no command ever executed. No notification should fire
@@ -4750,6 +4783,22 @@ for a command that never ran (no OSC 133 C marker).
 
 **Verification:** Ctrl-C on an idle prompt produces no notification; a real
 finished command still notifies per Task 76. Regression test.
+
+**Completion notes (branch `task-106/bug-closure`; landed with 106.2):**
+
+- As 106.2 anticipated, the fix is intertwined with the duration fix and shares
+  the `CommandBlock::executed()` predicate. `command_finished_request`
+  (`freminal/src/gui/notifications.rs`) gained an explicit
+  `if !block.executed() { return None; }` guard placed _before_ the
+  `block.duration()?` threshold check. The duration change alone would suppress
+  the notification (since `duration()` now returns `None` for unexecuted
+  blocks), but the explicit guard is robust against a zero/low
+  `command_finished_threshold_secs` and documents the intent at the call site.
+- Regression test `command_finished_request_unexecuted_ctrl_c_block_is_none`
+  builds an A→D block with `output_start_row = None` / `executed_at = None`,
+  a 30 s idle gap, and a `0.0` threshold, asserting no request is produced.
+  Existing executed-command notification tests are unaffected (their fixtures
+  already set `executed_at`).
 
 #### 106.4 — Teardown & lifecycle ordering (PLANNING #5, #6, channel errors)
 
