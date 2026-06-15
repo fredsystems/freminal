@@ -32,7 +32,7 @@ top of the correctness debts identified in the post-v0.7.0 audit.
 | 106 | Pre-0.9.0 Bug Closure (Release Gate)     | Medium       | Stub     | v0.9.0 features | TBD                                |
 | 107 | Build Version Embedding                  | Small        | Complete | None            | `task-107/build-version-embedding` |
 | 108 | About Modal & Attribution                | Small        | Complete | Task 107        | `task-108/about-modal-attribution` |
-| 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Stub     | Task 58         | TBD                                |
+| 109 | Active-Pane Highlight Correctness (Gate) | Small–Medium | Complete | Task 58         | `task-109/active-pane-highlight`   |
 | 110 | Focus Follows Mouse (Toggleable)         | Small        | Complete | Task 58         | `task-110/focus-follows-mouse`     |
 
 ### Execution order
