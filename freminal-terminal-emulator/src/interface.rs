@@ -550,6 +550,21 @@ impl TerminalEmulator {
             .map(|io| std::sync::Arc::clone(&io.echo_off))
     }
 
+    /// Return the shared PTY-reader shutdown flag.
+    ///
+    /// The PTY consumer thread sets this to `true` immediately before it
+    /// exits because the GUI dropped its input channel, so the reader thread
+    /// can treat the resulting send failure as an expected teardown rather
+    /// than an error.
+    ///
+    /// Returns `None` in headless / benchmark mode where there is no real PTY.
+    #[must_use]
+    pub fn reader_shutdown_atomic(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.pty_io
+            .as_ref()
+            .map(|io| std::sync::Arc::clone(&io.reader_shutdown))
+    }
+
     /// Return the OS process ID of the PTY child shell.
     ///
     /// Used by the GUI layer for CWD discovery (via a platform-specific path readback) when saving layouts and recording snapshots.

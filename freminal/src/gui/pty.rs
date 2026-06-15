@@ -10,7 +10,7 @@
 //! GUI-side channel endpoints as a [`TabChannels`].
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -230,6 +230,9 @@ pub fn spawn_pty_tab(
     let echo_off = terminal
         .echo_off_atomic()
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let reader_shutdown = terminal
+        .reader_shutdown_atomic()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let child_pid = terminal.child_pid();
 
     let (input_tx, input_rx) = unbounded::<InputEvent>();
@@ -294,6 +297,7 @@ pub fn spawn_pty_tab(
         tab_cfg.recording_swap,
         tab_cfg.recording_pane_id,
         command_event_tx,
+        reader_shutdown,
     );
 
     Ok(TabChannels {
@@ -339,6 +343,7 @@ fn spawn_pty_consumer_thread(
     recording_swap: RecordingSwap,
     recording_pane_id: u32,
     command_event_tx: Sender<CommandFinishedEvent>,
+    reader_shutdown: Arc<AtomicBool>,
 ) {
     let thread_name = format!("freminal-pty-consumer-{recording_pane_id}");
     if let Err(e) = std::thread::Builder::new()
@@ -503,6 +508,13 @@ fn spawn_pty_consumer_thread(
                     }
                     recv(input_rx) -> msg => {
                         if !handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
+                            // The GUI dropped the pane's input channel — the
+                            // pane/tab/window is being torn down while the
+                            // child shell may still be alive. Signal the PTY
+                            // reader thread so a subsequent failed `send` (the
+                            // receiver we own is about to drop) is treated as
+                            // an expected teardown, not an error.
+                            reader_shutdown.store(true, Ordering::Release);
                             return;
                         }
                     }
