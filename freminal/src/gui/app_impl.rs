@@ -463,6 +463,13 @@ impl freminal_windowing::App for FreminalGui {
         // All other windows remain in the map, so shader/bg propagation
         // to "other windows" simply iterates self.windows.
         let Some(mut win) = self.windows.remove(&window_id) else {
+            // This window has no PerWindowState — normally a transient state
+            // during teardown, but if the only/last shell failed to spawn it
+            // is permanent.  Rather than leave a blank surface, render the
+            // fatal-error panel (with an Exit button) when one is set.
+            if self.fatal_error.is_some() {
+                self.render_fatal_error(ctx);
+            }
             return;
         };
 
@@ -2118,13 +2125,16 @@ impl FreminalGui {
             Ok(channels) => channels,
             Err(e) => {
                 error!("Failed to spawn initial PTY: {e}");
-                self.push_error_toast(
+                // This is the first/only window and it has no other live
+                // panes — a failed spawn here is fatal.  Record it so the
+                // window renders the fatal-error panel (with an Exit button)
+                // instead of a blank surface.  We deliberately do NOT close
+                // the window: closing the only window would quit the app
+                // before the user can read why.
+                self.set_fatal_error(
                     "Failed to start shell",
-                    Some(format!("The shell could not be started: {e}")),
+                    format!("The shell could not be started:\n\n{e}"),
                 );
-                // Without a PTY there is nothing to show in this window.
-                // Close it so the user is not left with a black rectangle.
-                handle.close_window(window_id);
                 return;
             }
         };
@@ -2172,6 +2182,37 @@ impl FreminalGui {
             repaint_handle,
         );
         self.windows.insert(window_id, win);
+    }
+
+    /// Render the fatal-error panel for a window that has no
+    /// [`PerWindowState`] because the only/last shell failed to spawn.
+    ///
+    /// Shows the stored title, the underlying error detail, and a single
+    /// "Exit" button that quits the application.  Replaces what would
+    /// otherwise be a blank, unrecoverable window.
+    fn render_fatal_error(&self, ctx: &egui::Context) {
+        let Some((title, detail)) = self.fatal_error.as_ref() else {
+            return;
+        };
+        // Match the rest of the GUI: build a root Ui covering the window and
+        // reserve space from it via `show_inside` (the non-deprecated API).
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("freminal_fatal_error_root"),
+            egui::UiBuilder::default(),
+        );
+        CentralPanel::default().show_inside(&mut root_ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(48.0);
+                ui.heading(title);
+                ui.add_space(12.0);
+                ui.label(detail);
+                ui.add_space(24.0);
+                if ui.button("Exit").clicked() {
+                    std::process::exit(1);
+                }
+            });
+        });
     }
 
     /// Construct a `PerWindowState` with default field values for all
@@ -2282,6 +2323,22 @@ impl FreminalGui {
 
         if let Some(cmds) = cmds_opt {
             self.inject_layout_commands(&cmds);
+        } else if !self.has_live_window() {
+            // The first window's tabs could not be built (every pane spawn
+            // failed) and no other window holds a live pane.  Without this
+            // the window would be left blank and unrecoverable.  Record a
+            // fatal error so the next frame renders the Exit panel.  A more
+            // specific per-pane spawn error has already been surfaced as a
+            // toast by `spawn_pane_from_leaf`; this is the catch-all that
+            // guarantees a visible, actionable failure state.
+            self.set_fatal_error(
+                "Failed to start session",
+                "No shell could be started for the restored session or \
+                 layout.\n\nThis usually means the shell program could not \
+                 be launched. Check your shell configuration, or try \
+                 launching with shell integration disabled \
+                 ([shell_integration] set_term_program = false).",
+            );
         }
     }
 
