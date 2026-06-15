@@ -4894,13 +4894,63 @@ Source: `Documents/PLANNING.MD` #50–52.
 
 ### 108 Subtasks
 
-#### 108.1 — Attribution audit
+#### 108.1 — Attribution audit ✅ (2026-06-11)
 
 **Scope:** Read-only audit of vendored code and bundled assets requiring
 attribution (portable-pty, bundled fonts, any other MIT/BSD/OFL dependency or
 asset). Produce the list in this plan document before writing the doc.
 
 **Verification:** Audit list posted; no code changes.
+
+**Audit findings.** Three classes of attributable material ship inside the
+freminal binary or repo. Whole-crate-tree permissive dependencies (the MIT/
+BSD/ISC/etc. graph resolved through Cargo) are governed by `deny.toml`'s
+license allowlist and are out of scope for a hand-maintained NOTICE — the
+attribution doc covers the **deliberately vendored / bundled** set below.
+
+**(a) Vendored source code:**
+
+- **`portable-pty`** — upstream WezTerm (`wezterm/wezterm`, `pty/`), version
+  0.9.1, **MIT**, © 2018 Wez Furlong. Vendored in-tree at `portable-pty/`;
+  local changes logged in `portable-pty/vendored.md`; `LICENSE` present.
+
+**(b) Bundled font assets** (embedded via `include_bytes!`, no license file
+currently shipped alongside — **gap: 108.2 must add the license texts**):
+
+- **Hack** — `res/Hack-{Regular,Bold,Italic,BoldItalic}.ttf`, upstream
+  `source-foundry/Hack`, **MIT-style** (Hack Open Font License: MIT for the
+  font software, with a bitmap-rendering exception).
+- **MesloLGS Nerd Font Mono** —
+  `res/MesloLGSNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf`, upstream
+  `ryanoasis/nerd-fonts` (Meslo patched), **Apache-2.0** (base Meslo /
+  Apple-derived) **+ MIT** (Nerd Fonts glyph patches).
+
+**(c) Bundled image assets** (all first-party to the freminal project, MIT):
+
+- Application/window icon — `assets/icon.png`.
+- Logo — `assets/logo.png`.
+- macOS bundle icon — `assets/macos/freminal.icns`.
+
+**(d) Color theme palettes** — already attributed inline in
+`freminal-common/src/themes.rs` with `Source:` / `License:` doc comments
+(Catppuccin, Dracula, Nord, Solarized, Gruvbox, Tokyo Night, Kanagawa,
+Rosé Pine, Everforest, Ayu, One Dark/Light, Material, Monokai Pro, WezTerm,
+Ghostty, xterm). Most are MIT; a few are "color values widely published for
+terminal use". 108.2 should consolidate these into the attributions doc by
+reference rather than re-listing every palette.
+
+**Decisions for 108.2 (from this audit):**
+
+- The attributions doc lists (a), (b), (c) explicitly with license + upstream
+  link; (d) is covered by a single paragraph pointing at the inline
+  `themes.rs` attributions (single source of truth — no duplication).
+- **The font license texts are not currently bundled.** 108.2 must add the
+  upstream `LICENSE.md` (Hack) and `LICENSE` (Nerd Fonts / Meslo) under `res/`
+  (e.g. `res/fonts/`) so the distributed binary's source tree carries them, and
+  reference them from `ATTRIBUTIONS.md`.
+- Crate-tree transitive deps are NOT enumerated by hand; the doc states they
+  are permissive-licensed and governed by `deny.toml`, with a note that a full
+  SBOM can be produced via `cargo deny`/`cargo license`.
 
 #### 108.2 — Attributions document + README link
 
