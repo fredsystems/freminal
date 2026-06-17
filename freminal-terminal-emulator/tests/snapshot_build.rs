@@ -706,3 +706,49 @@ fn extra_rows_change_invalidates_cache() {
     let snap = emu.build_snapshot();
     assert_eq!(snap.row_offsets.len(), snap.term_height + 3);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK 113 — SMOKE TEST (commented out; uncomment to drive the fix).
+//
+// Bug E (amplifier): `handle_incoming_data` snaps the scroll offset to the live
+// bottom on new output (resets `gui_scroll_offset` to 0) but leaves
+// `gui_extra_rows` stale. A dedicated `reset_scroll_offset()` exists that clears
+// BOTH — `handle_incoming_data` should call it instead of only zeroing the
+// offset. While a fold is in view this leaves the flatten window extended above
+// the live bottom against a buffer that no longer has a fold there.
+//
+// This test is written against the CURRENT (buggy) code and FAILS on `main`.
+// Uncomment it, run it, watch it fail, implement the Task 113 fix, then watch it
+// pass. Once green, KEEP it (uncommented) as permanent regression coverage.
+//
+//   cargo test -p freminal-terminal-emulator --test snapshot_build task_113_new_data_resets_extra_rows
+//
+// See Documents/PLAN_VERSION_100.md "Task 113" for the full diagnosis.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// #[test]
+// fn task_113_new_data_resets_extra_rows() {
+//     let (mut emu, _rx) = make_emulator();
+//     fill_scrollback(&mut emu, 150);
+//
+//     // Simulate the GUI scrolled back with a fold in view: a non-zero
+//     // extra-row request riding alongside a non-zero scroll offset.
+//     emu.set_gui_scroll_window(10, 5);
+//     let scrolled = emu.build_snapshot();
+//     assert_eq!(scrolled.scroll_offset, 10);
+//     assert_eq!(scrolled.window_extra_rows, 5);
+//
+//     // New PTY output arrives → snap to the live bottom.
+//     emu.handle_incoming_data(b"new output\r\n");
+//     let after = emu.build_snapshot();
+//     assert_eq!(after.scroll_offset, 0, "offset must snap to live bottom");
+//
+//     // The fold-extra-row request must be cleared too, otherwise the flattened
+//     // window stays extended above the live bottom against a buffer that no
+//     // longer has a fold in view.
+//     assert_eq!(
+//         after.window_extra_rows, 0,
+//         "handle_incoming_data must clear gui_extra_rows on new output \
+//          (call reset_scroll_offset, not just zero the offset)"
+//     );
+// }

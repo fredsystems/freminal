@@ -32,15 +32,23 @@ bundled-font change alters the default glyph set.
 
 ## Task Summary
 
-| #   | Feature             | Scope | Status   | Depends On       |
-| --- | ------------------- | ----- | -------- | ---------------- |
-| 111 | Bundled Font / Icon | Large | Complete | v0.8.0, v0.9.0   |
-| 112 | UI Beautification   | Large | Active   | v0.8.0, Task 111 |
+| #   | Feature                     | Scope  | Status   | Depends On       |
+| --- | --------------------------- | ------ | -------- | ---------------- |
+| 111 | Bundled Font / Icon         | Large  | Complete | v0.8.0, v0.9.0   |
+| 112 | UI Beautification           | Large  | Active   | v0.8.0, Task 111 |
+| 113 | Resize / Reflow Scroll Bugs | Medium | Pending  | None             |
 
 Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
 "Pre-1.0 Remediations" (UI aesthetic, built-in fonts). Task 112 depends on Task
 111 because the bundled-icon asset pipeline (112) reuses the bundled-asset
 precedent established by the font swap (111), and both touch glyph rendering.
+
+Task 113 was added after a maintainer-reported intermittent scroll-corruption
+bug was root-caused during a v0.10.0 investigation session. It is independent of
+the beautification work (it lives in `freminal-buffer` and
+`freminal-terminal-emulator`, not the chrome) but is folded into this version
+because it is a correctness bug found while this version was active and should
+ship before 1.0. It has no dependency on Tasks 111/112.
 
 ---
 
@@ -953,3 +961,244 @@ Settings persistence without surfacing it.
 
 Stop: report all four wiring steps + the guard-test diff + Nix lint results;
 await review.
+
+---
+
+## Task 113 — Resize / Reflow Scroll Corruption
+
+> **STATUS: PENDING.** Decomposed into three subtasks (113.1–113.3). 113.1 is
+> the root-cause fix and the priority; 113.2 and 113.3 are independent
+> amplifiers found alongside it. Each subtask leaves `cargo test --all` green.
+
+### Background — the reported bug
+
+A maintainer reported an intermittent, hard-to-reproduce buffer-scroll
+corruption with these symptoms:
+
+1. There is scrollback present.
+2. The active prompt has scrolled to the top of the window even though it
+   should not be there.
+3. Sometimes the prompt is visible, sometimes it is itself in the scrollback
+   and nothing is visible. Typing a command still runs it, but the output is
+   missing (it lands in the scrollback).
+4. **No amount of scrolling surfaces the missing content.**
+5. Typing `clear` recovers the terminal.
+
+One reporter could reproduce it semi-reliably on macOS while changing font
+settings; the maintainer hits it on Hyprland (a tiling WM) **without** touching
+fonts, and it predates the command-block feature (Task 72). The font-change
+correlation is therefore a red herring: changing font size triggers a terminal
+resize (cell size changes → row/col count changes), and a tiling WM streams many
+resize events during interactive window manipulation. The common factor is
+**repeated resizes**, not fonts.
+
+### Root cause — Bug G (the real bug; predates command blocks)
+
+`Buffer::resize_height` grow branch
+(`freminal-buffer/src/buffer/resize_and_alt.rs`, ~line 490):
+
+```rust
+if new_height > old_height {
+    let grow = new_height - old_height;
+    for _ in 0..grow {
+        self.rows.push(Row::new(self.width)); // append blank rows at the BOTTOM
+        self.row_cache.push(None);
+    }
+    ...
+}
+```
+
+When the window grows, this appends `new_height - old_height` blank rows **at
+the bottom** of the buffer, leaving the live cursor's absolute `pos.y`
+unchanged. The shrink branch (same file, ~line 530) deliberately **retains**
+rows as scrollback and does not move the cursor. So the appended blanks are
+never reclaimed.
+
+Across a sequence of grow/shrink cycles — exactly what an interactive tiling-WM
+resize, or repeated font-size changes, produces — the buffer accumulates an
+unbounded tail of blank rows **below** the live cursor. The visible window
+(anchored to the bottom of the buffer via `visible_window_start`) then shows
+only that blank tail, while the live prompt/output is stranded near the **top**
+of the buffer, in scrollback. Because `scroll_offset` and `max_scroll_offset`
+are computed correctly from `rows.len()`, scrolling cannot recover it — the
+corruption is in the row layout, not the offset. `clear` recovers because it
+erases scrollback and re-homes the cursor.
+
+This was confirmed with a failing test that drives a height-only resize cycle
+(`[24, 30, 18, 40, 12, 50, 20, 24]`) and observes the live cursor escape the
+visible window with ~70 blank rows below it. (The test is checked in,
+commented out — see "Smoke tests" below.)
+
+### Amplifier — Bug R (reflow does not remap command blocks / prompt rows)
+
+`Buffer::reflow_to_width` (`resize_and_alt.rs`, ~line 263) rebuilds every row
+from scratch on a **width** change (which a font-size change, or a tiling-WM
+column-count change, triggers). It correctly remaps the cursor by flat-offset,
+but it does **not** update `self.command_blocks` or `self.prompt_rows`, whose
+row fields (`prompt_start_row`, `command_start_row`, `output_start_row`,
+`end_row`, and each `prompt_rows` entry) are **buffer-absolute** indices. After
+a reflow that changes the row count, those indices point at the wrong rows.
+
+The trim path (`enforce_scrollback_limit` → `adjust_prompt_rows`,
+`lifecycle.rs:132`) already does the equivalent remap when rows are dropped from
+the front; reflow simply lacks it. Stale block rows corrupt the command-block
+gutter and folding (`compute_fold_ranges` / `compute_extra_rows` /
+`FoldLayout`), which can push content off-screen incorrectly when a fold is in
+view — compounding Bug G's visual damage. Command blocks are **on by default**
+(`CommandBlocksConfig::default().enabled == true`), so this fires in normal use
+on any width-changing resize.
+
+Confirmed with a failing test: a block ending at row 4 at width 20 still reports
+`end_row == Some(4)` after reflowing to width 10, even though its last content
+row moved to row 9.
+
+### Amplifier — Bug E (new data clears scroll offset but not fold extra-rows)
+
+`TerminalEmulator::handle_incoming_data`
+(`freminal-terminal-emulator/src/interface.rs`, ~line 385) snaps to the live
+bottom on new output by resetting `self.gui_scroll_offset = 0`, but leaves
+`self.gui_extra_rows` stale. A dedicated `reset_scroll_offset()` (same file,
+~line 507) clears **both** — `handle_incoming_data` should call it instead of
+inlining only the offset reset. While a command-block fold is in view, the stale
+`gui_extra_rows` keeps the flattened window extended above the live bottom
+against a buffer that no longer has a fold there.
+
+On its own (no fold active) the GUI's `render_skip` absorbs the stale extra
+rows, so it self-heals; combined with a fold and Bug R's wrong block rows it
+contributes to the mis-anchored window. It is still a genuine correctness bug.
+
+Confirmed with a failing test: after `set_gui_scroll_window(10, 5)` then new
+output, `scroll_offset` correctly resets to 0 but `window_extra_rows` stays 5.
+
+### Smoke tests (already checked in, commented out)
+
+Three failing reproductions are committed alongside this task as **commented-out
+tests**, so the implementing agent has a built-in benchmark. Uncomment, run,
+watch them fail, implement the fix, watch them pass, then **keep them
+uncommented** as permanent regression coverage.
+
+- Bug G + Bug R: `freminal-buffer/src/buffer/mod.rs`, module `task_113_smoke`
+  (`task_113_repeated_resize_does_not_strand_live_content`,
+  `task_113_reflow_remaps_command_block_rows`).
+  Run: `cargo test -p freminal-buffer --lib task_113_smoke`.
+- Bug E: `freminal-terminal-emulator/tests/snapshot_build.rs`, function
+  `task_113_new_data_resets_extra_rows`.
+  Run: `cargo test -p freminal-terminal-emulator --test snapshot_build task_113_new_data_resets_extra_rows`.
+
+These tests are the acceptance criteria: a subtask is not done until its smoke
+test is uncommented and passing.
+
+Sequencing: 113.1 → 113.2 → 113.3 (independent; may be done in any order, but
+113.1 is the priority because it is the user-visible root cause). Each subtask
+leaves `cargo test --all` green.
+
+### Task 113 subtasks
+
+#### 113.1 — Fix the grow path so it never strands live content (Bug G)
+
+Scope: `freminal-buffer/src/buffer/resize_and_alt.rs` (`resize_height` grow
+branch, ~line 490). May add a private helper. Test changes in
+`freminal-buffer/src/buffer/mod.rs`.
+
+What: On a **primary-buffer** height grow, the live content must stay pinned to
+the bottom of the visible window. Instead of appending `grow` blank rows at the
+bottom, the grow must **re-expose existing scrollback rows above the live
+bottom** to fill the taller window, and append blank rows **only** when there is
+not enough scrollback to fill it. Concretely, the post-grow invariant is:
+
+- If `rows.len()` already provides at least `new_height` rows below the start of
+  the live region, the window grows by revealing scrollback upward (no rows
+  appended); the live cursor's absolute `pos.y` stays valid and the live bottom
+  stays at the bottom of the window.
+- Only when there are fewer than `new_height` total rows are blank rows appended
+  — and the number appended is bounded so a grow followed by a shrink/grow cycle
+  cannot accumulate an unbounded blank tail below the cursor.
+
+The **alternate buffer** keeps its current top-anchored behavior (it has no
+scrollback and the strict `rows.len() == height` invariant; do NOT change the
+alternate branch). Re-validate `debug_assert_invariants()` after the change.
+
+Think carefully about the interaction with the full-screen LF fast path
+(`lines.rs:169`), which assumes the live cursor sits at `rows.len() - 1`. The
+fix must not leave the cursor above the last row with blank rows below it, or LF
+will walk the cursor down through those blanks instead of scrolling.
+
+Deliverable: the grow path no longer appends an unreclaimable blank tail;
+repeated resize cycles keep the live cursor in the visible window with no blank
+tail below it.
+
+Verification: uncomment and pass the `task_113_smoke` module's
+`task_113_repeated_resize_does_not_strand_live_content` test (keep it
+uncommented); `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`. Per `freminal-bench-table` / `performance-benchmarks`, resize is a
+buffer operation — capture the relevant buffer/resize benchmark before/after and
+confirm < 15% regression.
+
+Prohibitions: do NOT change the alternate-buffer branch; do NOT change the
+shrink branch's row-retention behavior (it is correct); do NOT delete the
+committed smoke tests — uncomment them; do NOT "fix" the symptom in the GUI
+(`visible_window_start` / `render_skip`) — the bug is the buffer appending
+unreclaimable rows.
+
+Stop: report the new grow logic, the smoke-test result, and the benchmark
+before/after; await review.
+
+#### 113.2 — Remap command blocks and prompt rows across reflow (Bug R)
+
+Scope: `freminal-buffer/src/buffer/resize_and_alt.rs` (`reflow_to_width`, ~line
+263). May add a private helper mirroring `adjust_prompt_rows`. Test changes in
+`freminal-buffer/src/buffer/mod.rs`.
+
+What: `reflow_to_width` already tracks, during logical-line grouping, where each
+old row maps in the new layout (it uses this to remap the cursor by flat
+offset). Extend that tracking to also remap the buffer-absolute row fields of
+`self.command_blocks` (`prompt_start_row`, `command_start_row`,
+`output_start_row`, `end_row`) and each entry of `self.prompt_rows` to their new
+post-reflow row indices. The natural approach: record, per old logical line, the
+index of its first new row, and translate each stored row index through that
+map. Drop or clamp any block/prompt row that no longer maps onto a real row
+(matching the spirit of `adjust_prompt_rows`, which drops fully-scrolled-out
+blocks). Keep `command_blocks` ordering and the deque cap intact.
+
+Deliverable: after a width reflow, every command block's row fields and every
+prompt-row marker point at the row that actually holds their content.
+
+Verification: uncomment and pass `task_113_reflow_remaps_command_block_rows`
+(keep it uncommented); `cargo test --all`; `cargo clippy --all-targets
+--all-features -- -D warnings`. Add at least one more test covering a
+multi-block, multi-prompt reflow (wide → narrow AND narrow → wide) so the remap
+is exercised in both directions.
+
+Prohibitions: do NOT change the cursor remap (it is correct); do NOT leak parser
+/ escape-sequence knowledge into the buffer (this is pure row-index arithmetic
+on data the buffer already owns); do NOT delete the committed smoke test.
+
+Stop: report the remap approach + test results; await review.
+
+#### 113.3 — Clear fold extra-rows on new output (Bug E)
+
+Scope: `freminal-terminal-emulator/src/interface.rs` (`handle_incoming_data`,
+~line 385). Test changes in
+`freminal-terminal-emulator/tests/snapshot_build.rs`.
+
+What: In `handle_incoming_data`, replace the inline `if self.gui_scroll_offset >
+0 { self.gui_scroll_offset = 0; }` reset with a call to the existing
+`reset_scroll_offset()` (which clears both `gui_scroll_offset` and
+`gui_extra_rows`). Preserve the "only reset when actually scrolled back" intent
+if it matters for snapshot-cache invalidation — i.e. call `reset_scroll_offset()`
+when either `gui_scroll_offset > 0` or `gui_extra_rows > 0`, so new output always
+snaps fully to the live bottom without needlessly invalidating caches when
+already at the bottom with no fold extension.
+
+Deliverable: new PTY output clears both the scroll offset and the fold
+extra-rows request.
+
+Verification: uncomment and pass `task_113_new_data_resets_extra_rows` (keep it
+uncommented); `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`.
+
+Prohibitions: do NOT change the alternate-screen scroll handling; do NOT alter
+`reset_scroll_offset`'s semantics — call it; do NOT delete the committed smoke
+test.
+
+Stop: report the one-line change + test result; await review.

@@ -7547,3 +7547,125 @@ mod coverage_gap_tests {
         assert_eq!(buf.rows.len(), rows_before);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK 113 — SMOKE TESTS (commented out; uncomment to drive the fix).
+//
+// These two tests are the failing reproductions for Task 113's buffer-side
+// bugs (Bug G — the root cause — and Bug R — the reflow amplifier). They are
+// written against the CURRENT (buggy) code and FAIL on `main`. Uncomment the
+// module, run it, watch it fail, implement the Task 113 fix, then watch it
+// pass. Once green, KEEP these tests (uncommented) as permanent regression
+// coverage — do not delete them.
+//
+//   cargo test -p freminal-buffer --lib task_113_smoke
+//
+// See Documents/PLAN_VERSION_100.md "Task 113" for the full diagnosis.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// #[cfg(test)]
+// mod task_113_smoke {
+//     use super::*;
+//     use freminal_common::buffer_states::tchar::TChar;
+//
+//     fn t(s: &str) -> Vec<TChar> {
+//         s.bytes().map(TChar::Ascii).collect()
+//     }
+//
+//     // ── Bug G (ROOT CAUSE): grow appends blank rows at the bottom and never
+//     // reclaims them. Repeated grow/shrink cycles (an interactive tiling-WM
+//     // resize, or repeated font-size changes) accumulate an unbounded tail of
+//     // blank rows BELOW the live cursor. The visible window then shows only
+//     // that blank tail while the live prompt/output is stranded at the top of
+//     // the buffer in unreachable scrollback. `clear` recovers it.
+//     //
+//     // This test FAILS on main: after the resize cycle the live cursor lands
+//     // OUTSIDE the visible window, with a large blank tail below it.
+//     #[test]
+//     fn task_113_repeated_resize_does_not_strand_live_content() {
+//         let mut b = Buffer::new(40, 24);
+//         // A few lines of content, cursor at the live bottom.
+//         for i in 0..5 {
+//             b.insert_text(&t(&format!("line{i}")));
+//             b.handle_lf();
+//             b.handle_cr();
+//         }
+//
+//         // Interactive resize: height changes only, no output between them
+//         // (like dragging a tiling window border while sitting at a prompt).
+//         for &h in &[24usize, 30, 18, 40, 12, 50, 20, 24] {
+//             b.set_size(40, h, 0);
+//         }
+//
+//         // Settle and emit one line of output.
+//         b.set_size(40, 24, 0);
+//         b.handle_lf();
+//         b.handle_cr();
+//         b.insert_text(&t("PROMPT$"));
+//
+//         // The live cursor MUST be inside the visible window.
+//         let vis_start = b.visible_window_start(0);
+//         let vis_end = vis_start + b.height;
+//         assert!(
+//             b.cursor.pos.y >= vis_start && b.cursor.pos.y < vis_end,
+//             "live cursor (row {}) escaped visible window [{vis_start}, {vis_end}) \
+//              after repeated resize — content stranded in unreachable scrollback",
+//             b.cursor.pos.y
+//         );
+//
+//         // And the live content must be near the bottom, not stranded above a
+//         // large blank tail.
+//         let blanks_below = b.rows.len().saturating_sub(b.cursor.pos.y + 1);
+//         assert!(
+//             blanks_below <= 1,
+//             "blank tail of {blanks_below} rows below the live cursor — the grow \
+//              path is appending blanks that are never reclaimed",
+//         );
+//     }
+//
+//     // ── Bug R (amplifier): reflow_to_width rebuilds every row on a width
+//     // change but does NOT remap command_blocks / prompt_rows, whose row
+//     // fields are buffer-absolute. After a width reflow the block metadata
+//     // points at the wrong rows, corrupting gutters/folds.
+//     //
+//     // This test FAILS on main: end_row stays at its pre-reflow value while
+//     // the actual last content row has moved.
+//     #[test]
+//     fn task_113_reflow_remaps_command_block_rows() {
+//         let mut buf = Buffer::new(20, 5);
+//
+//         // Prompt + command on row 0, output starting on row 1.
+//         let _id = buf.start_command_block(None, "fid1".to_owned());
+//         buf.mark_prompt_row();
+//         buf.insert_text(&t("prompt$ cmd"));
+//         buf.mark_command_start_row("fid1"); // command_start_row = 0
+//         buf.handle_lf(); // cursor -> row 1
+//         buf.mark_output_start_row("fid1"); // output_start_row = 1
+//
+//         // A long output line that re-wraps differently at a new width.
+//         buf.insert_text(&t(
+//             "0123456789012345678901234567890123456789012345678901234567890",
+//         ));
+//         let _ = buf.finish_command_block(Some(0), "fid1"); // end_row = cursor row
+//
+//         let last_content_row_before = buf.rows.len() - 1;
+//         assert_eq!(
+//             buf.command_blocks()[0].end_row,
+//             Some(last_content_row_before),
+//             "precondition: end_row points at the last content row"
+//         );
+//
+//         // Reflow to a narrower width — the long output re-wraps into MORE
+//         // rows, so the last output row's absolute index increases.
+//         buf.set_size(10, 5, 0);
+//
+//         let last_content_row_after = buf.rows.len() - 1;
+//         assert_eq!(
+//             buf.command_blocks()[0].end_row,
+//             Some(last_content_row_after),
+//             "reflow must remap command_block end_row to the new layout \
+//              (block points at {:?}, last content row is {last_content_row_after})",
+//             buf.command_blocks()[0].end_row,
+//         );
+//     }
+// }
