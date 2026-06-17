@@ -24,26 +24,17 @@ the in-app About dialog both point here rather than duplicating license text.
 The following fonts are embedded into the freminal binary at compile time. The
 full upstream license texts are bundled under [`res/fonts/`](res/fonts/).
 
-### Hack
+### CaskaydiaCove Nerd Font
 
-- **Upstream:** <https://github.com/source-foundry/Hack>
-- **License:** MIT (Hack project) plus the Bitstream Vera License for the
-  Bitstream-derived components — Copyright 2018 Source Foundry Authors;
-  Bitstream Vera Sans Mono Copyright 2003 Bitstream Inc.
-- **License text:** [`res/fonts/Hack-LICENSE.md`](res/fonts/Hack-LICENSE.md)
-- **Files:** `res/Hack-{Regular,Bold,Italic,BoldItalic}.ttf`
-
-### MesloLGS Nerd Font Mono
-
-- **Upstream:** Nerd Fonts — <https://github.com/ryanoasis/nerd-fonts>
-  (Meslo LG patched); base typeface Meslo LG by André Berg —
-  <https://github.com/andreberg/Meslo-Font>
-- **License:** SIL Open Font License 1.1 for the bundled patched font files
-  (Copyright (c) 2014 Ryan L McIntyre); the underlying Meslo LG typeface is
-  Apache-2.0; the Nerd Fonts patcher source (not bundled) is MIT.
+- **Upstream:** Nerd Fonts — <https://github.com/ryanoasis/nerd-fonts> (Cascadia
+  Code patched and renamed to "CaskaydiaCove"); base typeface Cascadia Code by
+  Microsoft — <https://github.com/microsoft/cascadia-code>
+- **License:** SIL Open Font License 1.1. The base typeface reserves the name
+  "Cascadia Code" under the OFL Reserved Font Name clause; the Nerd Fonts patch
+  renames the bundled faces to "CaskaydiaCove" to comply.
 - **License text:**
-  [`res/fonts/MesloLGS-NerdFont-LICENSE.md`](res/fonts/MesloLGS-NerdFont-LICENSE.md)
-- **Files:** `res/MesloLGSNerdFontMono-{Regular,Bold,Italic,BoldItalic}.ttf`
+  [`res/fonts/CaskaydiaCove-NerdFont-LICENSE.md`](res/fonts/CaskaydiaCove-NerdFont-LICENSE.md)
+- **Files:** `res/CaskaydiaCoveNerdFont-{Regular,Bold,Italic,BoldItalic}.ttf`
 
 ## Bundled images
 

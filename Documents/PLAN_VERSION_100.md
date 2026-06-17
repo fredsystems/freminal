@@ -32,10 +32,10 @@ bundled-font change alters the default glyph set.
 
 ## Task Summary
 
-| #   | Feature             | Scope | Status | Depends On       |
-| --- | ------------------- | ----- | ------ | ---------------- |
-| 111 | Bundled Font / Icon | Large | Active | v0.8.0, v0.9.0   |
-| 112 | UI Beautification   | Large | Active | v0.8.0, Task 111 |
+| #   | Feature             | Scope | Status   | Depends On       |
+| --- | ------------------- | ----- | -------- | ---------------- |
+| 111 | Bundled Font / Icon | Large | Complete | v0.8.0, v0.9.0   |
+| 112 | UI Beautification   | Large | Active   | v0.8.0, Task 111 |
 
 Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
 "Pre-1.0 Remediations" (UI aesthetic, built-in fonts). Task 112 depends on Task
@@ -297,6 +297,21 @@ no code or asset changes.
 
 ## Task 111 — Bundled Font / Icon
 
+> **STATUS: COMPLETE.** All 7 subtasks (111.1–111.7) landed on
+> `task-111/bundled-font`. CaskaydiaCove NF is bundled, MesloLGS and Hack are
+> removed, attributions updated, ligatures are proven against the real bundled
+> face, and the font picker annotates the bundled default and any system
+> duplicate.
+>
+> **Durable finding (from 111.6):** CaskaydiaCove (like Cascadia Code)
+> implements its coding ligatures via `calt` chaining-contextual substitution
+> into dedicated "ligature-piece" glyphs, **not** a many-to-one ligature
+> collapse — so the shaped glyph _count_ is unchanged while the glyph _IDs_
+> change. The regression test asserts on glyph-ID difference (ligatures on vs
+> off), not on glyph-count reduction. The font's GSUB has `calt` only (no
+> `liga`), and `calt` is registered under `DFLT`/`latn`, so no
+> `guess_segment_properties()` call is needed in the shaping path.
+
 Replace the bundled MesloLGS faces with CaskaydiaCove Nerd Font (ligature-bearing
 `Cove` variant) and remove the unused Hack font. This makes the already-wired
 ligature feature functional out of the box and removes dead bundled assets. See
@@ -503,6 +518,88 @@ hard-code the bundled family name in multiple places (single source of truth);
 do NOT change the user-font loading path — this is picker labeling only.
 
 Stop: report the label logic + test results + manual check; await review.
+
+### Task 111 follow-up fixes
+
+These fixes landed on `task-111/bundled-font` after the seven planned
+subtasks. The CaskaydiaCove cell-metric change (111.2) altered cell height,
+which changed how a pair of pre-existing emoji bugs manifested visually —
+making them newly visible and worth fixing here alongside the font work.
+
+#### 111.8 — Color-emoji sizing + premultiplied alpha (DONE)
+
+Scope: `freminal/src/gui/atlas.rs`, `freminal/src/gui/renderer/vertex.rs`,
+`freminal/src/gui/renderer/shaders/fg.frag`.
+
+Two latent bugs in the color-emoji render path:
+
+1. Color emoji were rasterised at their native bitmap-strike size (swash
+   `StrikeWith::BestFit` does not downscale to the requested ppem) and the
+   cell-boundary code _cropped_ rather than _scaled_ them, so emoji rendered
+   oversized, clipped, and blurry. `emit_glyph_instance` now takes a dedicated
+   color-glyph branch (`fit_color_glyph_rect`) that scales the glyph to fit the
+   cell height with a 12% margin, preserves aspect ratio, and centres it in its
+   advance box. Monochrome glyphs keep the existing crop-clip path.
+2. swash returns straight (non-premultiplied) RGBA for color emoji, but the
+   shader and egui's GL blend state both assume premultiplied alpha, leaving a
+   white fringe. RGBA is now premultiplied on the CPU in `rasterize_glyph`
+   (`premultiply_rgba_in_place`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; `cargo machete`; `bench_fg_instances` before/after (no change).
+Nine new unit tests.
+
+#### 111.9 — Insert-mode (IRM) wide-character cursor drift
+
+Scope: `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+(`insert_text_irm_aware`, ~590).
+
+Long-standing, pre-existing bug (reproduces off-branch). When insert mode (IRM,
+`CSI 4 h`) is active — which shell line editors enable while editing the command
+line — `insert_text_irm_aware` opens exactly **one** column per character via
+`insert_spaces(1)` before writing the glyph. A double-width character (emoji,
+CJK) needs **two** columns opened, so the shift is off by one per wide
+character: a stray blank cell is left in front of the glyph, it overwrites part
+of the prompt, and the cursor drifts. The fix opens `ch.display_width().max(1)`
+columns instead of 1.
+
+Deliverable: inserting a wide character in IRM mode shifts existing content by
+the character's display width, not by 1. Regression test feeding a wide char in
+insert mode and asserting the resulting buffer layout + cursor column.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`.
+
+Prohibitions: do NOT change the non-insert path; do NOT alter `insert_spaces`
+semantics (it correctly opens `n` columns) — the bug is the caller passing 1.
+
+#### 111.10 — Backspace over a wide glyph drifts the cursor
+
+Scope: `freminal-buffer/src/buffer/lines.rs` (`handle_backspace`, ~43).
+
+Long-standing, pre-existing bug (reproduces off-branch; root cause of the
+emoji paste / prompt-redraw cursor drift, confirmed via an FREC recording of
+zsh). BS (cursor backward, `\x08`) must move the cursor **exactly one column**.
+`handle_backspace` moved one column and **then** skipped left over any wide-glyph
+continuation cells. Applications cross a double-width glyph by emitting **two**
+backspaces (xterm/VT behaviour); the continuation-skip consumed both as a single
+move, drifting the cursor by one per wide glyph. zsh redrawing a pasted emoji
+(`\x08\x08` then rewrite) therefore landed one cell off, leaving a stray blank
+cell and corrupting the prompt.
+
+Fix: remove the continuation-skip loop. The cursor may legitimately land on a
+continuation cell; the next write triggers the existing wide-overwrite cleanup
+at that position.
+
+Deliverable: one BS over a wide glyph lands on its continuation cell, a second
+on its head. Regression test updated (`backspace_moves_one_column_over_wide_glyph`,
+formerly `backspace_jumps_wide_glyph`, which asserted the buggy skip).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`.
+
+Prohibitions: do NOT reintroduce the continuation skip; do NOT change the
+reverse-wrap or pending-wrap branches.
 
 ---
 

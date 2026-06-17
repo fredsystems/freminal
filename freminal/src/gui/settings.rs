@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use super::font_manager;
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
     self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
@@ -150,6 +151,60 @@ enum KeyRecordingState {
         /// If `Some`, the combo is already bound to this other action.
         conflict: Option<KeyAction>,
     },
+}
+
+/// A single selectable entry in the font-family picker.
+///
+/// `label` is display-only (may carry a "(default — bundled)" / "(system)"
+/// annotation); `value` is what gets persisted into `font.family`
+/// (`None` = use the bundled default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FontFamilyEntry {
+    /// Text shown in the dropdown (annotated; never persisted).
+    label: String,
+    /// Persisted `font.family` value for this entry (`None` = bundled default).
+    value: Option<String>,
+}
+
+/// The display label for the bundled default entry (no system-duplicate
+/// annotation).
+fn default_font_label() -> String {
+    format!("{} (default — bundled)", font_manager::BUNDLED_FONT_FAMILY)
+}
+
+/// Build the ordered list of font-family picker entries from the installed
+/// monospace families.
+///
+/// The first entry is always the bundled default (`value = None`), annotated
+/// `"<family> (default — bundled)"`. It is followed by every installed
+/// monospace family in the order given. If an installed family is the same font
+/// as the bundled default (matched via the font manager's whitespace-stripped
+/// comparison), its label is annotated `"<family> (system)"` to distinguish it
+/// from the bundled default — but its persisted `value` is the real family name
+/// (`Some(name)`), so selecting it uses the system copy via the normal
+/// user-font path. The annotation is display-only.
+fn font_family_entries(monospace_families: &[String]) -> Vec<FontFamilyEntry> {
+    let mut entries = Vec::with_capacity(monospace_families.len() + 1);
+
+    // Bundled default first.
+    entries.push(FontFamilyEntry {
+        label: default_font_label(),
+        value: None,
+    });
+
+    for name in monospace_families {
+        let label = if font_manager::family_matches_bundled(name) {
+            format!("{name} (system)")
+        } else {
+            name.clone()
+        };
+        entries.push(FontFamilyEntry {
+            label,
+            value: Some(name.clone()),
+        });
+    }
+
+    entries
 }
 
 /// Persistent state for the settings modal.
@@ -827,33 +882,45 @@ impl SettingsModal {
         ui.separator();
     }
 
-    const DEFAULT_LABEL: &str = "Default (MesloLGS Nerd Font)";
-
     fn show_font_tab(&mut self, ui: &mut Ui) {
         // --- Font Family dropdown ---
         ui.label("Font Family:");
 
-        let selected_label = self
-            .draft
-            .font
-            .family
-            .as_deref()
-            .unwrap_or(Self::DEFAULT_LABEL);
+        // Build the labelled entries once so the same logic drives the
+        // dropdown text and the selectable items (and is unit-testable).
+        let entries = font_family_entries(&self.monospace_families);
+
+        // The label shown in the closed combo box: match the currently-selected
+        // persisted value against the entry list.
+        let selected_label = entries
+            .iter()
+            .find(|e| e.value.as_deref() == self.draft.font.family.as_deref())
+            .map_or_else(
+                || {
+                    // The persisted family is not in the installed list (e.g.
+                    // a font that was uninstalled). Show it verbatim.
+                    self.draft
+                        .font
+                        .family
+                        .clone()
+                        .unwrap_or_else(default_font_label)
+                },
+                |e| e.label.clone(),
+            );
 
         ComboBox::from_id_salt("font_family")
             .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui| {
-                // "Default" entry at the top.
-                ui.selectable_value(&mut self.draft.font.family, None, Self::DEFAULT_LABEL);
-                ui.separator();
-
-                // All installed monospace families.
-                for name in &self.monospace_families {
+                for (idx, entry) in entries.iter().enumerate() {
+                    // Separate the bundled default from the installed list.
+                    if idx == 1 {
+                        ui.separator();
+                    }
                     ui.selectable_value(
                         &mut self.draft.font.family,
-                        Some(name.clone()),
-                        name.as_str(),
+                        entry.value.clone(),
+                        entry.label.as_str(),
                     );
                 }
             });
@@ -878,7 +945,7 @@ impl SettingsModal {
         let preview_text = "The quick brown fox 0O1lI| {}[]() => !=";
 
         // Choose the font family for the preview text:
-        //   - Default selected → use egui's Monospace (bundled MesloLGS)
+        //   - Default selected → use egui's Monospace (bundled CaskaydiaCove)
         //   - Custom font selected AND the registered preview matches → use the preview font
         //   - Custom font selected but preview not yet loaded or stale → fall back to Monospace
         let preview_font = if self.preview_registered.as_deref()
@@ -2583,6 +2650,62 @@ mod tests {
 
         assert_eq!(modal.draft.tab_title.policy, TabTitlePolicy::Suffix);
         assert_eq!(modal.draft.tab_title.separator, " / ");
+    }
+
+    // -- Font-family picker label construction (Task 111.7) --
+
+    #[test]
+    fn font_family_entries_default_when_no_system_duplicate() {
+        // None of the installed families is the bundled font.
+        let installed = vec!["Fira Code".to_string(), "JetBrains Mono".to_string()];
+        let entries = font_family_entries(&installed);
+
+        // First entry is the annotated bundled default, persisting `None`.
+        assert_eq!(entries[0].label, default_font_label());
+        assert!(
+            entries[0].label.contains("default — bundled"),
+            "default entry must carry the bundled annotation: {}",
+            entries[0].label
+        );
+        assert_eq!(entries[0].value, None);
+
+        // Installed families follow, unannotated, persisting their real name.
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1].label, "Fira Code");
+        assert_eq!(entries[1].value, Some("Fira Code".to_string()));
+        assert_eq!(entries[2].label, "JetBrains Mono");
+        assert_eq!(entries[2].value, Some("JetBrains Mono".to_string()));
+
+        // No "(system)" annotation when there is no duplicate.
+        assert!(entries.iter().all(|e| !e.label.ends_with("(system)")));
+    }
+
+    #[test]
+    fn font_family_entries_annotates_system_duplicate() {
+        // The user also has the bundled font installed system-wide. The font
+        // manager's whitespace-stripped match treats "Caskaydia Cove Nerd Font"
+        // as the same font as the bundled "CaskaydiaCove Nerd Font".
+        let installed = vec![
+            "Caskaydia Cove Nerd Font".to_string(),
+            "Fira Code".to_string(),
+        ];
+        let entries = font_family_entries(&installed);
+
+        // Bundled default still first, still persists `None`.
+        assert_eq!(entries[0].label, default_font_label());
+        assert_eq!(entries[0].value, None);
+
+        // The system copy is annotated "(system)" but persists its real name,
+        // so selecting it uses the installed copy via the user-font path.
+        assert_eq!(entries[1].label, "Caskaydia Cove Nerd Font (system)");
+        assert_eq!(
+            entries[1].value,
+            Some("Caskaydia Cove Nerd Font".to_string())
+        );
+
+        // A non-duplicate installed family is untouched.
+        assert_eq!(entries[2].label, "Fira Code");
+        assert_eq!(entries[2].value, Some("Fira Code".to_string()));
     }
 
     #[test]

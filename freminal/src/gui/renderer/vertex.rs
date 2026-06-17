@@ -787,12 +787,92 @@ impl RowGlyphParams {
     }
 }
 
+/// Fraction of the cell height left as vertical breathing room around a
+/// fitted color emoji (split evenly top and bottom).  An emoji is scaled so
+/// that its height occupies `1.0 - COLOR_GLYPH_CELL_MARGIN` of the cell,
+/// giving the "sized to the line with a small gap" appearance rather than
+/// filling the cell edge-to-edge.
+const COLOR_GLYPH_CELL_MARGIN: f32 = 0.12;
+
+/// A fitted axis-aligned quad for a color glyph: top-left corner and size in
+/// pixels, in the same coordinate space as the row's cell box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FittedColorRect {
+    x0: f32,
+    y0: f32,
+    width: f32,
+    height: f32,
+}
+
+/// Scale a color (emoji) glyph to fit the cell box, preserving aspect ratio.
+///
+/// Color emoji are rasterised at their native bitmap-strike size (swash's
+/// `StrikeWith::BestFit` does not downscale to the requested ppem), so the
+/// raw glyph dimensions routinely exceed the cell.  Rather than crop the
+/// glyph to the cell (which cuts it off and minifies blurrily), we scale it
+/// uniformly so its height fits the cell minus [`COLOR_GLYPH_CELL_MARGIN`],
+/// then centre it within the glyph's advance box.
+///
+/// `advance_w` is the glyph's horizontal advance in pixels (the cell box
+/// width for a single-width emoji, already scaled for DECDWL).  `cell_top`
+/// and `cell_h` describe the cell's vertical extent.  The glyph is centred
+/// vertically within the cell.
+///
+/// Glyphs already small enough are only down-shifted to centre; they are
+/// never enlarged (`scale` is clamped to `<= 1.0`), preserving crisp small
+/// emoji.
+fn fit_color_glyph_rect(
+    glyph_w: f32,
+    glyph_h: f32,
+    x_origin: f32,
+    advance_w: f32,
+    cell_top: f32,
+    cell_h: f32,
+) -> FittedColorRect {
+    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_h <= 0.0 {
+        return FittedColorRect {
+            x0: x_origin,
+            y0: cell_top,
+            width: glyph_w.max(0.0),
+            height: glyph_h.max(0.0),
+        };
+    }
+
+    let target_h = cell_h * (1.0 - COLOR_GLYPH_CELL_MARGIN);
+
+    // Uniform scale: fit within target height AND the advance width, never
+    // enlarging beyond native size.
+    let scale_h = target_h / glyph_h;
+    let scale_w = if advance_w > 0.0 && glyph_w > advance_w {
+        advance_w / glyph_w
+    } else {
+        1.0
+    };
+    let scale = scale_h.min(scale_w).min(1.0);
+
+    let width = glyph_w * scale;
+    let height = glyph_h * scale;
+
+    // Centre horizontally within the advance box and vertically within the cell.
+    let x0 = (advance_w - width).mul_add(0.5, x_origin);
+    let y0 = (cell_h - height).mul_add(0.5, cell_top);
+
+    FittedColorRect {
+        x0,
+        y0,
+        width,
+        height,
+    }
+}
+
 /// Emit a single foreground glyph instance (13 floats).
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
-/// instance into `instances`.  Glyphs that extend beyond the cell's vertical
-/// extent are clipped, and their UV and position are adjusted proportionally
-/// so the visible portion of the atlas texture is correct.
+/// instance into `instances`.  Monochrome glyphs that extend beyond the
+/// cell's vertical extent are clipped (Nerd Font powerline/icon glyphs are
+/// intended to fill or overflow the cell), with UVs adjusted proportionally.
+/// Color emoji are instead scaled to fit the cell (see
+/// [`fit_color_glyph_rect`]) so they are not cropped or minified.
 ///
 /// `row_params` carries per-row scaling and baseline data for DECDWL / DECDHL.
 fn emit_glyph_instance(
@@ -827,6 +907,50 @@ fn emit_glyph_instance(
 
     let [u0, v0, u1, v1] = entry.uv_rect;
 
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+
+    // Color emoji take a separate geometry path: rather than crop an
+    // oversized bitmap to the cell, scale it to fit (see
+    // `fit_color_glyph_rect`).  UVs are passed through unmodified because the
+    // whole glyph is shown.
+    if glyph.is_color {
+        // Advance box width: the glyph's cell span times the cell width, with
+        // the row's horizontal scale applied (DECDWL).
+        let advance_w = gl_f32_u32(font_manager.cell_width())
+            * gl_f32(glyph.cell_width.max(1))
+            * row_params.x_scale;
+        let x_origin = glyph.x_px * row_params.x_scale;
+        let cell_h = cell_bottom - cell_top;
+        let fitted = fit_color_glyph_rect(
+            f32::from(entry.width) * row_params.x_scale,
+            f32::from(entry.height) * row_params.y_scale,
+            x_origin,
+            advance_w,
+            cell_top + row_params.y_origin_shift,
+            cell_h,
+        );
+        if fitted.width <= 0.0 || fitted.height <= 0.0 {
+            return;
+        }
+        instances.extend_from_slice(&[
+            fitted.x0,
+            fitted.y0,
+            fitted.width,
+            fitted.height,
+            u0,
+            v0,
+            u1,
+            v1,
+            fg_color[0],
+            fg_color[1],
+            fg_color[2],
+            fg_color[3],
+            1.0,
+        ]);
+        return;
+    }
+
     // Pixel position: cell-grid x + bearing, baseline_y - bearing_y.
     // Apply horizontal and vertical scaling for DECDWL / DECDHL rows.
     let x0 = (glyph.x_px + f32::from(entry.bearing_x)) * row_params.x_scale;
@@ -835,7 +959,6 @@ fn emit_glyph_instance(
     // Vertical position: scale the glyph's offset from the cell top, then
     // apply `y_origin_shift` (negative for DECDHL bottom half to show the
     // lower half of the 2× glyph).
-    let cell_top = row_params.cell_y_range[0];
     let relative_y = row_params.baseline_y - cell_top - f32::from(entry.bearing_y);
     let raw_y0 = row_params
         .y_scale
@@ -848,7 +971,6 @@ fn emit_glyph_instance(
     // above or below the cell.  Clamp the quad to the cell's vertical
     // extent and adjust the UV coordinates proportionally so only the
     // visible portion of the atlas texture is sampled.
-    let cell_bottom = row_params.cell_y_range[1];
     let glyph_h = raw_y1 - raw_y0;
     let (y0, v0_adj) = if raw_y0 < cell_top {
         // Glyph extends above the cell — clip the top.
@@ -870,9 +992,9 @@ fn emit_glyph_instance(
         return;
     }
 
-    let is_color_f: f32 = if glyph.is_color { 1.0 } else { 0.0 };
-
-    // One instance: glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1, r, g, b, a, is_color
+    // One instance: glyph_x, glyph_y, glyph_w, glyph_h, u0, v0, u1, v1, r, g, b, a, is_color.
+    // Color emoji took the early-return path above; this is always a
+    // monochrome glyph, so `is_color` is 0.0.
     instances.extend_from_slice(&[
         x0,
         y0,
@@ -886,7 +1008,7 @@ fn emit_glyph_instance(
         fg_color[1],
         fg_color[2],
         fg_color[3],
-        is_color_f,
+        0.0,
     ]);
 }
 
@@ -1602,6 +1724,86 @@ mod tests {
     // -----------------------------------------------------------------------
     //  Foreground instance tests
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    //  Color-glyph fit-to-cell sizing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fit_color_glyph_oversized_scales_to_cell_height_with_margin() {
+        // A 64x64 native emoji bitmap in a 20px-tall, 2-cell-wide box.
+        let cell_h = 20.0;
+        let advance_w = 20.0; // 2 cells of 10px each
+        let r = fit_color_glyph_rect(64.0, 64.0, 0.0, advance_w, 0.0, cell_h);
+        // Height fits within cell minus margin.
+        let max_h = cell_h * (1.0 - COLOR_GLYPH_CELL_MARGIN);
+        assert!(
+            r.height <= max_h + 0.01,
+            "height {} should be <= {max_h}",
+            r.height
+        );
+        // Aspect ratio preserved (square in, square out).
+        assert!(
+            (r.width - r.height).abs() < 0.01,
+            "aspect ratio not preserved"
+        );
+        // Centered vertically within the cell.
+        assert!((cell_h - r.height).mul_add(-0.5, r.y0).abs() < 0.01);
+        // Stays within the cell bounds vertically.
+        assert!(r.y0 >= 0.0);
+        assert!(r.y0 + r.height <= cell_h + 0.01);
+    }
+
+    #[test]
+    fn fit_color_glyph_centered_within_advance_box() {
+        // Emoji narrower than its 2-cell advance box must be centered, never
+        // shifted left into the previous cell.
+        let r = fit_color_glyph_rect(64.0, 64.0, 100.0, 40.0, 0.0, 20.0);
+        // Left edge must be at or past the box origin (never to the left).
+        assert!(r.x0 >= 100.0, "glyph shifted left of its cell: x0={}", r.x0);
+        // Right edge must stay within the advance box.
+        assert!(
+            r.x0 + r.width <= 100.0 + 40.0 + 0.01,
+            "glyph overflows its advance box: x1={}",
+            r.x0 + r.width
+        );
+        // Symmetric centering.
+        let left_gap = r.x0 - 100.0;
+        let right_gap = (100.0 + 40.0) - (r.x0 + r.width);
+        assert!((left_gap - right_gap).abs() < 0.01, "not centered");
+    }
+
+    #[test]
+    fn fit_color_glyph_small_not_enlarged() {
+        // A glyph already smaller than the cell must not be scaled up.
+        let r = fit_color_glyph_rect(8.0, 8.0, 0.0, 20.0, 0.0, 20.0);
+        assert!((r.width - 8.0).abs() < 0.01, "small glyph was enlarged");
+        assert!((r.height - 8.0).abs() < 0.01, "small glyph was enlarged");
+    }
+
+    #[test]
+    fn fit_color_glyph_degenerate_inputs() {
+        let r = fit_color_glyph_rect(0.0, 0.0, 5.0, 10.0, 2.0, 0.0);
+        assert!(r.width.abs() < f32::EPSILON);
+        assert!(r.height.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fit_color_glyph_wide_emoji_uses_full_two_cell_box() {
+        // The fitted glyph for a width-2 emoji must span (centered) the full
+        // 2-cell box, not a single cell — this is the regression guard for the
+        // "emoji squeezed into one cell, blank cell inserted" bug.
+        let cell_px = 10.0;
+        let two_cells = cell_px * 2.0;
+        let r = fit_color_glyph_rect(64.0, 64.0, 50.0, two_cells, 0.0, 20.0);
+        // The glyph must be wider than a single cell (it fit to 20px height,
+        // square, so ~17.6px wide > 10px cell).
+        assert!(
+            r.width > cell_px,
+            "width-2 emoji collapsed into a single cell: width={}",
+            r.width
+        );
+    }
 
     #[test]
     fn fg_instances_empty_on_empty_lines() {

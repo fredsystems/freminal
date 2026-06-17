@@ -219,7 +219,7 @@ in
           default = null;
           description = ''
             Primary terminal font family.
-            When null, the bundled MesloLGS Nerd Font Mono is used.
+            When null, the bundled CaskaydiaCove Nerd Font is used.
           '';
         };
 

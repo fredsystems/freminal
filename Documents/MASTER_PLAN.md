@@ -180,7 +180,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 108 | About Modal & Attribution                | `PLAN_VERSION_090.md` (Task 108)              | Complete      | Task 107               |
 | 109 | Active-Pane Highlight Correctness (Gate) | `PLAN_VERSION_090.md` (Task 109)              | Complete      | Task 58                |
 | 110 | Focus Follows Mouse (Toggleable)         | `PLAN_VERSION_090.md` (Task 110)              | Complete      | Task 58                |
-| 111 | Bundled Font / Icon (CaskaydiaCove)      | `PLAN_VERSION_100.md` (Task 111)              | Active        | v0.8.0, v0.9.0         |
+| 111 | Bundled Font / Icon (CaskaydiaCove)      | `PLAN_VERSION_100.md` (Task 111)              | Complete      | v0.8.0, v0.9.0         |
 | 112 | UI Beautification (ChromeStyle)          | `PLAN_VERSION_100.md` (Task 112)              | Active        | Task 111               |
 
 ---
@@ -635,6 +635,7 @@ Update this section as tasks complete:
 | 108  | 2026-06-11 | 2026-06-11 | 108.1-108.3 (audit, ATTRIBUTIONS.md, About link) on task-108/about-modal-at      |
 | 110  | 2026-06-14 | 2026-06-14 | 110.1-110.2 on task-110/focus-follows-mouse; PR pending                          |
 | 109  | 2026-06-14 | 2026-06-14 | 109.1 audit + 109.2 surround highlight (two-pane half-fill fallback); PR pending |
+| 111  | 2026-06-17 | 2026-06-17 | All 7 subtasks (111.1-111.7) on task-111/bundled-font; PR pending                |
 
 ---
 

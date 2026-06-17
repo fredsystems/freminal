@@ -9,7 +9,8 @@ uniform sampler2D u_atlas;
 
 void main() {
     if (v_is_color > 0.5) {
-        // Color emoji: pass through atlas RGBA directly (already premultiplied).
+        // Color emoji: atlas RGBA is premultiplied on the CPU (see
+        // atlas.rs rasterize_glyph), so pass it through directly.
         frag_color = texture(u_atlas, v_uv);
     } else {
         // Monochrome glyph: tint with foreground color.

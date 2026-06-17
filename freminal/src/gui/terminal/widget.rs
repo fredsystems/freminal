@@ -3095,7 +3095,7 @@ mod subtask_1_7_tests {
     }
 
     /// Verify that `FontManager::cell_size()` returns non-zero dimensions for
-    /// the default config (bundled `MesloLGS` Nerd Font Mono).
+    /// the default config (bundled `CaskaydiaCove` Nerd Font).
     #[test]
     fn cell_size_from_font_manager_is_nonzero() {
         let config = freminal_common::config::Config::default();

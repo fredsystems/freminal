@@ -10,7 +10,7 @@ use egui::{self, FontData, FontDefinitions, FontFamily};
 //
 //  Fallback order:
 //
-//      1. Bundled Primary Monospace Font (MesloLGS Nerd Mono)
+//      1. Bundled Primary Monospace Font (CaskaydiaCove Nerd Font)
 //      2. Bundled Nerd Symbols Fallback (same bundle or separate)
 //      3. User-Selected Primary Font (from config; optional)
 //      4. Emoji Fallback Font (best available from system)
@@ -52,7 +52,7 @@ pub struct FontConfig {
     /// Optional user-selected font family name or file path.
     ///
     /// When `Some`, this font is prepended to every terminal font family list,
-    /// making it the primary face. When `None`, the bundled `MesloLGS Nerd Mono`
+    /// making it the primary face. When `None`, the bundled `CaskaydiaCove Nerd Font`
     /// is used as the primary font.
     pub user_font: Option<String>,
     /// Font size in logical points.
@@ -88,7 +88,7 @@ impl Default for FontConfig {
 pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinitions {
     let mut defs = FontDefinitions::default();
 
-    // 1. Load bundled primary font family (Meslo Nerd)
+    // 1. Load bundled primary font family (CaskaydiaCove Nerd)
     load_bundled_primary_fonts(&mut defs);
 
     // 2. Load bundled Nerd symbols fallback
@@ -131,20 +131,23 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
     defs.font_data.insert(
         PRIMARY_REGULAR.to_owned(),
         FontData::from_static(include_bytes!(
-            "../../../res/MesloLGSNerdFontMono-Regular.ttf"
+            "../../../res/CaskaydiaCoveNerdFont-Regular.ttf"
         ))
         .into(),
     );
 
     defs.font_data.insert(
         PRIMARY_BOLD.to_owned(),
-        FontData::from_static(include_bytes!("../../../res/MesloLGSNerdFontMono-Bold.ttf")).into(),
+        FontData::from_static(include_bytes!(
+            "../../../res/CaskaydiaCoveNerdFont-Bold.ttf"
+        ))
+        .into(),
     );
 
     defs.font_data.insert(
         PRIMARY_ITALIC.to_owned(),
         FontData::from_static(include_bytes!(
-            "../../../res/MesloLGSNerdFontMono-Italic.ttf"
+            "../../../res/CaskaydiaCoveNerdFont-Italic.ttf"
         ))
         .into(),
     );
@@ -152,7 +155,7 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
     defs.font_data.insert(
         PRIMARY_BOLD_ITALIC.to_owned(),
         FontData::from_static(include_bytes!(
-            "../../../res/MesloLGSNerdFontMono-BoldItalic.ttf"
+            "../../../res/CaskaydiaCoveNerdFont-BoldItalic.ttf"
         ))
         .into(),
     );
@@ -189,7 +192,7 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
 // Bundling an emoji font would increase binary size; deferred as a quality-of-life improvement.
 const fn load_bundled_nerd_symbols(_defs: &mut FontDefinitions) {
     // If you have a separate Nerd symbols file, load it here.
-    // If MesloLGS Nerd Mono already includes full symbols, you can comment this out.
+    // If CaskaydiaCove Nerd Font already includes full symbols, you can comment this out.
 
     // Example (uncomment if you ship a standalone symbols font):
 

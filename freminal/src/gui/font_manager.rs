@@ -22,11 +22,19 @@ use freminal_common::config::Config;
 //  Bundled font data (compiled into the binary via include_bytes!)
 // ---------------------------------------------------------------------------
 
-static MESLO_REGULAR: &[u8] = include_bytes!("../../../res/MesloLGSNerdFontMono-Regular.ttf");
-static MESLO_BOLD: &[u8] = include_bytes!("../../../res/MesloLGSNerdFontMono-Bold.ttf");
-static MESLO_ITALIC: &[u8] = include_bytes!("../../../res/MesloLGSNerdFontMono-Italic.ttf");
-static MESLO_BOLD_ITALIC: &[u8] =
-    include_bytes!("../../../res/MesloLGSNerdFontMono-BoldItalic.ttf");
+/// The family name of the bundled default font.
+///
+/// Single source of truth for the bundled-font family string: the settings
+/// font picker, default-label construction, and the "is this installed font the
+/// same as our bundled one?" check all reference this constant rather than
+/// duplicating the literal.
+pub const BUNDLED_FONT_FAMILY: &str = "CaskaydiaCove Nerd Font";
+
+static CASKAYDIA_REGULAR: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Regular.ttf");
+static CASKAYDIA_BOLD: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Bold.ttf");
+static CASKAYDIA_ITALIC: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Italic.ttf");
+static CASKAYDIA_BOLD_ITALIC: &[u8] =
+    include_bytes!("../../../res/CaskaydiaCoveNerdFont-BoldItalic.ttf");
 
 /// Emoji font family candidates, tried in order.
 const EMOJI_CANDIDATES: &[&str] = &[
@@ -47,7 +55,7 @@ const EMOJI_CANDIDATES: &[&str] = &[
 /// Identifies which face in the manager a glyph was resolved from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FaceId {
-    /// Primary face (user font if configured, else bundled `MesloLGS`).
+    /// Primary face (user font if configured, else bundled `CaskaydiaCove`).
     PrimaryRegular,
     /// Primary bold face.
     PrimaryBold,
@@ -55,7 +63,7 @@ pub enum FaceId {
     PrimaryItalic,
     /// Primary bold-italic face.
     PrimaryBoldItalic,
-    /// Bundled `MesloLGS` — only present as fallback when a user font is primary.
+    /// Bundled `CaskaydiaCove` — only present as fallback when a user font is primary.
     BundledRegular,
     /// Bundled bold face (fallback only).
     BundledBold,
@@ -271,12 +279,12 @@ impl RebuildResult {
 /// from font metrics, and resolves individual glyphs to (face, `glyph_id`) pairs.
 pub struct FontManager {
     /// Primary face stack (regular, bold, italic, bold-italic).
-    /// If a user font is configured, it becomes primary; bundled `MesloLGS`
+    /// If a user font is configured, it becomes primary; bundled `CaskaydiaCove`
     /// becomes the first fallback tier.
     primary: PrimaryFaces,
 
-    /// Bundled `MesloLGS` faces — present as a fallback tier only when a user
-    /// font is active as primary. `None` when `MesloLGS` is already primary.
+    /// Bundled `CaskaydiaCove` faces — present as a fallback tier only when a user
+    /// font is active as primary. `None` when `CaskaydiaCove` is already primary.
     bundled_fallback: Option<PrimaryFaces>,
 
     /// System emoji face (Noto Color Emoji, Apple Color Emoji, etc.).
@@ -331,7 +339,7 @@ pub struct FontManager {
 impl FontManager {
     /// Create a new `FontManager` with the given configuration.
     ///
-    /// Loads the primary faces (user font or bundled `MesloLGS`), discovers a
+    /// Loads the primary faces (user font or bundled `CaskaydiaCove`), discovers a
     /// system emoji font, and computes the authoritative cell size.
     ///
     /// `pixels_per_point` is the display scale factor from
@@ -362,12 +370,12 @@ impl FontManager {
                     let suggestions = suggest_similar_families(family, &font_db);
                     if suggestions.is_empty() {
                         warn!(
-                            "Failed to load user font '{}'; falling back to bundled MesloLGS",
+                            "Failed to load user font '{}'; falling back to bundled CaskaydiaCove",
                             family
                         );
                     } else {
                         warn!(
-                            "Failed to load user font '{}'; falling back to bundled MesloLGS. \
+                            "Failed to load user font '{}'; falling back to bundled CaskaydiaCove. \
                              Similar families found: {}",
                             family,
                             suggestions.join(", ")
@@ -487,8 +495,8 @@ impl FontManager {
     /// Resolve a codepoint + style to a `(FaceId, glyph_id)` pair.
     ///
     /// Tries each fallback tier in order:
-    /// 1. Primary face (user font or bundled `MesloLGS`)
-    /// 2. Bundled fallback (`MesloLGS`, only when a user font is primary)
+    /// 1. Primary face (user font or bundled `CaskaydiaCove`)
+    /// 2. Bundled fallback (`CaskaydiaCove`, only when a user font is primary)
     /// 3. Emoji face
     /// 4. System fallback (fontdb discovery, cached per codepoint)
     /// 5. Tofu (`.notdef` glyph from the primary regular face)
@@ -589,7 +597,7 @@ impl FontManager {
 
         // Track whether the effective font family actually changed (as opposed
         // to the config requesting a font that fails to load and falls back to
-        // the same bundled MesloLGS that was already active).
+        // the same bundled CaskaydiaCove that was already active).
         let old_effective = self.current_family.clone();
         let mut effective_family_changed = false;
 
@@ -602,7 +610,7 @@ impl FontManager {
                     (user_primary, Some(bundled), Some(family.to_owned()))
                 } else {
                     warn!(
-                        "Failed to reload user font '{}'; using bundled MesloLGS",
+                        "Failed to reload user font '{}'; using bundled CaskaydiaCove",
                         family
                     );
                     (bundled, None, None)
@@ -635,7 +643,7 @@ impl FontManager {
         } else {
             // The config requested a different family, but after attempting to
             // load it, the effective font is the same (e.g. both old and new
-            // fell back to bundled MesloLGS).  No observable change.
+            // fell back to bundled CaskaydiaCove).  No observable change.
             Ok(RebuildResult::NoChange)
         }
     }
@@ -848,7 +856,7 @@ impl FontManager {
 //  Free functions
 // ---------------------------------------------------------------------------
 
-/// Load all four bundled `MesloLGS` Nerd Font Mono faces.
+/// Load all four bundled `CaskaydiaCove` Nerd Font faces.
 ///
 /// # Errors
 ///
@@ -858,20 +866,22 @@ impl FontManager {
 /// indicates a packaging error.
 fn load_bundled_faces() -> Result<PrimaryFaces, FontManagerError> {
     let regular =
-        LoadedFace::from_static(MESLO_REGULAR).ok_or(FontManagerError::BundledFontCorrupt {
-            face: "MesloLGS-Regular.ttf",
+        LoadedFace::from_static(CASKAYDIA_REGULAR).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "CaskaydiaCove-Regular.ttf",
         })?;
-    let bold = LoadedFace::from_static(MESLO_BOLD).ok_or(FontManagerError::BundledFontCorrupt {
-        face: "MesloLGS-Bold.ttf",
-    })?;
+    let bold =
+        LoadedFace::from_static(CASKAYDIA_BOLD).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "CaskaydiaCove-Bold.ttf",
+        })?;
     let italic =
-        LoadedFace::from_static(MESLO_ITALIC).ok_or(FontManagerError::BundledFontCorrupt {
-            face: "MesloLGS-Italic.ttf",
+        LoadedFace::from_static(CASKAYDIA_ITALIC).ok_or(FontManagerError::BundledFontCorrupt {
+            face: "CaskaydiaCove-Italic.ttf",
         })?;
-    let bold_italic =
-        LoadedFace::from_static(MESLO_BOLD_ITALIC).ok_or(FontManagerError::BundledFontCorrupt {
-            face: "MesloLGS-BoldItalic.ttf",
-        })?;
+    let bold_italic = LoadedFace::from_static(CASKAYDIA_BOLD_ITALIC).ok_or(
+        FontManagerError::BundledFontCorrupt {
+            face: "CaskaydiaCove-BoldItalic.ttf",
+        },
+    )?;
 
     Ok(PrimaryFaces {
         regular,
@@ -1003,6 +1013,19 @@ fn load_user_faces_by_name(
 /// Remove all whitespace from a string (for fuzzy font name matching).
 fn strip_whitespace(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Return `true` if an installed font `family` name refers to the same font as
+/// the bundled default ([`BUNDLED_FONT_FAMILY`]).
+///
+/// Uses the same whitespace-stripped, case-insensitive comparison the font
+/// lookup uses for naming variations (e.g. "Caskaydia Cove Nerd Font" vs
+/// "`CaskaydiaCove` Nerd Font"), so a system copy of the bundled font is
+/// recognised regardless of how fontconfig spells the family.
+#[must_use]
+pub fn family_matches_bundled(family: &str) -> bool {
+    strip_whitespace(&family.to_lowercase())
+        .eq_ignore_ascii_case(&strip_whitespace(&BUNDLED_FONT_FAMILY.to_lowercase()))
 }
 
 /// Search the fontdb for a font matching a family name, weight, and style.
@@ -1284,7 +1307,7 @@ fn compute_cell_metrics(
     };
 
     // A minimum 1 px top pad ensures glyphs are never flush against the cell
-    // edge (important for fonts like MesloLGS where leading == 0).
+    // edge (important for fonts like CaskaydiaCove where leading == 0).
     let top_pad = metrics.leading.mul_add(0.5, extra_top).max(1.0);
     let baseline_offset = metrics.ascent + top_pad;
 
@@ -1342,21 +1365,23 @@ mod tests {
         assert!(fm.descent > 0.0, "descent must be > 0 (absolute value)");
     }
 
-    // --- Test 2: Cell size computation matches expected range for MesloLGS ---
+    // --- Test 2: Cell size computation matches expected range for CaskaydiaCove ---
 
     #[test]
-    fn cell_size_reasonable_for_meslo() {
+    fn cell_size_reasonable_for_caskaydia() {
         let fm = default_manager();
-        // At 12pt, MesloLGS Nerd Font Mono should produce a cell roughly
-        // 7-10 pixels wide and 14-22 pixels tall (varies by exact font metrics).
+        // At 12pt, CaskaydiaCove Nerd Font produces a 10x19 px cell on the
+        // reference machine. The asserted range stays deliberately wide
+        // (5-20 wide, 10-30 tall) to tolerate per-platform metric/rounding
+        // variation while still catching a grossly wrong cell size.
         assert!(
             fm.cell_width >= 5 && fm.cell_width <= 20,
-            "cell_width {} out of expected range for 12pt MesloLGS",
+            "cell_width {} out of expected range for 12pt CaskaydiaCove",
             fm.cell_width
         );
         assert!(
             fm.cell_height >= 10 && fm.cell_height <= 30,
-            "cell_height {} out of expected range for 12pt MesloLGS",
+            "cell_height {} out of expected range for 12pt CaskaydiaCove",
             fm.cell_height
         );
     }
@@ -1368,11 +1393,11 @@ mod tests {
     fn cell_height_includes_win_metrics() {
         use swash::{FontRef, TableProvider, tag_from_bytes};
 
-        // Load the bundled MesloLGS font and compute the win-metric height
+        // Load the bundled CaskaydiaCove font and compute the win-metric height
         // at the default font size.  The cell height from `FontManager` must
         // be at least as tall as this value.
-        let font_ref = FontRef::from_index(MESLO_REGULAR, 0);
-        assert!(font_ref.is_some(), "bundled MesloLGS must parse");
+        let font_ref = FontRef::from_index(CASKAYDIA_REGULAR, 0);
+        assert!(font_ref.is_some(), "bundled CaskaydiaCove must parse");
         let font_ref = font_ref.unwrap();
 
         let config = Config::default();
@@ -1389,12 +1414,15 @@ mod tests {
 
         let os2_tag = tag_from_bytes(b"OS/2");
         let os2_data = font_ref.table_by_tag(os2_tag);
-        assert!(os2_data.is_some(), "MesloLGS must have an OS/2 table");
+        assert!(os2_data.is_some(), "CaskaydiaCove must have an OS/2 table");
         let os2_data = os2_data.unwrap();
         let win_metrics = read_os2_win_metrics(os2_data);
         assert!(win_metrics.is_some(), "OS/2 table must have win metrics");
         let (wa, wd) = win_metrics.unwrap();
-        assert!(wa > 0 || wd > 0, "MesloLGS must have non-zero win metrics");
+        assert!(
+            wa > 0 || wd > 0,
+            "CaskaydiaCove must have non-zero win metrics"
+        );
 
         let win_height_px = f32::from(wa).mul_add(scale_fdu, f32::from(wd) * scale_fdu);
 
@@ -1497,7 +1525,7 @@ mod tests {
         config.font.family = Some("/nonexistent/path/to/font.ttf".to_owned());
         let fm = FontManager::new(&config, 1.0).unwrap();
 
-        // Should have fallen back to bundled MesloLGS as primary.
+        // Should have fallen back to bundled CaskaydiaCove as primary.
         assert!(
             fm.bundled_fallback.is_none(),
             "No bundled fallback tier when bundled is primary"
@@ -1559,7 +1587,7 @@ mod tests {
         let result = fm.rebuild(&new_config, 1.0).unwrap();
 
         // The requested font fails to load, so the effective family stays as
-        // bundled MesloLGS (None → None).  No observable change.
+        // bundled CaskaydiaCove (None → None).  No observable change.
         assert_eq!(result, RebuildResult::NoChange);
         // Should have gracefully fallen back to bundled.
         assert!(fm.cell_width > 0);
@@ -1667,6 +1695,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn family_matches_bundled_recognises_naming_variants() {
+        // Exact and spacing/case variants of the bundled family all match.
+        assert!(family_matches_bundled(BUNDLED_FONT_FAMILY));
+        assert!(family_matches_bundled("CaskaydiaCove Nerd Font"));
+        assert!(family_matches_bundled("Caskaydia Cove Nerd Font"));
+        assert!(family_matches_bundled("caskaydiacove nerd font"));
+        assert!(family_matches_bundled("CaskaydiaCoveNerdFont"));
+
+        // Unrelated fonts do not match.
+        assert!(!family_matches_bundled("Fira Code"));
+        assert!(!family_matches_bundled("Cascadia Code"));
+        assert!(!family_matches_bundled("Caskaydia Mono Nerd Font"));
+        assert!(!family_matches_bundled(""));
+    }
+
     // --- Test: update_pixels_per_point returns false when unchanged ---
 
     #[test]
@@ -1736,7 +1780,7 @@ mod tests {
         let families = fm.enumerate_monospace_families();
 
         // The list may be empty on minimal CI/Docker environments where no
-        // system fonts are installed — the bundled MesloLGS is loaded via
+        // system fonts are installed — the bundled CaskaydiaCove is loaded via
         // swash, not registered in fontdb.  We only assert structural
         // properties (sorted, deduplicated) here.
 

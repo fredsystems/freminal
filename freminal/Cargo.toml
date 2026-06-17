@@ -40,7 +40,7 @@ deb_depends = ["libgl1-mesa-glx"]
 # `cargo xtask bump-version` keeps this in sync, translating the SemVer
 # pre-release separator to the RPM tilde operator (e.g. "0.9.0~beta.2"), which
 # sorts older than the final release just like the SemVer pre-release does.
-version = "0.9.0"
+version = "0.10.0~beta.1"
 assets = [
   { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
   # Ship the desktop entry (carrying StartupWMClass=freminal, which matches the

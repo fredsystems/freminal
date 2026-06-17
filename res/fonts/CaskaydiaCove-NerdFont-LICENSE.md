@@ -1,26 +1,36 @@
-# MesloLGS Nerd Font Mono — Licensing
+# CaskaydiaCove Nerd Font — Licensing
 
-Freminal bundles the Nerd Fonts-patched MesloLGS Mono font files
-(`MesloLGSNerdFontMono-*.ttf`). The patched font files are distributed by the
+Freminal bundles the Nerd Fonts-patched Cascadia Code font files
+(`CaskaydiaCoveNerdFont-*.ttf`). The patched font files are distributed by the
 Nerd Fonts project under the **SIL Open Font License, Version 1.1**. The
-underlying Meslo LG typeface (by André Berg, a customized version of Apple's
-Menlo, itself derived from Bitstream Vera Sans Mono) is licensed under the
-**Apache License 2.0**. The Nerd Fonts patcher source code (not bundled here)
-is MIT-licensed.
+underlying Cascadia Code typeface is created by Microsoft and is also licensed
+under the **SIL Open Font License, Version 1.1**. The Nerd Fonts patcher source
+code (not bundled here) is MIT-licensed.
 
+Cascadia Code's OFL reserves the font name **"Cascadia Code"**. To comply, the
+Nerd Fonts patch renames the patched family to **"CaskaydiaCove"** — Freminal
+bundles and refers to the font under that name and does not rename it back to
+the reserved name.
+
+The **`Cove`/Code** variant is bundled (it carries the full Calt-based ligature
+set), **not** the `CaskaydiaMono` variant (which strips ligatures).
+
+- Cascadia Code: <https://github.com/microsoft/cascadia-code>
 - Nerd Fonts: <https://github.com/ryanoasis/nerd-fonts>
-- Meslo LG: <https://github.com/andreberg/Meslo-Font>
 
 The full text of the SIL Open Font License 1.1 governing the bundled font files
 follows.
 
 ```text
-Copyright (c) 2014, Ryan L McIntyre (https://ryanlmcintyre.com).
+Copyright (c) 2019 - Present, Microsoft Corporation,
+with Reserved Font Name Cascadia Code.
+
+Patched and renamed to "CaskaydiaCove" by the Nerd Fonts project
+(https://github.com/ryanoasis/nerd-fonts).
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:
 http://scripts.sil.org/OFL
-
 -----------------------------------------------------------
 SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
 -----------------------------------------------------------

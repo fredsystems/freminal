@@ -304,7 +304,7 @@ fn config_with_custom_values_round_trips() {
     cfg.shell.path = Some("/bin/fish".to_string());
     cfg.logging.write_to_file = true;
     cfg.scrollback.limit = 8000;
-    cfg.font.family = Some("Hack".to_string());
+    cfg.font.family = Some("Test Font".to_string());
 
     let toml_str = toml::to_string_pretty(&cfg).expect("should serialize");
     let deserialized: Config = toml::from_str(&toml_str).expect("should deserialize");
@@ -312,7 +312,7 @@ fn config_with_custom_values_round_trips() {
     assert_eq!(deserialized.shell.path.as_deref(), Some("/bin/fish"));
     assert!(deserialized.logging.write_to_file);
     assert_eq!(deserialized.scrollback.limit, 8000);
-    assert_eq!(deserialized.font.family.as_deref(), Some("Hack"));
+    assert_eq!(deserialized.font.family.as_deref(), Some("Test Font"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

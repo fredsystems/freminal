@@ -14,9 +14,9 @@ Scratch notes so I don't forget things. I may specify a general timeline for whe
 4. Gutter coloring may extend past the current command prompt and go to the bottom of the pane. It should always stop at the command prompt, OR the last line of output text of a running command.
 5. "2026-06-11T16:13:06.465926Z WARN egui_glow::painter:753: You forgot to call destroy() on the egui glow painter. Resources will leak!" is a warning emitted at app close. Realistically, leaking at close is probably not a big deal, but we should tear down properly.
 6. We have a pattern on closing a pane/tab that feels like we're sequecing the close wrong.
-7. Builds via cargo, on the about modal, show `Build unknow`
+7. Builds via cargo, on the about modal, show `Build unknown`
 8. Builds via CI, ie the distributed versions, show `  freminal 0.9.0-beta.3 (unknown)` on tools like fastfetch. This is strongly related to #7 above, I'm sure. We should be embedding a build time, or commit hash, or something, I would think?
-9. Command History pallete sort order is wrong. It has the oldest command listed first, when it should sort by most recent.
+9. Command History palette sort order is wrong. It has the oldest command listed first, when it should sort by most recent.
 
 ```bash
 2026-06-11T16:13:56.518745Z ERROR freminal_terminal_emulator::io::pty:583: Failed to send data to terminal: sending on a disconnected channel
@@ -27,7 +27,7 @@ Scratch notes so I don't forget things. I may specify a general timeline for whe
 
 #### Pre-1.0 Remediations and Improvements
 
-##### UI asthetic is very bare bones
+##### UI aesthetic is very bare bones
 
 We need a major beautification pass. All of the UI modals, and toast notifications, need styling and theming with the user selected theme. The buffer should NOT be affected. Things to research: is this platform specific, are we hamstrung by the underlying window toolkit we've built on (egui, like that). We should take inspiration from ACARS Hub, and in general web apps with rounded corners, consistent colour theming, etc.
 
@@ -63,6 +63,6 @@ Currently, the visuals for muxxing are slightly wrong. The "highlight" is a bit 
 |----------------|
 ```
 
-If Pane 1 is focused, I would expect the divider bar between the bottom and top panes to be fully blue (or whatever the color is....are we themeing it? Should audit). I would expect the half coloring if we've focused a pane in the bottom _on the side of the pane that is focused_, as well as _the entire divider bar between the two side by side panes_. Currently, it chooses to fill in the horizontal divider half on the left side if P1 is focused, with P2 focused it goes to the right, and the top half of the vert bar. P3 focused it chooses the right and bottom half of the vert bar.
+If Pane 1 is focused, I would expect the divider bar between the bottom and top panes to be fully blue (or whatever the color is....are we theming it? Should audit). I would expect the half coloring if we've focused a pane in the bottom _on the side of the pane that is focused_, as well as _the entire divider bar between the two side by side panes_. Currently, it chooses to fill in the horizontal divider half on the left side if P1 is focused, with P2 focused it goes to the right, and the top half of the vert bar. P3 focused it chooses the right and bottom half of the vert bar.
 
 Basically, in as few words as I can put it: the active pane highlighting should _surround_ the active pane, excluding the top, bottom, left and right edges of the entire buffer window itself.
