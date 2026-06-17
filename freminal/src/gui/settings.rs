@@ -827,7 +827,7 @@ impl SettingsModal {
         ui.separator();
     }
 
-    const DEFAULT_LABEL: &str = "Default (MesloLGS Nerd Font)";
+    const DEFAULT_LABEL: &str = "Default (CaskaydiaCove Nerd Font)";
 
     fn show_font_tab(&mut self, ui: &mut Ui) {
         // --- Font Family dropdown ---
@@ -878,7 +878,7 @@ impl SettingsModal {
         let preview_text = "The quick brown fox 0O1lI| {}[]() => !=";
 
         // Choose the font family for the preview text:
-        //   - Default selected → use egui's Monospace (bundled MesloLGS)
+        //   - Default selected → use egui's Monospace (bundled CaskaydiaCove)
         //   - Custom font selected AND the registered preview matches → use the preview font
         //   - Custom font selected but preview not yet loaded or stale → fall back to Monospace
         let preview_font = if self.preview_registered.as_deref()
