@@ -32,10 +32,10 @@ bundled-font change alters the default glyph set.
 
 ## Task Summary
 
-| #   | Feature             | Scope | Status | Depends On       |
-| --- | ------------------- | ----- | ------ | ---------------- |
-| 111 | Bundled Font / Icon | Large | Active | v0.8.0, v0.9.0   |
-| 112 | UI Beautification   | Large | Active | v0.8.0, Task 111 |
+| #   | Feature             | Scope | Status   | Depends On       |
+| --- | ------------------- | ----- | -------- | ---------------- |
+| 111 | Bundled Font / Icon | Large | Complete | v0.8.0, v0.9.0   |
+| 112 | UI Beautification   | Large | Active   | v0.8.0, Task 111 |
 
 Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
 "Pre-1.0 Remediations" (UI aesthetic, built-in fonts). Task 112 depends on Task
@@ -296,6 +296,21 @@ no code or asset changes.
 ---
 
 ## Task 111 — Bundled Font / Icon
+
+> **STATUS: COMPLETE.** All 7 subtasks (111.1–111.7) landed on
+> `task-111/bundled-font`. CaskaydiaCove NF is bundled, MesloLGS and Hack are
+> removed, attributions updated, ligatures are proven against the real bundled
+> face, and the font picker annotates the bundled default and any system
+> duplicate.
+>
+> **Durable finding (from 111.6):** CaskaydiaCove (like Cascadia Code)
+> implements its coding ligatures via `calt` chaining-contextual substitution
+> into dedicated "ligature-piece" glyphs, **not** a many-to-one ligature
+> collapse — so the shaped glyph _count_ is unchanged while the glyph _IDs_
+> change. The regression test asserts on glyph-ID difference (ligatures on vs
+> off), not on glyph-count reduction. The font's GSUB has `calt` only (no
+> `liga`), and `calt` is registered under `DFLT`/`latn`, so no
+> `guess_segment_properties()` call is needed in the shaping path.
 
 Replace the bundled MesloLGS faces with CaskaydiaCove Nerd Font (ligature-bearing
 `Cove` variant) and remove the unused Hack font. This makes the already-wired
