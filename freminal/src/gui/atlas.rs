@@ -84,6 +84,26 @@ struct RasterizedGlyph {
     is_color: bool,
 }
 
+/// Premultiply straight (non-premultiplied) RGBA pixel data in place.
+///
+/// Each pixel's R, G, B channels are multiplied by its alpha (with rounding),
+/// converting straight alpha to premultiplied alpha. swash returns straight
+/// RGBA for color bitmap/outline emoji, but the foreground shader and the egui
+/// GL blend state both expect premultiplied alpha; this reconciles them so
+/// semi-transparent edges do not leave a white/colored fringe.
+///
+/// `data` must be a flat RGBA8 buffer (length a multiple of 4); any trailing
+/// partial pixel is ignored.
+fn premultiply_rgba_in_place(data: &mut [u8]) {
+    for px in data.chunks_exact_mut(4) {
+        let a = u16::from(px[3]);
+        // (channel * alpha + 127) / 255, rounded to nearest. Always <= 255.
+        px[0] = u8::try_from((u16::from(px[0]) * a + 127) / 255).unwrap_or(px[0]);
+        px[1] = u8::try_from((u16::from(px[1]) * a + 127) / 255).unwrap_or(px[1]);
+        px[2] = u8::try_from((u16::from(px[2]) * a + 127) / 255).unwrap_or(px[2]);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Shelf-based bin packing
 // ---------------------------------------------------------------------------
@@ -326,8 +346,15 @@ impl GlyphAtlas {
                 rgba
             }
             Content::Color => {
-                // Already RGBA.
-                image.data
+                // swash returns *straight* (non-premultiplied) RGBA for color
+                // bitmap/outline emoji. The foreground shader and the egui GL
+                // blend state both expect premultiplied alpha, so premultiply
+                // here. Without this, semi-transparent edge pixels composite at
+                // full colour intensity and leave a white/colored fringe around
+                // the emoji.
+                let mut data = image.data;
+                premultiply_rgba_in_place(&mut data);
+                data
             }
             Content::SubpixelMask => {
                 // Subpixel → treat as RGBA (per-channel coverage).
@@ -649,6 +676,39 @@ mod tests {
             face_id: FaceId::PrimaryRegular,
             size_px: 16,
         }
+    }
+
+    #[test]
+    fn premultiply_opaque_pixel_unchanged() {
+        // Alpha 255 → channels unchanged.
+        let mut px = [200, 100, 50, 255];
+        premultiply_rgba_in_place(&mut px);
+        assert_eq!(px, [200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn premultiply_transparent_pixel_zeroed() {
+        // Alpha 0 → all colour channels zeroed (this is what kills the white
+        // fringe: fully transparent pixels contribute no colour).
+        let mut px = [255, 255, 255, 0];
+        premultiply_rgba_in_place(&mut px);
+        assert_eq!(px, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn premultiply_half_alpha_halves_channels() {
+        // Alpha 128 (~0.502) → channels roughly halved with rounding.
+        let mut px = [255, 200, 100, 128];
+        premultiply_rgba_in_place(&mut px);
+        // 255*128+127 = 32767; /255 = 128. 200*128+127=25727;/255=100. 100*128+127=12927;/255=50.
+        assert_eq!(px, [128, 100, 50, 128]);
+    }
+
+    #[test]
+    fn premultiply_handles_multiple_pixels() {
+        let mut data = [255, 255, 255, 0, 100, 100, 100, 255];
+        premultiply_rgba_in_place(&mut data);
+        assert_eq!(data, [0, 0, 0, 0, 100, 100, 100, 255]);
     }
 
     #[test]
