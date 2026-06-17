@@ -1582,7 +1582,12 @@ mod backspace_tests {
     }
 
     #[test]
-    fn backspace_jumps_wide_glyph() {
+    fn backspace_moves_one_column_over_wide_glyph() {
+        // Regression (Task 111.10): BS (cursor backward) moves exactly ONE
+        // column, even across a double-width glyph's continuation cell.
+        // Applications emit two backspaces to cross a wide glyph; if BS skipped
+        // the continuation cell it would consume both as one move and drift the
+        // cursor by one per wide glyph (the emoji paste/prompt-redraw bug).
         let mut buf = Buffer::new(80, 24);
 
         // Use a known double-width glyph: "あ"
@@ -1590,14 +1595,19 @@ mod backspace_tests {
         buf.insert_text(&input);
 
         // "a" (col 0)
-        // "あ" (cols 1–2)
+        // "あ" (cols 1–2: head at 1, continuation at 2)
         // "b" (col 3)
         assert_eq!(buf.cursor.pos.x, 4);
 
         buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over b → x=3
         assert_eq!(buf.cursor.pos.x, 3);
 
-        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over wide glyph (continuation cell)
+        // One BS lands on the wide glyph's continuation cell (col 2), NOT the head.
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
+        assert_eq!(buf.cursor.pos.x, 2);
+
+        // A second BS lands on the wide glyph's head (col 1).
+        buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled);
         assert_eq!(buf.cursor.pos.x, 1);
 
         buf.handle_backspace(ReverseWrapAround::DontWrap, XtRevWrap2::Disabled); // over 'a'

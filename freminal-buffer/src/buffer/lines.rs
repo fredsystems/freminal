@@ -51,30 +51,26 @@ impl Buffer {
 
         let row_idx = self.cursor.pos.y;
 
+        // The bounds check protects the cursor invariant even though we no
+        // longer index the row directly (BS no longer inspects cells).
         if row_idx >= self.rows.len() {
             return;
         }
-
-        let row = &self.rows[row_idx];
 
         // When in pending-wrap state the internal x equals self.width (one past
         // the last column).  A real VT100 keeps the cursor at the last column with
         // a separate pending-wrap bit; BS clears the bit and moves left from the
         // reported column, landing at width-2 (0-based).  Clamp before subtracting.
         let effective_x = self.cursor.pos.x.min(self.width.saturating_sub(1));
-        let mut new_x = effective_x - 1;
 
-        // Skip left over continuation cells of a wide glyph
-        while new_x > 0 {
-            if let Some(cell) = row.char_at(new_x) {
-                if !cell.is_continuation() {
-                    break;
-                }
-            } else {
-                break;
-            }
-            new_x -= 1;
-        }
+        // BS (cursor backward) moves exactly one column, regardless of wide-glyph
+        // continuation cells.  Applications that need to move the cursor over a
+        // double-width glyph emit two backspaces (xterm/VT behaviour); skipping
+        // continuation cells here would consume both backspaces as one move and
+        // drift the cursor by one per wide glyph.  The cursor may legitimately
+        // land on a continuation cell; the next write triggers wide-overwrite
+        // cleanup at that position.
+        let new_x = effective_x - 1;
 
         self.cursor.pos.x = new_x;
 

@@ -573,6 +573,34 @@ Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
 Prohibitions: do NOT change the non-insert path; do NOT alter `insert_spaces`
 semantics (it correctly opens `n` columns) — the bug is the caller passing 1.
 
+#### 111.10 — Backspace over a wide glyph drifts the cursor
+
+Scope: `freminal-buffer/src/buffer/lines.rs` (`handle_backspace`, ~43).
+
+Long-standing, pre-existing bug (reproduces off-branch; root cause of the
+emoji paste / prompt-redraw cursor drift, confirmed via an FREC recording of
+zsh). BS (cursor backward, `\x08`) must move the cursor **exactly one column**.
+`handle_backspace` moved one column and **then** skipped left over any wide-glyph
+continuation cells. Applications cross a double-width glyph by emitting **two**
+backspaces (xterm/VT behaviour); the continuation-skip consumed both as a single
+move, drifting the cursor by one per wide glyph. zsh redrawing a pasted emoji
+(`\x08\x08` then rewrite) therefore landed one cell off, leaving a stray blank
+cell and corrupting the prompt.
+
+Fix: remove the continuation-skip loop. The cursor may legitimately land on a
+continuation cell; the next write triggers the existing wide-overwrite cleanup
+at that position.
+
+Deliverable: one BS over a wide glyph lands on its continuation cell, a second
+on its head. Regression test updated (`backspace_moves_one_column_over_wide_glyph`,
+formerly `backspace_jumps_wide_glyph`, which asserted the buggy skip).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`.
+
+Prohibitions: do NOT reintroduce the continuation skip; do NOT change the
+reverse-wrap or pending-wrap branches.
+
 ---
 
 ## Task 112 — UI Beautification
