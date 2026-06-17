@@ -2383,15 +2383,73 @@ mod tests_gui_resize {
     }
 
     // ------------------------------------------------------------------
-    // 5. Growing height adds rows at the bottom
+    // 5. Growing height keeps the live cursor pinned to the bottom
     // ------------------------------------------------------------------
+    //
+    // Task 113 (Bug G): growing the primary buffer must NOT append an
+    // unreclaimable blank tail below the live cursor.  When the buffer's rows
+    // are all live content (HardBreak) with the cursor on the last row and
+    // there is no scrollback to reveal, the grow appends nothing — the buffer
+    // stays as short as its content and the GUI pads the taller window below
+    // the live bottom (mirroring `Buffer::new`, which starts with a single row
+    // rather than `height` blank rows).  The live cursor stays inside the
+    // visible window in either case.
     #[test]
-    fn resize_grow_adds_rows() {
+    fn resize_grow_keeps_cursor_pinned_to_bottom() {
         let mut buf = buffer_with_rows_and_config(10, 80, 10, 1000, false);
+        // Cursor is on the last content row (set by the helper).
+        assert_eq!(buf.cursor.pos.y, 9);
 
         buf.set_size(80, 15, 0);
 
-        assert_eq!(buf.rows.len(), 15, "growing height must append blank rows");
+        // No blank tail was appended below the live cursor.
+        assert_eq!(
+            buf.rows.len(),
+            10,
+            "growing must not append an unreclaimable blank tail below the live \
+             cursor when the buffer is all content with no scrollback"
+        );
+        // The live cursor is still inside the visible window.
+        let vis_start = buf.visible_window_start(0);
+        let vis_end = vis_start + buf.height;
+        assert!(
+            buf.cursor.pos.y >= vis_start && buf.cursor.pos.y < vis_end,
+            "live cursor (row {}) must stay inside the visible window \
+             [{vis_start}, {vis_end}) after a grow",
+            buf.cursor.pos.y
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 5b. Growing height reveals existing scrollback instead of appending
+    // ------------------------------------------------------------------
+    //
+    // Task 113 (Bug G): when there IS scrollback above the live bottom, a grow
+    // reveals it upward (the bottom-anchored window grows toward row 0) and
+    // appends nothing.  Here the buffer has 20 content rows with the cursor on
+    // the last one and a 10-row screen, so rows 0..9 are scrollback.  Growing
+    // to height 15 must reveal 5 more scrollback rows, not append blanks.
+    #[test]
+    fn resize_grow_reveals_scrollback() {
+        let mut buf = buffer_with_rows_and_config(20, 80, 10, 1000, false);
+        assert_eq!(buf.cursor.pos.y, 19);
+
+        buf.set_size(80, 15, 0);
+
+        // Row count unchanged — the taller window revealed scrollback above.
+        assert_eq!(
+            buf.rows.len(),
+            20,
+            "growing into existing scrollback must not append blank rows"
+        );
+        // The live cursor (still on the last row) is at the bottom of the
+        // visible window.
+        let vis_start = buf.visible_window_start(0);
+        assert_eq!(vis_start, 20 - 15, "window reveals scrollback upward");
+        assert_eq!(
+            buf.cursor.pos.y, 19,
+            "live cursor stays pinned to the live bottom"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -6265,25 +6323,36 @@ mod resize_and_insert_tests {
     #[test]
     fn preserve_scrollback_anchor_clamps_offset() {
         let mut buf = Buffer::new(10, 5);
-        // Buffer::new starts with 1 row. Add more to get scrollback.
-        for _ in 0..14 {
-            buf.rows.push(Row::new(10));
-            buf.row_cache.push(None);
-        }
-        // Total rows = 15 (1 initial + 14 added).
-        assert_eq!(buf.rows.len(), 15);
+        // Build 18 rows of genuine CONTENT (HardBreak) so they are real
+        // scrollback, not blank screen-padding.  The cursor sits on the LAST
+        // row (the live bottom) so every row above it is scrollback and the
+        // Task 113 grow path has no trailing blank padding to reclaim.
+        buf.rows = (0..18)
+            .map(|_| Row::new_with_origin(10, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
+            .collect();
+        buf.row_cache = vec![None; buf.rows.len()];
+        buf.cursor.pos.y = buf.rows.len() - 1;
+        assert_eq!(buf.rows.len(), 18);
 
         buf.preserve_scrollback_anchor = true;
-        // Grow height from 5 to 8. rows.len()=15+3=18, new_height=8.
-        // max_offset = 18-8=10. scroll_offset 20 should clamp to 10.
+        // Grow height from 5 to 8. rows.len() stays 18 (scrollback revealed,
+        // nothing appended), new_height=8 → max_offset = 18-8 = 10. A
+        // scroll_offset of 20 must clamp to 10.
         let offset = buf.resize_height(8, 20);
+        assert_eq!(
+            buf.rows.len(),
+            18,
+            "grow reveals scrollback, appends nothing"
+        );
         assert_eq!(offset, 10);
     }
 
     #[test]
     fn preserve_scrollback_anchor_few_rows_returns_zero() {
         let mut buf = Buffer::new(10, 3);
-        // 3 rows, growing to height 5 — rows.len() becomes 5 which is <= new_height.
+        // A short buffer (fewer rows than the new height) with the cursor on
+        // its single content row.  Growing reveals no scrollback and appends
+        // nothing, so rows.len() stays below new_height and max_offset is 0.
         buf.preserve_scrollback_anchor = true;
         let offset = buf.resize_height(5, 10);
         assert_eq!(offset, 0);
@@ -7549,123 +7618,120 @@ mod coverage_gap_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TASK 113 — SMOKE TESTS (commented out; uncomment to drive the fix).
+// TASK 113 — SMOKE TESTS (permanent regression coverage).
 //
-// These two tests are the failing reproductions for Task 113's buffer-side
-// bugs (Bug G — the root cause — and Bug R — the reflow amplifier). They are
-// written against the CURRENT (buggy) code and FAIL on `main`. Uncomment the
-// module, run it, watch it fail, implement the Task 113 fix, then watch it
-// pass. Once green, KEEP these tests (uncommented) as permanent regression
-// coverage — do not delete them.
+// These tests are the failing reproductions for Task 113's buffer-side bugs
+// (Bug G — the root cause — and Bug R — the reflow amplifier). They were
+// written against the buggy code, drove the fix, and are now kept as permanent
+// regression coverage — do not delete them.
 //
 //   cargo test -p freminal-buffer --lib task_113_smoke
 //
 // See Documents/PLAN_VERSION_100.md "Task 113" for the full diagnosis.
 // ─────────────────────────────────────────────────────────────────────────────
-//
-// #[cfg(test)]
-// mod task_113_smoke {
-//     use super::*;
-//     use freminal_common::buffer_states::tchar::TChar;
-//
-//     fn t(s: &str) -> Vec<TChar> {
-//         s.bytes().map(TChar::Ascii).collect()
-//     }
-//
-//     // ── Bug G (ROOT CAUSE): grow appends blank rows at the bottom and never
-//     // reclaims them. Repeated grow/shrink cycles (an interactive tiling-WM
-//     // resize, or repeated font-size changes) accumulate an unbounded tail of
-//     // blank rows BELOW the live cursor. The visible window then shows only
-//     // that blank tail while the live prompt/output is stranded at the top of
-//     // the buffer in unreachable scrollback. `clear` recovers it.
-//     //
-//     // This test FAILS on main: after the resize cycle the live cursor lands
-//     // OUTSIDE the visible window, with a large blank tail below it.
-//     #[test]
-//     fn task_113_repeated_resize_does_not_strand_live_content() {
-//         let mut b = Buffer::new(40, 24);
-//         // A few lines of content, cursor at the live bottom.
-//         for i in 0..5 {
-//             b.insert_text(&t(&format!("line{i}")));
-//             b.handle_lf();
-//             b.handle_cr();
-//         }
-//
-//         // Interactive resize: height changes only, no output between them
-//         // (like dragging a tiling window border while sitting at a prompt).
-//         for &h in &[24usize, 30, 18, 40, 12, 50, 20, 24] {
-//             b.set_size(40, h, 0);
-//         }
-//
-//         // Settle and emit one line of output.
-//         b.set_size(40, 24, 0);
-//         b.handle_lf();
-//         b.handle_cr();
-//         b.insert_text(&t("PROMPT$"));
-//
-//         // The live cursor MUST be inside the visible window.
-//         let vis_start = b.visible_window_start(0);
-//         let vis_end = vis_start + b.height;
-//         assert!(
-//             b.cursor.pos.y >= vis_start && b.cursor.pos.y < vis_end,
-//             "live cursor (row {}) escaped visible window [{vis_start}, {vis_end}) \
-//              after repeated resize — content stranded in unreachable scrollback",
-//             b.cursor.pos.y
-//         );
-//
-//         // And the live content must be near the bottom, not stranded above a
-//         // large blank tail.
-//         let blanks_below = b.rows.len().saturating_sub(b.cursor.pos.y + 1);
-//         assert!(
-//             blanks_below <= 1,
-//             "blank tail of {blanks_below} rows below the live cursor — the grow \
-//              path is appending blanks that are never reclaimed",
-//         );
-//     }
-//
-//     // ── Bug R (amplifier): reflow_to_width rebuilds every row on a width
-//     // change but does NOT remap command_blocks / prompt_rows, whose row
-//     // fields are buffer-absolute. After a width reflow the block metadata
-//     // points at the wrong rows, corrupting gutters/folds.
-//     //
-//     // This test FAILS on main: end_row stays at its pre-reflow value while
-//     // the actual last content row has moved.
-//     #[test]
-//     fn task_113_reflow_remaps_command_block_rows() {
-//         let mut buf = Buffer::new(20, 5);
-//
-//         // Prompt + command on row 0, output starting on row 1.
-//         let _id = buf.start_command_block(None, "fid1".to_owned());
-//         buf.mark_prompt_row();
-//         buf.insert_text(&t("prompt$ cmd"));
-//         buf.mark_command_start_row("fid1"); // command_start_row = 0
-//         buf.handle_lf(); // cursor -> row 1
-//         buf.mark_output_start_row("fid1"); // output_start_row = 1
-//
-//         // A long output line that re-wraps differently at a new width.
-//         buf.insert_text(&t(
-//             "0123456789012345678901234567890123456789012345678901234567890",
-//         ));
-//         let _ = buf.finish_command_block(Some(0), "fid1"); // end_row = cursor row
-//
-//         let last_content_row_before = buf.rows.len() - 1;
-//         assert_eq!(
-//             buf.command_blocks()[0].end_row,
-//             Some(last_content_row_before),
-//             "precondition: end_row points at the last content row"
-//         );
-//
-//         // Reflow to a narrower width — the long output re-wraps into MORE
-//         // rows, so the last output row's absolute index increases.
-//         buf.set_size(10, 5, 0);
-//
-//         let last_content_row_after = buf.rows.len() - 1;
-//         assert_eq!(
-//             buf.command_blocks()[0].end_row,
-//             Some(last_content_row_after),
-//             "reflow must remap command_block end_row to the new layout \
-//              (block points at {:?}, last content row is {last_content_row_after})",
-//             buf.command_blocks()[0].end_row,
-//         );
-//     }
-// }
+#[cfg(test)]
+mod task_113_smoke {
+    use super::*;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn t(s: &str) -> Vec<TChar> {
+        s.bytes().map(TChar::Ascii).collect()
+    }
+
+    // ── Bug G (ROOT CAUSE): grow appends blank rows at the bottom and never
+    // reclaims them. Repeated grow/shrink cycles (an interactive tiling-WM
+    // resize, or repeated font-size changes) accumulate an unbounded tail of
+    // blank rows BELOW the live cursor. The visible window then shows only
+    // that blank tail while the live prompt/output is stranded at the top of
+    // the buffer in unreachable scrollback. `clear` recovers it.
+    #[test]
+    fn task_113_repeated_resize_does_not_strand_live_content() {
+        let mut b = Buffer::new(40, 24);
+        // A few lines of content, cursor at the live bottom.
+        for i in 0..5 {
+            b.insert_text(&t(&format!("line{i}")));
+            b.handle_lf();
+            b.handle_cr();
+        }
+
+        // Interactive resize: height changes only, no output between them
+        // (like dragging a tiling window border while sitting at a prompt).
+        for &h in &[24usize, 30, 18, 40, 12, 50, 20, 24] {
+            b.set_size(40, h, 0);
+        }
+
+        // Settle and emit one line of output.
+        b.set_size(40, 24, 0);
+        b.handle_lf();
+        b.handle_cr();
+        b.insert_text(&t("PROMPT$"));
+
+        // The live cursor MUST be inside the visible window.
+        let vis_start = b.visible_window_start(0);
+        let vis_end = vis_start + b.height;
+        assert!(
+            b.cursor.pos.y >= vis_start && b.cursor.pos.y < vis_end,
+            "live cursor (row {}) escaped visible window [{vis_start}, {vis_end}) \
+             after repeated resize — content stranded in unreachable scrollback",
+            b.cursor.pos.y
+        );
+
+        // And the live content must be near the bottom, not stranded above a
+        // large blank tail.
+        let blanks_below = b.rows.len().saturating_sub(b.cursor.pos.y + 1);
+        assert!(
+            blanks_below <= 1,
+            "blank tail of {blanks_below} rows below the live cursor — the grow \
+             path is appending blanks that are never reclaimed",
+        );
+    }
+
+    // ── Bug R (amplifier): reflow_to_width rebuilds every row on a width
+    // change but does NOT remap command_blocks / prompt_rows, whose row
+    // fields are buffer-absolute. After a width reflow the block metadata
+    // points at the wrong rows, corrupting gutters/folds.
+    //
+    // NOTE: this reproduction is driven and fixed by Task 113.2; it stays
+    // commented out until then so 113.1 leaves the suite green. Uncomment it
+    // in 113.2, watch it fail, implement the reflow remap, watch it pass, then
+    // keep it as permanent regression coverage.
+    //
+    // #[test]
+    // fn task_113_reflow_remaps_command_block_rows() {
+    //     let mut buf = Buffer::new(20, 5);
+    //
+    //     // Prompt + command on row 0, output starting on row 1.
+    //     let _id = buf.start_command_block(None, "fid1".to_owned());
+    //     buf.mark_prompt_row();
+    //     buf.insert_text(&t("prompt$ cmd"));
+    //     buf.mark_command_start_row("fid1"); // command_start_row = 0
+    //     buf.handle_lf(); // cursor -> row 1
+    //     buf.mark_output_start_row("fid1"); // output_start_row = 1
+    //
+    //     // A long output line that re-wraps differently at a new width.
+    //     buf.insert_text(&t(
+    //         "0123456789012345678901234567890123456789012345678901234567890",
+    //     ));
+    //     let _ = buf.finish_command_block(Some(0), "fid1"); // end_row = cursor row
+    //
+    //     let last_content_row_before = buf.rows.len() - 1;
+    //     assert_eq!(
+    //         buf.command_blocks()[0].end_row,
+    //         Some(last_content_row_before),
+    //         "precondition: end_row points at the last content row"
+    //     );
+    //
+    //     // Reflow to a narrower width — the long output re-wraps into MORE
+    //     // rows, so the last output row's absolute index increases.
+    //     buf.set_size(10, 5, 0);
+    //
+    //     let last_content_row_after = buf.rows.len() - 1;
+    //     assert_eq!(
+    //         buf.command_blocks()[0].end_row,
+    //         Some(last_content_row_after),
+    //         "reflow must remap command_block end_row to the new layout \
+    //          (block points at {:?}, last content row is {last_content_row_after})",
+    //         buf.command_blocks()[0].end_row,
+    //     );
+    // }
+}

@@ -150,6 +150,23 @@ fn bench_resize(c: &mut Criterion) {
         );
     });
 
+    // Height grow — the Task 113.1 path. Exercises the primary-buffer grow
+    // branch, which now reclaims trailing blank screen-padding below the live
+    // cursor instead of appending an unreclaimable blank tail.
+    group.bench_with_input(BenchmarkId::new("grow_height", 200), &data, |b, data| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(100, 80);
+                buf.insert_text(data);
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.set_size(100, 200, 0));
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
     group.finish();
 }
 

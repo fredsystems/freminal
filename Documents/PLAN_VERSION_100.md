@@ -966,9 +966,18 @@ await review.
 
 ## Task 113 — Resize / Reflow Scroll Corruption
 
-> **STATUS: PENDING.** Decomposed into three subtasks (113.1–113.3). 113.1 is
+> **STATUS: IN PROGRESS.** Decomposed into three subtasks (113.1–113.3). 113.1 is
 > the root-cause fix and the priority; 113.2 and 113.3 are independent
 > amplifiers found alongside it. Each subtask leaves `cargo test --all` green.
+>
+> - **113.1 — COMPLETE.** Grow path no longer appends an unreclaimable blank
+>   tail below the live cursor; it reclaims trailing pristine `ScrollFill`
+>   padding instead, pinning the live cursor to the bottom of the (taller)
+>   window and revealing real scrollback above. Bug G smoke test passes and is
+>   kept uncommented. Added a `buffer_resize/grow_height` benchmark (no
+>   regression: p = 0.08, "No change").
+> - **113.2 — pending.** Bug R smoke test remains commented out until activated.
+> - **113.3 — pending.**
 
 ### Background — the reported bug
 
@@ -1142,6 +1151,27 @@ unreclaimable rows.
 
 Stop: report the new grow logic, the smoke-test result, and the benchmark
 before/after; await review.
+
+**Implementation note (113.1, as landed).** The grow now appends **nothing** on
+the primary buffer (rather than "append only when scrollback is insufficient").
+Instead, `resize_height` calls a new private helper
+`reclaim_trailing_blank_padding()` that pops trailing pristine `ScrollFill` rows
+(empty cells) lying strictly below the live cursor, then leaves the buffer as
+short as its content requires. The taller window reveals real scrollback above
+via the existing bottom-anchored `visible_window_start`; when no scrollback
+exists the buffer is left with `rows.len() < height` and the GUI pads the
+remainder below the live bottom — exactly mirroring `Buffer::new`, which
+deliberately starts with a single row, not `height` blank rows. This is a
+cleaner equivalent of the plan's invariant: it satisfies "the live bottom stays
+at the bottom of the window," and because no rows are ever appended below the
+cursor, a grow/shrink cycle can never accumulate a blank tail. The screen
+re-fills through the normal `handle_lf` row-push path, so the LF fast path is
+never handed a cursor sitting above a blank tail. Two `tests_gui_resize` cases
+(`resize_grow_adds_rows`, the `preserve_scrollback_anchor_*` clamp tests) encoded
+the old append-at-bottom mechanics and were rewritten to assert the new contract
+(cursor stays pinned / scrollback is revealed). A `buffer_resize/grow_height`
+Criterion benchmark was added to cover the grow path (it had none); before/after
+showed no significant change (p = 0.08).
 
 #### 113.2 — Remap command blocks and prompt rows across reflow (Bug R)
 

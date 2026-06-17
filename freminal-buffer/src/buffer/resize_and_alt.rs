@@ -488,11 +488,51 @@ impl Buffer {
         let old_height = self.height;
 
         if new_height > old_height {
-            // Grow: add blank rows at the bottom.
-            let grow = new_height - old_height;
-            for _ in 0..grow {
-                self.rows.push(Row::new(self.width));
-                self.row_cache.push(None);
+            if self.kind == BufferType::Alternate {
+                // Alternate buffer has no scrollback and a strict
+                // `rows.len() == height` invariant.  Grow by appending exactly
+                // enough blank rows at the bottom to reach the new height; the
+                // live region is top-anchored, so this is correct.
+                let grow = new_height.saturating_sub(self.rows.len());
+                for _ in 0..grow {
+                    self.rows.push(Row::new(self.width));
+                    self.row_cache.push(None);
+                }
+            } else {
+                // Primary buffer: the visible window is anchored to the BOTTOM
+                // of the buffer (`visible_window_start` = rows.len() - height),
+                // and the live cursor sits in the bottom `height` rows.  A
+                // taller window must be filled by RE-EXPOSING existing
+                // scrollback ABOVE the live bottom — NOT by appending blank rows
+                // BELOW it.
+                //
+                // The old code appended `new_height - old_height` blank rows at
+                // the bottom unconditionally.  Because the shrink branch retains
+                // rows (they become scrollback) and the window is bottom-anchored,
+                // a sequence of grow/shrink cycles — exactly what an interactive
+                // tiling-WM resize or repeated font-size changes produce —
+                // accumulated an unreclaimable tail of blank rows below the live
+                // cursor.  After a later shrink the bottom-anchored window then
+                // showed only that blank tail while the live prompt/output was
+                // stranded above it, in unreachable scrollback; no amount of
+                // scrolling recovered it and only `clear` fixed it (Task 113,
+                // Bug G).
+                //
+                // The fix: reclaim any trailing blank screen-padding rows below
+                // the live cursor, then append nothing.  Rows below the cursor
+                // in the primary buffer are always unwritten screen padding —
+                // the cursor is the furthest-written point at the live bottom,
+                // and all real content/scrollback lies at or above it.  Such
+                // padding rows are pristine `ScrollFill` placeholders (created
+                // by `Row::new`); reclaiming them down to the cursor row pins the
+                // live cursor to the bottom of the (now taller) window while the
+                // window reveals real scrollback above.  When there is no
+                // scrollback the window simply shows the available content with
+                // blank screen space below — and the screen fills back up
+                // through the normal `handle_lf` row-push path.  Because we
+                // never append below the cursor, a grow/shrink cycle can never
+                // accumulate a blank tail.
+                self.reclaim_trailing_blank_padding();
             }
             // Mark all pre-existing rows dirty so the row-level cache is
             // invalidated.  The visible window is now taller and the old
@@ -554,6 +594,38 @@ impl Buffer {
         } else {
             // xterm-style: reset to live bottom
             0
+        }
+    }
+
+    /// Reclaim trailing blank screen-padding rows that lie strictly below the
+    /// live cursor (primary buffer only).
+    ///
+    /// In the primary buffer the cursor is the furthest-written point at the
+    /// live bottom: every real content and scrollback row lies at or above it,
+    /// and any row below it is unwritten screen padding.  A pristine padding
+    /// row is a `RowOrigin::ScrollFill` row with no cells (exactly what
+    /// `Row::new` produces).  Such rows are removed down to — but never
+    /// including — the cursor's row, so the live cursor is pinned to the bottom
+    /// of the buffer.
+    ///
+    /// This is used by the height-grow path so the taller window reveals real
+    /// scrollback above the live bottom instead of accumulating an
+    /// unreclaimable blank tail below it (Task 113, Bug G).  It deliberately
+    /// stops at the first non-pristine row from the bottom, so it never touches
+    /// BCE-filled rows, content, or scrollback.
+    fn reclaim_trailing_blank_padding(&mut self) {
+        while self.rows.len() > self.cursor.pos.y + 1 {
+            // Safe: loop guard guarantees rows.len() >= 2 here.
+            let Some(last) = self.rows.last() else { break };
+            if last.origin == RowOrigin::ScrollFill && last.characters().is_empty() {
+                // A pristine ScrollFill row has no cells, so it holds no image
+                // cells; image_cell_count needs no adjustment.  Keep row_cache
+                // length in lockstep with rows.
+                self.rows.pop();
+                self.row_cache.pop();
+            } else {
+                break;
+            }
         }
     }
 
