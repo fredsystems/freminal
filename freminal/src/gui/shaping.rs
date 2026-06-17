@@ -1321,6 +1321,72 @@ mod tests {
         assert_eq!(glyphs[1].cell_width, 2);
     }
 
+    // -- Bundled-font ligature smoke test (Task 111.6) --
+
+    /// Shape `text` as a single same-format ASCII run through the REAL bundled
+    /// font and return the sequence of shaped glyph IDs.
+    ///
+    /// Unlike the `build_glyphs_*` tests (which feed synthetic `GlyphInfo`
+    /// fixtures), this drives the actual shaping pipeline against the bundled
+    /// default face, so it observes whether the font's `calt` table actually
+    /// rewrites glyphs for ligating sequences.
+    fn bundled_glyph_ids(text: &str, ligatures: bool) -> Vec<u16> {
+        let mut fm = test_font_manager();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w = fm.cell_width() as f32;
+
+        let chars: Vec<TChar> = text.bytes().map(TChar::Ascii).collect();
+        let tags = vec![make_tag(0, text.len())];
+
+        let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        // A same-format ASCII run must stay a single run so a ligature can form.
+        assert_eq!(runs.len(), 1, "`{text}` should be one run");
+
+        let shaped = shape_runs(&runs, &fm, cell_w, ligatures);
+        assert_eq!(shaped.len(), 1);
+        shaped[0].glyphs.iter().map(|g| g.glyph_id).collect()
+    }
+
+    /// Regression guard: the bundled default font must actually form ligatures
+    /// when `ligatures = true`.
+    ///
+    /// This is the test that would have caught the `MesloLGS`
+    /// "ligature-feature-on-but-font-has-no-ligatures" bug that motivated the
+    /// `CaskaydiaCove` swap (Task 111). It loads the *real* bundled face and
+    /// asserts that known ligating sequences are shaped to a *different* set of
+    /// glyphs with ligatures on than with ligatures off.
+    ///
+    /// `CaskaydiaCove` (like `Cascadia Code`) implements its coding ligatures via
+    /// `calt` chaining-contextual substitution into dedicated "ligature piece"
+    /// glyphs rather than a many-to-one ligature collapse — so the glyph
+    /// *count* is unchanged but the glyph *IDs* change. Asserting on
+    /// "IDs differ" (not on specific IDs, which are font-version-specific, nor
+    /// on glyph-count reduction, which this font does not do) is the
+    /// non-brittle way to prove the feature fired.
+    ///
+    /// It fails if the bundled font is ever swapped back to a non-ligating face
+    /// such as `MesloLGS`, or to the `CaskaydiaMono` variant (which strips
+    /// `calt`): in those fonts the glyphs are identical regardless of the
+    /// ligature feature flag.
+    #[test]
+    fn bundled_font_forms_ligatures() {
+        for seq in ["->", "=>", "==="] {
+            let with_lig = bundled_glyph_ids(seq, true);
+            let without_lig = bundled_glyph_ids(seq, false);
+
+            // The ligature feature must have changed the shaping output. If the
+            // bundled font has no `calt` coverage (Meslo, CaskaydiaMono), the
+            // two would be identical.
+            assert_ne!(
+                with_lig, without_lig,
+                "`{seq}`: bundled font shaped to identical glyphs with \
+                 ligatures ON ({with_lig:?}) and OFF ({without_lig:?}) — the \
+                 `calt` feature did not fire. The bundled font may have lost \
+                 its ligature coverage."
+            );
+        }
+    }
+
     #[test]
     fn build_glyphs_wide_char_not_confused_with_ligature() {
         // A single wide CJK character — 1 glyph, 1 char, width 2.
