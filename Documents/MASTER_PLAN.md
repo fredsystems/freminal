@@ -20,7 +20,7 @@ and plan document maintenance rules.
 | v0.7.0  | Recording & Layouts             | (retired — see DESIGN_DECISIONS.md, FREC_FORMAT.md, LAYOUT_FORMAT.md) | 59,61,68,69      | Complete      |
 | v0.8.0  | Correctness & Polish            | `PLAN_VERSION_080.md`                                                 | 70–71            | Pending merge |
 | v0.9.0  | Modern Workflow Terminal        | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | In progress   |
-| v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | TBD              | Stub          |
+| v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | In progress   |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101           | Planned       |
 | v0.12.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_120.md`                                                 | 102–103          | Planned       |
 | v0.13.0 | Kitty: Text Sizing              | `PLAN_VERSION_130.md`                                                 | 104              | Planned       |
@@ -39,12 +39,13 @@ senior-engineer audit, plus the full UX Top-20. This is non-negotiable: we do no
 features on top of latent correctness debt.
 
 **Tiered planning.** Per the `freminal-version-activation` skill, plan documents are written
-in two tiers. The next-up kitty versions (v0.11.0–v0.13.0) carry a **full per-subtask
-breakdown** written against the current code. v0.10.0 (Beautification & Fonts) and everything
-from v0.14.0 onward is an **enriched stub**: goal, task summary, and every durable design
-decision captured, but **no subtask decomposition** — that happens in a dedicated session when
-the version is activated, against the code as it then exists. Capturing a durable decision in a
-far-term stub is expected; inventing its subtasks early is not.
+in two tiers. v0.10.0 (Beautification & Fonts) is **activated** and carries a **full
+per-subtask breakdown** (Tasks 111–112), as do the next-up kitty versions (v0.11.0–v0.13.0),
+all written against the current code. Everything from v0.14.0 onward is an **enriched stub**:
+goal, task summary, and every durable design decision captured, but **no subtask
+decomposition** — that happens in a dedicated session when the version is activated, against
+the code as it then exists. Capturing a durable decision in a far-term stub is expected;
+inventing its subtasks early is not.
 
 **Beautification & Fonts is v0.10.0, not an end-of-roadmap task.** The major UI
 beautification pass (theme-consistent modals/toasts, bundled glyph assets) and the bundled-font
@@ -179,6 +180,8 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 108 | About Modal & Attribution                | `PLAN_VERSION_090.md` (Task 108)              | Complete      | Task 107               |
 | 109 | Active-Pane Highlight Correctness (Gate) | `PLAN_VERSION_090.md` (Task 109)              | Complete      | Task 58                |
 | 110 | Focus Follows Mouse (Toggleable)         | `PLAN_VERSION_090.md` (Task 110)              | Complete      | Task 58                |
+| 111 | Bundled Font / Icon (CaskaydiaCove)      | `PLAN_VERSION_100.md` (Task 111)              | Active        | v0.8.0, v0.9.0         |
+| 112 | UI Beautification (ChromeStyle)          | `PLAN_VERSION_100.md` (Task 112)              | Active        | Task 111               |
 
 ---
 
@@ -644,7 +647,7 @@ Update this section as tasks complete:
 - `Documents/LAYOUT_FORMAT.md` — Saved layout TOML format reference
 - `Documents/PLAN_VERSION_080.md` — v0.8.0 "Correctness & Polish" roadmap (Tasks 70–71)
 - `Documents/PLAN_VERSION_090.md` — v0.9.0 "Modern Workflow Terminal" (Tasks 72–77, 94–95, 98, 106–110)
-- `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (enriched stub)
+- `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, decomposed)
 - `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty: Transfer & Cursors" (Tasks 102–103, decomposed)
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Text Sizing" (Task 104, decomposed)

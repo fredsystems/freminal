@@ -1,9 +1,9 @@
 # PLAN_VERSION_100.md — v0.10.0 "Beautification & Fonts"
 
-> **STATUS: ENRICHED STUB.** Durable design decisions are captured below;
-> per-subtask decomposition happens at activation in a dedicated session,
-> against the code as it then exists (see the `freminal-version-activation`
-> skill). Do not invent subtasks early.
+> **STATUS: ACTIVATED.** Decomposed into Tasks 111 and 112 (see "Task 111 —
+> Bundled Font / Icon" and "Task 112 — UI Beautification" below). Durable design
+> decisions and the activation-time audits (font analysis, egui capability) are
+> captured in the sections above the subtask breakdowns.
 
 ## Goal
 
@@ -32,13 +32,15 @@ bundled-font change alters the default glyph set.
 
 ## Task Summary
 
-| #   | Feature             | Scope | Status | Depends On     |
-| --- | ------------------- | ----- | ------ | -------------- |
-| TBD | UI Beautification   | Large | Stub   | v0.8.0, v0.9.0 |
-| TBD | Bundled Font / Icon | Large | Stub   | v0.8.0, v0.9.0 |
+| #   | Feature             | Scope | Status | Depends On       |
+| --- | ------------------- | ----- | ------ | ---------------- |
+| 111 | Bundled Font / Icon | Large | Active | v0.8.0, v0.9.0   |
+| 112 | UI Beautification   | Large | Active | v0.8.0, Task 111 |
 
-Task numbers are assigned at activation. Source: `Documents/PLANNING.MD`
-"Pre-1.0 Remediations" (UI aesthetic, built-in fonts).
+Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
+"Pre-1.0 Remediations" (UI aesthetic, built-in fonts). Task 112 depends on Task
+111 because the bundled-icon asset pipeline (112) reuses the bundled-asset
+precedent established by the font swap (111), and both touch glyph rendering.
 
 ---
 
@@ -61,15 +63,107 @@ Durable problems to solve (from `PLANNING.MD`):
 - **Inspiration:** ACARS Hub and modern web apps — rounded corners, consistent
   color theming, cohesive spacing.
 
+### egui capability audit (read-only, verified at activation)
+
+A read-only survey of the chrome rendering path and the egui 0.34.3 `Style` /
+`Visuals` API established the toolkit ceiling. No code was changed.
+
+- **Versions.** `egui`, `egui_glow`, and `egui-winit` are all **0.34.3**;
+  `winit` 0.30.13; `glutin` 0.32.3. `eframe` is fully removed — the
+  `freminal-windowing` crate owns the winit+glutin+egui integration directly.
+- **What egui gives us is sufficient for either aesthetic.** egui 0.34's
+  `Style`/`Visuals` expose full control over the surfaces that matter:
+  - Per-state widget visuals via `Visuals.widgets` — `noninteractive`,
+    `inactive`, `hovered`, `active`, `open` — each a `WidgetVisuals` with
+    `bg_fill`, `weak_bg_fill`, `bg_stroke`, `fg_stroke`, `corner_radius`, and
+    `expansion`. This means buttons, menus, combo boxes, sliders, and tabs can
+    be fully recolored and reshaped per interaction state.
+  - `window_corner_radius` and `menu_corner_radius` (square → fully rounded),
+    `Visuals.window_fill`, `window_stroke`, `panel_fill`, `selection`
+    (`Selection { bg_fill, stroke }`), `override_text_color`, and `Spacing`
+    (padding/margins/scroll-bar geometry).
+  - Per-widget overrides via scoped `ui.style_mut()` and custom `egui::Frame`
+    (`fill`, `stroke`, `corner_radius`, `inner_margin`) — already used in
+    `toast.rs` (the only current use of `Stroke` + `CornerRadius`) and the
+    settings window's opaque frame (`settings.rs`).
+
+  Conclusion: **we are not hamstrung by egui.** Both a hyper-modern rounded
+  look and a sharp/retro look are fully achievable; the only thing egui will
+  not do for free is render arbitrary SVG/vector chrome — custom shapes go
+  through `Painter` or a bundled raster/font asset (see icon decision below).
+
+- **Current state: chrome is essentially un-themed.** The _only_ egui visual
+  fields customized today are `style.visuals.window_fill` and
+  `style.visuals.panel_fill` (set from the theme's `DefaultBackground` in
+  `rendering.rs:set_egui_options` / `update_egui_theme` and the per-frame
+  style-cache in `app_impl.rs`). Everything else — every widget background,
+  hover/active state, stroke, corner radius, menu styling, separators, scroll
+  bars — is **stock default egui 0.34 dark visuals**. This is exactly why the
+  screenshots show a richly-themed terminal buffer inside flat, square,
+  grey-blue default chrome that ignores the selected theme.
+
+- **Live re-theming is already proven for the two fill fields and generalizes
+  cleanly.** The active palette travels to the GUI thread as
+  `TerminalSnapshot.theme: &'static ThemePalette`, available before any panel
+  is drawn. A theme change in the settings modal emits `PreviewTheme(slug)` →
+  `InputEvent::ThemeChange` to every pane → next `build_snapshot()` carries the
+  new `&'static` reference → the GUI's per-frame style cache detects the change
+  by pointer identity (`!std::ptr::eq(prev, snap.theme)`) and re-applies. The
+  same hook that updates `window_fill`/`panel_fill` today can apply a full
+  `Visuals` derived from the palette — **live re-theming of all chrome is a
+  natural extension of the existing mechanism, not new infrastructure.**
+
+- **Palette → `Color32` helpers already exist.** `colors.rs` provides
+  `internal_color_to_egui` and `internal_color_to_egui_with_alpha` (map a
+  `TerminalColor` against the active `ThemePalette`); a private
+  `rgb_to_color32((u8,u8,u8))` already does the trivial conversion needed to
+  pull `theme.background` / `theme.foreground` / `theme.ansi[..]` into chrome.
+
+### Decision: centralized `ChromeStyle` with selectable Modern / Retro profiles
+
+- **All non-terminal chrome is styled through one centralized layer.** Rather
+  than committing to a single aesthetic, the beautification pass builds a single
+  `ChromeStyle` abstraction that derives a complete egui `Visuals` (widget
+  states, corner radii, strokes, fills, selection, text color, spacing) from
+  **(a)** the active `ThemePalette` and **(b)** a selectable **style profile**.
+  This is the decided direction (the aesthetic is a runtime choice, not a baked
+  constant).
+- **Two profiles ship: Modern and Retro.**
+  - **Modern** — rounded corners, soft strokes, generous padding, subtle
+    hover/active states, cohesive flat fills (the ACARS Hub / modern-web
+    inspiration).
+  - **Retro** — sharp/square corners, harder edges, denser spacing,
+    higher-contrast borders, a terminal-native feel.
+
+  Both are fully theme-driven (colors come from the palette); they differ only
+  in geometry, stroke weight, and spacing. The profile is a config option and a
+  settings-modal control.
+
+- **Single application point.** The profile + palette resolve to one `Visuals`
+  applied via the existing per-frame style hook (extending the
+  `window_fill`/`panel_fill` cache to a full-`Visuals` cache keyed on
+  `(theme, profile, opacity, reverse-video)`). No per-widget ad-hoc styling
+  scattered across `menu.rs` / `settings.rs` / modal files — they consume the
+  centralized style.
+- **Scope of "all chrome":** menu bar (`menu.rs`), tab bar (`menu.rs`),
+  right-click context menu (`widget.rs`), settings modal _and_ standalone
+  settings window (`settings.rs`), command-history palette
+  (`command_history.rs`), search bar (`search.rs`), toasts (`toast.rs`),
+  welcome overlay (`welcome.rs`), and the broadcast / close / paste guard and
+  About / Save-Layout / unsaved-changes dialogs. The terminal buffer is
+  explicitly **excluded** (it has its own palette-driven renderer).
+
 Open questions (decide at activation):
 
 - **Asset format for bundled icons.** Working assumption is bundled SVGs for
   all action symbols, but alternatives (icon font, pre-rasterized PNG atlas)
-  are on the table. Decide against the renderer as it then exists.
-- **Toolkit constraints.** Is the visual ceiling platform-specific, and are we
-  hamstrung by egui? An early subtask must research what egui can and cannot do
-  for rounded corners, theming, and custom-drawn chrome before committing to an
-  approach.
+  are on the table. egui does not render SVG natively, so this is the one chrome
+  element that needs a concrete asset-pipeline decision against the renderer as
+  it then exists. (The font/glyph work in this version already establishes a
+  bundled-asset precedent.)
+- **Reverse-video interaction.** The current style cache forces white
+  fill in reverse-video (non-normal-display) mode; the `ChromeStyle` layer must
+  define how each profile behaves under reverse video.
 
 ---
 
@@ -83,17 +177,60 @@ Durable problems to solve (from `PLANNING.MD`):
 - **Maximum ligature AND powerline coverage out of the box**, regardless of what
   the user has installed.
 
-Options to investigate at activation (capture the decision, do not pre-commit):
+### Font audit findings (read-only, verified at activation)
 
-- **Change the bundled font to a Nerd Font** (or equivalent with broad
-  ligature and powerline coverage). **Licensing is a hard gate** — confirm the
-  license permits redistribution before this option is viable. This mirrors the
-  model
-  other terminals (e.g. WezTerm) use. Working preference, pending license
-  confirmation.
-- **Detect the platform default monospace font and use it** over a bundled
-  font. Disfavoured: platform fonts typically lack ligatures and powerline
-  glyphs, which defeats the goal.
+A read-only audit of the bundled fonts, the renderer's shaping pipeline, and the
+candidate replacement (`fonttools` via `nix shell`, `fc-list`, upstream license
+text) established the following facts. These are durable inputs; the audit made
+no code or asset changes.
+
+- **The ligature feature is already wired but silently dead with the default
+  font.** `shaping_features()` in `freminal/src/gui/shaping.rs` enables `liga`
+  and `calt` when ligatures are on, `config.font.ligatures` defaults to `true`,
+  and the Settings modal advertises "Enable Ligatures". But the bundled
+  **MesloLGS Nerd Font Mono** has **no ligature features at all** (its GSUB
+  table contains only `rtla`). So the default install ships a feature that is
+  on, advertised, and incapable of doing anything. This validates the font
+  overhaul premise — it is not misplaced; the gap is worse than "no guarantee".
+- **Hack is dead weight and must be dropped.** The four `res/Hack-*.ttf` files
+  (~1.27 MB) are **never loaded anywhere** — no `include_bytes!`, no build
+  script, no runtime path. The sole `.rs` reference
+  (`freminal-common/tests/config_tests.rs`) uses the bare string `"Hack"` as an
+  arbitrary font-family value in a TOML round-trip test; it is not the font.
+  Removing the files, the `ATTRIBUTIONS.md` "Hack" entry, and
+  `res/fonts/Hack-LICENSE.md` is a clean, license-unencumbered deletion.
+  **CaskaydiaCove Nerd Font is a strict superset of MesloLGS and the license is
+  clear.** Verified against the four candidate faces:
+
+| Font (Regular)        | Ligatures (`calt`/`liga`/`dlig`)     | Nerd / powerline    | Monospace                         | Glyphs |
+| --------------------- | ------------------------------------ | ------------------- | --------------------------------- | ------ |
+| MesloLGS NF (current) | NONE (GSUB has only `rtla`)          | full Nerd set       | yes                               | 12,784 |
+| Hack (unused)         | NONE                                 | no (7/56 powerline) | yes                               | 1,573  |
+| CaskaydiaCove NF      | YES — `calt`, 285 chaining subtables | full Nerd + Braille | yes (uniform ASCII advance, 1200) | 14,724 |
+| Cascadia Code NF      | YES (same `calt`)                    | full Nerd + Braille | yes                               | 13,560 |
+
+- **License: SIL OFL 1.1**, verified against upstream
+  `microsoft/cascadia-code/LICENSE`. Same license class as the MesloLGS we
+  already bundle — the hard gate is cleared, redistribution and embedding are
+  permitted.
+- **Reserved Font Name caveat.** Cascadia Code's OFL reserves the name
+  "Cascadia Code". The Nerd Fonts patch already renames it to
+  **"CaskaydiaCove"** to comply; bundle under that name, do not rename back.
+- **Variant caveat.** Use the **`Cove`/Code** variant (285 `calt` subtables),
+  **not `CaskaydiaMono`** — the Mono variant has ligatures stripped (1 `calt`
+  subtable). `isFixedPitch=0` on CaskaydiaCove is benign: ASCII advances are
+  uniform; the flag is unset only because Nerd icons are double-width.
+
+### Decision: bundle CaskaydiaCove NF, drop Hack
+
+- **Replace the bundled MesloLGS faces with CaskaydiaCove Nerd Font** (the
+  ligature-bearing `Cove` variant). It clears the license gate (OFL-1.1), is a
+  superset of MesloLGS coverage (full Nerd set plus Braille), and is the only
+  way the already-implemented ligature feature produces ligatures out of the
+  box. The previously-disfavoured "detect platform default font" option stays
+  rejected — platform fonts lack ligatures and powerline glyphs.
+- **Drop the Hack font** — files, `ATTRIBUTIONS.md` entry, and
+  `res/fonts/Hack-LICENSE.md`. It is unused dead weight.
 
 ---
 
@@ -108,11 +245,614 @@ Options to investigate at activation (capture the decision, do not pre-commit):
 - **The terminal buffer is out of scope** for the beautification pass.
 - **We bundle our own action-glyph assets.** Relying on the system font for our
   own UI symbols is a failure mode, not an acceptable fallback.
+- **All chrome is styled through one centralized `ChromeStyle` layer with
+  selectable Modern / Retro profiles.** Decided rather than committing to a
+  single aesthetic: the styling layer derives a complete egui `Visuals` from the
+  active `ThemePalette` plus a user-selectable style profile. Both profiles are
+  fully theme-driven; they differ in geometry (corner radius), stroke weight,
+  and spacing. The profile is a config option and a settings-modal control.
+- **Live chrome re-theming is in scope and uses the existing mechanism.** The
+  active palette already reaches the GUI thread via `TerminalSnapshot.theme`;
+  the per-frame style hook that sets `window_fill`/`panel_fill` today is
+  extended to apply the full palette-derived `Visuals`. No new transport
+  infrastructure is required.
+- **egui 0.34.3 is sufficient — we are not hamstrung.** Verified at the
+  activation audit: `Visuals`/`Style` expose per-state `WidgetVisuals`
+  (fill/stroke/`corner_radius`), `window_corner_radius`, `menu_corner_radius`,
+  `selection`, `override_text_color`, and `Spacing`. The one gap is native SVG
+  rendering, which only affects the bundled-icon asset-format decision.
+- **Bundled font is CaskaydiaCove Nerd Font (`Cove`/Code variant), replacing
+  MesloLGS.** Decided at the activation audit: it clears the license gate
+  (SIL OFL 1.1, confirmed against upstream), is a superset of MesloLGS coverage,
+  and is required for the already-wired ligature feature to function out of the
+  box. Must be bundled under the "CaskaydiaCove" name (OFL Reserved Font Name on
+  "Cascadia Code") and must be the `Cove` variant, not `CaskaydiaMono` (which
+  strips ligatures).
+- **The Hack font is dropped.** Confirmed unused (never loaded anywhere); the
+  files, `ATTRIBUTIONS.md` entry, and `res/fonts/Hack-LICENSE.md` are removed.
 - **Bundled-font choice is license-gated.** No font is bundled until its license
-  is confirmed to permit redistribution.
-- **egui-capability research is the first beautification subtask** at
-  activation — the approach depends on what the toolkit allows.
+  is confirmed to permit redistribution. (Satisfied for CaskaydiaCove: OFL-1.1.)
+- **egui-capability research is complete** (folded into "UI Beautification"
+  above). egui 0.34.3 supports both aesthetic directions and live palette-driven
+  re-theming; the centralized `ChromeStyle` layer is the chosen approach. The
+  remaining activation research is narrowed to the bundled-icon asset format.
 - Any new or restyled dialog/overlay is a focusable surface and MUST follow
   `freminal-modal-input-suppression`.
 - Escape-sequence support is not touched by this version (no
   `freminal-escape-sequence-docs` dual-doc update expected).
+- **Crate architecture (decided at activation):** No new crate. The chrome
+  styling is a centralized module in the `freminal` binary
+  (`freminal/src/gui/chrome_style.rs`) — egui stays in the binary, matching the
+  `freminal-architecture` invariant. The _toolkit-agnostic data type_
+  (`GuiTheme` plus `StyleProfile`, serde-derivable, zero egui) lives in
+  `freminal-common` beside `ThemeConfig`/`ThemePalette`, so a future
+  Lua/custom-config layer edits
+  config-shaped data and the GUI maps it — mirroring the existing
+  `ThemePalette` (data in common) / `colors.rs` (egui mapping in binary) split.
+  Palettes are **not** moved; `freminal-common::themes` already is the common
+  theme home. A separate crate is justified only by a second egui consumer,
+  which does not exist.
+
+---
+
+## Task 111 — Bundled Font / Icon
+
+Replace the bundled MesloLGS faces with CaskaydiaCove Nerd Font (ligature-bearing
+`Cove` variant) and remove the unused Hack font. This makes the already-wired
+ligature feature functional out of the box and removes dead bundled assets. See
+the "Font audit findings" and "Decision: bundle CaskaydiaCove NF, drop Hack"
+sections above for the durable rationale.
+
+Sequencing: 111.1 → 111.2 → 111.3 → 111.4 → 111.5 → 111.6; 111.7 (picker
+labeling) needs 111.2. Each subtask leaves `cargo test --all` green.
+
+### Task 111 subtasks
+
+#### 111.1 — Vendor CaskaydiaCove NF font files + license
+
+Scope: `res/` (new font files), `res/fonts/` (new license file). No `.rs`
+changes.
+
+What: Add the four ligature-bearing CaskaydiaCove Nerd Font `Cove` faces to
+`res/`: `CaskaydiaCoveNerdFont-Regular.ttf`, `-Bold.ttf`, `-Italic.ttf`,
+`-BoldItalic.ttf` (the `Cove`/Code variant with 285 `calt` subtables — **NOT**
+`CaskaydiaMono`, which strips ligatures). Source: Nerd Fonts release 3.4.0 (the
+patched files already use the OFL-compliant "CaskaydiaCove" Reserved-Font-Name
+rename). Add `res/fonts/CaskaydiaCove-NerdFont-LICENSE.md` containing the SIL OFL
+1.1 text (verbatim from `microsoft/cascadia-code/LICENSE`) plus a header noting
+the Nerd Fonts patch and the Cascadia Code reserved name.
+
+Deliverable: four `.ttf` files + one license markdown file present in `res/`.
+Verify each face parses and carries `calt`: `ttx -l` (via
+`nix shell nixpkgs#python3Packages.fonttools`) or the audit script confirms 285
+`calt` chaining subtables on Regular.
+
+Verification: `cargo build` (files present, nothing references them yet);
+`markdownlint` on the new license file.
+
+Prohibitions: do NOT delete the Meslo files yet (111.2 swaps the references
+first); do NOT use the `CaskaydiaMono` variant; do NOT rename the font family.
+
+Stop: report files added + the `calt` subtable count from the audit tool; await
+review.
+
+#### 111.2 — Swap the bundled-font references from Meslo to CaskaydiaCove
+
+Scope: `freminal/src/gui/font_manager.rs`, `freminal/src/gui/fonts.rs`.
+
+What: Repoint every `include_bytes!("../../../res/MesloLGSNerdFontMono-*.ttf")`
+to the CaskaydiaCove faces from 111.1. Rename the `MESLO_*` statics
+(`font_manager.rs:25-29`) and the bundled-face identifiers
+(`load_bundled_*` / face name strings at `font_manager.rs:851-873`) to
+`CASKAYDIA_*` / "CaskaydiaCove-\*". Update the `fonts.rs` egui `FontData`
+inserts (`fonts.rs:133-155`). Update the `DEFAULT_LABEL` in `settings.rs:830`
+("Default (CaskaydiaCove Nerd Font)") and the doc/comment references to the
+bundled font name across `font_manager.rs`, `fonts.rs`, `widget.rs:3098`,
+`nix/home-manager-module.nix:222`.
+
+Deliverable: the binary embeds CaskaydiaCove; no source reference to Meslo
+remains. Existing font-loading tests pass (update the metric-range assertions
+in `font_manager.rs:1345-1397` to CaskaydiaCove's cell metrics — recompute the
+expected 12pt cell width/height range against the new face).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`. The `font_manager` cell-metric tests must pass with recomputed
+ranges.
+
+Prohibitions: do NOT change the shaping pipeline (`shaping.rs` already requests
+`liga`/`calt`); do NOT alter the user-font fallback logic; do NOT delete the
+Meslo files yet (111.3).
+
+Stop: report the recomputed cell-metric ranges + test results; await review.
+
+#### 111.3 — Delete the Meslo font files
+
+Scope: `res/MesloLGSNerdFontMono-*.ttf`, `res/fonts/MesloLGS-NerdFont-LICENSE.md`.
+
+What: Remove the four Meslo `.ttf` files and the Meslo license markdown, now
+that 111.2 references CaskaydiaCove exclusively.
+
+Deliverable: Meslo files gone; build still succeeds (confirms 111.2 was
+complete).
+
+Verification: `cargo build`; `cargo test --all`; `rg -i meslo` returns only
+historical references in `Documents/` (plan/changelog), not in `res/` or `*.rs`.
+
+Prohibitions: do NOT remove anything referenced by code (111.2 must be merged
+first); do NOT touch the Hack files here (111.4).
+
+Stop: report files removed + `rg -i meslo` results; await review.
+
+#### 111.4 — Delete the unused Hack font + its attribution
+
+Scope: `res/Hack-*.ttf`, `res/fonts/Hack-LICENSE.md`, `ATTRIBUTIONS.md`,
+`freminal-common/tests/config_tests.rs`.
+
+What: Remove the four `res/Hack-*.ttf` files (confirmed never loaded — no
+`include_bytes!`, no runtime path) and `res/fonts/Hack-LICENSE.md`. Delete the
+"Hack" entry from `ATTRIBUTIONS.md:27-34`. In
+`config_tests.rs:307,315`, change the arbitrary font-family test value from
+`"Hack"` to a neutral literal (e.g. `"Test Font"`) so the round-trip test no
+longer name-drops a font we don't ship.
+
+Deliverable: no Hack artifacts remain anywhere; the config round-trip test
+still asserts font-family round-trips with a neutral value.
+
+Verification: `cargo test --all`; `rg -i "\bhack\b"` returns no `res/`, `*.rs`,
+or `ATTRIBUTIONS.md` hits (historical `Documents/` mentions are acceptable);
+`markdownlint ATTRIBUTIONS.md`.
+
+Prohibitions: do NOT change the meaning of the round-trip test (it still
+verifies an arbitrary family name survives serialization); do NOT touch the
+CaskaydiaCove attribution (111.5).
+
+Stop: report files/lines removed + `rg` results; await review.
+
+#### 111.5 — Add CaskaydiaCove to ATTRIBUTIONS.md
+
+Scope: `ATTRIBUTIONS.md`.
+
+What: Add a "CaskaydiaCove Nerd Font" attribution entry (replacing the Meslo
+entry, which 111.3's license-file removal orphans): upstream
+`microsoft/cascadia-code` (base, OFL-1.1, reserved name "Cascadia Code") and
+`ryanoasis/nerd-fonts` (patch + "CaskaydiaCove" rename), license SIL OFL 1.1,
+license-text link to `res/fonts/CaskaydiaCove-NerdFont-LICENSE.md`, and the file
+list `res/CaskaydiaCoveNerdFont-{Regular,Bold,Italic,BoldItalic}.ttf`. Remove
+the now-stale "MesloLGS Nerd Font Mono" entry (`ATTRIBUTIONS.md:36-46`).
+
+Deliverable: ATTRIBUTIONS.md lists CaskaydiaCove (OFL-1.1) and no longer lists
+Meslo or Hack.
+
+Verification: `markdownlint ATTRIBUTIONS.md`; manual read confirms license
+class and reserved-name note are present.
+
+Prohibitions: do NOT invent license terms — use OFL-1.1 as verified; do NOT
+re-add Hack.
+
+Stop: report the diff; await review.
+
+#### 111.6 — Ligature smoke test against the bundled font
+
+Scope: `freminal/src/gui/shaping.rs` (test module only), or a new test module
+under `freminal/tests/` if integration-level.
+
+What: Add a regression test proving the bundled default font now forms a
+ligature when `ligatures = true`. Shape a known ligating sequence (e.g. `->`,
+`=>`, `===`) with the bundled CaskaydiaCove face and assert the shaper emits a
+single ligature glyph spanning multiple cells (the
+`build_glyphs_two_char_ligature` / `_three_char_ligature` tests already define
+the shape; this one must run against the _real bundled face_, not a synthetic
+glyph-info fixture). This is the test that would have caught the Meslo
+"feature-on-but-dead" bug.
+
+Deliverable: a passing test that fails if the bundled font ever loses `calt`
+(guards against a future accidental revert to a non-ligating bundled font).
+
+Verification: `cargo test --all`; the new test passes and is named so its intent
+is obvious (e.g. `bundled_font_forms_ligatures`).
+
+Prohibitions: do NOT mock the font — load the actual bundled face; do NOT assert
+on a specific glyph ID (those are font-version-specific) — assert on
+cell-spanning ligature formation.
+
+Stop: report the test name + result; await review.
+
+#### 111.7 — Annotate the bundled default in the font picker + disambiguate a system duplicate
+
+Scope: `freminal/src/gui/settings.rs` (`show_font_tab` ~832-859, `DEFAULT_LABEL`
+~830).
+
+What: The font-family picker (`ComboBox` "font_family") lists a `None`-valued
+"Default" entry followed by every installed monospace family from
+`self.monospace_families`. Two labeling changes:
+
+1. **Annotate the bundled default.** The default entry's label gains an explicit
+   bundled/default annotation, e.g. `CaskaydiaCove Nerd Font (default —
+bundled)`. (After 111.2 the `DEFAULT_LABEL` already names CaskaydiaCove; this
+   adds the "bundled/default" flag so the user knows it ships with Freminal.)
+2. **Disambiguate a system duplicate.** If the user **also** has a font with the
+   same family name installed (i.e. the bundled font's family name appears in
+   `self.monospace_families`), that installed entry is annotated to
+   differentiate it from the bundled default, e.g.
+   `CaskaydiaCove Nerd Font (system)`. The two entries remain distinct
+   selectable items: choosing the annotated default keeps `font.family = None`
+   (use bundled); choosing the "(system)" entry sets
+   `font.family = Some("CaskaydiaCove Nerd Font")` (use the system copy via the
+   normal user-font path). The annotation is **display-only** — it must NOT be
+   written into the persisted `font.family` value.
+
+Match the bundled family name against the installed list using the same
+whitespace-stripped comparison the font manager already uses for naming
+variations (`font_manager.rs` "Caskaydia Cove" vs "CaskaydiaCove"); the bundled
+family name should come from a single source of truth (a const/accessor, not a
+duplicated string literal).
+
+Deliverable: the picker shows the annotated bundled default always, and the
+"(system)" annotation only when a same-named font is installed; selecting either
+behaves as described. Tests: a unit test for the label-construction logic
+covering (a) no system duplicate present and (b) system duplicate present,
+asserting the produced labels and that the persisted `family` value is `None`
+for the default and `Some(name)` for the system entry.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; manual: open Font settings with and without the font installed
+system-wide, confirm annotations.
+
+Prohibitions: do NOT bake the annotation text into `font.family`; do NOT
+hard-code the bundled family name in multiple places (single source of truth);
+do NOT change the user-font loading path — this is picker labeling only.
+
+Stop: report the label logic + test results + manual check; await review.
+
+---
+
+## Task 112 — UI Beautification
+
+Theme all non-terminal chrome to the active palette through one centralized
+styling layer with selectable Modern / Retro profiles, and ship our own action
+glyphs instead of relying on the system font. See the "egui capability audit"
+and "Decision: centralized `ChromeStyle`…" sections above for the durable
+rationale, and the crate-architecture decision in Design Decisions.
+
+The work splits into four phases: **data type** (112.2, in `freminal-common`) →
+**egui mapping + application** (112.3-112.5, in the binary) → **per-surface
+adoption** (112.6-112.9) → **icons** (112.10-112.12). An icon-asset audit
+(112.1) precedes everything. Each subtask leaves `cargo test --all` green.
+
+Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.4-112.5
+need 112.3; 112.6-112.9 need 112.5; 112.10 needs 112.1; 112.11-112.12 need
+112.10.
+
+### Task 112 subtasks
+
+#### 112.1 — READ-ONLY audit: action-glyph inventory + asset-format decision
+
+Scope: read-only. No file changes. Produces a findings section appended to this
+plan doc under "Task 112 audit results".
+
+What: Enumerate every action symbol the chrome currently draws via a font glyph
+(close `×`, recording indicator, broadcast-keyboard indicator, lock, tab `+`,
+menu chevrons, any powerline/emoji glyph in `menu.rs`, `toast.rs`,
+`settings.rs`, guard dialogs). For each, record the current codepoint, where
+it's drawn, and whether it renders on Linux (empty-square risk). Then decide the
+bundled-icon asset format against the current renderer: SVG-via-`Painter`,
+icon-font, or pre-rasterized PNG atlas. egui 0.34 has **no native SVG**, so this
+must weigh `egui_extras`/`resvg` rasterization vs. an icon font vs. baking PNGs.
+Recommend one with rationale.
+
+Deliverable: a written inventory (symbol → location → codepoint → render risk)
+and a recommended asset format with justification, appended to this plan.
+
+Verification: N/A (audit). Maintainer signs off on the asset-format choice
+before 112.10 begins.
+
+Prohibitions: do NOT write code; do NOT pick the format unilaterally without
+surfacing the tradeoffs.
+
+Stop: post the inventory + recommendation; await maintainer decision.
+
+#### 112.2 — Add `GuiTheme` + `StyleProfile` to `freminal-common` (data type only)
+
+Scope: `freminal-common/src/` (new module, e.g. `gui_theme.rs`, plus `lib.rs`
+re-export). NO egui. NO config wiring yet (that is 112.13).
+
+What: Define a toolkit-agnostic `GuiTheme` struct and `StyleProfile` enum,
+serde-derivable, zero external GUI deps:
+
+```text
+pub enum StyleProfile { Modern, Retro }   // #[serde(rename_all = "lowercase")]
+
+pub struct GuiTheme {
+    pub profile: StyleProfile,
+    pub corner_radius: u8,        // px; Modern default 6, Retro default 0
+    pub stroke_width: f32,        // px; border weight
+    pub item_spacing: (f32, f32), // x, y padding
+    pub window_padding: f32,
+    // … the minimal set the mapping in 112.3 needs; numbers/enums only
+}
+```
+
+`StyleProfile` carries a `fn defaults(self) -> GuiTheme` returning the
+profile's baseline geometry (Modern = rounded/soft, Retro = sharp/dense). All
+fields are plain numbers/enums — colors are NOT here (they come from
+`ThemePalette` at mapping time). Add `Default` (Modern), `Serialize`,
+`Deserialize`, and unit tests for `defaults()` and serde round-trip.
+
+Deliverable: the type + tests in `freminal-common`; nothing consumes it yet.
+
+Verification: `cargo test -p freminal-common`; `cargo clippy --all-targets
+--all-features -- -D warnings`.
+
+Prohibitions: do NOT add egui or any GUI crate to `freminal-common`'s
+`Cargo.toml`; do NOT put `Color32` or palette colors in `GuiTheme`; do NOT wire
+it into `Config` here.
+
+Stop: report the type surface + test results; await review.
+
+#### 112.3 — `chrome_style.rs`: map `(GuiTheme, ThemePalette) → egui::Visuals`
+
+Scope: `freminal/src/gui/chrome_style.rs` (new), `freminal/src/gui/mod.rs`
+(module decl). May read `colors.rs` helpers.
+
+What: Implement the centralized mapping `pub fn build_visuals(gui_theme:
+&GuiTheme, palette: &ThemePalette, bg_opacity: f32, normal_display: bool) ->
+egui::Visuals`. Derive every chrome surface from the palette: `window_fill`,
+`panel_fill` (opacity-aware, preserving current behavior), `window_stroke`,
+`window_corner_radius`/`menu_corner_radius` (from `gui_theme.corner_radius`),
+`selection` (from `palette.selection_bg`/`_fg`), `override_text_color`
+(`palette.foreground`), and all five `widgets` states (`noninteractive`,
+`inactive`, `hovered`, `active`, `open`) — each `WidgetVisuals` with `bg_fill`,
+`weak_bg_fill`, `bg_stroke`, `fg_stroke`, `corner_radius`, `expansion` derived
+from palette + profile geometry. Preserve the reverse-video (`!normal_display`)
+white-fill behavior currently in `app_impl.rs:1072-1080`. Add a public
+`palette_rgb_to_color32((u8,u8,u8)) -> Color32` helper (or reuse the existing
+private `rgb_to_color32` by making it `pub(crate)`).
+
+Deliverable: `build_visuals` + unit tests asserting key mappings (e.g. Retro
+profile yields `corner_radius == 0`; selection color matches palette; reverse
+video forces white). Nothing calls it yet (112.4 wires it).
+
+Verification: `cargo test -p freminal`; `cargo clippy --all-targets
+--all-features -- -D warnings`.
+
+Prohibitions: do NOT apply the visuals to the context here (112.4); do NOT
+hard-code any color — everything derives from the palette; do NOT touch the
+terminal-buffer renderer.
+
+Stop: report the function signature + which `Visuals` fields are set; await
+review.
+
+#### 112.4 — Apply full `Visuals` via the per-frame style hook
+
+Scope: `freminal/src/gui/rendering.rs` (`set_egui_options`,
+`update_egui_theme`), `freminal/src/gui/app_impl.rs` (per-frame style-cache
+~1042-1083), `freminal/src/gui/window.rs` (the `style_cache` field type ~49).
+
+What: Replace the two-field (`window_fill`/`panel_fill`) style application with
+a call to `chrome_style::build_visuals(...)` applied via
+`ctx.set_visuals(...)`/`global_style_mut`. Extend the `style_cache` key from
+`(bool, &'static ThemePalette, f32)` to also include the active `GuiTheme`
+(profile + geometry) so a profile change invalidates the cache. Wire the active
+`GuiTheme` in from config (read alongside the theme in `app_impl`). Keep the
+pointer-identity theme comparison; add equality on `GuiTheme`.
+
+Deliverable: all chrome now renders with palette-derived visuals in both
+profiles; switching theme live re-themes chrome (the existing
+`PreviewTheme`→snapshot path now also moves chrome colors).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; manual: launch, switch themes in settings, confirm menu/tab/modal
+colors follow.
+
+Prohibitions: do NOT scatter styling into individual widgets (that is
+112.6-112.9 consuming this centralized style); do NOT regress the
+`background_opacity` behavior (panel_fill stays opacity-aware, window_fill
+opaque).
+
+Stop: report cache-key change + manual re-theming result; await review.
+
+#### 112.5 — Performance: before/after frame-time capture
+
+Scope: benchmark capture only (per `performance-benchmarks` +
+`freminal-bench-table`). No production code change beyond what 112.4 landed.
+
+What: The per-frame style application + `Visuals` rebuild touches the render
+hot path. Capture the relevant benchmark IDs before (pre-112.4 baseline) and
+after, confirm < 15% regression. If `build_visuals` is called every frame,
+verify the `style_cache` actually short-circuits the rebuild on the steady-state
+(unchanged theme/profile) path — a cache miss every frame would be the
+regression.
+
+Deliverable: recorded before/after numbers in the prescribed format; confirmed
+within threshold (or a fix to the cache if not).
+
+Verification: `cargo bench` on the named IDs; numbers recorded.
+
+Prohibitions: do NOT skip this — chrome styling runs per frame; do NOT accept a
+
+> 15% regression without a documented justification.
+
+Stop: report before/after numbers; await review.
+
+#### 112.6 — Adopt centralized style: menu bar + tab bar
+
+Scope: `freminal/src/gui/menu.rs`.
+
+What: Remove any ad-hoc per-widget fills/strokes/corner radii in the menu bar
+and tab bar; let them inherit the centralized `Visuals` from 112.4. Where the
+tab bar sets explicit `Frame` fills/`corner_radius` (`menu.rs:760-777`) and
+selectable-button styling, replace with palette/profile-derived values from
+`chrome_style` (e.g. active-tab fill = `palette.selection_bg`, inactive =
+`weak_bg_fill`). Ensure the active-tab highlight still reads correctly in both
+profiles.
+
+Deliverable: menu + tab bar visually consistent with the active theme and
+profile, no hard-coded colors.
+
+Verification: `cargo test --all`; `cargo clippy …`; manual: tabs + menu in
+Modern and Retro, in a light and a dark theme.
+
+Prohibitions: do NOT introduce a second source of truth for colors; do NOT
+break tab-rename `TextEdit` focus (`freminal-modal-input-suppression`).
+
+Stop: report changes + manual check; await review.
+
+#### 112.7 — Adopt centralized style: settings modal + standalone settings window
+
+Scope: `freminal/src/gui/settings.rs`.
+
+What: Replace the bespoke `opaque_frame` (`settings.rs:603-608`) and any inline
+styling with the centralized `chrome_style` surface, keeping the
+"settings stays opaque regardless of background_opacity" guarantee. The settings
+tab bar, combo boxes, sliders, separators inherit the themed `Visuals`. Add the
+**style-profile picker control** here (a `Modern`/`Retro` selector) and a live
+preview — selecting a profile re-themes immediately via the 112.4 hook (parallel
+to the existing live theme preview).
+
+Deliverable: settings UI fully themed in both profiles; profile picker present
+and live.
+
+Verification: `cargo test --all`; `cargo clippy …`; manual: open settings,
+switch profile, confirm immediate restyle; confirm settings opacity guarantee
+holds.
+
+Prohibitions: do NOT persist the profile here (112.13 handles config wiring);
+the picker edits the in-memory draft + live preview only at this stage; do NOT
+break settings-field focus rules.
+
+Stop: report changes + manual check; await review.
+
+#### 112.8 — Adopt centralized style: overlays (context menu, command history, search, toasts, welcome)
+
+Scope: `freminal/src/gui/terminal/widget.rs` (context menu),
+`freminal/src/gui/command_history.rs`, `freminal/src/gui/search.rs`,
+`freminal/src/gui/toast.rs`, `freminal/src/gui/welcome.rs`.
+
+What: Route each overlay's `Frame`/`Area` styling through `chrome_style`. The
+toast `Frame` (`toast.rs:175-179`, currently the only `Stroke`+`CornerRadius`
+user) derives its fill/stroke/corner radius from palette + profile. The
+command-history and search popups, the right-click context menu, and the welcome
+overlay inherit themed `Visuals`.
+
+Deliverable: all listed overlays themed and profile-aware.
+
+Verification: `cargo test --all`; `cargo clippy …`; manual: trigger each overlay
+in both profiles + a light/dark theme.
+
+Prohibitions: do NOT change overlay _behavior_ (positioning, dismissal, focus);
+styling only; honor `freminal-modal-input-suppression` for the focusable ones.
+
+Stop: report changes + manual check; await review.
+
+#### 112.9 — Adopt centralized style: guard + info dialogs (broadcast, close, paste, About, save-layout, unsaved-changes)
+
+Scope: `freminal/src/gui/broadcast_guard.rs`, `freminal/src/gui/close_guard.rs`,
+`freminal/src/gui/paste_guard.rs`, `freminal/src/gui/menu.rs` (About,
+Save-Layout), `freminal/src/gui/settings.rs` (unsaved-changes dialog).
+
+What: Route each `egui::Window` dialog through the centralized themed visuals so
+buttons, frames, and text follow palette + profile. These all already use
+`egui::Window`, so most inherit automatically once 112.4 lands; this subtask
+audits each and removes any remaining default-styled outliers and confirms each
+honors the focus rules.
+
+Deliverable: every guard/info dialog themed and profile-aware.
+
+Verification: `cargo test --all`; `cargo clippy …`; manual: trigger each dialog
+in both profiles.
+
+Prohibitions: do NOT alter dialog logic; styling + focus-rule confirmation only.
+
+Stop: report per-dialog status; await review.
+
+#### 112.10 — Build the bundled-icon asset pipeline (format from 112.1)
+
+Scope: depends on the 112.1 decision; new asset files under `res/` or
+`assets/`, a new `freminal/src/gui/icons.rs` loader. Touches `Cargo.toml` only
+if the chosen format needs a crate (e.g. `egui_extras`/`resvg`) — if so, follow
+`flake-dev-shell-discipline` / `rust-best-practices` dependency rules.
+
+What: Implement the chosen asset pipeline: bundle the action-glyph assets and
+expose a typed accessor (e.g. `enum ChromeIcon { Close, Recording, Broadcast,
+Lock, AddTab, … }` → texture/mesh) so chrome code requests an icon by name, not
+a codepoint. Icons tint to the active palette where appropriate.
+
+Deliverable: an icon loader + bundled assets; a test that every `ChromeIcon`
+variant resolves to a loadable asset.
+
+Verification: `cargo test --all`; `cargo clippy …`.
+
+Prohibitions: do NOT proceed until 112.1's format is signed off; do NOT keep any
+fallible system-font glyph for our own UI symbols.
+
+Stop: report the icon set + loader API; await review.
+
+#### 112.11 — Replace font-glyph action symbols with bundled icons
+
+Scope: the chrome files identified in 112.1 (`menu.rs`, `toast.rs`,
+`settings.rs`, guard dialogs as applicable).
+
+What: Swap each font-glyph action symbol for the corresponding `ChromeIcon`
+from 112.10. The close `×`, recording/broadcast/lock indicators, tab `+`, etc.
+now render from bundled assets identically on every platform.
+
+Deliverable: no chrome action symbol depends on a system/emoji/powerline font
+glyph.
+
+Verification: `cargo test --all`; `cargo clippy …`; manual on Linux (the
+known empty-square platform) confirms every symbol renders.
+
+Prohibitions: do NOT leave a single action glyph on the font path; do NOT change
+the symbols' behavior or hit-targets.
+
+Stop: report which symbols were swapped + Linux render confirmation; await
+review.
+
+#### 112.12 — Icon regression test
+
+Scope: a test module (location per 112.10's loader).
+
+What: Add a test asserting every `ChromeIcon` variant loads and (if the format
+supports it) has nonzero dimensions — guarding against a future asset deletion
+or rename silently reintroducing the empty-square failure mode this version
+exists to kill.
+
+Deliverable: passing test over all `ChromeIcon` variants.
+
+Verification: `cargo test --all`.
+
+Prohibitions: do NOT assert on pixel content (brittle); assert on
+load-success + dimensions.
+
+Stop: report test name + result; await review.
+
+#### 112.13 — Config wiring for `[chrome]` profile (full `freminal-config-options` ritual)
+
+Scope: `freminal-common/src/config.rs`, `config_example.toml`,
+`freminal/src/gui/settings.rs` + `settings_dispatch.rs`,
+`nix/home-manager-module.nix`. (Whole-new-section, so all four merge-wiring
+steps apply.)
+
+What: Add a `[chrome]` section to `Config` carrying the `GuiTheme` profile (and
+any user-overridable geometry decided in 112.2). Per `freminal-config-options`:
+add `pub chrome: ChromeConfig` to `Config` + `Default`; add `Option<ChromeConfig>`
+to `ConfigPartial`; add the `apply_partial` merge arm; update the
+`every_config_section_survives_partial_merge` guard test (mutation + assertion +
+exhaustive destructure entry). Document `[chrome] profile = "modern"` (and
+geometry keys) in `config_example.toml`. Persist the 112.7 profile picker
+through Apply (wire `settings_dispatch.rs`). Mirror the section in the Nix
+home-manager module (the three edits). Add a round-trip test.
+
+Deliverable: `[chrome] profile = "retro"` in a user config takes effect and
+persists; the guard test covers it; Nix module exposes it.
+
+Verification: `cargo test --all` (incl. the guard test + new round-trip test);
+`cargo clippy …`; `nixfmt --check && statix check && deadnix --fail` on the Nix
+module; manual: set profile in TOML, launch, confirm it applies.
+
+Prohibitions: do NOT silence the guard test's `E0027` with `field: _` — wire
+`ConfigPartial`/`apply_partial` properly; do NOT skip the Nix mirror or the
+Settings persistence without surfacing it.
+
+Stop: report all four wiring steps + the guard-test diff + Nix lint results;
+await review.
