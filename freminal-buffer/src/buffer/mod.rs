@@ -7690,48 +7690,133 @@ mod task_113_smoke {
     // change but does NOT remap command_blocks / prompt_rows, whose row
     // fields are buffer-absolute. After a width reflow the block metadata
     // points at the wrong rows, corrupting gutters/folds.
-    //
-    // NOTE: this reproduction is driven and fixed by Task 113.2; it stays
-    // commented out until then so 113.1 leaves the suite green. Uncomment it
-    // in 113.2, watch it fail, implement the reflow remap, watch it pass, then
-    // keep it as permanent regression coverage.
-    //
-    // #[test]
-    // fn task_113_reflow_remaps_command_block_rows() {
-    //     let mut buf = Buffer::new(20, 5);
-    //
-    //     // Prompt + command on row 0, output starting on row 1.
-    //     let _id = buf.start_command_block(None, "fid1".to_owned());
-    //     buf.mark_prompt_row();
-    //     buf.insert_text(&t("prompt$ cmd"));
-    //     buf.mark_command_start_row("fid1"); // command_start_row = 0
-    //     buf.handle_lf(); // cursor -> row 1
-    //     buf.mark_output_start_row("fid1"); // output_start_row = 1
-    //
-    //     // A long output line that re-wraps differently at a new width.
-    //     buf.insert_text(&t(
-    //         "0123456789012345678901234567890123456789012345678901234567890",
-    //     ));
-    //     let _ = buf.finish_command_block(Some(0), "fid1"); // end_row = cursor row
-    //
-    //     let last_content_row_before = buf.rows.len() - 1;
-    //     assert_eq!(
-    //         buf.command_blocks()[0].end_row,
-    //         Some(last_content_row_before),
-    //         "precondition: end_row points at the last content row"
-    //     );
-    //
-    //     // Reflow to a narrower width — the long output re-wraps into MORE
-    //     // rows, so the last output row's absolute index increases.
-    //     buf.set_size(10, 5, 0);
-    //
-    //     let last_content_row_after = buf.rows.len() - 1;
-    //     assert_eq!(
-    //         buf.command_blocks()[0].end_row,
-    //         Some(last_content_row_after),
-    //         "reflow must remap command_block end_row to the new layout \
-    //          (block points at {:?}, last content row is {last_content_row_after})",
-    //         buf.command_blocks()[0].end_row,
-    //     );
-    // }
+    #[test]
+    fn task_113_reflow_remaps_command_block_rows() {
+        let mut buf = Buffer::new(20, 5);
+
+        // Prompt + command on row 0, output starting on row 1.
+        let _id = buf.start_command_block(None, "fid1".to_owned());
+        buf.mark_prompt_row();
+        buf.insert_text(&t("prompt$ cmd"));
+        buf.mark_command_start_row("fid1"); // command_start_row = 0
+        buf.handle_lf(); // cursor -> row 1
+        buf.mark_output_start_row("fid1"); // output_start_row = 1
+
+        // A long output line that re-wraps differently at a new width.
+        buf.insert_text(&t(
+            "0123456789012345678901234567890123456789012345678901234567890",
+        ));
+        let _ = buf.finish_command_block(Some(0), "fid1"); // end_row = cursor row
+
+        let last_content_row_before = buf.rows.len() - 1;
+        assert_eq!(
+            buf.command_blocks()[0].end_row,
+            Some(last_content_row_before),
+            "precondition: end_row points at the last content row"
+        );
+
+        // Reflow to a narrower width — the long output re-wraps into MORE
+        // rows, so the last output row's absolute index increases.
+        buf.set_size(10, 5, 0);
+
+        let last_content_row_after = buf.rows.len() - 1;
+        assert_eq!(
+            buf.command_blocks()[0].end_row,
+            Some(last_content_row_after),
+            "reflow must remap command_block end_row to the new layout \
+             (block points at {:?}, last content row is {last_content_row_after})",
+            buf.command_blocks()[0].end_row,
+        );
+    }
+
+    // Build one command block whose prompt is on its own row and whose output
+    // is `output_len` chars wide, starting from a fresh cursor row. Returns the
+    // recorded (prompt_start_row, output_start_row, end_row) for assertions.
+    fn push_block(buf: &mut Buffer, fid: &str, prompt: &str, output_len: usize) {
+        let _ = buf.start_command_block(None, fid.to_owned());
+        buf.mark_prompt_row();
+        buf.insert_text(&t(prompt));
+        buf.mark_command_start_row(fid);
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.mark_output_start_row(fid);
+        let output: String = "0123456789".chars().cycle().take(output_len).collect();
+        buf.insert_text(&t(&output));
+        let _ = buf.finish_command_block(Some(0), fid);
+        buf.handle_lf();
+        buf.handle_cr();
+    }
+
+    // Assert that every command block's row fields point at rows that actually
+    // hold the block's content: the prompt row carries the prompt text, the
+    // output region [output_start_row, end_row] is a valid ascending span
+    // inside the buffer, and all indices are in range.
+    fn assert_block_rows_sane(buf: &Buffer) {
+        let len = buf.rows.len();
+        for b in buf.command_blocks() {
+            assert!(b.prompt_start_row < len, "prompt_start_row in range");
+            if let Some(c) = b.command_start_row {
+                assert!(c < len, "command_start_row in range");
+            }
+            if let (Some(o), Some(e)) = (b.output_start_row, b.end_row) {
+                assert!(o < len && e < len, "output region in range");
+                assert!(o <= e, "output_start_row {o} must be <= end_row {e}");
+                assert!(
+                    b.prompt_start_row <= o,
+                    "prompt_start_row {} must be <= output_start_row {o}",
+                    b.prompt_start_row
+                );
+            }
+        }
+    }
+
+    // Multi-block, multi-prompt reflow in BOTH directions (Task 113.2). Two
+    // command blocks with multi-row outputs are reflowed narrow→wide and then
+    // wide→narrow; after each reflow every block's row fields must still point
+    // at the rows holding their content, and the two prompt-row markers must
+    // remain ordered and in range.
+    #[test]
+    fn task_113_reflow_remaps_multiple_blocks_both_directions() {
+        let mut buf = Buffer::new(20, 6);
+
+        push_block(&mut buf, "fid1", "p1$ cmd-one", 55);
+        push_block(&mut buf, "fid2", "p2$ cmd-two", 47);
+
+        assert_eq!(buf.command_blocks().len(), 2);
+        assert_eq!(buf.prompt_rows().len(), 2);
+        assert_block_rows_sane(&buf);
+
+        // narrow → wide: re-wraps each output into FEWER rows.
+        buf.set_size(40, 6, 0);
+        assert_eq!(buf.command_blocks().len(), 2, "blocks preserved on widen");
+        assert_eq!(buf.prompt_rows().len(), 2, "prompts preserved on widen");
+        assert_block_rows_sane(&buf);
+        // Prompt markers stay ordered.
+        assert!(
+            buf.prompt_rows()[0] < buf.prompt_rows()[1],
+            "prompt rows must remain ordered after widen: {:?}",
+            buf.prompt_rows()
+        );
+
+        // wide → narrow: re-wraps each output into MORE rows.
+        buf.set_size(8, 6, 0);
+        assert_eq!(buf.command_blocks().len(), 2, "blocks preserved on narrow");
+        assert_eq!(buf.prompt_rows().len(), 2, "prompts preserved on narrow");
+        assert_block_rows_sane(&buf);
+        assert!(
+            buf.prompt_rows()[0] < buf.prompt_rows()[1],
+            "prompt rows must remain ordered after narrow: {:?}",
+            buf.prompt_rows()
+        );
+
+        // The two blocks must not overlap: block 0 ends before block 1 starts.
+        let b1_prompt = buf.command_blocks()[1].prompt_start_row;
+        match buf.command_blocks()[0].end_row {
+            Some(b0_end) => assert!(
+                b0_end < b1_prompt,
+                "block 0 end_row {b0_end} must precede block 1 prompt_start_row {b1_prompt}"
+            ),
+            None => panic!("block 0 should be finished with an end_row"),
+        }
+    }
 }

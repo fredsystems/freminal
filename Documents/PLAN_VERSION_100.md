@@ -976,7 +976,13 @@ await review.
 >   window and revealing real scrollback above. Bug G smoke test passes and is
 >   kept uncommented. Added a `buffer_resize/grow_height` benchmark (no
 >   regression: p = 0.08, "No change").
-> - **113.2 — pending.** Bug R smoke test remains commented out until activated.
+> - **113.2 — COMPLETE.** `reflow_to_width` now remaps `command_blocks` and
+>   `prompt_rows` to their post-reflow row indices via a new
+>   `remap_block_rows_after_reflow` helper (start fields anchor to the old
+>   row's first cell, `end_row` to its last cell, matching the inclusive
+>   `[output_start_row, end_row]` range the GUI consumes). Bug R smoke test
+>   plus a multi-block/both-directions test pass and are kept uncommented.
+>   `reflow_width` / `softwrap_heavy` benches within noise (< 15%).
 > - **113.3 — pending.**
 
 ### Background — the reported bug
@@ -1204,6 +1210,28 @@ Prohibitions: do NOT change the cursor remap (it is correct); do NOT leak parser
 on data the buffer already owns); do NOT delete the committed smoke test.
 
 Stop: report the remap approach + test results; await review.
+
+**Implementation note (113.2, as landed).** During logical-line grouping,
+`reflow_to_width` now records `old_row_meta[r] = (logical_line_idx,
+flat_offset_of_row_start, row_len)` for every old row, and `line_new_starts`
+records where each logical line's re-wrapped rows begin in the new buffer.
+After installing the new rows and remapping the cursor, a new private helper
+`remap_block_rows_after_reflow` translates each stored row index through that
+map: an old row's content offset is located in the new layout the same way the
+cursor remap works. Start fields (`prompt_start_row`, `command_start_row`,
+`output_start_row`, and each `prompt_rows` entry) anchor to the old row's
+**first** cell; `end_row` anchors to its **last** cell, because the GUI treats
+`[output_start_row, end_row]` as an inclusive span and a row that re-wraps into
+several narrower rows must keep `end_row` on the final piece (verified against
+the consumers in `gui/terminal/input.rs`). Blocks whose `prompt_start_row` no
+longer maps are dropped (mirroring `adjust_prompt_rows`); optional later fields
+that no longer map are cleared rather than left dangling. Block ordering and the
+deque are untouched. Tests: the Bug R smoke test plus a new
+`task_113_reflow_remaps_multiple_blocks_both_directions` (two blocks, narrow→wide
+**and** wide→narrow, asserting in-range, ordered, non-overlapping block spans).
+Benchmarks `buffer_resize/reflow_width` and `softwrap_heavy` showed no regression
+beyond the bench's inherent run-to-run noise (same-code reruns swing ±3%; the
+added work is O(blocks + prompts) against an O(total cells) reflow).
 
 #### 113.3 — Clear fold extra-rows on new output (Bug E)
 
