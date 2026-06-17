@@ -519,6 +519,60 @@ do NOT change the user-font loading path — this is picker labeling only.
 
 Stop: report the label logic + test results + manual check; await review.
 
+### Task 111 follow-up fixes
+
+These fixes landed on `task-111/bundled-font` after the seven planned
+subtasks. The CaskaydiaCove cell-metric change (111.2) altered cell height,
+which changed how a pair of pre-existing emoji bugs manifested visually —
+making them newly visible and worth fixing here alongside the font work.
+
+#### 111.8 — Color-emoji sizing + premultiplied alpha (DONE)
+
+Scope: `freminal/src/gui/atlas.rs`, `freminal/src/gui/renderer/vertex.rs`,
+`freminal/src/gui/renderer/shaders/fg.frag`.
+
+Two latent bugs in the color-emoji render path:
+
+1. Color emoji were rasterised at their native bitmap-strike size (swash
+   `StrikeWith::BestFit` does not downscale to the requested ppem) and the
+   cell-boundary code _cropped_ rather than _scaled_ them, so emoji rendered
+   oversized, clipped, and blurry. `emit_glyph_instance` now takes a dedicated
+   color-glyph branch (`fit_color_glyph_rect`) that scales the glyph to fit the
+   cell height with a 12% margin, preserves aspect ratio, and centres it in its
+   advance box. Monochrome glyphs keep the existing crop-clip path.
+2. swash returns straight (non-premultiplied) RGBA for color emoji, but the
+   shader and egui's GL blend state both assume premultiplied alpha, leaving a
+   white fringe. RGBA is now premultiplied on the CPU in `rasterize_glyph`
+   (`premultiply_rgba_in_place`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; `cargo machete`; `bench_fg_instances` before/after (no change).
+Nine new unit tests.
+
+#### 111.9 — Insert-mode (IRM) wide-character cursor drift
+
+Scope: `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+(`insert_text_irm_aware`, ~590).
+
+Long-standing, pre-existing bug (reproduces off-branch). When insert mode (IRM,
+`CSI 4 h`) is active — which shell line editors enable while editing the command
+line — `insert_text_irm_aware` opens exactly **one** column per character via
+`insert_spaces(1)` before writing the glyph. A double-width character (emoji,
+CJK) needs **two** columns opened, so the shift is off by one per wide
+character: a stray blank cell is left in front of the glyph, it overwrites part
+of the prompt, and the cursor drifts. The fix opens `ch.display_width().max(1)`
+columns instead of 1.
+
+Deliverable: inserting a wide character in IRM mode shifts existing content by
+the character's display width, not by 1. Regression test feeding a wide char in
+insert mode and asserting the resulting buffer layout + cursor column.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`.
+
+Prohibitions: do NOT change the non-insert path; do NOT alter `insert_spaces`
+semantics (it correctly opens `n` columns) — the bug is the caller passing 1.
+
 ---
 
 ## Task 112 — UI Beautification

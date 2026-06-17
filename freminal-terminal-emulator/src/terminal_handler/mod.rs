@@ -590,7 +590,11 @@ impl TerminalHandler {
     fn insert_text_irm_aware(&mut self, text: &[TChar]) {
         if self.insert_mode.is_insert() {
             for ch in text {
-                self.buffer.insert_spaces(1);
+                // Open as many columns as the character is wide. A
+                // double-width glyph (emoji, CJK) needs two columns shifted
+                // open; opening only one leaves a stray blank cell in front of
+                // the glyph and drifts the cursor by one per wide character.
+                self.buffer.insert_spaces(ch.display_width().max(1));
                 self.buffer.insert_text(std::slice::from_ref(ch));
             }
         } else {
@@ -4306,6 +4310,37 @@ mod tests {
         handler.handle_data(b"AB");
         // Cursor should be at col 2
         assert_eq!(handler.buffer.cursor().pos.x, 2);
+    }
+
+    #[test]
+    fn irm_insert_wide_char_shifts_by_two() {
+        // Regression (Task 111.9): inserting a double-width character in IRM
+        // insert mode must open TWO columns, not one, so existing content
+        // shifts by the glyph's display width and the cursor advances by 2.
+        let mut handler = TerminalHandler::new(20, 5);
+        handler.handle_data(b"ABCDE");
+        handler.handle_cursor_pos(Some(3), Some(1)); // x=col 2 (0-based), y=row 0
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Irm(Irm::Insert))]);
+
+        // Insert a wide CJK character (display_width == 2) at col 2.
+        handler.handle_data("中".as_bytes());
+
+        let cells = handler.buffer().rows()[0].cells();
+        // col 0,1 unchanged.
+        assert_eq!(cells[0].tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(cells[1].tchar(), &TChar::Ascii(b'B'));
+        // The wide char occupies col 2 (head) + col 3 (continuation).
+        assert!(cells[2].is_head(), "wide char head expected at col 2");
+        assert!(
+            cells[3].is_continuation(),
+            "wide char continuation expected at col 3"
+        );
+        // Original "CDE" shifted right by two columns (was at 2,3,4).
+        assert_eq!(cells[4].tchar(), &TChar::Ascii(b'C'));
+        assert_eq!(cells[5].tchar(), &TChar::Ascii(b'D'));
+        assert_eq!(cells[6].tchar(), &TChar::Ascii(b'E'));
+        // Cursor advanced by the glyph width (2), from col 2 to col 4.
+        assert_eq!(handler.buffer().cursor().pos.x, 4);
     }
 
     #[test]
