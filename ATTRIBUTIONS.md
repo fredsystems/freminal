@@ -24,15 +24,6 @@ the in-app About dialog both point here rather than duplicating license text.
 The following fonts are embedded into the freminal binary at compile time. The
 full upstream license texts are bundled under [`res/fonts/`](res/fonts/).
 
-### Hack
-
-- **Upstream:** <https://github.com/source-foundry/Hack>
-- **License:** MIT (Hack project) plus the Bitstream Vera License for the
-  Bitstream-derived components — Copyright 2018 Source Foundry Authors;
-  Bitstream Vera Sans Mono Copyright 2003 Bitstream Inc.
-- **License text:** [`res/fonts/Hack-LICENSE.md`](res/fonts/Hack-LICENSE.md)
-- **Files:** `res/Hack-{Regular,Bold,Italic,BoldItalic}.ttf`
-
 ### MesloLGS Nerd Font Mono
 
 - **Upstream:** Nerd Fonts — <https://github.com/ryanoasis/nerd-fonts>
