@@ -22,6 +22,14 @@ use freminal_common::config::Config;
 //  Bundled font data (compiled into the binary via include_bytes!)
 // ---------------------------------------------------------------------------
 
+/// The family name of the bundled default font.
+///
+/// Single source of truth for the bundled-font family string: the settings
+/// font picker, default-label construction, and the "is this installed font the
+/// same as our bundled one?" check all reference this constant rather than
+/// duplicating the literal.
+pub const BUNDLED_FONT_FAMILY: &str = "CaskaydiaCove Nerd Font";
+
 static CASKAYDIA_REGULAR: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Regular.ttf");
 static CASKAYDIA_BOLD: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Bold.ttf");
 static CASKAYDIA_ITALIC: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Italic.ttf");
@@ -1007,6 +1015,19 @@ fn strip_whitespace(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Return `true` if an installed font `family` name refers to the same font as
+/// the bundled default ([`BUNDLED_FONT_FAMILY`]).
+///
+/// Uses the same whitespace-stripped, case-insensitive comparison the font
+/// lookup uses for naming variations (e.g. "Caskaydia Cove Nerd Font" vs
+/// "`CaskaydiaCove` Nerd Font"), so a system copy of the bundled font is
+/// recognised regardless of how fontconfig spells the family.
+#[must_use]
+pub fn family_matches_bundled(family: &str) -> bool {
+    strip_whitespace(&family.to_lowercase())
+        .eq_ignore_ascii_case(&strip_whitespace(&BUNDLED_FONT_FAMILY.to_lowercase()))
+}
+
 /// Search the fontdb for a font matching a family name, weight, and style.
 ///
 /// Matching strategy (in order):
@@ -1672,6 +1693,22 @@ mod tests {
             stripped_family.eq_ignore_ascii_case(&stripped_query),
             "Whitespace-stripped comparison should match: '{stripped_family}' vs '{stripped_query}'"
         );
+    }
+
+    #[test]
+    fn family_matches_bundled_recognises_naming_variants() {
+        // Exact and spacing/case variants of the bundled family all match.
+        assert!(family_matches_bundled(BUNDLED_FONT_FAMILY));
+        assert!(family_matches_bundled("CaskaydiaCove Nerd Font"));
+        assert!(family_matches_bundled("Caskaydia Cove Nerd Font"));
+        assert!(family_matches_bundled("caskaydiacove nerd font"));
+        assert!(family_matches_bundled("CaskaydiaCoveNerdFont"));
+
+        // Unrelated fonts do not match.
+        assert!(!family_matches_bundled("Fira Code"));
+        assert!(!family_matches_bundled("Cascadia Code"));
+        assert!(!family_matches_bundled("Caskaydia Mono Nerd Font"));
+        assert!(!family_matches_bundled(""));
     }
 
     // --- Test: update_pixels_per_point returns false when unchanged ---
