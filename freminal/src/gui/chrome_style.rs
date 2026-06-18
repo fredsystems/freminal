@@ -120,20 +120,34 @@ fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> Wid
     // guessing — that produced invisible borders and low-contrast tabs.
     let border = rgb_to_color32(palette.chrome_role(ChromeRole::Border));
 
-    // The fill for each state, and the text color picked to CONTRAST that
-    // specific fill (fixes low-contrast text on the active-tab fill).
-    let (fill_rgb, expansion) = match role {
-        WidgetRole::NonInteractive => (palette.chrome_role(ChromeRole::Surface), 0.0),
-        WidgetRole::Inactive => (palette.chrome_role(ChromeRole::SurfaceVariant), 0.0),
-        WidgetRole::Hovered => (palette.chrome_role(ChromeRole::SurfaceHover), exp),
-        // Active (pressed) and Open (combo/menu expanded) share the active fill.
-        WidgetRole::Active | WidgetRole::Open => {
-            (palette.chrome_role(ChromeRole::SurfaceActive), exp)
+    // The fill for each state and the text drawn on it. The
+    // active/open/pressed state uses the saturated Accent fill with the
+    // theme's authored OnAccent text (a dedicated, designed pair that pops and
+    // is legible by construction). Other states derive legible text via the
+    // WCAG-AA `chrome_text_on` picker against their own fill.
+    let (fill_rgb, text_rgb, expansion) = match role {
+        WidgetRole::NonInteractive => {
+            let f = palette.chrome_role(ChromeRole::Surface);
+            (f, palette.chrome_text_on(f), 0.0)
         }
+        WidgetRole::Inactive => {
+            let f = palette.chrome_role(ChromeRole::SurfaceVariant);
+            (f, palette.chrome_text_on(f), 0.0)
+        }
+        WidgetRole::Hovered => {
+            let f = palette.chrome_role(ChromeRole::SurfaceHover);
+            (f, palette.chrome_text_on(f), exp)
+        }
+        // Active (pressed) and Open (combo/menu expanded) use the accent pair.
+        WidgetRole::Active | WidgetRole::Open => (
+            palette.chrome_role(ChromeRole::Accent),
+            palette.chrome_role(ChromeRole::OnAccent),
+            exp,
+        ),
     };
 
     let fill = rgb_to_color32(fill_rgb);
-    let text = rgb_to_color32(palette.chrome_text_on(fill_rgb));
+    let text = rgb_to_color32(text_rgb);
 
     WidgetVisuals {
         bg_fill: fill,
@@ -172,12 +186,12 @@ fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> Wid
 /// |--------------------------|-------------------------------------------------------|
 /// | `window_fill`            | `palette.background` (opaque) / white (reverse video) |
 /// | `panel_fill`             | `palette.background` at `bg_opacity` / white          |
-/// | `window_stroke`          | `stroke_width` + `palette.foreground` (border colour) |
+/// | `window_stroke`          | `stroke_width` + `ChromeRole::Border`                 |
 /// | `window_corner_radius`   | `gui_theme.corner_radius`                             |
 /// | `menu_corner_radius`     | `gui_theme.menu_corner_radius`                        |
-/// | `selection.bg_fill`      | `palette.selection_bg`                                |
-/// | `selection.stroke`       | 1 px + `palette.selection_fg`                         |
-/// | `override_text_color`    | `Some(palette.foreground)`                            |
+/// | `selection.bg_fill`      | `ChromeRole::Accent` (selected tab / dropdown item)   |
+/// | `selection.stroke`       | 1 px + `ChromeRole::OnAccent` (selected text)         |
+/// | `override_text_color`    | `None` (would nullify per-state/selection text)       |
 /// | `widgets.*`              | see module-level doc table                            |
 ///
 /// # Determinism
@@ -237,13 +251,19 @@ pub fn build_visuals(
 
     // ── Selection ────────────────────────────────────────────────────────────
     //
-    // Selection uses the terminal palette's selection colors directly — this
-    // is the one UI highlight the palette explicitly defines, and matching it
-    // to terminal selection is intentional.
-
+    // CRITICAL: egui draws the *selected* state of `SelectableValue` /
+    // `selectable_label` (the active tab) and the selected item in a combo-box
+    // dropdown from `visuals.selection.bg_fill` + `visuals.selection.stroke` —
+    // NOT from `widgets.active`. So the active/selected element must be driven
+    // here. We use the dedicated Accent (saturated fill) + OnAccent (legible
+    // text) pair so the selected element pops and its text is readable, rather
+    // than the muted terminal `selection_bg` (which left active tabs as a
+    // washed-out grey with illegible text).
+    let accent = rgb_to_color32(palette.chrome_role(ChromeRole::Accent));
+    let on_accent = rgb_to_color32(palette.chrome_role(ChromeRole::OnAccent));
     let selection = Selection {
-        bg_fill: rgb_to_color32(palette.selection_bg),
-        stroke: Stroke::new(1.0, rgb_to_color32(palette.selection_fg)),
+        bg_fill: accent,
+        stroke: Stroke::new(1.0, on_accent),
     };
 
     // ── Widgets (all five states) ─────────────────────────────────────────────
@@ -282,7 +302,14 @@ pub fn build_visuals(
     visuals.window_corner_radius = window_cr;
     visuals.menu_corner_radius = menu_cr;
     visuals.selection = selection;
-    visuals.override_text_color = Some(rgb_to_color32(palette.chrome_role(ChromeRole::Text)));
+    // Deliberately DO NOT set `override_text_color`. egui bakes that color
+    // into every glyph at layout time, which silently nullifies all per-state
+    // text colors — including `selection.stroke.color` (selected-tab/dropdown
+    // text) and every `widgets.*.fg_stroke`. Leaving it `None` lets each
+    // widget state resolve its own text color: plain labels use
+    // `widgets.noninteractive.fg_stroke` (chrome text, set via `widget()`),
+    // and selected elements use `selection.stroke` (OnAccent, set above).
+    visuals.override_text_color = None;
 
     // ── Surface backgrounds ───────────────────────────────────────────────────
     //
@@ -444,29 +471,36 @@ mod tests {
 
     // ── Selection derivation ─────────────────────────────────────────────────
 
-    #[test]
-    fn selection_bg_fill_matches_palette() {
-        let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
-
-        assert_eq!(
-            v.selection.bg_fill,
-            rgb_to_color32(PALETTE.selection_bg),
-            "selection.bg_fill must equal rgb_to_color32(palette.selection_bg)"
-        );
-    }
-
     // ── Override text color ─────────────────────────────────────────────────
 
     #[test]
-    fn override_text_color_is_foreground() {
+    fn override_text_color_is_none() {
+        // Must be None: a global override bakes one color into every glyph and
+        // nullifies selection/per-state text colors (the active-tab bug).
         let gt = StyleProfile::Modern.defaults();
         let v = build_visuals(&gt, PALETTE, 1.0, true);
-
         assert_eq!(
-            v.override_text_color,
-            Some(rgb_to_color32(PALETTE.foreground)),
-            "override_text_color must be Some(palette.foreground)"
+            v.override_text_color, None,
+            "override_text_color must be None so per-state text colors apply"
+        );
+    }
+
+    #[test]
+    fn selection_uses_accent_and_on_accent() {
+        // The selected tab / dropdown item reads selection.bg_fill +
+        // selection.stroke; these must be the Accent / OnAccent pair so the
+        // selected element is saturated and its text legible.
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        assert_eq!(
+            v.selection.bg_fill,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::Accent)),
+            "selection bg must be the Accent role"
+        );
+        assert_eq!(
+            v.selection.stroke.color,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::OnAccent)),
+            "selection stroke (selected text) must be the OnAccent role"
         );
     }
 
@@ -745,24 +779,31 @@ mod tests {
             rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceHover)),
             "hovered fill = SurfaceHover"
         );
+        // The active/open state uses the dedicated saturated Accent fill, not
+        // the muted SurfaceActive.
         assert_eq!(
             v.widgets.active.bg_fill,
-            rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceActive)),
-            "active fill = SurfaceActive"
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::Accent)),
+            "active fill = Accent"
         );
     }
 
     #[test]
-    fn active_tab_text_contrasts_its_fill() {
-        // The low-contrast active-tab bug: the text on the active fill must be
-        // the contrast-picked color, not blindly the foreground.
+    fn active_tab_uses_accent_and_on_accent() {
+        // The active tab/button uses the dedicated Accent + OnAccent pair
+        // (a designed, legible-by-construction combo) rather than a derived
+        // text on a muted surface.
         let gt = StyleProfile::Modern.defaults();
         let v = build_visuals(&gt, PALETTE, 1.0, true);
-        let active_fill = PALETTE.chrome_role(ChromeRole::SurfaceActive);
-        let expected_text = rgb_to_color32(PALETTE.chrome_text_on(active_fill));
         assert_eq!(
-            v.widgets.active.fg_stroke.color, expected_text,
-            "active-state text must be the contrast-picked color for its fill"
+            v.widgets.active.bg_fill,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::Accent)),
+            "active fill must be the Accent role"
+        );
+        assert_eq!(
+            v.widgets.active.fg_stroke.color,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::OnAccent)),
+            "active text must be the OnAccent role"
         );
     }
 

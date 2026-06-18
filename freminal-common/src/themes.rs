@@ -95,6 +95,16 @@ pub struct ThemePalette {
     /// Secondary / muted / disabled chrome text. `None` is best-fit/derived
     /// toward the surface.
     pub chrome_text_muted: Option<(u8, u8, u8)>,
+
+    /// Accent fill for the strongly-emphasised "active / selected" element
+    /// (the active tab, a primary button). This is a *saturated* color, not a
+    /// muted surface — it must clearly read as "this one is active". `None`
+    /// best-fits to the palette's blue (`ansi[4]`).
+    pub chrome_accent: Option<(u8, u8, u8)>,
+
+    /// Text/foreground drawn on top of [`chrome_accent`]. `None` is derived to
+    /// clear WCAG AA against the accent (typically the dark base or white).
+    pub chrome_on_accent: Option<(u8, u8, u8)>,
 }
 
 /// A named chrome (UI) color role resolved from a [`ThemePalette`].
@@ -120,6 +130,11 @@ pub enum ChromeRole {
     Text,
     /// Secondary / muted chrome text.
     TextMuted,
+    /// Saturated accent fill for the active/selected element (active tab,
+    /// primary button) — designed to pop, not a muted surface.
+    Accent,
+    /// Legible text drawn on top of [`Accent`](ChromeRole::Accent).
+    OnAccent,
 }
 
 impl ThemePalette {
@@ -229,6 +244,22 @@ impl ThemePalette {
                 // Guarantee the muted text still separates from the surface.
                 ensure_contrast(muted, surface, dark)
             }),
+
+            // Accent: authored, else the palette's blue (`ansi[4]`) — a
+            // saturated color every terminal palette defines. The accent is
+            // the "this is active" fill; it intentionally pops against the
+            // surface, so it is separation-guaranteed too.
+            ChromeRole::Accent => {
+                let a = self.chrome_accent.unwrap_or(self.ansi[4]);
+                ensure_separation(a, surface, dark, ACTIVE_MIN_SEPARATION)
+            }
+
+            // On-accent text: authored, else the WCAG-AA contrast pick against
+            // the resolved accent (black/white-leaning is fine here because
+            // the accent is a strong saturated color, not a muted surface).
+            ChromeRole::OnAccent => self
+                .chrome_on_accent
+                .unwrap_or_else(|| self.chrome_text_on(self.chrome_role(ChromeRole::Accent))),
         }
     }
 
@@ -266,9 +297,12 @@ impl ThemePalette {
         if contrast_ratio(anchor, surface) >= WCAG_AA_TEXT {
             return anchor;
         }
-        // 3. Guaranteed floor: push toward white on a dark surface, toward
-        //    black on a light surface, until 4.5:1 is met.
-        ensure_contrast_to(anchor, surface, is_dark(surface), WCAG_AA_TEXT)
+        // 3. Guaranteed floor: push toward whichever of black/white contrasts
+        //    the surface MORE (not by surface luminance — a mid-tone fill can
+        //    contrast black better than white even when it reads as "light").
+        let toward_white =
+            contrast_ratio((255, 255, 255), surface) >= contrast_ratio((0, 0, 0), surface);
+        ensure_contrast_to(anchor, surface, toward_white, WCAG_AA_TEXT)
     }
 }
 
@@ -457,6 +491,8 @@ pub const CATPPUCCIN_MOCHA: ThemePalette = ThemePalette {
     chrome_border: Some((0x6c, 0x70, 0x86)),  // Overlay0
     chrome_text: Some((0xcd, 0xd6, 0xf4)),    // Text
     chrome_text_muted: Some((0xa6, 0xad, 0xc8)), // Subtext0
+    chrome_accent: Some((0x89, 0xb4, 0xfa)),  // Blue
+    chrome_on_accent: Some((0x1e, 0x1e, 0x2e)), // Base
 };
 
 // ---------------------------------------------------------------------------
@@ -507,6 +543,8 @@ pub const CATPPUCCIN_MACCHIATO: ThemePalette = ThemePalette {
     chrome_border: Some((0x6e, 0x73, 0x8d)),  // Overlay0
     chrome_text: Some((0xca, 0xd3, 0xf5)),    // Text
     chrome_text_muted: Some((0xa5, 0xad, 0xcb)), // Subtext0
+    chrome_accent: Some((0x8a, 0xad, 0xf4)),  // Blue
+    chrome_on_accent: Some((0x24, 0x27, 0x3a)), // Base
 };
 
 // ---------------------------------------------------------------------------
@@ -557,6 +595,8 @@ pub const CATPPUCCIN_FRAPPE: ThemePalette = ThemePalette {
     chrome_border: Some((0x73, 0x79, 0x94)),  // Overlay0
     chrome_text: Some((0xc6, 0xd0, 0xf5)),    // Text
     chrome_text_muted: Some((0xa5, 0xad, 0xce)), // Subtext0
+    chrome_accent: Some((0x8c, 0xaa, 0xee)),  // Blue
+    chrome_on_accent: Some((0x30, 0x34, 0x46)), // Base
 };
 
 // ---------------------------------------------------------------------------
@@ -607,6 +647,8 @@ pub const CATPPUCCIN_LATTE: ThemePalette = ThemePalette {
     chrome_border: Some((0x9c, 0xa0, 0xb0)),  // Overlay0
     chrome_text: Some((0x4c, 0x4f, 0x69)),    // Text
     chrome_text_muted: Some((0x6c, 0x6f, 0x85)), // Subtext0
+    chrome_accent: Some((0x1e, 0x66, 0xf5)),  // Blue
+    chrome_on_accent: Some((0xff, 0xff, 0xff)), // white on the strong blue
 };
 
 // ---------------------------------------------------------------------------
@@ -657,6 +699,8 @@ pub const DRACULA: ThemePalette = ThemePalette {
     chrome_border: Some((0x62, 0x72, 0xa4)),  // Comment
     chrome_text: Some((0xf8, 0xf8, 0xf2)),    // Foreground
     chrome_text_muted: Some((0x62, 0x72, 0xa4)), // Comment
+    chrome_accent: Some((0xbd, 0x93, 0xf9)),  // Purple
+    chrome_on_accent: Some((0x28, 0x2a, 0x36)), // Background
 };
 
 // ---------------------------------------------------------------------------
@@ -707,6 +751,8 @@ pub const NORD: ThemePalette = ThemePalette {
     chrome_border: Some((0x4c, 0x56, 0x6a)),  // nord3
     chrome_text: Some((0xd8, 0xde, 0xe9)),    // nord4
     chrome_text_muted: Some((0x60, 0x6b, 0x80)), // dimmed nord3/4 boundary
+    chrome_accent: Some((0x88, 0xc0, 0xd0)),  // nord8 (Frost)
+    chrome_on_accent: Some((0x2e, 0x34, 0x40)), // nord0
 };
 
 // ---------------------------------------------------------------------------
@@ -757,6 +803,10 @@ pub const SOLARIZED_DARK: ThemePalette = ThemePalette {
     chrome_border: Some((0x58, 0x6e, 0x75)),  // base01
     chrome_text: Some((0x93, 0xa1, 0xa1)),    // base1 (emphasized)
     chrome_text_muted: Some((0x65, 0x7b, 0x83)), // base00
+    chrome_accent: Some((0x26, 0x8b, 0xd2)),  // blue
+    // Solarized blue is a light-ish accent; let the resolver derive the
+    // legible on-accent text (it cannot clear 4.5:1 with either base verbatim).
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -807,6 +857,9 @@ pub const SOLARIZED_LIGHT: ThemePalette = ThemePalette {
     chrome_border: Some((0x93, 0xa1, 0xa1)),  // base1
     chrome_text: Some((0x58, 0x6e, 0x75)),    // base01 (emphasized)
     chrome_text_muted: Some((0x83, 0x94, 0x96)), // base0
+    chrome_accent: Some((0x26, 0x8b, 0xd2)),  // blue
+    // See Solarized Dark: derive the legible on-accent text.
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -854,6 +907,8 @@ pub const GRUVBOX_DARK: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -901,6 +956,8 @@ pub const GRUVBOX_LIGHT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -948,6 +1005,8 @@ pub const ONE_DARK: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -995,6 +1054,8 @@ pub const ONE_LIGHT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1107,8 @@ pub const TOKYO_NIGHT: ThemePalette = ThemePalette {
     chrome_border: Some((0x54, 0x5c, 0x7e)),  // dark3
     chrome_text: Some((0xc0, 0xca, 0xf5)),    // fg
     chrome_text_muted: Some((0x56, 0x5f, 0x89)), // comment
+    chrome_accent: Some((0x7a, 0xa2, 0xf7)),  // blue
+    chrome_on_accent: Some((0x1a, 0x1b, 0x26)), // bg
 };
 
 // ---------------------------------------------------------------------------
@@ -1096,6 +1159,8 @@ pub const TOKYO_NIGHT_STORM: ThemePalette = ThemePalette {
     chrome_border: Some((0x54, 0x5c, 0x7e)),  // dark3
     chrome_text: Some((0xc0, 0xca, 0xf5)),    // fg
     chrome_text_muted: Some((0x56, 0x5f, 0x89)), // comment
+    chrome_accent: Some((0x7a, 0xa2, 0xf7)),  // blue
+    chrome_on_accent: Some((0x24, 0x28, 0x3b)), // bg
 };
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1208,8 @@ pub const KANAGAWA: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1190,6 +1257,8 @@ pub const ROSE_PINE: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1306,8 @@ pub const ROSE_PINE_MOON: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1284,6 +1355,8 @@ pub const ROSE_PINE_DAWN: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1331,6 +1404,8 @@ pub const MONOKAI_PRO: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1453,8 @@ pub const AYU_DARK: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1425,6 +1502,8 @@ pub const AYU_LIGHT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1472,6 +1551,8 @@ pub const EVERFOREST_DARK: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1519,6 +1600,8 @@ pub const EVERFOREST_LIGHT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1566,6 +1649,8 @@ pub const MATERIAL_DARK: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1613,6 +1698,8 @@ pub const XTERM_DEFAULT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1659,6 +1746,8 @@ pub const WEZTERM_DEFAULT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1705,6 +1794,8 @@ pub const GHOSTTY_DEFAULT: ThemePalette = ThemePalette {
     chrome_border: None,
     chrome_text: None,
     chrome_text_muted: None,
+    chrome_accent: None,
+    chrome_on_accent: None,
 };
 
 /// The default theme used when no theme is configured or the configured slug
@@ -1988,6 +2079,8 @@ mod tests {
             assert_eq!(theme.chrome_border, None, "theme {slug}");
             assert_eq!(theme.chrome_text, None, "theme {slug}");
             assert_eq!(theme.chrome_text_muted, None, "theme {slug}");
+            assert_eq!(theme.chrome_accent, None, "theme {slug}");
+            assert_eq!(theme.chrome_on_accent, None, "theme {slug}");
         }
     }
 
@@ -2007,6 +2100,8 @@ mod tests {
         t.chrome_border = Some((120, 120, 120));
         t.chrome_text = Some((230, 230, 230));
         t.chrome_text_muted = Some((140, 140, 140));
+        t.chrome_accent = Some((90, 130, 245)); // a strong blue, well-separated
+        t.chrome_on_accent = Some((10, 10, 20));
 
         assert_eq!(t.chrome_role(ChromeRole::Surface), (20, 20, 20));
         assert_eq!(t.chrome_role(ChromeRole::SurfaceVariant), (45, 45, 45));
@@ -2015,6 +2110,8 @@ mod tests {
         assert_eq!(t.chrome_role(ChromeRole::Border), (120, 120, 120));
         assert_eq!(t.chrome_role(ChromeRole::Text), (230, 230, 230));
         assert_eq!(t.chrome_role(ChromeRole::TextMuted), (140, 140, 140));
+        assert_eq!(t.chrome_role(ChromeRole::Accent), (90, 130, 245));
+        assert_eq!(t.chrome_role(ChromeRole::OnAccent), (10, 10, 20));
     }
 
     #[test]
@@ -2121,6 +2218,37 @@ mod tests {
                 "theme {}: active-tab text {text:?} fails 4.5:1 on fill {active:?} (ratio {:.2})",
                 theme.slug,
                 contrast_ratio(text, active),
+            );
+        }
+    }
+
+    #[test]
+    fn on_accent_text_is_legible_on_every_theme() {
+        // The dedicated active/selected pair: OnAccent must clear WCAG AA
+        // against the resolved Accent fill on EVERY built-in theme.
+        for theme in all_themes() {
+            let accent = theme.chrome_role(ChromeRole::Accent);
+            let on = theme.chrome_role(ChromeRole::OnAccent);
+            assert!(
+                contrast_ratio(on, accent) >= WCAG_AA_TEXT,
+                "theme {}: on-accent {on:?} fails 4.5:1 on accent {accent:?} (ratio {:.2})",
+                theme.slug,
+                contrast_ratio(on, accent),
+            );
+        }
+    }
+
+    #[test]
+    fn accent_separates_from_surface_on_every_theme() {
+        // The accent fill must pop against the panel surface (it is the
+        // "this is active" color).
+        for theme in all_themes() {
+            let surface = theme.chrome_role(ChromeRole::Surface);
+            let accent = theme.chrome_role(ChromeRole::Accent);
+            assert!(
+                contrast_ratio(accent, surface) >= ACTIVE_MIN_SEPARATION,
+                "theme {}: accent {accent:?} too close to surface {surface:?}",
+                theme.slug,
             );
         }
     }
