@@ -33,27 +33,17 @@ use freminal_common::gui_theme::{GuiTheme, StyleProfile};
 use freminal_common::themes::{self, ThemePalette};
 use freminal_windowing::{App, WindowConfig, WindowHandle, WindowId};
 
-/// The palettes offered in the gallery's theme selector.
-///
-/// A small curated mix of dark and light themes is enough to confirm the
-/// geometry reads correctly against both ends of the contrast range; the
-/// gallery does not need every bundled theme.
-const PALETTES: &[&ThemePalette] = &[
-    &themes::CATPPUCCIN_MOCHA,
-    &themes::CATPPUCCIN_LATTE,
-    &themes::DRACULA,
-    &themes::NORD,
-    &themes::GRUVBOX_DARK,
-    &themes::GRUVBOX_LIGHT,
-    &themes::SOLARIZED_LIGHT,
-    &themes::TOKYO_NIGHT,
-];
+/// All built-in themes, in registry order, so every theme can be audited
+/// (112.3f/g) — not a curated subset.
+fn palettes() -> &'static [&'static ThemePalette] {
+    themes::all_themes()
+}
 
 /// Gallery application state.
 struct ChromeGallery {
     /// The geometry draft being tuned. Edited live by the controls.
     draft: GuiTheme,
-    /// Index into [`PALETTES`] of the palette currently driving the preview.
+    /// Index into [`palettes`] of the palette currently driving the preview.
     palette_idx: usize,
     /// Background opacity passed to `build_visuals` (`panel_fill` alpha).
     bg_opacity: f32,
@@ -81,7 +71,8 @@ impl Default for ChromeGallery {
 impl ChromeGallery {
     /// Currently selected palette.
     fn palette(&self) -> &'static ThemePalette {
-        PALETTES[self.palette_idx.min(PALETTES.len() - 1)]
+        let all = palettes();
+        all[self.palette_idx.min(all.len() - 1)]
     }
 
     /// Draw the control column (left): profile, geometry, palette, mode.
@@ -131,14 +122,22 @@ impl ChromeGallery {
         );
 
         ui.separator();
-        ui.label("Palette");
+        ui.label(format!("Theme ({} built-in)", palettes().len()));
         egui::ComboBox::from_id_salt("palette_picker")
             .selected_text(self.palette().name)
             .show_ui(ui, |ui| {
-                for (idx, palette) in PALETTES.iter().enumerate() {
+                for (idx, palette) in palettes().iter().enumerate() {
                     ui.selectable_value(&mut self.palette_idx, idx, palette.name);
                 }
             });
+        // Indicate whether this theme has authored chrome roles or is
+        // resolver-driven (useful during the per-theme audit).
+        let authored = self.palette().chrome_surface.is_some();
+        ui.label(if authored {
+            "roles: authored (upstream)"
+        } else {
+            "roles: resolver (best-fit/contrast)"
+        });
 
         ui.separator();
         ui.label("Display mode");
