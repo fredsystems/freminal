@@ -966,7 +966,7 @@ await review.
 
 ## Task 113 — Resize / Reflow Scroll Corruption
 
-> **STATUS: IN PROGRESS.** Decomposed into three subtasks (113.1–113.3). 113.1 is
+> **STATUS: COMPLETE.** Decomposed into three subtasks (113.1–113.3). 113.1 is
 > the root-cause fix and the priority; 113.2 and 113.3 are independent
 > amplifiers found alongside it. Each subtask leaves `cargo test --all` green.
 >
@@ -983,7 +983,12 @@ await review.
 >   `[output_start_row, end_row]` range the GUI consumes). Bug R smoke test
 >   plus a multi-block/both-directions test pass and are kept uncommented.
 >   `reflow_width` / `softwrap_heavy` benches within noise (< 15%).
-> - **113.3 — pending.**
+> - **113.3 — COMPLETE.** `handle_incoming_data` now calls `reset_scroll_offset()`
+>   (clearing both `gui_scroll_offset` and `gui_extra_rows`) instead of inlining
+>   only the offset reset, and runs that reset only when either is non-zero so
+>   output at the live bottom does not needlessly invalidate the snapshot cache.
+>   Bug E smoke test plus two unit tests pass and are kept uncommented.
+>   `bench_handle_incoming_data` no regression (p = 0.31, "No change").
 
 ### Background — the reported bug
 
@@ -1260,3 +1265,18 @@ Prohibitions: do NOT change the alternate-screen scroll handling; do NOT alter
 test.
 
 Stop: report the one-line change + test result; await review.
+
+**Implementation note (113.3, as landed).** `handle_incoming_data` now calls the
+existing `reset_scroll_offset()` (which clears both `gui_scroll_offset` and
+`gui_extra_rows`) in place of the old inline reset that zeroed only
+`gui_scroll_offset`. The reset runs only when the GUI is scrolled back or a fold
+has extended the window — that is, when either `gui_scroll_offset` or
+`gui_extra_rows` is non-zero — so that ordinary output at the live bottom (the
+common case, both already zero) does not call the reset and therefore does not
+needlessly touch state or invalidate the snapshot cache. `reset_scroll_offset`'s
+semantics were not changed. Tests: the Bug E smoke test
+(`task_113_new_data_resets_extra_rows`, integration) plus two interface unit
+tests — `handle_incoming_data_clears_extra_rows` (offset already zero but a fold
+is in view) and `handle_incoming_data_resets_both_offset_and_extra_rows` (both
+set) — all kept uncommented. `bench_handle_incoming_data` showed no regression
+(p = 0.31, "No change in performance detected").
