@@ -172,32 +172,52 @@ impl ThemePalette {
     #[must_use]
     pub fn chrome_role(&self, role: ChromeRole) -> (u8, u8, u8) {
         let dark = is_dark(self.background);
+        // The base panel surface every other surface/border is measured
+        // against for the minimum-separation guarantees below.
+        let surface = self.chrome_surface.unwrap_or(self.background);
         match role {
             // Surface: authored, else the terminal background.
-            ChromeRole::Surface => self.chrome_surface.unwrap_or(self.background),
+            ChromeRole::Surface => surface,
 
             // Variant fill (buttons/inputs/inactive tabs): authored, else a
             // surface nudged toward the foreground so it reads as a distinct
-            // raised/inset fill against the panel.
-            ChromeRole::SurfaceVariant => self
-                .chrome_surface_variant
-                .unwrap_or_else(|| blend(self.background, self.foreground, 0.10)),
+            // raised/inset fill against the panel. The fallback uses a heavier
+            // blend than before so raw palettes (e.g. xterm/wezterm on pure
+            // black) get a visibly distinct fill, and is separation-guaranteed.
+            ChromeRole::SurfaceVariant => {
+                let v = self
+                    .chrome_surface_variant
+                    .unwrap_or_else(|| blend(surface, self.foreground, 0.16));
+                ensure_separation(v, surface, dark, FILL_MIN_SEPARATION)
+            }
 
-            // Hover fill: authored, else a slightly stronger lift than variant.
-            ChromeRole::SurfaceHover => self
-                .chrome_surface_hover
-                .unwrap_or_else(|| blend(self.background, self.foreground, 0.18)),
+            // Hover fill: authored, else a stronger lift than variant.
+            ChromeRole::SurfaceHover => {
+                let h = self
+                    .chrome_surface_hover
+                    .unwrap_or_else(|| blend(surface, self.foreground, 0.26));
+                ensure_separation(h, surface, dark, FILL_MIN_SEPARATION)
+            }
 
             // Active/selected fill: authored, else the palette's own selection
-            // background (a color the theme already vetted for highlights).
-            ChromeRole::SurfaceActive => self.chrome_surface_active.unwrap_or(self.selection_bg),
+            // background. Either way it must stay visibly distinct from the
+            // panel surface (fixes active tabs that read as "the same color as
+            // the background", e.g. Rose Pine Moon).
+            ChromeRole::SurfaceActive => {
+                let a = self.chrome_surface_active.unwrap_or(self.selection_bg);
+                ensure_separation(a, surface, dark, ACTIVE_MIN_SEPARATION)
+            }
 
             // Border: authored, else a color blended between surface and
             // foreground far enough to stay visible against the surface on
-            // any theme (the fix for "invisible" ANSI-black borders).
-            ChromeRole::Border => self
-                .chrome_border
-                .unwrap_or_else(|| blend(self.background, self.foreground, 0.30)),
+            // any theme (the fix for "invisible" borders). Heavier fallback
+            // blend + separation guarantee so raw palettes get a real border.
+            ChromeRole::Border => {
+                let b = self
+                    .chrome_border
+                    .unwrap_or_else(|| blend(surface, self.foreground, 0.38));
+                ensure_separation(b, surface, dark, BORDER_MIN_SEPARATION)
+            }
 
             // Primary text: authored, else the terminal foreground.
             ChromeRole::Text => self.chrome_text.unwrap_or(self.foreground),
@@ -205,34 +225,50 @@ impl ThemePalette {
             // Muted text: authored, else foreground pulled toward the surface
             // (dimmed) but kept readable.
             ChromeRole::TextMuted => self.chrome_text_muted.unwrap_or_else(|| {
-                let muted = blend(self.foreground, self.background, 0.40);
+                let muted = blend(self.foreground, surface, 0.40);
                 // Guarantee the muted text still separates from the surface.
-                ensure_contrast(muted, self.background, dark)
+                ensure_contrast(muted, surface, dark)
             }),
         }
     }
 
-    /// Pick whichever of [`ChromeRole::Text`] / a given surface color reads
-    /// with higher contrast on `surface` — used to choose legible text on an
-    /// arbitrary chrome fill (e.g. the active-tab fill).
+    /// Choose a legible text color to draw on an arbitrary chrome `surface`
+    /// (e.g. the active-tab fill).
     ///
-    /// Returns the palette's chrome text if it contrasts the surface well
-    /// enough; otherwise returns the opposite of the surface
-    /// (`background`/`foreground` whichever contrasts more).
+    /// Legibility is enforced, not merely preferred: the result must clear the
+    /// WCAG AA text contrast ratio (4.5:1) against `surface`. The selection
+    /// order is:
+    ///
+    /// 1. the palette's chrome [`Text`](ChromeRole::Text), if it clears 4.5:1;
+    /// 2. else the palette's `foreground` / `background` (whichever is the
+    ///    higher-contrast anchor), if it clears 4.5:1;
+    /// 3. else a near-black or near-white text derived to guarantee the floor.
+    ///
+    /// This deliberately overrides an author's tinted text on a mid-tone fill
+    /// when that tint would be illegible — correctness over fidelity, which is
+    /// what active-tab text on mid-tone surface fills (e.g. Catppuccin's
+    /// Surface2) requires.
     #[must_use]
     pub fn chrome_text_on(&self, surface: (u8, u8, u8)) -> (u8, u8, u8) {
+        // 1. Authored/resolved chrome text, if legible.
         let text = self.chrome_role(ChromeRole::Text);
-        let candidate_a = text;
-        let candidate_b = if is_dark(surface) {
+        if contrast_ratio(text, surface) >= WCAG_AA_TEXT {
+            return text;
+        }
+        // 2. The higher-contrast palette anchor (fg vs bg), if legible.
+        let anchor = if contrast_ratio(self.foreground, surface)
+            >= contrast_ratio(self.background, surface)
+        {
             self.foreground
         } else {
             self.background
         };
-        if contrast_ratio(candidate_a, surface) >= contrast_ratio(candidate_b, surface) {
-            candidate_a
-        } else {
-            candidate_b
+        if contrast_ratio(anchor, surface) >= WCAG_AA_TEXT {
+            return anchor;
         }
+        // 3. Guaranteed floor: push toward white on a dark surface, toward
+        //    black on a light surface, until 4.5:1 is met.
+        ensure_contrast_to(anchor, surface, is_dark(surface), WCAG_AA_TEXT)
     }
 }
 
@@ -293,10 +329,26 @@ fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
     (hi + 0.05) / (lo + 0.05)
 }
 
+/// WCAG AA contrast ratio for normal text (4.5:1). The legibility floor that
+/// [`ThemePalette::chrome_text_on`] enforces.
+const WCAG_AA_TEXT: f32 = 4.5;
+
 /// Minimum contrast ratio a derived chrome color must keep against its
 /// surface. ~2.2:1 is below text-legibility thresholds but enough to keep
 /// borders and muted text visibly separated from the surface.
 const MIN_CHROME_CONTRAST: f32 = 2.2;
+
+/// Minimum contrast a resting/hover fill must keep from the panel surface so
+/// the widget reads as a distinct fill rather than blending into the panel.
+const FILL_MIN_SEPARATION: f32 = 1.18;
+
+/// Minimum contrast the active/selected fill must keep from the panel surface
+/// (stronger than [`FILL_MIN_SEPARATION`] so the active tab clearly stands
+/// out — fixes fills that sit too close to the background).
+const ACTIVE_MIN_SEPARATION: f32 = 1.35;
+
+/// Minimum contrast a border must keep from the surface it outlines.
+const BORDER_MIN_SEPARATION: f32 = 1.4;
 
 /// Ensure `color` contrasts `surface` by at least [`MIN_CHROME_CONTRAST`],
 /// nudging it away from the surface (toward black on light surfaces, toward
@@ -306,24 +358,55 @@ fn ensure_contrast(
     surface: (u8, u8, u8),
     surface_is_dark: bool,
 ) -> (u8, u8, u8) {
-    if contrast_ratio(color, surface) >= MIN_CHROME_CONTRAST {
+    ensure_contrast_to(color, surface, surface_is_dark, MIN_CHROME_CONTRAST)
+}
+
+/// Like [`ensure_contrast`] but with an explicit `threshold`. `toward_white`
+/// chooses the nudge direction: `true` pushes toward white, `false` toward
+/// black. (Callers pass the direction that increases separation from the
+/// surface — typically white for a dark surface.)
+fn ensure_contrast_to(
+    color: (u8, u8, u8),
+    surface: (u8, u8, u8),
+    toward_white: bool,
+    threshold: f32,
+) -> (u8, u8, u8) {
+    if contrast_ratio(color, surface) >= threshold {
         return color;
     }
-    let target = if surface_is_dark {
+    let target = if toward_white {
         (255, 255, 255)
     } else {
         (0, 0, 0)
     };
     // Step toward the high-contrast target in fixed increments until the
     // threshold is met (integer steps to avoid float-loop pitfalls).
-    for step in 1_u8..=6 {
-        let t = f32::from(step) * 0.15;
+    for step in 1_u8..=10 {
+        let t = f32::from(step) * 0.1;
         let candidate = blend(color, target, t);
-        if contrast_ratio(candidate, surface) >= MIN_CHROME_CONTRAST {
+        if contrast_ratio(candidate, surface) >= threshold {
             return candidate;
         }
     }
     target
+}
+
+/// Ensure a `fill` is visibly distinct from the panel `surface` by at least
+/// `threshold`, nudging the fill *away from the surface* (lighter on a dark
+/// surface, darker on a light surface) when it sits too close. Used so resting
+/// / hover / active fills never blend into the background.
+fn ensure_separation(
+    fill: (u8, u8, u8),
+    surface: (u8, u8, u8),
+    surface_is_dark: bool,
+    threshold: f32,
+) -> (u8, u8, u8) {
+    if contrast_ratio(fill, surface) >= threshold {
+        return fill;
+    }
+    // Push the fill away from the surface: toward white on dark themes (fills
+    // sit "above" the panel), toward black on light themes.
+    ensure_contrast_to(fill, surface, surface_is_dark, threshold)
 }
 
 // ---------------------------------------------------------------------------
@@ -664,13 +747,16 @@ pub const SOLARIZED_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Solarized spec
+    // (github.com/altercation/solarized): base03/base02 surfaces, base01
+    // accent/comment, base00/base0 body text, base1 emphasized.
+    chrome_surface: Some((0x00, 0x2b, 0x36)), // base03 (bg)
+    chrome_surface_variant: Some((0x07, 0x36, 0x42)), // base02 (highlight)
+    chrome_surface_hover: Some((0x0d, 0x47, 0x55)), // base02 lifted
+    chrome_surface_active: Some((0x58, 0x6e, 0x75)), // base01 (accent)
+    chrome_border: Some((0x58, 0x6e, 0x75)),  // base01
+    chrome_text: Some((0x93, 0xa1, 0xa1)),    // base1 (emphasized)
+    chrome_text_muted: Some((0x65, 0x7b, 0x83)), // base00
 };
 
 // ---------------------------------------------------------------------------
@@ -711,13 +797,16 @@ pub const SOLARIZED_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Solarized spec
+    // (github.com/altercation/solarized): base3/base2 surfaces, base1
+    // accent, base00/base01 body text. Light variant.
+    chrome_surface: Some((0xfd, 0xf6, 0xe3)), // base3 (bg)
+    chrome_surface_variant: Some((0xee, 0xe8, 0xd5)), // base2 (highlight)
+    chrome_surface_hover: Some((0xe2, 0xdc, 0xc8)), // base2 deepened
+    chrome_surface_active: Some((0x93, 0xa1, 0xa1)), // base1 (accent)
+    chrome_border: Some((0x93, 0xa1, 0xa1)),  // base1
+    chrome_text: Some((0x58, 0x6e, 0x75)),    // base01 (emphasized)
+    chrome_text_muted: Some((0x83, 0x94, 0x96)), // base0
 };
 
 // ---------------------------------------------------------------------------
@@ -1904,22 +1993,43 @@ mod tests {
 
     #[test]
     fn chrome_role_prefers_authored_value() {
+        // Authored values that already satisfy the separation floors are
+        // returned verbatim. (The fill/border roles are separation-guaranteed
+        // against the surface, so authored values must be realistically
+        // spaced — an author cannot set an active fill identical to the
+        // surface and expect it back unchanged; see
+        // `authored_fills_too_close_to_surface_are_separated`.)
         let mut t = CATPPUCCIN_MOCHA;
-        t.chrome_surface = Some((1, 2, 3));
-        t.chrome_surface_variant = Some((4, 5, 6));
-        t.chrome_surface_hover = Some((7, 8, 9));
-        t.chrome_surface_active = Some((10, 11, 12));
-        t.chrome_border = Some((13, 14, 15));
-        t.chrome_text = Some((16, 17, 18));
-        t.chrome_text_muted = Some((19, 20, 21));
+        t.chrome_surface = Some((20, 20, 20));
+        t.chrome_surface_variant = Some((45, 45, 45));
+        t.chrome_surface_hover = Some((65, 65, 65));
+        t.chrome_surface_active = Some((95, 95, 95));
+        t.chrome_border = Some((120, 120, 120));
+        t.chrome_text = Some((230, 230, 230));
+        t.chrome_text_muted = Some((140, 140, 140));
 
-        assert_eq!(t.chrome_role(ChromeRole::Surface), (1, 2, 3));
-        assert_eq!(t.chrome_role(ChromeRole::SurfaceVariant), (4, 5, 6));
-        assert_eq!(t.chrome_role(ChromeRole::SurfaceHover), (7, 8, 9));
-        assert_eq!(t.chrome_role(ChromeRole::SurfaceActive), (10, 11, 12));
-        assert_eq!(t.chrome_role(ChromeRole::Border), (13, 14, 15));
-        assert_eq!(t.chrome_role(ChromeRole::Text), (16, 17, 18));
-        assert_eq!(t.chrome_role(ChromeRole::TextMuted), (19, 20, 21));
+        assert_eq!(t.chrome_role(ChromeRole::Surface), (20, 20, 20));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceVariant), (45, 45, 45));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceHover), (65, 65, 65));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceActive), (95, 95, 95));
+        assert_eq!(t.chrome_role(ChromeRole::Border), (120, 120, 120));
+        assert_eq!(t.chrome_role(ChromeRole::Text), (230, 230, 230));
+        assert_eq!(t.chrome_role(ChromeRole::TextMuted), (140, 140, 140));
+    }
+
+    #[test]
+    fn authored_fills_too_close_to_surface_are_separated() {
+        // The separation guarantee applies even to authored values: an active
+        // fill set too close to the surface is nudged to stay distinct.
+        let mut t = CATPPUCCIN_MOCHA;
+        t.chrome_surface = Some((30, 30, 30));
+        t.chrome_surface_active = Some((34, 34, 34)); // far too close
+        let surface = t.chrome_role(ChromeRole::Surface);
+        let active = t.chrome_role(ChromeRole::SurfaceActive);
+        assert!(
+            contrast_ratio(active, surface) >= ACTIVE_MIN_SEPARATION,
+            "authored active fill must still be separated; got {active:?} on {surface:?}"
+        );
     }
 
     #[test]
@@ -1985,14 +2095,48 @@ mod tests {
     #[test]
     fn chrome_border_always_contrasts_the_surface() {
         // The fix for "invisible" borders: on EVERY built-in theme, the
-        // resolved border must visibly separate from the surface.
+        // resolved border must meet the border separation floor.
         for theme in all_themes() {
             let surface = theme.chrome_role(ChromeRole::Surface);
             let border = theme.chrome_role(ChromeRole::Border);
             assert!(
-                contrast_ratio(border, surface) > 1.2,
-                "theme {}: border {border:?} indistinguishable from surface {surface:?}",
+                contrast_ratio(border, surface) >= BORDER_MIN_SEPARATION,
+                "theme {}: border {border:?} too close to surface {surface:?}",
                 theme.slug
+            );
+        }
+    }
+
+    #[test]
+    fn active_tab_text_is_legible_on_every_theme() {
+        // The active-tab-text fix: chrome_text_on must clear WCAG AA (4.5:1)
+        // against the active fill on EVERY built-in theme (Modern & Retro use
+        // the same colors). This is the structural guarantee behind the audit
+        // complaints about light/dark active-tab text.
+        for theme in all_themes() {
+            let active = theme.chrome_role(ChromeRole::SurfaceActive);
+            let text = theme.chrome_text_on(active);
+            assert!(
+                contrast_ratio(text, active) >= WCAG_AA_TEXT,
+                "theme {}: active-tab text {text:?} fails 4.5:1 on fill {active:?} (ratio {:.2})",
+                theme.slug,
+                contrast_ratio(text, active),
+            );
+        }
+    }
+
+    #[test]
+    fn active_fill_separates_from_surface_on_every_theme() {
+        // The "active tab too close to background" fix (e.g. Rose Pine Moon):
+        // the active fill must visibly separate from the panel surface.
+        for theme in all_themes() {
+            let surface = theme.chrome_role(ChromeRole::Surface);
+            let active = theme.chrome_role(ChromeRole::SurfaceActive);
+            assert!(
+                contrast_ratio(active, surface) >= ACTIVE_MIN_SEPARATION,
+                "theme {}: active fill {active:?} too close to surface {surface:?} (ratio {:.2})",
+                theme.slug,
+                contrast_ratio(active, surface),
             );
         }
     }
@@ -2022,12 +2166,12 @@ mod tests {
         let on_white = t.chrome_text_on((250, 250, 250));
         let on_black = t.chrome_text_on((5, 5, 5));
         assert!(
-            contrast_ratio(on_white, (250, 250, 250)) >= 3.0,
-            "text on near-white must be reasonably dark"
+            contrast_ratio(on_white, (250, 250, 250)) >= WCAG_AA_TEXT,
+            "text on near-white must clear WCAG AA"
         );
         assert!(
-            contrast_ratio(on_black, (5, 5, 5)) >= 3.0,
-            "text on near-black must be reasonably light"
+            contrast_ratio(on_black, (5, 5, 5)) >= WCAG_AA_TEXT,
+            "text on near-black must clear WCAG AA"
         );
     }
 

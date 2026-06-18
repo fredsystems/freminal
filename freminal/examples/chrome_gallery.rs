@@ -232,9 +232,17 @@ impl ChromeGallery {
                     .corner_radius(ui.visuals().window_corner_radius)
                     .inner_margin(8.0)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        // Center both the text and the close button on the row
+                        // so the button is not taller-than-and-misaligned-with
+                        // the label (the previous top-aligned-text bug).
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             ui.label("Notification text");
-                            let _ = ui.button("x");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let _ = ui.button("x");
+                                },
+                            );
                         });
                     });
 
