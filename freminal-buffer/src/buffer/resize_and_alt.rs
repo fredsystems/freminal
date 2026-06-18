@@ -271,15 +271,27 @@ impl Buffer {
 
         // Take ownership of the old rows
         let old_rows = std::mem::take(&mut self.rows);
+        let old_rows_len = old_rows.len();
 
         // 1) Group rows into logical lines based on RowJoin.
         //    While grouping, identify which logical line contains the cursor
         //    and compute the cursor's flat cell offset within that line.
+        //
+        //    We also record, for EVERY old row, the logical line it belongs to
+        //    and the flat cell offset of its first cell within that line
+        //    (`old_row_meta`).  After re-wrapping we use this to translate the
+        //    buffer-absolute row indices stored on `command_blocks` and
+        //    `prompt_rows` to their post-reflow positions — those indices are
+        //    absolute and would otherwise dangle once reflow changes the row
+        //    count (Task 113, Bug R).
         let mut logical_lines: Vec<Vec<Row>> = Vec::new();
         let mut current_line: Vec<Row> = Vec::new();
 
         let mut cursor_logical_line: Option<usize> = None;
         let mut cursor_flat_offset: usize = 0;
+
+        // Per old row: (logical_line_idx, flat_offset_of_row_start, row_len).
+        let mut old_row_meta: Vec<(usize, usize, usize)> = Vec::with_capacity(old_rows_len);
 
         for (old_row_idx, row) in old_rows.into_iter().enumerate() {
             if row.join == RowJoin::NewLogicalLine && !current_line.is_empty() {
@@ -287,14 +299,22 @@ impl Buffer {
                 current_line = Vec::new();
             }
 
+            // Flat offset of this row's first cell within its logical line =
+            // the sum of cells already accumulated in `current_line`.
+            let row_start_flat_offset = current_line
+                .iter()
+                .map(|r| r.characters().len())
+                .sum::<usize>();
+            old_row_meta.push((
+                logical_lines.len(),
+                row_start_flat_offset,
+                row.characters().len(),
+            ));
+
             if old_row_idx == old_cursor_y {
                 cursor_logical_line = Some(logical_lines.len());
                 // Flat offset = cells from preceding rows in this logical line + cursor X.
-                cursor_flat_offset = current_line
-                    .iter()
-                    .map(|r| r.characters().len())
-                    .sum::<usize>()
-                    + old_cursor_x;
+                cursor_flat_offset = row_start_flat_offset + old_cursor_x;
             }
 
             current_line.push(row);
@@ -308,6 +328,11 @@ impl Buffer {
         let mut new_cursor_y: Option<usize> = None;
         let mut new_cursor_x: Option<usize> = None;
 
+        // Per logical line: the index in `new_rows` at which that line's
+        // re-wrapped rows begin.  Used together with `old_row_meta` to remap
+        // command-block / prompt row indices after reflow.
+        let mut line_new_starts: Vec<usize> = Vec::with_capacity(old_row_meta.len());
+
         for (line_idx, line) in logical_lines.into_iter().enumerate() {
             // Determine origin for the first row of this logical line.
             let first_origin = line.first().map_or(RowOrigin::HardBreak, |r| r.origin);
@@ -319,8 +344,10 @@ impl Buffer {
                 flat_cells.extend(row.characters().iter().cloned());
             }
 
-            // Record where this logical line's new rows start (for cursor mapping).
+            // Record where this logical line's new rows start (for cursor and
+            // block/prompt row mapping).
             let line_start_idx = new_rows.len();
+            line_new_starts.push(line_start_idx);
 
             if flat_cells.is_empty() {
                 // Empty logical line → keep a single empty row
@@ -477,6 +504,100 @@ impl Buffer {
         } else if self.cursor.pos.x >= self.width {
             self.cursor.pos.x = self.width.saturating_sub(1);
         }
+
+        // 5) Remap command-block and prompt-row indices (Task 113, Bug R).
+        //    These fields are buffer-absolute row indices; reflow changed the
+        //    row count, so they would otherwise point at the wrong rows,
+        //    corrupting the command-block gutter and fold layout.
+        self.remap_block_rows_after_reflow(&old_row_meta, &line_new_starts);
+    }
+
+    /// Translate the buffer-absolute row indices stored on `command_blocks` and
+    /// `prompt_rows` to their post-reflow positions.
+    ///
+    /// `old_row_meta[r]` is `(logical_line_idx, flat_offset_of_row_start)` for
+    /// each old row `r`; `line_new_starts[line_idx]` is the index in the new
+    /// `self.rows` where that logical line's re-wrapped rows begin.  An old row
+    /// is mapped to the new row of its logical line whose cumulative cell span
+    /// contains the old row's first-cell flat offset — the same flat-offset
+    /// strategy the cursor remap uses.
+    ///
+    /// Block/prompt rows that no longer map onto a real row (their old index is
+    /// past the end of the pre-reflow buffer) are dropped, mirroring
+    /// `adjust_prompt_rows`, which drops fully-scrolled-out blocks.  Block
+    /// ordering and the `command_blocks` deque cap are preserved (this only
+    /// rewrites row fields and may drop whole entries; it never reorders).
+    fn remap_block_rows_after_reflow(
+        &mut self,
+        old_row_meta: &[(usize, usize, usize)],
+        line_new_starts: &[usize],
+    ) {
+        let new_len = self.rows.len();
+
+        // Translate a flat offset within a logical line to the new absolute row
+        // index whose cell span contains it.
+        let offset_to_new_row = |line_idx: usize, flat_offset: usize| -> Option<usize> {
+            let line_start = *line_new_starts.get(line_idx)?;
+            // The line's new rows span [line_start, line_end).
+            let line_end = line_new_starts
+                .get(line_idx + 1)
+                .copied()
+                .unwrap_or(new_len);
+
+            let mut acc = 0usize;
+            for new_idx in line_start..line_end {
+                let cells = self.rows[new_idx].characters().len();
+                // A zero-width row (empty logical line) still anchors offset 0.
+                if flat_offset < acc + cells.max(1) {
+                    return Some(new_idx);
+                }
+                acc += cells;
+            }
+            // Offset past the end of the line's content: clamp to the line's
+            // last new row (the cursor remap uses the same fallback).
+            Some(line_end.saturating_sub(1).max(line_start))
+        };
+
+        // A "start" field (prompt/command/output start) anchors to the FIRST
+        // cell of its old row, so it maps to the new row where that old row's
+        // content begins.
+        let map_start_row = |old_row: usize| -> Option<usize> {
+            let (line_idx, row_start, _len) = *old_row_meta.get(old_row)?;
+            offset_to_new_row(line_idx, row_start)
+        };
+
+        // An "end" field (`end_row`) marks the LAST row of a region (the GUI
+        // treats `[output_start_row, end_row]` as an inclusive range), so it
+        // anchors to the LAST cell of its old row — otherwise a row that
+        // re-wraps into several narrower rows would shrink the region to its
+        // first piece.
+        let map_end_row = |old_row: usize| -> Option<usize> {
+            let (line_idx, row_start, len) = *old_row_meta.get(old_row)?;
+            let last_cell = row_start + len.saturating_sub(1);
+            offset_to_new_row(line_idx, last_cell)
+        };
+
+        self.prompt_rows.retain_mut(|r| {
+            map_start_row(*r).is_some_and(|new_r| {
+                *r = new_r;
+                true
+            })
+        });
+
+        self.command_blocks.retain_mut(|b| {
+            // The prompt-start row anchors the block; if it cannot be mapped,
+            // the block has no valid home and is dropped.
+            let Some(new_prompt) = map_start_row(b.prompt_start_row) else {
+                return false;
+            };
+            b.prompt_start_row = new_prompt;
+            // Optional later fields are remapped where present; if a field no
+            // longer maps it is cleared rather than left dangling.
+            b.command_start_row = b.command_start_row.and_then(&map_start_row);
+            b.output_start_row = b.output_start_row.and_then(&map_start_row);
+            b.end_row = b.end_row.and_then(&map_end_row);
+            true
+        });
     }
 
     /// Adjust the buffer rows for a new height and return the adjusted `scroll_offset`.
@@ -488,11 +609,51 @@ impl Buffer {
         let old_height = self.height;
 
         if new_height > old_height {
-            // Grow: add blank rows at the bottom.
-            let grow = new_height - old_height;
-            for _ in 0..grow {
-                self.rows.push(Row::new(self.width));
-                self.row_cache.push(None);
+            if self.kind == BufferType::Alternate {
+                // Alternate buffer has no scrollback and a strict
+                // `rows.len() == height` invariant.  Grow by appending exactly
+                // enough blank rows at the bottom to reach the new height; the
+                // live region is top-anchored, so this is correct.
+                let grow = new_height.saturating_sub(self.rows.len());
+                for _ in 0..grow {
+                    self.rows.push(Row::new(self.width));
+                    self.row_cache.push(None);
+                }
+            } else {
+                // Primary buffer: the visible window is anchored to the BOTTOM
+                // of the buffer (`visible_window_start` = rows.len() - height),
+                // and the live cursor sits in the bottom `height` rows.  A
+                // taller window must be filled by RE-EXPOSING existing
+                // scrollback ABOVE the live bottom — NOT by appending blank rows
+                // BELOW it.
+                //
+                // The old code appended `new_height - old_height` blank rows at
+                // the bottom unconditionally.  Because the shrink branch retains
+                // rows (they become scrollback) and the window is bottom-anchored,
+                // a sequence of grow/shrink cycles — exactly what an interactive
+                // tiling-WM resize or repeated font-size changes produce —
+                // accumulated an unreclaimable tail of blank rows below the live
+                // cursor.  After a later shrink the bottom-anchored window then
+                // showed only that blank tail while the live prompt/output was
+                // stranded above it, in unreachable scrollback; no amount of
+                // scrolling recovered it and only `clear` fixed it (Task 113,
+                // Bug G).
+                //
+                // The fix: reclaim any trailing blank screen-padding rows below
+                // the live cursor, then append nothing.  Rows below the cursor
+                // in the primary buffer are always unwritten screen padding —
+                // the cursor is the furthest-written point at the live bottom,
+                // and all real content/scrollback lies at or above it.  Such
+                // padding rows are pristine `ScrollFill` placeholders (created
+                // by `Row::new`); reclaiming them down to the cursor row pins the
+                // live cursor to the bottom of the (now taller) window while the
+                // window reveals real scrollback above.  When there is no
+                // scrollback the window simply shows the available content with
+                // blank screen space below — and the screen fills back up
+                // through the normal `handle_lf` row-push path.  Because we
+                // never append below the cursor, a grow/shrink cycle can never
+                // accumulate a blank tail.
+                self.reclaim_trailing_blank_padding();
             }
             // Mark all pre-existing rows dirty so the row-level cache is
             // invalidated.  The visible window is now taller and the old
@@ -554,6 +715,38 @@ impl Buffer {
         } else {
             // xterm-style: reset to live bottom
             0
+        }
+    }
+
+    /// Reclaim trailing blank screen-padding rows that lie strictly below the
+    /// live cursor (primary buffer only).
+    ///
+    /// In the primary buffer the cursor is the furthest-written point at the
+    /// live bottom: every real content and scrollback row lies at or above it,
+    /// and any row below it is unwritten screen padding.  A pristine padding
+    /// row is a `RowOrigin::ScrollFill` row with no cells (exactly what
+    /// `Row::new` produces).  Such rows are removed down to — but never
+    /// including — the cursor's row, so the live cursor is pinned to the bottom
+    /// of the buffer.
+    ///
+    /// This is used by the height-grow path so the taller window reveals real
+    /// scrollback above the live bottom instead of accumulating an
+    /// unreclaimable blank tail below it (Task 113, Bug G).  It deliberately
+    /// stops at the first non-pristine row from the bottom, so it never touches
+    /// BCE-filled rows, content, or scrollback.
+    fn reclaim_trailing_blank_padding(&mut self) {
+        while self.rows.len() > self.cursor.pos.y + 1 {
+            // Safe: loop guard guarantees rows.len() >= 2 here.
+            let Some(last) = self.rows.last() else { break };
+            if last.origin == RowOrigin::ScrollFill && last.characters().is_empty() {
+                // A pristine ScrollFill row has no cells, so it holds no image
+                // cells; image_cell_count needs no adjustment.  Keep row_cache
+                // length in lockstep with rows.
+                self.rows.pop();
+                self.row_cache.pop();
+            } else {
+                break;
+            }
         }
     }
 

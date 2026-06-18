@@ -380,15 +380,24 @@ impl TerminalEmulator {
     /// Process a chunk of raw PTY bytes.
     ///
     /// This wraps `TerminalState::handle_incoming_data` for the consumer thread.
-    /// When the user is scrolled back (`gui_scroll_offset > 0`), new output
-    /// auto-scrolls to the bottom by resetting the offset to 0.
+    /// When the user is scrolled back (`gui_scroll_offset > 0`) or a
+    /// command-block fold has extended the flatten window above the live bottom
+    /// (`gui_extra_rows > 0`), new output auto-scrolls fully to the live bottom.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         self.internal.handle_incoming_data(incoming);
-        // Auto-scroll to bottom on new output, matching standard terminal
-        // behavior.  The next snapshot will carry scroll_offset = 0 so the
-        // GUI's ViewState is synced automatically.
-        if self.gui_scroll_offset > 0 {
-            self.gui_scroll_offset = 0;
+        // Auto-scroll to the live bottom on new output, matching standard
+        // terminal behavior.  This must clear BOTH the scroll offset AND the
+        // fold extra-rows request: leaving `gui_extra_rows` stale keeps the
+        // flattened window extended above the live bottom against a buffer that
+        // no longer has a fold there (Task 113, Bug E).  `reset_scroll_offset`
+        // clears both; the next snapshot then carries scroll_offset = 0 and
+        // window_extra_rows = 0 so the GUI's ViewState is synced automatically.
+        //
+        // Only reset when actually scrolled back or extended, so that ordinary
+        // output at the live bottom (the common case) does not needlessly
+        // invalidate the snapshot cache.
+        if self.gui_scroll_offset > 0 || self.gui_extra_rows > 0 {
+            self.reset_scroll_offset();
         }
     }
 
@@ -1012,6 +1021,32 @@ mod tests {
         emu.gui_scroll_offset = 0;
         emu.handle_incoming_data(b"data");
         assert_eq!(emu.gui_scroll_offset, 0);
+    }
+
+    #[test]
+    fn handle_incoming_data_clears_extra_rows() {
+        // Task 113, Bug E: new output must clear the fold extra-rows request,
+        // not just the scroll offset.  Here the offset is already 0 but a fold
+        // has extended the window (gui_extra_rows > 0); new data must still
+        // snap fully to the live bottom.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.set_gui_scroll_window(0, 4);
+        emu.handle_incoming_data(b"new data");
+        assert_eq!(emu.gui_scroll_offset, 0, "offset stays at live bottom");
+        assert_eq!(
+            emu.gui_extra_rows, 0,
+            "fold extra-rows request must be cleared on new output"
+        );
+    }
+
+    #[test]
+    fn handle_incoming_data_resets_both_offset_and_extra_rows() {
+        // Both scrolled back AND a fold in view → new output clears both.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.set_gui_scroll_window(7, 3);
+        emu.handle_incoming_data(b"new data");
+        assert_eq!(emu.gui_scroll_offset, 0);
+        assert_eq!(emu.gui_extra_rows, 0);
     }
 
     // ── set_win_size ───────────────────────────────────────────────────────────
