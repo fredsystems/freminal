@@ -620,13 +620,18 @@ and "Decision: centralized `ChromeStyle`…" sections above for the durable
 rationale, and the crate-architecture decision in Design Decisions.
 
 The work splits into four phases: **data type** (112.2, in `freminal-common`) →
-**egui mapping + application** (112.3-112.5, in the binary) → **per-surface
-adoption** (112.6-112.9) → **icons** (112.10-112.12). An icon-asset audit
-(112.1) precedes everything. Each subtask leaves `cargo test --all` green.
+**egui mapping + preview + application** (112.3, 112.3a, 112.4-112.5, in the
+binary) → **per-surface adoption** (112.6-112.9) → **icons** (112.10-112.12).
+An icon-asset audit (112.1) precedes everything. A dedicated preview-gallery
+subtask (112.3a) sits between the mapping and its global application so the
+Modern/Retro geometry can be tweaked and the visual vision locked in against
+real rendered chrome **before** the profiles are applied app-wide and rolled
+out per surface. Each subtask leaves `cargo test --all` green.
 
-Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.4-112.5
-need 112.3; 112.6-112.9 need 112.5; 112.10 needs 112.1; 112.11-112.12 need
-112.10.
+Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.3a needs
+112.3; 112.4-112.5 need 112.3a (the geometry baselines locked in the gallery
+feed 112.4's global application); 112.6-112.9 need 112.5; 112.10 needs 112.1;
+112.11-112.12 need 112.10.
 
 ### Task 112 subtasks
 
@@ -656,7 +661,95 @@ surfacing the tradeoffs.
 
 Stop: post the inventory + recommendation; await maintainer decision.
 
+##### Task 112 audit results (112.1)
+
+> **STATUS: audit complete; asset format SIGNED OFF.** Read-only inventory; no
+> code or assets changed. Maintainer approved the recommended icon-font /
+> CaskaydiaCove NF direction (see "Recommended asset format" below); the icon
+> track (112.10-112.12) is unblocked.
+
+**Action-glyph inventory.** Every non-ASCII symbol the chrome renders through
+egui's font pipeline, with codepoint, location, and Linux render risk. The five
+HIGH-risk entries are color-emoji codepoints that fall through to tofu on a
+Linux install lacking a system emoji font (the emoji fallback chain in
+`fonts.rs` is system-sourced, **not** bundled — `fonts.rs:191-192`).
+
+| Symbol           | Codepoint | Location                      | Represents                  | Linux risk |
+| ---------------- | --------- | ----------------------------- | --------------------------- | ---------- |
+| lock             | U+1F512   | `menu.rs:161` (menu-bar)      | echo-off indicator          | HIGH       |
+| record dot + REC | U+25CF    | `menu.rs:169` (menu-bar)      | recording indicator         | LOW        |
+| lock+key         | U+1F510   | `menu.rs:741-742` (tab label) | password-prompt tab         | HIGH       |
+| bell             | U+1F514   | `menu.rs:743` (tab label)     | unacked bell on tab         | HIGH       |
+| antenna          | U+1F4E1   | `menu.rs:750` (tab label)     | broadcast-input tab         | HIGH       |
+| ellipsis         | U+2026    | `menu.rs:841`                 | "Rename Tab..." menu item   | LOW        |
+| multiply         | U+00D7    | `menu.rs:852`                 | tab close button            | LOW        |
+| multiply         | U+00D7    | `toast.rs:207`                | toast dismiss button        | LOW        |
+| lock+key (text)  | U+1F510   | `settings.rs:1761`            | Security-tab description    | HIGH       |
+| heavy minus      | U+2796    | `settings.rs:1844`            | remove paste-guard pattern  | MEDIUM     |
+| heavy plus       | U+2795    | `settings.rs:1866`            | add paste-guard pattern     | MEDIUM     |
+| warning          | U+26A0    | `settings.rs:2086`            | keybinding conflict warning | MEDIUM     |
+| record (tech)    | U+23FA    | `settings.rs:2168`            | recording button label      | MEDIUM     |
+| lock             | U+1F512   | `terminal/widget.rs:2488`     | in-pane echo-off overlay    | HIGH       |
+| right triangle   | U+25B6    | `terminal/widget.rs:73`       | fold-placeholder prefix     | LOW        |
+| ellipsis         | U+2026    | `terminal/widget.rs:93`       | fold-placeholder truncation | LOW        |
+| middle dot       | U+00B7    | `close_guard.rs:256,282`      | hint/list separators        | LOW        |
+
+Pure-ASCII button labels (`search.rs` `<`/`>`/`X`; `command_history.rs`
+`OK`/`ER`/`..`/`??` status badges — already flagged in-code at
+`command_history.rs:527-530` as awaiting icon replacement) carry no render risk
+but are candidates for icon treatment for visual consistency. No actionable
+glyphs in `broadcast_guard.rs`, `paste_guard.rs`, `welcome.rs`,
+`notifications.rs`, `command_blocks.rs`.
+
+**Renderer facts relevant to the format choice.** egui 0.34.3 has no native
+SVG. No existing `egui_extras` / `RetainedImage` / egui `TextureHandle` usage in
+the chrome. `image` (0.25) is already a dependency; background/inline images go
+through `glow::Texture` in `renderer/gpu.rs` (not egui `TextureId`).
+`egui::Image::tint(Color32)` works in 0.34.3, so a monochrome glyph/texture can
+be tinted to the active palette. Task 111 bundled CaskaydiaCove NF (full Nerd
+Font: Powerline + Material Design Icons + PUA sets) via `include_bytes!`, already
+registered at position 0 of egui's `FontFamily::Monospace` (`fonts.rs:183`).
+
+**Recommended asset format: bundled icon font — reuse the already-bundled
+CaskaydiaCove Nerd Font.** Tradeoffs surfaced for sign-off:
+
+- **Icon font / CaskaydiaCove (recommended).** Zero new crates, zero new assets
+  for icons that have a Nerd Font equivalent (lock, bell, antenna, record,
+  warning, plus/minus, arrows all exist in CaskaydiaCove's PUA/MDI ranges).
+  Native tinting via `RichText::color()`. Consistent with the Task 111
+  bundled-font precedent. Cost: a one-time codepoint-mapping pass (emoji
+  codepoint → Nerd Font codepoint), and icons become monochrome (intended — it
+  is what enables tinting). A supplemental <200 KB icon TTF is the fallback for
+  any future symbol with no Nerd Font equivalent.
+- **SVG via `egui_extras` + `resvg`/`usvg`.** Best DPI/scalability story and
+  human-editable sources, but pulls a heavy transitive crate chain
+  (`resvg`/`usvg`/`tiny-skia`/...) against the repo's `machete`/`deny`
+  enforcement — not justified for ~15 icons.
+- **Pre-rasterized PNG atlas.** No new crates (`image` already present), but
+  opaque binary diffs, manual UV-coordinate maintenance, and multi-resolution
+  atlases for HiDPI make it the highest-maintenance option.
+
+**Decision (maintainer, signed off):** the icon-font / CaskaydiaCove NF
+direction is approved. 112.10 implements the bundled-icon pipeline as an icon
+font reusing the already-bundled CaskaydiaCove faces (supplemental <200 KB icon
+TTF only if a future symbol has no Nerd Font equivalent). The icon-track
+subtasks (112.10-112.12) are unblocked; the styling track (112.2 → 112.3 →
+112.3a → 112.4-112.9) was never blocked on this.
+
 #### 112.2 — Add `GuiTheme` + `StyleProfile` to `freminal-common` (data type only)
+
+> **STATUS: COMPLETE.** `freminal-common/src/gui_theme.rs` adds `StyleProfile`
+> (`Modern`/`Retro`, serde `lowercase`) and `GuiTheme`, re-exported from
+> `lib.rs`. Fields: `profile`, `corner_radius`, `stroke_width`, `item_spacing`,
+> `window_padding`, plus two judged-minimal extras — `menu_corner_radius` (nested
+> menus warrant a distinct radius) and `widget_hover_expansion` (hover geometry
+> differs sharply between profiles). No egui, no colors, no `Config` wiring.
+> Baselines (starting points, to be tuned in 112.3a): Modern = radius 6 / stroke
+> 1.0 / spacing (8,4) / padding 8 / menu-radius 4 / hover 2.0; Retro = radius 0 /
+> stroke 1.5 / spacing (6,2) / padding 4 / menu-radius 0 / hover 0.0. 12 unit
+> tests (defaults, `Default`, TOML round-trip, lowercase serde) pass;
+> `cargo clippy -p freminal-common --all-targets --all-features -- -D warnings`
+> clean.
 
 Scope: `freminal-common/src/` (new module, e.g. `gui_theme.rs`, plus `lib.rs`
 re-export). NO egui. NO config wiring yet (that is 112.13).
@@ -681,7 +774,12 @@ pub struct GuiTheme {
 profile's baseline geometry (Modern = rounded/soft, Retro = sharp/dense). All
 fields are plain numbers/enums — colors are NOT here (they come from
 `ThemePalette` at mapping time). Add `Default` (Modern), `Serialize`,
-`Deserialize`, and unit tests for `defaults()` and serde round-trip.
+`Deserialize`, and unit tests for `defaults()` and serde round-trip. The
+baseline numbers here are a working starting point; they are **empirically
+dialed in and locked** in the 112.3a preview gallery against rendered chrome
+before 112.4 applies them app-wide. If 112.3a is being done first to lock the
+vision, land 112.2 with placeholder baselines and update them once 112.3a signs
+off.
 
 Deliverable: the type + tests in `freminal-common`; nothing consumes it yet.
 
@@ -726,6 +824,74 @@ terminal-buffer renderer.
 
 Stop: report the function signature + which `Visuals` fields are set; await
 review.
+
+#### 112.3a — Style-profile preview gallery (lock in the vision)
+
+Scope: `freminal/src/gui/settings.rs` (a new `Appearance` preview surface — a
+new `SettingsTab` variant + its draw fn, e.g. `show_appearance_tab`, plus a
+`show_chrome_preview` free function modelled on the existing
+`show_theme_preview`/`color_swatch` pair). May read `chrome_style::build_visuals`
+(112.3) and the `colors.rs` helpers. NO config persistence (that is 112.13); NO
+global application to the rest of the app (that is 112.4).
+
+What: This is the subtask where the Modern/Retro aesthetic is **tweaked and
+locked in against real rendered chrome** before it is committed app-wide. Build
+an isolated, self-contained preview gallery that renders a representative slice
+of chrome — **inside a locally-scoped `egui::Frame`/`ui.scope` whose `Visuals`
+come from `build_visuals(&gui_theme_draft, palette, opacity, normal_display)`**,
+so the preview restyles **without** touching the surrounding app (this is the
+key isolation property — 112.4 has not run yet, so the global style is still
+stock egui). The gallery must show, at minimum:
+
+- a button row (normal + a primary/accent button),
+- a `ComboBox` and a `Slider` (the two most common settings widgets),
+- a separator,
+- an active-tab / inactive-tab pair (the tab-bar look),
+- a sample bordered panel/window frame (corner radius + stroke visible),
+- a sample toast frame (the only current `Stroke`+`CornerRadius` user),
+- a line of selected text (selection bg/fg).
+
+Above the gallery, expose **live geometry controls** bound to an in-memory
+`GuiTheme` draft: a `StyleProfile` selector (Modern/Retro — switching it resets
+the draft to that profile's `defaults()`), plus sliders for the
+user-tunable geometry (`corner_radius`, `stroke_width`, `item_spacing`,
+`window_padding`). Changing any control re-derives the `Visuals` for the gallery
+on the next frame. This is the surface the maintainer uses to dial in the
+profile baseline numbers — the values that become `StyleProfile::defaults()` in
+112.2 — and to sign off the look before 112.4 applies it everywhere.
+
+Reuse the existing live-preview signal shape only insofar as it is needed for
+the gallery's own restyle; do **not** broadcast the draft to panes or write it
+into `Config` (no `PreviewVisualProfile` dispatch, no persistence — that is
+112.7's picker + 112.13's config wiring). The gallery is read-only with respect
+to app state: it mutates only its own in-memory draft.
+
+Deliverable: an `Appearance` preview tab rendering the gallery, restyled live by
+a local `GuiTheme` draft, with Modern/Retro + geometry controls — usable to lock
+in the profile baselines. A unit test for the draft-control logic (e.g.
+selecting a profile resets the draft to that profile's `defaults()`; a geometry
+slider edit updates the draft field) — not a pixel test.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; manual: open the Appearance tab, toggle Modern↔Retro and move the
+geometry sliders, confirm the gallery restyles while the rest of the settings
+window chrome stays unchanged (proving local-scope isolation, since 112.4 has
+not landed); confirm in a light and a dark theme.
+
+Prohibitions: do NOT apply the draft globally (`ctx.set_visuals` /
+`global_style_mut`) — scope it locally to the gallery; do NOT persist the draft
+to `Config` or broadcast it to panes; do NOT hard-code colors — the gallery's
+colors derive from the active `palette` via `build_visuals`; do NOT touch the
+terminal-buffer renderer. If the gallery's focusable controls warrant it, honor
+`freminal-modal-input-suppression`.
+
+Outcome to capture: once the maintainer signs off, record the locked-in
+Modern/Retro geometry baselines (the numbers that land in 112.2's
+`StyleProfile::defaults()`) in this plan under a short "112.3a — locked
+baselines" note, so 112.4's global application uses the agreed values.
+
+Stop: report the gallery contents, the (proposed or locked) geometry baselines,
+and the test results; await the maintainer's sign-off on the look before 112.4.
 
 #### 112.4 — Apply full `Visuals` via the per-frame style hook
 
