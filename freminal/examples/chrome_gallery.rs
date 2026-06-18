@@ -161,86 +161,89 @@ impl ChromeGallery {
         ));
     }
 
-    /// Draw the previewed chrome (right), styled by the real `build_visuals`.
+    /// Draw the previewed chrome (right).
+    ///
+    /// The previewed style is applied as the window's **global** `Visuals` in
+    /// [`update`](ChromeGallery::update), not scoped locally — this is
+    /// deliberate: combo-box dropdowns and context menus render in egui's
+    /// top-level popup layer, which reads the *global* style and ignores a
+    /// local `ui.scope`. Applying globally is the only way to faithfully
+    /// preview menu/dropdown theming, and is safe here because the gallery
+    /// owns its whole window.
     fn preview(&mut self, ui: &mut egui::Ui) {
-        let visuals = build_visuals(
-            &self.draft,
-            self.palette(),
-            self.bg_opacity,
-            self.normal_display,
-        );
+        egui::Frame::group(ui.style())
+            .inner_margin(self.draft.window_padding)
+            .show(ui, |ui| {
+                ui.heading("Preview");
+                ui.add_space(4.0);
 
-        // Scope the previewed style locally: only this region adopts the
-        // derived Visuals; the surrounding controls keep the default style.
-        ui.scope(|ui| {
-            *ui.visuals_mut() = visuals;
-            ui.spacing_mut().item_spacing =
-                egui::vec2(self.draft.item_spacing.0, self.draft.item_spacing.1);
-
-            egui::Frame::group(ui.style())
-                .inner_margin(self.draft.window_padding)
-                .show(ui, |ui| {
-                    ui.heading("Preview");
-                    ui.add_space(4.0);
-
-                    ui.label("Buttons");
-                    ui.horizontal(|ui| {
-                        let _ = ui.button("Default");
-                        let _ = ui.button("Cancel");
-                        let _ = ui.button("Apply");
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label("Combo box + slider");
-                    egui::ComboBox::from_id_salt("preview_combo")
-                        .selected_text(format!("Option {}", self.combo_choice + 1))
-                        .show_ui(ui, |ui| {
-                            for idx in 0..3 {
-                                ui.selectable_value(
-                                    &mut self.combo_choice,
-                                    idx,
-                                    format!("Option {}", idx + 1),
-                                );
-                            }
-                        });
-                    ui.add(egui::Slider::new(&mut self.slider_value, 0.0..=1.0).text("value"));
-
-                    ui.separator();
-
-                    ui.label("Tabs");
-                    ui.horizontal(|ui| {
-                        let _ = ui.selectable_label(true, "Active tab");
-                        let _ = ui.selectable_label(false, "Inactive tab");
-                        let _ = ui.selectable_label(false, "Inactive tab");
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label("Bordered panel (corner radius + stroke)");
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.label("Panel content sits inside a stroked, rounded frame.");
-                    });
-
-                    ui.add_space(6.0);
-                    ui.label("Toast frame");
-                    let toast_fill = ui.visuals().widgets.inactive.bg_fill;
-                    egui::Frame::new()
-                        .fill(toast_fill)
-                        .stroke(ui.visuals().window_stroke)
-                        .corner_radius(ui.visuals().window_corner_radius)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label("Notification text");
-                                let _ = ui.button("x");
-                            });
-                        });
-
-                    ui.add_space(6.0);
-                    ui.label("Selected text:");
-                    let mut sample = String::from("the quick brown fox");
-                    ui.add(egui::TextEdit::singleline(&mut sample));
+                ui.label("Buttons");
+                ui.horizontal(|ui| {
+                    let _ = ui.button("Default");
+                    let _ = ui.button("Cancel");
+                    let _ = ui.button("Apply");
                 });
-        });
+
+                ui.add_space(6.0);
+                ui.label("Combo box (dropdown popup follows the theme)");
+                egui::ComboBox::from_id_salt("preview_combo")
+                    .selected_text(format!("Option {}", self.combo_choice + 1))
+                    .show_ui(ui, |ui| {
+                        for idx in 0..4 {
+                            ui.selectable_value(
+                                &mut self.combo_choice,
+                                idx,
+                                format!("Option {}", idx + 1),
+                            );
+                        }
+                    });
+                ui.add(egui::Slider::new(&mut self.slider_value, 0.0..=1.0).text("value"));
+
+                ui.add_space(6.0);
+                ui.label("Right-click the button below for a context menu:");
+                ui.button("Right-click me").context_menu(|ui| {
+                    let _ = ui.button("Cut");
+                    let _ = ui.button("Copy");
+                    let _ = ui.button("Paste");
+                    ui.separator();
+                    let _ = ui.button("Select all");
+                });
+
+                ui.separator();
+
+                ui.label("Tabs");
+                ui.horizontal(|ui| {
+                    let _ = ui.selectable_label(true, "Active tab");
+                    let _ = ui.selectable_label(false, "Inactive tab");
+                    let _ = ui.selectable_label(false, "Inactive tab");
+                });
+
+                ui.add_space(6.0);
+                ui.label("Bordered panel (corner radius + stroke)");
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label("Panel content sits inside a stroked, rounded frame.");
+                });
+
+                ui.add_space(6.0);
+                ui.label("Toast frame");
+                let toast_fill = ui.visuals().widgets.inactive.bg_fill;
+                egui::Frame::new()
+                    .fill(toast_fill)
+                    .stroke(ui.visuals().window_stroke)
+                    .corner_radius(ui.visuals().window_corner_radius)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Notification text");
+                            let _ = ui.button("x");
+                        });
+                    });
+
+                ui.add_space(6.0);
+                ui.label("Text edit (extreme_bg_color surface):");
+                let mut sample = String::from("the quick brown fox");
+                ui.add(egui::TextEdit::singleline(&mut sample));
+            });
     }
 }
 
@@ -252,6 +255,22 @@ impl App for ChromeGallery {
         _gl: &glow::Context,
         _handle: &WindowHandle<'_>,
     ) {
+        // Apply the draft style as the window's GLOBAL visuals so that
+        // top-level popup surfaces (combo dropdowns, context menus) — which
+        // do not inherit a local `ui.scope` style — also follow the theme.
+        // This is what 112.4 will do for the real app via the per-frame hook.
+        let visuals = build_visuals(
+            &self.draft,
+            self.palette(),
+            self.bg_opacity,
+            self.normal_display,
+        );
+        ctx.set_visuals(visuals);
+        ctx.global_style_mut(|style| {
+            style.spacing.item_spacing =
+                egui::vec2(self.draft.item_spacing.0, self.draft.item_spacing.1);
+        });
+
         // Mirror the app's root-Ui + `show_inside` idiom (the `show(ctx, …)`
         // form is deprecated in this egui version).
         let mut root_ui = egui::Ui::new(

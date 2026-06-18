@@ -41,6 +41,47 @@ use freminal_common::themes::ThemePalette;
 use super::colors::{internal_color_to_egui_with_alpha, rgb_to_color32};
 
 // ---------------------------------------------------------------------------
+//  Color derivation helpers
+// ---------------------------------------------------------------------------
+
+/// Perceptual luminance of an `(r, g, b)` color in `[0.0, 1.0]`.
+///
+/// Uses the standard Rec. 601 luma coefficients.  Used to decide whether a
+/// palette reads as "dark" or "light" (which flips `Visuals::dark_mode` and
+/// the direction surface colors are nudged).
+fn luminance(rgb: (u8, u8, u8)) -> f32 {
+    let r = f32::from(rgb.0) / 255.0;
+    let g = f32::from(rgb.1) / 255.0;
+    let b = f32::from(rgb.2) / 255.0;
+    0.299_f32.mul_add(r, 0.587_f32.mul_add(g, 0.114 * b))
+}
+
+/// Linearly blend two colors by `t` in `[0.0, 1.0]` (`0.0` = `a`, `1.0` = `b`).
+fn blend(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| -> u8 {
+        let xf = f32::from(x);
+        let yf = f32::from(y);
+        (yf - xf)
+            .mul_add(t, xf)
+            .round()
+            .approx_as::<u8>()
+            .unwrap_or(x)
+    };
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// Nudge `base` toward black (dark palettes) or white (light palettes) by `t`.
+///
+/// Produces a surface that contrasts the base background in the
+/// palette-appropriate direction: on a dark theme a `TextEdit` well should be
+/// *darker* than the panel; on a light theme it should be *lighter*.
+fn contrast_surface(base: (u8, u8, u8), t: f32, is_dark: bool) -> (u8, u8, u8) {
+    let target = if is_dark { (0, 0, 0) } else { (255, 255, 255) };
+    blend(base, target, t)
+}
+
+// ---------------------------------------------------------------------------
 //  WidgetRole — private helper for per-state parameterisation
 // ---------------------------------------------------------------------------
 
@@ -252,7 +293,15 @@ pub fn build_visuals(
     // fields are set explicitly so the mapping is deterministic regardless
     // of what egui's defaults produce.
 
-    let mut visuals = egui::Visuals::dark();
+    let is_dark = luminance(palette.background) < 0.5;
+
+    let mut visuals = if is_dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+
+    visuals.dark_mode = is_dark;
 
     visuals.widgets = widgets;
     visuals.window_fill = window_fill;
@@ -262,6 +311,40 @@ pub fn build_visuals(
     visuals.menu_corner_radius = menu_cr;
     visuals.selection = selection;
     visuals.override_text_color = Some(rgb_to_color32(palette.foreground));
+
+    // ── Surface backgrounds (previously left at Visuals::dark() defaults) ─────
+    //
+    // egui hard-codes these to near-black in dark mode; left unset they make
+    // TextEdit wells, scrollbar tracks, grid stripes, and inline-code spans
+    // render black regardless of the palette.  Derive them from the palette so
+    // every surface follows the theme.
+    //
+    // `extreme_bg_color` backs TextEdit/scrollbar/progress tracks — it must
+    // contrast the panel, so nudge the background away from itself in the
+    // palette-appropriate direction (darker on dark themes, lighter on light).
+    visuals.extreme_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.35, is_dark));
+    // `faint_bg_color` backs striped-grid alternate rows — a subtle lift.
+    visuals.faint_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.12, is_dark));
+    // `code_bg_color` backs inline `code` spans — between faint and extreme.
+    visuals.code_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.22, is_dark));
+
+    // ── Semantic foreground colors (previously hard-coded orange/red/blue) ────
+    //
+    // Map to the palette's ANSI slots so warnings/errors/links match the theme.
+    visuals.warn_fg_color = rgb_to_color32(palette.ansi[3]); // yellow
+    visuals.error_fg_color = rgb_to_color32(palette.ansi[1]); // red
+    visuals.hyperlink_color = rgb_to_color32(palette.ansi[4]); // blue
+
+    // ── Shadows (window + popup/menu) ─────────────────────────────────────────
+    //
+    // Keep egui's shadow geometry (offset/blur/spread) but tint the color from
+    // the palette so drop shadows read correctly on both light and dark themes.
+    // Menus, combo-box dropdowns, and context menus all use `popup_shadow`.
+    let shadow_color = rgb_to_color32(contrast_surface(palette.background, 0.6, is_dark));
+    let shadow_tint =
+        Color32::from_rgba_unmultiplied(shadow_color.r(), shadow_color.g(), shadow_color.b(), 96);
+    visuals.window_shadow.color = shadow_tint;
+    visuals.popup_shadow.color = shadow_tint;
 
     visuals
 }
@@ -536,5 +619,87 @@ mod tests {
         assert_eq!(red, 255, "panel_fill R (unmultiplied) must be 255");
         assert_eq!(green, 255, "panel_fill G (unmultiplied) must be 255");
         assert_eq!(blue, 255, "panel_fill B (unmultiplied) must be 255");
+    }
+
+    // ── Surface backgrounds derive from the palette ──────────────────────────
+
+    #[test]
+    fn surface_backgrounds_are_not_egui_dark_defaults() {
+        // On a non-black palette, extreme/faint/code backgrounds must be
+        // palette-derived, not egui's hard-coded near-black dark defaults.
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+
+        let dark_default = egui::Visuals::dark();
+        assert_ne!(
+            v.extreme_bg_color, dark_default.extreme_bg_color,
+            "extreme_bg_color must be palette-derived, not the egui dark default"
+        );
+        assert_ne!(
+            v.faint_bg_color, dark_default.faint_bg_color,
+            "faint_bg_color must be palette-derived, not the egui dark default"
+        );
+        assert_ne!(
+            v.code_bg_color, dark_default.code_bg_color,
+            "code_bg_color must be palette-derived, not the egui dark default"
+        );
+    }
+
+    #[test]
+    fn semantic_fg_colors_map_to_palette_ansi() {
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+
+        assert_eq!(
+            v.warn_fg_color,
+            rgb_to_color32(PALETTE.ansi[3]),
+            "warn_fg_color must map to ANSI yellow (ansi[3])"
+        );
+        assert_eq!(
+            v.error_fg_color,
+            rgb_to_color32(PALETTE.ansi[1]),
+            "error_fg_color must map to ANSI red (ansi[1])"
+        );
+        assert_eq!(
+            v.hyperlink_color,
+            rgb_to_color32(PALETTE.ansi[4]),
+            "hyperlink_color must map to ANSI blue (ansi[4])"
+        );
+    }
+
+    #[test]
+    fn popup_shadow_is_tinted_from_palette() {
+        // Menus / combo dropdowns / context menus all use popup_shadow; its
+        // color must be palette-tinted (semi-transparent), not the egui default.
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+
+        assert_eq!(
+            v.popup_shadow.color, v.window_shadow.color,
+            "popup and window shadows share the palette-derived tint"
+        );
+        assert_eq!(
+            v.popup_shadow.color.a(),
+            96,
+            "shadow tint alpha must be the palette-derived 96"
+        );
+    }
+
+    #[test]
+    fn light_palette_flips_dark_mode_false() {
+        // A light palette must set dark_mode = false so egui's implicit
+        // shading is correct.
+        let gt = StyleProfile::Modern.defaults();
+        let light = build_visuals(&gt, &themes::CATPPUCCIN_LATTE, 1.0, true);
+        assert!(
+            !light.dark_mode,
+            "Catppuccin Latte is a light theme; dark_mode must be false"
+        );
+
+        let dark = build_visuals(&gt, &themes::CATPPUCCIN_MOCHA, 1.0, true);
+        assert!(
+            dark.dark_mode,
+            "Catppuccin Mocha is a dark theme; dark_mode must be true"
+        );
     }
 }
