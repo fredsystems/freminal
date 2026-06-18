@@ -364,13 +364,16 @@ pub const CATPPUCCIN_MOCHA: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Catppuccin Mocha spec
+    // (github.com/catppuccin/catppuccin): Mantle / Surface0 / Surface1 /
+    // Surface2 / Overlay0 / Text / Subtext0.
+    chrome_surface: Some((0x18, 0x18, 0x25)), // Mantle
+    chrome_surface_variant: Some((0x31, 0x32, 0x44)), // Surface0
+    chrome_surface_hover: Some((0x45, 0x47, 0x5a)), // Surface1
+    chrome_surface_active: Some((0x58, 0x5b, 0x70)), // Surface2
+    chrome_border: Some((0x6c, 0x70, 0x86)),  // Overlay0
+    chrome_text: Some((0xcd, 0xd6, 0xf4)),    // Text
+    chrome_text_muted: Some((0xa6, 0xad, 0xc8)), // Subtext0
 };
 
 // ---------------------------------------------------------------------------
@@ -411,13 +414,16 @@ pub const CATPPUCCIN_MACCHIATO: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Catppuccin Macchiato spec
+    // (github.com/catppuccin/catppuccin): Mantle / Surface0 / Surface1 /
+    // Surface2 / Overlay0 / Text / Subtext0.
+    chrome_surface: Some((0x1e, 0x20, 0x30)), // Mantle
+    chrome_surface_variant: Some((0x36, 0x3a, 0x4f)), // Surface0
+    chrome_surface_hover: Some((0x49, 0x4d, 0x64)), // Surface1
+    chrome_surface_active: Some((0x5b, 0x60, 0x78)), // Surface2
+    chrome_border: Some((0x6e, 0x73, 0x8d)),  // Overlay0
+    chrome_text: Some((0xca, 0xd3, 0xf5)),    // Text
+    chrome_text_muted: Some((0xa5, 0xad, 0xcb)), // Subtext0
 };
 
 // ---------------------------------------------------------------------------
@@ -458,13 +464,16 @@ pub const CATPPUCCIN_FRAPPE: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Catppuccin Frappe spec
+    // (github.com/catppuccin/catppuccin): Mantle / Surface0 / Surface1 /
+    // Surface2 / Overlay0 / Text / Subtext0.
+    chrome_surface: Some((0x29, 0x2c, 0x3c)), // Mantle
+    chrome_surface_variant: Some((0x41, 0x45, 0x59)), // Surface0
+    chrome_surface_hover: Some((0x51, 0x57, 0x6d)), // Surface1
+    chrome_surface_active: Some((0x62, 0x68, 0x80)), // Surface2
+    chrome_border: Some((0x73, 0x79, 0x94)),  // Overlay0
+    chrome_text: Some((0xc6, 0xd0, 0xf5)),    // Text
+    chrome_text_muted: Some((0xa5, 0xad, 0xce)), // Subtext0
 };
 
 // ---------------------------------------------------------------------------
@@ -505,13 +514,16 @@ pub const CATPPUCCIN_LATTE: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Catppuccin Latte spec (light)
+    // (github.com/catppuccin/catppuccin): Mantle / Surface0 / Surface1 /
+    // Surface2 / Overlay0 / Text / Subtext0.
+    chrome_surface: Some((0xe6, 0xe9, 0xef)), // Mantle
+    chrome_surface_variant: Some((0xcc, 0xd0, 0xda)), // Surface0
+    chrome_surface_hover: Some((0xbc, 0xc0, 0xcc)), // Surface1
+    chrome_surface_active: Some((0xac, 0xb0, 0xbe)), // Surface2
+    chrome_border: Some((0x9c, 0xa0, 0xb0)),  // Overlay0
+    chrome_text: Some((0x4c, 0x4f, 0x69)),    // Text
+    chrome_text_muted: Some((0x6c, 0x6f, 0x85)), // Subtext0
 };
 
 // ---------------------------------------------------------------------------
@@ -552,13 +564,16 @@ pub const DRACULA: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Dracula spec
+    // (github.com/dracula/dracula-theme#color-palette): Darker-BG /
+    // Current Line / Selection / Comment / Foreground.
+    chrome_surface: Some((0x21, 0x22, 0x2c)), // darker background
+    chrome_surface_variant: Some((0x34, 0x37, 0x46)), // between bg & current line
+    chrome_surface_hover: Some((0x44, 0x47, 0x5a)), // Current Line
+    chrome_surface_active: Some((0x62, 0x72, 0xa4)), // Comment (accent fill)
+    chrome_border: Some((0x62, 0x72, 0xa4)),  // Comment
+    chrome_text: Some((0xf8, 0xf8, 0xf2)),    // Foreground
+    chrome_text_muted: Some((0x62, 0x72, 0xa4)), // Comment
 };
 
 // ---------------------------------------------------------------------------
@@ -599,13 +614,16 @@ pub const NORD: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Nord spec (nordtheme.com):
+    // Polar Night nord0/1/2/3 + Snow Storm nord4. surface=nord0,
+    // variant=nord1, hover=nord2, active/border=nord3, text=nord4.
+    chrome_surface: Some((0x2e, 0x34, 0x40)), // nord0
+    chrome_surface_variant: Some((0x3b, 0x42, 0x52)), // nord1
+    chrome_surface_hover: Some((0x43, 0x4c, 0x5e)), // nord2
+    chrome_surface_active: Some((0x4c, 0x56, 0x6a)), // nord3
+    chrome_border: Some((0x4c, 0x56, 0x6a)),  // nord3
+    chrome_text: Some((0xd8, 0xde, 0xe9)),    // nord4
+    chrome_text_muted: Some((0x60, 0x6b, 0x80)), // dimmed nord3/4 boundary
 };
 
 // ---------------------------------------------------------------------------
@@ -928,13 +946,17 @@ pub const TOKYO_NIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Tokyo Night spec
+    // (github.com/folke/tokyonight.nvim colors.lua, "night" variant):
+    // bg_dark / bg_highlight / terminal_black / fg_gutter+selection /
+    // dark3 / fg / comment.
+    chrome_surface: Some((0x16, 0x16, 0x1e)), // bg_dark
+    chrome_surface_variant: Some((0x29, 0x2e, 0x42)), // bg_highlight
+    chrome_surface_hover: Some((0x2f, 0x35, 0x49)), // lighter highlight
+    chrome_surface_active: Some((0x3b, 0x42, 0x61)), // fg_gutter / selection
+    chrome_border: Some((0x54, 0x5c, 0x7e)),  // dark3
+    chrome_text: Some((0xc0, 0xca, 0xf5)),    // fg
+    chrome_text_muted: Some((0x56, 0x5f, 0x89)), // comment
 };
 
 // ---------------------------------------------------------------------------
@@ -975,13 +997,16 @@ pub const TOKYO_NIGHT_STORM: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
-    chrome_surface: None,
-    chrome_surface_variant: None,
-    chrome_surface_hover: None,
-    chrome_surface_active: None,
-    chrome_border: None,
-    chrome_text: None,
-    chrome_text_muted: None,
+    // Chrome roles transcribed from the Tokyo Night Storm spec
+    // (github.com/folke/tokyonight.nvim colors.lua, "storm" variant):
+    // bg_dark / bg_highlight / fg_gutter / selection / dark3 / fg / comment.
+    chrome_surface: Some((0x1f, 0x23, 0x35)), // bg_dark
+    chrome_surface_variant: Some((0x29, 0x2e, 0x42)), // bg_highlight
+    chrome_surface_hover: Some((0x33, 0x39, 0x4f)), // lighter highlight
+    chrome_surface_active: Some((0x3b, 0x42, 0x61)), // fg_gutter / selection
+    chrome_border: Some((0x54, 0x5c, 0x7e)),  // dark3
+    chrome_text: Some((0xc0, 0xca, 0xf5)),    // fg
+    chrome_text_muted: Some((0x56, 0x5f, 0x89)), // comment
 };
 
 // ---------------------------------------------------------------------------
@@ -1860,15 +1885,20 @@ mod tests {
     // --- Chrome-role resolver (112.3c) -----------------------------------
 
     #[test]
-    fn chrome_roles_default_to_none_on_all_themes() {
-        for theme in all_themes() {
-            assert_eq!(theme.chrome_surface, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_surface_variant, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_surface_hover, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_surface_active, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_border, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_text, None, "theme {}", theme.slug);
-            assert_eq!(theme.chrome_text_muted, None, "theme {}", theme.slug);
+    fn role_less_themes_have_no_authored_chrome_roles() {
+        // Raw terminal palettes (and any theme not yet transcribed in 112.3d)
+        // intentionally leave all seven chrome roles `None` and rely on the
+        // resolver. This guards against accidentally authoring partial roles
+        // on a theme meant to be fully resolver-driven.
+        for slug in ["xterm-default", "wezterm-default", "ghostty-default"] {
+            let theme = by_slug(slug).unwrap();
+            assert_eq!(theme.chrome_surface, None, "theme {slug}");
+            assert_eq!(theme.chrome_surface_variant, None, "theme {slug}");
+            assert_eq!(theme.chrome_surface_hover, None, "theme {slug}");
+            assert_eq!(theme.chrome_surface_active, None, "theme {slug}");
+            assert_eq!(theme.chrome_border, None, "theme {slug}");
+            assert_eq!(theme.chrome_text, None, "theme {slug}");
+            assert_eq!(theme.chrome_text_muted, None, "theme {slug}");
         }
     }
 
@@ -1893,10 +1923,60 @@ mod tests {
     }
 
     #[test]
+    fn vetted_themes_carry_authored_chrome_roles() {
+        // Themes transcribed in 112.3d must return their authored values,
+        // not the resolver fallback.
+        for slug in [
+            "catppuccin-mocha",
+            "catppuccin-macchiato",
+            "catppuccin-frappe",
+            "catppuccin-latte",
+            "tokyo-night",
+            "tokyo-night-storm",
+            "dracula",
+            "nord",
+        ] {
+            let theme = by_slug(slug).unwrap();
+            assert!(
+                theme.chrome_surface.is_some(),
+                "{slug} must have an authored chrome_surface"
+            );
+            assert!(
+                theme.chrome_border.is_some(),
+                "{slug} must have an authored chrome_border"
+            );
+            // Authored border is returned verbatim by the resolver.
+            assert_eq!(
+                theme.chrome_role(ChromeRole::Border),
+                theme.chrome_border.unwrap(),
+                "{slug} resolver must return the authored border"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_terminal_palettes_use_the_resolver() {
+        // xterm/wezterm/ghostty intentionally have no authored roles and rely
+        // on the resolver — which must still produce a contrasting border.
+        for slug in ["xterm-default", "wezterm-default", "ghostty-default"] {
+            let theme = by_slug(slug).unwrap();
+            assert_eq!(theme.chrome_border, None, "{slug} should be role-less");
+            let surface = theme.chrome_role(ChromeRole::Surface);
+            let border = theme.chrome_role(ChromeRole::Border);
+            assert!(
+                contrast_ratio(border, surface) > 1.2,
+                "{slug}: resolver border must contrast the surface"
+            );
+        }
+    }
+
+    #[test]
     fn chrome_role_best_fits_from_palette_when_unset() {
         // With no authored values, surface == background, text == foreground,
-        // active == selection_bg (colors the palette already defines).
-        let t = CATPPUCCIN_MOCHA;
+        // active == selection_bg (colors the palette already defines). Use a
+        // role-less raw palette (xterm) since vetted themes now author roles.
+        let t = by_slug("xterm-default").unwrap();
+        assert_eq!(t.chrome_surface, None);
         assert_eq!(t.chrome_role(ChromeRole::Surface), t.background);
         assert_eq!(t.chrome_role(ChromeRole::Text), t.foreground);
         assert_eq!(t.chrome_role(ChromeRole::SurfaceActive), t.selection_bg);
@@ -1925,6 +2005,7 @@ mod tests {
         let mut t = CATPPUCCIN_MOCHA;
         t.background = (20, 20, 20);
         t.foreground = (28, 28, 28); // very low contrast with background
+        t.chrome_text_muted = None; // force the resolver fallback path
         let muted = t.chrome_role(ChromeRole::TextMuted);
         assert!(
             contrast_ratio(muted, t.background) >= MIN_CHROME_CONTRAST,
