@@ -97,19 +97,25 @@ impl StyleProfile {
                 profile: Self::Modern,
                 corner_radius: 6,
                 stroke_width: 1.0,
-                item_spacing: (8.0, 4.0),
-                window_padding: 8.0,
+                item_spacing: (8.0, 6.0),
+                window_padding: 10.0,
                 menu_corner_radius: 4,
                 widget_hover_expansion: 2.0,
+                button_padding: (10.0, 6.0),
+                menu_padding: 8,
+                text_edit_padding: (8.0, 5.0),
             },
             Self::Retro => GuiTheme {
                 profile: Self::Retro,
                 corner_radius: 0,
                 stroke_width: 1.5,
-                item_spacing: (6.0, 2.0),
-                window_padding: 4.0,
+                item_spacing: (6.0, 4.0),
+                window_padding: 6.0,
                 menu_corner_radius: 0,
                 widget_hover_expansion: 0.0,
+                button_padding: (8.0, 4.0),
+                menu_padding: 6,
+                text_edit_padding: (6.0, 4.0),
             },
         }
     }
@@ -184,6 +190,25 @@ pub struct GuiTheme {
     /// A non-zero value gives a subtle grow-on-hover effect.  Set to `0.0`
     /// to express hover state through color alone (Retro default).
     pub widget_hover_expansion: f32,
+
+    /// Inner padding of buttons / selectable widgets in logical pixels
+    /// `(x, y)`.
+    ///
+    /// Maps to egui's `Spacing.button_padding`.  Larger values give roomier,
+    /// more modern-feeling controls; the egui default is `(4.0, 1.0)`.
+    pub button_padding: (f32, f32),
+
+    /// Inner padding of menu / dropdown / popup frames in logical pixels.
+    ///
+    /// Maps to egui's `Spacing.menu_margin` (applied to every combo-box
+    /// dropdown, context menu, and popup).  The egui default is `6`.
+    pub menu_padding: u8,
+
+    /// Inner padding of text-input fields in logical pixels `(x, y)`.
+    ///
+    /// egui has no global `Spacing` field for this, so it is applied per
+    /// `TextEdit` via `.margin(...)`.  The egui default is `(4.0, 2.0)`.
+    pub text_edit_padding: (f32, f32),
 }
 
 impl Default for GuiTheme {
@@ -243,10 +268,13 @@ mod tests {
         let t = StyleProfile::Modern.defaults();
         assert_eq!(t.corner_radius, 6);
         assert_eq!(t.stroke_width, 1.0_f32);
-        assert_eq!(t.item_spacing, (8.0_f32, 4.0_f32));
-        assert_eq!(t.window_padding, 8.0_f32);
+        assert_eq!(t.item_spacing, (8.0_f32, 6.0_f32));
+        assert_eq!(t.window_padding, 10.0_f32);
         assert_eq!(t.menu_corner_radius, 4);
         assert_eq!(t.widget_hover_expansion, 2.0_f32);
+        assert_eq!(t.button_padding, (10.0_f32, 6.0_f32));
+        assert_eq!(t.menu_padding, 8);
+        assert_eq!(t.text_edit_padding, (8.0_f32, 5.0_f32));
     }
 
     #[test]
@@ -254,10 +282,13 @@ mod tests {
         let t = StyleProfile::Retro.defaults();
         assert_eq!(t.corner_radius, 0);
         assert_eq!(t.stroke_width, 1.5_f32);
-        assert_eq!(t.item_spacing, (6.0_f32, 2.0_f32));
-        assert_eq!(t.window_padding, 4.0_f32);
+        assert_eq!(t.item_spacing, (6.0_f32, 4.0_f32));
+        assert_eq!(t.window_padding, 6.0_f32);
         assert_eq!(t.menu_corner_radius, 0);
         assert_eq!(t.widget_hover_expansion, 0.0_f32);
+        assert_eq!(t.button_padding, (8.0_f32, 4.0_f32));
+        assert_eq!(t.menu_padding, 6);
+        assert_eq!(t.text_edit_padding, (6.0_f32, 4.0_f32));
     }
 
     // -----------------------------------------------------------------------

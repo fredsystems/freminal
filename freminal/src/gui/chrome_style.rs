@@ -36,7 +36,7 @@ use egui::style::{Selection, WidgetVisuals, Widgets};
 use egui::{Color32, CornerRadius, Stroke};
 use freminal_common::colors::TerminalColor;
 use freminal_common::gui_theme::GuiTheme;
-use freminal_common::themes::ThemePalette;
+use freminal_common::themes::{ChromeRole, ThemePalette};
 
 use super::colors::{internal_color_to_egui_with_alpha, rgb_to_color32};
 
@@ -115,64 +115,33 @@ fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> Wid
     let sw = gui_theme.stroke_width;
     let exp = gui_theme.widget_hover_expansion;
 
-    let foreground = rgb_to_color32(palette.foreground);
-    let background = rgb_to_color32(palette.background);
-    let dim_border = rgb_to_color32(palette.ansi[0]);
-    // selection_bg is the fill color for hover/active states.
-    let sel_fill = rgb_to_color32(palette.selection_bg);
-    // selection_fg is used for strokes on hover/active states.
-    let sel_text = rgb_to_color32(palette.selection_fg);
-    let lifted = rgb_to_color32(palette.ansi[8]);
+    // All chrome colors come from resolved theme roles (authored upstream for
+    // vetted themes, best-fit/contrast-derived for raw palettes). No ANSI-slot
+    // guessing — that produced invisible borders and low-contrast tabs.
+    let border = rgb_to_color32(palette.chrome_role(ChromeRole::Border));
 
-    // Active state: selection_bg at 80% alpha — signals "pressed" without
-    // being identical to the hover fill.
-    let active_fill = {
-        let [red, green, blue, _] = sel_fill.to_array();
-        let alpha = (0.8_f32 * 255.0).approx_as::<u8>().unwrap_or(204_u8);
-        Color32::from_rgba_unmultiplied(red, green, blue, alpha)
+    // The fill for each state, and the text color picked to CONTRAST that
+    // specific fill (fixes low-contrast text on the active-tab fill).
+    let (fill_rgb, expansion) = match role {
+        WidgetRole::NonInteractive => (palette.chrome_role(ChromeRole::Surface), 0.0),
+        WidgetRole::Inactive => (palette.chrome_role(ChromeRole::SurfaceVariant), 0.0),
+        WidgetRole::Hovered => (palette.chrome_role(ChromeRole::SurfaceHover), exp),
+        // Active (pressed) and Open (combo/menu expanded) share the active fill.
+        WidgetRole::Active | WidgetRole::Open => {
+            (palette.chrome_role(ChromeRole::SurfaceActive), exp)
+        }
     };
 
-    match role {
-        WidgetRole::NonInteractive => WidgetVisuals {
-            bg_fill: background,
-            weak_bg_fill: background,
-            bg_stroke: Stroke::new(sw, dim_border),
-            corner_radius: cr,
-            fg_stroke: Stroke::new(sw, foreground),
-            expansion: 0.0,
-        },
-        WidgetRole::Inactive => WidgetVisuals {
-            bg_fill: dim_border,
-            weak_bg_fill: dim_border,
-            bg_stroke: Stroke::new(sw, dim_border),
-            corner_radius: cr,
-            fg_stroke: Stroke::new(sw, foreground),
-            expansion: 0.0,
-        },
-        WidgetRole::Hovered => WidgetVisuals {
-            bg_fill: sel_fill,
-            weak_bg_fill: sel_fill,
-            bg_stroke: Stroke::new(sw, sel_text),
-            corner_radius: cr,
-            fg_stroke: Stroke::new(sw, foreground),
-            expansion: exp,
-        },
-        WidgetRole::Active => WidgetVisuals {
-            bg_fill: active_fill,
-            weak_bg_fill: active_fill,
-            bg_stroke: Stroke::new(sw, sel_text),
-            corner_radius: cr,
-            fg_stroke: Stroke::new(sw, foreground),
-            expansion: exp,
-        },
-        WidgetRole::Open => WidgetVisuals {
-            bg_fill: lifted,
-            weak_bg_fill: lifted,
-            bg_stroke: Stroke::new(sw, foreground),
-            corner_radius: cr,
-            fg_stroke: Stroke::new(sw, foreground),
-            expansion: exp,
-        },
+    let fill = rgb_to_color32(fill_rgb);
+    let text = rgb_to_color32(palette.chrome_text_on(fill_rgb));
+
+    WidgetVisuals {
+        bg_fill: fill,
+        weak_bg_fill: fill,
+        bg_stroke: Stroke::new(sw, border),
+        corner_radius: cr,
+        fg_stroke: Stroke::new(sw, text),
+        expansion,
     }
 }
 
@@ -261,13 +230,16 @@ pub fn build_visuals(
     let window_cr = CornerRadius::same(gui_theme.corner_radius);
     let menu_cr = CornerRadius::same(gui_theme.menu_corner_radius);
 
-    // Window border: foreground color with stroke_width.
-    // Using the palette foreground gives a readable, theme-consistent border
-    // that stands out against the background without being jarring.
-    let fg = rgb_to_color32(palette.foreground);
-    let window_stroke = Stroke::new(gui_theme.stroke_width, fg);
+    // Window border: the resolved chrome Border role, guaranteed to contrast
+    // the surface on every theme (no more invisible borders).
+    let border = rgb_to_color32(palette.chrome_role(ChromeRole::Border));
+    let window_stroke = Stroke::new(gui_theme.stroke_width, border);
 
     // ── Selection ────────────────────────────────────────────────────────────
+    //
+    // Selection uses the terminal palette's selection colors directly — this
+    // is the one UI highlight the palette explicitly defines, and matching it
+    // to terminal selection is intentional.
 
     let selection = Selection {
         bg_fill: rgb_to_color32(palette.selection_bg),
@@ -310,23 +282,23 @@ pub fn build_visuals(
     visuals.window_corner_radius = window_cr;
     visuals.menu_corner_radius = menu_cr;
     visuals.selection = selection;
-    visuals.override_text_color = Some(rgb_to_color32(palette.foreground));
+    visuals.override_text_color = Some(rgb_to_color32(palette.chrome_role(ChromeRole::Text)));
 
-    // ── Surface backgrounds (previously left at Visuals::dark() defaults) ─────
+    // ── Surface backgrounds ───────────────────────────────────────────────────
     //
-    // egui hard-codes these to near-black in dark mode; left unset they make
-    // TextEdit wells, scrollbar tracks, grid stripes, and inline-code spans
-    // render black regardless of the palette.  Derive them from the palette so
-    // every surface follows the theme.
+    // These egui surfaces default to near-black in dark mode; left unset they
+    // make TextEdit wells, scrollbar tracks, grid stripes, and inline-code
+    // spans render black regardless of the palette.  Derive them from the
+    // resolved chrome roles so they follow the theme's authored UI ladder.
     //
-    // `extreme_bg_color` backs TextEdit/scrollbar/progress tracks — it must
-    // contrast the panel, so nudge the background away from itself in the
-    // palette-appropriate direction (darker on dark themes, lighter on light).
-    visuals.extreme_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.35, is_dark));
-    // `faint_bg_color` backs striped-grid alternate rows — a subtle lift.
-    visuals.faint_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.12, is_dark));
-    // `code_bg_color` backs inline `code` spans — between faint and extreme.
-    visuals.code_bg_color = rgb_to_color32(contrast_surface(palette.background, 0.22, is_dark));
+    // `extreme_bg_color` backs TextEdit/scrollbar/progress tracks — use the
+    // input/well fill role (surface_variant).
+    visuals.extreme_bg_color = rgb_to_color32(palette.chrome_role(ChromeRole::SurfaceVariant));
+    // `faint_bg_color` backs striped-grid alternate rows — the chrome surface.
+    visuals.faint_bg_color = rgb_to_color32(palette.chrome_role(ChromeRole::Surface));
+    // `code_bg_color` backs inline `code` spans — the hover surface reads as a
+    // slightly raised inline block.
+    visuals.code_bg_color = rgb_to_color32(palette.chrome_role(ChromeRole::SurfaceHover));
 
     // ── Semantic foreground colors (previously hard-coded orange/red/blue) ────
     //
@@ -347,6 +319,49 @@ pub fn build_visuals(
     visuals.popup_shadow.color = shadow_tint;
 
     visuals
+}
+
+/// Apply the chrome [`GuiTheme`] padding to an egui [`Style`]'s [`Spacing`].
+///
+/// `Spacing` lives on [`egui::Style`], not [`egui::Visuals`], so padding
+/// cannot be returned from [`build_visuals`]; this sibling is applied
+/// alongside `set_visuals` (the per-frame style hook in 112.4, and the gallery
+/// example). It bumps button/menu/window/item padding so chrome does not feel
+/// cramped — Modern is more generous than Retro per the profile defaults.
+///
+/// `TextEdit` inner padding has no global `Spacing` field in egui; callers
+/// that want roomier inputs pass [`text_edit_margin`] to `TextEdit::margin`.
+pub fn apply_chrome_spacing(style: &mut egui::Style, gui_theme: &GuiTheme) {
+    let s = &mut style.spacing;
+    s.item_spacing = egui::vec2(gui_theme.item_spacing.0, gui_theme.item_spacing.1);
+    s.button_padding = egui::vec2(gui_theme.button_padding.0, gui_theme.button_padding.1);
+    s.menu_margin = egui::Margin::same(i8_from_u8(gui_theme.menu_padding));
+    s.window_margin = egui::Margin::same(f32_to_i8(gui_theme.window_padding));
+}
+
+/// The [`egui::Margin`] to apply to a `TextEdit` for the theme's input
+/// padding (egui has no global spacing field for text-input inner padding).
+#[must_use]
+pub fn text_edit_margin(gui_theme: &GuiTheme) -> egui::Margin {
+    egui::Margin::symmetric(
+        f32_to_i8(gui_theme.text_edit_padding.0),
+        f32_to_i8(gui_theme.text_edit_padding.1),
+    )
+}
+
+/// Convert a `u8` padding value to the `i8` egui `Margin` expects, saturating
+/// at the `i8` ceiling (padding never legitimately exceeds 127px).
+fn i8_from_u8(v: u8) -> i8 {
+    v.value_as::<i8>().unwrap_or(i8::MAX)
+}
+
+/// Convert an `f32` padding value to the `i8` egui `Margin` expects, clamped
+/// to the non-negative `i8` range.
+fn f32_to_i8(v: f32) -> i8 {
+    v.round()
+        .clamp(0.0, f32::from(i8::MAX))
+        .approx_as::<i8>()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -701,5 +716,98 @@ mod tests {
             dark.dark_mode,
             "Catppuccin Mocha is a dark theme; dark_mode must be true"
         );
+    }
+
+    // ── Role-sourced colors (112.3e) ─────────────────────────────────────────
+
+    #[test]
+    fn window_stroke_uses_resolved_border_role() {
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let expected = rgb_to_color32(PALETTE.chrome_role(ChromeRole::Border));
+        assert_eq!(
+            v.window_stroke.color, expected,
+            "window border must come from the resolved Border role"
+        );
+    }
+
+    #[test]
+    fn widget_fills_use_resolved_surface_roles() {
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        assert_eq!(
+            v.widgets.inactive.bg_fill,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceVariant)),
+            "inactive fill = SurfaceVariant"
+        );
+        assert_eq!(
+            v.widgets.hovered.bg_fill,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceHover)),
+            "hovered fill = SurfaceHover"
+        );
+        assert_eq!(
+            v.widgets.active.bg_fill,
+            rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceActive)),
+            "active fill = SurfaceActive"
+        );
+    }
+
+    #[test]
+    fn active_tab_text_contrasts_its_fill() {
+        // The low-contrast active-tab bug: the text on the active fill must be
+        // the contrast-picked color, not blindly the foreground.
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let active_fill = PALETTE.chrome_role(ChromeRole::SurfaceActive);
+        let expected_text = rgb_to_color32(PALETTE.chrome_text_on(active_fill));
+        assert_eq!(
+            v.widgets.active.fg_stroke.color, expected_text,
+            "active-state text must be the contrast-picked color for its fill"
+        );
+    }
+
+    #[test]
+    fn no_ansi_slots_borrowed_for_chrome_fills() {
+        // Guard against regressing to ANSI-slot guessing: the inactive fill
+        // must not equal ansi[0] (the old "dim border"/fill source) unless the
+        // theme genuinely resolves there.
+        let gt = StyleProfile::Modern.defaults();
+        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        // Mocha authors a distinct Surface0 variant != ansi[0] (Surface1).
+        assert_ne!(
+            v.widgets.inactive.bg_fill,
+            rgb_to_color32(PALETTE.ansi[0]),
+            "inactive fill must come from a role, not ansi[0]"
+        );
+    }
+
+    // ── Padding (112.3e) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_chrome_spacing_bumps_padding() {
+        let gt = StyleProfile::Modern.defaults();
+        let mut style = egui::Style::default();
+        apply_chrome_spacing(&mut style, &gt);
+        assert_eq!(
+            style.spacing.button_padding,
+            egui::vec2(gt.button_padding.0, gt.button_padding.1)
+        );
+        assert_eq!(
+            style.spacing.menu_margin,
+            egui::Margin::same(i8_from_u8(gt.menu_padding))
+        );
+        assert_eq!(
+            style.spacing.item_spacing,
+            egui::vec2(gt.item_spacing.0, gt.item_spacing.1)
+        );
+        // Modern padding is more generous than egui's default button_padding.
+        assert!(style.spacing.button_padding.x > 4.0);
+    }
+
+    #[test]
+    fn text_edit_margin_reflects_theme() {
+        let gt = StyleProfile::Modern.defaults();
+        let m = text_edit_margin(&gt);
+        assert_eq!(m, egui::Margin::symmetric(f32_to_i8(8.0), f32_to_i8(5.0)));
     }
 }

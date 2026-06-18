@@ -242,7 +242,8 @@ impl ChromeGallery {
                 ui.add_space(6.0);
                 ui.label("Text edit (extreme_bg_color surface):");
                 let mut sample = String::from("the quick brown fox");
-                ui.add(egui::TextEdit::singleline(&mut sample));
+                let margin = freminal::gui::chrome_style::text_edit_margin(&self.draft);
+                ui.add(egui::TextEdit::singleline(&mut sample).margin(margin));
             });
     }
 }
@@ -267,8 +268,7 @@ impl App for ChromeGallery {
         );
         ctx.set_visuals(visuals);
         ctx.global_style_mut(|style| {
-            style.spacing.item_spacing =
-                egui::vec2(self.draft.item_spacing.0, self.draft.item_spacing.1);
+            freminal::gui::chrome_style::apply_chrome_spacing(style, &self.draft);
         });
 
         // Mirror the app's root-Ui + `show_inside` idiom (the `show(ctx, …)`
