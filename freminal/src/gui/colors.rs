@@ -10,7 +10,7 @@ use freminal_common::themes::ThemePalette;
 
 /// Convert an `(r, g, b)` tuple to a `Color32`.
 #[must_use]
-pub(crate) const fn rgb_to_color32(rgb: (u8, u8, u8)) -> Color32 {
+pub const fn rgb_to_color32(rgb: (u8, u8, u8)) -> Color32 {
     Color32::from_rgb(rgb.0, rgb.1, rgb.2)
 }
 

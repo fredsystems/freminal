@@ -48,8 +48,6 @@ use super::colors::{internal_color_to_egui_with_alpha, rgb_to_color32};
 ///
 /// Used by [`widget`] to pick the correct colors and expansion without
 /// duplicating the construction five times.
-// TODO(112.4): remove once build_visuals is wired into the rendering path.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum WidgetRole {
     /// Non-interactive chrome: labels, separators, window outlines.
@@ -71,8 +69,6 @@ enum WidgetRole {
 /// Build a single [`WidgetVisuals`] for the given interaction `role`.
 ///
 /// See the module-level doc table for the full color scheme rationale.
-// TODO(112.4): remove once build_visuals is wired into the rendering path.
-#[allow(dead_code)]
 fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> WidgetVisuals {
     let cr = CornerRadius::same(gui_theme.corner_radius);
     let sw = gui_theme.stroke_width;
@@ -180,8 +176,6 @@ fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> Wid
 /// output.  It does not call `Visuals::dark()` / `Visuals::light()` as a
 /// base — it constructs `Visuals` fully from inputs so behaviour is never
 /// inherited from egui defaults.
-// TODO(112.4): dead_code allow removed once build_visuals is wired into the rendering path.
-#[allow(dead_code)]
 #[must_use]
 pub fn build_visuals(
     gui_theme: &GuiTheme,
