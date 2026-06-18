@@ -4,7 +4,7 @@ members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-
 default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-terminal-emulator"]
 
 [workspace.package]
-version = "0.10.0-beta.1"
+version = "0.10.0-beta.2"
 edition = "2024"
 rust-version = "1.95.0"
 description = "A terminal emulator written in Rust"
