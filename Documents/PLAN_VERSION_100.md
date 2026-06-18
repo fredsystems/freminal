@@ -1055,6 +1055,12 @@ await the maintainer's font decision before 112.4.
 
 #### 112.3c — Add explicit chrome-role colors to `ThemePalette` + resolver
 
+> **STATUS: COMPLETE** (`bc5887cc`). Seven `Option<(u8,u8,u8)>` chrome roles,
+> a `ChromeRole` enum, the `chrome_role()` resolver (authored, then best-fit,
+> then WCAG-contrast fallback), and `chrome_text_on()`. Pure RGB math, no egui.
+> All 27 themes start `None`. 8 tests including "border always contrasts
+> surface on every theme".
+
 Scope: `freminal-common/src/themes.rs` (`ThemePalette` struct + a resolver
 method + every theme const gains the new fields, initially `None`), tests in the
 same crate. NO egui. NO `build_visuals` change yet (112.3e). NO per-theme
@@ -1103,6 +1109,14 @@ results; await review.
 
 #### 112.3d — Transcribe authored chrome roles for the vetted themes
 
+> **STATUS: COMPLETE** (`87e24272`). Authored roles transcribed from upstream
+> (with source comments) for: Catppuccin Mocha/Macchiato/Frappe/Latte, Tokyo
+> Night + Storm, Dracula, Nord (8 themes). Remaining themes (Gruvbox, One
+> Dark/Light, Rose Pine family, Kanagawa, Monokai Pro, Ayu, Everforest,
+> Material, Solarized, xterm/wezterm/ghostty) left `None` → resolver; the
+> 112.3g audit decides which of those warrant authored roles. Tests confirm
+> vetted themes return authored values and raw palettes contrast-resolve.
+
 Scope: `freminal-common/src/themes.rs` (populate the 112.3c fields for themes
 with a documented upstream UI palette), tests. NO resolver/struct change (112.3c
 already landed it).
@@ -1138,6 +1152,14 @@ Stop: report which themes got authored roles (and from which upstream sources)
 vs left to the resolver; await review.
 
 #### 112.3e — Rework `build_visuals` to consume resolved roles + add padding
+
+> **STATUS: COMPLETE** (`fff2fe1f`). `build_visuals` derives all chrome colors
+> from `chrome_role(...)` (no ANSI-slot guessing): border = Border role
+> (always contrasts), fills = Surface/Variant/Hover/Active, per-widget text via
+> `chrome_text_on()` (fixes low-contrast active tab). `GuiTheme` gains
+> `button_padding`/`menu_padding`/`text_edit_padding` (Modern roomier than
+> Retro), applied via new `apply_chrome_spacing(style, gui_theme)` +
+> `text_edit_margin()`. Gallery uses both. 7 new tests.
 
 Scope: `freminal/src/gui/chrome_style.rs` (`build_visuals` + the
 luminance/blend helpers — relocate the pure derivation to the 112.3c resolver
@@ -1183,6 +1205,10 @@ build/clippy/gallery results; await review.
 
 #### 112.3f — Gallery loads ALL built-in themes for per-theme audit
 
+> **STATUS: COMPLETE** (`30602a2e`). The gallery picker enumerates the full
+> `themes::all_themes()` registry (27 themes) and labels each as authored vs
+> resolver-driven. Ready as the 112.3g audit instrument.
+
 Scope: `freminal/examples/chrome_gallery.rs`; expose the theme registry from
 `freminal-common` (promote `ALL_THEMES` to `pub`, or add a
 `pub fn all_themes() -> &'static [&'static ThemePalette]` accessor).
@@ -1207,6 +1233,13 @@ registry; do NOT add the gallery to the product (still example-only).
 Stop: report the registry accessor used + theme count shown; await review.
 
 #### 112.3g — Per-theme chrome audit + sign-off
+
+> **STATUS: AWAITING MAINTAINER.** This is a human visual-audit gate and
+> cannot be self-completed by an agent. 112.3c-f are landed and the gallery
+> (`cargo run -p freminal --example chrome_gallery`) is ready. The maintainer
+> walks each theme in Modern and Retro, records pass/fix, and any fix is either
+> an authored-role transcription (112.3d) or a resolver improvement (112.3c).
+> Gates 112.4.
 
 Scope: no production code by default — an audit pass using the 112.3f gallery,
 recording results in this plan under a "112.3g — theme audit results" note. Any
