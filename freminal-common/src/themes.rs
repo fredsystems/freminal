@@ -3,6 +3,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use conv2::ConvUtil;
+
 use crate::buffer_states::command_block::CommandStatus;
 
 /// A complete terminal color palette.
@@ -58,6 +60,66 @@ pub struct ThemePalette {
     /// received, no D yet).  `None` falls back to the normal-yellow ANSI
     /// color (`ansi[3]`).  See [`ThemePalette::gutter_color_for`].
     pub gutter_running: Option<(u8, u8, u8)>,
+
+    // --- Chrome (UI) roles ------------------------------------------------
+    //
+    // These describe the *non-terminal* UI surfaces (menus, dialogs, toasts,
+    // tab bar, buttons, inputs) rather than terminal text.  A `ThemePalette`
+    // is primarily a terminal palette, so these are `Option`: vetted upstream
+    // themes (e.g. Catppuccin's Surface/Overlay ladder) transcribe authored
+    // values here, and raw terminal palettes leave them `None` to be resolved
+    // by [`ThemePalette::chrome_role`] (best-fit from existing palette colors,
+    // then a contrast-guaranteed fallback).  See the `ChromeRole` enum.
+    /// Chrome panel/window background surface. `None` resolves to
+    /// `background`.
+    pub chrome_surface: Option<(u8, u8, u8)>,
+
+    /// Chrome fill for resting interactive widgets (buttons, inputs,
+    /// inactive tabs). `None` is best-fit/derived.
+    pub chrome_surface_variant: Option<(u8, u8, u8)>,
+
+    /// Chrome fill for hovered widgets. `None` is best-fit/derived.
+    pub chrome_surface_hover: Option<(u8, u8, u8)>,
+
+    /// Chrome fill for pressed / selected / active-tab widgets. `None` is
+    /// best-fit/derived (often `selection_bg`).
+    pub chrome_surface_active: Option<(u8, u8, u8)>,
+
+    /// Chrome border / separator color. Must read against `chrome_surface`.
+    /// `None` resolves to a palette color that contrasts the surface.
+    pub chrome_border: Option<(u8, u8, u8)>,
+
+    /// Primary chrome text color. `None` resolves to `foreground`.
+    pub chrome_text: Option<(u8, u8, u8)>,
+
+    /// Secondary / muted / disabled chrome text. `None` is best-fit/derived
+    /// toward the surface.
+    pub chrome_text_muted: Option<(u8, u8, u8)>,
+}
+
+/// A named chrome (UI) color role resolved from a [`ThemePalette`].
+///
+/// Roles are resolved by [`ThemePalette::chrome_role`] using a three-step
+/// priority ladder: authored value → best-fit from existing palette colors →
+/// contrast-guaranteed derivation. This lets vetted themes look exactly as
+/// their authors intended while raw terminal palettes still produce a usable,
+/// always-contrasting chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeRole {
+    /// Panel/window background surface.
+    Surface,
+    /// Resting interactive-widget fill (buttons, inputs, inactive tabs).
+    SurfaceVariant,
+    /// Hovered-widget fill.
+    SurfaceHover,
+    /// Pressed / selected / active-tab fill.
+    SurfaceActive,
+    /// Border / separator color.
+    Border,
+    /// Primary chrome text.
+    Text,
+    /// Secondary / muted chrome text.
+    TextMuted,
 }
 
 impl ThemePalette {
@@ -91,6 +153,177 @@ impl ThemePalette {
             CommandStatus::Unknown => self.ansi[7],
         }
     }
+
+    /// Resolve a chrome (UI) color [`ChromeRole`] to a concrete RGB triple.
+    ///
+    /// Priority ladder (per the v0.10.0 chrome-styling design decision):
+    ///
+    /// 1. **Authored** — the theme's explicit `chrome_*` field, if `Some`.
+    ///    Vetted themes transcribe these from upstream (112.3d).
+    /// 2. **Best-fit** — reuse a color the palette already defines that suits
+    ///    the role (e.g. `selection_bg` for the active fill, `background` for
+    ///    the surface). No invented hues.
+    /// 3. **Contrast-guaranteed fallback** — derive from `background` /
+    ///    `foreground` so the result always contrasts the surface it sits on
+    ///    (e.g. a border that never vanishes into the background).
+    ///
+    /// The returned color is never an invisible/non-contrasting choice: the
+    /// fallback guarantees a minimum separation from the relevant surface.
+    #[must_use]
+    pub fn chrome_role(&self, role: ChromeRole) -> (u8, u8, u8) {
+        let dark = is_dark(self.background);
+        match role {
+            // Surface: authored, else the terminal background.
+            ChromeRole::Surface => self.chrome_surface.unwrap_or(self.background),
+
+            // Variant fill (buttons/inputs/inactive tabs): authored, else a
+            // surface nudged toward the foreground so it reads as a distinct
+            // raised/inset fill against the panel.
+            ChromeRole::SurfaceVariant => self
+                .chrome_surface_variant
+                .unwrap_or_else(|| blend(self.background, self.foreground, 0.10)),
+
+            // Hover fill: authored, else a slightly stronger lift than variant.
+            ChromeRole::SurfaceHover => self
+                .chrome_surface_hover
+                .unwrap_or_else(|| blend(self.background, self.foreground, 0.18)),
+
+            // Active/selected fill: authored, else the palette's own selection
+            // background (a color the theme already vetted for highlights).
+            ChromeRole::SurfaceActive => self.chrome_surface_active.unwrap_or(self.selection_bg),
+
+            // Border: authored, else a color blended between surface and
+            // foreground far enough to stay visible against the surface on
+            // any theme (the fix for "invisible" ANSI-black borders).
+            ChromeRole::Border => self
+                .chrome_border
+                .unwrap_or_else(|| blend(self.background, self.foreground, 0.30)),
+
+            // Primary text: authored, else the terminal foreground.
+            ChromeRole::Text => self.chrome_text.unwrap_or(self.foreground),
+
+            // Muted text: authored, else foreground pulled toward the surface
+            // (dimmed) but kept readable.
+            ChromeRole::TextMuted => self.chrome_text_muted.unwrap_or_else(|| {
+                let muted = blend(self.foreground, self.background, 0.40);
+                // Guarantee the muted text still separates from the surface.
+                ensure_contrast(muted, self.background, dark)
+            }),
+        }
+    }
+
+    /// Pick whichever of [`ChromeRole::Text`] / a given surface color reads
+    /// with higher contrast on `surface` — used to choose legible text on an
+    /// arbitrary chrome fill (e.g. the active-tab fill).
+    ///
+    /// Returns the palette's chrome text if it contrasts the surface well
+    /// enough; otherwise returns the opposite of the surface
+    /// (`background`/`foreground` whichever contrasts more).
+    #[must_use]
+    pub fn chrome_text_on(&self, surface: (u8, u8, u8)) -> (u8, u8, u8) {
+        let text = self.chrome_role(ChromeRole::Text);
+        let candidate_a = text;
+        let candidate_b = if is_dark(surface) {
+            self.foreground
+        } else {
+            self.background
+        };
+        if contrast_ratio(candidate_a, surface) >= contrast_ratio(candidate_b, surface) {
+            candidate_a
+        } else {
+            candidate_b
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Chrome-role color math (pure RGB; no egui)
+// ---------------------------------------------------------------------------
+
+/// Perceptual (gamma-space, Rec. 601) luminance of an RGB color in
+/// `[0.0, 1.0]`. Used only for the dark/light decision and quick comparisons.
+fn luma(rgb: (u8, u8, u8)) -> f32 {
+    let r = f32::from(rgb.0) / 255.0;
+    let g = f32::from(rgb.1) / 255.0;
+    let b = f32::from(rgb.2) / 255.0;
+    0.299_f32.mul_add(r, 0.587_f32.mul_add(g, 0.114 * b))
+}
+
+/// Whether a color reads as "dark" (luminance below the midpoint).
+fn is_dark(rgb: (u8, u8, u8)) -> bool {
+    luma(rgb) < 0.5
+}
+
+/// Linear interpolation between two colors in gamma space
+/// (`t = 0.0` → `a`, `t = 1.0` → `b`).
+fn blend(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| -> u8 {
+        let xf = f32::from(x);
+        let yf = f32::from(y);
+        let v = (yf - xf).mul_add(t, xf).round().clamp(0.0, 255.0);
+        v.approx_as::<u8>().unwrap_or(x)
+    };
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+}
+
+/// Convert an sRGB channel byte to linear light (IEC 61966-2-1).
+fn srgb_to_linear(c: u8) -> f32 {
+    let cs = f32::from(c) / 255.0;
+    if cs <= 0.040_45 {
+        cs / 12.92
+    } else {
+        ((cs + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG relative luminance of an sRGB color (linear-light weighted).
+fn relative_luminance(rgb: (u8, u8, u8)) -> f32 {
+    let r = srgb_to_linear(rgb.0);
+    let g = srgb_to_linear(rgb.1);
+    let b = srgb_to_linear(rgb.2);
+    0.2126_f32.mul_add(r, 0.7152_f32.mul_add(g, 0.0722 * b))
+}
+
+/// WCAG contrast ratio between two colors, in `[1.0, 21.0]`.
+fn contrast_ratio(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Minimum contrast ratio a derived chrome color must keep against its
+/// surface. ~2.2:1 is below text-legibility thresholds but enough to keep
+/// borders and muted text visibly separated from the surface.
+const MIN_CHROME_CONTRAST: f32 = 2.2;
+
+/// Ensure `color` contrasts `surface` by at least [`MIN_CHROME_CONTRAST`],
+/// nudging it away from the surface (toward black on light surfaces, toward
+/// white on dark surfaces) until it does.
+fn ensure_contrast(
+    color: (u8, u8, u8),
+    surface: (u8, u8, u8),
+    surface_is_dark: bool,
+) -> (u8, u8, u8) {
+    if contrast_ratio(color, surface) >= MIN_CHROME_CONTRAST {
+        return color;
+    }
+    let target = if surface_is_dark {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    // Step toward the high-contrast target in fixed increments until the
+    // threshold is met (integer steps to avoid float-loop pitfalls).
+    for step in 1_u8..=6 {
+        let t = f32::from(step) * 0.15;
+        let candidate = blend(color, target, t);
+        if contrast_ratio(candidate, surface) >= MIN_CHROME_CONTRAST {
+            return candidate;
+        }
+    }
+    target
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +364,13 @@ pub const CATPPUCCIN_MOCHA: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -171,6 +411,13 @@ pub const CATPPUCCIN_MACCHIATO: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -211,6 +458,13 @@ pub const CATPPUCCIN_FRAPPE: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -251,6 +505,13 @@ pub const CATPPUCCIN_LATTE: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -291,6 +552,13 @@ pub const DRACULA: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -331,6 +599,13 @@ pub const NORD: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -371,6 +646,13 @@ pub const SOLARIZED_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -411,6 +693,13 @@ pub const SOLARIZED_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -451,6 +740,13 @@ pub const GRUVBOX_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -491,6 +787,13 @@ pub const GRUVBOX_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -531,6 +834,13 @@ pub const ONE_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -571,6 +881,13 @@ pub const ONE_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -611,6 +928,13 @@ pub const TOKYO_NIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -651,6 +975,13 @@ pub const TOKYO_NIGHT_STORM: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -691,6 +1022,13 @@ pub const KANAGAWA: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -731,6 +1069,13 @@ pub const ROSE_PINE: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -771,6 +1116,13 @@ pub const ROSE_PINE_MOON: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -811,6 +1163,13 @@ pub const ROSE_PINE_DAWN: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -851,6 +1210,13 @@ pub const MONOKAI_PRO: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -891,6 +1257,13 @@ pub const AYU_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -931,6 +1304,13 @@ pub const AYU_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -971,6 +1351,13 @@ pub const EVERFOREST_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1011,6 +1398,13 @@ pub const EVERFOREST_LIGHT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1051,6 +1445,13 @@ pub const MATERIAL_DARK: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1492,13 @@ pub const XTERM_DEFAULT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1538,13 @@ pub const WEZTERM_DEFAULT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1584,13 @@ pub const GHOSTTY_DEFAULT: ThemePalette = ThemePalette {
     gutter_success: None,
     gutter_failure: None,
     gutter_running: None,
+    chrome_surface: None,
+    chrome_surface_variant: None,
+    chrome_surface_hover: None,
+    chrome_surface_active: None,
+    chrome_border: None,
+    chrome_text: None,
+    chrome_text_muted: None,
 };
 
 /// The default theme used when no theme is configured or the configured slug
@@ -1433,5 +1855,108 @@ mod tests {
         assert_eq!(t.gutter_color_for(CommandStatus::Running), (7, 8, 9));
         // Unknown is unaffected by overrides.
         assert_eq!(t.gutter_color_for(CommandStatus::Unknown), t.ansi[7]);
+    }
+
+    // --- Chrome-role resolver (112.3c) -----------------------------------
+
+    #[test]
+    fn chrome_roles_default_to_none_on_all_themes() {
+        for theme in all_themes() {
+            assert_eq!(theme.chrome_surface, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_surface_variant, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_surface_hover, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_surface_active, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_border, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_text, None, "theme {}", theme.slug);
+            assert_eq!(theme.chrome_text_muted, None, "theme {}", theme.slug);
+        }
+    }
+
+    #[test]
+    fn chrome_role_prefers_authored_value() {
+        let mut t = CATPPUCCIN_MOCHA;
+        t.chrome_surface = Some((1, 2, 3));
+        t.chrome_surface_variant = Some((4, 5, 6));
+        t.chrome_surface_hover = Some((7, 8, 9));
+        t.chrome_surface_active = Some((10, 11, 12));
+        t.chrome_border = Some((13, 14, 15));
+        t.chrome_text = Some((16, 17, 18));
+        t.chrome_text_muted = Some((19, 20, 21));
+
+        assert_eq!(t.chrome_role(ChromeRole::Surface), (1, 2, 3));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceVariant), (4, 5, 6));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceHover), (7, 8, 9));
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceActive), (10, 11, 12));
+        assert_eq!(t.chrome_role(ChromeRole::Border), (13, 14, 15));
+        assert_eq!(t.chrome_role(ChromeRole::Text), (16, 17, 18));
+        assert_eq!(t.chrome_role(ChromeRole::TextMuted), (19, 20, 21));
+    }
+
+    #[test]
+    fn chrome_role_best_fits_from_palette_when_unset() {
+        // With no authored values, surface == background, text == foreground,
+        // active == selection_bg (colors the palette already defines).
+        let t = CATPPUCCIN_MOCHA;
+        assert_eq!(t.chrome_role(ChromeRole::Surface), t.background);
+        assert_eq!(t.chrome_role(ChromeRole::Text), t.foreground);
+        assert_eq!(t.chrome_role(ChromeRole::SurfaceActive), t.selection_bg);
+    }
+
+    #[test]
+    fn chrome_border_always_contrasts_the_surface() {
+        // The fix for "invisible" borders: on EVERY built-in theme, the
+        // resolved border must visibly separate from the surface.
+        for theme in all_themes() {
+            let surface = theme.chrome_role(ChromeRole::Surface);
+            let border = theme.chrome_role(ChromeRole::Border);
+            assert!(
+                contrast_ratio(border, surface) > 1.2,
+                "theme {}: border {border:?} indistinguishable from surface {surface:?}",
+                theme.slug
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_role_contrast_fallback_meets_threshold() {
+        // A pathological palette whose background and foreground are nearly
+        // identical must still yield a muted-text color that separates from
+        // the surface via the contrast fallback.
+        let mut t = CATPPUCCIN_MOCHA;
+        t.background = (20, 20, 20);
+        t.foreground = (28, 28, 28); // very low contrast with background
+        let muted = t.chrome_role(ChromeRole::TextMuted);
+        assert!(
+            contrast_ratio(muted, t.background) >= MIN_CHROME_CONTRAST,
+            "muted text {muted:?} must meet MIN_CHROME_CONTRAST against {:?}",
+            t.background
+        );
+    }
+
+    #[test]
+    fn chrome_text_on_picks_higher_contrast() {
+        let t = CATPPUCCIN_MOCHA;
+        // On a near-white surface, the chosen text must be dark; on a
+        // near-black surface, light — whichever contrasts more.
+        let on_white = t.chrome_text_on((250, 250, 250));
+        let on_black = t.chrome_text_on((5, 5, 5));
+        assert!(
+            contrast_ratio(on_white, (250, 250, 250)) >= 3.0,
+            "text on near-white must be reasonably dark"
+        );
+        assert!(
+            contrast_ratio(on_black, (5, 5, 5)) >= 3.0,
+            "text on near-black must be reasonably light"
+        );
+    }
+
+    #[test]
+    fn contrast_ratio_is_symmetric_and_bounded() {
+        let a = (0, 0, 0);
+        let b = (255, 255, 255);
+        let r = contrast_ratio(a, b);
+        assert!((r - contrast_ratio(b, a)).abs() < f32::EPSILON);
+        // Black vs white is the maximum WCAG ratio, 21:1.
+        assert!((r - 21.0).abs() < 0.1, "black/white must be ~21:1, got {r}");
     }
 }
