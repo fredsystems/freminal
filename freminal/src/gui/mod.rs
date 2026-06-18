@@ -37,6 +37,7 @@ pub mod view_state;
 mod actions;
 mod app_impl;
 mod broadcast_guard;
+pub(crate) mod chrome_style;
 mod close_guard;
 mod command_blocks;
 mod command_history;

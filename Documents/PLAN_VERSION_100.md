@@ -794,6 +794,23 @@ Stop: report the type surface + test results; await review.
 
 #### 112.3 — `chrome_style.rs`: map `(GuiTheme, ThemePalette) → egui::Visuals`
 
+> **STATUS: COMPLETE.** `freminal/src/gui/chrome_style.rs` adds
+> `pub fn build_visuals(gui_theme, palette, bg_opacity, normal_display) ->
+egui::Visuals`. Starts from `Visuals::dark()` and overrides every listed
+> field from palette + geometry: `window_fill`/`panel_fill` (preserving the
+> reverse-video white-fill + opacity behavior verbatim from `app_impl.rs`),
+> `window_stroke` (foreground, `stroke_width`), `window_corner_radius` /
+> `menu_corner_radius` (from the respective `GuiTheme` radii), `selection`
+> (palette `selection_bg`/`_fg`), `override_text_color` (foreground), and all
+> five `widgets` states via a private `widget()` helper — noninteractive/inactive
+> use background/`ansi[0]` fills with `expansion 0.0`; hovered/active use
+> `selection_bg` (active at 80% alpha) with `expansion = widget_hover_expansion`;
+> open uses `ansi[8]`. `colors::rgb_to_color32` was promoted private → `pub(crate)`
+> for reuse. Nothing calls it yet (112.4 wires it). 13 unit tests (Retro→radius 0,
+> Modern→nonzero, selection/text-color mapping, reverse-video white, opacity→alpha,
+> per-state expansion) pass; `cargo clippy -p freminal --all-targets
+--all-features -- -D warnings` clean. Test palette: `CATPPUCCIN_MOCHA`.
+
 Scope: `freminal/src/gui/chrome_style.rs` (new), `freminal/src/gui/mod.rs`
 (module decl). May read `colors.rs` helpers.
 
