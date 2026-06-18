@@ -300,6 +300,29 @@ no code or asset changes.
   Palettes are **not** moved; `freminal-common::themes` already is the common
   theme home. A separate crate is justified only by a second egui consumer,
   which does not exist.
+- **Chrome colors come from explicit theme-authored UI roles, not borrowed ANSI
+  slots (decided mid-112.3a, after activation review).** The original spec
+  assumed the chrome could be styled from the existing `ThemePalette`
+  (`background`/`foreground`/`selection`/`ansi[16]`). The gallery proved this
+  wrong: `ThemePalette` is a _terminal_ palette and does not declare UI surface
+  roles, so deriving them by guessing ANSI slots produced invisible borders
+  (e.g. Tokyo Night's `ansi[0]` ≈ its background) and low-contrast active tabs.
+  The vetted upstream themes (Catppuccin's Base/Surface0/Overlay/Text ladder,
+  Tokyo Night's `bg_highlight`/`fg_dark`, Dracula's Current-Line/Comment, etc.)
+  **already define** these roles; freminal simply was not carrying them. Decision:
+  `ThemePalette` gains an explicit **7-role chrome set** —
+  `chrome_surface`, `chrome_surface_variant`, `chrome_surface_hover`,
+  `chrome_surface_active`, `chrome_border`, `chrome_text`, `chrome_text_muted`
+  (each `Option<(u8,u8,u8)>`). Vetted themes have these **transcribed from
+  upstream (authored values, never invented)**. Themes that do not define them
+  (raw terminal palettes — xterm/wezterm/ghostty) get a **best-fit resolver**
+  that first reuses colors already in the palette and only as a last resort
+  computes a contrast-guaranteed fallback. `build_visuals` consumes the
+  _resolved_ roles. No per-theme contrast "science" — vetted themes copy, raw
+  themes best-fit. Every built-in theme is auditable in the gallery (112.3f) and
+  signed off per theme (112.3g). This is a deliberate expansion of v0.10.0 scope
+  driven by the activation review; it touches `ThemePalette` (a
+  `freminal-common` type) and is done in full, not deferred.
 
 ---
 
@@ -631,8 +654,12 @@ rolled out per surface. Each subtask leaves `cargo test --all` green.
 
 Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.3a needs
 112.3; 112.3b (UI font control) needs 112.2 and is tuned in the same gallery as
-112.3a; 112.4-112.5 need 112.3a + 112.3b (the geometry baselines and UI-font
-choice locked in the gallery feed 112.4's global application); 112.6-112.9 need
+112.3a. The chrome-role colour work (added after activation review) runs:
+112.3c (ThemePalette role fields + resolver) → 112.3d (transcribe authored roles
+for vetted themes) → 112.3e (build_visuals consumes resolved roles + padding) →
+112.3f (gallery loads all themes) → 112.3g (per-theme audit + sign-off). 112.4-
+112.5 need 112.3a + 112.3b + 112.3g (the locked baselines, UI-font choice, and
+the audited per-theme chrome feed 112.4's global application); 112.6-112.9 need
 112.5; 112.10 needs 112.1; 112.11-112.12 need 112.10.
 
 ### Task 112 subtasks
@@ -1025,6 +1052,189 @@ is UI chrome only); do NOT persist the choice to `Config` here (112.13).
 Stop: report the `UiFont` surface, the proportional-font decision (with the
 audit if a face is bundled), the gallery result, and the verification output;
 await the maintainer's font decision before 112.4.
+
+#### 112.3c — Add explicit chrome-role colors to `ThemePalette` + resolver
+
+Scope: `freminal-common/src/themes.rs` (`ThemePalette` struct + a resolver
+method + every theme const gains the new fields, initially `None`), tests in the
+same crate. NO egui. NO `build_visuals` change yet (112.3e). NO per-theme
+authored values yet (112.3d).
+
+What: Add seven `Option<(u8,u8,u8)>` chrome-role fields to `ThemePalette`:
+
+- `chrome_surface` — panel/window background for chrome.
+- `chrome_surface_variant` — button / input-well / inactive-tab fill.
+- `chrome_surface_hover` — hovered widget fill.
+- `chrome_surface_active` — pressed/selected/active-tab fill.
+- `chrome_border` — widget/window border (must read against `chrome_surface`).
+- `chrome_text` — chrome text on surfaces.
+- `chrome_text_muted` — secondary/disabled chrome text.
+
+Add a resolver — `pub fn chrome_role(&self, role: ChromeRole) -> (u8,u8,u8)`
+(plus a `ChromeRole` enum, or per-role accessor methods) — that returns, in
+priority order: (1) the authored field if `Some`; (2) a **best-fit from existing
+palette colors** (e.g. `chrome_border` → a palette color that contrasts
+`background`; `chrome_surface_variant` → `selection_bg` if it reads as a fill;
+etc. — reuse what the palette already has); (3) a last-resort
+**contrast-guaranteed derivation** from `background`/`foreground` (the
+luminance/blend approach, moved here as pure `(u8,u8,u8)` math — NO egui). The
+resolver never returns an invisible/!contrasting color: the final fallback
+guarantees a minimum contrast against the relevant surface. Document the
+priority ladder per role.
+
+Set all seven fields to `None` on **every** existing theme const (29 of them);
+112.3d fills the vetted ones. Update the theme-count / field tests.
+
+Deliverable: `ThemePalette` carries the seven roles + a resolver with the
+authored → best-fit → contrast ladder; all themes compile with `None`; resolver
+unit-tested (authored wins; `None` best-fits from palette; a synthetic
+low-info palette hits the contrast fallback and the result meets the minimum
+contrast threshold).
+
+Verification: `cargo test -p freminal-common`; `cargo clippy --all-targets
+--all-features -- -D warnings`.
+
+Prohibitions: NO egui types in `freminal-common`; do NOT invent authored values
+here (that is 112.3d, and even there they are transcribed, not invented); do NOT
+change `build_visuals` yet.
+
+Stop: report the field set, the resolver signature + priority ladder, and test
+results; await review.
+
+#### 112.3d — Transcribe authored chrome roles for the vetted themes
+
+Scope: `freminal-common/src/themes.rs` (populate the 112.3c fields for themes
+with a documented upstream UI palette), tests. NO resolver/struct change (112.3c
+already landed it).
+
+What: For each **vetted** built-in theme that has a published/derivable UI
+surface ladder, fill the seven chrome-role fields with **values transcribed from
+upstream** — never invented. Cover at least the Catppuccin family
+(Latte/Frappé/Macchiato/Mocha — Base/Mantle/Surface0/Surface1/Overlay1/Text/
+Subtext mapping), Tokyo Night + Storm (`bg`/`bg_highlight`/`fg`/`fg_dark`/
+border), Dracula (Background/Current-Line/Comment/Foreground), Nord
+(`nord0..3`/`nord4..6`), Gruvbox dark/light (`bg0/bg1/bg2`/`fg`), One Dark/Light,
+Rose Pine (Base/Surface/Overlay/Muted/Subtle/Text), and any other theme whose
+upstream defines surface roles (Everforest, Kanagawa, Monokai Pro, Ayu, Material
+all have documented palettes — include those whose upstream role mapping is
+unambiguous). For each theme, add a source comment citing where the values come
+from (upstream palette name → role). Leave genuinely role-less raw terminal
+palettes (xterm, wezterm, ghostty) at `None` — they intentionally fall through
+to the 112.3c best-fit resolver.
+
+Deliverable: vetted themes carry authored chrome roles with upstream-source
+comments; raw palettes remain `None`. A test asserting a representative vetted
+theme (e.g. Catppuccin Mocha) returns its authored values (not the fallback) for
+each role, and that a raw palette (e.g. xterm) returns non-`None` resolved values
+via the resolver.
+
+Verification: `cargo test -p freminal-common`; `cargo clippy …`.
+
+Prohibitions: do NOT invent colors for vetted themes — every value is traceable
+to an upstream source (cite it); if a theme's upstream role is ambiguous, leave
+that role `None` and let the resolver best-fit rather than guessing.
+
+Stop: report which themes got authored roles (and from which upstream sources)
+vs left to the resolver; await review.
+
+#### 112.3e — Rework `build_visuals` to consume resolved roles + add padding
+
+Scope: `freminal/src/gui/chrome_style.rs` (`build_visuals` + the
+luminance/blend helpers — relocate the pure derivation to the 112.3c resolver
+and have `build_visuals` call `palette.chrome_role(...)` instead of reaching for
+ANSI slots), and a new `pub fn apply_chrome_spacing(style/ctx, gui_theme)` for
+padding. May add padding fields to `GuiTheme` in `freminal-common`
+(`button_padding: (f32,f32)`, `menu_padding: i8` or similar — toolkit-agnostic
+numbers).
+
+What:
+
+1. Replace every borrowed-ANSI-slot color in `widget()` and the assembly block
+   with the resolved chrome role: `noninteractive`/window bg → `chrome_surface`;
+   `inactive` fill → `chrome_surface_variant`; `hovered` → `chrome_surface_hover`;
+   `active`/selected/open → `chrome_surface_active`; all `bg_stroke`/window
+   border → `chrome_border`; `fg_stroke`/`override_text_color` → `chrome_text`;
+   muted/secondary → `chrome_text_muted`. **Text on a fill must use the
+   higher-contrast of `chrome_text`/`chrome_surface`** (WCAG-style pick via
+   linear luminance from `egui::Rgba::from(Color32)`), fixing the low-contrast
+   active-tab problem.
+2. Add `apply_chrome_spacing` bumping `Spacing.button_padding`,
+   `Spacing.menu_margin` (menu/popup inner padding), `Spacing.window_margin`,
+   and `Spacing.item_spacing` from `GuiTheme` — Modern gets more generous
+   padding than Retro. (`Spacing` cannot live in `Visuals`; this is a sibling
+   applied alongside `set_visuals`, as the gallery already demonstrates.)
+3. Update/extend the `build_visuals` unit tests to assert role-sourced colors
+   and the text-contrast pick.
+
+Deliverable: `build_visuals` derives all chrome colors from resolved roles (no
+raw `ansi[..]` borrowing remains); `apply_chrome_spacing` exists; padding is
+visibly larger (Modern) on inputs/menus/buttons; tests updated.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; `cargo run -p freminal --example chrome_gallery` shows borders and
+active tabs with proper contrast and roomier padding.
+
+Prohibitions: do NOT reintroduce ANSI-slot guessing; do NOT hard-code colors
+(reverse-video white excepted); keep `build_visuals` `Visuals`-only (padding via
+the sibling).
+
+Stop: report the role→field mapping, the padding fields/values, and
+build/clippy/gallery results; await review.
+
+#### 112.3f — Gallery loads ALL built-in themes for per-theme audit
+
+Scope: `freminal/examples/chrome_gallery.rs`; expose the theme registry from
+`freminal-common` (promote `ALL_THEMES` to `pub`, or add a
+`pub fn all_themes() -> &'static [&'static ThemePalette]` accessor).
+
+What: Replace the gallery's hand-picked palette list with the **full built-in
+theme registry**, with a picker (combo or searchable list) iterating every
+theme by `name`. The audit workflow: select a theme, view it in Modern and
+Retro, confirm every gallery surface (buttons, inputs, dropdown popup, context
+menu, tabs, toast, border, selected text) reads correctly. Keep the geometry +
+UI-font + opacity + reverse-video controls.
+
+Deliverable: the gallery enumerates every built-in theme and is the audit
+instrument for 112.3g.
+
+Verification: `cargo run -p freminal --example chrome_gallery` lists all themes
+and switches between them live; `cargo build -p freminal`; `cargo clippy
+--all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT bake a curated subset; the picker must cover the whole
+registry; do NOT add the gallery to the product (still example-only).
+
+Stop: report the registry accessor used + theme count shown; await review.
+
+#### 112.3g — Per-theme chrome audit + sign-off
+
+Scope: no production code by default — an audit pass using the 112.3f gallery,
+recording results in this plan under a "112.3g — theme audit results" note. Any
+theme that fails audit produces a fix: a missing authored role transcribed
+(back to 112.3d) or a resolver/best-fit adjustment (112.3c) — each as a small
+follow-up, not invented per-theme tuning.
+
+What: Walk **every** built-in theme in the gallery, in both Modern and Retro,
+and record per theme: borders visible, text/active-tab contrast adequate,
+dropdown/context-menu legible, light-vs-dark handled. Mark each
+pass / fix-needed. For fix-needed themes, capture the specific role at fault and
+whether the fix is "transcribe authored role" (preferred) or "improve resolver
+best-fit". The maintainer signs off the look here; this gates 112.4.
+
+Deliverable: an audit table (theme → Modern/Retro → pass|fix) in the plan, all
+fixes applied and re-verified, and the locked Modern/Retro geometry + padding
+baselines recorded (the 112.3a "locked baselines" note).
+
+Verification: `cargo test --all`; `cargo clippy …`; gallery walk-through with
+the maintainer.
+
+Prohibitions: do NOT fine-tune contrast ratios per theme by hand — fixes are
+either an authored-role transcription or a resolver improvement that helps the
+whole class; do NOT proceed to 112.4 until every theme passes or has a recorded,
+accepted disposition.
+
+Stop: post the audit table + applied fixes + locked baselines; await the
+maintainer's final sign-off before 112.4.
 
 #### 112.4 — Apply full `Visuals` via the per-frame style hook
 
