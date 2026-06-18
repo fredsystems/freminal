@@ -630,9 +630,10 @@ the real `build_visuals` mapping **before** the profiles are applied app-wide an
 rolled out per surface. Each subtask leaves `cargo test --all` green.
 
 Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.3a needs
-112.3; 112.4-112.5 need 112.3a (the geometry baselines locked in the gallery
-feed 112.4's global application); 112.6-112.9 need 112.5; 112.10 needs 112.1;
-112.11-112.12 need 112.10.
+112.3; 112.3b (UI font control) needs 112.2 and is tuned in the same gallery as
+112.3a; 112.4-112.5 need 112.3a + 112.3b (the geometry baselines and UI-font
+choice locked in the gallery feed 112.4's global application); 112.6-112.9 need
+112.5; 112.10 needs 112.1; 112.11-112.12 need 112.10.
 
 ### Task 112 subtasks
 
@@ -940,6 +941,90 @@ as part of this subtask's sign-off.
 Stop: report the gallery contents, the run command, the (proposed or locked)
 geometry baselines, and the build/clippy results; await the maintainer's
 sign-off on the look before 112.4.
+
+> **112.3 amendment (landed during 112.3a sign-off).** Activation review of the
+> gallery surfaced three gaps in the original `build_visuals` field set, all now
+> fixed (commit on `task-112/ui-beautification`): (a) surface backgrounds
+> (`extreme_bg_color` for TextEdit/scrollbar wells, `faint_bg_color`,
+> `code_bg_color`) plus `warn`/`error`/`hyperlink` semantic colors and
+> window/popup shadow tints are now palette-derived (they were left at
+> `Visuals::dark()` near-black/orange/red/blue defaults), and `dark_mode` flips
+> by background luminance so light palettes start from `Visuals::light()`;
+> (b) the gallery applies the draft as the window's **global** visuals
+> (`ctx.set_visuals`) rather than a local `ui.scope`, because egui renders
+> combo-box dropdowns and context menus in a top-level popup layer that ignores
+> scoped style — this is the only way to preview menu/dropdown theming, and it
+> mirrors what 112.4 does in the real app. UI **font** control is a separate
+> concern, broken out as 112.3b below.
+
+#### 112.3b — UI chrome font control (proportional UI font + Retro monospace)
+
+Scope: a `UiFont` choice on `GuiTheme` in `freminal-common/src/gui_theme.rs`
+(toolkit-agnostic — enum/string, **no egui**), mapped to concrete egui font
+families in the binary's `freminal/src/gui/fonts.rs` (`setup_font_files` /
+`FontConfig`); the gallery (`chrome_gallery.rs`) gains a UI-font selector. A
+license-gated **proportional Nerd Font** vendor step (mirroring Task 111) is the
+first sub-step if a bundled sans face is chosen. NO config persistence (that is
+112.13).
+
+**Why this exists.** Activation review established that the egui chrome does not
+currently use the bundled monospace font at all — it silently falls back to
+epaint's bundled **Ubuntu Light** (`FontFamily::Proportional`, which
+`setup_font_files` never populates), because `setup_font_files` only overrides
+`FontFamily::Monospace` (→ CaskaydiaCove) and leaves `Proportional` at epaint's
+default. So the chrome font is both unbundled (we don't control it) and not a
+deliberate choice. A monospace font is the wrong default for UI chrome; a
+proportional/sans face is the right Modern look, while **monospace UI is the
+intentional Retro look** (terminal-native feel).
+
+What:
+
+1. **`UiFont` on `GuiTheme` (common, egui-free).** Add a toolkit-agnostic
+   choice, e.g. `enum UiFont { Proportional, Monospace }` (or a richer set if a
+   bundled sans is added — `BundledSans` / `MatchTerminal`). Wire it into the
+   `StyleProfile::defaults()` baselines: Modern → proportional, Retro →
+   monospace. Serde + tests as for the other `GuiTheme` fields. No `FontId`, no
+   `FontFamily` — those are egui types and stay in the binary.
+2. **Proportional-font decision (license-gated).** Decide the proportional UI
+   face. Options, to be weighed and surfaced (do not pick unilaterally): (a) use
+   epaint's built-in proportional font (zero bundle cost, but not a Nerd Font
+   and not ours to control across versions); (b) bundle a proportional/sans Nerd
+   Font — **note Nerd Fonts are predominantly monospace-patched, so proportional
+   options are limited**; a candidate audit (coverage, `isFixedPitch`, license —
+   must clear OFL-1.1 or equivalent per the bundled-font gate) is required before
+   any face is vendored, exactly as Task 111 did for CaskaydiaCove. Bundling, if
+   chosen, follows the 111 precedent (`res/`, `include_bytes!`,
+   `ATTRIBUTIONS.md`, license file).
+3. **Binary mapping (`fonts.rs`).** Map `UiFont` to egui: populate
+   `FontFamily::Proportional` (with the chosen face) and/or remap
+   `Style.text_styles` (`Body`/`Button`/`Heading`) to `FontFamily::Monospace`
+   for the Retro/monospace choice. This is the egui-touching half and stays in
+   the binary, mirroring the `ThemePalette` (data in common) → `colors.rs` (egui
+   mapping in binary) split. Confirm `setup_font_files` is the single font
+   registration point and thread `UiFont` to it.
+4. **Gallery control.** Add a UI-font selector to `chrome_gallery.rs` so the
+   proportional-vs-monospace chrome look is tunable alongside the geometry, and
+   confirm the preview re-renders text in the selected face.
+
+Deliverable: `GuiTheme` carries a serde-able `UiFont`; the gallery renders UI
+chrome in a proportional face for Modern and monospace for Retro; if a font is
+bundled, it is license-cleared and attributed. The mapping is unit-tested where
+testable without egui (the `UiFont` enum / `defaults()` wiring) — the egui
+font-family wiring is exercised manually via the gallery.
+
+Verification: `cargo run -p freminal --example chrome_gallery` shows the UI font
+change live; `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; if a font is bundled, `markdownlint ATTRIBUTIONS.md` and the
+license file checks from the 111 playbook.
+
+Prohibitions: do NOT add egui types (`FontId`/`FontFamily`) to `freminal-common`;
+do NOT bundle a font whose license is unconfirmed (the bundled-font gate from
+the Design Decisions applies); do NOT change the terminal-buffer font path (this
+is UI chrome only); do NOT persist the choice to `Config` here (112.13).
+
+Stop: report the `UiFont` surface, the proportional-font decision (with the
+audit if a face is bundled), the gallery result, and the verification output;
+await the maintainer's font decision before 112.4.
 
 #### 112.4 — Apply full `Visuals` via the per-frame style hook
 
