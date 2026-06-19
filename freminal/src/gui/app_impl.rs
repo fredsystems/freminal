@@ -375,10 +375,13 @@ impl freminal_windowing::App for FreminalGui {
             [0.0, 0.0, 0.0, 0.0]
         } else {
             // Fully opaque: use the terminal background color from the theme.
+            // Honor the live preview override so the window background tracks a
+            // theme being previewed in Settings, not just the committed config.
             let os_dark_mode = self.windows.get(&window_id).is_some_and(|w| w.os_dark_mode);
-            let theme =
+            let theme = self.preview_theme.unwrap_or_else(|| {
                 freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
-                    .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
+                    .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA)
+            });
             let (r, g, b) = theme.background;
             let color = egui::Color32::from_rgb(r, g, b);
             color.to_normalized_gamma_f32()
@@ -420,7 +423,12 @@ impl freminal_windowing::App for FreminalGui {
             // per-frame style hook in the terminal render path runs — so
             // without this the settings window stays on egui's default visuals
             // and ignores the active theme + profile (112.7 follow-up).
-            let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark))
+            //
+            // Style from the *draft* (unsaved) theme so selecting a new theme
+            // in the picker repaints the settings window live, instead of
+            // staying on the committed theme until Apply + re-open.
+            let active_slug = self.settings_modal.draft_active_theme_slug(os_dark);
+            let theme = freminal_common::themes::by_slug(&active_slug)
                 .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
             let visuals = crate::gui::chrome_style::build_visuals(
                 &self.gui_theme,
@@ -459,6 +467,13 @@ impl freminal_windowing::App for FreminalGui {
 
             // If the modal closed (Cancel or Apply), close the OS window.
             if !self.settings_modal.is_open {
+                // Drop the live chrome preview override: the session is over.
+                // On Apply the committed theme now flows via the snapshot; on
+                // Cancel the RevertTheme broadcast restored it. Clearing also
+                // re-enables per-window Auto-mode theming, which a pinned global
+                // override cannot represent. The follow-up repaints scheduled by
+                // the Apply / Revert dispatch cover the snapshot catch-up.
+                self.preview_theme = None;
                 self.persist_window_state();
                 self.settings_window_id = None;
                 self.settings_owner = None;
@@ -880,6 +895,55 @@ impl freminal_windowing::App for FreminalGui {
             p.view_state.scroll_offset = snap.scroll_offset;
         }
 
+        // Apply the full palette-derived chrome `Visuals` (112.4) BEFORE any
+        // chrome is drawn this frame.  The menu bar and tab bar are rendered
+        // immediately below, so the style must be in place first — applying it
+        // after them (as it was) left the bars styled by the *previous* frame's
+        // palette, so a live theme change did not reach the menu/tab bar until
+        // a later frame happened to repaint them (the "bars don't update"
+        // symptom).
+        //
+        // Gated: only call `global_style_mut` when the inputs have changed.
+        // `global_style_mut` triggers `Arc::make_mut` on the egui `Style`,
+        // which clones every frame unless skipped — and `build_visuals` itself
+        // is non-trivial, so the cache short-circuits the rebuild on the
+        // steady-state (unchanged) path.
+        //
+        // Chrome styles from the live preview theme when one is active
+        // (Settings theme picker), falling back to the snapshot's theme at
+        // steady state.  The preview override makes chrome re-theme immediately
+        // and deterministically — it does not depend on the GUI happening to
+        // read the post-`ThemeChange` snapshot (a race that left the
+        // background/chrome stale until a mouseover repaint).
+        let bg_opacity = self.config.ui.background_opacity;
+        {
+            let gui_theme = self.gui_theme;
+            let chrome_theme = self.preview_theme.unwrap_or(snap.theme);
+            let style_changed = match win.style_cache {
+                Some((prev_display, prev_theme, prev_opacity, prev_gui_theme)) => {
+                    prev_display != snap.is_normal_display
+                        || !std::ptr::eq(prev_theme, chrome_theme)
+                        || prev_opacity.to_bits() != bg_opacity.to_bits()
+                        || prev_gui_theme != gui_theme
+                }
+                None => true,
+            };
+            if style_changed {
+                let visuals = crate::gui::chrome_style::build_visuals(
+                    &gui_theme,
+                    chrome_theme,
+                    bg_opacity,
+                    snap.is_normal_display,
+                );
+                ctx.global_style_mut(|style| {
+                    style.visuals = visuals;
+                    crate::gui::chrome_style::apply_chrome_spacing(style, &gui_theme);
+                });
+                win.style_cache =
+                    Some((snap.is_normal_display, chrome_theme, bg_opacity, gui_theme));
+            }
+        }
+
         // Create a root Ui covering the full available area.  Panels reserve
         // space from this Ui via `show_inside` (the non-deprecated API).
         let mut root_ui = egui::Ui::new(
@@ -1070,43 +1134,6 @@ impl freminal_windowing::App for FreminalGui {
                         &mut toasts,
                     );
                 }
-            }
-
-            // Apply the full palette-derived chrome `Visuals` (112.4).
-            //
-            // Gated: only call `global_style_mut` when the inputs have
-            // changed.  `global_style_mut` triggers `Arc::make_mut` on
-            // the egui `Style`, which clones every frame unless skipped — and
-            // `build_visuals` itself is non-trivial, so the cache short-circuits
-            // the rebuild on the steady-state (unchanged) path.
-            //
-            // The active `GuiTheme` is the geometry profile (Modern/Retro +
-            // radii/strokes/spacing) held on `self.gui_theme`.  It defaults to
-            // Modern; the settings profile picker (112.7) mutates it for live
-            // preview.  Config persistence is wired in 112.13.
-            let bg_opacity = self.config.ui.background_opacity;
-            let gui_theme = self.gui_theme;
-            let style_changed = match win.style_cache {
-                Some((prev_display, prev_theme, prev_opacity, prev_gui_theme)) => {
-                    prev_display != snap.is_normal_display
-                        || !std::ptr::eq(prev_theme, snap.theme)
-                        || prev_opacity.to_bits() != bg_opacity.to_bits()
-                        || prev_gui_theme != gui_theme
-                }
-                None => true,
-            };
-            if style_changed {
-                let visuals = crate::gui::chrome_style::build_visuals(
-                    &gui_theme,
-                    snap.theme,
-                    bg_opacity,
-                    snap.is_normal_display,
-                );
-                ctx.global_style_mut(|style| {
-                    style.visuals = visuals;
-                    crate::gui::chrome_style::apply_chrome_spacing(style, &gui_theme);
-                });
-                win.style_cache = Some((snap.is_normal_display, snap.theme, bg_opacity, gui_theme));
             }
 
             // ── Multi-pane rendering loop ────────────────────────────

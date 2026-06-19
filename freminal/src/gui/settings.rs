@@ -838,6 +838,15 @@ impl SettingsModal {
         &self.draft.notifications
     }
 
+    /// Returns the active theme slug for the draft (unsaved) config, so the
+    /// settings window can style its own chrome with the theme the user is
+    /// currently previewing instead of the committed config's theme. Without
+    /// this the settings window keeps showing the old theme until Apply.
+    #[must_use]
+    pub(super) fn draft_active_theme_slug(&self, os_dark_mode: bool) -> String {
+        self.draft.theme.active_slug(os_dark_mode).to_string()
+    }
+
     /// The draft `[paste_guard]` config, so the "Test Paste" button can preview
     /// the confirm dialog using the settings the user is currently editing
     /// (including unsaved changes).
@@ -3058,6 +3067,35 @@ mod tests {
             modal.draft_paste_guard().pattern_list,
             vec![r"\bgit\s+push\b"]
         );
+    }
+
+    #[test]
+    fn draft_active_theme_slug_follows_draft_edits() {
+        // The settings window styles its own chrome from this accessor so a
+        // theme picked in the dropdown previews live (before Apply). It must
+        // reflect unsaved draft edits, honour the mode, and the OS-dark arg.
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), true);
+
+        // Defaults: dark mode in light/dark resolves to the dark/light name.
+        assert_eq!(modal.draft.theme.mode, ThemeMode::Dark);
+        assert_eq!(modal.draft_active_theme_slug(true), "catppuccin-mocha");
+
+        // Editing the draft dark theme is reflected immediately.
+        modal.draft.theme.dark_name = "dracula".to_string();
+        assert_eq!(modal.draft_active_theme_slug(true), "dracula");
+
+        // In Light mode the light name wins regardless of the OS-dark arg.
+        modal.draft.theme.mode = ThemeMode::Light;
+        modal.draft.theme.light_name = "catppuccin-latte".to_string();
+        assert_eq!(modal.draft_active_theme_slug(true), "catppuccin-latte");
+        assert_eq!(modal.draft_active_theme_slug(false), "catppuccin-latte");
+
+        // In Auto mode the OS-dark arg selects the dark vs light name.
+        modal.draft.theme.mode = ThemeMode::Auto;
+        assert_eq!(modal.draft_active_theme_slug(true), "dracula");
+        assert_eq!(modal.draft_active_theme_slug(false), "catppuccin-latte");
     }
 
     #[test]

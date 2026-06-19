@@ -135,6 +135,19 @@ struct FreminalGui {
     /// runtime source the style hook reads.
     gui_theme: freminal_common::gui_theme::GuiTheme,
 
+    /// Live theme preview override for chrome styling.
+    ///
+    /// While the Settings theme picker is previewing a theme, the chosen
+    /// palette is stored here so the per-frame chrome style hook can apply it
+    /// **immediately and deterministically**, without waiting for the PTY
+    /// round-trip (`InputEvent::ThemeChange` -> `set_theme` -> `build_snapshot`
+    /// -> `snap.theme`). The round-trip still happens (so the terminal *buffer*
+    /// re-themes too), but chrome no longer depends on the GUI happening to
+    /// read the post-`ThemeChange` snapshot — which was racy and intermittent.
+    /// `None` means "use the active snapshot's theme" (the steady state).
+    /// Set on `PreviewTheme` / `RevertTheme`, cleared on Apply.
+    preview_theme: Option<&'static freminal_common::themes::ThemePalette>,
+
     /// CLI arguments needed for spawning new PTY tabs.
     args: Args,
 
@@ -319,6 +332,7 @@ struct FreminalGui {
 
 impl FreminalGui {
     #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
+    #[allow(clippy::too_many_lines)] // Constructor: sequential field init + legacy state migration.
     fn new(
         config: Config,
         args: Args,
@@ -413,6 +427,7 @@ impl FreminalGui {
             paste_guard,
             config,
             gui_theme,
+            preview_theme: None,
             args,
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),
