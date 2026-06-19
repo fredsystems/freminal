@@ -157,6 +157,20 @@ limit = 4000
 # auto_detect_urls = true
 
 ## ##############################################################################
+# CHROME (UI STYLING)
+## ##############################################################################
+
+[chrome]
+# Visual style profile for the non-terminal chrome (menu bar, tabs, modals,
+# dialogs, toasts). The terminal buffer itself is unaffected. One of:
+#   "modern" - rounded corners, soft borders, roomier spacing
+#   "retro"  - square corners, crisp borders, denser spacing
+# Both profiles are fully theme-driven (colors come from the active theme);
+# they differ only in geometry and spacing.
+# Default: "modern".
+# profile = "modern"
+
+## ##############################################################################
 # SHADER SETTINGS
 ## ##############################################################################
 [shader]

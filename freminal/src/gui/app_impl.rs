@@ -113,7 +113,12 @@ impl freminal_windowing::App for FreminalGui {
             let theme =
                 freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
                     .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
-            rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
+            rendering::set_egui_options(
+                ctx,
+                theme,
+                self.config.ui.background_opacity,
+                &self.gui_theme,
+            );
 
             let repaint_handle = Arc::new(OnceLock::new());
             let proxy = handle.event_loop_proxy();
@@ -594,7 +599,12 @@ impl freminal_windowing::App for FreminalGui {
                             }
                         }
                     }
-                    rendering::update_egui_theme(ctx, theme, self.config.ui.background_opacity);
+                    rendering::update_egui_theme(
+                        ctx,
+                        theme,
+                        self.config.ui.background_opacity,
+                        &self.gui_theme,
+                    );
                     // Invalidate theme cache on all panes in all tabs so the
                     // next frame forces a full vertex rebuild with the new palette.
                     for tab in win.tabs.iter_mut() {
@@ -2107,7 +2117,12 @@ impl FreminalGui {
 
         let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
             .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
-        rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
+        rendering::set_egui_options(
+            ctx,
+            theme,
+            self.config.ui.background_opacity,
+            &self.gui_theme,
+        );
 
         let terminal_widget = FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
             tracing::error!("fatal: failed to initialise terminal widget (font manager): {e}");

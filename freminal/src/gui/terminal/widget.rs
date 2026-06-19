@@ -8,6 +8,7 @@
 use crate::gui::{
     folding::{RenderedRow, RowMap, compute_fold_ranges},
     fonts::{FontConfig, setup_font_files},
+    icons::ChromeIcon,
     mouse::PreviousMouseState,
     shaping::ShapedLine,
     view_state::{CellCoord, ViewState},
@@ -2490,12 +2491,16 @@ impl FreminalTerminalWidget {
                 .cursor_visual_row
                 .mul_add(logical_cell_h, terminal_rect.min.y);
             let lock_pos = egui::pos2(cursor_logical_x, cursor_logical_y);
+            // Bundled lock glyph (monospace family → resolves from the bundled
+            // Nerd Font, not the fallible system emoji font), tinted to the
+            // palette warning color rather than a hard-coded amber.
+            let lock_color = ui.visuals().warn_fg_color;
             ui.painter().text(
                 lock_pos,
                 egui::Align2::LEFT_TOP,
-                "\u{1F512}",
-                egui::FontId::proportional(logical_cell_h),
-                egui::Color32::from_rgb(255, 200, 50),
+                ChromeIcon::Lock.glyph(),
+                egui::FontId::monospace(logical_cell_h),
+                lock_color,
             );
         }
 

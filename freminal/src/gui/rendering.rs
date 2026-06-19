@@ -30,8 +30,13 @@ use crate::gui::notifications::NotificationRequest;
 /// the per-frame style hook in `app_impl::update` keeps the visuals in sync
 /// with the active pane's display mode and the active `GuiTheme` profile
 /// thereafter.
-pub(super) fn set_egui_options(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
-    apply_chrome_visuals(ctx, theme, bg_opacity);
+pub(super) fn set_egui_options(
+    ctx: &egui::Context,
+    theme: &ThemePalette,
+    bg_opacity: f32,
+    gui_theme: &GuiTheme,
+) {
+    apply_chrome_visuals(ctx, theme, bg_opacity, gui_theme);
     ctx.options_mut(|options| {
         options.zoom_with_keyboard = false;
     });
@@ -39,23 +44,32 @@ pub(super) fn set_egui_options(ctx: &egui::Context, theme: &ThemePalette, bg_opa
 
 /// Re-apply the full palette-derived chrome [`Visuals`](egui::Visuals) to match
 /// a new theme (e.g. an OS dark/light change in `Auto` theme mode).
-pub(super) fn update_egui_theme(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
-    apply_chrome_visuals(ctx, theme, bg_opacity);
+pub(super) fn update_egui_theme(
+    ctx: &egui::Context,
+    theme: &ThemePalette,
+    bg_opacity: f32,
+    gui_theme: &GuiTheme,
+) {
+    apply_chrome_visuals(ctx, theme, bg_opacity, gui_theme);
 }
 
 /// Shared body for [`set_egui_options`] / [`update_egui_theme`]: derive the
-/// chrome `Visuals` + spacing from the active palette and the default
-/// (Modern) [`GuiTheme`] profile, then apply them globally.
+/// chrome `Visuals` + spacing from the active palette and the active
+/// [`GuiTheme`] profile (the user's persisted `[chrome] profile`, Task 112.13),
+/// then apply them globally.
 ///
-/// The `GuiTheme` profile is the default until config persistence wires the
-/// user's choice (subtask 112.13).  Normal-display mode is assumed here; the
-/// per-frame hook in `app_impl::update` handles the reverse-video case.
-fn apply_chrome_visuals(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
-    let gui_theme = GuiTheme::default();
-    let visuals = chrome_style::build_visuals(&gui_theme, theme, bg_opacity, true);
+/// Normal-display mode is assumed here; the per-frame hook in
+/// `app_impl::update` handles the reverse-video case.
+fn apply_chrome_visuals(
+    ctx: &egui::Context,
+    theme: &ThemePalette,
+    bg_opacity: f32,
+    gui_theme: &GuiTheme,
+) {
+    let visuals = chrome_style::build_visuals(gui_theme, theme, bg_opacity, true);
     ctx.global_style_mut(|style| {
         style.visuals = visuals;
-        chrome_style::apply_chrome_spacing(style, &gui_theme);
+        chrome_style::apply_chrome_spacing(style, gui_theme);
     });
 }
 

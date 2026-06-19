@@ -8,6 +8,7 @@ use freminal_common::config::TabTitlePolicy;
 use freminal_common::keybindings::KeyAction;
 
 use super::TabBarAction;
+use super::icons::ChromeIcon;
 use super::tabs::Tab;
 use super::window::PerWindowState;
 
@@ -175,16 +176,18 @@ impl super::FreminalGui {
             let error_color = ui.visuals().error_fg_color;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if show_lock {
-                    ui.label(egui::RichText::new("\u{1F512}").color(warn_color));
+                    ui.label(ChromeIcon::Lock.rich_text_colored(warn_color));
                 }
                 if show_rec {
-                    // Filled bullet + "REC" label; kept short so it does not
-                    // crowd the menu bar.
+                    // Recording dot + "REC" label; kept short so it does not
+                    // crowd the menu bar. The dot is a bundled icon; "REC" stays
+                    // plain text.
                     ui.label(
-                        egui::RichText::new("\u{25CF} REC")
-                            .color(error_color)
+                        ChromeIcon::RecordDot
+                            .rich_text_colored(error_color)
                             .strong(),
                     );
+                    ui.label(egui::RichText::new("REC").color(error_color).strong());
                 }
             });
         }
@@ -783,23 +786,11 @@ impl super::FreminalGui {
 
         let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
-        // Build the display label: prepend a lock indicator when echo is disabled
-        // (password prompt active), and a bell indicator when the tab has an
-        // unacknowledged bell and is not the active (focused) tab.
-        let display_label = match (is_echo_off, has_bell) {
-            (true, true) => format!("\u{1f510} \u{1f514} {label}"),
-            (true, false) => format!("\u{1f510} {label}"),
-            (false, true) => format!("\u{1f514} {label}"),
-            (false, false) => label.to_owned(),
-        };
-
-        // Broadcast indicator (Task 74): prepend a satellite-antenna glyph
-        // when this tab is broadcasting keyboard input to all its panes.
-        let display_label = if tab.broadcast_input {
-            format!("\u{1f4e1} {display_label}")
-        } else {
-            display_label
-        };
+        // The tab label text itself; status indicators (broadcast, lock, bell)
+        // are drawn as separate bundled-icon glyphs ahead of it (see the icon
+        // prefixes rendered below), not embedded in this string — the label uses
+        // the proportional UI font, which carries no Nerd Font icon glyphs.
+        let display_label = label.to_owned();
 
         let frame = Self::tab_frame(ui, is_being_dragged, has_bell);
 
@@ -826,12 +817,32 @@ impl super::FreminalGui {
                         action = TabBarAction::CancelRename;
                     }
                 } else {
+                    // Status indicators, drawn as bundled icon glyphs ahead of
+                    // the label (palette-tinted, monospace family so they
+                    // resolve from the bundled Nerd Font rather than the
+                    // proportional UI font). Order matches the previous inline
+                    // prefixes: broadcast, lock, bell.
+                    let warn_color = ui.visuals().warn_fg_color;
+                    if tab.broadcast_input {
+                        // Broadcast indicator (Task 74): tab is broadcasting
+                        // keyboard input to all its panes.
+                        ui.label(ChromeIcon::Broadcast.rich_text());
+                    }
+                    if is_echo_off {
+                        // Echo disabled (password prompt active).
+                        ui.label(ChromeIcon::LockKey.rich_text_colored(warn_color));
+                    }
+                    if has_bell {
+                        // Unacknowledged bell on a non-focused tab.
+                        ui.label(ChromeIcon::Bell.rich_text_colored(warn_color));
+                    }
+
                     // Bell-active tabs use the palette warning color for the
                     // label so it stands out in any theme (no hard-coded amber).
                     let rich_label = if has_bell {
                         egui::RichText::new(&display_label)
                             .size(13.0)
-                            .color(ui.visuals().warn_fg_color)
+                            .color(warn_color)
                     } else {
                         egui::RichText::new(&display_label).size(13.0)
                     };
@@ -877,7 +888,7 @@ impl super::FreminalGui {
                     });
 
                     // Show close button when more than one tab is open.
-                    if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                    if count > 1 && ui.small_button(ChromeIcon::Close.rich_text()).clicked() {
                         action = TabBarAction::Close(index);
                     }
                 }

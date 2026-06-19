@@ -117,6 +117,13 @@ impl FreminalGui {
 
         self.config = new_cfg;
 
+        // Adopt the persisted chrome style profile (Task 112.13). A previewed
+        // profile may have set `gui_theme` ephemerally; on Apply we re-derive it
+        // from the now-saved config so it persists. On a cancelled preview, the
+        // saved config still carries the original profile, so this also reverts
+        // an un-applied preview to the persisted value.
+        self.gui_theme = self.config.chrome.profile.defaults();
+
         // Rebuild the paste-guard pattern cache from the new config and report
         // any patterns that fail to compile (skipped at match time).
         let invalid = self.paste_guard.rebuild(&self.config.paste_guard);

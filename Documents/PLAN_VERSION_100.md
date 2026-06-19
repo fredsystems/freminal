@@ -35,7 +35,7 @@ bundled-font change alters the default glyph set.
 | #   | Feature                     | Scope  | Status   | Depends On       |
 | --- | --------------------------- | ------ | -------- | ---------------- |
 | 111 | Bundled Font / Icon         | Large  | Complete | v0.8.0, v0.9.0   |
-| 112 | UI Beautification           | Large  | Active   | v0.8.0, Task 111 |
+| 112 | UI Beautification           | Large  | Complete | v0.8.0, Task 111 |
 | 113 | Resize / Reflow Scroll Bugs | Medium | Pending  | None             |
 
 Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
@@ -1599,6 +1599,24 @@ Stop: report per-dialog status; await review.
 
 #### 112.10 — Build the bundled-icon asset pipeline (format from 112.1)
 
+> **STATUS: COMPLETE.** Implemented as an icon font reusing the already-bundled
+> CaskaydiaCove Nerd Font (the 112.1 signed-off direction) — **zero new crates,
+> zero new assets**. `freminal/src/gui/icons.rs` defines
+> `pub(crate) enum ChromeIcon` (10 variants: `Lock`, `LockKey`, `RecordDot`,
+> `Record`, `Bell`, `Broadcast`, `Close`, `Minus`, `Plus`, `Warning`) with
+> `codepoint()` mapping each to a Nerd Font PUA glyph (FontAwesome `nf-fa-*`
+> range, plus `nf-cod-record` for the technical record control), and accessors
+> `glyph()`, `rich_text()`, and `rich_text_colored(color)` that build a
+> monospace-family `RichText` so the glyph resolves from the bundled face rather
+> than the proportional UI font, tintable to a palette color. Each candidate
+> codepoint was verified present in the bundled `CaskaydiaCoveNerdFont-Regular.ttf`
+> cmap via `fonttools` before mapping — zero misses across the whole inventory,
+> resolving the "a single missing codepoint forces a worse icon" risk. A
+> `pub(crate)` `bundled_regular_font_bytes()` accessor was added to
+> `font_manager.rs` (test-gated) so the regression test can inspect the real
+> bundled face. `cargo test --all`, `cargo clippy --all-targets --all-features --
+-D warnings`, and `cargo machete` are green.
+
 Scope: depends on the 112.1 decision; new asset files under `res/` or
 `assets/`, a new `freminal/src/gui/icons.rs` loader. Touches `Cargo.toml` only
 if the chosen format needs a crate (e.g. `egui_extras`/`resvg`) — if so, follow
@@ -1621,6 +1639,39 @@ Stop: report the icon set + loader API; await review.
 
 #### 112.11 — Replace font-glyph action symbols with bundled icons
 
+> **STATUS: COMPLETE.** Every chrome **action symbol** the 112.1 inventory
+> flagged as a font-glyph indicator now renders from a `ChromeIcon` (bundled
+> Nerd Font, monospace family) instead of an emoji/system-font codepoint:
+>
+> - **menu.rs** — menu-bar lock (was U+1F512 emoji → `ChromeIcon::Lock`) and
+>   recording dot (was U+25CF → `ChromeIcon::RecordDot`, with "REC" kept as plain
+>   text); tab-bar status indicators (broadcast U+1F4E1, lock-key U+1F510, bell
+>   U+1F514 emoji) are now drawn as separate palette-tinted icon widgets ahead of
+>   the label (they were previously emoji embedded in the label string, which
+>   the proportional UI font cannot carry); tab close button (was U+00D7 →
+>   `ChromeIcon::Close`).
+> - **toast.rs** — dismiss button (was literal `×` → `ChromeIcon::Close`).
+> - **settings.rs** — paste-guard remove/add buttons (U+2796/U+2795 →
+>   `Minus`/`Plus`), keybinding-conflict warning (U+26A0 → `Warning`, split into
+>   icon + text), recording-state button (U+23FA → `Record`, built as a
+>   `LayoutJob` so the icon is monospace and the text is the UI font).
+> - **widget.rs** — the in-pane echo-off lock overlay (was U+1F512 emoji drawn
+>   in the **proportional** font with a hard-coded amber) now uses
+>   `ChromeIcon::Lock.glyph()` in the **monospace** family tinted to the palette
+>   `warn_fg_color` — fixing the pre-existing hard-coded-color outlier noted in
+>   the 112.1 audit.
+>
+> **Deliberately left on the standard-Unicode path (not action symbols on the
+> fallible system-font path):** the in-prose ellipsis in "Rename Tab…" and the
+> lock-key reference inside the Security-tab description sentence (BMP/standard
+> punctuation, render fine in the UI font, replacing them with icon glyphs would
+> be visually wrong); and the fold-placeholder `▶`/`…` (`widget.rs`
+> `format_placeholder_text`), which is **terminal-buffer-grid** text rendered
+> through the cell-grid glyph atlas — explicitly out of scope for the chrome
+> beautification pass, and standard BMP glyphs the bundled face renders fine.
+> `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+> and `cargo machete` are green.
+
 Scope: the chrome files identified in 112.1 (`menu.rs`, `toast.rs`,
 `settings.rs`, guard dialogs as applicable).
 
@@ -1642,6 +1693,17 @@ review.
 
 #### 112.12 — Icon regression test
 
+> **STATUS: COMPLETE.** `every_icon_resolves_in_bundled_font` (in
+> `icons.rs`'s test module) loads the real bundled `CaskaydiaCove` regular face
+> via `rustybuzz::Face::from_slice(bundled_regular_font_bytes(), 0)` and asserts
+> `face.glyph_index(icon.codepoint()).is_some()` for **every** `ChromeIcon`
+> variant — guarding against a future font swap silently dropping a glyph and
+> reintroducing the tofu failure mode this version exists to kill (the icon-font
+> analogue of the 111.6 ligature regression test). Two supporting tests:
+> `all_contains_every_variant` (the test-only `ChromeIcon::ALL` lists every
+> variant with distinct codepoints — count guard) and `glyph_is_single_char`.
+> `cargo test --all` green.
+
 Scope: a test module (location per 112.10's loader).
 
 What: Add a test asserting every `ChromeIcon` variant loads and (if the format
@@ -1659,6 +1721,32 @@ load-success + dimensions.
 Stop: report test name + result; await review.
 
 #### 112.13 — Config wiring for `[chrome]` profile (full `freminal-config-options` ritual)
+
+> **STATUS: COMPLETE.** A `[chrome]` section carrying `profile` (the
+> `StyleProfile`, serialized lowercase `"modern"`/`"retro"`) is wired through the
+> full layered-merge path. `freminal-common/src/config.rs`: new
+> `pub struct ChromeConfig { pub profile: StyleProfile }` (`#[derive(Default)]`
+> → Modern), added to `Config` + its `Default`, to `ConfigPartial` as
+> `Option<ChromeConfig>`, with the simple-replace `apply_partial` arm; the
+> `every_config_section_survives_partial_merge` guard test gained the
+> mutation, assertion, and exhaustive-destructure entry. Two new round-trip tests
+> (`chrome_round_trips_through_toml` asserting the lowercase serialization,
+> `chrome_defaults_to_modern`). Runtime wiring: `mod.rs` initializes
+> `gui_theme` from `config.chrome.profile.defaults()` (was hardcoded
+> `GuiTheme::default()`); the settings profile picker writes the choice into
+> `draft.chrome.profile` so Apply persists it; `apply_new_config` re-derives
+> `self.gui_theme` from the saved profile (and thereby reverts an un-applied
+> preview); `open()`/`sync_from_config` seed the picker's `draft_profile` from
+> the persisted value; `rendering.rs` `set_egui_options`/`update_egui_theme`
+> /`apply_chrome_visuals` gained a `&GuiTheme` parameter so the window-creation
+> and OS-dark/light-flip paths style chrome with the user's profile instead of
+> the hardcoded default. Documented in `config_example.toml` (`[chrome]` after
+> `[ui]`) and mirrored in the Nix home-manager module (the three edits:
+> `chromeSection` filterAttrs binding, `optionalAttrs` result arm, and a
+> `types.enum ["modern" "retro"]` `mkOption`). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, `cargo machete`,
+> and `nixfmt --check` / `statix check` / `deadnix --fail` on the module are all
+> green.
 
 Scope: `freminal-common/src/config.rs`, `config_example.toml`,
 `freminal/src/gui/settings.rs` + `settings_dispatch.rs`,

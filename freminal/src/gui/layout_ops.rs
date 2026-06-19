@@ -560,7 +560,12 @@ impl FreminalGui {
 
         let theme = freminal_common::themes::by_slug(self.config.theme.active_slug(os_dark_mode))
             .unwrap_or(&freminal_common::themes::CATPPUCCIN_MOCHA);
-        rendering::set_egui_options(ctx, theme, self.config.ui.background_opacity);
+        rendering::set_egui_options(
+            ctx,
+            theme,
+            self.config.ui.background_opacity,
+            &self.gui_theme,
+        );
 
         let is_first_window = prealloc.is_some();
         let (repaint_handle, window_post) = if let Some((rh, wp)) = prealloc {

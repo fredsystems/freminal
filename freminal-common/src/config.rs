@@ -40,6 +40,7 @@ pub struct Config {
     pub shell_integration: ShellIntegrationConfig,
     pub command_blocks: CommandBlocksConfig,
     pub notifications: NotificationsConfig,
+    pub chrome: ChromeConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -85,6 +86,7 @@ impl Default for Config {
             shell_integration: ShellIntegrationConfig::default(),
             command_blocks: CommandBlocksConfig::default(),
             notifications: NotificationsConfig::default(),
+            chrome: ChromeConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -1026,6 +1028,32 @@ impl Default for NotificationsConfig {
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Chrome (UI styling)
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for the non-terminal chrome styling.
+///
+/// Carries the [`StyleProfile`](crate::gui_theme::StyleProfile) that drives the
+/// centralized chrome appearance (corner radius, stroke weight, spacing). The
+/// concrete geometry is derived from the profile at runtime via
+/// `StyleProfile::defaults()`, so only the profile name is persisted.
+///
+/// ```toml
+/// [chrome]
+/// # "modern" (rounded, soft, roomy) or "retro" (square, crisp, dense).
+/// profile = "modern"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChromeConfig {
+    /// The chrome style profile: Modern (rounded/soft) or Retro (sharp/dense).
+    ///
+    /// Defaults to [`StyleProfile::Modern`](crate::gui_theme::StyleProfile),
+    /// which is the `Default` for `StyleProfile`.
+    pub profile: crate::gui_theme::StyleProfile,
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Startup / Layout
 // ------------------------------------------------------------------------------------------------
 
@@ -1395,6 +1423,7 @@ struct ConfigPartial {
     pub shell_integration: Option<ShellIntegrationConfig>,
     pub command_blocks: Option<CommandBlocksConfig>,
     pub notifications: Option<NotificationsConfig>,
+    pub chrome: Option<ChromeConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
@@ -1456,6 +1485,9 @@ impl Config {
         }
         if let Some(notifications) = partial.notifications {
             self.notifications = notifications;
+        }
+        if let Some(chrome) = partial.chrome {
+            self.chrome = chrome;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -2123,6 +2155,30 @@ size = 14.0
         assert_eq!(
             parsed.notifications.command_finished_template,
             "{command}: {exit_code}"
+        );
+    }
+
+    #[test]
+    fn chrome_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.chrome.profile = crate::gui_theme::StyleProfile::Retro;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        // The profile must serialize as the lowercase `StyleProfile` form.
+        assert!(
+            toml.contains("profile = \"retro\""),
+            "chrome.profile should serialize as lowercase: {toml}"
+        );
+
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+        assert_eq!(parsed.chrome.profile, crate::gui_theme::StyleProfile::Retro);
+    }
+
+    #[test]
+    fn chrome_defaults_to_modern() {
+        assert_eq!(
+            Config::default().chrome.profile,
+            crate::gui_theme::StyleProfile::Modern
         );
     }
 
@@ -2916,6 +2972,7 @@ mode = "none"
             !Config::default().shell_integration.set_term_program;
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
         original.notifications.enabled = !Config::default().notifications.enabled;
+        original.chrome.profile = crate::gui_theme::StyleProfile::Retro;
         original
             .keybindings
             .overrides
@@ -2997,6 +3054,11 @@ mode = "none"
             "notifications section dropped"
         );
         assert_eq!(
+            loaded.chrome.profile,
+            crate::gui_theme::StyleProfile::Retro,
+            "chrome section dropped"
+        );
+        assert_eq!(
             loaded.keybindings.overrides.get("copy").map(String::as_str),
             Some("Ctrl+Shift+C"),
             "keybindings section dropped"
@@ -3037,6 +3099,7 @@ mode = "none"
             shell_integration: _,
             command_blocks: _,
             notifications: _,
+            chrome: _,
             keybindings: _,
             managed_by: _,
             startup: _,

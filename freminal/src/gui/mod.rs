@@ -42,6 +42,7 @@ mod close_guard;
 mod command_blocks;
 mod command_history;
 mod hot_reload;
+pub(crate) mod icons;
 mod layout_ops;
 mod menu;
 mod notifications;
@@ -401,12 +402,17 @@ impl FreminalGui {
                 |dir| freminal_common::layout::discover_layouts_with_errors(&dir),
             );
 
+        // Initialize the chrome style profile from the persisted config
+        // ([chrome] profile = "modern"|"retro", Task 112.13). Captured before
+        // `config` is moved into the struct literal below.
+        let gui_theme = config.chrome.profile.defaults();
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
             paste_guard,
             config,
-            gui_theme: freminal_common::gui_theme::GuiTheme::default(),
+            gui_theme,
             args,
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),

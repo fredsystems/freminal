@@ -93,6 +93,10 @@ let
           ;
       };
 
+      chromeSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.chrome) profile;
+      };
+
       tabsSection = lib.filterAttrs (_: v: v != null) {
         inherit (s.tabs)
           show_single_tab
@@ -183,6 +187,7 @@ let
       // lib.optionalAttrs (shellSection != { }) { shell = shellSection; }
       // lib.optionalAttrs (loggingSection != { }) { logging = loggingSection; }
       // lib.optionalAttrs (uiSection != { }) { ui = uiSection; }
+      // lib.optionalAttrs (chromeSection != { }) { chrome = chromeSection; }
       // lib.optionalAttrs (shaderSection != { }) { shader = shaderSection; }
       // lib.optionalAttrs (tabsSection != { }) { tabs = tabsSection; }
       // lib.optionalAttrs (bellSection != { }) { bell = bellSection; }
@@ -489,6 +494,25 @@ in
             Opacity of the background image (0.0–1.0). Applied on top of the
             image itself; background_opacity then layers over that.
             Null uses the default (0.5).
+          '';
+        };
+      };
+
+      chrome = {
+        profile = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "modern"
+              "retro"
+            ]
+          );
+          default = null;
+          description = ''
+            Visual style profile for the non-terminal chrome (menu bar, tabs,
+            modals, dialogs, toasts). "modern" uses rounded corners, soft
+            borders, and roomier spacing; "retro" uses square corners, crisp
+            borders, and denser spacing. Both are fully theme-driven.
+            Null uses the default ("modern").
           '';
         };
       };

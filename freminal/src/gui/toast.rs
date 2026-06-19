@@ -22,6 +22,8 @@
 
 use std::time::{Duration, Instant};
 
+use super::icons::ChromeIcon;
+
 /// Severity of a toast.  Drives color and default duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToastKind {
@@ -245,8 +247,8 @@ impl ToastStack {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("×")
-                                                        .color(text_color)
+                                                    ChromeIcon::Close
+                                                        .rich_text_colored(text_color)
                                                         .strong(),
                                                 )
                                                 .frame(false)

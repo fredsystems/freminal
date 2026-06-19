@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use super::font_manager;
+use super::icons::ChromeIcon;
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
     self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
@@ -363,6 +364,9 @@ impl SettingsModal {
         self.draft = live_config.clone();
         self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
         self.original_opacity = live_config.ui.background_opacity;
+        // Seed the profile picker from the persisted chrome profile (112.13) so
+        // it reflects the active choice rather than always showing the default.
+        self.draft_profile = live_config.chrome.profile;
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
     }
@@ -483,6 +487,8 @@ impl SettingsModal {
         };
 
         self.key_recording = KeyRecordingState::Idle;
+        // Seed the profile picker from the persisted chrome profile (112.13).
+        self.draft_profile = live_config.chrome.profile;
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
         self.is_open = true;
@@ -1193,8 +1199,8 @@ impl SettingsModal {
     ///
     /// Changing the selection sets `pending_preview_profile`, which
     /// `show` / `show_standalone` return as `SettingsAction::PreviewProfile`
-    /// for a live restyle. The choice is **not** persisted here (112.13 wires
-    /// config persistence); this is in-memory preview only.
+    /// for a live restyle, and writes the choice into the draft config
+    /// (`draft.chrome.profile`) so it is persisted on Apply (Task 112.13).
     fn show_style_profile_picker(&mut self, ui: &mut Ui) {
         use freminal_common::gui_theme::StyleProfile;
 
@@ -1211,6 +1217,9 @@ impl SettingsModal {
             });
         if self.draft_profile != before {
             self.pending_preview_profile = Some(self.draft_profile);
+            // Persist into the draft so Apply (which saves `self.draft`) writes
+            // the chosen profile to config.
+            self.draft.chrome.profile = self.draft_profile;
         }
         ui.add_space(4.0);
         ui.colored_label(
@@ -1927,7 +1936,11 @@ impl SettingsModal {
                 let mut remove_index: Option<usize> = None;
                 for (idx, pattern) in self.draft.paste_guard.pattern_list.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.button("\u{2796}").on_hover_text("Remove").clicked() {
+                        if ui
+                            .button(ChromeIcon::Minus.rich_text())
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
                             remove_index = Some(idx);
                         }
                         let valid = regex::Regex::new(pattern).is_ok();
@@ -1948,7 +1961,11 @@ impl SettingsModal {
                 }
 
                 ui.add_space(2.0);
-                if ui.button("\u{2795} Add pattern").clicked() {
+                if ui
+                    .button(ChromeIcon::Plus.rich_text().strong())
+                    .on_hover_text("Add pattern")
+                    .clicked()
+                {
                     self.draft.paste_guard.pattern_list.push(String::new());
                 }
             });
@@ -2166,14 +2183,17 @@ impl SettingsModal {
 
                         if let Some(other) = conflict {
                             let warn = ui.visuals().warn_fg_color;
-                            ui.colored_label(
-                                warn,
-                                format!(
-                                    "\u{26a0} {} is already bound to {}.",
-                                    combo,
-                                    other.display_label()
-                                ),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.label(ChromeIcon::Warning.rich_text_colored(warn));
+                                ui.colored_label(
+                                    warn,
+                                    format!(
+                                        "{} is already bound to {}.",
+                                        combo,
+                                        other.display_label()
+                                    ),
+                                );
+                            });
                             ui.label("Accepting will unbind the other action.");
                             ui.add_space(8.0);
                         }
@@ -2250,13 +2270,29 @@ impl SettingsModal {
                 },
             );
 
-        let button_text = if is_recording {
-            "\u{23fa} Recording...".to_owned()
+        let button_label: egui::WidgetText = if is_recording {
+            // Bundled record glyph (monospace family) + text; built as layout
+            // job so the icon resolves from the Nerd Font and the text stays in
+            // the UI font.
+            let mut job = egui::text::LayoutJob::default();
+            ChromeIcon::Record.rich_text().append_to(
+                &mut job,
+                &egui::Style::default(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+            egui::RichText::new(" Recording...").append_to(
+                &mut job,
+                &egui::Style::default(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+            job.into()
         } else {
-            current_text
+            current_text.into()
         };
 
-        let btn = ui.add_sized([180.0, 20.0], egui::Button::new(&button_text));
+        let btn = ui.add_sized([180.0, 20.0], egui::Button::new(button_label));
         if btn.clicked() && !is_recording {
             self.key_recording = KeyRecordingState::Recording { action };
         }
