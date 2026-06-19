@@ -649,6 +649,14 @@ fn render_context_menu_area(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(120.0);
 
+                // Apply egui's menu styling so items render as borderless
+                // rows (transparent until hovered) rather than boxed buttons,
+                // matching the menu-bar dropdowns. egui applies this
+                // automatically inside `menu_button`/`context_menu`, but this
+                // popup is hand-rolled via `Area` + `Frame::popup`, so it must
+                // be applied explicitly here.
+                egui::containers::menu::menu_style(ui.style_mut());
+
                 // Copy — disabled when no text is selected.
                 if ui
                     .add_enabled(has_selection, egui::Button::new("Copy"))

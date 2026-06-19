@@ -348,11 +348,13 @@ impl PasteDialog {
             .show(ctx, |ui| {
                 ui.set_max_width(560.0);
 
-                // Trigger banner.
+                // Trigger banner — a paste-risk warning, so it uses the
+                // palette warning color (was hard-coded orange).
+                let warn = ui.visuals().warn_fg_color;
                 ui.label(
                     egui::RichText::new(banner_text(&state.analysis))
                         .strong()
-                        .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x4B)),
+                        .color(warn),
                 );
                 ui.add_space(6.0);
 

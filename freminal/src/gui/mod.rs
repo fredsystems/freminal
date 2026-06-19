@@ -126,6 +126,14 @@ struct FreminalGui {
 
     config: Config,
 
+    /// Active chrome style geometry (Modern/Retro profile + radii/strokes/
+    /// spacing) applied to all egui chrome via the per-frame style hook
+    /// (112.4). Defaults to `GuiTheme::default()` (Modern); the settings
+    /// profile picker (112.7) mutates it for live preview. Config persistence
+    /// of the profile is wired in 112.13 — until then this is the single
+    /// runtime source the style hook reads.
+    gui_theme: freminal_common::gui_theme::GuiTheme,
+
     /// CLI arguments needed for spawning new PTY tabs.
     args: Args,
 
@@ -398,6 +406,7 @@ impl FreminalGui {
             binding_map,
             paste_guard,
             config,
+            gui_theme: freminal_common::gui_theme::GuiTheme::default(),
             args,
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),

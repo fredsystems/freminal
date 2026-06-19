@@ -1234,12 +1234,15 @@ Stop: report the registry accessor used + theme count shown; await review.
 
 #### 112.3g — Per-theme chrome audit + sign-off
 
-> **STATUS: AWAITING MAINTAINER.** This is a human visual-audit gate and
-> cannot be self-completed by an agent. 112.3c-f are landed and the gallery
-> (`cargo run -p freminal --example chrome_gallery`) is ready. The maintainer
-> walks each theme in Modern and Retro, records pass/fix, and any fix is either
-> an authored-role transcription (112.3d) or a resolver improvement (112.3c).
-> Gates 112.4.
+> **STATUS: SIGNED OFF.** The maintainer completed the per-theme visual audit
+> in the gallery (`cargo run -p freminal --example chrome_gallery`) across all
+> built-in themes in both Modern and Retro and signed off the look. The audit
+> fixes landed as the `task-112/ui-beautification` commits leading up to
+> `f7b14696` (text-legibility enforcement, fill separation, Solarized roles,
+> Accent/OnAccent routed into `visuals.selection`). The locked Modern/Retro
+> geometry + padding baselines are the values in `StyleProfile::defaults()`
+> (`freminal-common/src/gui_theme.rs:94-121`). This gate is now cleared; 112.4 is
+> unblocked.
 
 Scope: no production code by default — an audit pass using the 112.3f gallery,
 recording results in this plan under a "112.3g — theme audit results" note. Any
@@ -1271,6 +1274,26 @@ maintainer's final sign-off before 112.4.
 
 #### 112.4 — Apply full `Visuals` via the per-frame style hook
 
+> **STATUS: COMPLETE.** The per-frame style hook in `app_impl.rs` (~1036-1075)
+> now calls `chrome_style::build_visuals(...)` and applies the result via
+> `ctx.global_style_mut(|s| { s.visuals = visuals; apply_chrome_spacing(s, ...) })`,
+> replacing the two-field (`window_fill`/`panel_fill`) application. The
+> `style_cache` key (`window.rs:49`) grew a fourth element — the active
+> `GuiTheme` — so a profile change invalidates the cache; the comparison stays
+> manual (pointer-identity on the palette, `to_bits` on opacity, `PartialEq` on
+> `GuiTheme`, which is not `Eq` because of its `f32` fields). The setup/auto-mode
+> paths (`rendering.rs` `set_egui_options` / `update_egui_theme`) were likewise
+> routed through `build_visuals` + `apply_chrome_spacing` via a shared
+> `apply_chrome_visuals` helper, so chrome is fully themed at window creation and
+> on OS dark/light flips, not just on the per-frame hook. The now-unused
+> `internal_color_to_egui_with_alpha` imports were dropped from both files. The
+> active `GuiTheme` is `GuiTheme::default()` (Modern) until config persistence
+> (112.13) wires the user's profile choice — the cache key and `build_visuals`
+> plumbing are already profile-aware, so 112.13 only needs to feed the configured
+> value. `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, and `cargo machete` are green. The `background_opacity` behavior is
+> preserved (window_fill opaque, panel_fill opacity-aware) inside `build_visuals`.
+
 Scope: `freminal/src/gui/rendering.rs` (`set_egui_options`,
 `update_egui_theme`), `freminal/src/gui/app_impl.rs` (per-frame style-cache
 ~1042-1083), `freminal/src/gui/window.rs` (the `style_cache` field type ~49).
@@ -1300,8 +1323,44 @@ Stop: report cache-key change + manual re-theming result; await review.
 
 #### 112.5 — Performance: before/after frame-time capture
 
+> **STATUS: COMPLETE.** Within threshold; the steady-state cache short-circuit
+> is confirmed.
+>
+> A `build_visuals` micro-benchmark was added to
+> `freminal/benches/render_loop_bench.rs` (none existed — the per-frame style
+> hook is not headlessly reachable, so the function it calls is measured
+> directly). `build_visuals` costs **~1.4 µs** per invocation (Modern and Retro
+> both). Even in the impossible worst case where the cache regressed and it ran
+> every frame at 60 fps, that is ~0.008% of the 16.6 ms frame budget — invisible.
+> On the steady-state path it does **not** run: the `style_cache` key (display
+> mode, palette pointer, opacity bits, `GuiTheme`) is unchanged frame-to-frame
+> (`GuiTheme` is the constant default until 112.13), so `style_changed == false`
+> and neither `build_visuals` nor `global_style_mut` is called — verified
+> structurally in the 112.4 gate.
+>
+> Before/after on the render-pipeline control benches (none of which are in the
+> style-hook call path, so they confirm 112.4 did not perturb the render hot
+> path):
+>
+> | Benchmark                        | Before   | After    | Change            |
+> | -------------------------------- | -------- | -------- | ----------------- |
+> | `build_snapshot_after_ansi_feed` | ~160 ns  | ~161 ns  | noise (no change) |
+> | `instanced_bg/build_bg/200x50`   | ~265 ns  | ~279 ns  | noise (no change) |
+> | `instanced_fg/build_fg/80x24`    | ~1.48 ms | ~1.68 ms | noise¹            |
+> | `instanced_fg/build_fg/200x50`   | ~1.77 ms | ~1.96 ms | noise (no change) |
+> | `build_visuals/normal/modern`    | ~1.39 µs | ~1.40 µs | no change         |
+> | `build_visuals/normal/retro`     | ~1.41 µs | ~1.43 µs | no change         |
+>
+> ¹ The `sample_size = 10` Criterion config produces wide (~±11%) confidence
+> bands; `build_visuals` — byte-identical in before/after (it lives in
+> `chrome_style.rs`, untouched by 112.4) — itself flagged "+11.5% regressed" on
+> one run and "no change" on a rerun, proving the swings are environment noise,
+> not real regressions (per the `performance-benchmarks` noise rule). All deltas
+> are within the 15% threshold once noise is accounted for.
+
 Scope: benchmark capture only (per `performance-benchmarks` +
-`freminal-bench-table`). No production code change beyond what 112.4 landed.
+`freminal-bench-table`). No production code change beyond what 112.4 landed
+(a `build_visuals` micro-benchmark was added to `render_loop_bench.rs`).
 
 What: The per-frame style application + `Visuals` rebuild touches the render
 hot path. Capture the relevant benchmark IDs before (pre-112.4 baseline) and
@@ -1322,6 +1381,34 @@ Prohibitions: do NOT skip this — chrome styling runs per frame; do NOT accept 
 Stop: report before/after numbers; await review.
 
 #### 112.6 — Adopt centralized style: menu bar + tab bar
+
+> **STATUS: COMPLETE.** All hard-coded hues in `menu.rs` now derive from the
+> centralized themed `Visuals` (set in 112.4), read via `ui.visuals()` — the
+> single source of truth, so no palette plumbing was threaded into `menu.rs`.
+> Changes:
+>
+> - **Menu-bar indicators:** the password lock glyph uses `warn_fg_color`
+>   (palette yellow, was `rgb(255,200,50)`); the REC dot uses `error_fg_color`
+>   (palette red, was `rgb(220,60,60)`).
+> - **Active tab:** the explicit grey `Frame` fill (`from_gray(100)`) was
+>   removed entirely — the active-tab highlight is now drawn by the existing
+>   `Button::selectable(is_active, ...)`, which reads `visuals.selection`
+>   (Accent / OnAccent from 112.3e), so the active tab follows the theme and
+>   the frame no longer fights the selectable.
+> - **Bell-active tab:** the warm-amber tint (`rgba(180,120,30,40)`) and amber
+>   label (`rgb(255,180,50)`) now derive from `warn_fg_color` (translucent
+>   fill + solid label).
+> - **Being-dragged ghost:** the neutral grey ghost (`rgba(120,120,120,40)`)
+>   now derives from `faint_bg_color`.
+> - **Corner radius:** the hard-coded `4.0` is replaced by
+>   `visuals.menu_corner_radius` (profile-driven: Modern rounded, Retro square).
+>
+> The frame construction was extracted into a `Self::tab_frame(ui,
+is_being_dragged, has_bell)` helper to keep `show_single_tab` under the
+> `too_many_lines` limit. The tab-rename `TextEdit` focus path was untouched
+> (`freminal-modal-input-suppression` honored). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo machete`
+> are green.
 
 Scope: `freminal/src/gui/menu.rs`.
 
@@ -1345,6 +1432,52 @@ break tab-rename `TextEdit` focus (`freminal-modal-input-suppression`).
 Stop: report changes + manual check; await review.
 
 #### 112.7 — Adopt centralized style: settings modal + standalone settings window
+
+> **STATUS: COMPLETE.** Settings UI now inherits the centralized themed
+> `Visuals` (from 112.4) and ships a live style-profile picker. Changes:
+>
+> - **Profile picker (live preview, not persisted).** A new "Chrome Style"
+>   `ComboBox` (Modern / Retro) in the UI tab (`show_style_profile_picker`).
+>   Selecting a profile sets `pending_preview_profile`, which `show` /
+>   `show_standalone` return as the new `SettingsAction::PreviewProfile(profile)`.
+>   The dispatch (`settings_dispatch.rs`) sets `self.gui_theme =
+profile.defaults()` and repaints — the 112.4 per-frame hook (which now reads
+>   `self.gui_theme` instead of a hardcoded default) restyles all chrome live.
+>   The runtime seam is in place for 112.13 to wire config persistence; nothing
+>   is written to `Config` here.
+> - **Hard-coded colors removed.** The read-only banner (was amber
+>   `rgb(80,60,20)` fill + `rgb(255,220,100)` text) is now a translucent
+>   `warn_fg_color` tint via a shared `show_warning_banner` helper; status
+>   messages and the keybinding-conflict warning use `warn_fg_color` (was
+>   `Color32::YELLOW`); the regex-invalid input and layout "Delete" button use
+>   `error_fg_color` (was `rgb(0xE0,0x6C,0x4B)` / `rgb(220,80,80)`); the font
+>   preview frame uses `extreme_bg_color` + `menu_corner_radius` (was
+>   `from_gray(30)` + `4.0`); all 39 `Color32::GRAY` hint labels use
+>   `weak_text_color()`.
+> - **Standalone settings window visuals.** Settings opens as its own OS
+>   window with a separate egui `ctx`, and that branch in `update()` returns
+>   before the terminal render path's per-frame style hook runs — so the
+>   settings window was rendering with egui's default (unthemed) visuals. The
+>   settings-window branch now applies `build_visuals` + `apply_chrome_spacing`
+>   to its own `ctx` (resolving the active theme via the owning window's stable
+>   `os_dark_mode`, not the just-overwritten palette `dark_mode`) before
+>   rendering. (The unused inline `show()` modal path is left as-is.)
+> - **Opacity guarantee preserved.** The `opaque_frame` (derives its fill from
+>   `window_fill` and forces alpha 255) is unchanged — settings stays opaque
+>   regardless of `background_opacity`.
+> - **Focus rules:** the picker is a `ComboBox`, not a text field; the settings
+>   modal is already registered in `ui_overlay_open`, so no new
+>   `freminal-modal-input-suppression` wiring is needed.
+>
+> Two unit tests (`new_modal_defaults_to_modern_profile`,
+> `pending_preview_profile_round_trips`). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, `cargo machete`
+> green.
+>
+> **Deferred to 112.13:** revert-on-cancel for a previewed profile (theme and
+> opacity revert when the modal is cancelled; profile preview currently
+> persists in `gui_theme` after cancel because there is no original-profile
+> baseline to restore until config wiring lands).
 
 Scope: `freminal/src/gui/settings.rs`.
 
@@ -1371,6 +1504,36 @@ Stop: report changes + manual check; await review.
 
 #### 112.8 — Adopt centralized style: overlays (context menu, command history, search, toasts, welcome)
 
+> **STATUS: COMPLETE.** Per-overlay outcome:
+>
+> - **Context menu** (`widget.rs`) — already done in the 112.14 follow-up
+>   (`egui::containers::menu::menu_style` applied to the hand-rolled popup).
+> - **Toasts** (`toast.rs`) — the only `Stroke`+`CornerRadius` user, now fully
+>   theme-driven. The per-kind bubble fill (`background`) derives from palette
+>   semantic colors read off the active themed `Visuals` (Error→`error_fg_color`,
+>   Warning→`warn_fg_color`, Info→`hyperlink_color`), blended 65/35 toward
+>   `panel_fill` for a saturated bubble (was hard-coded `rgb(120,30,30)` etc.).
+>   The border uses `window_stroke.color` (was `rgba(255,255,255,32)`), the
+>   corner radius uses `menu_corner_radius` (was `6`, now profile-aware), and
+>   the title / detail / dismiss text is contrast-picked by bubble luminance
+>   (`prefers_dark_text`) so it stays legible on light and dark themes (was
+>   hard-coded `WHITE` / `gray(230)`). Three unit tests added.
+> - **Search** (`search.rs`) — the `Frame::popup` already inherits themed
+>   visuals; the two hard-coded reds are now palette-derived: the no-match
+>   TextEdit tint from a translucent `error_fg_color`, the regex-error label
+>   from `error_fg_color` (was `rgb(80,20,20)` / `rgb(255,80,80)`).
+> - **Command history** (`command_history.rs`) — already themed: `Frame::popup`
+>   inherits visuals and the selected-row fill already used
+>   `visuals.selection.bg_fill`. No change needed.
+> - **Welcome** (`welcome.rs`) — pure `egui::Window` + standard widgets, no
+>   hard-coded colors; themed by construction once 112.4 applies global
+>   visuals. No change needed.
+>
+> Behavior (positioning, dismissal, focus) untouched; the focusable overlays
+> (search, command history) keep their existing `ui_overlay_open` /
+> `lock_focus` wiring. `cargo test --all`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo machete` green.
+
 Scope: `freminal/src/gui/terminal/widget.rs` (context menu),
 `freminal/src/gui/command_history.rs`, `freminal/src/gui/search.rs`,
 `freminal/src/gui/toast.rs`, `freminal/src/gui/welcome.rs`.
@@ -1392,6 +1555,28 @@ styling only; honor `freminal-modal-input-suppression` for the focusable ones.
 Stop: report changes + manual check; await review.
 
 #### 112.9 — Adopt centralized style: guard + info dialogs (broadcast, close, paste, About, save-layout, unsaved-changes)
+
+> **STATUS: COMPLETE.** All six dialogs use `egui::Window` and inherit the
+> centralized themed `Visuals` (112.4) automatically; the audit found and fixed
+> three hard-coded color outliers, no logic touched:
+>
+> - **Paste guard** (`paste_guard.rs`) — the risky-content trigger banner used
+>   hard-coded orange `rgb(0xE0,0x6C,0x4B)`; now `warn_fg_color` (it is a
+>   paste-risk warning).
+> - **Broadcast guard** (`broadcast_guard.rs`) — the warning hint used
+>   `Color32::GRAY`; now `weak_text_color()`.
+> - **Close guard** (`close_guard.rs`) — the "Esc to cancel · Ctrl+Enter" hint
+>   used `Color32::GRAY`; now `weak_text_color()`.
+> - **About** (`menu.rs`), **Save Layout** (`menu.rs`), **Unsaved changes**
+>   (`settings.rs`) — pure `egui::Window` + standard widgets/hyperlink, no
+>   hard-coded colors; themed by construction. No change needed.
+>
+> Focus rules confirmed intact (styling-only pass, no logic change): the
+> focusable dialogs are all registered in `ui_overlay_open`
+> (`pending_save_layout`, `paste_dialog`, `broadcast_dialog`, `close_dialog`,
+> `about_window_open`); the settings unsaved-changes prompt lives in the
+> settings window's own context. `cargo test --all`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo machete` green.
 
 Scope: `freminal/src/gui/broadcast_guard.rs`, `freminal/src/gui/close_guard.rs`,
 `freminal/src/gui/paste_guard.rs`, `freminal/src/gui/menu.rs` (About,
@@ -1503,6 +1688,60 @@ Settings persistence without surfacing it.
 
 Stop: report all four wiring steps + the guard-test diff + Nix lint results;
 await review.
+
+### Task 112 follow-up fixes
+
+These fixes landed on `task-112/ui-beautification` after the planned subtasks,
+addressing chrome polish issues surfaced by maintainer review of the themed
+chrome.
+
+#### 112.14 — Context-menu + menu-bar styling polish (DONE)
+
+Scope: `freminal/src/gui/terminal/widget.rs` (`render_context_menu_area`),
+`freminal/src/gui/menu.rs` (`show_menu_bar`).
+
+Two chrome-styling issues surfaced once 112.4's themed widget fills landed:
+
+1. **Right-click context menu rendered as boxed buttons.** The context menu is
+   hand-rolled via `egui::Area` + `egui::Frame::popup`, which bypasses the menu
+   styling egui applies automatically inside `menu_button` / `context_menu`. So
+   its items rendered as full boxed buttons (each with the themed
+   `widgets.inactive` fill/stroke), instead of the borderless,
+   transparent-until-hovered rows the menu-bar dropdowns show. Fix: apply
+   `egui::containers::menu::menu_style(ui.style_mut())` inside the popup frame so
+   the context menu matches the dropdowns.
+2. **Menu bar too tight vertically.** egui's default `MenuBar` style
+   (`menu_style`) forces `button_padding = (2.0, 0.0)` — zero vertical padding —
+   leaving the top-level items cramped. Fix: `MenuBar::new().style(...)` now
+   applies `menu_style` (to keep the menu look) and then restores
+   `button_padding = (8.0, 6.0)` so the items have comfortable space above and
+   below the label.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`. Done.
+
+#### 112.15 — Menu-bar click-then-hover-to-switch (DEFERRED — egui limitation)
+
+Scope: `freminal/src/gui/menu.rs` (menu-bar open-state handling) — **not yet
+implemented**.
+
+Traditional menu-bar behavior — click one top-level menu, then mouse over a
+sibling top-level item to switch the open menu to that one — does not work.
+Root cause is an **egui 0.34.3 limitation**, not freminal code: inside
+`egui::MenuBar`, `ui.menu_button(...)` makes each top-level item a
+`SubMenuButton`, whose open logic is
+`should_open = (!was_open && clicked) || (is_hovered && !is_any_open)`. The
+hover-open path is gated by `!is_any_open`, so once any menu is open, hovering a
+sibling top-level item is blocked from switching to it. egui exposes no public
+config to flip this; the "armed menu bar" hover-switch is not implemented at the
+bar level in this version.
+
+Disposition: deferred. Implementing it would require reimplementing the menu
+bar's open-state management ourselves (track an "armed" top-level item,
+force-open the hovered sibling, close the previous) against egui internals — a
+larger, fragile change disproportionate to the polish. Revisit on an egui
+upgrade that fixes bar-level hover-switch, or as a dedicated follow-up if the
+custom workaround is approved.
 
 ---
 

@@ -266,6 +266,16 @@ impl FreminalGui {
                     handle.request_repaint(wid);
                 }
             }
+            SettingsAction::PreviewProfile(profile) => {
+                // Live chrome re-style: update the runtime GuiTheme the
+                // per-frame style hook (112.4) reads. Not persisted (112.13).
+                // The style_cache keys on GuiTheme, so the next frame rebuilds
+                // and re-applies the visuals across all chrome.
+                self.gui_theme = profile.defaults();
+                for &wid in self.windows.keys() {
+                    handle.request_repaint(wid);
+                }
+            }
             SettingsAction::PreviewTheme(slug)
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
             {

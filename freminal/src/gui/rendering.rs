@@ -11,50 +11,51 @@ use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
-use freminal_common::colors::TerminalColor;
 use freminal_common::config::BellMode;
+use freminal_common::gui_theme::GuiTheme;
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::io::WindowCommand;
 
-use crate::gui::colors::internal_color_to_egui_with_alpha;
+use crate::gui::chrome_style;
 use crate::gui::notifications::NotificationRequest;
 
+/// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
+/// spacing for the initial / window-creation style setup.
+///
+/// Routes through [`chrome_style::build_visuals`](crate::gui::chrome_style::build_visuals)
+/// so the entire chrome (widgets, borders, selection, menus) is themed, not
+/// just `window_fill`/`panel_fill`.  Normal-display mode is assumed at setup;
+/// the per-frame style hook in `app_impl::update` keeps the visuals in sync
+/// with the active pane's display mode and the active `GuiTheme` profile
+/// thereafter.
 pub(super) fn set_egui_options(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
-    ctx.global_style_mut(|style| {
-        // window_fill stays fully opaque so menus, settings modal, and all
-        // egui chrome are never affected by background_opacity.
-        style.visuals.window_fill =
-            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, theme, 1.0);
-        // panel_fill gets the opacity — it controls the CentralPanel
-        // (terminal area) background, which is the only surface that
-        // should be semi-transparent.
-        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
-            TerminalColor::DefaultBackground,
-            false,
-            theme,
-            bg_opacity,
-        );
-    });
+    apply_chrome_visuals(ctx, theme, bg_opacity);
     ctx.options_mut(|options| {
         options.zoom_with_keyboard = false;
     });
 }
 
-/// Update egui chrome colors (window/panel fill) to match a new theme.
+/// Re-apply the full palette-derived chrome [`Visuals`](egui::Visuals) to match
+/// a new theme (e.g. an OS dark/light change in `Auto` theme mode).
 pub(super) fn update_egui_theme(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
+    apply_chrome_visuals(ctx, theme, bg_opacity);
+}
+
+/// Shared body for [`set_egui_options`] / [`update_egui_theme`]: derive the
+/// chrome `Visuals` + spacing from the active palette and the default
+/// (Modern) [`GuiTheme`] profile, then apply them globally.
+///
+/// The `GuiTheme` profile is the default until config persistence wires the
+/// user's choice (subtask 112.13).  Normal-display mode is assumed here; the
+/// per-frame hook in `app_impl::update` handles the reverse-video case.
+fn apply_chrome_visuals(ctx: &egui::Context, theme: &ThemePalette, bg_opacity: f32) {
+    let gui_theme = GuiTheme::default();
+    let visuals = chrome_style::build_visuals(&gui_theme, theme, bg_opacity, true);
     ctx.global_style_mut(|style| {
-        // window_fill: always opaque (menus, settings, chrome).
-        style.visuals.window_fill =
-            internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, theme, 1.0);
-        // panel_fill: respects background_opacity (terminal area only).
-        style.visuals.panel_fill = internal_color_to_egui_with_alpha(
-            TerminalColor::DefaultBackground,
-            false,
-            theme,
-            bg_opacity,
-        );
+        style.visuals = visuals;
+        chrome_style::apply_chrome_spacing(style, &gui_theme);
     });
 }
 

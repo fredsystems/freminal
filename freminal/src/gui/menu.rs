@@ -39,7 +39,19 @@ impl super::FreminalGui {
     ) -> (TabBarAction, bool) {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
-        egui::MenuBar::new().ui(ui, |ui| {
+        // egui's default `MenuBar` style (`egui::menu_style`) sets
+        // `button_padding = (2.0, 0.0)`, leaving the top-level menu items with
+        // no vertical breathing room — the bar feels cramped. Override the
+        // bar's button style to keep the menu look (transparent inactive fill,
+        // no widget strokes) while restoring vertical padding so the items have
+        // comfortable space above and below the label, like a traditional menu.
+        let bar_style = |style: &mut egui::Style| {
+            egui::containers::menu::menu_style(style);
+            // Restore vertical (and a little horizontal) padding on the
+            // top-level bar buttons.
+            style.spacing.button_padding = egui::vec2(8.0, 6.0);
+        };
+        egui::MenuBar::new().style(bar_style).ui(ui, |ui| {
             self.show_menu_bar_contents(ui, win, window_id, &mut menu_action, &mut any_menu_open);
         });
         (menu_action, any_menu_open)
@@ -155,19 +167,22 @@ impl super::FreminalGui {
         let show_rec = self.is_recording();
 
         if show_lock || show_rec {
+            // Semantic indicator colors come from the centralized themed
+            // Visuals (set in 112.4): the lock is a "warning"-class indicator
+            // (palette yellow), the REC dot an "error"-class indicator
+            // (palette red).  No hard-coded hues — they follow the active theme.
+            let warn_color = ui.visuals().warn_fg_color;
+            let error_color = ui.visuals().error_fg_color;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if show_lock {
-                    ui.label(
-                        egui::RichText::new("\u{1F512}")
-                            .color(egui::Color32::from_rgb(255, 200, 50)),
-                    );
+                    ui.label(egui::RichText::new("\u{1F512}").color(warn_color));
                 }
                 if show_rec {
-                    // Red filled bullet + "REC" label; kept short so
-                    // it does not crowd the menu bar.
+                    // Filled bullet + "REC" label; kept short so it does not
+                    // crowd the menu bar.
                     ui.label(
                         egui::RichText::new("\u{25CF} REC")
-                            .color(egui::Color32::from_rgb(220, 60, 60))
+                            .color(error_color)
                             .strong(),
                     );
                 }
@@ -672,6 +687,40 @@ impl super::FreminalGui {
         .inner
     }
 
+    /// Build the [`egui::Frame`] for a single tab.
+    ///
+    /// Colors and corner radius come from the centralized themed `Visuals`
+    /// (set in 112.4) so the tab bar follows the active theme + profile — no
+    /// hard-coded hues:
+    ///
+    /// - **active**: the active-tab highlight is drawn by the
+    ///   `Button::selectable(is_active, ...)` in [`show_single_tab`], which
+    ///   reads `visuals.selection` (`Accent` / `OnAccent`).  The frame is left
+    ///   transparent so the two do not fight; the selectable owns the look.
+    /// - **bell-active (inactive)**: a translucent tint of the palette warning
+    ///   color so an unacked bell reads as attention-worthy in any theme.
+    /// - **being-dragged**: a translucent ghost using the faint surface fill.
+    /// - **otherwise**: a transparent frame.
+    fn tab_frame(ui: &egui::Ui, is_being_dragged: bool, has_bell: bool) -> egui::Frame {
+        let corner = ui.visuals().menu_corner_radius;
+        let translucent = |c: egui::Color32, alpha: u8| {
+            egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+        };
+        if is_being_dragged {
+            egui::Frame::NONE
+                .fill(translucent(ui.visuals().faint_bg_color, 64))
+                .corner_radius(corner)
+                .inner_margin(0.0)
+        } else if has_bell {
+            egui::Frame::NONE
+                .fill(translucent(ui.visuals().warn_fg_color, 40))
+                .corner_radius(corner)
+                .inner_margin(0.0)
+        } else {
+            egui::Frame::NONE
+        }
+    }
+
     /// Render a single tab element with label, optional close button,
     /// and a distinct background color for the active tab.
     ///
@@ -752,29 +801,7 @@ impl super::FreminalGui {
             display_label
         };
 
-        // Tab frame: active gets a gray fill, bell-active inactive tabs
-        // get a warm amber tint, others use a transparent frame. A tab
-        // that is currently being dragged renders as a translucent ghost
-        // (dimmed fill) at its preview position so the user sees where
-        // the reorder will land without committing the move.
-        let frame = if is_being_dragged {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgba_unmultiplied(120, 120, 120, 40))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else if is_active {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_gray(100))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else if has_bell {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgba_unmultiplied(180, 120, 30, 40))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else {
-            egui::Frame::NONE
-        };
+        let frame = Self::tab_frame(ui, is_being_dragged, has_bell);
 
         let frame_response = frame.show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -799,11 +826,12 @@ impl super::FreminalGui {
                         action = TabBarAction::CancelRename;
                     }
                 } else {
-                    // Bell-active tabs use amber text for visibility.
+                    // Bell-active tabs use the palette warning color for the
+                    // label so it stands out in any theme (no hard-coded amber).
                     let rich_label = if has_bell {
                         egui::RichText::new(&display_label)
                             .size(13.0)
-                            .color(egui::Color32::from_rgb(255, 180, 50))
+                            .color(ui.visuals().warn_fg_color)
                     } else {
                         egui::RichText::new(&display_label).size(13.0)
                     };
