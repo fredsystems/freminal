@@ -37,10 +37,12 @@ pub mod view_state;
 mod actions;
 mod app_impl;
 mod broadcast_guard;
+pub mod chrome_style;
 mod close_guard;
 mod command_blocks;
 mod command_history;
 mod hot_reload;
+pub(crate) mod icons;
 mod layout_ops;
 mod menu;
 mod notifications;
@@ -124,6 +126,27 @@ struct FreminalGui {
     windows: HashMap<WindowId, PerWindowState>,
 
     config: Config,
+
+    /// Active chrome style geometry (Modern/Retro profile + radii/strokes/
+    /// spacing) applied to all egui chrome via the per-frame style hook
+    /// (112.4). Defaults to `GuiTheme::default()` (Modern); the settings
+    /// profile picker (112.7) mutates it for live preview. Config persistence
+    /// of the profile is wired in 112.13 — until then this is the single
+    /// runtime source the style hook reads.
+    gui_theme: freminal_common::gui_theme::GuiTheme,
+
+    /// Live theme preview override for chrome styling.
+    ///
+    /// While the Settings theme picker is previewing a theme, the chosen
+    /// palette is stored here so the per-frame chrome style hook can apply it
+    /// **immediately and deterministically**, without waiting for the PTY
+    /// round-trip (`InputEvent::ThemeChange` -> `set_theme` -> `build_snapshot`
+    /// -> `snap.theme`). The round-trip still happens (so the terminal *buffer*
+    /// re-themes too), but chrome no longer depends on the GUI happening to
+    /// read the post-`ThemeChange` snapshot — which was racy and intermittent.
+    /// `None` means "use the active snapshot's theme" (the steady state).
+    /// Set on `PreviewTheme` / `RevertTheme`, cleared on Apply.
+    preview_theme: Option<&'static freminal_common::themes::ThemePalette>,
 
     /// CLI arguments needed for spawning new PTY tabs.
     args: Args,
@@ -309,6 +332,7 @@ struct FreminalGui {
 
 impl FreminalGui {
     #[allow(clippy::too_many_arguments)] // Constructor naturally needs all initialization params.
+    #[allow(clippy::too_many_lines)] // Constructor: sequential field init + legacy state migration.
     fn new(
         config: Config,
         args: Args,
@@ -392,11 +416,18 @@ impl FreminalGui {
                 |dir| freminal_common::layout::discover_layouts_with_errors(&dir),
             );
 
+        // Initialize the chrome style profile from the persisted config
+        // ([chrome] profile = "modern"|"retro", Task 112.13). Captured before
+        // `config` is moved into the struct literal below.
+        let gui_theme = config.chrome.profile.defaults();
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
             paste_guard,
             config,
+            gui_theme,
+            preview_theme: None,
             args,
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),

@@ -36,6 +36,18 @@ static CASKAYDIA_ITALIC: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdF
 static CASKAYDIA_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../res/CaskaydiaCoveNerdFont-BoldItalic.ttf");
 
+/// Raw bytes of the bundled default font (`CaskaydiaCove` Nerd Font, Regular).
+///
+/// Exposed for callers that need to inspect the bundled face directly rather
+/// than going through the egui font registry — notably the chrome-icon
+/// regression test, which verifies every [`crate::gui::icons::ChromeIcon`]
+/// codepoint resolves to a glyph in this exact face.
+#[cfg(test)]
+#[must_use]
+pub(crate) const fn bundled_regular_font_bytes() -> &'static [u8] {
+    CASKAYDIA_REGULAR
+}
+
 /// Emoji font family candidates, tried in order.
 const EMOJI_CANDIDATES: &[&str] = &[
     "Apple Color Emoji",

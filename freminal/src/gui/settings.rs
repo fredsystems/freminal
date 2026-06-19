@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use super::font_manager;
+use super::icons::ChromeIcon;
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
     self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
@@ -98,6 +99,11 @@ pub enum SettingsAction {
     /// The modal was closed without Apply while opacity was being previewed —
     /// revert to the original value.
     RevertOpacity(f32),
+    /// The user changed the chrome style profile (Modern/Retro) in the UI tab —
+    /// apply it temporarily so they can preview the restyle live. Carries the
+    /// chosen profile. Not persisted here (112.13 wires config persistence);
+    /// this only drives the runtime `gui_theme` the style hook reads.
+    PreviewProfile(freminal_common::gui_theme::StyleProfile),
     /// The user clicked "Test Notification" in the Notifications tab — route
     /// a sample notification through the current draft `[notifications]`
     /// config so the user can verify routing without running a command.
@@ -305,6 +311,17 @@ pub struct SettingsModal {
     /// `SettingsAction::TestPaste` so the app can open the confirm dialog with
     /// sample content using the draft `[paste_guard]` config.
     pending_test_paste: bool,
+
+    /// The chrome style profile (Modern/Retro) currently selected in the UI
+    /// tab's profile picker. In-memory only at this stage — config persistence
+    /// is wired in 112.13. Tracks the picker's selection so the control renders
+    /// the active choice; changing it sets `pending_preview_profile`.
+    draft_profile: freminal_common::gui_theme::StyleProfile,
+
+    /// Set by `show_ui_tab` when the user changes the style-profile picker.
+    /// Consumed by `show` / `show_standalone` which return it as
+    /// `SettingsAction::PreviewProfile` so the chrome restyles live.
+    pending_preview_profile: Option<freminal_common::gui_theme::StyleProfile>,
 }
 
 impl SettingsModal {
@@ -332,6 +349,8 @@ impl SettingsModal {
             pending_close: PendingClose::None,
             pending_test_notification: false,
             pending_test_paste: false,
+            draft_profile: freminal_common::gui_theme::StyleProfile::default(),
+            pending_preview_profile: None,
         }
     }
 
@@ -345,6 +364,9 @@ impl SettingsModal {
         self.draft = live_config.clone();
         self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
         self.original_opacity = live_config.ui.background_opacity;
+        // Seed the profile picker from the persisted chrome profile (112.13) so
+        // it reflects the active choice rather than always showing the default.
+        self.draft_profile = live_config.chrome.profile;
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
     }
@@ -465,6 +487,8 @@ impl SettingsModal {
         };
 
         self.key_recording = KeyRecordingState::Idle;
+        // Seed the profile picker from the persisted chrome profile (112.13).
+        self.draft_profile = live_config.chrome.profile;
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
         self.is_open = true;
@@ -528,7 +552,8 @@ impl SettingsModal {
         Panel::bottom("settings_bottom_bar").show_inside(&mut root_ui, |ui| {
             ui.add_space(4.0);
             if let Some(msg) = &self.status_message {
-                ui.colored_label(egui::Color32::YELLOW, msg);
+                let warn = ui.visuals().warn_fg_color;
+                ui.colored_label(warn, msg);
             }
             ui.horizontal(|ui| {
                 let reset_btn = egui::Button::new("Reset to Defaults");
@@ -556,15 +581,8 @@ impl SettingsModal {
             ui.add_space(4.0);
 
             // --- Read-only banner ---
-            if let Some(reason) = &self.read_only_reason {
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(80, 60, 20))
-                    .corner_radius(4.0)
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.colored_label(egui::Color32::from_rgb(255, 220, 100), reason);
-                    });
-                ui.add_space(4.0);
+            if let Some(reason) = self.read_only_reason.clone() {
+                Self::show_warning_banner(ui, &reason);
             }
 
             // --- Tab bar ---
@@ -604,6 +622,12 @@ impl SettingsModal {
 
         if std::mem::take(&mut self.pending_test_paste) {
             return SettingsAction::TestPaste;
+        }
+
+        if let Some(profile) = self.pending_preview_profile.take()
+            && action != SettingsAction::Applied
+        {
+            return SettingsAction::PreviewProfile(profile);
         }
 
         if !self.is_open && action != SettingsAction::Applied {
@@ -671,15 +695,8 @@ impl SettingsModal {
             .show(ctx, |ui| {
                 // --- Read-only banner ---
                 let is_read_only = self.read_only_reason.is_some();
-                if let Some(reason) = &self.read_only_reason {
-                    egui::Frame::NONE
-                        .fill(egui::Color32::from_rgb(80, 60, 20))
-                        .corner_radius(4.0)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.colored_label(egui::Color32::from_rgb(255, 220, 100), reason);
-                        });
-                    ui.add_space(4.0);
+                if let Some(reason) = self.read_only_reason.clone() {
+                    Self::show_warning_banner(ui, &reason);
                 }
 
                 // --- Tab bar ---
@@ -710,7 +727,8 @@ impl SettingsModal {
 
                 // --- Status message ---
                 if let Some(msg) = &self.status_message {
-                    ui.colored_label(egui::Color32::YELLOW, msg);
+                    let warn = ui.visuals().warn_fg_color;
+                    ui.colored_label(warn, msg);
                 }
 
                 // --- Bottom buttons ---
@@ -767,6 +785,12 @@ impl SettingsModal {
             return SettingsAction::TestPaste;
         }
 
+        if let Some(profile) = self.pending_preview_profile.take()
+            && action != SettingsAction::Applied
+        {
+            return SettingsAction::PreviewProfile(profile);
+        }
+
         if !self.is_open && action != SettingsAction::Applied {
             let theme_changed = self.original_theme_slug != theme_before;
             let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
@@ -812,6 +836,15 @@ impl SettingsModal {
     #[must_use]
     pub(super) const fn draft_notifications(&self) -> &config::NotificationsConfig {
         &self.draft.notifications
+    }
+
+    /// Returns the active theme slug for the draft (unsaved) config, so the
+    /// settings window can style its own chrome with the theme the user is
+    /// currently previewing instead of the committed config's theme. Without
+    /// this the settings window keeps showing the old theme until Apply.
+    #[must_use]
+    pub(super) fn draft_active_theme_slug(&self, os_dark_mode: bool) -> String {
+        self.draft.theme.active_slug(os_dark_mode).to_string()
     }
 
     /// The draft `[paste_guard]` config, so the "Test Paste" button can preview
@@ -934,7 +967,7 @@ impl SettingsModal {
         // --- Ligatures toggle ---
         ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures");
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Render multi-character ligatures (e.g. =>, !=, ->).",
         );
         ui.add_space(8.0);
@@ -957,9 +990,11 @@ impl SettingsModal {
             FontFamily::Monospace
         };
 
+        let preview_fill = ui.visuals().extreme_bg_color;
+        let preview_corner = ui.visuals().menu_corner_radius;
         egui::Frame::NONE
-            .fill(egui::Color32::from_gray(30))
-            .corner_radius(4.0)
+            .fill(preview_fill)
+            .corner_radius(preview_corner)
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.label(
@@ -1022,7 +1057,7 @@ impl SettingsModal {
         ui.add_space(4.0);
         if self.draft.theme.mode == ThemeMode::Auto {
             ui.colored_label(
-                egui::Color32::GRAY,
+                ui.visuals().weak_text_color(),
                 "Auto mode uses the dark theme when the OS is in dark mode,\nand the light theme when the OS is in light mode.",
             );
         }
@@ -1091,14 +1126,20 @@ impl SettingsModal {
         }
         ui.label("Leave empty to use the system default shell.");
         ui.add_space(8.0);
-        ui.colored_label(egui::Color32::GRAY, "Changes take effect on next session.");
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Changes take effect on next session.",
+        );
     }
 
     fn show_scrollback_tab(&mut self, ui: &mut Ui) {
         ui.label("Scrollback Limit:");
         ui.add(DragValue::new(&mut self.draft.scrollback.limit).range(1..=100_000));
         ui.add_space(8.0);
-        ui.colored_label(egui::Color32::GRAY, "Changes take effect on next session.");
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Changes take effect on next session.",
+        );
     }
 
     fn show_logging_tab(&mut self, ui: &mut Ui) {
@@ -1138,8 +1179,62 @@ impl SettingsModal {
 
         ui.add_space(8.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Log level changes take effect on next launch.",
+        );
+    }
+
+    /// Render the read-only / warning banner shown at the top of the settings
+    /// UI when editing is disabled.
+    ///
+    /// The fill is a translucent tint of the palette warning color and the text
+    /// is the warning color, so the banner follows the active theme + profile
+    /// (no hard-coded amber).
+    fn show_warning_banner(ui: &mut Ui, reason: &str) {
+        let warn = ui.visuals().warn_fg_color;
+        let fill = egui::Color32::from_rgba_unmultiplied(warn.r(), warn.g(), warn.b(), 32);
+        let corner = ui.visuals().menu_corner_radius;
+        egui::Frame::NONE
+            .fill(fill)
+            .corner_radius(corner)
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.colored_label(warn, reason);
+            });
+        ui.add_space(4.0);
+    }
+
+    /// Render the chrome style-profile picker (Modern / Retro).
+    ///
+    /// Changing the selection sets `pending_preview_profile`, which
+    /// `show` / `show_standalone` return as `SettingsAction::PreviewProfile`
+    /// for a live restyle, and writes the choice into the draft config
+    /// (`draft.chrome.profile`) so it is persisted on Apply (Task 112.13).
+    fn show_style_profile_picker(&mut self, ui: &mut Ui) {
+        use freminal_common::gui_theme::StyleProfile;
+
+        ui.label("Chrome Style:");
+        let before = self.draft_profile;
+        ComboBox::from_id_salt("chrome_style_profile")
+            .selected_text(match self.draft_profile {
+                StyleProfile::Modern => "Modern",
+                StyleProfile::Retro => "Retro",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern");
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro");
+            });
+        if self.draft_profile != before {
+            self.pending_preview_profile = Some(self.draft_profile);
+            // Persist into the draft so Apply (which saves `self.draft`) writes
+            // the chosen profile to config.
+            self.draft.chrome.profile = self.draft_profile;
+        }
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Modern: rounded corners, soft borders, roomier spacing. \
+             Retro: square corners, crisp borders, denser spacing.",
         );
     }
 
@@ -1147,14 +1242,20 @@ impl SettingsModal {
         ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When enabled, the menu bar at the top of the window is hidden.",
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Can also be set via the --hide-menu-bar CLI flag.",
         );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        self.show_style_profile_picker(ui);
 
         ui.add_space(8.0);
         ui.separator();
@@ -1164,11 +1265,11 @@ impl SettingsModal {
         ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05));
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Only affects backgrounds. Text and content remain fully opaque.",
         );
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "On X11, requires a running compositor (e.g. picom).",
         );
 
@@ -1182,7 +1283,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Makes plain URLs (http, https, file, ftp, mailto) clickable even when \
              programs do not emit OSC 8 hyperlinks.",
         );
@@ -1214,7 +1315,7 @@ impl SettingsModal {
         }
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Path to a background image (PNG, JPEG, WebP). Leave empty to disable.",
         );
 
@@ -1258,7 +1359,7 @@ impl SettingsModal {
         ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05));
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Controls the opacity of the background image overlay.",
         );
     }
@@ -1286,11 +1387,11 @@ impl SettingsModal {
         }
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Path to a GLSL fragment shader for post-processing. Leave empty to disable.",
         );
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Uniforms: sampler2D u_terminal, vec2 u_resolution, float u_time.",
         );
 
@@ -1299,7 +1400,7 @@ impl SettingsModal {
         ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Automatically recompile the shader when the file changes on disk.",
         );
     }
@@ -1311,7 +1412,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When disabled, the tab bar only appears with multiple tabs.",
         );
 
@@ -1339,7 +1440,7 @@ impl SettingsModal {
         ui.label("Tab Title Policy:");
         ui.add_space(2.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "How a tab combines a custom name (your rename) with the title the \
              shell sets via OSC 0/1/2.",
         );
@@ -1388,7 +1489,10 @@ impl SettingsModal {
             self.draft.tab_title.policy,
             &self.draft.tab_title.separator,
         );
-        ui.colored_label(egui::Color32::GRAY, format!("Preview:  {preview}"));
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            format!("Preview:  {preview}"),
+        );
 
         ui.add_space(8.0);
         ui.separator();
@@ -1402,7 +1506,7 @@ impl SettingsModal {
         );
         ui.add_space(2.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When enabled, mousing into a split pane gives it keyboard focus \
              without a click. When disabled, panes are focused only by \
              clicking. Tab switching is always click-to-focus.",
@@ -1422,7 +1526,7 @@ impl SettingsModal {
         ui.label("Broadcast Input:");
         ui.add_space(2.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When enabled for a tab, keystrokes are sent to every pane in the \
              tab at once. Toggle it per-tab with the keybinding below.",
         );
@@ -1447,7 +1551,7 @@ impl SettingsModal {
         );
         ui.add_space(2.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When on, the first time you enable broadcast in a tab a dialog \
              asks you to confirm. Disabling broadcast never prompts.",
         );
@@ -1462,7 +1566,7 @@ impl SettingsModal {
         ui.heading("Shell Integration");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "OSC 133 (FinalTerm/FTCS) shell integration lets Freminal detect \
              where each shell command starts, ends, and what its exit code was. \
              This powers command-block navigation, exit-status gutters, and \
@@ -1476,7 +1580,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Sets TERM_PROGRAM and TERM_PROGRAM_VERSION in the PTY environment \
              so shell scripts can detect Freminal.  Also enables spawn-time \
              auto-loading of the bundled shell-integration scripts for bash, \
@@ -1491,7 +1595,7 @@ impl SettingsModal {
         ui.heading("Command Blocks");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Visual treatment of OSC 133 command blocks. Requires the \
              \"Set TERM_PROGRAM=freminal\" option above to be enabled so \
              that the bundled shell-integration scripts auto-load on \
@@ -1505,7 +1609,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When disabled, OSC 133 markers are still parsed but no command \
              blocks are surfaced to the GUI.",
         );
@@ -1518,7 +1622,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Display the duration of long-running commands next to the gutter.",
         );
 
@@ -1535,7 +1639,7 @@ impl SettingsModal {
         });
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Minimum command duration before the duration label is shown.",
         );
 
@@ -1559,7 +1663,7 @@ impl SettingsModal {
             });
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "A thin colored strip on the left edge of each pane showing every \
              command's status (green = success, red = failure, yellow = \
              running). \"Off\" hides the gutter and reclaims its width for text.",
@@ -1584,7 +1688,7 @@ impl SettingsModal {
 
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Visual: briefly flash the terminal area.\n\
              None: silently ignore the bell.",
         );
@@ -1597,7 +1701,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Ring the bell (using the mode above) when a command finishes \
              (OSC 133 D), even if the program emitted no bell character. \
              Requires shell integration.",
@@ -1611,7 +1715,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Master switch. When off, no toasts or desktop notifications are \
              produced, regardless of the options below.",
         );
@@ -1643,7 +1747,7 @@ impl SettingsModal {
         });
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Minimum command duration before a command-finished notification \
              fires. Avoids spamming notifications for fast commands.",
         );
@@ -1667,7 +1771,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Tokens: {command}, {duration}, {exit_code}, {cwd}, {tab_name}.",
         );
 
@@ -1677,7 +1781,7 @@ impl SettingsModal {
         }
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Dispatches a sample notification through the routing selected \
              above (uses the current, unsaved settings).",
         );
@@ -1690,7 +1794,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Mirrors the toggle in the Bell tab. The bell mode is configured \
              there.",
         );
@@ -1742,7 +1846,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "When enabled, programs can read the system clipboard via \
              OSC 52 query.\n\
              This is a potential security risk if untrusted programs run \
@@ -1757,7 +1861,7 @@ impl SettingsModal {
         );
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Show a \u{1f510} lock icon in the tab bar when the foreground \
              process disables terminal echo (e.g. password prompts from \
              sudo, ssh, passwd).",
@@ -1779,7 +1883,7 @@ impl SettingsModal {
         ui.heading("Close Guard");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Confirm before closing a pane, tab, or window that has a running \
              foreground command (detected via OSC 133 shell integration).",
         );
@@ -1806,7 +1910,7 @@ impl SettingsModal {
         ui.heading("Paste Guard");
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Show a confirmation dialog before pasting risky content. \
              Bypass for a single paste with Ctrl+Shift+Alt+V.",
         );
@@ -1841,16 +1945,19 @@ impl SettingsModal {
                 let mut remove_index: Option<usize> = None;
                 for (idx, pattern) in self.draft.paste_guard.pattern_list.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.button("\u{2796}").on_hover_text("Remove").clicked() {
+                        if ui
+                            .button(ChromeIcon::Minus.rich_text())
+                            .on_hover_text("Remove")
+                            .clicked()
+                        {
                             remove_index = Some(idx);
                         }
                         let valid = regex::Regex::new(pattern).is_ok();
+                        let error_color = ui.visuals().error_fg_color;
                         let edit = egui::TextEdit::singleline(pattern)
                             .desired_width(f32::INFINITY)
                             .font(egui::TextStyle::Monospace)
-                            .text_color_opt(
-                                (!valid).then_some(egui::Color32::from_rgb(0xE0, 0x6C, 0x4B)),
-                            );
+                            .text_color_opt((!valid).then_some(error_color));
                         ui.add(edit).on_hover_text(if valid {
                             "Valid regex"
                         } else {
@@ -1863,7 +1970,11 @@ impl SettingsModal {
                 }
 
                 ui.add_space(2.0);
-                if ui.button("\u{2795} Add pattern").clicked() {
+                if ui
+                    .button(ChromeIcon::Plus.rich_text().strong())
+                    .on_hover_text("Add pattern")
+                    .clicked()
+                {
                     self.draft.paste_guard.pattern_list.push(String::new());
                 }
             });
@@ -1875,7 +1986,7 @@ impl SettingsModal {
         }
         ui.add_space(4.0);
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Opens the confirm dialog with sample content using the current \
              (unsaved) settings, so you can preview the guard without pasting \
              for real.",
@@ -1888,7 +1999,7 @@ impl SettingsModal {
         let effective_map = self.draft.build_binding_map().unwrap_or_default();
 
         ui.colored_label(
-            egui::Color32::GRAY,
+            ui.visuals().weak_text_color(),
             "Click a binding to change it.  Press the new key combination \
              when prompted.",
         );
@@ -2080,14 +2191,18 @@ impl SettingsModal {
                         ui.add_space(8.0);
 
                         if let Some(other) = conflict {
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
-                                format!(
-                                    "\u{26a0} {} is already bound to {}.",
-                                    combo,
-                                    other.display_label()
-                                ),
-                            );
+                            let warn = ui.visuals().warn_fg_color;
+                            ui.horizontal(|ui| {
+                                ui.label(ChromeIcon::Warning.rich_text_colored(warn));
+                                ui.colored_label(
+                                    warn,
+                                    format!(
+                                        "{} is already bound to {}.",
+                                        combo,
+                                        other.display_label()
+                                    ),
+                                );
+                            });
                             ui.label("Accepting will unbind the other action.");
                             ui.add_space(8.0);
                         }
@@ -2164,13 +2279,29 @@ impl SettingsModal {
                 },
             );
 
-        let button_text = if is_recording {
-            "\u{23fa} Recording...".to_owned()
+        let button_label: egui::WidgetText = if is_recording {
+            // Bundled record glyph (monospace family) + text; built as layout
+            // job so the icon resolves from the Nerd Font and the text stays in
+            // the UI font.
+            let mut job = egui::text::LayoutJob::default();
+            ChromeIcon::Record.rich_text().append_to(
+                &mut job,
+                &egui::Style::default(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+            egui::RichText::new(" Recording...").append_to(
+                &mut job,
+                &egui::Style::default(),
+                egui::FontSelection::Default,
+                egui::Align::Center,
+            );
+            job.into()
         } else {
-            current_text
+            current_text.into()
         };
 
-        let btn = ui.add_sized([180.0, 20.0], egui::Button::new(&button_text));
+        let btn = ui.add_sized([180.0, 20.0], egui::Button::new(button_label));
         if btn.clicked() && !is_recording {
             self.key_recording = KeyRecordingState::Recording { action };
         }
@@ -2454,15 +2585,15 @@ impl SettingsModal {
                                     ui.label(egui::RichText::new(format!("— {desc}")).weak());
                                 }
                                 // Right-align the delete button.
+                                let delete_color = ui.visuals().error_fg_color;
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("Delete").color(
-                                                        egui::Color32::from_rgb(220, 80, 80),
-                                                    ),
+                                                    egui::RichText::new("Delete")
+                                                        .color(delete_color),
                                                 )
                                                 .small(),
                                             )
@@ -2742,6 +2873,39 @@ mod tests {
     }
 
     #[test]
+    fn new_modal_defaults_to_modern_profile() {
+        use freminal_common::gui_theme::StyleProfile;
+        let modal = SettingsModal::new(None);
+        assert_eq!(
+            modal.draft_profile,
+            StyleProfile::Modern,
+            "the chrome style picker must default to Modern"
+        );
+        assert!(
+            modal.pending_preview_profile.is_none(),
+            "no profile preview is pending on a fresh modal"
+        );
+    }
+
+    #[test]
+    fn pending_preview_profile_round_trips() {
+        use freminal_common::gui_theme::StyleProfile;
+        // Simulate the picker selecting Retro: the UI tab sets
+        // `pending_preview_profile`; `show`/`show_standalone` then take it and
+        // return a PreviewProfile action.
+        let mut modal = SettingsModal::new(None);
+        modal.draft_profile = StyleProfile::Retro;
+        modal.pending_preview_profile = Some(StyleProfile::Retro);
+
+        let taken = modal.pending_preview_profile.take();
+        assert_eq!(taken, Some(StyleProfile::Retro));
+        assert!(
+            modal.pending_preview_profile.is_none(),
+            "taking the pending preview clears it (one-shot signal)"
+        );
+    }
+
+    #[test]
     fn settings_tab_labels() {
         assert_eq!(SettingsTab::Font.label(), "Font");
         assert_eq!(SettingsTab::Cursor.label(), "Cursor");
@@ -2903,6 +3067,35 @@ mod tests {
             modal.draft_paste_guard().pattern_list,
             vec![r"\bgit\s+push\b"]
         );
+    }
+
+    #[test]
+    fn draft_active_theme_slug_follows_draft_edits() {
+        // The settings window styles its own chrome from this accessor so a
+        // theme picked in the dropdown previews live (before Apply). It must
+        // reflect unsaved draft edits, honour the mode, and the OS-dark arg.
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), true);
+
+        // Defaults: dark mode in light/dark resolves to the dark/light name.
+        assert_eq!(modal.draft.theme.mode, ThemeMode::Dark);
+        assert_eq!(modal.draft_active_theme_slug(true), "catppuccin-mocha");
+
+        // Editing the draft dark theme is reflected immediately.
+        modal.draft.theme.dark_name = "dracula".to_string();
+        assert_eq!(modal.draft_active_theme_slug(true), "dracula");
+
+        // In Light mode the light name wins regardless of the OS-dark arg.
+        modal.draft.theme.mode = ThemeMode::Light;
+        modal.draft.theme.light_name = "catppuccin-latte".to_string();
+        assert_eq!(modal.draft_active_theme_slug(true), "catppuccin-latte");
+        assert_eq!(modal.draft_active_theme_slug(false), "catppuccin-latte");
+
+        // In Auto mode the OS-dark arg selects the dark vs light name.
+        modal.draft.theme.mode = ThemeMode::Auto;
+        assert_eq!(modal.draft_active_theme_slug(true), "dracula");
+        assert_eq!(modal.draft_active_theme_slug(false), "catppuccin-latte");
     }
 
     #[test]

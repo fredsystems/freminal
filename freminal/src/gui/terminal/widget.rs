@@ -8,6 +8,7 @@
 use crate::gui::{
     folding::{RenderedRow, RowMap, compute_fold_ranges},
     fonts::{FontConfig, setup_font_files},
+    icons::ChromeIcon,
     mouse::PreviousMouseState,
     shaping::ShapedLine,
     view_state::{CellCoord, ViewState},
@@ -648,6 +649,14 @@ fn render_context_menu_area(
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(120.0);
+
+                // Apply egui's menu styling so items render as borderless
+                // rows (transparent until hovered) rather than boxed buttons,
+                // matching the menu-bar dropdowns. egui applies this
+                // automatically inside `menu_button`/`context_menu`, but this
+                // popup is hand-rolled via `Area` + `Frame::popup`, so it must
+                // be applied explicitly here.
+                egui::containers::menu::menu_style(ui.style_mut());
 
                 // Copy — disabled when no text is selected.
                 if ui
@@ -2482,12 +2491,16 @@ impl FreminalTerminalWidget {
                 .cursor_visual_row
                 .mul_add(logical_cell_h, terminal_rect.min.y);
             let lock_pos = egui::pos2(cursor_logical_x, cursor_logical_y);
+            // Bundled lock glyph (monospace family → resolves from the bundled
+            // Nerd Font, not the fallible system emoji font), tinted to the
+            // palette warning color rather than a hard-coded amber.
+            let lock_color = ui.visuals().warn_fg_color;
             ui.painter().text(
                 lock_pos,
                 egui::Align2::LEFT_TOP,
-                "\u{1F512}",
-                egui::FontId::proportional(logical_cell_h),
-                egui::Color32::from_rgb(255, 200, 50),
+                ChromeIcon::Lock.glyph(),
+                egui::FontId::monospace(logical_cell_h),
+                lock_color,
             );
         }
 

@@ -83,7 +83,7 @@ impl BroadcastConfirmDialog {
                 );
                 ui.add_space(8.0);
                 ui.colored_label(
-                    egui::Color32::GRAY,
+                    ui.visuals().weak_text_color(),
                     "Every keystroke will be sent to all panes at once until you \
                      toggle broadcast off.",
                 );

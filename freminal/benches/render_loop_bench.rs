@@ -595,6 +595,45 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Chrome style: build_visuals (Task 112.4 / 112.5)
+// ---------------------------------------------------------------
+//
+// `build_visuals` maps a `(GuiTheme, ThemePalette)` pair to a fully-specified
+// egui `Visuals`.  It is invoked by the per-frame style hook in
+// `app_impl::update`, but **only when the style cache key changes** (theme /
+// profile / opacity / display-mode).  On the steady-state path the cache
+// short-circuits the call entirely, so this measures the worst case: the cost
+// paid on a theme/profile switch, and the cost that *would* be paid every
+// frame if the cache regressed.  It must be far below a frame budget so that
+// even a per-frame call (a cache regression) would be invisible.
+fn bench_build_visuals(c: &mut Criterion) {
+    use freminal::gui::chrome_style::build_visuals;
+    use freminal_common::gui_theme::StyleProfile;
+
+    let mut group = c.benchmark_group("build_visuals");
+    group.throughput(Throughput::Elements(1));
+
+    for (label, profile) in [
+        ("modern", StyleProfile::Modern),
+        ("retro", StyleProfile::Retro),
+    ] {
+        let gui_theme = profile.defaults();
+        group.bench_function(BenchmarkId::new("normal_display", label), |b| {
+            b.iter(|| {
+                std::hint::black_box(build_visuals(
+                    std::hint::black_box(&gui_theme),
+                    std::hint::black_box(&CATPPUCCIN_MOCHA),
+                    std::hint::black_box(1.0),
+                    std::hint::black_box(true),
+                ));
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -610,6 +649,7 @@ criterion_group!(
         bench_bg_instances,
         bench_fg_instances,
         bench_shape_placeholder_line,
+        bench_build_visuals,
 );
 
 criterion_main!(benches);

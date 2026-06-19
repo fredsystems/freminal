@@ -22,6 +22,8 @@
 
 use std::time::{Duration, Instant};
 
+use super::icons::ChromeIcon;
+
 /// Severity of a toast.  Drives color and default duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ToastKind {
@@ -45,16 +47,46 @@ impl ToastKind {
         }
     }
 
-    /// Background tint for the toast bubble.
-    //
-    // Not `const fn`: `Color32::from_rgba_unmultiplied` is not itself const.
-    #[allow(clippy::missing_const_for_fn)]
-    fn background(self) -> egui::Color32 {
-        match self {
-            Self::Error => egui::Color32::from_rgba_unmultiplied(120, 30, 30, 240),
-            Self::Warning => egui::Color32::from_rgba_unmultiplied(120, 90, 20, 240),
-            Self::Info => egui::Color32::from_rgba_unmultiplied(30, 60, 110, 240),
-        }
+    /// Background tint for the toast bubble, derived from the active theme.
+    ///
+    /// Each toast kind maps to a palette semantic color (error/warn/link) so
+    /// the bubble follows the theme instead of hard-coded hues. The semantic
+    /// color is darkened toward the panel background and rendered at high
+    /// opacity so it reads as a saturated bubble over any background.
+    fn background(self, visuals: &egui::Visuals) -> egui::Color32 {
+        let accent = match self {
+            Self::Error => visuals.error_fg_color,
+            Self::Warning => visuals.warn_fg_color,
+            Self::Info => visuals.hyperlink_color,
+        };
+        // Blend the accent toward the panel background for a deeper bubble, then
+        // apply a high (but not full) opacity so it sits over the terminal.
+        let base = visuals.panel_fill;
+        let mix = |a: u8, b: u8| -> u8 {
+            use conv2::ConvUtil;
+            // 65% accent, 35% panel background.
+            f32::from(b)
+                .mul_add(0.35, f32::from(a) * 0.65)
+                .round()
+                .clamp(0.0, 255.0)
+                .approx_as::<u8>()
+                .unwrap_or(b)
+        };
+        egui::Color32::from_rgba_unmultiplied(
+            mix(accent.r(), base.r()),
+            mix(accent.g(), base.g()),
+            mix(accent.b(), base.b()),
+            240,
+        )
+    }
+
+    /// Whether `bg` is light enough that dark text reads better on it.
+    fn prefers_dark_text(bg: egui::Color32) -> bool {
+        // Rec. 601 luma; > 0.6 → light fill → use dark text.
+        let r = f32::from(bg.r()) / 255.0;
+        let g = f32::from(bg.g()) / 255.0;
+        let b = f32::from(bg.b()) / 255.0;
+        0.299_f32.mul_add(r, 0.587_f32.mul_add(g, 0.114 * b)) > 0.6
     }
 
     /// Short prefix shown before the message (e.g. "Error").
@@ -168,15 +200,28 @@ impl ToastStack {
             .show(ctx, |ui| {
                 ui.set_max_width(360.0);
                 ui.vertical(|ui| {
+                    // Derive bubble geometry/stroke from the active themed
+                    // visuals (set globally by 112.4): border + profile corner
+                    // radius. Text color is contrast-picked against the bubble
+                    // fill so it stays legible on light and dark themes alike.
+                    let border = ui.visuals().window_stroke.color;
+                    let corner = ui.visuals().menu_corner_radius;
                     for toast in &mut self.entries {
-                        let bg = toast.kind.background();
+                        let bg = toast.kind.background(ui.visuals());
+                        let text_color = if ToastKind::prefers_dark_text(bg) {
+                            egui::Color32::from_gray(20)
+                        } else {
+                            egui::Color32::from_gray(245)
+                        };
+                        let detail_color = if ToastKind::prefers_dark_text(bg) {
+                            egui::Color32::from_gray(60)
+                        } else {
+                            egui::Color32::from_gray(215)
+                        };
                         let frame = egui::Frame::NONE
                             .fill(bg)
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 32),
-                            ))
-                            .corner_radius(egui::CornerRadius::same(6))
+                            .stroke(egui::Stroke::new(1.0, border))
+                            .corner_radius(corner)
                             .inner_margin(egui::Margin::symmetric(10, 8));
                         let resp = frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -187,14 +232,12 @@ impl ToastStack {
                                             toast.kind.label(),
                                             toast.title
                                         ))
-                                        .color(egui::Color32::WHITE)
+                                        .color(text_color)
                                         .strong(),
                                     );
                                     if let Some(ref detail) = toast.detail {
                                         ui.label(
-                                            egui::RichText::new(detail)
-                                                .color(egui::Color32::from_gray(230))
-                                                .small(),
+                                            egui::RichText::new(detail).color(detail_color).small(),
                                         );
                                     }
                                 });
@@ -204,8 +247,8 @@ impl ToastStack {
                                         if ui
                                             .add(
                                                 egui::Button::new(
-                                                    egui::RichText::new("×")
-                                                        .color(egui::Color32::WHITE)
+                                                    ChromeIcon::Close
+                                                        .rich_text_colored(text_color)
                                                         .strong(),
                                                 )
                                                 .frame(false)
@@ -250,6 +293,44 @@ mod tests {
     fn stack_starts_empty() {
         let s = ToastStack::default();
         assert!(s.entries.is_empty());
+    }
+
+    #[test]
+    fn prefers_dark_text_picks_by_luminance() {
+        // Near-white fill → dark text; near-black fill → light text.
+        assert!(ToastKind::prefers_dark_text(egui::Color32::from_gray(240)));
+        assert!(!ToastKind::prefers_dark_text(egui::Color32::from_gray(20)));
+    }
+
+    #[test]
+    fn background_derives_from_visuals_semantic_colors() {
+        // The bubble fill must be a blend of the kind's palette semantic color
+        // and the panel background — not a hard-coded hue. Use distinct
+        // semantic colors so each kind yields a distinct fill.
+        let mut v = egui::Visuals::dark();
+        v.error_fg_color = egui::Color32::from_rgb(200, 0, 0);
+        v.warn_fg_color = egui::Color32::from_rgb(0, 200, 0);
+        v.hyperlink_color = egui::Color32::from_rgb(0, 0, 200);
+        v.panel_fill = egui::Color32::from_gray(0);
+
+        let err = ToastKind::Error.background(&v);
+        let warn = ToastKind::Warning.background(&v);
+        let info = ToastKind::Info.background(&v);
+
+        // Each is a 65% accent / 35% black blend → dominant channel ~130.
+        assert!(
+            err.r() > err.g() && err.r() > err.b(),
+            "error bubble is red-dominant"
+        );
+        assert!(
+            warn.g() > warn.r() && warn.g() > warn.b(),
+            "warning bubble is green-dominant"
+        );
+        assert!(
+            info.b() > info.r() && info.b() > info.g(),
+            "info bubble is blue-dominant"
+        );
+        assert_eq!(err.a(), 240, "bubble opacity is 240");
     }
 
     #[test]

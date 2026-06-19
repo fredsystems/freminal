@@ -17,6 +17,8 @@
 //! - [`colors`] — terminal color representation and 256-color palette
 //! - [`cursor`] — cursor position and visual style types
 //! - [`themes`] — embedded color theme palettes
+//! - [`gui_theme`] — toolkit-agnostic GUI styling geometry (radii, strokes,
+//!   spacing); no colors, no egui dependency
 //! - [`buffer_states::fonts`] — font decoration and weight types
 //! - [`pty_write`] — PTY write command types shared with the emulator
 
@@ -63,6 +65,8 @@ pub mod colors;
 pub mod config;
 /// Cursor position and visual style types.
 pub mod cursor;
+/// Toolkit-agnostic GUI styling geometry (corner radii, strokes, spacing).
+pub mod gui_theme;
 /// Configurable key bindings: actions, key combos, and the binding map.
 pub mod keybindings;
 /// Layout file format types, parser, and resolver.

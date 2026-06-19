@@ -432,13 +432,22 @@ pub fn show_search_bar(
                         // is visible even without reading the match-count label.
                         let no_matches =
                             !view_state.search_state.query.is_empty() && match_count == 0;
+                        // Tint from the palette error color so the no-match
+                        // state follows the theme (no hard-coded red).
+                        let error_color = ui.visuals().error_fg_color;
+                        let no_match_bg = Color32::from_rgba_unmultiplied(
+                            error_color.r(),
+                            error_color.g(),
+                            error_color.b(),
+                            48,
+                        );
                         let mut text_edit =
                             egui::TextEdit::singleline(&mut view_state.search_state.query)
                                 .hint_text("Search…")
                                 .desired_width(180.0)
                                 .lock_focus(true);
                         if no_matches {
-                            text_edit = text_edit.background_color(Color32::from_rgb(80, 20, 20));
+                            text_edit = text_edit.background_color(no_match_bg);
                         }
 
                         // Text input.
@@ -495,7 +504,8 @@ pub fn show_search_bar(
                         ui.checkbox(&mut view_state.search_state.case_sensitive, "Aa")
                             .on_hover_text("Match case");
                         if let Some(err) = error_msg {
-                            ui.colored_label(Color32::from_rgb(255, 80, 80), err);
+                            let error_color = ui.visuals().error_fg_color;
+                            ui.colored_label(error_color, err);
                         }
                     });
                 });

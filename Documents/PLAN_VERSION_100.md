@@ -35,7 +35,7 @@ bundled-font change alters the default glyph set.
 | #   | Feature                     | Scope  | Status   | Depends On       |
 | --- | --------------------------- | ------ | -------- | ---------------- |
 | 111 | Bundled Font / Icon         | Large  | Complete | v0.8.0, v0.9.0   |
-| 112 | UI Beautification           | Large  | Active   | v0.8.0, Task 111 |
+| 112 | UI Beautification           | Large  | Complete | v0.8.0, Task 111 |
 | 113 | Resize / Reflow Scroll Bugs | Medium | Pending  | None             |
 
 Task numbers assigned at activation (111, 112). Source: `Documents/PLANNING.MD`
@@ -300,6 +300,29 @@ no code or asset changes.
   Palettes are **not** moved; `freminal-common::themes` already is the common
   theme home. A separate crate is justified only by a second egui consumer,
   which does not exist.
+- **Chrome colors come from explicit theme-authored UI roles, not borrowed ANSI
+  slots (decided mid-112.3a, after activation review).** The original spec
+  assumed the chrome could be styled from the existing `ThemePalette`
+  (`background`/`foreground`/`selection`/`ansi[16]`). The gallery proved this
+  wrong: `ThemePalette` is a _terminal_ palette and does not declare UI surface
+  roles, so deriving them by guessing ANSI slots produced invisible borders
+  (e.g. Tokyo Night's `ansi[0]` ≈ its background) and low-contrast active tabs.
+  The vetted upstream themes (Catppuccin's Base/Surface0/Overlay/Text ladder,
+  Tokyo Night's `bg_highlight`/`fg_dark`, Dracula's Current-Line/Comment, etc.)
+  **already define** these roles; freminal simply was not carrying them. Decision:
+  `ThemePalette` gains an explicit **7-role chrome set** —
+  `chrome_surface`, `chrome_surface_variant`, `chrome_surface_hover`,
+  `chrome_surface_active`, `chrome_border`, `chrome_text`, `chrome_text_muted`
+  (each `Option<(u8,u8,u8)>`). Vetted themes have these **transcribed from
+  upstream (authored values, never invented)**. Themes that do not define them
+  (raw terminal palettes — xterm/wezterm/ghostty) get a **best-fit resolver**
+  that first reuses colors already in the palette and only as a last resort
+  computes a contrast-guaranteed fallback. `build_visuals` consumes the
+  _resolved_ roles. No per-theme contrast "science" — vetted themes copy, raw
+  themes best-fit. Every built-in theme is auditable in the gallery (112.3f) and
+  signed off per theme (112.3g). This is a deliberate expansion of v0.10.0 scope
+  driven by the activation review; it touches `ThemePalette` (a
+  `freminal-common` type) and is done in full, not deferred.
 
 ---
 
@@ -620,13 +643,24 @@ and "Decision: centralized `ChromeStyle`…" sections above for the durable
 rationale, and the crate-architecture decision in Design Decisions.
 
 The work splits into four phases: **data type** (112.2, in `freminal-common`) →
-**egui mapping + application** (112.3-112.5, in the binary) → **per-surface
-adoption** (112.6-112.9) → **icons** (112.10-112.12). An icon-asset audit
-(112.1) precedes everything. Each subtask leaves `cargo test --all` green.
+**egui mapping + preview + application** (112.3, 112.3a, 112.4-112.5, in the
+binary) → **per-surface adoption** (112.6-112.9) → **icons** (112.10-112.12).
+An icon-asset audit (112.1) precedes everything. A dedicated preview-gallery
+subtask (112.3a) — shipped as a standalone `cargo` example binary, **not** an
+in-product settings tab — sits between the mapping and its global application so
+the Modern/Retro geometry can be tweaked and the visual vision locked in against
+the real `build_visuals` mapping **before** the profiles are applied app-wide and
+rolled out per surface. Each subtask leaves `cargo test --all` green.
 
-Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.4-112.5
-need 112.3; 112.6-112.9 need 112.5; 112.10 needs 112.1; 112.11-112.12 need
-112.10.
+Sequencing: 112.1 ∥ 112.2 first (independent); 112.3 needs 112.2; 112.3a needs
+112.3; 112.3b (UI font control) needs 112.2 and is tuned in the same gallery as
+112.3a. The chrome-role colour work (added after activation review) runs:
+112.3c (ThemePalette role fields + resolver) → 112.3d (transcribe authored roles
+for vetted themes) → 112.3e (build_visuals consumes resolved roles + padding) →
+112.3f (gallery loads all themes) → 112.3g (per-theme audit + sign-off). 112.4-
+112.5 need 112.3a + 112.3b + 112.3g (the locked baselines, UI-font choice, and
+the audited per-theme chrome feed 112.4's global application); 112.6-112.9 need
+112.5; 112.10 needs 112.1; 112.11-112.12 need 112.10.
 
 ### Task 112 subtasks
 
@@ -656,7 +690,95 @@ surfacing the tradeoffs.
 
 Stop: post the inventory + recommendation; await maintainer decision.
 
+##### Task 112 audit results (112.1)
+
+> **STATUS: audit complete; asset format SIGNED OFF.** Read-only inventory; no
+> code or assets changed. Maintainer approved the recommended icon-font /
+> CaskaydiaCove NF direction (see "Recommended asset format" below); the icon
+> track (112.10-112.12) is unblocked.
+
+**Action-glyph inventory.** Every non-ASCII symbol the chrome renders through
+egui's font pipeline, with codepoint, location, and Linux render risk. The five
+HIGH-risk entries are color-emoji codepoints that fall through to tofu on a
+Linux install lacking a system emoji font (the emoji fallback chain in
+`fonts.rs` is system-sourced, **not** bundled — `fonts.rs:191-192`).
+
+| Symbol           | Codepoint | Location                      | Represents                  | Linux risk |
+| ---------------- | --------- | ----------------------------- | --------------------------- | ---------- |
+| lock             | U+1F512   | `menu.rs:161` (menu-bar)      | echo-off indicator          | HIGH       |
+| record dot + REC | U+25CF    | `menu.rs:169` (menu-bar)      | recording indicator         | LOW        |
+| lock+key         | U+1F510   | `menu.rs:741-742` (tab label) | password-prompt tab         | HIGH       |
+| bell             | U+1F514   | `menu.rs:743` (tab label)     | unacked bell on tab         | HIGH       |
+| antenna          | U+1F4E1   | `menu.rs:750` (tab label)     | broadcast-input tab         | HIGH       |
+| ellipsis         | U+2026    | `menu.rs:841`                 | "Rename Tab..." menu item   | LOW        |
+| multiply         | U+00D7    | `menu.rs:852`                 | tab close button            | LOW        |
+| multiply         | U+00D7    | `toast.rs:207`                | toast dismiss button        | LOW        |
+| lock+key (text)  | U+1F510   | `settings.rs:1761`            | Security-tab description    | HIGH       |
+| heavy minus      | U+2796    | `settings.rs:1844`            | remove paste-guard pattern  | MEDIUM     |
+| heavy plus       | U+2795    | `settings.rs:1866`            | add paste-guard pattern     | MEDIUM     |
+| warning          | U+26A0    | `settings.rs:2086`            | keybinding conflict warning | MEDIUM     |
+| record (tech)    | U+23FA    | `settings.rs:2168`            | recording button label      | MEDIUM     |
+| lock             | U+1F512   | `terminal/widget.rs:2488`     | in-pane echo-off overlay    | HIGH       |
+| right triangle   | U+25B6    | `terminal/widget.rs:73`       | fold-placeholder prefix     | LOW        |
+| ellipsis         | U+2026    | `terminal/widget.rs:93`       | fold-placeholder truncation | LOW        |
+| middle dot       | U+00B7    | `close_guard.rs:256,282`      | hint/list separators        | LOW        |
+
+Pure-ASCII button labels (`search.rs` `<`/`>`/`X`; `command_history.rs`
+`OK`/`ER`/`..`/`??` status badges — already flagged in-code at
+`command_history.rs:527-530` as awaiting icon replacement) carry no render risk
+but are candidates for icon treatment for visual consistency. No actionable
+glyphs in `broadcast_guard.rs`, `paste_guard.rs`, `welcome.rs`,
+`notifications.rs`, `command_blocks.rs`.
+
+**Renderer facts relevant to the format choice.** egui 0.34.3 has no native
+SVG. No existing `egui_extras` / `RetainedImage` / egui `TextureHandle` usage in
+the chrome. `image` (0.25) is already a dependency; background/inline images go
+through `glow::Texture` in `renderer/gpu.rs` (not egui `TextureId`).
+`egui::Image::tint(Color32)` works in 0.34.3, so a monochrome glyph/texture can
+be tinted to the active palette. Task 111 bundled CaskaydiaCove NF (full Nerd
+Font: Powerline + Material Design Icons + PUA sets) via `include_bytes!`, already
+registered at position 0 of egui's `FontFamily::Monospace` (`fonts.rs:183`).
+
+**Recommended asset format: bundled icon font — reuse the already-bundled
+CaskaydiaCove Nerd Font.** Tradeoffs surfaced for sign-off:
+
+- **Icon font / CaskaydiaCove (recommended).** Zero new crates, zero new assets
+  for icons that have a Nerd Font equivalent (lock, bell, antenna, record,
+  warning, plus/minus, arrows all exist in CaskaydiaCove's PUA/MDI ranges).
+  Native tinting via `RichText::color()`. Consistent with the Task 111
+  bundled-font precedent. Cost: a one-time codepoint-mapping pass (emoji
+  codepoint → Nerd Font codepoint), and icons become monochrome (intended — it
+  is what enables tinting). A supplemental <200 KB icon TTF is the fallback for
+  any future symbol with no Nerd Font equivalent.
+- **SVG via `egui_extras` + `resvg`/`usvg`.** Best DPI/scalability story and
+  human-editable sources, but pulls a heavy transitive crate chain
+  (`resvg`/`usvg`/`tiny-skia`/...) against the repo's `machete`/`deny`
+  enforcement — not justified for ~15 icons.
+- **Pre-rasterized PNG atlas.** No new crates (`image` already present), but
+  opaque binary diffs, manual UV-coordinate maintenance, and multi-resolution
+  atlases for HiDPI make it the highest-maintenance option.
+
+**Decision (maintainer, signed off):** the icon-font / CaskaydiaCove NF
+direction is approved. 112.10 implements the bundled-icon pipeline as an icon
+font reusing the already-bundled CaskaydiaCove faces (supplemental <200 KB icon
+TTF only if a future symbol has no Nerd Font equivalent). The icon-track
+subtasks (112.10-112.12) are unblocked; the styling track (112.2 → 112.3 →
+112.3a → 112.4-112.9) was never blocked on this.
+
 #### 112.2 — Add `GuiTheme` + `StyleProfile` to `freminal-common` (data type only)
+
+> **STATUS: COMPLETE.** `freminal-common/src/gui_theme.rs` adds `StyleProfile`
+> (`Modern`/`Retro`, serde `lowercase`) and `GuiTheme`, re-exported from
+> `lib.rs`. Fields: `profile`, `corner_radius`, `stroke_width`, `item_spacing`,
+> `window_padding`, plus two judged-minimal extras — `menu_corner_radius` (nested
+> menus warrant a distinct radius) and `widget_hover_expansion` (hover geometry
+> differs sharply between profiles). No egui, no colors, no `Config` wiring.
+> Baselines (starting points, to be tuned in 112.3a): Modern = radius 6 / stroke
+> 1.0 / spacing (8,4) / padding 8 / menu-radius 4 / hover 2.0; Retro = radius 0 /
+> stroke 1.5 / spacing (6,2) / padding 4 / menu-radius 0 / hover 0.0. 12 unit
+> tests (defaults, `Default`, TOML round-trip, lowercase serde) pass;
+> `cargo clippy -p freminal-common --all-targets --all-features -- -D warnings`
+> clean.
 
 Scope: `freminal-common/src/` (new module, e.g. `gui_theme.rs`, plus `lib.rs`
 re-export). NO egui. NO config wiring yet (that is 112.13).
@@ -681,7 +803,12 @@ pub struct GuiTheme {
 profile's baseline geometry (Modern = rounded/soft, Retro = sharp/dense). All
 fields are plain numbers/enums — colors are NOT here (they come from
 `ThemePalette` at mapping time). Add `Default` (Modern), `Serialize`,
-`Deserialize`, and unit tests for `defaults()` and serde round-trip.
+`Deserialize`, and unit tests for `defaults()` and serde round-trip. The
+baseline numbers here are a working starting point; they are **empirically
+dialed in and locked** in the 112.3a preview gallery against rendered chrome
+before 112.4 applies them app-wide. If 112.3a is being done first to lock the
+vision, land 112.2 with placeholder baselines and update them once 112.3a signs
+off.
 
 Deliverable: the type + tests in `freminal-common`; nothing consumes it yet.
 
@@ -695,6 +822,23 @@ it into `Config` here.
 Stop: report the type surface + test results; await review.
 
 #### 112.3 — `chrome_style.rs`: map `(GuiTheme, ThemePalette) → egui::Visuals`
+
+> **STATUS: COMPLETE.** `freminal/src/gui/chrome_style.rs` adds
+> `pub fn build_visuals(gui_theme, palette, bg_opacity, normal_display) ->
+egui::Visuals`. Starts from `Visuals::dark()` and overrides every listed
+> field from palette + geometry: `window_fill`/`panel_fill` (preserving the
+> reverse-video white-fill + opacity behavior verbatim from `app_impl.rs`),
+> `window_stroke` (foreground, `stroke_width`), `window_corner_radius` /
+> `menu_corner_radius` (from the respective `GuiTheme` radii), `selection`
+> (palette `selection_bg`/`_fg`), `override_text_color` (foreground), and all
+> five `widgets` states via a private `widget()` helper — noninteractive/inactive
+> use background/`ansi[0]` fills with `expansion 0.0`; hovered/active use
+> `selection_bg` (active at 80% alpha) with `expansion = widget_hover_expansion`;
+> open uses `ansi[8]`. `colors::rgb_to_color32` was promoted private → `pub(crate)`
+> for reuse. Nothing calls it yet (112.4 wires it). 13 unit tests (Retro→radius 0,
+> Modern→nonzero, selection/text-color mapping, reverse-video white, opacity→alpha,
+> per-state expansion) pass; `cargo clippy -p freminal --all-targets
+--all-features -- -D warnings` clean. Test palette: `CATPPUCCIN_MOCHA`.
 
 Scope: `freminal/src/gui/chrome_style.rs` (new), `freminal/src/gui/mod.rs`
 (module decl). May read `colors.rs` helpers.
@@ -727,7 +871,428 @@ terminal-buffer renderer.
 Stop: report the function signature + which `Visuals` fields are set; await
 review.
 
+#### 112.3a — Style-profile preview gallery, as a standalone example binary (lock in the vision)
+
+Scope: `freminal/examples/chrome_gallery.rs` (new **cargo example** — not
+compiled into the product binary, not part of any release), plus the minimal
+visibility promotion needed to reach the real mapping: in
+`freminal/src/gui/mod.rs` promote `mod chrome_style` from `pub(crate)` to
+`pub`, and in `freminal/src/gui/colors.rs` promote `rgb_to_color32` from
+`pub(crate)` to `pub` (it is called transitively by `build_visuals`). Remove
+the `#[allow(dead_code)]` / `TODO(112.4)` on `build_visuals` once the example is
+its first real caller. May add `[dev-dependencies]` to `freminal/Cargo.toml`
+**only** if strictly required (the example should need none — see below).
+
+**Why an example binary, not a settings tab (decided at activation).** The
+tuning gallery is a developer instrument used to dial in the `StyleProfile`
+geometry and lock the aesthetic; it is used during this implementation and the
+occasional future revision, never by end users. Baking it into the product's
+`SettingsModal` would permanently couple a throwaway dev surface to the shipping
+GUI's tab structure and force it to keep compiling as the settings UI evolves. A
+`cargo run --example chrome_gallery` binary lives beside the code (stays
+compilable, revisable) but is structurally outside the product — cargo examples
+are not built into the release. The **user-facing** live preview (a small
+themed-chrome swatch next to the profile picker) is a separate, deliberately
+minimal concern and belongs to **112.7's** settings work, not here.
+
+**Bootstrap (verified at activation).** `eframe` is gone; the app uses the
+`freminal-windowing` crate, which exposes a reusable
+`freminal_windowing::run(WindowConfig, impl App)` entry point. The example
+implements the `App` trait (`update`, `on_window_created`, `on_close_requested`
+→ `true`, `clear_color`) in ~35 lines, ignoring the `gl` parameter (no terminal
+renderer involved), and renders the gallery via
+`egui::CentralPanel::default().show(ctx, |ui| { … })`. `freminal-windowing`,
+`egui`, and `egui_glow` are already direct deps of `freminal`, so an example
+inherits them with **no new dependencies**.
+
+What: This is the subtask where the Modern/Retro aesthetic is **tweaked and
+locked in against the real `build_visuals` mapping** before it is committed
+app-wide. The example must call the **real**
+`freminal::gui::chrome_style::build_visuals(&gui_theme_draft, palette, opacity,
+normal_display)` (this is why the visibility promotion is required) — it must
+**not** reimplement or copy the function body, or it would be tuning a divergent
+copy. Render a representative slice of chrome inside a region whose `Visuals`
+come from that call (set the example window's egui style, or a locally-scoped
+`ui.scope` / child `Ui` with `*ui.visuals_mut() = visuals`). The gallery must
+show, at minimum:
+
+- a button row (normal + a primary/accent button),
+- a `ComboBox` and a `Slider` (the two most common settings widgets),
+- a separator,
+- an active-tab / inactive-tab pair (the tab-bar look),
+- a sample bordered panel/window frame (corner radius + stroke visible),
+- a sample toast frame (the only current `Stroke`+`CornerRadius` user),
+- a line of selected text (selection bg/fg).
+
+Alongside the gallery, expose **live controls** bound to an in-memory `GuiTheme`
+draft: a `StyleProfile` selector (Modern/Retro — switching it resets the draft
+to that profile's `defaults()`), sliders for the tunable geometry
+(`corner_radius`, `stroke_width`, `item_spacing`, `window_padding`,
+`menu_corner_radius`, `widget_hover_expansion`), an opacity slider, a
+normal/reverse-video toggle, and a `ThemePalette` selector (pick from
+`freminal_common::themes` so the look can be checked against a light and a dark
+palette). Changing any control re-derives the `Visuals` next frame. This is the
+surface the maintainer uses to dial in the profile baseline numbers — the values
+that become `StyleProfile::defaults()` in 112.2 — and to sign off the look
+before 112.4 applies it everywhere.
+
+Deliverable: a runnable `cargo run -p freminal --example chrome_gallery` that
+renders the gallery, restyled live by the real `build_visuals` against a local
+`GuiTheme` draft, with the controls above — usable to lock in the profile
+baselines. No unit test is required for an example binary (it is a dev tool,
+exercised manually); the `build_visuals` mapping it drives is already unit-tested
+in 112.3. The visibility promotions must keep `cargo test --all` and clippy
+green.
+
+Verification: `cargo run -p freminal --example chrome_gallery` launches and the
+gallery restyles live as controls change; `cargo build -p freminal` (confirm the
+example does not break the normal build and is not pulled into it);
+`cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`
+(examples are linted under `--all-targets`).
+
+Prohibitions: do NOT reimplement or copy the `build_visuals` body — call the
+real one (promote visibility instead); do NOT add the gallery to `SettingsModal`
+/ `SettingsTab` (that is the rejected settings-tab approach; the user preview is
+112.7); do NOT persist anything to `Config` or touch the snapshot/PTY path; do
+NOT hard-code colors — the gallery's colors derive from the selected `palette`
+via `build_visuals`; do NOT touch the terminal-buffer renderer; do NOT add a new
+crate dependency (the example needs none).
+
+Outcome to capture: once the maintainer signs off, record the locked-in
+Modern/Retro geometry baselines (the numbers that land in 112.2's
+`StyleProfile::defaults()`) in this plan under a short "112.3a — locked
+baselines" note, so 112.4's global application uses the agreed values. If the
+locked numbers differ from 112.2's placeholders, 112.2's `defaults()` is updated
+as part of this subtask's sign-off.
+
+Stop: report the gallery contents, the run command, the (proposed or locked)
+geometry baselines, and the build/clippy results; await the maintainer's
+sign-off on the look before 112.4.
+
+> **112.3 amendment (landed during 112.3a sign-off).** Activation review of the
+> gallery surfaced three gaps in the original `build_visuals` field set, all now
+> fixed (commit on `task-112/ui-beautification`): (a) surface backgrounds
+> (`extreme_bg_color` for TextEdit/scrollbar wells, `faint_bg_color`,
+> `code_bg_color`) plus `warn`/`error`/`hyperlink` semantic colors and
+> window/popup shadow tints are now palette-derived (they were left at
+> `Visuals::dark()` near-black/orange/red/blue defaults), and `dark_mode` flips
+> by background luminance so light palettes start from `Visuals::light()`;
+> (b) the gallery applies the draft as the window's **global** visuals
+> (`ctx.set_visuals`) rather than a local `ui.scope`, because egui renders
+> combo-box dropdowns and context menus in a top-level popup layer that ignores
+> scoped style — this is the only way to preview menu/dropdown theming, and it
+> mirrors what 112.4 does in the real app. UI **font** control is a separate
+> concern, broken out as 112.3b below.
+
+#### 112.3b — UI chrome font control (proportional UI font + Retro monospace)
+
+Scope: a `UiFont` choice on `GuiTheme` in `freminal-common/src/gui_theme.rs`
+(toolkit-agnostic — enum/string, **no egui**), mapped to concrete egui font
+families in the binary's `freminal/src/gui/fonts.rs` (`setup_font_files` /
+`FontConfig`); the gallery (`chrome_gallery.rs`) gains a UI-font selector. A
+license-gated **proportional Nerd Font** vendor step (mirroring Task 111) is the
+first sub-step if a bundled sans face is chosen. NO config persistence (that is
+112.13).
+
+**Why this exists.** Activation review established that the egui chrome does not
+currently use the bundled monospace font at all — it silently falls back to
+epaint's bundled **Ubuntu Light** (`FontFamily::Proportional`, which
+`setup_font_files` never populates), because `setup_font_files` only overrides
+`FontFamily::Monospace` (→ CaskaydiaCove) and leaves `Proportional` at epaint's
+default. So the chrome font is both unbundled (we don't control it) and not a
+deliberate choice. A monospace font is the wrong default for UI chrome; a
+proportional/sans face is the right Modern look, while **monospace UI is the
+intentional Retro look** (terminal-native feel).
+
+What:
+
+1. **`UiFont` on `GuiTheme` (common, egui-free).** Add a toolkit-agnostic
+   choice, e.g. `enum UiFont { Proportional, Monospace }` (or a richer set if a
+   bundled sans is added — `BundledSans` / `MatchTerminal`). Wire it into the
+   `StyleProfile::defaults()` baselines: Modern → proportional, Retro →
+   monospace. Serde + tests as for the other `GuiTheme` fields. No `FontId`, no
+   `FontFamily` — those are egui types and stay in the binary.
+2. **Proportional-font decision (license-gated).** Decide the proportional UI
+   face. Options, to be weighed and surfaced (do not pick unilaterally): (a) use
+   epaint's built-in proportional font (zero bundle cost, but not a Nerd Font
+   and not ours to control across versions); (b) bundle a proportional/sans Nerd
+   Font — **note Nerd Fonts are predominantly monospace-patched, so proportional
+   options are limited**; a candidate audit (coverage, `isFixedPitch`, license —
+   must clear OFL-1.1 or equivalent per the bundled-font gate) is required before
+   any face is vendored, exactly as Task 111 did for CaskaydiaCove. Bundling, if
+   chosen, follows the 111 precedent (`res/`, `include_bytes!`,
+   `ATTRIBUTIONS.md`, license file).
+3. **Binary mapping (`fonts.rs`).** Map `UiFont` to egui: populate
+   `FontFamily::Proportional` (with the chosen face) and/or remap
+   `Style.text_styles` (`Body`/`Button`/`Heading`) to `FontFamily::Monospace`
+   for the Retro/monospace choice. This is the egui-touching half and stays in
+   the binary, mirroring the `ThemePalette` (data in common) → `colors.rs` (egui
+   mapping in binary) split. Confirm `setup_font_files` is the single font
+   registration point and thread `UiFont` to it.
+4. **Gallery control.** Add a UI-font selector to `chrome_gallery.rs` so the
+   proportional-vs-monospace chrome look is tunable alongside the geometry, and
+   confirm the preview re-renders text in the selected face.
+
+Deliverable: `GuiTheme` carries a serde-able `UiFont`; the gallery renders UI
+chrome in a proportional face for Modern and monospace for Retro; if a font is
+bundled, it is license-cleared and attributed. The mapping is unit-tested where
+testable without egui (the `UiFont` enum / `defaults()` wiring) — the egui
+font-family wiring is exercised manually via the gallery.
+
+Verification: `cargo run -p freminal --example chrome_gallery` shows the UI font
+change live; `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; if a font is bundled, `markdownlint ATTRIBUTIONS.md` and the
+license file checks from the 111 playbook.
+
+Prohibitions: do NOT add egui types (`FontId`/`FontFamily`) to `freminal-common`;
+do NOT bundle a font whose license is unconfirmed (the bundled-font gate from
+the Design Decisions applies); do NOT change the terminal-buffer font path (this
+is UI chrome only); do NOT persist the choice to `Config` here (112.13).
+
+Stop: report the `UiFont` surface, the proportional-font decision (with the
+audit if a face is bundled), the gallery result, and the verification output;
+await the maintainer's font decision before 112.4.
+
+#### 112.3c — Add explicit chrome-role colors to `ThemePalette` + resolver
+
+> **STATUS: COMPLETE** (`bc5887cc`). Seven `Option<(u8,u8,u8)>` chrome roles,
+> a `ChromeRole` enum, the `chrome_role()` resolver (authored, then best-fit,
+> then WCAG-contrast fallback), and `chrome_text_on()`. Pure RGB math, no egui.
+> All 27 themes start `None`. 8 tests including "border always contrasts
+> surface on every theme".
+
+Scope: `freminal-common/src/themes.rs` (`ThemePalette` struct + a resolver
+method + every theme const gains the new fields, initially `None`), tests in the
+same crate. NO egui. NO `build_visuals` change yet (112.3e). NO per-theme
+authored values yet (112.3d).
+
+What: Add seven `Option<(u8,u8,u8)>` chrome-role fields to `ThemePalette`:
+
+- `chrome_surface` — panel/window background for chrome.
+- `chrome_surface_variant` — button / input-well / inactive-tab fill.
+- `chrome_surface_hover` — hovered widget fill.
+- `chrome_surface_active` — pressed/selected/active-tab fill.
+- `chrome_border` — widget/window border (must read against `chrome_surface`).
+- `chrome_text` — chrome text on surfaces.
+- `chrome_text_muted` — secondary/disabled chrome text.
+
+Add a resolver — `pub fn chrome_role(&self, role: ChromeRole) -> (u8,u8,u8)`
+(plus a `ChromeRole` enum, or per-role accessor methods) — that returns, in
+priority order: (1) the authored field if `Some`; (2) a **best-fit from existing
+palette colors** (e.g. `chrome_border` → a palette color that contrasts
+`background`; `chrome_surface_variant` → `selection_bg` if it reads as a fill;
+etc. — reuse what the palette already has); (3) a last-resort
+**contrast-guaranteed derivation** from `background`/`foreground` (the
+luminance/blend approach, moved here as pure `(u8,u8,u8)` math — NO egui). The
+resolver never returns an invisible/!contrasting color: the final fallback
+guarantees a minimum contrast against the relevant surface. Document the
+priority ladder per role.
+
+Set all seven fields to `None` on **every** existing theme const (29 of them);
+112.3d fills the vetted ones. Update the theme-count / field tests.
+
+Deliverable: `ThemePalette` carries the seven roles + a resolver with the
+authored → best-fit → contrast ladder; all themes compile with `None`; resolver
+unit-tested (authored wins; `None` best-fits from palette; a synthetic
+low-info palette hits the contrast fallback and the result meets the minimum
+contrast threshold).
+
+Verification: `cargo test -p freminal-common`; `cargo clippy --all-targets
+--all-features -- -D warnings`.
+
+Prohibitions: NO egui types in `freminal-common`; do NOT invent authored values
+here (that is 112.3d, and even there they are transcribed, not invented); do NOT
+change `build_visuals` yet.
+
+Stop: report the field set, the resolver signature + priority ladder, and test
+results; await review.
+
+#### 112.3d — Transcribe authored chrome roles for the vetted themes
+
+> **STATUS: COMPLETE** (`87e24272`). Authored roles transcribed from upstream
+> (with source comments) for: Catppuccin Mocha/Macchiato/Frappe/Latte, Tokyo
+> Night + Storm, Dracula, Nord (8 themes). Remaining themes (Gruvbox, One
+> Dark/Light, Rose Pine family, Kanagawa, Monokai Pro, Ayu, Everforest,
+> Material, Solarized, xterm/wezterm/ghostty) left `None` → resolver; the
+> 112.3g audit decides which of those warrant authored roles. Tests confirm
+> vetted themes return authored values and raw palettes contrast-resolve.
+
+Scope: `freminal-common/src/themes.rs` (populate the 112.3c fields for themes
+with a documented upstream UI palette), tests. NO resolver/struct change (112.3c
+already landed it).
+
+What: For each **vetted** built-in theme that has a published/derivable UI
+surface ladder, fill the seven chrome-role fields with **values transcribed from
+upstream** — never invented. Cover at least the Catppuccin family
+(Latte/Frappé/Macchiato/Mocha — Base/Mantle/Surface0/Surface1/Overlay1/Text/
+Subtext mapping), Tokyo Night + Storm (`bg`/`bg_highlight`/`fg`/`fg_dark`/
+border), Dracula (Background/Current-Line/Comment/Foreground), Nord
+(`nord0..3`/`nord4..6`), Gruvbox dark/light (`bg0/bg1/bg2`/`fg`), One Dark/Light,
+Rose Pine (Base/Surface/Overlay/Muted/Subtle/Text), and any other theme whose
+upstream defines surface roles (Everforest, Kanagawa, Monokai Pro, Ayu, Material
+all have documented palettes — include those whose upstream role mapping is
+unambiguous). For each theme, add a source comment citing where the values come
+from (upstream palette name → role). Leave genuinely role-less raw terminal
+palettes (xterm, wezterm, ghostty) at `None` — they intentionally fall through
+to the 112.3c best-fit resolver.
+
+Deliverable: vetted themes carry authored chrome roles with upstream-source
+comments; raw palettes remain `None`. A test asserting a representative vetted
+theme (e.g. Catppuccin Mocha) returns its authored values (not the fallback) for
+each role, and that a raw palette (e.g. xterm) returns non-`None` resolved values
+via the resolver.
+
+Verification: `cargo test -p freminal-common`; `cargo clippy …`.
+
+Prohibitions: do NOT invent colors for vetted themes — every value is traceable
+to an upstream source (cite it); if a theme's upstream role is ambiguous, leave
+that role `None` and let the resolver best-fit rather than guessing.
+
+Stop: report which themes got authored roles (and from which upstream sources)
+vs left to the resolver; await review.
+
+#### 112.3e — Rework `build_visuals` to consume resolved roles + add padding
+
+> **STATUS: COMPLETE** (`fff2fe1f`). `build_visuals` derives all chrome colors
+> from `chrome_role(...)` (no ANSI-slot guessing): border = Border role
+> (always contrasts), fills = Surface/Variant/Hover/Active, per-widget text via
+> `chrome_text_on()` (fixes low-contrast active tab). `GuiTheme` gains
+> `button_padding`/`menu_padding`/`text_edit_padding` (Modern roomier than
+> Retro), applied via new `apply_chrome_spacing(style, gui_theme)` +
+> `text_edit_margin()`. Gallery uses both. 7 new tests.
+
+Scope: `freminal/src/gui/chrome_style.rs` (`build_visuals` + the
+luminance/blend helpers — relocate the pure derivation to the 112.3c resolver
+and have `build_visuals` call `palette.chrome_role(...)` instead of reaching for
+ANSI slots), and a new `pub fn apply_chrome_spacing(style/ctx, gui_theme)` for
+padding. May add padding fields to `GuiTheme` in `freminal-common`
+(`button_padding: (f32,f32)`, `menu_padding: i8` or similar — toolkit-agnostic
+numbers).
+
+What:
+
+1. Replace every borrowed-ANSI-slot color in `widget()` and the assembly block
+   with the resolved chrome role: `noninteractive`/window bg → `chrome_surface`;
+   `inactive` fill → `chrome_surface_variant`; `hovered` → `chrome_surface_hover`;
+   `active`/selected/open → `chrome_surface_active`; all `bg_stroke`/window
+   border → `chrome_border`; `fg_stroke`/`override_text_color` → `chrome_text`;
+   muted/secondary → `chrome_text_muted`. **Text on a fill must use the
+   higher-contrast of `chrome_text`/`chrome_surface`** (WCAG-style pick via
+   linear luminance from `egui::Rgba::from(Color32)`), fixing the low-contrast
+   active-tab problem.
+2. Add `apply_chrome_spacing` bumping `Spacing.button_padding`,
+   `Spacing.menu_margin` (menu/popup inner padding), `Spacing.window_margin`,
+   and `Spacing.item_spacing` from `GuiTheme` — Modern gets more generous
+   padding than Retro. (`Spacing` cannot live in `Visuals`; this is a sibling
+   applied alongside `set_visuals`, as the gallery already demonstrates.)
+3. Update/extend the `build_visuals` unit tests to assert role-sourced colors
+   and the text-contrast pick.
+
+Deliverable: `build_visuals` derives all chrome colors from resolved roles (no
+raw `ansi[..]` borrowing remains); `apply_chrome_spacing` exists; padding is
+visibly larger (Modern) on inputs/menus/buttons; tests updated.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`; `cargo run -p freminal --example chrome_gallery` shows borders and
+active tabs with proper contrast and roomier padding.
+
+Prohibitions: do NOT reintroduce ANSI-slot guessing; do NOT hard-code colors
+(reverse-video white excepted); keep `build_visuals` `Visuals`-only (padding via
+the sibling).
+
+Stop: report the role→field mapping, the padding fields/values, and
+build/clippy/gallery results; await review.
+
+#### 112.3f — Gallery loads ALL built-in themes for per-theme audit
+
+> **STATUS: COMPLETE** (`30602a2e`). The gallery picker enumerates the full
+> `themes::all_themes()` registry (27 themes) and labels each as authored vs
+> resolver-driven. Ready as the 112.3g audit instrument.
+
+Scope: `freminal/examples/chrome_gallery.rs`; expose the theme registry from
+`freminal-common` (promote `ALL_THEMES` to `pub`, or add a
+`pub fn all_themes() -> &'static [&'static ThemePalette]` accessor).
+
+What: Replace the gallery's hand-picked palette list with the **full built-in
+theme registry**, with a picker (combo or searchable list) iterating every
+theme by `name`. The audit workflow: select a theme, view it in Modern and
+Retro, confirm every gallery surface (buttons, inputs, dropdown popup, context
+menu, tabs, toast, border, selected text) reads correctly. Keep the geometry +
+UI-font + opacity + reverse-video controls.
+
+Deliverable: the gallery enumerates every built-in theme and is the audit
+instrument for 112.3g.
+
+Verification: `cargo run -p freminal --example chrome_gallery` lists all themes
+and switches between them live; `cargo build -p freminal`; `cargo clippy
+--all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT bake a curated subset; the picker must cover the whole
+registry; do NOT add the gallery to the product (still example-only).
+
+Stop: report the registry accessor used + theme count shown; await review.
+
+#### 112.3g — Per-theme chrome audit + sign-off
+
+> **STATUS: SIGNED OFF.** The maintainer completed the per-theme visual audit
+> in the gallery (`cargo run -p freminal --example chrome_gallery`) across all
+> built-in themes in both Modern and Retro and signed off the look. The audit
+> fixes landed as the `task-112/ui-beautification` commits leading up to
+> `f7b14696` (text-legibility enforcement, fill separation, Solarized roles,
+> Accent/OnAccent routed into `visuals.selection`). The locked Modern/Retro
+> geometry + padding baselines are the values in `StyleProfile::defaults()`
+> (`freminal-common/src/gui_theme.rs:94-121`). This gate is now cleared; 112.4 is
+> unblocked.
+
+Scope: no production code by default — an audit pass using the 112.3f gallery,
+recording results in this plan under a "112.3g — theme audit results" note. Any
+theme that fails audit produces a fix: a missing authored role transcribed
+(back to 112.3d) or a resolver/best-fit adjustment (112.3c) — each as a small
+follow-up, not invented per-theme tuning.
+
+What: Walk **every** built-in theme in the gallery, in both Modern and Retro,
+and record per theme: borders visible, text/active-tab contrast adequate,
+dropdown/context-menu legible, light-vs-dark handled. Mark each
+pass / fix-needed. For fix-needed themes, capture the specific role at fault and
+whether the fix is "transcribe authored role" (preferred) or "improve resolver
+best-fit". The maintainer signs off the look here; this gates 112.4.
+
+Deliverable: an audit table (theme → Modern/Retro → pass|fix) in the plan, all
+fixes applied and re-verified, and the locked Modern/Retro geometry + padding
+baselines recorded (the 112.3a "locked baselines" note).
+
+Verification: `cargo test --all`; `cargo clippy …`; gallery walk-through with
+the maintainer.
+
+Prohibitions: do NOT fine-tune contrast ratios per theme by hand — fixes are
+either an authored-role transcription or a resolver improvement that helps the
+whole class; do NOT proceed to 112.4 until every theme passes or has a recorded,
+accepted disposition.
+
+Stop: post the audit table + applied fixes + locked baselines; await the
+maintainer's final sign-off before 112.4.
+
 #### 112.4 — Apply full `Visuals` via the per-frame style hook
+
+> **STATUS: COMPLETE.** The per-frame style hook in `app_impl.rs` (~1036-1075)
+> now calls `chrome_style::build_visuals(...)` and applies the result via
+> `ctx.global_style_mut(|s| { s.visuals = visuals; apply_chrome_spacing(s, ...) })`,
+> replacing the two-field (`window_fill`/`panel_fill`) application. The
+> `style_cache` key (`window.rs:49`) grew a fourth element — the active
+> `GuiTheme` — so a profile change invalidates the cache; the comparison stays
+> manual (pointer-identity on the palette, `to_bits` on opacity, `PartialEq` on
+> `GuiTheme`, which is not `Eq` because of its `f32` fields). The setup/auto-mode
+> paths (`rendering.rs` `set_egui_options` / `update_egui_theme`) were likewise
+> routed through `build_visuals` + `apply_chrome_spacing` via a shared
+> `apply_chrome_visuals` helper, so chrome is fully themed at window creation and
+> on OS dark/light flips, not just on the per-frame hook. The now-unused
+> `internal_color_to_egui_with_alpha` imports were dropped from both files. The
+> active `GuiTheme` is `GuiTheme::default()` (Modern) until config persistence
+> (112.13) wires the user's profile choice — the cache key and `build_visuals`
+> plumbing are already profile-aware, so 112.13 only needs to feed the configured
+> value. `cargo test --all`, `cargo clippy --all-targets --all-features -- -D
+warnings`, and `cargo machete` are green. The `background_opacity` behavior is
+> preserved (window_fill opaque, panel_fill opacity-aware) inside `build_visuals`.
 
 Scope: `freminal/src/gui/rendering.rs` (`set_egui_options`,
 `update_egui_theme`), `freminal/src/gui/app_impl.rs` (per-frame style-cache
@@ -758,8 +1323,44 @@ Stop: report cache-key change + manual re-theming result; await review.
 
 #### 112.5 — Performance: before/after frame-time capture
 
+> **STATUS: COMPLETE.** Within threshold; the steady-state cache short-circuit
+> is confirmed.
+>
+> A `build_visuals` micro-benchmark was added to
+> `freminal/benches/render_loop_bench.rs` (none existed — the per-frame style
+> hook is not headlessly reachable, so the function it calls is measured
+> directly). `build_visuals` costs **~1.4 µs** per invocation (Modern and Retro
+> both). Even in the impossible worst case where the cache regressed and it ran
+> every frame at 60 fps, that is ~0.008% of the 16.6 ms frame budget — invisible.
+> On the steady-state path it does **not** run: the `style_cache` key (display
+> mode, palette pointer, opacity bits, `GuiTheme`) is unchanged frame-to-frame
+> (`GuiTheme` is the constant default until 112.13), so `style_changed == false`
+> and neither `build_visuals` nor `global_style_mut` is called — verified
+> structurally in the 112.4 gate.
+>
+> Before/after on the render-pipeline control benches (none of which are in the
+> style-hook call path, so they confirm 112.4 did not perturb the render hot
+> path):
+>
+> | Benchmark                        | Before   | After    | Change            |
+> | -------------------------------- | -------- | -------- | ----------------- |
+> | `build_snapshot_after_ansi_feed` | ~160 ns  | ~161 ns  | noise (no change) |
+> | `instanced_bg/build_bg/200x50`   | ~265 ns  | ~279 ns  | noise (no change) |
+> | `instanced_fg/build_fg/80x24`    | ~1.48 ms | ~1.68 ms | noise¹            |
+> | `instanced_fg/build_fg/200x50`   | ~1.77 ms | ~1.96 ms | noise (no change) |
+> | `build_visuals/normal/modern`    | ~1.39 µs | ~1.40 µs | no change         |
+> | `build_visuals/normal/retro`     | ~1.41 µs | ~1.43 µs | no change         |
+>
+> ¹ The `sample_size = 10` Criterion config produces wide (~±11%) confidence
+> bands; `build_visuals` — byte-identical in before/after (it lives in
+> `chrome_style.rs`, untouched by 112.4) — itself flagged "+11.5% regressed" on
+> one run and "no change" on a rerun, proving the swings are environment noise,
+> not real regressions (per the `performance-benchmarks` noise rule). All deltas
+> are within the 15% threshold once noise is accounted for.
+
 Scope: benchmark capture only (per `performance-benchmarks` +
-`freminal-bench-table`). No production code change beyond what 112.4 landed.
+`freminal-bench-table`). No production code change beyond what 112.4 landed
+(a `build_visuals` micro-benchmark was added to `render_loop_bench.rs`).
 
 What: The per-frame style application + `Visuals` rebuild touches the render
 hot path. Capture the relevant benchmark IDs before (pre-112.4 baseline) and
@@ -780,6 +1381,34 @@ Prohibitions: do NOT skip this — chrome styling runs per frame; do NOT accept 
 Stop: report before/after numbers; await review.
 
 #### 112.6 — Adopt centralized style: menu bar + tab bar
+
+> **STATUS: COMPLETE.** All hard-coded hues in `menu.rs` now derive from the
+> centralized themed `Visuals` (set in 112.4), read via `ui.visuals()` — the
+> single source of truth, so no palette plumbing was threaded into `menu.rs`.
+> Changes:
+>
+> - **Menu-bar indicators:** the password lock glyph uses `warn_fg_color`
+>   (palette yellow, was `rgb(255,200,50)`); the REC dot uses `error_fg_color`
+>   (palette red, was `rgb(220,60,60)`).
+> - **Active tab:** the explicit grey `Frame` fill (`from_gray(100)`) was
+>   removed entirely — the active-tab highlight is now drawn by the existing
+>   `Button::selectable(is_active, ...)`, which reads `visuals.selection`
+>   (Accent / OnAccent from 112.3e), so the active tab follows the theme and
+>   the frame no longer fights the selectable.
+> - **Bell-active tab:** the warm-amber tint (`rgba(180,120,30,40)`) and amber
+>   label (`rgb(255,180,50)`) now derive from `warn_fg_color` (translucent
+>   fill + solid label).
+> - **Being-dragged ghost:** the neutral grey ghost (`rgba(120,120,120,40)`)
+>   now derives from `faint_bg_color`.
+> - **Corner radius:** the hard-coded `4.0` is replaced by
+>   `visuals.menu_corner_radius` (profile-driven: Modern rounded, Retro square).
+>
+> The frame construction was extracted into a `Self::tab_frame(ui,
+is_being_dragged, has_bell)` helper to keep `show_single_tab` under the
+> `too_many_lines` limit. The tab-rename `TextEdit` focus path was untouched
+> (`freminal-modal-input-suppression` honored). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo machete`
+> are green.
 
 Scope: `freminal/src/gui/menu.rs`.
 
@@ -803,6 +1432,52 @@ break tab-rename `TextEdit` focus (`freminal-modal-input-suppression`).
 Stop: report changes + manual check; await review.
 
 #### 112.7 — Adopt centralized style: settings modal + standalone settings window
+
+> **STATUS: COMPLETE.** Settings UI now inherits the centralized themed
+> `Visuals` (from 112.4) and ships a live style-profile picker. Changes:
+>
+> - **Profile picker (live preview, not persisted).** A new "Chrome Style"
+>   `ComboBox` (Modern / Retro) in the UI tab (`show_style_profile_picker`).
+>   Selecting a profile sets `pending_preview_profile`, which `show` /
+>   `show_standalone` return as the new `SettingsAction::PreviewProfile(profile)`.
+>   The dispatch (`settings_dispatch.rs`) sets `self.gui_theme =
+profile.defaults()` and repaints — the 112.4 per-frame hook (which now reads
+>   `self.gui_theme` instead of a hardcoded default) restyles all chrome live.
+>   The runtime seam is in place for 112.13 to wire config persistence; nothing
+>   is written to `Config` here.
+> - **Hard-coded colors removed.** The read-only banner (was amber
+>   `rgb(80,60,20)` fill + `rgb(255,220,100)` text) is now a translucent
+>   `warn_fg_color` tint via a shared `show_warning_banner` helper; status
+>   messages and the keybinding-conflict warning use `warn_fg_color` (was
+>   `Color32::YELLOW`); the regex-invalid input and layout "Delete" button use
+>   `error_fg_color` (was `rgb(0xE0,0x6C,0x4B)` / `rgb(220,80,80)`); the font
+>   preview frame uses `extreme_bg_color` + `menu_corner_radius` (was
+>   `from_gray(30)` + `4.0`); all 39 `Color32::GRAY` hint labels use
+>   `weak_text_color()`.
+> - **Standalone settings window visuals.** Settings opens as its own OS
+>   window with a separate egui `ctx`, and that branch in `update()` returns
+>   before the terminal render path's per-frame style hook runs — so the
+>   settings window was rendering with egui's default (unthemed) visuals. The
+>   settings-window branch now applies `build_visuals` + `apply_chrome_spacing`
+>   to its own `ctx` (resolving the active theme via the owning window's stable
+>   `os_dark_mode`, not the just-overwritten palette `dark_mode`) before
+>   rendering. (The unused inline `show()` modal path is left as-is.)
+> - **Opacity guarantee preserved.** The `opaque_frame` (derives its fill from
+>   `window_fill` and forces alpha 255) is unchanged — settings stays opaque
+>   regardless of `background_opacity`.
+> - **Focus rules:** the picker is a `ComboBox`, not a text field; the settings
+>   modal is already registered in `ui_overlay_open`, so no new
+>   `freminal-modal-input-suppression` wiring is needed.
+>
+> Two unit tests (`new_modal_defaults_to_modern_profile`,
+> `pending_preview_profile_round_trips`). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, `cargo machete`
+> green.
+>
+> **Deferred to 112.13:** revert-on-cancel for a previewed profile (theme and
+> opacity revert when the modal is cancelled; profile preview currently
+> persists in `gui_theme` after cancel because there is no original-profile
+> baseline to restore until config wiring lands).
 
 Scope: `freminal/src/gui/settings.rs`.
 
@@ -829,6 +1504,36 @@ Stop: report changes + manual check; await review.
 
 #### 112.8 — Adopt centralized style: overlays (context menu, command history, search, toasts, welcome)
 
+> **STATUS: COMPLETE.** Per-overlay outcome:
+>
+> - **Context menu** (`widget.rs`) — already done in the 112.14 follow-up
+>   (`egui::containers::menu::menu_style` applied to the hand-rolled popup).
+> - **Toasts** (`toast.rs`) — the only `Stroke`+`CornerRadius` user, now fully
+>   theme-driven. The per-kind bubble fill (`background`) derives from palette
+>   semantic colors read off the active themed `Visuals` (Error→`error_fg_color`,
+>   Warning→`warn_fg_color`, Info→`hyperlink_color`), blended 65/35 toward
+>   `panel_fill` for a saturated bubble (was hard-coded `rgb(120,30,30)` etc.).
+>   The border uses `window_stroke.color` (was `rgba(255,255,255,32)`), the
+>   corner radius uses `menu_corner_radius` (was `6`, now profile-aware), and
+>   the title / detail / dismiss text is contrast-picked by bubble luminance
+>   (`prefers_dark_text`) so it stays legible on light and dark themes (was
+>   hard-coded `WHITE` / `gray(230)`). Three unit tests added.
+> - **Search** (`search.rs`) — the `Frame::popup` already inherits themed
+>   visuals; the two hard-coded reds are now palette-derived: the no-match
+>   TextEdit tint from a translucent `error_fg_color`, the regex-error label
+>   from `error_fg_color` (was `rgb(80,20,20)` / `rgb(255,80,80)`).
+> - **Command history** (`command_history.rs`) — already themed: `Frame::popup`
+>   inherits visuals and the selected-row fill already used
+>   `visuals.selection.bg_fill`. No change needed.
+> - **Welcome** (`welcome.rs`) — pure `egui::Window` + standard widgets, no
+>   hard-coded colors; themed by construction once 112.4 applies global
+>   visuals. No change needed.
+>
+> Behavior (positioning, dismissal, focus) untouched; the focusable overlays
+> (search, command history) keep their existing `ui_overlay_open` /
+> `lock_focus` wiring. `cargo test --all`, `cargo clippy --all-targets
+--all-features -- -D warnings`, `cargo machete` green.
+
 Scope: `freminal/src/gui/terminal/widget.rs` (context menu),
 `freminal/src/gui/command_history.rs`, `freminal/src/gui/search.rs`,
 `freminal/src/gui/toast.rs`, `freminal/src/gui/welcome.rs`.
@@ -851,6 +1556,28 @@ Stop: report changes + manual check; await review.
 
 #### 112.9 — Adopt centralized style: guard + info dialogs (broadcast, close, paste, About, save-layout, unsaved-changes)
 
+> **STATUS: COMPLETE.** All six dialogs use `egui::Window` and inherit the
+> centralized themed `Visuals` (112.4) automatically; the audit found and fixed
+> three hard-coded color outliers, no logic touched:
+>
+> - **Paste guard** (`paste_guard.rs`) — the risky-content trigger banner used
+>   hard-coded orange `rgb(0xE0,0x6C,0x4B)`; now `warn_fg_color` (it is a
+>   paste-risk warning).
+> - **Broadcast guard** (`broadcast_guard.rs`) — the warning hint used
+>   `Color32::GRAY`; now `weak_text_color()`.
+> - **Close guard** (`close_guard.rs`) — the "Esc to cancel · Ctrl+Enter" hint
+>   used `Color32::GRAY`; now `weak_text_color()`.
+> - **About** (`menu.rs`), **Save Layout** (`menu.rs`), **Unsaved changes**
+>   (`settings.rs`) — pure `egui::Window` + standard widgets/hyperlink, no
+>   hard-coded colors; themed by construction. No change needed.
+>
+> Focus rules confirmed intact (styling-only pass, no logic change): the
+> focusable dialogs are all registered in `ui_overlay_open`
+> (`pending_save_layout`, `paste_dialog`, `broadcast_dialog`, `close_dialog`,
+> `about_window_open`); the settings unsaved-changes prompt lives in the
+> settings window's own context. `cargo test --all`, `cargo clippy
+--all-targets --all-features -- -D warnings`, `cargo machete` green.
+
 Scope: `freminal/src/gui/broadcast_guard.rs`, `freminal/src/gui/close_guard.rs`,
 `freminal/src/gui/paste_guard.rs`, `freminal/src/gui/menu.rs` (About,
 Save-Layout), `freminal/src/gui/settings.rs` (unsaved-changes dialog).
@@ -871,6 +1598,24 @@ Prohibitions: do NOT alter dialog logic; styling + focus-rule confirmation only.
 Stop: report per-dialog status; await review.
 
 #### 112.10 — Build the bundled-icon asset pipeline (format from 112.1)
+
+> **STATUS: COMPLETE.** Implemented as an icon font reusing the already-bundled
+> CaskaydiaCove Nerd Font (the 112.1 signed-off direction) — **zero new crates,
+> zero new assets**. `freminal/src/gui/icons.rs` defines
+> `pub(crate) enum ChromeIcon` (10 variants: `Lock`, `LockKey`, `RecordDot`,
+> `Record`, `Bell`, `Broadcast`, `Close`, `Minus`, `Plus`, `Warning`) with
+> `codepoint()` mapping each to a Nerd Font PUA glyph (FontAwesome `nf-fa-*`
+> range, plus `nf-cod-record` for the technical record control), and accessors
+> `glyph()`, `rich_text()`, and `rich_text_colored(color)` that build a
+> monospace-family `RichText` so the glyph resolves from the bundled face rather
+> than the proportional UI font, tintable to a palette color. Each candidate
+> codepoint was verified present in the bundled `CaskaydiaCoveNerdFont-Regular.ttf`
+> cmap via `fonttools` before mapping — zero misses across the whole inventory,
+> resolving the "a single missing codepoint forces a worse icon" risk. A
+> `pub(crate)` `bundled_regular_font_bytes()` accessor was added to
+> `font_manager.rs` (test-gated) so the regression test can inspect the real
+> bundled face. `cargo test --all`, `cargo clippy --all-targets --all-features --
+-D warnings`, and `cargo machete` are green.
 
 Scope: depends on the 112.1 decision; new asset files under `res/` or
 `assets/`, a new `freminal/src/gui/icons.rs` loader. Touches `Cargo.toml` only
@@ -894,6 +1639,39 @@ Stop: report the icon set + loader API; await review.
 
 #### 112.11 — Replace font-glyph action symbols with bundled icons
 
+> **STATUS: COMPLETE.** Every chrome **action symbol** the 112.1 inventory
+> flagged as a font-glyph indicator now renders from a `ChromeIcon` (bundled
+> Nerd Font, monospace family) instead of an emoji/system-font codepoint:
+>
+> - **menu.rs** — menu-bar lock (was U+1F512 emoji → `ChromeIcon::Lock`) and
+>   recording dot (was U+25CF → `ChromeIcon::RecordDot`, with "REC" kept as plain
+>   text); tab-bar status indicators (broadcast U+1F4E1, lock-key U+1F510, bell
+>   U+1F514 emoji) are now drawn as separate palette-tinted icon widgets ahead of
+>   the label (they were previously emoji embedded in the label string, which
+>   the proportional UI font cannot carry); tab close button (was U+00D7 →
+>   `ChromeIcon::Close`).
+> - **toast.rs** — dismiss button (was literal `×` → `ChromeIcon::Close`).
+> - **settings.rs** — paste-guard remove/add buttons (U+2796/U+2795 →
+>   `Minus`/`Plus`), keybinding-conflict warning (U+26A0 → `Warning`, split into
+>   icon + text), recording-state button (U+23FA → `Record`, built as a
+>   `LayoutJob` so the icon is monospace and the text is the UI font).
+> - **widget.rs** — the in-pane echo-off lock overlay (was U+1F512 emoji drawn
+>   in the **proportional** font with a hard-coded amber) now uses
+>   `ChromeIcon::Lock.glyph()` in the **monospace** family tinted to the palette
+>   `warn_fg_color` — fixing the pre-existing hard-coded-color outlier noted in
+>   the 112.1 audit.
+>
+> **Deliberately left on the standard-Unicode path (not action symbols on the
+> fallible system-font path):** the in-prose ellipsis in "Rename Tab…" and the
+> lock-key reference inside the Security-tab description sentence (BMP/standard
+> punctuation, render fine in the UI font, replacing them with icon glyphs would
+> be visually wrong); and the fold-placeholder `▶`/`…` (`widget.rs`
+> `format_placeholder_text`), which is **terminal-buffer-grid** text rendered
+> through the cell-grid glyph atlas — explicitly out of scope for the chrome
+> beautification pass, and standard BMP glyphs the bundled face renders fine.
+> `cargo test --all`, `cargo clippy --all-targets --all-features -- -D warnings`,
+> and `cargo machete` are green.
+
 Scope: the chrome files identified in 112.1 (`menu.rs`, `toast.rs`,
 `settings.rs`, guard dialogs as applicable).
 
@@ -915,6 +1693,17 @@ review.
 
 #### 112.12 — Icon regression test
 
+> **STATUS: COMPLETE.** `every_icon_resolves_in_bundled_font` (in
+> `icons.rs`'s test module) loads the real bundled `CaskaydiaCove` regular face
+> via `rustybuzz::Face::from_slice(bundled_regular_font_bytes(), 0)` and asserts
+> `face.glyph_index(icon.codepoint()).is_some()` for **every** `ChromeIcon`
+> variant — guarding against a future font swap silently dropping a glyph and
+> reintroducing the tofu failure mode this version exists to kill (the icon-font
+> analogue of the 111.6 ligature regression test). Two supporting tests:
+> `all_contains_every_variant` (the test-only `ChromeIcon::ALL` lists every
+> variant with distinct codepoints — count guard) and `glyph_is_single_char`.
+> `cargo test --all` green.
+
 Scope: a test module (location per 112.10's loader).
 
 What: Add a test asserting every `ChromeIcon` variant loads and (if the format
@@ -932,6 +1721,32 @@ load-success + dimensions.
 Stop: report test name + result; await review.
 
 #### 112.13 — Config wiring for `[chrome]` profile (full `freminal-config-options` ritual)
+
+> **STATUS: COMPLETE.** A `[chrome]` section carrying `profile` (the
+> `StyleProfile`, serialized lowercase `"modern"`/`"retro"`) is wired through the
+> full layered-merge path. `freminal-common/src/config.rs`: new
+> `pub struct ChromeConfig { pub profile: StyleProfile }` (`#[derive(Default)]`
+> → Modern), added to `Config` + its `Default`, to `ConfigPartial` as
+> `Option<ChromeConfig>`, with the simple-replace `apply_partial` arm; the
+> `every_config_section_survives_partial_merge` guard test gained the
+> mutation, assertion, and exhaustive-destructure entry. Two new round-trip tests
+> (`chrome_round_trips_through_toml` asserting the lowercase serialization,
+> `chrome_defaults_to_modern`). Runtime wiring: `mod.rs` initializes
+> `gui_theme` from `config.chrome.profile.defaults()` (was hardcoded
+> `GuiTheme::default()`); the settings profile picker writes the choice into
+> `draft.chrome.profile` so Apply persists it; `apply_new_config` re-derives
+> `self.gui_theme` from the saved profile (and thereby reverts an un-applied
+> preview); `open()`/`sync_from_config` seed the picker's `draft_profile` from
+> the persisted value; `rendering.rs` `set_egui_options`/`update_egui_theme`
+> /`apply_chrome_visuals` gained a `&GuiTheme` parameter so the window-creation
+> and OS-dark/light-flip paths style chrome with the user's profile instead of
+> the hardcoded default. Documented in `config_example.toml` (`[chrome]` after
+> `[ui]`) and mirrored in the Nix home-manager module (the three edits:
+> `chromeSection` filterAttrs binding, `optionalAttrs` result arm, and a
+> `types.enum ["modern" "retro"]` `mkOption`). `cargo test --all`,
+> `cargo clippy --all-targets --all-features -- -D warnings`, `cargo machete`,
+> and `nixfmt --check` / `statix check` / `deadnix --fail` on the module are all
+> green.
 
 Scope: `freminal-common/src/config.rs`, `config_example.toml`,
 `freminal/src/gui/settings.rs` + `settings_dispatch.rs`,
@@ -961,6 +1776,60 @@ Settings persistence without surfacing it.
 
 Stop: report all four wiring steps + the guard-test diff + Nix lint results;
 await review.
+
+### Task 112 follow-up fixes
+
+These fixes landed on `task-112/ui-beautification` after the planned subtasks,
+addressing chrome polish issues surfaced by maintainer review of the themed
+chrome.
+
+#### 112.14 — Context-menu + menu-bar styling polish (DONE)
+
+Scope: `freminal/src/gui/terminal/widget.rs` (`render_context_menu_area`),
+`freminal/src/gui/menu.rs` (`show_menu_bar`).
+
+Two chrome-styling issues surfaced once 112.4's themed widget fills landed:
+
+1. **Right-click context menu rendered as boxed buttons.** The context menu is
+   hand-rolled via `egui::Area` + `egui::Frame::popup`, which bypasses the menu
+   styling egui applies automatically inside `menu_button` / `context_menu`. So
+   its items rendered as full boxed buttons (each with the themed
+   `widgets.inactive` fill/stroke), instead of the borderless,
+   transparent-until-hovered rows the menu-bar dropdowns show. Fix: apply
+   `egui::containers::menu::menu_style(ui.style_mut())` inside the popup frame so
+   the context menu matches the dropdowns.
+2. **Menu bar too tight vertically.** egui's default `MenuBar` style
+   (`menu_style`) forces `button_padding = (2.0, 0.0)` — zero vertical padding —
+   leaving the top-level items cramped. Fix: `MenuBar::new().style(...)` now
+   applies `menu_style` (to keep the menu look) and then restores
+   `button_padding = (8.0, 6.0)` so the items have comfortable space above and
+   below the label.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features --
+-D warnings`. Done.
+
+#### 112.15 — Menu-bar click-then-hover-to-switch (DEFERRED — egui limitation)
+
+Scope: `freminal/src/gui/menu.rs` (menu-bar open-state handling) — **not yet
+implemented**.
+
+Traditional menu-bar behavior — click one top-level menu, then mouse over a
+sibling top-level item to switch the open menu to that one — does not work.
+Root cause is an **egui 0.34.3 limitation**, not freminal code: inside
+`egui::MenuBar`, `ui.menu_button(...)` makes each top-level item a
+`SubMenuButton`, whose open logic is
+`should_open = (!was_open && clicked) || (is_hovered && !is_any_open)`. The
+hover-open path is gated by `!is_any_open`, so once any menu is open, hovering a
+sibling top-level item is blocked from switching to it. egui exposes no public
+config to flip this; the "armed menu bar" hover-switch is not implemented at the
+bar level in this version.
+
+Disposition: deferred. Implementing it would require reimplementing the menu
+bar's open-state management ourselves (track an "armed" top-level item,
+force-open the hovered sibling, close the previous) against egui internals — a
+larger, fragile change disproportionate to the polish. Revisit on an egui
+upgrade that fixes bar-level hover-switch, or as a dedicated follow-up if the
+custom workaround is approved.
 
 ---
 

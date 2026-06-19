@@ -8,6 +8,7 @@ use freminal_common::config::TabTitlePolicy;
 use freminal_common::keybindings::KeyAction;
 
 use super::TabBarAction;
+use super::icons::ChromeIcon;
 use super::tabs::Tab;
 use super::window::PerWindowState;
 
@@ -39,7 +40,19 @@ impl super::FreminalGui {
     ) -> (TabBarAction, bool) {
         let mut menu_action = TabBarAction::None;
         let mut any_menu_open = false;
-        egui::MenuBar::new().ui(ui, |ui| {
+        // egui's default `MenuBar` style (`egui::menu_style`) sets
+        // `button_padding = (2.0, 0.0)`, leaving the top-level menu items with
+        // no vertical breathing room — the bar feels cramped. Override the
+        // bar's button style to keep the menu look (transparent inactive fill,
+        // no widget strokes) while restoring vertical padding so the items have
+        // comfortable space above and below the label, like a traditional menu.
+        let bar_style = |style: &mut egui::Style| {
+            egui::containers::menu::menu_style(style);
+            // Restore vertical (and a little horizontal) padding on the
+            // top-level bar buttons.
+            style.spacing.button_padding = egui::vec2(8.0, 6.0);
+        };
+        egui::MenuBar::new().style(bar_style).ui(ui, |ui| {
             self.show_menu_bar_contents(ui, win, window_id, &mut menu_action, &mut any_menu_open);
         });
         (menu_action, any_menu_open)
@@ -155,21 +168,26 @@ impl super::FreminalGui {
         let show_rec = self.is_recording();
 
         if show_lock || show_rec {
+            // Semantic indicator colors come from the centralized themed
+            // Visuals (set in 112.4): the lock is a "warning"-class indicator
+            // (palette yellow), the REC dot an "error"-class indicator
+            // (palette red).  No hard-coded hues — they follow the active theme.
+            let warn_color = ui.visuals().warn_fg_color;
+            let error_color = ui.visuals().error_fg_color;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if show_lock {
-                    ui.label(
-                        egui::RichText::new("\u{1F512}")
-                            .color(egui::Color32::from_rgb(255, 200, 50)),
-                    );
+                    ui.label(ChromeIcon::Lock.rich_text_colored(warn_color));
                 }
                 if show_rec {
-                    // Red filled bullet + "REC" label; kept short so
-                    // it does not crowd the menu bar.
+                    // Recording dot + "REC" label; kept short so it does not
+                    // crowd the menu bar. The dot is a bundled icon; "REC" stays
+                    // plain text.
                     ui.label(
-                        egui::RichText::new("\u{25CF} REC")
-                            .color(egui::Color32::from_rgb(220, 60, 60))
+                        ChromeIcon::RecordDot
+                            .rich_text_colored(error_color)
                             .strong(),
                     );
+                    ui.label(egui::RichText::new("REC").color(error_color).strong());
                 }
             });
         }
@@ -672,6 +690,119 @@ impl super::FreminalGui {
         .inner
     }
 
+    /// Build the [`egui::Frame`] for a single tab.
+    ///
+    /// The frame owns the tab's entire visual (fill, border, corner radius) and
+    /// — critically — has **constant geometry across every state**. Every tab,
+    /// whether active, inactive, hovered, or dragged, uses the same
+    /// `inner_margin` and the same `stroke` width, so hovering or activating a
+    /// tab never changes its size and therefore never reflows the tab bar (or
+    /// the terminal buffer below it). Only the *colors* change between states.
+    ///
+    /// Colors come from the active theme's [`ChromeRole`] palette so the tab
+    /// bar follows the selected theme + profile — no hard-coded hues:
+    ///
+    /// - **active**: the saturated `Accent` fill with an `Accent`-colored
+    ///   border, so the focused tab pops.
+    /// - **hovered (inactive)**: the `SurfaceHover` fill with a `Border` stroke.
+    /// - **inactive**: the `SurfaceVariant` fill with a `Border` stroke, so
+    ///   non-active tabs always carry a visible outline in every theme.
+    /// - **being-dragged**: a translucent ghost over the inactive look.
+    /// - **bell-active (inactive)**: a warm tint blended toward the palette
+    ///   warning color so an unacked bell reads as attention-worthy.
+    // The four bools each describe an independent, orthogonal tab state
+    // (active / hovered / being-dragged / bell). They are not a closed set of
+    // mutually-exclusive variants, so an enum would not model them.
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn tab_frame(
+        ui: &egui::Ui,
+        is_active: bool,
+        is_hovered: bool,
+        is_being_dragged: bool,
+        has_bell: bool,
+    ) -> egui::Frame {
+        let v = ui.visuals();
+        let corner = v.menu_corner_radius;
+        let stroke_width = v.widgets.inactive.bg_stroke.width.max(1.0);
+
+        // Fill + border colors per state, read from the themed `Visuals`
+        // (built from the active palette's `ChromeRole`s in `chrome_style.rs`):
+        //   Accent          = selection.bg_fill
+        //   OnAccent border = selection.stroke.color
+        //   SurfaceVariant  = widgets.inactive.bg_fill
+        //   SurfaceHover    = widgets.hovered.bg_fill
+        //   Border          = widgets.inactive.bg_stroke.color
+        // Geometry is identical in all cases — only colors change.
+        let (fill, border) = if is_active {
+            (v.selection.bg_fill, v.selection.stroke.color)
+        } else if is_hovered {
+            (
+                v.widgets.hovered.bg_fill,
+                v.widgets.inactive.bg_stroke.color,
+            )
+        } else {
+            (
+                v.widgets.inactive.bg_fill,
+                v.widgets.inactive.bg_stroke.color,
+            )
+        };
+        let warn = v.warn_fg_color;
+
+        // Blend toward the warning color for an unacked bell on an inactive tab.
+        let fill = if has_bell && !is_active {
+            egui::Color32::from_rgb(
+                u8::midpoint(fill.r(), warn.r()),
+                u8::midpoint(fill.g(), warn.g()),
+                u8::midpoint(fill.b(), warn.b()),
+            )
+        } else {
+            fill
+        };
+
+        // Dragged tabs render as a translucent ghost so the pickup is visible.
+        let fill = if is_being_dragged {
+            egui::Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 96)
+        } else {
+            fill
+        };
+
+        egui::Frame::NONE
+            .fill(fill)
+            .stroke(egui::Stroke::new(stroke_width, border))
+            .corner_radius(corner)
+            // Uniform padding for every state keeps the tab a constant height,
+            // so the label is vertically centered and hover never reflows.
+            .inner_margin(egui::Margin::symmetric(8, 4))
+    }
+
+    /// Render the inline rename editor for a tab and return the resulting
+    /// [`TabBarAction`].  Commit on Enter, cancel on Escape or focus loss.
+    fn show_tab_rename_editor(
+        ui: &mut egui::Ui,
+        tab_id: super::tabs::TabId,
+        index: usize,
+        rename_buffer: &mut String,
+    ) -> TabBarAction {
+        let edit_id = egui::Id::new(("tab_rename", tab_id));
+        let edit = egui::TextEdit::singleline(rename_buffer)
+            .id(edit_id)
+            .desired_width(120.0);
+        let response = ui.add(edit);
+        // Auto-focus on the first frame the editor appears.
+        if !response.has_focus() && !response.lost_focus() {
+            response.request_focus();
+        }
+        let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if enter {
+            TabBarAction::CommitRename(index, rename_buffer.clone())
+        } else if escape || response.lost_focus() {
+            TabBarAction::CancelRename
+        } else {
+            TabBarAction::None
+        }
+    }
+
     /// Render a single tab element with label, optional close button,
     /// and a distinct background color for the active tab.
     ///
@@ -734,90 +865,76 @@ impl super::FreminalGui {
 
         let has_bell = pane.is_some_and(|p| p.bell_active) && !is_active;
 
-        // Build the display label: prepend a lock indicator when echo is disabled
-        // (password prompt active), and a bell indicator when the tab has an
-        // unacknowledged bell and is not the active (focused) tab.
-        let display_label = match (is_echo_off, has_bell) {
-            (true, true) => format!("\u{1f510} \u{1f514} {label}"),
-            (true, false) => format!("\u{1f510} {label}"),
-            (false, true) => format!("\u{1f514} {label}"),
-            (false, false) => label.to_owned(),
-        };
+        // The tab label text itself; status indicators (broadcast, lock, bell)
+        // are drawn as separate bundled-icon glyphs ahead of it (see the icon
+        // prefixes rendered below), not embedded in this string — the label uses
+        // the proportional UI font, which carries no Nerd Font icon glyphs.
+        let display_label = label.to_owned();
 
-        // Broadcast indicator (Task 74): prepend a satellite-antenna glyph
-        // when this tab is broadcasting keyboard input to all its panes.
-        let display_label = if tab.broadcast_input {
-            format!("\u{1f4e1} {display_label}")
-        } else {
-            display_label
-        };
+        // Two-phase frame: lay the content out first (so we know the tab's
+        // hover state and final size), then style + paint the frame around it.
+        // This keeps the tab geometry constant across active/inactive/hover
+        // states — the frame's fill/stroke change but its margins never do —
+        // so hovering or activating a tab never reflows the tab bar (bug: tab
+        // bar grew on hover) and the label stays vertically centered.
+        let mut prepared = egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(8, 4))
+            .begin(ui);
 
-        // Tab frame: active gets a gray fill, bell-active inactive tabs
-        // get a warm amber tint, others use a transparent frame. A tab
-        // that is currently being dragged renders as a translucent ghost
-        // (dimmed fill) at its preview position so the user sees where
-        // the reorder will land without committing the move.
-        let frame = if is_being_dragged {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgba_unmultiplied(120, 120, 120, 40))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else if is_active {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_gray(100))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else if has_bell {
-            egui::Frame::NONE
-                .fill(egui::Color32::from_rgba_unmultiplied(180, 120, 30, 40))
-                .corner_radius(4.0)
-                .inner_margin(0.0)
-        } else {
-            egui::Frame::NONE
-        };
-
-        let frame_response = frame.show(ui, |ui| {
-            ui.horizontal(|ui| {
+        let mut tab_hovered = false;
+        {
+            let ui = &mut prepared.content_ui;
+            // Center the row vertically within the constant-height frame so the
+            // label sits in the middle regardless of active/inactive state.
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if is_renaming {
-                    // Inline rename editor.  Commit on Enter, cancel on
-                    // Escape or focus loss.
-                    let edit_id = egui::Id::new(("tab_rename", tab.id));
-                    let edit = egui::TextEdit::singleline(rename_buffer)
-                        .id(edit_id)
-                        .desired_width(120.0);
-                    let response = ui.add(edit);
-                    // Auto-focus on the first frame the editor appears.
-                    if !response.has_focus() && !response.lost_focus() {
-                        response.request_focus();
-                    }
-                    let enter =
-                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                    if enter {
-                        action = TabBarAction::CommitRename(index, rename_buffer.clone());
-                    } else if escape || response.lost_focus() {
-                        action = TabBarAction::CancelRename;
-                    }
+                    action = Self::show_tab_rename_editor(ui, tab.id, index, rename_buffer);
                 } else {
-                    // Bell-active tabs use amber text for visibility.
-                    let rich_label = if has_bell {
-                        egui::RichText::new(&display_label)
-                            .size(13.0)
-                            .color(egui::Color32::from_rgb(255, 180, 50))
+                    // Status indicators, drawn as bundled icon glyphs ahead
+                    // of the label (palette-tinted, monospace family so they
+                    // resolve from the bundled Nerd Font rather than the
+                    // proportional UI font). Order: broadcast, lock, bell.
+                    let warn_color = ui.visuals().warn_fg_color;
+                    // Text color: legible OnAccent over the active tab's
+                    // accent fill; otherwise the normal/bell color.
+                    let label_color = if is_active {
+                        ui.visuals().selection.stroke.color
+                    } else if has_bell {
+                        warn_color
                     } else {
-                        egui::RichText::new(&display_label).size(13.0)
+                        ui.visuals().widgets.inactive.fg_stroke.color
                     };
+                    if tab.broadcast_input {
+                        // Broadcast indicator (Task 74): tab is broadcasting
+                        // keyboard input to all its panes.
+                        ui.label(ChromeIcon::Broadcast.rich_text_colored(label_color));
+                    }
+                    if is_echo_off {
+                        // Echo disabled (password prompt active).
+                        ui.label(ChromeIcon::LockKey.rich_text_colored(warn_color));
+                    }
+                    if has_bell {
+                        // Unacknowledged bell on a non-focused tab.
+                        ui.label(ChromeIcon::Bell.rich_text_colored(warn_color));
+                    }
 
-                    // Use Button::selectable with click_and_drag sense so the
-                    // tab can be picked up and dragged. `selectable_label` only
-                    // senses clicks; retrofitting a drag sense onto its
-                    // response via `.interact()` registers the drag too late
-                    // — egui's interaction state machine needs the sense at
-                    // widget allocation time, not after.
+                    let rich_label = egui::RichText::new(&display_label)
+                        .size(13.0)
+                        .color(label_color);
+
+                    // Frameless button: the tab frame owns the visual, so
+                    // the button must not draw its own background/border
+                    // (that is what made non-active tabs borderless and grew
+                    // the bar on hover). It still senses click_and_drag so
+                    // the tab can be picked up and dragged.
                     let response = ui.add(
-                        egui::Button::selectable(is_active, rich_label)
+                        egui::Button::new(rich_label)
+                            .frame(false)
                             .sense(egui::Sense::click_and_drag()),
                     );
+                    if response.hovered() {
+                        tab_hovered = true;
+                    }
                     if response.double_clicked() {
                         action = TabBarAction::BeginRename(index);
                     } else if response.clicked() && !is_active {
@@ -849,14 +966,30 @@ impl super::FreminalGui {
                     });
 
                     // Show close button when more than one tab is open.
-                    if count > 1 && ui.small_button("\u{00d7}").clicked() {
+                    if count > 1 && ui.small_button(ChromeIcon::Close.rich_text()).clicked() {
                         action = TabBarAction::Close(index);
                     }
                 }
             });
-        });
+        }
 
-        (action, frame_response.response.rect)
+        // Whole-tab hover (covers the padding around the label), so the hover
+        // highlight tracks the entire tab rect, not just the label glyphs.
+        let outer_rect = prepared
+            .content_ui
+            .min_rect()
+            .expand2(egui::Vec2::new(8.0, 4.0));
+        if ui.rect_contains_pointer(outer_rect) {
+            tab_hovered = true;
+        }
+
+        // Now that the content is laid out and hover is known, apply the
+        // state-dependent fill/stroke and paint the frame behind the content.
+        prepared.frame = Self::tab_frame(ui, is_active, tab_hovered, is_being_dragged, has_bell);
+        prepared.paint(ui);
+        let frame_response = prepared.allocate_space(ui);
+
+        (action, frame_response.rect)
     }
 
     /// Show the floating "Save Layout" name-entry prompt.

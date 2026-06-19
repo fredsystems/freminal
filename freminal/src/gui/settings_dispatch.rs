@@ -30,6 +30,13 @@ impl FreminalGui {
         new_cfg: Config,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
+        // The theme is being committed: drop the live preview override so
+        // chrome styling returns to the snapshot's theme (which now carries the
+        // committed theme via the broadcast below). Keeping the override pinned
+        // would break per-window Auto-mode (OS dark/light) theming, which the
+        // global override cannot represent.
+        self.preview_theme = None;
+
         // Apply theme change to all windows.
         for win in self.windows.values_mut() {
             if new_cfg.theme.active_slug(win.os_dark_mode)
@@ -117,6 +124,13 @@ impl FreminalGui {
 
         self.config = new_cfg;
 
+        // Adopt the persisted chrome style profile (Task 112.13). A previewed
+        // profile may have set `gui_theme` ephemerally; on Apply we re-derive it
+        // from the now-saved config so it persists. On a cancelled preview, the
+        // saved config still carries the original profile, so this also reverts
+        // an un-applied preview to the persisted value.
+        self.gui_theme = self.config.chrome.profile.defaults();
+
         // Rebuild the paste-guard pattern cache from the new config and report
         // any patterns that fail to compile (skipped at match time).
         let invalid = self.paste_guard.rebuild(&self.config.paste_guard);
@@ -203,8 +217,13 @@ impl FreminalGui {
         }
 
         // Request repaint on all terminal windows so changes are visible.
+        // The theme reaches the terminal chrome via the PTY round-trip
+        // (snap.theme), so an immediate repaint may re-read a stale snapshot;
+        // a short follow-up repaint guarantees the restyle lands even on an
+        // idle terminal.
         for &wid in self.windows.keys() {
             handle.request_repaint(wid);
+            handle.request_repaint_after(wid, std::time::Duration::from_millis(50));
         }
     }
 
@@ -266,10 +285,26 @@ impl FreminalGui {
                     handle.request_repaint(wid);
                 }
             }
+            SettingsAction::PreviewProfile(profile) => {
+                // Live chrome re-style: update the runtime GuiTheme the
+                // per-frame style hook (112.4) reads. Not persisted (112.13).
+                // The style_cache keys on GuiTheme, so the next frame rebuilds
+                // and re-applies the visuals across all chrome.
+                self.gui_theme = profile.defaults();
+                for &wid in self.windows.keys() {
+                    handle.request_repaint(wid);
+                }
+            }
             SettingsAction::PreviewTheme(slug)
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
             {
-                // Send theme preview to all panes in all windows.
+                // Drive chrome styling from this preview theme immediately and
+                // deterministically (the per-frame style hook reads
+                // `self.preview_theme`), independent of the PTY round-trip.
+                self.preview_theme = Some(theme);
+                // Send theme preview to all panes in all windows so the
+                // terminal *buffer* re-themes too (its renderer reads the
+                // snapshot's theme, set on the PTY side).
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
                         match tab.pane_tree.iter_panes() {
@@ -291,13 +326,27 @@ impl FreminalGui {
                         }
                     }
                 }
+                // The theme travels to the terminal windows via the PTY
+                // round-trip (InputEvent::ThemeChange -> set_theme ->
+                // build_snapshot -> snap.theme), so an immediate repaint would
+                // re-read a stale snapshot. The PTY thread schedules its own
+                // repaint after rebuilding, but a quiet terminal (no cursor
+                // blink, no output) would otherwise only refresh on the next
+                // external event (mouseover). Schedule a short follow-up repaint
+                // so the GUI re-reads the updated snapshot and restyles chrome
+                // even when idle.
                 for &wid in self.windows.keys() {
                     handle.request_repaint(wid);
+                    handle.request_repaint_after(wid, std::time::Duration::from_millis(50));
                 }
             }
             SettingsAction::RevertTheme(slug, original_opacity)
                 if let Some(theme) = freminal_common::themes::by_slug(slug) =>
             {
+                // Restore the chrome override to the reverted (original) theme
+                // so the chrome snaps back deterministically alongside the
+                // buffer's PTY round-trip below.
+                self.preview_theme = Some(theme);
                 for win in self.windows.values() {
                     for tab in win.tabs.iter() {
                         match tab.pane_tree.iter_panes() {
@@ -320,8 +369,11 @@ impl FreminalGui {
                     }
                 }
                 self.config.ui.background_opacity = *original_opacity;
+                // Same PTY round-trip as PreviewTheme: schedule a follow-up
+                // repaint so the reverted theme is picked up even when idle.
                 for &wid in self.windows.keys() {
                     handle.request_repaint(wid);
+                    handle.request_repaint_after(wid, std::time::Duration::from_millis(50));
                 }
             }
             SettingsAction::TestNotification => {
