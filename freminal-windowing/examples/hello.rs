@@ -17,7 +17,7 @@ impl App for HelloApp {
             egui::Id::new("hello_root"),
             egui::UiBuilder::default(),
         );
-        egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.heading("Hello from freminal-windowing");
             ui.label("This is a minimal example using winit + glutin + egui.");
         });

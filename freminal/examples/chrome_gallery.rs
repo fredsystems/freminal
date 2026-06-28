@@ -276,14 +276,15 @@ impl App for ChromeGallery {
             freminal::gui::chrome_style::apply_chrome_spacing(style, &self.draft);
         });
 
-        // Mirror the app's root-Ui + `show_inside` idiom (the `show(ctx, …)`
-        // form is deprecated in this egui version).
+        // Mirror the app's root-Ui + `show(ui, …)` idiom (the top-level
+        // `CentralPanel::default().show(ctx, …)` form is gone in egui 0.35;
+        // panels now take a `&mut Ui`).
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
             egui::Id::new("chrome_gallery_root"),
             egui::UiBuilder::default(),
         );
-        egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.columns(2, |cols| {
                 self.controls(&mut cols[0]);
                 self.preview(&mut cols[1]);

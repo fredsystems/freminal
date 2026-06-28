@@ -945,7 +945,8 @@ impl freminal_windowing::App for FreminalGui {
         }
 
         // Create a root Ui covering the full available area.  Panels reserve
-        // space from this Ui via `show_inside` (the non-deprecated API).
+        // space from this Ui via `show` (the non-deprecated API; `show_inside`
+        // was renamed to `show` in egui 0.35).
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
             egui::Id::new("freminal_root"),
@@ -956,7 +957,7 @@ impl freminal_windowing::App for FreminalGui {
         let mut any_menu_open = false;
         if !self.config.ui.hide_menu_bar {
             let (menu_action, menu_open) = Panel::top("menu_bar")
-                .show_inside(&mut root_ui, |ui| {
+                .show(&mut root_ui, |ui| {
                     self.show_menu_bar(ui, &mut win, window_id)
                 })
                 .inner;
@@ -1000,12 +1001,12 @@ impl freminal_windowing::App for FreminalGui {
                 freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
             };
             let tab_action = panel
-                .show_inside(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
+                .show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
                 .inner;
             self.dispatch_tab_bar_action(tab_action, &mut win);
         }
 
-        let _panel_response = CentralPanel::default().show_inside(&mut root_ui, |ui| {
+        let _panel_response = CentralPanel::default().show(&mut root_ui, |ui| {
             // Synchronise font metrics with the current display scale *before*
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
@@ -2253,13 +2254,14 @@ impl FreminalGui {
             return;
         };
         // Match the rest of the GUI: build a root Ui covering the window and
-        // reserve space from it via `show_inside` (the non-deprecated API).
+        // reserve space from it via `show` (the non-deprecated API; `show_inside`
+        // was renamed to `show` in egui 0.35).
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
             egui::Id::new("freminal_fatal_error_root"),
             egui::UiBuilder::default(),
         );
-        CentralPanel::default().show_inside(&mut root_ui, |ui| {
+        CentralPanel::default().show(&mut root_ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(48.0);
                 ui.heading(title);
