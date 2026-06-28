@@ -328,6 +328,24 @@ struct FreminalGui {
     /// `(title, detail)` — `title` is a short headline, `detail` carries
     /// the underlying spawn error for the user to act on.
     fatal_error: Option<(String, String)>,
+
+    /// Hash of the TOML last written to `last_session.toml` by the auto-save
+    /// path, used to skip redundant writes.
+    ///
+    /// The session is auto-saved both periodically (a background timer) and on
+    /// shutdown.  Most ticks produce a layout identical to the one already on
+    /// disk; rather than rewrite an unchanged file every minute (and risk a
+    /// pointless write racing a shutdown), we fingerprint the serialized TOML
+    /// and only write when it differs from this value.  `None` until the first
+    /// successful auto-save.  Only the *automatic* path consults this — an
+    /// explicit "Save Layout As..." always writes.
+    last_session_fingerprint: Option<u64>,
+
+    /// Set by the background auto-save timer thread (every
+    /// [`SESSION_AUTOSAVE_INTERVAL`]) to request that `update()` re-evaluate
+    /// whether the session needs saving.  The thread also wakes the event loop
+    /// via the repaint proxy so this is observed promptly even at idle.
+    session_save_due: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FreminalGui {
@@ -463,6 +481,8 @@ impl FreminalGui {
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
+            last_session_fingerprint: None,
+            session_save_due: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         if !layout_errors.is_empty() {

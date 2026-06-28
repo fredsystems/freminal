@@ -1042,6 +1042,40 @@ project_dir = "~/default"
         assert_eq!(tab.panes.len(), 3);
     }
 
+    /// A blank `last_session.toml` (e.g. a zero-byte file left by a write that
+    /// was killed mid-flush) deserializes to a structurally-valid but empty
+    /// `Layout` — every field is `#[serde(default)]`, so parsing *succeeds*.
+    /// `resolve()` then yields zero windows.  This is the exact condition the
+    /// GUI's session-restore path must detect and treat as "no usable session"
+    /// (fall back to a default shell) rather than as a parse error or a usable
+    /// layout.  This test pins that invariant so the empty-windows guard in the
+    /// GUI cannot silently stop being load-bearing.
+    #[test]
+    fn empty_toml_parses_to_zero_window_layout() {
+        for content in [
+            "",
+            "\n",
+            "# just a comment\n",
+            "[layout]\nname = \"Last Session\"\n",
+        ] {
+            let layout = Layout::from_str_content(Path::new("last_session.toml"), content)
+                .expect("blank/empty TOML should parse as a valid empty layout");
+            assert!(
+                layout.windows.is_empty(),
+                "expected no windows for content {content:?}"
+            );
+            assert!(
+                layout.tabs.is_empty(),
+                "expected no top-level tabs for content {content:?}"
+            );
+            let resolved = layout.resolve().expect("empty layout should resolve");
+            assert!(
+                resolved.windows.is_empty(),
+                "empty layout must resolve to zero windows for content {content:?}"
+            );
+        }
+    }
+
     #[test]
     fn validate_split_layout_ok() {
         let layout =
