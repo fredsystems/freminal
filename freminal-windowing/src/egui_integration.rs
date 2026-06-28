@@ -75,12 +75,12 @@ impl EguiState {
     {
         let mut ui_fn = ui_fn;
 
-        #[expect(
-            deprecated,
-            reason = "run_ui takes &mut Ui, we need &Context for App trait"
-        )]
-        let full_output = self.ctx.run(raw_input, |ctx| {
-            ui_fn(ctx, &gl_state.glow_context);
+        // egui 0.35 replaced `Context::run` (closure took `&Context`) with
+        // `Context::run_ui` (closure takes the root `&mut Ui`).  Our `App`
+        // trait still works in terms of `&Context`; `Ui` derefs to `Context`,
+        // so deref explicitly rather than relying on a silent coercion.
+        let full_output = self.ctx.run_ui(raw_input, |root_ui| {
+            ui_fn(&*root_ui, &gl_state.glow_context);
         });
 
         self.winit_state

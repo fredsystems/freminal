@@ -549,7 +549,7 @@ impl SettingsModal {
 
         // Bottom bar must be laid out first (Panel reserves space from the root).
         let is_read_only = self.read_only_reason.is_some();
-        Panel::bottom("settings_bottom_bar").show_inside(&mut root_ui, |ui| {
+        Panel::bottom("settings_bottom_bar").show(&mut root_ui, |ui| {
             ui.add_space(4.0);
             if let Some(msg) = &self.status_message {
                 let warn = ui.visuals().warn_fg_color;
@@ -576,7 +576,7 @@ impl SettingsModal {
             ui.add_space(4.0);
         });
 
-        egui::CentralPanel::default().show_inside(&mut root_ui, |ui| {
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.heading("Settings");
             ui.add_space(4.0);
 
