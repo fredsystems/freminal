@@ -53,6 +53,12 @@ impl freminal_windowing::App for FreminalGui {
         let os_dark_mode = ctx.global_style().visuals.dark_mode;
 
         if let Some(initial) = self.initial_state.take() {
+            // Start the periodic session auto-save timer, bound to the first
+            // window's repaint handle so it can wake the (otherwise sleeping)
+            // event loop when a save is due.  Spawned exactly once, here at
+            // first-window creation.
+            self.spawn_session_autosave_timer(Arc::clone(&initial.repaint_handle));
+
             // First window — spawn the initial PTY tab now, or if a
             // startup layout/session-restore applies, delegate to the
             // layout machinery (which will build the tabs itself and
@@ -315,21 +321,24 @@ impl freminal_windowing::App for FreminalGui {
         //
         // Saving is independent of `restore_last_session` — the flag only
         // controls whether the saved session is *applied* on next launch.
-        // Always writing keeps `_last_session.toml` fresh so users can
-        // toggle the flag on at any time and get their real last session
-        // back, rather than whatever stale state happened to be on disk
-        // when they last had the flag enabled.
+        // Saving keeps `last_session.toml` fresh so users can toggle the flag
+        // on at any time and get their real last session back, rather than
+        // whatever stale state happened to be on disk when they last had the
+        // flag enabled.
         //
-        // We still skip saving when the user launched with an ad-hoc
-        // command (`freminal -- vim foo`): those panes are running a
-        // one-shot program and are not meaningfully restorable.
+        // `maybe_auto_save_session` skips the write when nothing changed since
+        // the periodic timer last persisted, and skips entirely for ad-hoc
+        // command launches (`freminal -- vim foo`).  In the common case the
+        // periodic save already wrote the current state, so this shutdown call
+        // is a no-op — by design, so we no longer depend on a write surviving
+        // an abrupt teardown.
         let remaining_terminal_windows = self
             .windows
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1 && self.args.command.is_empty() {
-            self.auto_save_session();
+        if remaining_terminal_windows == 1 {
+            self.maybe_auto_save_session();
         }
 
         // Capture geometry of every still-open terminal window (including
@@ -481,6 +490,12 @@ impl freminal_windowing::App for FreminalGui {
             }
             return;
         }
+
+        // ── Periodic session auto-save ───────────────────────────────────────
+        // The background timer latches `session_save_due`; drain it here so a
+        // due save runs on the terminal-window update path (the settings
+        // window returned above).  Cheap no-op when not due.
+        self.poll_session_autosave();
 
         // ── Focus or create settings window (deferred from menu/keybind) ─────
         if self.pending_focus_settings {
@@ -2433,6 +2448,22 @@ impl FreminalGui {
             let var_map = self.args.layout_var_map();
             return match freminal_common::layout::Layout::from_file(&path) {
                 Ok(layout) => match layout.apply_variables(&positional, &var_map).resolve() {
+                    Ok(resolved) if resolved.windows.is_empty() => {
+                        // A structurally-valid but empty layout (no windows /
+                        // no panes) cannot produce a usable window.  Treat it
+                        // as "no layout applies" so the caller falls back to a
+                        // default shell rather than rendering a blank/fatal
+                        // window.
+                        error!("Layout '{}' contains no windows", path.display());
+                        self.push_error_toast(
+                            "Layout is empty",
+                            Some(format!(
+                                "{} defines no windows or panes; starting a default shell.",
+                                path.display()
+                            )),
+                        );
+                        None
+                    }
                     Ok(resolved) => Some(resolved),
                     Err(e) => {
                         error!("Failed to resolve layout '{}': {e}", path.display());
@@ -2463,6 +2494,29 @@ impl FreminalGui {
             l.apply_variables(&[], &std::collections::HashMap::new())
                 .resolve()
         }) {
+            // A blank or zero-window `last_session.toml` deserializes to a
+            // structurally-valid but empty `Layout` (every field is
+            // `#[serde(default)]`), so parsing *succeeds* and we land here with
+            // no windows.  This is exactly the corruption case observed when a
+            // previous run was killed mid-write (e.g. an aggressive reboot
+            // truncated the file): without this guard the empty layout produced
+            // a blank window and a fatal-error panel at startup.  Treat it like
+            // a parse failure — warn the user via a non-blocking toast and fall
+            // back to a default shell so the terminal still starts.
+            Ok(resolved) if resolved.windows.is_empty() => {
+                error!(
+                    "restore_last_session: {} contains no windows (blank/corrupt session)",
+                    path.display()
+                );
+                self.push_error_toast(
+                    "Could not restore last session",
+                    Some(
+                        "The saved session was empty or corrupt; starting a default shell."
+                            .to_owned(),
+                    ),
+                );
+                None
+            }
             Ok(resolved) => Some(resolved),
             Err(e) => {
                 error!(

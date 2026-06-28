@@ -273,41 +273,54 @@ impl FreminalGui {
 
     /// Read the current working directory of the shell in the given pane.
     ///
-    /// Delegates to [`crate::gui::platform::read_cwd`], which supports Linux
-    /// (`/proc/<pid>/cwd`), macOS (`proc_pidinfo(PROC_PIDVNODEPATHINFO)` via
-    /// `sysinfo`), and Windows (`NtQueryInformationProcess` via `sysinfo`).
-    /// Returns `None` when the child PID is unknown, the process has exited,
-    /// the platform is unsupported, or the path is not valid UTF-8.
+    /// Source priority:
+    /// 1. The OSC 7 cwd carried in the pane's latest snapshot
+    ///    (`snap.cwd`).  When the shell runs freminal's shell integration it
+    ///    emits `OSC 7` at every prompt, so this is present, free (a single
+    ///    atomic snapshot load, no syscall), and tracks the user's perceived
+    ///    cwd across `cd` and subshells.
+    /// 2. Fallback: [`crate::gui::platform::read_cwd`], which inspects the OS
+    ///    process — Linux (`/proc/<pid>/cwd`), macOS / Windows (via `sysinfo`).
+    ///    This covers users who do *not* run shell integration (where
+    ///    `snap.cwd` is always `None`).  Returns `None` when the child PID is
+    ///    unknown, the process has exited, the platform is unsupported, or the
+    ///    path is not valid UTF-8.
+    ///
+    /// Returns `None` when neither source can supply a cwd — in which case the
+    /// pane simply has no `directory` recorded (and contributes nothing to a
+    /// session-change check, so an OSC-7-less freshly-spawned shell does not
+    /// churn the saved session).
     pub(super) fn read_cwd_for_pane_with_extra(
         &self,
         pane_id: panes::PaneId,
         extra_win: Option<&PerWindowState>,
     ) -> Option<String> {
-        // Search extra_win first (current window removed from self.windows during update()).
-        let child_pid = extra_win
-            .and_then(|win| {
-                win.tabs.iter().find_map(|tab| {
-                    tab.pane_tree.iter_panes().ok().and_then(|ps| {
-                        ps.into_iter()
-                            .find(|p| p.id == pane_id)
-                            .and_then(|p| p.child_pid)
-                    })
-                })
+        // Locate the pane once; from it we can read both the snapshot cwd and
+        // the child PID without iterating the window set twice.  A named `fn`
+        // (not a closure) is used so the borrow checker ties the returned
+        // `&Pane` to the input `&PerWindowState` lifetime.
+        fn find_in(win: &PerWindowState, pane_id: panes::PaneId) -> Option<&panes::Pane> {
+            win.tabs.iter().find_map(|tab| {
+                tab.pane_tree
+                    .iter_panes()
+                    .ok()
+                    .and_then(|ps| ps.into_iter().find(|p| p.id == pane_id))
             })
-            .or_else(|| {
-                // Find the pane across all other windows and tabs.
-                self.windows.values().find_map(|win| {
-                    win.tabs.iter().find_map(|tab| {
-                        tab.pane_tree.iter_panes().ok().and_then(|ps| {
-                            ps.into_iter()
-                                .find(|p| p.id == pane_id)
-                                .and_then(|p| p.child_pid)
-                        })
-                    })
-                })
-            })?;
+        }
 
-        crate::gui::platform::read_cwd(child_pid)
+        // Search extra_win first (current window removed from self.windows
+        // during update()), then all other windows and tabs.
+        let pane = extra_win
+            .and_then(|win| find_in(win, pane_id))
+            .or_else(|| self.windows.values().find_map(|win| find_in(win, pane_id)))?;
+
+        // Priority 1: OSC 7 cwd from the latest snapshot (no syscall).
+        if let Some(cwd) = pane.arc_swap.load().cwd.clone() {
+            return Some(cwd);
+        }
+
+        // Priority 2: OS process inspection (one syscall; only when OSC 7 absent).
+        crate::gui::platform::read_cwd(pane.child_pid?)
     }
 
     /// Serialise the current window/tab/pane topology as a [`freminal_common::layout::Layout`]
@@ -316,8 +329,8 @@ impl FreminalGui {
     /// `extra_win` should be `Some(win)` when called during `update()`, because
     /// the current window has been removed from `self.windows` for the duration
     /// of the frame.  Pass `None` when called outside `update()` (e.g. from
-    /// `auto_save_session` in `on_close_requested`) where all windows are still
-    /// in `self.windows`.
+    /// `maybe_auto_save_session` in `on_close_requested`) where all windows are
+    /// still in `self.windows`.
     ///
     /// `name` is the human-readable name for the layout; if empty the path
     /// file stem is used as a fallback.
@@ -331,6 +344,77 @@ impl FreminalGui {
         name: &str,
         extra_win: Option<&PerWindowState>,
     ) -> anyhow::Result<()> {
+        // Preserve the historical behavior: an empty `name` derives the layout
+        // name from the file stem.  `build_layout` itself is path-agnostic.
+        let resolved_name = if name.is_empty() {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+        } else {
+            name
+        };
+        let layout = self.build_layout(resolved_name, extra_win);
+        let toml_str = layout.to_toml_string()?;
+        Self::atomic_write(path, &toml_str)?;
+        Ok(())
+    }
+
+    /// Atomically write `contents` to `path`.
+    ///
+    /// Writes to a sibling temporary file first, flushes it, then renames it
+    /// over the destination.  A rename within a filesystem is atomic, so a
+    /// concurrent reader (or a crash mid-write) always observes either the
+    /// complete old file or the complete new file — never a truncated one.
+    ///
+    /// This is the fix for the "blank `last_session.toml` after an aggressive
+    /// shutdown" failure mode: the previous `std::fs::write` truncated the
+    /// destination on open, so a process killed between truncate and write
+    /// left a zero-byte file on disk.  With temp+rename, the worst a killed
+    /// write leaves behind is a stray `.tmp` sibling (harmless; overwritten
+    /// on the next save), and the real file is left intact.
+    pub(super) fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        // Place the temp file next to the destination so the rename stays
+        // within the same filesystem (cross-filesystem renames are not
+        // atomic and fail with EXDEV).  Suffix with the PID to avoid two
+        // freminal processes clobbering each other's temp file.
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp.{}", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
+
+        // Scope the file handle so it is closed (and flushed) before rename.
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(contents.as_bytes())?;
+            f.flush()?;
+        }
+
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Best-effort cleanup of the temp file on rename failure so we
+                // don't leak it.  The original error is what the caller sees.
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
+    }
+
+    /// Build an in-memory [`Layout`](freminal_common::layout::Layout) snapshot
+    /// of the current session from all open windows.
+    ///
+    /// Pure: performs no I/O of its own beyond the per-pane CWD lookup (which
+    /// prefers the OSC 7 cwd carried in each pane's snapshot and only falls
+    /// back to a `/proc` syscall when that is absent — see
+    /// [`Self::read_cwd_for_pane_with_extra`]).  Separated from
+    /// [`Self::save_layout`] so the auto-save path can serialize-and-fingerprint
+    /// the result to decide whether a write is even necessary.
+    pub(super) fn build_layout(
+        &self,
+        name: &str,
+        extra_win: Option<&PerWindowState>,
+    ) -> freminal_common::layout::Layout {
         use freminal_common::layout::{Layout, LayoutMeta, LayoutTab, LayoutWindow};
 
         let mut windows: Vec<LayoutWindow> = Vec::new();
@@ -381,12 +465,12 @@ impl FreminalGui {
         }
 
         let layout_name = if name.is_empty() {
-            path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+            None
         } else {
             Some(name.to_owned())
         };
 
-        let layout = Layout {
+        Layout {
             layout: LayoutMeta {
                 name: layout_name,
                 description: None,
@@ -394,11 +478,7 @@ impl FreminalGui {
             },
             windows,
             tabs: Vec::new(),
-        };
-
-        let toml_str = layout.to_toml_string()?;
-        std::fs::write(path, toml_str)?;
-        Ok(())
+        }
     }
 
     /// Apply a resolved layout to the current frontmost window and spawn any
@@ -657,5 +737,74 @@ impl FreminalGui {
         }
 
         Some(commands)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::FreminalGui;
+
+    /// `atomic_write` creates the destination with the given contents.
+    #[test]
+    fn atomic_write_creates_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("session.toml");
+
+        FreminalGui::atomic_write(&path, "hello = 1").expect("write");
+
+        let read_back = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(read_back, "hello = 1");
+    }
+
+    /// A second write fully replaces the first — no truncation, no leftover
+    /// bytes from a longer previous value.
+    #[test]
+    fn atomic_write_overwrites_completely() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("session.toml");
+
+        FreminalGui::atomic_write(&path, "a-long-initial-value = true").expect("first write");
+        FreminalGui::atomic_write(&path, "short = 1").expect("second write");
+
+        let read_back = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(read_back, "short = 1");
+    }
+
+    /// After a successful write the temporary sibling file is renamed away,
+    /// so no `.tmp.<pid>` artifact is left in the directory.
+    #[test]
+    fn atomic_write_leaves_no_temp_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("session.toml");
+
+        FreminalGui::atomic_write(&path, "x = 1").expect("write");
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec!["session.toml".to_owned()],
+            "stray files: {entries:?}"
+        );
+    }
+
+    /// The destination directory must exist; writing into a missing directory
+    /// surfaces an error rather than silently succeeding (callers create the
+    /// layout dir first).
+    #[test]
+    fn atomic_write_errors_when_parent_missing() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("no-such-subdir").join("session.toml");
+
+        let result = FreminalGui::atomic_write(&path, "x = 1");
+        assert!(
+            result.is_err(),
+            "expected error writing into missing parent"
+        );
     }
 }

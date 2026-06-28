@@ -3,10 +3,19 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::hash::{Hash as _, Hasher as _};
+
 use tracing::error;
 
 use super::FreminalGui;
 use super::window;
+
+/// How often the background timer asks the GUI to re-evaluate the session for
+/// auto-save.  The check is cheap when nothing changed (build + hash + compare,
+/// no write), so a tight-ish minute keeps the on-disk session fresh without
+/// being chatty.  Not user-configurable by design — see the module docs on
+/// `last_session_fingerprint`.
+pub(super) const SESSION_AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
 impl FreminalGui {
     /// Return the path used for auto-save/restore of the last session.
@@ -77,30 +86,137 @@ impl FreminalGui {
         self.window_state.main_windows = main_windows;
     }
 
-    /// Save the current session to `last_session.toml` in the layout library.
+    /// Auto-save the current session to `last_session.toml`, but only if it
+    /// differs from what was last written.
     ///
-    /// Called automatically when the last terminal window closes.  Runs
-    /// regardless of `restore_last_session` so the on-disk session stays
-    /// fresh; the flag only controls whether the saved session is
-    /// reapplied on next launch.  Failures are logged but not fatal.
-    pub(super) fn auto_save_session(&self) {
+    /// Runs regardless of `restore_last_session` so the on-disk session stays
+    /// fresh; the flag only controls whether the saved session is reapplied on
+    /// next launch.  Invoked from two places:
+    /// * the periodic background timer (every [`SESSION_AUTOSAVE_INTERVAL`]),
+    ///   and
+    /// * window close / shutdown.
+    ///
+    /// Because both paths converge here, most shutdown saves are no-ops: the
+    /// timer has usually already persisted the current state, so the on-disk
+    /// fingerprint matches and we skip the write entirely.  That deliberately
+    /// makes the shutdown write non-load-bearing — the resilience win is that
+    /// we no longer depend on a synchronous write surviving a hostile teardown.
+    ///
+    /// Skips saving when the user launched with an ad-hoc command
+    /// (`freminal -- vim foo`): those panes run a one-shot program and are not
+    /// meaningfully restorable.  Failures are logged but never fatal.
+    pub(super) fn maybe_auto_save_session(&mut self) {
+        if !self.args.command.is_empty() {
+            return;
+        }
+
         let Some(path) = Self::last_session_path() else {
-            error!("auto_save_session: cannot determine layout library path");
+            error!("maybe_auto_save_session: cannot determine layout library path");
             return;
         };
+
+        // Build the session layout and serialize it in memory so we can
+        // fingerprint the exact bytes we would write.  No disk read-back: the
+        // fingerprint compares against the last value *we* wrote this run.
+        let layout = self.build_layout("Last Session", None);
+        let toml_str = match layout.to_toml_string() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("maybe_auto_save_session: serialize failed: {e}");
+                return;
+            }
+        };
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        toml_str.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+
+        if self.last_session_fingerprint == Some(fingerprint) {
+            // Nothing changed since the last write — skip the I/O entirely.
+            tracing::trace!("session unchanged since last save; skipping write");
+            return;
+        }
+
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            error!("auto_save_session: cannot create layout library dir: {e}");
+            error!("maybe_auto_save_session: cannot create layout library dir: {e}");
             return;
         }
-        match self.save_layout(&path, "Last Session", None) {
+
+        match Self::atomic_write(&path, &toml_str) {
             Ok(()) => {
+                self.last_session_fingerprint = Some(fingerprint);
                 tracing::info!("Session auto-saved to {}", path.display());
             }
             Err(e) => {
-                error!("auto_save_session: failed: {e}");
+                error!(
+                    "maybe_auto_save_session: failed to write {}: {e}",
+                    path.display()
+                );
             }
+        }
+    }
+
+    /// Spawn the background thread that periodically asks `update()` to
+    /// re-evaluate the session for auto-save.
+    ///
+    /// The GUI event loop sleeps on `ControlFlow::Wait` at idle, so a timer
+    /// living on the GUI thread (a per-frame elapsed check) would never fire
+    /// without traffic.  Instead we mirror the PTY consumer pattern: a
+    /// dedicated thread sleeps for [`SESSION_AUTOSAVE_INTERVAL`], flips the
+    /// shared `session_save_due` flag, and pokes the window's
+    /// [`RepaintProxy`](freminal_windowing::RepaintProxy) to wake the loop.
+    /// `update()` observes the flag and calls
+    /// [`Self::maybe_auto_save_session`].
+    ///
+    /// The thread holds only an `Arc<OnceLock<(RepaintProxy, WindowId)>>` and
+    /// an `Arc<AtomicBool>` — no GUI state — so it cannot violate the
+    /// single-threaded GUI invariant.  It runs for the life of the process
+    /// (the proxy clone keeps the loop reachable); on process exit it is torn
+    /// down with everything else.
+    pub(super) fn spawn_session_autosave_timer(
+        &self,
+        repaint_handle: std::sync::Arc<
+            std::sync::OnceLock<(
+                freminal_windowing::RepaintProxy,
+                freminal_windowing::WindowId,
+            )>,
+        >,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        let due = std::sync::Arc::clone(&self.session_save_due);
+        std::thread::Builder::new()
+            .name("session-autosave".to_owned())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(SESSION_AUTOSAVE_INTERVAL);
+                    due.store(true, Ordering::Relaxed);
+                    // Wake the event loop so `update()` runs and sees the flag.
+                    // If the handle is not yet initialised (first window still
+                    // coming up), skip this tick's wake — the next one will
+                    // catch it, and the flag is already latched.
+                    if let Some((proxy, wid)) = repaint_handle.get() {
+                        proxy.request_repaint(*wid);
+                    }
+                }
+            })
+            .map_or_else(
+                |e| error!("failed to spawn session-autosave timer: {e}"),
+                |_handle| (),
+            );
+    }
+
+    /// If the background timer has requested it, re-evaluate and auto-save the
+    /// session.  Called once near the top of each `update()`; cheap when the
+    /// flag is clear.
+    pub(super) fn poll_session_autosave(&mut self) {
+        if self
+            .session_save_due
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.maybe_auto_save_session();
         }
     }
 
