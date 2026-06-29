@@ -42,7 +42,22 @@ short_description = "A terminal emulator written in Rust"
 long_description = """
 Freminal is a terminal emulator written in Rust, designed to provide a fast, efficient, and customizable terminal experience. It leverages modern Rust libraries and technologies to deliver a robust and user-friendly interface for developers and power users.
 """
-deb_depends = ["libgl1-mesa-glx"]
+# Runtime shared-library dependencies for the .deb.  These are NOT visible to
+# dpkg-shlibdeps / `patchelf --print-needed` because the GL/EGL/xkb libraries
+# are dlopen()'d at runtime (by glutin/glow/winit) rather than recorded as
+# link-time DT_NEEDED entries, so they must be declared by hand.
+#   * libgl1   -- provides libGL.so.1 (libglvnd dispatcher).  Replaces the old
+#                 `libgl1-mesa-glx`, a transitional package removed in
+#                 Debian 11+/Ubuntu 22.04+, whose absence made the install fail.
+#   * libegl1  -- provides libEGL.so.1; glutin/winit use EGL on Wayland.
+#   * libxkbcommon0 -- keyboard handling (winit dlopens it).
+#   * libwayland-client0 -- Wayland session support.
+deb_depends = [
+  "libgl1",
+  "libegl1",
+  "libxkbcommon0",
+  "libwayland-client0",
+]
 # osx_frameworks = ["SDL2"]
 # osx_url_schemes = ["io.github.fredclausen.freminal"]
 
