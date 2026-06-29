@@ -17,18 +17,47 @@ name = "Freminal"
 identifier = "io.github.fredclausen.freminal"
 copyright = "Copyright (c) 2024-2026 Fred Clausen"
 category = "Developer Tools"
-# A square SVG is listed first so the Linux deb/appimage/rpm bundlers install
-# it to `hicolor/scalable/apps/freminal.svg` -- the only icon-theme location
-# that every desktop scales from at any size.  The original `icon.png` is
-# 301x289 (non-square, non-standard), which cargo-bundle would otherwise drop
-# into a `hicolor/301x289/apps/` directory that no icon-theme lookup ever
-# scans, leaving the taskbar/launcher with the generic fallback icon.
-icon = ["assets/icon.svg", "assets/icon.png"]
+# cargo-bundle (deb/appimage) installs each PNG at its *native* size only --
+# it does NOT resize -- dropping `hicolor/{W}x{H}/apps/freminal.png`, and copies
+# any SVG once to `hicolor/scalable/apps/freminal.svg`.  Listing only the SVG
+# plus a single 512x512 PNG therefore left deb/appimage without the smaller
+# sized PNGs, so environments that only consult small sized-PNG directories
+# (and neither downscale the 512 nor read scalable/) fell back to the generic
+# icon.  Listing the full pre-rendered hicolor PNG set -- each already at its
+# named size -- makes cargo-bundle lay down the complete tree, matching the RPM
+# (generate-rpm assets) and the flake.nix postInstall tree.  The scalable SVG
+# is listed first as the any-size fallback.
+icon = [
+  "assets/icon.svg",
+  "assets/icons/hicolor/16x16/apps/freminal.png",
+  "assets/icons/hicolor/24x24/apps/freminal.png",
+  "assets/icons/hicolor/32x32/apps/freminal.png",
+  "assets/icons/hicolor/48x48/apps/freminal.png",
+  "assets/icons/hicolor/64x64/apps/freminal.png",
+  "assets/icons/hicolor/128x128/apps/freminal.png",
+  "assets/icons/hicolor/256x256/apps/freminal.png",
+  "assets/icons/hicolor/512x512/apps/freminal.png",
+]
 short_description = "A terminal emulator written in Rust"
 long_description = """
 Freminal is a terminal emulator written in Rust, designed to provide a fast, efficient, and customizable terminal experience. It leverages modern Rust libraries and technologies to deliver a robust and user-friendly interface for developers and power users.
 """
-deb_depends = ["libgl1-mesa-glx"]
+# Runtime shared-library dependencies for the .deb.  These are NOT visible to
+# dpkg-shlibdeps / `patchelf --print-needed` because the GL/EGL/xkb libraries
+# are dlopen()'d at runtime (by glutin/glow/winit) rather than recorded as
+# link-time DT_NEEDED entries, so they must be declared by hand.
+#   * libgl1   -- provides libGL.so.1 (libglvnd dispatcher).  Replaces the old
+#                 `libgl1-mesa-glx`, a transitional package removed in
+#                 Debian 11+/Ubuntu 22.04+, whose absence made the install fail.
+#   * libegl1  -- provides libEGL.so.1; glutin/winit use EGL on Wayland.
+#   * libxkbcommon0 -- keyboard handling (winit dlopens it).
+#   * libwayland-client0 -- Wayland session support.
+deb_depends = [
+  "libgl1",
+  "libegl1",
+  "libxkbcommon0",
+  "libwayland-client0",
+]
 # osx_frameworks = ["SDL2"]
 # osx_url_schemes = ["io.github.fredclausen.freminal"]
 
@@ -40,18 +69,68 @@ deb_depends = ["libgl1-mesa-glx"]
 # `cargo xtask bump-version` keeps this in sync, translating the SemVer
 # pre-release separator to the RPM tilde operator (e.g. "0.9.0~beta.2"), which
 # sorts older than the final release just like the SemVer pre-release does.
-version = "0.10.1"
+version = "0.10.2"
 assets = [
   { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
   # Ship the desktop entry (carrying StartupWMClass=freminal, which matches the
-  # runtime app_id/WM_CLASS set in freminal/src/gui/run.rs) and a square SVG
-  # icon in hicolor/scalable so the installed RPM shows the Freminal logo in
-  # the taskbar/launcher instead of the generic fallback.  cargo-generate-rpm
+  # runtime app_id/WM_CLASS set in freminal/src/gui/run.rs), the scalable SVG,
+  # and the full hicolor PNG tree so the installed RPM shows the Freminal logo
+  # in the taskbar/launcher instead of the generic fallback.  cargo-generate-rpm
   # does not synthesise these the way cargo-bundle does for deb/appimage, so
-  # they are listed explicitly here.
+  # they are listed explicitly here.  The sized PNGs are required because some
+  # taskbars/launchers resolve a window's icon by app_id and only consult sized
+  # PNG directories, skipping scalable/ -- an SVG-only install leaves those
+  # environments on the generic fallback.  This mirrors the flake.nix postInstall
+  # icon tree exactly.
   { source = "assets/freminal.desktop", dest = "/usr/share/applications/freminal.desktop", mode = "644" },
   { source = "assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/freminal.svg", mode = "644" },
+  { source = "assets/icons/hicolor/16x16/apps/freminal.png", dest = "/usr/share/icons/hicolor/16x16/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/24x24/apps/freminal.png", dest = "/usr/share/icons/hicolor/24x24/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/32x32/apps/freminal.png", dest = "/usr/share/icons/hicolor/32x32/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/48x48/apps/freminal.png", dest = "/usr/share/icons/hicolor/48x48/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/64x64/apps/freminal.png", dest = "/usr/share/icons/hicolor/64x64/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/128x128/apps/freminal.png", dest = "/usr/share/icons/hicolor/128x128/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/256x256/apps/freminal.png", dest = "/usr/share/icons/hicolor/256x256/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/512x512/apps/freminal.png", dest = "/usr/share/icons/hicolor/512x512/apps/freminal.png", mode = "644" },
 ]
+# Refresh the freedesktop icon-theme cache and desktop database after the icon
+# and .desktop files land.  Without this, the running window manager (KDE
+# Plasma's taskbar especially) resolves the window->desktop-file association
+# correctly but cannot find the freshly-installed `freminal` icon in the
+# hicolor theme until its cache is rebuilt, so the taskbar shows the generic
+# fallback even though the app launcher (which reads the .desktop file
+# directly) shows the real icon.  The `|| :` guards keep install/erase from
+# failing on minimal systems where the tools are absent; touching the hicolor
+# directory mtime nudges caches that key off it.
+post_install_script = '''
+touch --no-create /usr/share/icons/hicolor || :
+gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor || :
+update-desktop-database --quiet /usr/share/applications || :
+'''
+post_uninstall_script = '''
+touch --no-create /usr/share/icons/hicolor || :
+gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor || :
+update-desktop-database --quiet /usr/share/applications || :
+'''
+
+# Runtime shared-library dependencies for the .rpm.  cargo-generate-rpm's
+# automatic dependency processing (auto-req, still enabled) only captures the
+# binary's link-time DT_NEEDED entries -- libc/libm/libgcc -- and is blind to
+# the GL/EGL/xkb/wayland libraries that glutin/glow/winit dlopen() at runtime.
+# Without these, a clean minimal Fedora/RHEL/openSUSE install would fail to
+# launch even though the package installs (the equivalent of the .deb's missing
+# libgl1 dependency).
+#
+# These are declared as raw soname capabilities rather than distro package
+# names (e.g. mesa-libGL) so they resolve against the Provides of whatever
+# package ships the library on any rpm distro -- Fedora's mesa-libGL,
+# openSUSE's Mesa-libGL1, libglvnd, etc. -- mirroring how rpm's own auto-req
+# expresses libc.so.6()(64bit).
+[package.metadata.generate-rpm.requires]
+"libGL.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
 
 [[bench]]
 harness = false

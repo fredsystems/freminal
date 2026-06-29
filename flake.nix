@@ -107,7 +107,7 @@
             };
           };
 
-          version = "0.10.1";
+          version = "0.10.2";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -171,9 +171,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.10.1</string>
+                    <string>0.10.2</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.10.1</string>
+                    <string>0.10.2</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -363,7 +363,17 @@
               # is only needed to produce local deb/appimage artifacts; the
               # profilers, vttest, dpkg and squashfsTools are likewise unused by
               # CI lint/test.  squashfsTools + dpkg let the local artifact patch
-              # script (assets/ci/fix-linux-icon-metadata.sh) run by hand.
+              # script (assets/ci/fix-linux-icon-metadata.sh) run by hand, and
+              # back `cargo xtask package-local`, which round-trips the deb and
+              # AppImage to patch the embedded binary's ELF interpreter.
+              # patchelf resets the Nix-store interpreter on locally-built
+              # binaries to the portable /lib64 loader so local rpm/deb/AppImage
+              # artifacts run on non-Nix distros (see `cargo xtask package-local`).
+              # imagemagick + librsvg + libicns regenerate the icon assets
+              # (hicolor PNG tree, icon.png, macOS .icns) from the editable
+              # vector sources under assets/source/ -- see that directory's
+              # SVGs.  librsvg is imagemagick's SVG delegate (text + gradient
+              # rendering); libicns provides `png2icns` for the macOS bundle.
               devOnlyTools = [
                 pkgs.cargo-profiler
                 cargoBundleLatest
@@ -371,6 +381,10 @@
                 pkgs.cargo-flamegraph
                 pkgs.dpkg
                 pkgs.squashfsTools
+                pkgs.patchelf
+                pkgs.imagemagick
+                pkgs.librsvg
+                pkgs.libicns
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.perf

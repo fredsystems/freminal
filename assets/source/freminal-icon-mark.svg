@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
-  <title id="title">Freminal icon</title>
-  <desc id="desc">Catppuccin Mocha inspired terminal emulator app icon: a rounded app badge with a prompt chevron, cursor, and Freminal wordmark. Tagline trimmed for icon use.</desc>
+  <title id="title">Freminal icon (mark)</title>
+  <desc id="desc">Catppuccin Mocha inspired terminal emulator app icon, glyph-only variant for small sizes: a rounded app badge with a centred prompt chevron and cursor, no wordmark.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#181825"/>
@@ -25,31 +25,22 @@
 
   <rect width="1024" height="1024" fill="url(#bg)"/>
 
-  <!-- Badge group re-centred and scaled to leave a small uniform margin -->
-  <!-- Original badge: x=128 y=108 w=768 h=768, centre (512,492). -->
-  <!-- Target: centre (512,512), scale 832/768 so the badge fills the canvas. -->
+  <!-- Badge re-centred and scaled to leave a small uniform margin. -->
   <g transform="translate(512,512) scale(1.0833) translate(-512,-492)">
     <g filter="url(#softShadow)">
       <rect x="128" y="108" width="768" height="768" rx="150" fill="url(#surface)" stroke="#6c7086" stroke-width="14"/>
       <rect x="150" y="130" width="724" height="724" rx="130" fill="none" stroke="#313244" stroke-width="4" opacity="0.75"/>
     </g>
 
-    <!-- terminal prompt -->
-    <path d="M326 292 L474 440 L326 588" fill="none" stroke="url(#mauve)" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
-
-    <!-- cursor -->
-    <rect x="538" y="548" width="258" height="58" rx="29" fill="url(#pink)"/>
-
-    <!-- wordmark -->
-    <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="86" font-weight="800" text-anchor="middle">
-      <text x="263" y="728" fill="#f5c2e7">f</text>
-      <text x="341" y="728" fill="#f38ba8">r</text>
-      <text x="419" y="728" fill="#f9e2af">e</text>
-      <text x="497" y="728" fill="#a6e3a1">m</text>
-      <text x="575" y="728" fill="#89b4fa">i</text>
-      <text x="653" y="728" fill="#cba6f7">n</text>
-      <text x="731" y="728" fill="#b4befe">a</text>
-      <text x="809" y="728" fill="#cdd6f4">l</text>
+    <!-- Prompt glyph (chevron + cursor), enlarged and vertically centred in the
+         badge so it reads clearly at small icon sizes. The original prompt sits
+         high to leave room for the wordmark; here it is scaled 1.32x about the
+         badge centre and nudged down to occupy the badge body. -->
+    <g transform="translate(512,512) scale(1.32) translate(-545,-440)">
+      <!-- terminal prompt -->
+      <path d="M326 292 L474 440 L326 588" fill="none" stroke="url(#mauve)" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+      <!-- cursor -->
+      <rect x="538" y="548" width="258" height="58" rx="29" fill="url(#pink)"/>
     </g>
   </g>
 </svg>
