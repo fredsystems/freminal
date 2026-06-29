@@ -113,6 +113,25 @@ gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor || :
 update-desktop-database --quiet /usr/share/applications || :
 '''
 
+# Runtime shared-library dependencies for the .rpm.  cargo-generate-rpm's
+# automatic dependency processing (auto-req, still enabled) only captures the
+# binary's link-time DT_NEEDED entries -- libc/libm/libgcc -- and is blind to
+# the GL/EGL/xkb/wayland libraries that glutin/glow/winit dlopen() at runtime.
+# Without these, a clean minimal Fedora/RHEL/openSUSE install would fail to
+# launch even though the package installs (the equivalent of the .deb's missing
+# libgl1 dependency).
+#
+# These are declared as raw soname capabilities rather than distro package
+# names (e.g. mesa-libGL) so they resolve against the Provides of whatever
+# package ships the library on any rpm distro -- Fedora's mesa-libGL,
+# openSUSE's Mesa-libGL1, libglvnd, etc. -- mirroring how rpm's own auto-req
+# expresses libc.so.6()(64bit).
+[package.metadata.generate-rpm.requires]
+"libGL.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+"libxkbcommon.so.0()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+
 [[bench]]
 harness = false
 name = "paste_guard_bench"
