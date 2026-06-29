@@ -364,6 +364,11 @@
               # profilers, vttest, dpkg and squashfsTools are likewise unused by
               # CI lint/test.  squashfsTools + dpkg let the local artifact patch
               # script (assets/ci/fix-linux-icon-metadata.sh) run by hand.
+              # imagemagick + librsvg + libicns regenerate the icon assets
+              # (hicolor PNG tree, icon.png, macOS .icns) from the editable
+              # vector sources under assets/source/ -- see that directory's
+              # SVGs.  librsvg is imagemagick's SVG delegate (text + gradient
+              # rendering); libicns provides `png2icns` for the macOS bundle.
               devOnlyTools = [
                 pkgs.cargo-profiler
                 cargoBundleLatest
@@ -371,6 +376,9 @@
                 pkgs.cargo-flamegraph
                 pkgs.dpkg
                 pkgs.squashfsTools
+                pkgs.imagemagick
+                pkgs.librsvg
+                pkgs.libicns
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.perf

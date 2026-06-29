@@ -44,14 +44,45 @@ version = "0.10.1"
 assets = [
   { source = "target/release/freminal", dest = "/usr/bin/freminal", mode = "755" },
   # Ship the desktop entry (carrying StartupWMClass=freminal, which matches the
-  # runtime app_id/WM_CLASS set in freminal/src/gui/run.rs) and a square SVG
-  # icon in hicolor/scalable so the installed RPM shows the Freminal logo in
-  # the taskbar/launcher instead of the generic fallback.  cargo-generate-rpm
+  # runtime app_id/WM_CLASS set in freminal/src/gui/run.rs), the scalable SVG,
+  # and the full hicolor PNG tree so the installed RPM shows the Freminal logo
+  # in the taskbar/launcher instead of the generic fallback.  cargo-generate-rpm
   # does not synthesise these the way cargo-bundle does for deb/appimage, so
-  # they are listed explicitly here.
+  # they are listed explicitly here.  The sized PNGs are required because some
+  # taskbars/launchers resolve a window's icon by app_id and only consult sized
+  # PNG directories, skipping scalable/ -- an SVG-only install leaves those
+  # environments on the generic fallback.  This mirrors the flake.nix postInstall
+  # icon tree exactly.
   { source = "assets/freminal.desktop", dest = "/usr/share/applications/freminal.desktop", mode = "644" },
   { source = "assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/freminal.svg", mode = "644" },
+  { source = "assets/icons/hicolor/16x16/apps/freminal.png", dest = "/usr/share/icons/hicolor/16x16/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/24x24/apps/freminal.png", dest = "/usr/share/icons/hicolor/24x24/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/32x32/apps/freminal.png", dest = "/usr/share/icons/hicolor/32x32/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/48x48/apps/freminal.png", dest = "/usr/share/icons/hicolor/48x48/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/64x64/apps/freminal.png", dest = "/usr/share/icons/hicolor/64x64/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/128x128/apps/freminal.png", dest = "/usr/share/icons/hicolor/128x128/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/256x256/apps/freminal.png", dest = "/usr/share/icons/hicolor/256x256/apps/freminal.png", mode = "644" },
+  { source = "assets/icons/hicolor/512x512/apps/freminal.png", dest = "/usr/share/icons/hicolor/512x512/apps/freminal.png", mode = "644" },
 ]
+# Refresh the freedesktop icon-theme cache and desktop database after the icon
+# and .desktop files land.  Without this, the running window manager (KDE
+# Plasma's taskbar especially) resolves the window->desktop-file association
+# correctly but cannot find the freshly-installed `freminal` icon in the
+# hicolor theme until its cache is rebuilt, so the taskbar shows the generic
+# fallback even though the app launcher (which reads the .desktop file
+# directly) shows the real icon.  The `|| :` guards keep install/erase from
+# failing on minimal systems where the tools are absent; touching the hicolor
+# directory mtime nudges caches that key off it.
+post_install_script = '''
+touch --no-create /usr/share/icons/hicolor || :
+gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor || :
+update-desktop-database --quiet /usr/share/applications || :
+'''
+post_uninstall_script = '''
+touch --no-create /usr/share/icons/hicolor || :
+gtk-update-icon-cache --quiet --force /usr/share/icons/hicolor || :
+update-desktop-database --quiet /usr/share/applications || :
+'''
 
 [[bench]]
 harness = false
