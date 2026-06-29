@@ -17,13 +17,27 @@ name = "Freminal"
 identifier = "io.github.fredclausen.freminal"
 copyright = "Copyright (c) 2024-2026 Fred Clausen"
 category = "Developer Tools"
-# A square SVG is listed first so the Linux deb/appimage/rpm bundlers install
-# it to `hicolor/scalable/apps/freminal.svg` -- the only icon-theme location
-# that every desktop scales from at any size.  The original `icon.png` is
-# 301x289 (non-square, non-standard), which cargo-bundle would otherwise drop
-# into a `hicolor/301x289/apps/` directory that no icon-theme lookup ever
-# scans, leaving the taskbar/launcher with the generic fallback icon.
-icon = ["assets/icon.svg", "assets/icon.png"]
+# cargo-bundle (deb/appimage) installs each PNG at its *native* size only --
+# it does NOT resize -- dropping `hicolor/{W}x{H}/apps/freminal.png`, and copies
+# any SVG once to `hicolor/scalable/apps/freminal.svg`.  Listing only the SVG
+# plus a single 512x512 PNG therefore left deb/appimage without the smaller
+# sized PNGs, so environments that only consult small sized-PNG directories
+# (and neither downscale the 512 nor read scalable/) fell back to the generic
+# icon.  Listing the full pre-rendered hicolor PNG set -- each already at its
+# named size -- makes cargo-bundle lay down the complete tree, matching the RPM
+# (generate-rpm assets) and the flake.nix postInstall tree.  The scalable SVG
+# is listed first as the any-size fallback.
+icon = [
+  "assets/icon.svg",
+  "assets/icons/hicolor/16x16/apps/freminal.png",
+  "assets/icons/hicolor/24x24/apps/freminal.png",
+  "assets/icons/hicolor/32x32/apps/freminal.png",
+  "assets/icons/hicolor/48x48/apps/freminal.png",
+  "assets/icons/hicolor/64x64/apps/freminal.png",
+  "assets/icons/hicolor/128x128/apps/freminal.png",
+  "assets/icons/hicolor/256x256/apps/freminal.png",
+  "assets/icons/hicolor/512x512/apps/freminal.png",
+]
 short_description = "A terminal emulator written in Rust"
 long_description = """
 Freminal is a terminal emulator written in Rust, designed to provide a fast, efficient, and customizable terminal experience. It leverages modern Rust libraries and technologies to deliver a robust and user-friendly interface for developers and power users.
