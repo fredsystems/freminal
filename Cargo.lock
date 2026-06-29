@@ -5361,6 +5361,7 @@ dependencies = [
  "color-eyre",
  "duct",
  "semver",
+ "tempfile",
  "tracing",
  "tracing-log",
  "tracing-subscriber",

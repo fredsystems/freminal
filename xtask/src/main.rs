@@ -173,6 +173,38 @@ enum Command {
         /// The new version string (e.g. "0.8.0")
         version: String,
     },
+
+    /// Build Linux packages locally with a portable ELF interpreter.
+    ///
+    /// Inside the Nix dev shell the Rust toolchain links the binary against
+    /// the Nix-store glibc and stamps its ELF interpreter as
+    /// `/nix/store/.../ld-linux-x86-64.so.2`.  That path exists only on a Nix
+    /// system, so a locally-built rpm/deb/AppImage fails to execute on a
+    /// normal distro with "cannot execute: required file not found".  This
+    /// subcommand builds the packages and resets the embedded binary's
+    /// interpreter to the standard `/lib64/ld-linux-x86-64.so.2` (and strips
+    /// the Nix-store rpath) so the artifacts run on glibc distros.
+    ///
+    /// This is a **local testing aid only**.  The release CI builds on a
+    /// plain Ubuntu runner with rustup, which already links against the
+    /// system loader, so CI artifacts never need this.
+    #[command(visible_alias = "pl")]
+    PackageLocal {
+        /// Which package format(s) to build (default: all).
+        #[arg(value_enum)]
+        formats: Vec<LocalPackageFormat>,
+    },
+}
+
+/// Linux package formats that [`package_local`] can produce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum LocalPackageFormat {
+    /// `.rpm` via `cargo-generate-rpm`.
+    Rpm,
+    /// `.deb` via `cargo-bundle`.
+    Deb,
+    /// `.AppImage` via `cargo-bundle`.
+    Appimage,
 }
 
 impl Command {
@@ -200,6 +232,7 @@ impl Command {
             Self::BenchCompile => bench_compile(),
             Self::Precommit => precommit(),
             Self::BumpVersion { version } => bump_version(&version),
+            Self::PackageLocal { formats } => package_local(&formats),
         }
     }
 }
@@ -638,6 +671,243 @@ fn update_rpm_version(manifest_path: &str, new_rpm_version: &str) -> Result<()> 
     fs::write(manifest_path, final_content)
         .wrap_err_with(|| format!("failed to write {manifest_path}"))?;
     tracing::info!("  updated {manifest_path} (rpm Version = {new_rpm_version})");
+    Ok(())
+}
+
+/// The standard glibc ELF interpreter path on x86-64 Linux distros.
+///
+/// Nix-built binaries point their interpreter at a `/nix/store/...` glibc that
+/// does not exist on a normal distro; resetting it to this canonical path is
+/// what makes a locally-built artifact portable.
+const PORTABLE_INTERPRETER: &str = "/lib64/ld-linux-x86-64.so.2";
+
+/// The release binary path that every Linux packager reads from.
+const RELEASE_BINARY: &str = "target/release/freminal";
+
+/// Build Linux packages locally with a portable ELF interpreter.
+///
+/// See the [`Command::PackageLocal`] documentation for the why.  The mechanics
+/// differ per format because of *when* the binary is read:
+///
+/// * `cargo-generate-rpm` copies `target/release/freminal` verbatim and does
+///   **not** rebuild, so the binary is patched in place *before* packaging.
+/// * `cargo-bundle` runs its own `cargo build` (which relinks and restores the
+///   Nix interpreter) before copying, so pre-patching is futile; instead the
+///   binary embedded *inside* the built `.deb` / `.AppImage` is patched and the
+///   artifact repacked.
+fn package_local(formats: &[LocalPackageFormat]) -> Result<()> {
+    let formats: Vec<LocalPackageFormat> = if formats.is_empty() {
+        vec![
+            LocalPackageFormat::Rpm,
+            LocalPackageFormat::Deb,
+            LocalPackageFormat::Appimage,
+        ]
+    } else {
+        formats.to_vec()
+    };
+
+    ensure_tool("patchelf")?;
+
+    // A clean release build first so every packager sees the same binary.
+    run_cargo(vec!["build", "--release", "-p", "freminal"])?;
+
+    let want_rpm = formats.contains(&LocalPackageFormat::Rpm);
+    let want_deb = formats.contains(&LocalPackageFormat::Deb);
+    let want_appimage = formats.contains(&LocalPackageFormat::Appimage);
+
+    // RPM path: patch the binary in place, then generate-rpm (no rebuild).
+    if want_rpm {
+        ensure_tool("cargo-generate-rpm")?;
+        patch_binary_in_place(RELEASE_BINARY)?;
+        cmd!("cargo-generate-rpm", "-p", "freminal").run_with_trace()?;
+        tracing::info!("rpm: target/generate-rpm/*.rpm (interpreter patched)");
+    }
+
+    // Bundle path: cargo-bundle relinks, so patch the embedded binary after.
+    if want_deb || want_appimage {
+        ensure_tool("cargo-bundle")?;
+        run_cargo(vec!["bundle", "--release", "-p", "freminal"])?;
+
+        if want_deb {
+            ensure_tool("dpkg-deb")?;
+            patch_deb_interpreter("target/release/bundle/deb")?;
+        }
+        if want_appimage {
+            ensure_tool("unsquashfs")?;
+            ensure_tool("mksquashfs")?;
+            patch_appimage_interpreter("target/release/bundle/appimage")?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Fail with a clear message if a required external tool is not on `PATH`.
+///
+/// Per the flake-dev-shell-discipline, missing tools indicate an incomplete
+/// dev shell, not broken logic — so this surfaces the gap instead of trying to
+/// work around it.  A std-only `PATH` scan avoids adding a dependency just to
+/// locate an executable.
+fn ensure_tool(tool: &str) -> Result<()> {
+    let path =
+        std::env::var_os("PATH").ok_or_else(|| color_eyre::eyre::eyre!("PATH is not set"))?;
+    let found = std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(tool);
+        candidate.is_file() && is_executable(&candidate)
+    });
+    color_eyre::eyre::ensure!(found, "required tool `{tool}` not found on PATH");
+    Ok(())
+}
+
+/// Whether a path is executable by the current user (Unix); on other platforms
+/// existence as a file is treated as sufficient.
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &std::path::Path) -> bool {
+    true
+}
+
+/// Reset a binary's ELF interpreter to the portable path and strip its rpath.
+///
+/// patchelf cannot rewrite a file that is hardlinked / busy in place reliably,
+/// so the edit is done on a copy that is then moved over the original.
+fn patch_binary_in_place(path: &str) -> Result<()> {
+    let before = cmd!("patchelf", "--print-interpreter", path)
+        .read()
+        .wrap_err_with(|| format!("failed to read interpreter of {path}"))?;
+    tracing::info!("patching {path} (was {})", before.trim());
+
+    let tmp = format!("{path}.patched");
+    fs::copy(path, &tmp).wrap_err_with(|| format!("failed to copy {path}"))?;
+    cmd!("patchelf", "--set-interpreter", PORTABLE_INTERPRETER, &tmp).run_with_trace()?;
+    cmd!("patchelf", "--remove-rpath", &tmp).run_with_trace()?;
+    fs::rename(&tmp, path).wrap_err_with(|| format!("failed to replace {path}"))?;
+    Ok(())
+}
+
+/// Find the single artifact with the given extension in a bundle output dir.
+fn single_artifact(dir: &str, extension: &str) -> Result<std::path::PathBuf> {
+    let mut found = None;
+    for entry in fs::read_dir(dir).wrap_err_with(|| format!("failed to read {dir}"))? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some(extension) {
+            if found.is_some() {
+                color_eyre::eyre::bail!("multiple .{extension} artifacts in {dir}");
+            }
+            found = Some(path);
+        }
+    }
+    found.ok_or_else(|| color_eyre::eyre::eyre!("no .{extension} artifact in {dir}"))
+}
+
+/// Patch the interpreter of the binary inside a built `.deb` and repack it.
+///
+/// `dpkg-deb -R` / `-b` round-trips the package and regenerates `md5sums`, so
+/// rewriting `usr/bin/freminal` in the extracted tree and rebuilding is
+/// sufficient. `--root-owner-group` keeps files owned by root:root.
+fn patch_deb_interpreter(dir: &str) -> Result<()> {
+    let deb = single_artifact(dir, "deb")?;
+    let deb = deb.to_string_lossy().into_owned();
+    let workdir = tempfile::tempdir().wrap_err("failed to create tempdir")?;
+    let work = workdir.path().to_string_lossy().into_owned();
+
+    cmd!("dpkg-deb", "-R", &deb, &work).run_with_trace()?;
+    let bin = format!("{work}/usr/bin/freminal");
+    patch_binary_in_place(&bin)?;
+    cmd!("dpkg-deb", "--root-owner-group", "-b", &work, &deb).run_with_trace()?;
+    tracing::info!("deb: {deb} (interpreter patched)");
+    Ok(())
+}
+
+/// Patch the interpreter of the binary inside a built `.AppImage` and repack.
+///
+/// `cargo-bundle`'s `AppImage` is a type-2 ELF runtime header followed by a
+/// squashfs payload.  The runtime does not implement `--appimage-extract`, so
+/// the payload is operated on directly: the squashfs offset is the end of the
+/// runtime ELF (section-header table is last in this runtime, so the payload
+/// begins at `e_shoff + e_shnum * e_shentsize`), the runtime header bytes are
+/// split off verbatim, the payload is `unsquashfs`-ed, the binary patched, and
+/// the tree re-`mksquashfs`-ed and re-prepended.  This mirrors the existing
+/// `assets/ci/fix-linux-icon-metadata.sh` `AppImage` logic.
+fn patch_appimage_interpreter(dir: &str) -> Result<()> {
+    let appimage = single_artifact(dir, "AppImage")?;
+    let appimage = appimage.to_string_lossy().into_owned();
+
+    let bytes = fs::read(&appimage).wrap_err_with(|| format!("failed to read {appimage}"))?;
+    color_eyre::eyre::ensure!(
+        bytes.get(0..4) == Some(b"\x7fELF"),
+        "AppImage does not start with an ELF runtime header"
+    );
+    // 64-bit ELF header fields: e_shoff @ 0x28 (u64), e_shentsize @ 0x3A (u16),
+    // e_shnum @ 0x3C (u16).
+    let e_shoff = u64::from_le_bytes(bytes[0x28..0x30].try_into()?);
+    let e_shentsize = u16::from_le_bytes(bytes[0x3A..0x3C].try_into()?);
+    let e_shnum = u16::from_le_bytes(bytes[0x3C..0x3E].try_into()?);
+    let offset = e_shoff + u64::from(e_shentsize) * u64::from(e_shnum);
+    let offset_usize = usize::try_from(offset).wrap_err("squashfs offset overflows usize")?;
+
+    color_eyre::eyre::ensure!(
+        bytes.get(offset_usize..offset_usize + 4) == Some(b"hsqs"),
+        "no squashfs magic at computed offset {offset}"
+    );
+
+    let workdir = tempfile::tempdir().wrap_err("failed to create tempdir")?;
+    let work = workdir.path();
+    let runtime = work.join("runtime");
+    fs::write(&runtime, &bytes[..offset_usize]).wrap_err("failed to write runtime header")?;
+
+    let appdir = work.join("squashfs-root");
+    cmd!(
+        "unsquashfs",
+        "-o",
+        offset.to_string(),
+        "-d",
+        appdir.to_string_lossy().as_ref(),
+        &appimage
+    )
+    .run_with_trace()?;
+
+    let bin = appdir.join("usr/bin/freminal");
+    patch_binary_in_place(bin.to_string_lossy().as_ref())?;
+
+    let payload = work.join("payload.squashfs");
+    cmd!(
+        "mksquashfs",
+        appdir.to_string_lossy().as_ref(),
+        payload.to_string_lossy().as_ref(),
+        "-root-owned",
+        "-noappend",
+        "-quiet"
+    )
+    .run_with_trace()?;
+
+    // Concatenate runtime header + new payload back into the AppImage.
+    let mut out = fs::read(&runtime)?;
+    out.extend_from_slice(&fs::read(&payload)?);
+    fs::write(&appimage, &out).wrap_err_with(|| format!("failed to rewrite {appimage}"))?;
+    set_executable(&appimage)?;
+    tracing::info!("appimage: {appimage} (interpreter patched)");
+    Ok(())
+}
+
+/// Make a file executable (mode |= 0o111) on Unix; no-op elsewhere.
+#[cfg(unix)]
+fn set_executable(path: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path)?.permissions();
+    let mode = perms.mode();
+    perms.set_mode(mode | 0o111);
+    fs::set_permissions(path, perms).wrap_err_with(|| format!("failed to chmod {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &str) -> Result<()> {
     Ok(())
 }
 
