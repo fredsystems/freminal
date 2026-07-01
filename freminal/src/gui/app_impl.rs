@@ -1243,8 +1243,17 @@ impl freminal_windowing::App for FreminalGui {
                         }
                     }
                     Osc99ControlKind::Query => {
-                        // Capability handshake is Task 99.7.
-                        trace!("OSC 99 p=? query received (handshake pending Task 99.7)");
+                        // OSC 99 p=? capability handshake (Task 99.7): answer
+                        // with freminal's truthfully-advertised OSC 99
+                        // capabilities.
+                        let bytes = crate::gui::notifications::osc99_query_response(
+                            control.id.as_deref(),
+                        );
+                        send_or_log!(
+                            tx,
+                            PtyWrite::Write(bytes),
+                            "Failed to send OSC 99 capability response"
+                        );
                     }
                 }
             }

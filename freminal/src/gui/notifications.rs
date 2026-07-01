@@ -396,6 +396,30 @@ pub(super) fn osc99_alive_report(req_id: Option<&str>, live_ids: &[String]) -> V
     format!("\x1b]99;i={req_id}:p=alive;{list}\x1b\\").into_bytes()
 }
 
+/// The OSC 99 capabilities freminal truthfully advertises in a `p=?`
+/// response.
+///
+/// Colon-separated `key=value` pairs, in a stable order. Advertises only
+/// what is genuinely implemented (the truthful-advertisement rule from
+/// Task 76): `a=report` (NOT `focus` — `focus_on_activation` is parsed but
+/// freminal does not act on it), `c=1` (close reports), `o=` all three
+/// occasions (99.5a), `p=` the payload types freminal handles (display
+/// types plus the control types it answers), `s=system,silent` (forwarded
+/// freedesktop sound-name hints — freminal forwards the name, playback is
+/// the daemon's concern), `u=0,1,2` (urgency levels — advertised even
+/// though the setter is unavailable on macOS, matching Task 76's handling
+/// of the same gap), and `w=1` (auto-expiry, wired via `.timeout()`).
+const OSC99_CAPABILITIES: &str = "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+
+/// Build the OSC 99 `p=?` capability handshake response:
+/// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`.
+///
+/// `id` defaults to `0` when the query control carried no id.
+pub(super) fn osc99_query_response(id: Option<&str>) -> Vec<u8> {
+    let id = id.unwrap_or("0");
+    format!("\x1b]99;i={id}:p=?;{OSC99_CAPABILITIES}\x1b\\").into_bytes()
+}
+
 /// Collect the live notification ids in sorted order (deterministic for the
 /// `p=alive` response and for testing).
 pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<String> {
@@ -428,9 +452,9 @@ pub(super) fn osc99_action_report(
 
 /// An OSC 99 app→terminal control sequence collected from
 /// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
-/// (Task 99.5c). Inert placeholder: paired with a cloned `pty_write_tx` in
-/// `app_impl::update()`'s post-loop routing, but not yet answered — that is
-/// Tasks 99.6 (close/alive) and 99.7 (query).
+/// (Task 99.5c). Paired with a cloned `pty_write_tx` in
+/// `app_impl::update()`'s post-loop routing, where it is answered:
+/// Task 99.6 (close/alive) and Task 99.7 (query).
 #[derive(Debug, Clone)]
 pub(super) struct Osc99Control {
     /// Notification id (`i=`) the control refers to, if any.
@@ -1614,6 +1638,42 @@ mod tests {
             osc99_alive_report(None, &["x".to_owned()]),
             b"\x1b]99;i=0:p=alive;x\x1b\\".to_vec()
         );
+    }
+
+    #[test]
+    fn osc99_query_response_with_id_matches_exact_bytes() {
+        assert_eq!(
+            osc99_query_response(Some("q1")),
+            b"\x1b]99;i=q1:p=?;a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_query_response_no_id_defaults_to_zero() {
+        let bytes = osc99_query_response(None);
+        assert!(bytes.starts_with(b"\x1b]99;i=0:p=?;"));
+    }
+
+    #[test]
+    fn osc99_capabilities_are_truthful() {
+        // Guards the truthful-advertisement decision: activation reporting
+        // is advertised, but NOT the `focus` sub-capability (freminal parses
+        // `focus_on_activation` but does not act on it). Scoped to the `a=`
+        // field specifically — the `o=` field's `unfocused` value legitimately
+        // contains the substring "focus".
+        let a_field = OSC99_CAPABILITIES
+            .split(':')
+            .find(|kv| kv.starts_with("a="))
+            .expect("a= field present");
+        assert_eq!(a_field, "a=report");
+        assert!(!a_field.contains("focus"));
+
+        // `p=` payload types must include at least `title` (spec minimum).
+        let p_field = OSC99_CAPABILITIES
+            .split(':')
+            .find(|kv| kv.starts_with("p="))
+            .expect("p= field present");
+        assert!(p_field.contains("title"));
     }
 
     #[test]
