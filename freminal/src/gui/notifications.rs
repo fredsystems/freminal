@@ -487,11 +487,12 @@ impl NotificationRouter {
     /// for later update/close reconciliation.
     ///
     /// Does nothing when the notification system is disabled
-    /// ([`NotificationsConfig::enabled`] is `false`) or when the occasion
-    /// gate says the notification should not be displayed right now (in
-    /// which case it is also not recorded in `live` — an occasion-suppressed
-    /// notification never happened as far as later update/close tracking is
-    /// concerned).
+    /// ([`NotificationsConfig::enabled`] is `false`), when the OSC 99
+    /// kill-switch is off ([`NotificationsConfig::osc_99`] is `false`,
+    /// Task 99.8), or when the occasion gate says the notification should
+    /// not be displayed right now (in which case it is also not recorded in
+    /// `live` — an occasion-suppressed notification never happened as far
+    /// as later update/close tracking is concerned).
     pub(super) fn route_osc99(
         data: &Notification99Data,
         config: &NotificationsConfig,
@@ -502,6 +503,12 @@ impl NotificationRouter {
         pty_write_tx: &Sender<PtyWrite>,
     ) {
         if !config.enabled {
+            return;
+        }
+
+        // OSC 99 kill-switch (Task 99.8): even with the master switch on, users can
+        // disable the kitty stateful protocol specifically.
+        if !config.osc_99 {
             return;
         }
 
@@ -1208,6 +1215,35 @@ mod tests {
     #[test]
     fn route_osc99_master_gate_disabled_does_nothing() {
         let config = NotificationsConfig::default(); // enabled = false
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_osc99_kill_switch_disabled_does_nothing() {
+        // Task 99.8: `enabled = true` but `osc_99 = false` must still
+        // suppress OSC 99 notifications specifically.
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_99: false,
+            ..NotificationsConfig::default()
+        };
         let mut toasts = ToastStack::default();
         let mut icon_cache = HashMap::new();
         let mut live = HashMap::new();

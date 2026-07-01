@@ -1,11 +1,9 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-06-10 — Kitty Keyboard fix: closed a latent defect where
-functional keys (arrows, Home/End, Insert/Delete, PageUp/PageDown, F-keys)
-emitted bare legacy sequences on repeat/release under `REPORT_EVENT_TYPES`,
-which applications read as duplicate presses. They now emit the CSI
-`:event-type` form. No new gap; the protocol remains complete.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76)
+Last updated: 2026-07-01 — OSC 99 (kitty desktop notifications) implemented
+directly (Task 99, v0.11.0); it was never a tracked gap, so no GAPS entry is
+removed.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only

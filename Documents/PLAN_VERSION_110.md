@@ -656,6 +656,45 @@ Prohibitions: do NOT skip the `apply_partial` wiring if a config key is added.
 
 Stop: report + await review.
 
+##### 99.8 execution decisions (recorded 2026-07-01)
+
+- **`osc_99` field + full config wiring already landed in 110.0** (field +
+  `ConfigPartial`/`apply_partial` + `config_example.toml` + Nix mirror + Settings
+  UI + partial-merge test). 99.8's config work is therefore only the **drain-site
+  gate**: `route_osc99` returns early when `!config.osc_99` (in addition to the
+  existing `!config.enabled` gate). No further config plumbing needed.
+- **`osc_9`/`osc_777` separate enforcement is deferred to cleanup 99.10.** The
+  `KITTY_PROTOCOL_REFERENCE` note asked 99.8 to also retroactively enforce
+  `osc_9`/`osc_777`, but those cannot be gated separately without threading the
+  OSC source (9 vs 777) through `AnsiOscType::Notify` →
+  `WindowManipulation::Notification` → `NotificationKind` → `route` (a 4-layer,
+  two-crate change) — both currently collapse to `NotificationKind::OscText`.
+  That is a pre-existing Task 76 gap, out of proportion to fold into 99.8;
+  tracked as 99.10 instead of silently skipped.
+- **Dual-doc:** OSC 99 was never in `ESCAPE_SEQUENCE_GAPS.md` (never tracked as a
+  gap), so per `freminal-escape-sequence-docs` it is **added to
+  `ESCAPE_SEQUENCE_COVERAGE.md` only** (a new `OSC 99` row), NOT to GAPS. Both
+  docs' "Last updated" headers are refreshed. The `KITTY_PROTOCOL_REFERENCE.md`
+  notifications "current-state deltas" flip from gap-list to done.
+
+##### 99.10 — Cleanup: separate `osc_9` / `osc_777` drain-site enforcement (surfaced during 99.8)
+
+- **Surface point:** 99.8 config-gate work (2026-07-01), on `task-99/osc99-notifications`.
+- **Impact:** `[notifications] osc_9` and `osc_777` are declared, defaulted,
+  documented, and Settings-exposed, but **never read** at the drain site — both
+  OSC 9 and OSC 777 notifications collapse to `NotificationKind::OscText` and are
+  gated only by `enabled`/`routing_info`. Toggling `osc_9 = false` (or
+  `osc_777 = false`) has no effect (a silent-drop, the exact
+  `freminal-config-options` bug class — pre-existing since Task 76).
+- **Scope of fix:** thread the OSC source (9 vs 777) from the parser to the
+  router so each can be gated: add the source to `AnsiOscType::Notify` (or a
+  discriminant on `WindowManipulation::Notification`), carry it to a
+  `NotificationKind`/`NotificationRequest` discriminant, and gate in `route`.
+- **Verification:** a routing test asserting `osc_9 = false` suppresses an OSC 9
+  notification while OSC 777 still shows (and vice-versa).
+- **Scheduling:** independent of OSC 99; can be done any time (a Task 76 hygiene
+  fix). Not a blocker for the v0.11.0 OSC 99 work.
+
 ### 99 Open questions (resolved at activation, 2026-07-01)
 
 - **Icon-by-data cache (`g=`): in-memory only.** The cache lives for the session
