@@ -5,17 +5,19 @@
 Close the first, lower-risk half of the remaining kitty terminal-protocol surface:
 stateful desktop notifications (OSC 99), completion of the kitty graphics protocol
 (animation, unicode placeholders, relative placements, storage quotas), and a
-verification pass over the existing kitty keyboard protocol (Task 35). Every protocol
-here targets a **stable** kitty spec, and all three reuse plumbing that already exists
-in the codebase.
+compliance-gap closure over the existing kitty keyboard protocol (Task 35). Every
+protocol here targets a **stable** kitty spec, and all three build on plumbing that
+already exists in the codebase (the keyboard work additionally needs new
+modifier plumbing from the windowing layer up — see Task 101).
 
 Depends on v0.9.0 (Task 76 notification routing for OSC 99; OSC 133 command blocks
 already shipped).
 
 This version is **decomposed** (per the `freminal-version-activation` skill) because it
-is next-up and targets stable specs. The subtasks below are written against the current
-code seams. Re-confirm the seams at activation before executing — the codebase may have
-moved.
+is next-up and targets stable specs. The subtasks below were re-confirmed against the
+current code seams during a 2026-07-01 activation recon (see the per-task current-state
+maps in `Documents/KITTY_PROTOCOL_REFERENCE.md`). Re-confirm the seams again if execution
+is deferred — the codebase may move.
 
 ---
 
@@ -24,8 +26,20 @@ moved.
 | #   | Feature                              | Scope       | Status  | Depends On       |
 | --- | ------------------------------------ | ----------- | ------- | ---------------- |
 | 99  | Kitty Desktop Notifications (OSC 99) | Medium-high | Planned | v0.9.0 (Task 76) |
-| 100 | Kitty Graphics Protocol Completion   | Medium      | Planned | Task 13          |
-| 101 | Kitty Keyboard Protocol Verification | Small       | Planned | Task 35          |
+| 100 | Kitty Graphics Protocol Completion   | Medium-high | Planned | Task 13          |
+| 101 | Kitty Keyboard Protocol Compliance   | Medium      | Planned | Task 35          |
+
+> **Scope note (from 2026-07-01 activation recon).** Task 101 was originally
+> scoped "Small — verification". Recon against the current spec found freminal
+> encodes only 3 of the 8 kitty modifier bits (missing super, hyper, meta,
+> caps_lock, num_lock) and is missing whole functional-key classes (keypad
+> `CSI u` forms, media keys, modifier-keys-as-keys, F13–F35, lock/print/pause/
+> menu). Reaching 100% compliance is real implementation work, so Task 101 is
+> re-scoped to **Medium (compliance-gap closure)** and retitled accordingly.
+> Task 100 is likewise bumped **Medium → Medium-high**: the recon confirmed
+> shared-memory transmission (`t=s`) and zlib compression (`o=z`) — both required
+> for 100% compliance — are in scope on top of animation/placeholders/relative/
+> quotas.
 
 ---
 
@@ -34,6 +48,14 @@ moved.
 - OSC 99 — <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
 - Graphics — <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 - Keyboard — <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
+
+A **distilled, freminal-facing** reference for all three protocols — wire
+formats, key tables, report/response byte layouts, error codes, quota numbers,
+and the per-protocol current-state deltas found during activation recon — lives
+in `Documents/KITTY_PROTOCOL_REFERENCE.md`. Implementers and reviewers should
+work from that reference (which cross-links back to these subtasks) rather than
+re-fetching the upstream specs. Upstream URLs above remain authoritative on any
+conflict.
 
 Every escape-sequence change here triggers the mandatory dual-document update
 (`ESCAPE_SEQUENCE_COVERAGE.md` + `ESCAPE_SEQUENCE_GAPS.md`) per the
@@ -261,13 +283,21 @@ Prohibitions: do NOT skip the `apply_partial` wiring if a config key is added.
 
 Stop: report + await review.
 
-### 99 Open questions (resolve at activation)
+### 99 Open questions (resolved at activation, 2026-07-01)
 
-- Icon-by-data cache (`g=`): in-memory only, or persisted across runs? (Lean: in-memory.)
-- macOS close-tracking limitation (spec notes close is untracked) — emit the
-  `untracked` close form or suppress? (Spec says emit `untracked`.)
-- Do we surface OSC 99 notifications through the same `[notifications]` routing policy as
-  OSC 9/777, or does OSC 99's richer `o=` occasion model override it?
+- **Icon-by-data cache (`g=`): in-memory only.** The cache lives for the session
+  (terminal process lifetime), satisfying the spec minimum; not persisted across
+  runs.
+- **macOS close-tracking: emit the `untracked` close form.** On platforms that
+  cannot observe OS-side close, reply immediately with
+  `ESC ] 99 ; i=<id> : p=close ; untracked ST` and implement the `p=alive`
+  polling response so applications can reconcile liveness. This is a spec mandate,
+  not a judgment call.
+- **OSC 99 routing: `o=` occasion is the primary display gate; `[notifications]`
+  retains an on/off kill-switch.** OSC 99's `o=always/unfocused/invisible` model
+  drives when a notification is honoured (a superset of the OSC 9/777 behaviour),
+  but a master `[notifications] enabled` plus a new `osc_99` toggle still gate it
+  on/off, wired end to end per `freminal-config-options` (no silent-drop).
 
 ---
 
@@ -291,7 +321,11 @@ Scope: read-only across `terminal_handler/graphics_kitty.rs`,
 
 What: enumerate exactly which `KittyAction` arms are warn-and-skip vs implemented; which
 control keys are parsed-but-ignored at handler level; the current image-store eviction
-behaviour (if any). Produce the precise gap list that 100.2–100.5 implement.
+behaviour (if any). Produce the precise gap list that 100.2–100.6 implement. Reconcile
+one known recon error: an early sub-agent summary claimed relative placements were "a
+separate CSI extension, out of scope" — confirm from the code that `P`/`Q`/`H`/`V` are
+already typed in `KittyControlData` and that relative placements are APC graphics
+commands handled by 100.4 (they are in scope).
 
 Deliverable: a findings report (in chat / appended to this task's notes), not code.
 
@@ -299,7 +333,7 @@ Verification: none (read-only).
 
 Prohibitions: do NOT edit any files; do NOT proceed to implementation.
 
-Stop: report findings; await review and scoping confirmation of 100.2–100.5.
+Stop: report findings; await review and scoping confirmation of 100.2–100.6.
 
 #### 100.2 — Animation: frame transfer + control + compose
 
@@ -312,7 +346,13 @@ What: implement `a=f` (frame transfer, partial-frame rects, composition backgrou
 stop/run/loop `s=`, loop count `v=`, per-frame gap), `a=c` (compose). Terminal-driven
 animation timing drives the existing frame-advance; reuse the snapshot/renderer image
 path. ACK/NACK responses via the existing `format_kitty_response` reverse path,
-respecting `q=` quiet modes.
+respecting `q=` quiet modes. While here, close the response-format gap the recon found:
+`format_kitty_response` currently emits only `i=<id>`; extend it to include
+`,p=<placement_id>` **when** the request specified a non-zero `p=` (the spec requires
+`i=<id>,p=<placement>` in that case). Note the per-action key aliasing documented in
+`KITTY_PROTOCOL_REFERENCE.md` (e.g. `s`/`v`/`c`/`r`/`z`/`X`/`Y` mean different things
+under `a=f`/`a=a`/`a=c` than under transmit/display) — the handler must re-interpret
+these by action, since the parser stores them in transmit/display-named fields.
 
 Deliverable: animation handling + tests (frame add, gap timing, loop count, compose
 rectangle).
@@ -346,12 +386,18 @@ Stop: report + await review.
 
 Scope: `terminal_handler/graphics_kitty.rs`, `image_store.rs` (placement group links).
 
-What: implement `P=`/`Q=` (parent image/placement) with optional `H`/`V` cell offsets;
-lifecycle tied to parent (cascade delete); chain depth limit (`ETOODEEP` past ≥8); cycle
-rejection (`ECYCLE`); missing parent (`ENOPARENT`). Error responses via the reverse path.
+What: relative placements are **graphics-protocol APC commands** (`a=p` with
+`P=`/`Q=`/`H`/`V`) — not a separate CSI extension — and the parser already types
+`P`/`Q`/`H`/`V` in `KittyControlData`, so this is handler/store work only.
+Implement `P=`/`Q=` (parent image/placement) with optional `H`/`V` cell offsets;
+lifecycle tied to parent (cascade delete); the cursor must not move after a
+relative placement regardless of `C`; a virtual placement may be a parent but
+cannot itself be made relative (`EINVAL`); chain depth limit (`ETOODEEP` past ≥8);
+cycle rejection (`ECYCLE`); missing parent (`ENOPARENT`). Error responses via the
+reverse path.
 
-Deliverable: relative-placement handling + tests (offset, cascade delete, depth/cycle
-errors).
+Deliverable: relative-placement handling + tests (offset, cascade delete, virtual
+parent, depth/cycle/no-parent errors).
 
 Verification: `cargo test --all`; clippy.
 
@@ -376,117 +422,279 @@ Prohibitions: do NOT change protocol parsing; do NOT proceed.
 
 Stop: report + await review.
 
-#### 100.6 — Escape-sequence docs
+#### 100.6 — Shared-memory transmission (`t=s`) + zlib compression (`o=z`)
 
-Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+Scope: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`,
+`freminal-common/src/buffer_states/kitty_graphics.rs` (only if a decode helper
+belongs there). A new crate dependency for a POSIX/Windows shared-memory object
+may be required — if so, add it to the dev shell per `flake-dev-shell-discipline`
+and to `Cargo.toml` per `rust-best-practices` before use.
 
-What: update the graphics rows to reflect animation/placeholders/relative/quotas now
-implemented; refresh the "Last updated" header.
+What: two independent-but-related gaps the parser already types but the handler
+does not honour.
 
-Deliverable: dual-doc update.
+- `o=z`: when `control.compression == Some(Zlib)`, RFC 1950 zlib-inflate the
+  (already-base64-decoded) payload before it is interpreted as raw pixels or PNG.
+  Applies to every `f=` format. With PNG + compression the client supplies `S=`
+  (source size). Currently `o=z` is parsed and silently ignored, storing garbage.
+- `t=s`: replace the current `ENOTSUP` stub with an actual shared-memory read —
+  open the named object from the payload, read `S` bytes at offset `O`, then
+  `shm_unlink` + `close` (POSIX) / `close` (Windows). Enforce the spec's
+  special-file / sensitive-path refusals (mirror the existing `t=f`/`t=t`
+  security checks).
 
-Verification: markdownlint clean.
+Deliverable: both handlers + tests (zlib round-trip decode for RGB/RGBA/PNG; a
+shared-memory read that asserts the object is unlinked after read; the security
+refusals).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT touch animation, placeholders, or relative placements; do
+NOT weaken the file/medium security checks; do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.7 — Escape-sequence docs
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/KITTY_PROTOCOL_REFERENCE.md`.
+
+What: update the graphics rows to reflect animation / placeholders / relative
+placements / quotas / `t=s` / `o=z` / `p=`-in-responses now implemented; refresh
+the "Last updated" header. Also flip the graphics "current-state deltas" section
+in `KITTY_PROTOCOL_REFERENCE.md` from gap-list to done, and bump its
+`Distilled ... as of` date if any spec detail was reconfirmed.
+
+Deliverable: dual-doc update (plus reference-doc refresh).
+
+Verification: markdownlint clean (`markdownlint-cli2`), prettier clean.
 
 Prohibitions: none beyond scope.
 
 Stop: report + await review.
 
-### 100 Open questions (resolve at activation)
+### 100 Open questions (resolved at activation, 2026-07-01)
 
-- Quota numbers: mirror kitty's defaults (≈320 MB base, 5× frames) or pick freminal
-  values? (Lean: mirror kitty, make it a constant.)
-- Shared-memory transmission (`t=s`): in scope for this version or deferred? (The parser
-  types it; the handler may stub it. Decide based on 100.1 findings.)
+- **Quota numbers: mirror kitty's defaults as named constants.** Base image
+  budget ≈ 320 MB per buffer; animation frame budget = 5× base. Captured as
+  constants so they can be tuned without a protocol change.
+- **Shared-memory transmission (`t=s`): in scope.** Implement the POSIX/Windows
+  shared-memory read (read `S` bytes at offset `O`, then unlink+close on POSIX /
+  close on Windows), with the special-file/security refusals the spec requires.
+  100% compliance requires it (added as subtask 100.6).
+- **Zlib compression (`o=z`): in scope.** The parser types `o=z` but the handler
+  never decompresses; implement RFC 1950 inflate before pixel/PNG interpretation
+  (added as subtask 100.6 alongside `t=s`).
 
 ---
 
-## Task 101 — Kitty Keyboard Protocol Verification
+## Task 101 — Kitty Keyboard Protocol Compliance
 
 ### 101 Summary
 
 Task 35 shipped the kitty keyboard protocol; the 2026-06-10 fix closed the
-functional-key event-type defect. This task **verifies completeness** against the current
-spec rather than building new infrastructure: confirm all five progressive-enhancement
-flags are correctly encoded, the per-screen stack semantics are correct, and the
-detection handshake is right. Close any drift found; do not rebuild what works.
+functional-key event-type defect. The 2026-07-01 activation recon found this is
+**not** a pure verification task: freminal is materially short of 100% compliance
+in two areas —
+
+1. **Modifiers.** Only 3 of the 8 kitty modifier bits are modelled
+   (shift=1, alt=2, ctrl=4). Missing: super=8, hyper=16, meta=32, caps_lock=64,
+   num_lock=128. `KeyModifiers` in `input.rs` has no fields for them, and they are
+   not captured at the windowing layer, so no amount of encoding work alone fixes
+   it — the modifier state must be plumbed from winit through `InputEvent` first.
+2. **Functional keys.** Whole classes are missing their `CSI u` encodings: keypad
+   keys (KP_0–KP_9 and friends, 57399–57427), media keys (57428–57440),
+   modifier-keys-as-keys (LEFT_SHIFT…ISO_LEVEL5_SHIFT, 57441–57454), F13–F35
+   (57376–57398), and the lock/print/pause/menu keys (57358–57363). These are
+   primarily reported under flag 8 (report-all-keys).
+
+The stack semantics, set/push/pop handlers, `CSI ? u` query, XTGETTCAP `u`, and
+separate main/alt-screen stacks are implemented and tested — those are verified
+conformant and must not be rebuilt.
+
+Per the 2026-07-01 activation decision, Task 101 is re-scoped from "verify" to
+**close these gaps to 100% compliance**. The full spec surface (all 8 modifier
+bits, the complete functional-key table, the encoding format) is captured in
+`Documents/KITTY_PROTOCOL_REFERENCE.md`.
 
 ### 101 Subtasks
 
-#### 101.1 — READ-ONLY conformance audit against current spec
+#### 101.1 — READ-ONLY conformance audit (confirm the recon gap list)
 
 Scope: read-only across
 `freminal-common/src/buffer_states/modes/kitty_keyboard.rs`,
 `freminal-terminal-emulator/src/input.rs`, `terminal_handler/mod.rs` (stack),
-`ansi_components/csi_commands/` (`>u`/`<u`/`?u`/`=u`), and the existing
-`tests/kitty_keyboard_*.rs`.
+`ansi_components/csi_commands/scorc.rs` (`>u`/`<u`/`?u`/`=u`), the winit key
+handling in `freminal/src/gui/` and `freminal-windowing`, and the existing
+`tests/kitty_keyboard_*.rs` + `input.rs` inline tests.
 
-What: check each of the 5 flags (disambiguate, report-event-types, report-alternate-keys,
-report-all-keys-as-escape-codes, report-associated-text) against the spec encoding,
-including the `key:shifted:base` sub-fields, modifier bitmask, and the detection
-handshake (`CSI ? u` then DA1). Produce a precise drift list: conformant vs gap, each
-with the spec citation and the offending code location.
+What: confirm and refine the recon gap list against the code as it stands at
+execution time. For each of the 5 flags and the modifier/functional-key surface,
+mark conformant vs gap with the spec citation (cite
+`KITTY_PROTOCOL_REFERENCE.md` section + the upstream URL) and the exact code
+location. Critically, determine **where** super/hyper/meta/caps_lock/num_lock
+modifier state is available in the winit event today (if at all) and what must be
+added to `InputEvent` / `KeyEventMeta` to carry it — this scopes 101.2. Confirm
+which functional keys freminal's `to_payload_kkp` already emits vs. which are
+missing.
 
-Deliverable: findings report (chat / task notes), not code.
+Deliverable: a refined, code-anchored gap list that fixes the exact scope of
+101.2–101.4. Not code.
 
 Verification: none (read-only).
 
 Prohibitions: do NOT edit files; do NOT proceed to fixes without review.
 
-Stop: report findings; await scoping of 101.2 fixes (if any).
+Stop: report findings; await confirmation of the 101.2–101.4 scope.
 
-#### 101.2 — Close any drift found (scoped from 101.1)
+#### 101.2 — Modifier bits: capture super/hyper/meta/caps_lock/num_lock end to end
 
-Scope: defined by the 101.1 findings — strictly the files identified, nothing else.
+Scope: the winit key-event handling (`freminal-windowing` and/or
+`freminal/src/gui/` input path), the `InputEvent` definition it feeds,
+`KeyModifiers` / `KeyEventMeta` in `freminal-terminal-emulator/src/input.rs`.
+**Architecture-affecting** (new fields cross the GUI→PTY `InputEvent` boundary) —
+follow `freminal-architecture`; do not introduce shared state, only extend the
+existing one-way `InputEvent` channel.
 
-What: fix the specific encoding/stack/handshake drift items the audit found. If 101.1
-finds full conformance, this subtask is a no-op closed with "verified conformant; no
-changes" and the audit becomes the deliverable.
+What: extend the modifier model from 3 bits to all 8 kitty bits. Capture
+super/hyper/meta and the caps_lock/num_lock lock states from the winit modifiers
+at the GUI layer, carry them through `InputEvent`, and surface them on
+`KeyModifiers` so `modifier_param()` can compute the full `1 + bitmask` value
+(super=8, hyper=16, meta=32, caps_lock=64, num_lock=128). Honour the flag-1
+carve-out (lock modifiers are not reported for text-producing keys unless flag 8
+is set). Do NOT yet add the missing functional-key encodings (101.3).
 
-Deliverable: targeted fixes + regression tests for each drift item, OR a documented
-"verified conformant" result.
+Deliverable: full 8-bit modifier plumbing + tests (each new modifier bit produces
+the correct `1 + bitmask` value; the lock-modifier carve-out under flag 1 vs
+flag 8).
 
-Verification: `cargo test --all`; clippy.
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
-Prohibitions: do NOT refactor beyond the drift list; do NOT change unrelated keyboard
-behaviour; do NOT proceed.
+Prohibitions: do NOT add functional-key encodings; do NOT alter the stack/query
+code (it is conformant); do NOT introduce shared PTY/GUI state; do NOT proceed.
 
 Stop: report + await review.
 
-#### 101.3 — Escape-sequence docs
+#### 101.3 — Missing functional-key encodings (keypad, media, modifier-keys, F13–F35, lock/print/pause/menu)
 
-Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
+Scope: `freminal-terminal-emulator/src/input.rs` (`to_payload_kkp` and the
+functional-key encoding helpers). Depends on 101.2 (modifier bits) being merged.
 
-What: record the verification result (and any fixes); refresh the "Last updated" header.
-If conformant, state so explicitly so a future agent does not re-audit needlessly.
+What: add the missing `CSI u` encodings from the kitty functional-key table
+(reproduced in `KITTY_PROTOCOL_REFERENCE.md`): keypad keys KP_0–KP_9,
+KP_Decimal/Divide/Multiply/Subtract/Add/Enter/Equal/Separator,
+KP_Left/Right/Up/Down/PageUp/PageDown/Home/End/Insert/Delete/Begin (57399–57427);
+media keys (57428–57440); modifier-keys-as-keys LEFT_SHIFT…RIGHT_META and
+ISO_LEVEL3/5_SHIFT (57441–57454); F13–F35 (57376–57398); CAPS_LOCK, SCROLL_LOCK,
+NUM_LOCK, PRINT_SCREEN, PAUSE, MENU (57358–57363). Respect which keys report only
+under flag 8 (report-all-keys) vs the disambiguation set. Confirm F3 stays `13 ~`
+and never `CSI R` (CPR collision). These keys must be available from the winit
+layer — if a key class is not currently delivered as a distinct key, note it and
+scope the windowing-layer addition (may fold back into 101.2's plumbing or become
+a numbered follow-up).
 
-Deliverable: dual-doc update.
+Deliverable: the missing encodings + tests (a representative case per key class,
+with and without modifiers, and under flag 8 for modifier-keys-as-keys).
 
-Verification: markdownlint clean.
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT touch the modifier plumbing from 101.2 beyond consuming it;
+do NOT change stack/query behaviour; do NOT proceed.
+
+Stop: report + await review.
+
+#### 101.4 — Escape-sequence docs
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/KITTY_PROTOCOL_REFERENCE.md`.
+
+What: record the compliance work (modifier bits + functional-key encodings now
+complete); refresh the "Last updated" header; flip the keyboard "current-state
+deltas" section in `KITTY_PROTOCOL_REFERENCE.md` from gap-list to done. State the
+final compliance status explicitly so a future agent does not re-audit needlessly.
+
+Deliverable: dual-doc update (plus reference-doc refresh).
+
+Verification: markdownlint clean (`markdownlint-cli2`), prettier clean.
 
 Prohibitions: none beyond scope.
 
 Stop: report + await review.
 
-### 101 Open questions (resolve at activation)
+### 101 Open questions (resolved at activation, 2026-07-01)
 
-- None expected; this is a verification task. If 101.1 surfaces a large gap (unlikely),
-  stop and re-scope with the maintainer rather than ballooning 101.2.
+- **Re-scoped to full compliance, not verification.** The recon confirmed real
+  gaps (3-of-8 modifier bits; missing keypad/media/modifier-key/F13–F35/lock key
+  encodings). Task 101 now closes them. If 101.1 surfaces a gap materially larger
+  than the recon list (e.g. the windowing layer cannot deliver a needed key
+  class without significant work), stop and file it as a numbered cleanup entry
+  per `freminal-orchestrator-protocol` rather than ballooning a subtask.
 
 ---
 
-## Design Decisions (provisional, confirm at activation)
+## Design Decisions
 
-- **0.10.0 ships full kitty notifications & graphics, not a subset.** The split across
-  three versions is about risk sequencing, not feature trimming. Within this version,
-  every protocol is finished to spec.
-- **Reverse-PTY-write reuses existing plumbing.** OSC 99 activation/close reports go
-  through `Pane::pty_write_tx` / `write_to_pty` — the same path DSR/DA responses and OSC
-  52 clipboard queries already use. No new channel without architecture sign-off
-  (`freminal-architecture`).
-- **Capability advertisement is truthful.** The OSC 99 `p=?` handshake (and any graphics
-  `a=q` response) advertises only what is actually implemented — never a half-supported
-  protocol. Carries forward the Task 76 capability-advertisement rule.
-- **Notifications & graphics are two workstreams in one version.** They share the APC/OSC
-  dispatch and reverse-write plumbing but are otherwise independent; they can be
-  implemented in parallel (Task 99 vs Task 100) by separate sub-agents, with Task 101
-  (verification) running independently of both.
+Provisional decisions are marked; the rest were confirmed at the 2026-07-01
+activation.
+
+- **v0.11.0 ships full kitty notifications & graphics & keyboard, not a subset.**
+  The split across versions is about risk sequencing, not feature trimming. Within
+  this version, every protocol is finished to spec (100% compliance is the goal).
+- **Reverse-PTY-write reuses existing plumbing.** OSC 99 activation/close/alive
+  reports and graphics responses go through `Pane::pty_write_tx` / `write_to_pty` —
+  the same path DSR/DA responses and OSC 52 clipboard queries already use. No new
+  channel without architecture sign-off (`freminal-architecture`).
+- **Capability advertisement is truthful.** The OSC 99 `p=?` handshake (and any
+  graphics `a=q` response) advertises only what is actually implemented — never a
+  half-supported protocol. Carries forward the Task 76 capability-advertisement
+  rule.
+- **The three protocols are largely independent workstreams.** They share the
+  APC/OSC dispatch and reverse-write plumbing but are otherwise independent and can
+  be implemented in parallel (Task 99 vs Task 100 vs Task 101) by separate
+  sub-agents. Note Task 101 is now a compliance-gap task, not a verification pass,
+  and 101.2 crosses the GUI→PTY `InputEvent` boundary (architecture-affecting).
+- **Activation decisions (2026-07-01):**
+  - OSC 99 icon-data cache (`g=`) is **in-memory, session-lifetime** only.
+  - macOS/untracked-close: emit the `untracked` close form and implement the
+    `p=alive` polling response (spec mandate).
+  - OSC 99 display gating: `o=` occasion is the primary gate; `[notifications]`
+    keeps a wired on/off `osc_99` kill-switch (`freminal-config-options`).
+  - Graphics `t=s` (shared memory) and `o=z` (zlib) are **both in scope**
+    (subtask 100.6).
+  - Task 101 re-scoped to full compliance (all 8 modifier bits + the complete
+    functional-key table).
+- **A distilled kitty-protocol reference is maintained.**
+  `Documents/KITTY_PROTOCOL_REFERENCE.md` holds the wire formats / key tables /
+  error codes / current-state deltas for all kitty protocols freminal implements.
+  It is a snapshot (kitty ~0.47.x, 2026-07-01); upstream URLs remain authoritative
+  on conflict, and each escape-sequence subtask refreshes it.
+
+## Manual test scripts (to be produced after implementation, per maintainer request)
+
+The maintainer requested runnable scripts to manually exercise the **full spec
+set** for Tasks 99 and 100 (and, if tractable, 101). Per the "do not generate the
+scripts until the full API surface exists" instruction, these are **produced at
+the end of each task**, once the implemented surface is concrete — not up front.
+
+- **Task 99 script:** drives every OSC 99 code path — single/chunked title+body,
+  update-by-id, close, `c=1` close report, `a=report` activation, buttons (with
+  activation index), icons (by name and by transmitted+cached data), sounds,
+  urgency, occasion, auto-expiry, `p=alive`, and the `p=?` handshake — printing
+  the exact escape sequences and reading back the reverse-path reports so a human
+  can confirm each against the spec. Delivered as the final Task 99 subtask.
+- **Task 100 script:** drives transmit/put/delete/query, animation (frame
+  transfer, control run/stop/loop, compose), unicode placeholders, relative
+  placements (incl. the error cases), `t=s`, `o=z`, source-rect crop, and
+  quota/eviction, again echoing the wire bytes and any responses. Delivered as
+  the final Task 100 subtask.
+- **Task 101 script (tentative):** the maintainer noted this is subtler. A
+  keyboard-protocol exerciser is best realized as an interactive mode that turns
+  on each progressive-enhancement flag and prints the raw `CSI u` bytes freminal
+  emits for a scripted set of key presses (all 8 modifiers, keypad/media/modifier/
+  F13–F35 keys, event types, associated text), letting a human diff against the
+  reference table. Feasibility is decided during 101.3; if an automated harness is
+  cleaner than a manual script, that substitutes.
+
+The scripts live under a to-be-decided path (candidate: a `scripts/` or
+`test-scripts/` directory at the repo root) and are documented but not wired into
+CI (they are manual exercisers, distinct from the mandated `cargo test` suites).

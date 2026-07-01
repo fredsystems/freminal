@@ -170,7 +170,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 98  | Block Close on Running Commands          | `PLAN_VERSION_090.md` (Task 98)               | Complete      | Task 72                |
 | 99  | Kitty Desktop Notifications (OSC 99)     | `PLAN_VERSION_110.md` (Task 99)               | Planned       | v0.9.0 (Task 76)       |
 | 100 | Kitty Graphics Protocol Completion       | `PLAN_VERSION_110.md` (Task 100)              | Planned       | Task 13                |
-| 101 | Kitty Keyboard Protocol Verification     | `PLAN_VERSION_110.md` (Task 101)              | Planned       | Task 35                |
+| 101 | Kitty Keyboard Protocol Compliance       | `PLAN_VERSION_110.md` (Task 101)              | Planned       | Task 35                |
 | 102 | Kitty File Transfer (OSC 5113)           | `PLAN_VERSION_120.md` (Task 102)              | Planned       | Task 99                |
 | 103 | Multiple Cursors (CSI)                   | `PLAN_VERSION_120.md` (Task 103)              | Planned       | None                   |
 | 104 | Kitty Text Sizing (OSC 66)               | `PLAN_VERSION_130.md` (Task 104)              | Planned       | Task 13                |
@@ -426,8 +426,10 @@ the OSC 9/777 notification routing from Task 76 and extends it with a stateful i
 a reverse-PTY-write activation path (which already exists via `write_to_pty` /
 `Pane::pty_write_tx`). Task 100 (graphics completion) extends the Task 13 kitty graphics
 handler — the control-data parser already types every key including animation, so the work is
-filling stubbed handler arms. Task 101 verifies the Task 35 keyboard protocol against the
-current spec. All three target stable kitty specs.
+filling stubbed handler arms. Task 101 closes the remaining kitty keyboard-protocol
+compliance gaps (all 8 modifier bits; keypad/media/modifier-key/F13–F35 encodings) found
+in the 2026-07-01 activation recon — re-scoped from a verification pass to gap closure.
+All three target stable kitty specs.
 
 **Tasks 102–103 (v0.12.0, file transfer & cursors):** Task 102 (OSC 5113) is a stateful
 bidirectional session machine with a mandatory user-consent prompt; it reuses the reverse-write
