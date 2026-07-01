@@ -395,6 +395,61 @@ Prohibitions: do NOT change GUI behaviour yet; do NOT proceed.
 
 Stop: report + await review.
 
+##### 99.4 execution decisions (recorded 2026-07-01, against the real seams)
+
+A recon of the mapping seam confirmed 110.0's `Notification99Data` shell is the
+target and the `WindowCommand` channel is the transport. Resolutions (Opus
+decisions, not open questions):
+
+- **No `snapshot.rs` change.** Transport is `window_commands` →
+  `WindowCommand::Viewport/Report` → GUI, fully generic over
+  `WindowManipulation`; `snapshot.rs` never carries `WindowManipulation`. The
+  literal 99.4 Scope line naming `snapshot.rs` is superseded by the 110.0
+  "execution decisions" note (transport is the `WindowCommand` channel).
+- **No `pty.rs` reclassification in 99.4.** `Notification99` rides the
+  `_ => Viewport` wildcard, which reaches the GUI (both wrappers unwrap
+  identically). Reclassifying to `Report` for the reverse-write path is 99.6.
+- **`focus_on_activation` gets a home: extend the shell.** `Osc99Actions` carries
+  both `report_activation` and `focus_on_activation`, but 110.0's
+  `Notification99Data` only had `report_activation`. Silently dropping `a=focus`
+  is an observable-behaviour loss, so **99.4 adds `focus_on_activation: bool` to
+  `Notification99Data`** (completing the OSC 99 superset this subtask is meant to
+  carry). This is the one `window_manipulation.rs` type change in 99.4.
+- **Field mapping `FinalizedNotification`/`Osc99Command` → `Notification99Data`:**
+  `id`/`title`/`body` direct; `icon_data ← finalized.icon`;
+  `icon_names`/`icon_cache_key`/`sound`/`app_name`/`notification_type` from
+  `meta`; `report_activation`/`focus_on_activation ← meta.actions.*`;
+  `close_report ← meta.close_report`;
+  `urgency`: `NotificationUrgency` → `Option<u8>` (`Low`→`Some(0)`,
+  `Normal`→`Some(1)`, `Critical`→`Some(2)`, `None`→`None`);
+  `occasion`: `NotificationOccasion` → `Option<String>` with **`Always → None`**
+  (the default; behaviourally identical to unset), `Unfocused →
+Some("unfocused")`, `Invisible → Some("invisible")`;
+  `expire_ms`: `i64` → `Option<i64>` with **`-1 → None`** (the spec's "OS
+  default" sentinel), any other value → `Some(v)`.
+- **`button_labels` is `Vec::new()` for now (tracked, not silently dropped).**
+  Button-label extraction from the `p=buttons` (U+2028-separated) payload is not
+  implemented anywhere in the 99.1 parser / 99.3 reassembler yet, so 99.4 has no
+  source. See cleanup entry **99.9** below.
+
+##### 99.9 — Cleanup: OSC 99 button-label extraction (surfaced during 99.4)
+
+- **Surface point:** 99.4 mapping recon (2026-07-01), on `task-99/osc99-notifications`.
+- **Impact:** OSC 99 `p=buttons` payloads (U+2028-separated labels) are parsed to
+  the `Buttons` payload type but the individual labels are never extracted, so
+  `Notification99Data.button_labels` is always empty and the GUI (99.5) cannot
+  render notification buttons or map a button-activation index back (99.6).
+- **Scope of fix:** accumulate `p=buttons` payload in `FinalizedNotification`
+  (99.3's reassembler) and split it on U+2028 into `Vec<String>`; populate
+  `Notification99Data.button_labels` in the 99.4 mapping. Purely additive.
+- **Suggested approach:** add a `buttons: Vec<u8>` accumulator to
+  `PendingNotification` + a `buttons: Vec<String>` field to
+  `FinalizedNotification` (split on U+2028 at finalize); map it in 99.4.
+- **Verification:** a reassembly test feeding a `p=buttons` chunk asserts the
+  split labels; a 99.4 mapping test asserts `button_labels` is populated.
+- **Scheduling:** do before or with 99.5 (the GUI consumes buttons). Not a
+  blocker for the 99.4 field-mapping commit.
+
 #### 99.5 — GUI: render OSC 99 notifications with identity, buttons, icons, expiry
 
 Scope: `freminal/src/gui/notifications.rs`, the notification drain site in `freminal/src/gui/`
@@ -414,6 +469,137 @@ Verification: `cargo test --all`; clippy.
 Prohibitions: do NOT wire the reverse-write yet (99.6); do NOT proceed.
 
 Stop: report + await review.
+
+##### 99.5 execution decisions (recorded 2026-07-01, against the real seams)
+
+A recon of the GUI notification machinery found 99.5 is larger than one
+Sonnet-sized subtask and crosses shared-state / dependency / platform lines that
+need explicit resolution. Maintainer-approved decisions:
+
+- **Split into 99.5a and 99.5b.**
+  - **99.5a — render leg + state:** keep `NotificationRouter` the stateless unit
+    type it is (additive — do NOT rewire the existing `route`/`route_test` call
+    sites); add a live-notification-by-id map and a session `g=` icon-data cache
+    (`HashMap<String, Vec<u8>>`) as fields on `FreminalGui` (app-level, `RefCell`,
+    alongside `toasts` — matching that precedent); add a `route_osc99` associated
+    function taking a `Notification99Data` plus the maps by `&mut`. The OSC 99
+    command is collected into an out-param `Vec` in `rendering.rs` (mirroring the
+    OSC 9/777 `NotificationRequest` collection) and routed after the pane loop in
+    `app_impl.rs` where `self.config`, `self.toasts`, and the maps are borrowable.
+    Render the toast leg + the OS-notification leg with
+    buttons/urgency/sound/expiry/icon-by-name (`.icon()`) / icon-by-data (temp
+    file + `.image_path()`) and the occasion gate. **No handle retention yet**
+    (still fire-and-forget in 99.5a); no reverse-write.
+  - **99.5b — handle retention:** change the OSC 99 OS-notification path so the
+    spawned per-notification thread **keeps** the `notify-rust` handle and calls
+    `wait_for_action` / `on_close`, turning observed activation/close into events
+    delivered back toward the PTY. 99.5b pairs with 99.6 (the reverse-write that
+    consumes those events). Written per `freminal-architecture`; no new
+    steady-state GUI↔PTY shared lock.
+- **Handle retention = per-notification thread keeps the handle** (not a
+  synchronous GUI-thread `.show()`). Preserves Task 76's off-thread D-Bus model.
+  The Linux handle is `Send` (zbus `Connection`); macOS/Windows handle types
+  differ — 99.5b keeps the retention logic behind the same `#[cfg]` structure
+  `show_system` already uses, and only assumes the common
+  `wait_for_action`/`close`/`on_close` shape.
+- **Icon-by-data = temp file + `notify-rust` `.image_path()`** (no Cargo feature
+  change, no new system dep). `.image_data()` is behind the unset
+  `images_no_default_features` feature; the temp-file path avoids touching the
+  dependency. Icon-by-name uses `.icon()`. The `g=` cache stores the transmitted
+  bytes for the session so later `g=`-only notifications reuse them.
+- **`expire_ms` mapping:** `None` → `notify-rust` `Timeout::Default`; `Some(0)` →
+  `Timeout::Never` (kitty `w=0` = "never expire", which matches `notify-rust`'s
+  `Timeout::from(0)` = Never); `Some(n>0)` → `Timeout::Milliseconds(n)`.
+- **Occasion gate:** `None`(=Always) → always display; `unfocused` → gate on
+  `!flags.window_focused` (already threaded); `invisible` → gate on window
+  minimized (`ui.ctx().input(|i| i.viewport().minimized)`, already reachable in
+  `handle_window_manipulation`) OR the imperfect `!flags.is_active` background
+  proxy — 99.5a uses minimized as the honest signal and treats background-tab
+  occlusion as out of scope (documented, not silently dropped).
+- **Truthful-advertisement gaps to carry into 99.7:** `sound` is only a
+  freedesktop hint (no guaranteed playback); `notification_type` has no clean
+  `notify-rust` mapping; on macOS there is no urgency setter (matches the
+  existing Task 76 `#[cfg(not(target_os = "macos"))]` gate). 99.7 must not
+  over-advertise these.
+
+##### Reverse-path gaps found during 99.5b/99.6 recon (2026-07-01)
+
+The recon of the reverse-write path found two correctness gaps and a lifecycle
+gap that reshape the reverse-path work. Maintainer-approved resolutions:
+
+- **Gap 1 — control payload types were misrouted (bug).**
+  `FinalizedNotification::into_notification99_data()` discards
+  `Osc99PayloadType`, so `p=close` (close request), `p=alive` (liveness poll),
+  and `p=?` (capability query) currently reach the GUI as empty `Notification99`
+  display requests and get wrongly toasted / OS-notified. **Resolution: a new
+  `WindowManipulation::Osc99Control { id: Option<String>, kind: Osc99ControlKind }`
+  variant** (with `enum Osc99ControlKind { Close, Alive, Query }` in
+  `freminal-common`), emitted by the `handle_osc` `Notify99` arm in
+  `terminal_handler/osc.rs` when `finalized.meta.payload_type` is
+  `Close`/`Alive`/`Query`; the display types (`Title`/`Body`/`Icon`/`Buttons`)
+  keep flowing as `Notification99`. Display stays clean; control routes to
+  distinct GUI handling (close-request/alive-response in 99.6, query in 99.7).
+- **Gap 2 — pane identity is lost.** The reverse report must reach the
+  **originating pane's** `pty_write_tx`, but `Notification99Data` carries no pane
+  id and 99.5a's post-loop routing site has no pane context. `pty_write_tx` IS in
+  scope at the per-pane `rendering.rs` `Notification99`/`Osc99Control` arm.
+  **Resolution: clone `pty_write_tx` at the rendering site and carry the clone
+  alongside each collected item** — the OSC 99 out-param becomes
+  `Vec<(Notification99Data, Sender<PtyWrite>)>` (and a parallel one for
+  `Osc99Control`), so the post-loop router writes reports back to the correct
+  pane. Cloning the existing `Sender<PtyWrite>` (already `Send + Clone`, precedent
+  in `layout_ops.rs`) satisfies the "no new channel" rule.
+- **Gap 3 — `osc99_live` never pruned.** Entries are only inserted (99.5a),
+  never removed, so the map grows unbounded and a `p=alive` response would over-
+  report. **Resolution: remove the entry on observed close** (99.5b/99.6) and on
+  an app-driven `p=close`.
+
+##### 99.5c — Reverse-path prerequisites (control variant + pane-tx + prune scaffolding)
+
+Scope: `freminal-common/src/buffer_states/window_manipulation.rs`
+(`Osc99Control` variant + `Osc99ControlKind`), `freminal-common` `osc_notify_99.rs`
+(expose `payload_type` on the finalized path if needed),
+`freminal-terminal-emulator/src/terminal_handler/osc.rs` (branch on
+`payload_type`; emit `Notification99` vs `Osc99Control`),
+`freminal-terminal-emulator/src/terminal_handler/notify_99.rs`
+(carry `payload_type` to the emit site),
+`freminal/src/gui/rendering.rs` (clone `pty_write_tx` into the OSC 99 out-param
+tuples; add an inert `Osc99Control` arm), `freminal/src/gui/app_impl.rs`
+(thread the tupled out-params), `freminal/src/gui/pty.rs` (classify
+`Notification99` and `Osc99Control` as `Report`, not `Viewport`, since they now
+drive reverse-writes).
+
+What: land the type/routing shells so 99.5b/99.6 can be a focused behaviour
+change. **No handle retention, no report bytes yet** — the `Osc99Control` GUI arm
+and the tupled `pty_write_tx` are inert placeholders (routing + plumbing only).
+Add the `pty.rs` `Report` reclassification here (it is a pure classification
+change; both wrappers unwrap identically GUI-side, so it is behaviour-neutral
+until 99.6 uses the write path). Prune-on-close scaffolding: add a `remove`-capable
+path for `osc99_live` (used by 99.6).
+
+Deliverable: the variant + routing split + pane-tx threading + tests (a
+`p=close`/`p=alive`/`p=?` sequence produces `Osc99Control{kind}` not
+`Notification99`; a display sequence still produces `Notification99`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT retain the notify-rust handle or write report bytes (99.5b/99.6);
+do NOT change display rendering (99.5a).
+
+Stop: report + await review.
+
+##### 99.5b + 99.6 (combined) — handle retention + reverse reports
+
+Per the recon, 99.5b (retain the handle, produce `(id, action-string)` events) and
+99.6 (turn events into report bytes on the originating pane's `pty_write_tx`) are
+structurally inseparable and land as **one reviewed change** on top of 99.5c: the
+per-notification thread keeps the handle, calls `wait_for_action` (Linux; covers
+both activation `"default"`/button-index and close `"__closed"`), and — using the
+`pty_write_tx` clone threaded in 99.5c — writes `ESC ] 99 ; i=<id> ; <btn> ST`
+(activation, when `a=report`), `ESC ] 99 ; i=<id> : p=close ; ST` (close, when
+`c=1`), pruning `osc99_live` on close. The `Osc99Control{Alive}` arm answers the
+`p=alive` poll with `ESC ] 99 ; i=<id> : p=alive ; <live-ids> ST`. macOS/Windows:
+`untracked` close form + `p=alive` (main-run-loop hazard confirmed in recon).
 
 #### 99.6 — Reverse path: activation + close + alive reports to the PTY
 
@@ -469,6 +655,45 @@ Verification: `cargo test --all`; clippy; markdownlint clean.
 Prohibitions: do NOT skip the `apply_partial` wiring if a config key is added.
 
 Stop: report + await review.
+
+##### 99.8 execution decisions (recorded 2026-07-01)
+
+- **`osc_99` field + full config wiring already landed in 110.0** (field +
+  `ConfigPartial`/`apply_partial` + `config_example.toml` + Nix mirror + Settings
+  UI + partial-merge test). 99.8's config work is therefore only the **drain-site
+  gate**: `route_osc99` returns early when `!config.osc_99` (in addition to the
+  existing `!config.enabled` gate). No further config plumbing needed.
+- **`osc_9`/`osc_777` separate enforcement is deferred to cleanup 99.10.** The
+  `KITTY_PROTOCOL_REFERENCE` note asked 99.8 to also retroactively enforce
+  `osc_9`/`osc_777`, but those cannot be gated separately without threading the
+  OSC source (9 vs 777) through `AnsiOscType::Notify` →
+  `WindowManipulation::Notification` → `NotificationKind` → `route` (a 4-layer,
+  two-crate change) — both currently collapse to `NotificationKind::OscText`.
+  That is a pre-existing Task 76 gap, out of proportion to fold into 99.8;
+  tracked as 99.10 instead of silently skipped.
+- **Dual-doc:** OSC 99 was never in `ESCAPE_SEQUENCE_GAPS.md` (never tracked as a
+  gap), so per `freminal-escape-sequence-docs` it is **added to
+  `ESCAPE_SEQUENCE_COVERAGE.md` only** (a new `OSC 99` row), NOT to GAPS. Both
+  docs' "Last updated" headers are refreshed. The `KITTY_PROTOCOL_REFERENCE.md`
+  notifications "current-state deltas" flip from gap-list to done.
+
+##### 99.10 — Cleanup: separate `osc_9` / `osc_777` drain-site enforcement (surfaced during 99.8)
+
+- **Surface point:** 99.8 config-gate work (2026-07-01), on `task-99/osc99-notifications`.
+- **Impact:** `[notifications] osc_9` and `osc_777` are declared, defaulted,
+  documented, and Settings-exposed, but **never read** at the drain site — both
+  OSC 9 and OSC 777 notifications collapse to `NotificationKind::OscText` and are
+  gated only by `enabled`/`routing_info`. Toggling `osc_9 = false` (or
+  `osc_777 = false`) has no effect (a silent-drop, the exact
+  `freminal-config-options` bug class — pre-existing since Task 76).
+- **Scope of fix:** thread the OSC source (9 vs 777) from the parser to the
+  router so each can be gated: add the source to `AnsiOscType::Notify` (or a
+  discriminant on `WindowManipulation::Notification`), carry it to a
+  `NotificationKind`/`NotificationRequest` discriminant, and gate in `route`.
+- **Verification:** a routing test asserting `osc_9 = false` suppresses an OSC 9
+  notification while OSC 777 still shows (and vice-versa).
+- **Scheduling:** independent of OSC 99; can be done any time (a Task 76 hygiene
+  fix). Not a blocker for the v0.11.0 OSC 99 work.
 
 ### 99 Open questions (resolved at activation, 2026-07-01)
 

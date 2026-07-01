@@ -68,6 +68,7 @@ mod edit_ops;
 mod graphics_iterm2;
 mod graphics_kitty;
 mod graphics_sixel;
+mod notify_99;
 mod osc;
 mod osc_colors;
 mod pty_writer;
@@ -342,6 +343,14 @@ pub struct TerminalHandler {
     /// The spec requires main and alternate screens to maintain independent
     /// keyboard mode stacks.
     saved_kitty_keyboard_stack: Option<Vec<u32>>,
+    /// In-flight OSC 99 notification accumulators, keyed by the `i=` id.
+    ///
+    /// Multi-chunk notifications arrive with `d=0` chunks that must be
+    /// concatenated until the final `d=1` (or default-done) chunk arrives.
+    /// Each entry is removed when its notification finalizes.
+    /// See [`notify_99::PendingNotification`] and
+    /// [`TerminalHandler::reassemble_osc99`].
+    pub(in crate::terminal_handler) pending_notifications: notify_99::PendingNotifications,
 }
 
 impl TerminalHandler {
@@ -394,6 +403,7 @@ impl TerminalHandler {
             s8c1t_mode: S8c1t::SevenBit,
             kitty_keyboard_stack: Vec::new(),
             saved_kitty_keyboard_stack: None,
+            pending_notifications: notify_99::PendingNotifications::new(),
         }
     }
 
@@ -484,6 +494,7 @@ impl TerminalHandler {
         self.application_escape_key = ApplicationEscapeKey::Reset;
         self.kitty_keyboard_stack.clear();
         self.saved_kitty_keyboard_stack = None;
+        self.pending_notifications.clear();
     }
 
     /// Get a reference to the underlying buffer

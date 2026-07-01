@@ -174,6 +174,8 @@ pub enum OscTarget {
     /// OSC 777 — urxvt-style desktop notification of the form
     /// `notify;TITLE;BODY`.  One-way, fire-and-forget.
     Notify777,
+    /// OSC 99 — kitty stateful desktop notification (Task 99).
+    Notify99,
     Unknown,
     ITerm2,
     /// OSC 1338 — Freminal-private shell-information sub-protocol.
@@ -230,6 +232,7 @@ impl From<&AnsiOscToken> for OscTarget {
             AnsiOscToken::OscValue(7) => Self::RemoteHost,
             AnsiOscToken::OscValue(8) => Self::Url,
             AnsiOscToken::OscValue(9) => Self::Notify9,
+            AnsiOscToken::OscValue(99) => Self::Notify99,
             AnsiOscToken::OscValue(11) => Self::Background,
             AnsiOscToken::OscValue(10) => Self::Foreground,
             AnsiOscToken::OscValue(12) => Self::CursorColor,
@@ -363,6 +366,10 @@ pub enum AnsiOscType {
         /// The notification body text.
         body: String,
     },
+    /// OSC 99 — kitty stateful desktop notification (Task 99), carrying the
+    /// fully-parsed [`crate::buffer_states::osc_notify_99::Osc99Command`].
+    /// Chunk reassembly / transport / GUI are handled downstream (Tasks 99.3+).
+    Notify99(crate::buffer_states::osc_notify_99::Osc99Command),
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -416,6 +423,7 @@ impl std::fmt::Display for AnsiOscType {
             Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
             Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
             Self::Notify { title, body } => write!(f, "Notify(title={title:?}, body={body:?})"),
+            Self::Notify99(cmd) => write!(f, "Notify99(id={:?})", cmd.id),
         }
     }
 }
@@ -1065,6 +1073,40 @@ mod tests {
             OscTarget::from(&AnsiOscToken::OscValue(777)),
             OscTarget::Notify777
         );
+    }
+
+    #[test]
+    fn osc_target_from_token_notify99() {
+        assert_eq!(
+            OscTarget::from(&AnsiOscToken::OscValue(99)),
+            OscTarget::Notify99
+        );
+    }
+
+    #[test]
+    fn display_ansi_osc_notify99() {
+        use crate::buffer_states::osc_notify_99::{
+            NotificationOccasion, Osc99Actions, Osc99Command, Osc99PayloadType,
+        };
+        let cmd = Osc99Command {
+            id: Some("abc".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: true,
+            payload: b"Hello".to_vec(),
+            actions: Osc99Actions::default(),
+            close_report: false,
+            app_name: None,
+            icon_cache_key: None,
+            icon_names: Vec::new(),
+            occasion: NotificationOccasion::Always,
+            sound: None,
+            notification_type: Vec::new(),
+            urgency: None,
+            expire_ms: -1,
+        };
+        let s = AnsiOscType::Notify99(cmd).to_string();
+        assert!(s.contains("Notify99"), "got: {s}");
+        assert!(s.contains("abc"), "got: {s}");
     }
 
     #[test]

@@ -216,39 +216,50 @@ back, OSC 99 is unsupported.
   encoding (≤2048 raw bytes/chunk, include padding) or after encoding (≤4096
   bytes/chunk, padding only on the last chunk; terminals handle either).
 
-### freminal current-state deltas: notifications (from 99 seam audit, 2026-07-01)
+### freminal current-state deltas: notifications — implemented in v0.11.0 (Task 99)
 
-- No OSC 99 routing yet: `OscTarget` has `Notify9`/`Notify777` but no `Notify99`;
-  OSC 99 currently falls through to `Unknown` and is dropped.
-- **Parser must use `raw_params`, not the pre-split token vector.** The OSC
-  splitter naively splits on every `;`; an escape-safe-UTF-8 title/body may
-  contain a literal `;` (0x3B is a legal payload byte). `handle_osc_notify_99`
-  must scan `raw_params` and split on the **second** `;` only — the same reason
-  `handle_osc_notify_9/_777` already parse from `raw_params`.
-- `AnsiOscType::Notify { title, body }` is the shared OSC 9/777 output; OSC 99
-  needs a **new** variant (id, payload-type, done, base64, actions, close, urgency,
-  occasion, sound, app-name, icon-cache-key, icon-names, type, expiry, payload
-  bytes) — this is the parser→handler transport.
-- `WindowManipulation` gets a **new** `Notification99 { … }` variant (110.0), NOT
-  an extension of the existing `Notification` variant (that would break the OSC
-  9/777 call sites). Transport is the `WindowCommand` channel
-  (`window_commands` → `handle_window_manipulation`), not the snapshot.
-- Chunk reassembly: add `pending_notifications: HashMap<String, PendingNotification>`
-  at the **end** of `TerminalHandler` (after the KKP stack fields, to minimize
-  collision with Task 101) + `clear()` in `full_reset()`.
-- `notify-rust` 4.18.0 supports actions/buttons, urgency, and `wait_for_action`
-  (Linux/Windows; macOS legacy backend limited → use the `untracked` close form).
-  `wait_for_action` **blocks** its thread until dismissed/activated — acceptable on
-  the already-spawned notification thread. Icon-by-data (`p=icon`) needs the
-  `images_no_default_features` feature or a temp-file + `image_path()`.
-- Reverse-write for reports needs the **originating pane's** `pty_write_tx`, but
-  the current drain drops pane identity before routing. Fix: carry
-  `pane_id`/`pty_write_tx` on the notification request, or reuse the
-  `HashMap<PaneId, Sender<PtyWrite>>` that broadcast-input (Task 74) already builds.
-- **`osc_9`/`osc_777` config fields are declared but never read** (the `route()`
-  call site ignores them). 99.8 adds `osc_99` wired end-to-end AND retroactively
-  enforces `osc_9`/`osc_777` at the drain site (do not repeat the silent-drop) —
-  per `freminal-config-options`.
+OSC 99 routing landed across Tasks 99.1–99.8:
+
+- Parser: `osc_notify_99.rs` scans `raw_params` (not the pre-split token
+  vector) and splits on the **second** `;` only, so an escape-safe-UTF-8
+  title/body containing a literal `;` parses correctly. Dispatch runs through
+  the dedicated `OscTarget::Notify99` / `AnsiOscType::Notify99` variants
+  (kept separate from the shared OSC 9/777 `Notify` variant).
+- Chunk reassembly: `reassemble_osc99` accumulates multi-escape payloads
+  (`pending_notifications` on `TerminalHandler`, cleared in `full_reset()`)
+  before a fully-formed `Notification99Data` reaches the GUI.
+- App→terminal control payloads (close/alive/`p=?` query) are split into
+  `Osc99Control` / `Osc99ControlKind` rather than folded into the display
+  path.
+- Display: `NotificationRouter::route_osc99` (`freminal/src/gui/notifications.rs`)
+  pushes the toast leg and/or a `notify-rust` desktop notification, honouring
+  the `o=` occasion gate, urgency, sound, auto-expiry, buttons, and the `g=`
+  icon-by-data cache (`icon_cache: HashMap<String, Vec<u8>>`).
+- Reverse reports: activation, close, and alive reports are written back via
+  the originating pane's `pty_write_tx` (Linux/BSD observes real
+  activation/close through `wait_for_action`; macOS/Windows emit the
+  `untracked` close form immediately, since no observable handle is available
+  from a background thread there).
+- Capability handshake: `p=?` is answered with `osc99_query_response`,
+  truthfully advertising only what's implemented (see `OSC99_CAPABILITIES` in
+  `notifications.rs`).
+- Config: `[notifications] osc_99` (added in 110.0, wired through
+  `ConfigPartial`/`apply_partial`) is enforced at the `route_osc99` drain site
+  (Task 99.8) as a kill-switch alongside the master `enabled` gate.
+
+**Known deferrals (not silently dropped — tracked):**
+
+- **`osc_9`/`osc_777` are still not gated independently** (Task 99.10,
+  scheduled as an independent Task 76 hygiene cleanup, not a v0.11.0
+  blocker). Both currently collapse to the shared `NotificationKind::OscText`
+  and are gated only by `enabled`/`routing_info`; the `osc_9`/`osc_777`
+  config fields have no effect yet.
+- **Alive-map pruning tradeoff:** an OS-observed close on Linux writes the
+  close report directly from the notification thread but does not prune
+  `live` (a `!Send` map on the GUI thread); the map is pruned only on an
+  app-driven `p=close` control. A `p=alive` response may thus transiently
+  over-report a user-dismissed notification — spec-tolerable for a
+  best-effort poll.
 
 ---
 

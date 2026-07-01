@@ -60,6 +60,9 @@ pub struct Notification99Data {
     pub button_labels: Vec<String>,
     /// Whether `a=report` was set (activation reports wanted).
     pub report_activation: bool,
+    /// Whether `a=focus` was set (focus the source window on activation).
+    /// Default `true` (the OSC 99 default is `focus`).
+    pub focus_on_activation: bool,
     /// Whether `c=1` was set (close report wanted).
     pub close_report: bool,
     /// Urgency (`u=`): 0 low, 1 normal, 2 critical. `None` = unset/normal.
@@ -74,6 +77,19 @@ pub struct Notification99Data {
     pub notification_type: Vec<String>,
     /// Auto-expire after N ms (`w=`). `None` = OS default.
     pub expire_ms: Option<i64>,
+}
+
+/// The three OSC 99 app→terminal control payload types that are NOT display
+/// requests: they require a terminal response or state change rather than a
+/// notification banner (Task 99).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99ControlKind {
+    /// `p=close`: the application asks to close the notification with this id.
+    Close,
+    /// `p=alive`: liveness poll; the terminal answers with the live-id list.
+    Alive,
+    /// `p=?`: capability query; the terminal answers with its supported keys.
+    Query,
 }
 
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
@@ -177,6 +193,18 @@ pub enum WindowManipulation {
     /// that parser, not here.  Transported via the `WindowCommand` channel
     /// (not the snapshot) and rendered by Task 99.5.
     Notification99(Box<Notification99Data>),
+    /// OSC 99 app→terminal control sequence (`p=close`/`p=alive`/`p=?`, Task 99).
+    ///
+    /// Routed distinctly from display notifications: it drives a terminal
+    /// response (close reconciliation, alive-id list, or capability
+    /// handshake) rather than a banner. The reverse writes land in Tasks
+    /// 99.6/99.7.
+    Osc99Control {
+        /// Notification id (`i=`) the control refers to, if any.
+        id: Option<String>,
+        /// Which control payload type this is.
+        kind: Osc99ControlKind,
+    },
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {
@@ -238,6 +266,7 @@ mod tests {
             icon_cache_key: Some("cache-key-1".to_owned()),
             button_labels: vec!["OK".to_owned(), "Cancel".to_owned()],
             report_activation: true,
+            focus_on_activation: true,
             close_report: false,
             urgency: Some(1),
             occasion: Some("unfocused".to_owned()),
@@ -265,6 +294,7 @@ mod tests {
         assert_eq!(d.icon_cache_key.as_deref(), Some("cache-key-1"));
         assert_eq!(d.button_labels, vec!["OK", "Cancel"]);
         assert!(d.report_activation);
+        assert!(d.focus_on_activation);
         assert!(!d.close_report);
         assert_eq!(d.urgency, Some(1));
         assert_eq!(d.occasion.as_deref(), Some("unfocused"));

@@ -309,6 +309,18 @@ struct FreminalGui {
     /// entire GUI runs on a single thread, so `RefCell` is sufficient.
     toasts: std::cell::RefCell<toast::ToastStack>,
 
+    /// Session cache of transmitted OSC 99 icon data, keyed by the `g=` cache
+    /// key. Populated when a notification transmits icon bytes with a `g=`; later
+    /// notifications sending `g=` alone reuse the cached bytes. Session lifetime
+    /// (never persisted). Single-threaded GUI, so `RefCell` suffices.
+    osc99_icon_cache: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>,
+
+    /// Live OSC 99 notifications by their `i=` id, for update/close tracking
+    /// (99.5a records identity; handle retention for activation/close is 99.5b).
+    /// Value carries what 99.5b/99.6 need to reconcile a notification later.
+    osc99_live:
+        std::cell::RefCell<std::collections::HashMap<String, notifications::Osc99LiveEntry>>,
+
     /// Windows for which the user has already confirmed a force-close in the
     /// close-guard dialog (Task 98).  When `on_close_requested` fires for a
     /// window in this set it skips the running-command guard and lets the
@@ -479,6 +491,8 @@ impl FreminalGui {
             welcome: welcome_overlay,
             pending_open_keybindings: false,
             toasts: std::cell::RefCell::new(toast::ToastStack::default()),
+            osc99_icon_cache: std::cell::RefCell::new(HashMap::new()),
+            osc99_live: std::cell::RefCell::new(HashMap::new()),
             force_close_windows: std::collections::HashSet::new(),
             fatal_error: None,
             last_session_fingerprint: None,

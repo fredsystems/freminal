@@ -371,7 +371,15 @@ fn spawn_pty_consumer_thread(
                             | WindowManipulation::ReportRootWindowSizeInPixels
                             | WindowManipulation::ReportIconLabel
                             | WindowManipulation::ReportTitle
-                            | WindowManipulation::QueryClipboard(_) => WindowCommand::Report(cmd),
+                            | WindowManipulation::QueryClipboard(_)
+                            // OSC 99 display and control requests drive reverse writes
+                            // back to the originating pane's pty_write_tx (Tasks
+                            // 99.5c/99.6/99.7), so they are classified as Report like
+                            // the other PTY-response-producing variants above.
+                            | WindowManipulation::Notification99(_)
+                            | WindowManipulation::Osc99Control { .. } => {
+                                WindowCommand::Report(cmd)
+                            }
                             _ => WindowCommand::Viewport(cmd),
                         };
                         send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
