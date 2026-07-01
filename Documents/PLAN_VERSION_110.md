@@ -395,6 +395,61 @@ Prohibitions: do NOT change GUI behaviour yet; do NOT proceed.
 
 Stop: report + await review.
 
+##### 99.4 execution decisions (recorded 2026-07-01, against the real seams)
+
+A recon of the mapping seam confirmed 110.0's `Notification99Data` shell is the
+target and the `WindowCommand` channel is the transport. Resolutions (Opus
+decisions, not open questions):
+
+- **No `snapshot.rs` change.** Transport is `window_commands` →
+  `WindowCommand::Viewport/Report` → GUI, fully generic over
+  `WindowManipulation`; `snapshot.rs` never carries `WindowManipulation`. The
+  literal 99.4 Scope line naming `snapshot.rs` is superseded by the 110.0
+  "execution decisions" note (transport is the `WindowCommand` channel).
+- **No `pty.rs` reclassification in 99.4.** `Notification99` rides the
+  `_ => Viewport` wildcard, which reaches the GUI (both wrappers unwrap
+  identically). Reclassifying to `Report` for the reverse-write path is 99.6.
+- **`focus_on_activation` gets a home: extend the shell.** `Osc99Actions` carries
+  both `report_activation` and `focus_on_activation`, but 110.0's
+  `Notification99Data` only had `report_activation`. Silently dropping `a=focus`
+  is an observable-behaviour loss, so **99.4 adds `focus_on_activation: bool` to
+  `Notification99Data`** (completing the OSC 99 superset this subtask is meant to
+  carry). This is the one `window_manipulation.rs` type change in 99.4.
+- **Field mapping `FinalizedNotification`/`Osc99Command` → `Notification99Data`:**
+  `id`/`title`/`body` direct; `icon_data ← finalized.icon`;
+  `icon_names`/`icon_cache_key`/`sound`/`app_name`/`notification_type` from
+  `meta`; `report_activation`/`focus_on_activation ← meta.actions.*`;
+  `close_report ← meta.close_report`;
+  `urgency`: `NotificationUrgency` → `Option<u8>` (`Low`→`Some(0)`,
+  `Normal`→`Some(1)`, `Critical`→`Some(2)`, `None`→`None`);
+  `occasion`: `NotificationOccasion` → `Option<String>` with **`Always → None`**
+  (the default; behaviourally identical to unset), `Unfocused →
+Some("unfocused")`, `Invisible → Some("invisible")`;
+  `expire_ms`: `i64` → `Option<i64>` with **`-1 → None`** (the spec's "OS
+  default" sentinel), any other value → `Some(v)`.
+- **`button_labels` is `Vec::new()` for now (tracked, not silently dropped).**
+  Button-label extraction from the `p=buttons` (U+2028-separated) payload is not
+  implemented anywhere in the 99.1 parser / 99.3 reassembler yet, so 99.4 has no
+  source. See cleanup entry **99.9** below.
+
+##### 99.9 — Cleanup: OSC 99 button-label extraction (surfaced during 99.4)
+
+- **Surface point:** 99.4 mapping recon (2026-07-01), on `task-99/osc99-notifications`.
+- **Impact:** OSC 99 `p=buttons` payloads (U+2028-separated labels) are parsed to
+  the `Buttons` payload type but the individual labels are never extracted, so
+  `Notification99Data.button_labels` is always empty and the GUI (99.5) cannot
+  render notification buttons or map a button-activation index back (99.6).
+- **Scope of fix:** accumulate `p=buttons` payload in `FinalizedNotification`
+  (99.3's reassembler) and split it on U+2028 into `Vec<String>`; populate
+  `Notification99Data.button_labels` in the 99.4 mapping. Purely additive.
+- **Suggested approach:** add a `buttons: Vec<u8>` accumulator to
+  `PendingNotification` + a `buttons: Vec<String>` field to
+  `FinalizedNotification` (split on U+2028 at finalize); map it in 99.4.
+- **Verification:** a reassembly test feeding a `p=buttons` chunk asserts the
+  split labels; a 99.4 mapping test asserts `button_labels` is populated.
+- **Scheduling:** do before or with 99.5 (the GUI consumes buttons). Not a
+  blocker for the 99.4 field-mapping commit.
+
 #### 99.5 — GUI: render OSC 99 notifications with identity, buttons, icons, expiry
 
 Scope: `freminal/src/gui/notifications.rs`, the notification drain site in `freminal/src/gui/`

@@ -60,6 +60,9 @@ pub struct Notification99Data {
     pub button_labels: Vec<String>,
     /// Whether `a=report` was set (activation reports wanted).
     pub report_activation: bool,
+    /// Whether `a=focus` was set (focus the source window on activation).
+    /// Default `true` (the OSC 99 default is `focus`).
+    pub focus_on_activation: bool,
     /// Whether `c=1` was set (close report wanted).
     pub close_report: bool,
     /// Urgency (`u=`): 0 low, 1 normal, 2 critical. `None` = unset/normal.
@@ -238,6 +241,7 @@ mod tests {
             icon_cache_key: Some("cache-key-1".to_owned()),
             button_labels: vec!["OK".to_owned(), "Cancel".to_owned()],
             report_activation: true,
+            focus_on_activation: true,
             close_report: false,
             urgency: Some(1),
             occasion: Some("unfocused".to_owned()),
@@ -265,6 +269,7 @@ mod tests {
         assert_eq!(d.icon_cache_key.as_deref(), Some("cache-key-1"));
         assert_eq!(d.button_labels, vec!["OK", "Cancel"]);
         assert!(d.report_activation);
+        assert!(d.focus_on_activation);
         assert!(!d.close_report);
         assert_eq!(d.urgency, Some(1));
         assert_eq!(d.occasion.as_deref(), Some("unfocused"));
