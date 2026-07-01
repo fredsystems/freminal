@@ -216,29 +216,49 @@ back, OSC 99 is unsupported.
   encoding (≤2048 raw bytes/chunk, include padding) or after encoding (≤4096
   bytes/chunk, padding only on the last chunk; terminals handle either).
 
-### freminal current-state deltas: notifications (from activation recon, 2026-07-01)
+### freminal current-state deltas: notifications (from 99 seam audit, 2026-07-01)
 
 - No OSC 99 routing yet: `OscTarget` has `Notify9`/`Notify777` but no `Notify99`;
   OSC 99 currently falls through to `Unknown` and is dropped.
+- **Parser must use `raw_params`, not the pre-split token vector.** The OSC
+  splitter naively splits on every `;`; an escape-safe-UTF-8 title/body may
+  contain a literal `;` (0x3B is a legal payload byte). `handle_osc_notify_99`
+  must scan `raw_params` and split on the **second** `;` only — the same reason
+  `handle_osc_notify_9/_777` already parse from `raw_params`.
 - `AnsiOscType::Notify { title, body }` is the shared OSC 9/777 output; OSC 99
-  needs a richer variant (id, buttons, urgency, sound, icon, occasion, expiry,
-  report flags).
-- `WindowManipulation::Notification { kind, title, body }` carries no OSC 99
-  fields — Task 99.4 extends it.
-- `notify-rust` handle is dropped immediately (fire-and-forget); reports need the
-  handle retained — Task 99.5/99.6.
-- `NotificationsConfig` `osc_9`/`osc_777` fields exist but are **not enforced** in
-  dispatch today; an `osc_99` field must be wired end-to-end (do not repeat the
-  silent-drop) — Task 99.8, per `freminal-config-options`.
+  needs a **new** variant (id, payload-type, done, base64, actions, close, urgency,
+  occasion, sound, app-name, icon-cache-key, icon-names, type, expiry, payload
+  bytes) — this is the parser→handler transport.
+- `WindowManipulation` gets a **new** `Notification99 { … }` variant (110.0), NOT
+  an extension of the existing `Notification` variant (that would break the OSC
+  9/777 call sites). Transport is the `WindowCommand` channel
+  (`window_commands` → `handle_window_manipulation`), not the snapshot.
+- Chunk reassembly: add `pending_notifications: HashMap<String, PendingNotification>`
+  at the **end** of `TerminalHandler` (after the KKP stack fields, to minimize
+  collision with Task 101) + `clear()` in `full_reset()`.
+- `notify-rust` 4.18.0 supports actions/buttons, urgency, and `wait_for_action`
+  (Linux/Windows; macOS legacy backend limited → use the `untracked` close form).
+  `wait_for_action` **blocks** its thread until dismissed/activated — acceptable on
+  the already-spawned notification thread. Icon-by-data (`p=icon`) needs the
+  `images_no_default_features` feature or a temp-file + `image_path()`.
+- Reverse-write for reports needs the **originating pane's** `pty_write_tx`, but
+  the current drain drops pane identity before routing. Fix: carry
+  `pane_id`/`pty_write_tx` on the notification request, or reuse the
+  `HashMap<PaneId, Sender<PtyWrite>>` that broadcast-input (Task 74) already builds.
+- **`osc_9`/`osc_777` config fields are declared but never read** (the `route()`
+  call site ignores them). 99.8 adds `osc_99` wired end-to-end AND retroactively
+  enforces `osc_9`/`osc_777` at the drain site (do not repeat the silent-drop) —
+  per `freminal-config-options`.
 
 ---
 
 ## Graphics protocol completion
 
 Reference for Task 100. Task 13 shipped transmit/put/delete/query and unicode
-placeholders; the parser already types every control key. Remaining: animation,
-storage quotas, compression (`o=z`), shared memory (`t=s`), source-rect crop,
-relative placements, and `p=` in responses.
+placeholders; the parser types most control keys (but **not** the relative-
+placement keys `P`/`Q`/`H`/`V` — see below). Remaining: animation, storage
+quotas, compression (`o=z`), shared memory (`t=s`), source-rect crop, relative
+placements (incl. adding their parser keys), and `p=` in responses.
 
 ### Envelope (graphics)
 
@@ -374,7 +394,11 @@ and closes the `image_number` reference-by-number gap.
 
 Relative placements are part of the **graphics protocol proper**, transmitted in
 the same `ESC _ G ... ESC \` APC envelope with `a=p` — they are _not_ a separate
-CSI extension. The parser already types `P`, `Q`, `H`, `V`; Task 100.4 is
+CSI extension. **Correction (100.1 audit, 2026-07-01):** contrary to an earlier
+recon note, `P`/`Q`/`H`/`V` are **not** currently typed in `KittyControlData` —
+they hit the `_ => {}` wildcard in `apply_control_pair` and are silently dropped.
+Task 100.4 therefore requires adding the 4 fields + 4 parser arms in
+`freminal-common` (folded into foundation subtask 110.0) **before** the
 handler/store work.
 
 ```text
@@ -462,21 +486,40 @@ Eviction: LRU on overflow, preferring images without placements. The protocol
 floor is "at least a few full-screen images"; the exact number is an
 implementation choice.
 
-### freminal current-state deltas: graphics (from activation recon, 2026-07-01)
+### freminal current-state deltas: graphics (from 100.1 audit, 2026-07-01)
 
-- Parser types **all** control keys (including `P Q H V`, `t=s`, `U`, `o=z`, the
-  animation keys). Remaining work is handler/store, not parsing.
-- `a=f`/`a=a`/`a=c` are warn-and-skip stubs; `InlineImage` has no frame concept.
-- `o=z` parsed but never decompressed; `t=s` returns `ENOTSUP`.
-- Source-rect crop (`x/y/w/h`) and cell offsets (`X/Y`) parsed but not applied at
-  decode/render.
-- `format_kitty_response` omits `p=`.
-- Renderer sorts image quads by id, not z-index.
-- No storage quota; only scrollback-driven GC.
-- Delete "and-after"/uppercase-free distinctions are partially collapsed.
-- **Correction to a recon note:** an early sub-agent summary claimed relative
-  placements were "a separate CSI extension, out of scope". That is wrong —
-  relative placements are APC graphics commands and are in scope as Task 100.4.
+- Parser types most control keys, **but NOT `P`/`Q`/`H`/`V`** (relative
+  placements) — those hit the `_ => {}` wildcard in `apply_control_pair` and are
+  silently dropped. 100.4 must add 4 fields + 4 parser arms (via 110.0).
+- `a=f`/`a=a`/`a=c` are one warn-and-skip arm; `InlineImage` has no frame concept,
+  and there is no image-animation tick anywhere (the only animation infra is the
+  unrelated cursor-trail in `view_state.rs`). Animation needs a frame model on
+  `InlineImage` + a GUI-side wall-clock frame selector.
+- The parser stores animation keys under transmit/display-named fields (`s`→
+  `src_width`, `v`→`src_height`, `c`→`display_cols`, `r`→`display_rows`, `z`→
+  `z_index`, `X`→`cell_x_offset`, `Y`→`cell_y_offset`), so the handler must
+  re-interpret them per action (the key-aliasing table in this doc).
+- `o=z` parsed but never decompressed; no zlib crate in the workspace
+  (`flate2`/`miniz_oxide` must be added). `t=s` returns `ENOTSUP`; the `nix` dep
+  needs its `"mman"` feature for POSIX `shm_open`/`shm_unlink` (Windows: `winapi`).
+- Source-rect crop (`x/y/w/h`) and cell offsets (`X/Y`) parsed but not applied.
+  The renderer UV logic (`compute_image_quad`) is cell-grid based (min/max
+  col/row_in_image), not pixel based — sub-cell `X/Y` offsets need new geometry.
+- `format_kitty_response(image_id, ok, message)` omits `p=`; it needs a
+  `placement_id: Option<u32>` param, emitting `,p=<pid>` when the request had a
+  non-zero placement id. Same for the `send_kitty_error` helper. 5 call sites.
+- Renderer sorts image quads by id, not z-index (a real stacking bug).
+- No storage quota; only scrollback-driven `retain_referenced` GC. Byte size is
+  `InlineImage.pixels.len()`; a quota check + LRU (prefer placement-less) hooks in
+  `ImageStore::insert`.
+- Delete gaps: `d=a` vs `d=A` (both over-delete the store), `d=i` vs `d=I` (both
+  remove image data; lowercase should keep it), `d=x/X` `d=y/Y` `d=z/Z` (uppercase
+  "and-after" collapses to non-after). Missing enum variants entirely: `d=f`/`d=F`
+  (delete frames) and `d=r`/`d=R` (delete id-range, kitty 0.33.0).
+- **Correction to an earlier recon note:** an early sub-agent summary claimed
+  relative placements were "a separate CSI extension, out of scope". That is wrong
+  — relative placements are APC graphics commands (`a=p` + `P/Q/H/V`) and are in
+  scope as Task 100.4.
 
 ---
 
@@ -599,13 +642,36 @@ under flag 8.
 → 9. `ctrl+0` → 48, `ctrl+1` → 49 (no transform). Any other ASCII key is left
 untouched by ctrl.
 
-### freminal current-state deltas: keyboard (from activation recon, 2026-07-01)
+### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01)
 
-- Modifiers: only shift/alt/ctrl (bits 1/2/4). Missing bits 8–128.
-- Keypad keys, media keys, modifier-keys-as-keys, F13–F35, and the lock/
-  print/pause/menu keys are suspected absent (need audit in 101.1).
-- Stack, set/push/pop, query handshake, XTGETTCAP `u`, and alt-screen separate
-  stacks are implemented and tested.
+The audit found the real blocker is **egui 0.35 (via egui-winit)**, not freminal's
+encoding layer. Work splits into "encoding-only" (doable in Task 101) and
+"egui-blocked" (a separate windowing-layer task — see the roadmap).
+
+- Modifiers: `KeyModifiers` models only shift/alt/ctrl (bits 1/2/4);
+  `modifier_param()` returns 1+shift+alt·2+ctrl·4. `egui_mods_to_key_modifiers`
+  drops everything else (egui's `Modifiers` has no super/hyper/meta/caps/num).
+  - **Encoding-only (101.2):** add the 5 fields + arithmetic; source `super` (bit 8) by tracking `Key::SuperLeft`/`SuperRight` press/release in the GUI loop.
+    `modifier_param` return type must widen past `u8` (max is 1+255=256).
+  - **egui-blocked:** true `caps_lock`/`num_lock` (bits 64/128) — no egui API;
+    needs raw winit `ModifiersChanged`. `hyper`/`meta` (16/32) unavailable on any
+    current platform path.
+- Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F12,
+  Enter/Tab/Backspace/Escape. `KeyPad(u8)` carries only legacy bytes, not KKP
+  codepoints.
+  - **Encoding-only (101.3):** F13–F35 (`FunctionKey(u8)` silently drops n>12; add
+    57376–57398), and modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right,
+    AltLeft/Right, SuperLeft/Right (57441–57452; egui _does_ deliver these as
+    `Key::*Left/*Right`, but the event loop has no arm for them) — under flag 8.
+  - **egui-blocked (new task):** keypad operators/directional/KP_Enter/KP_Begin,
+    media keys, ISO_Level3/5_Shift, CapsLock/ScrollLock/NumLock/PrintScreen/Pause/
+    Menu — **absent from egui 0.35's `Key` enum entirely** (numpad digits are also
+    unified with main-row digits, egui#3653). Needs a raw-winit intercept in
+    `freminal-windowing` or an egui/egui-winit upgrade.
+- F3: currently `ESC O R` (SS3), which is neither the prohibited `CSI R` nor the
+  spec's `13 ~`. 101.3 should confirm/normalize to `13 ~` under KKP.
+- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`,
+  separate main/alt-screen stacks (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).
 - DA1 does not advertise kitty keyboard (correct — detection is via `CSI ? u`).
 
