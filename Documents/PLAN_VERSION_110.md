@@ -96,6 +96,106 @@ These are the seams the subtasks target. Verify at activation.
 
 ---
 
+## Execution model — branches & parallelism
+
+Tasks 99, 100, and 101 are **largely independent in their primary code** (OSC
+dispatch/notifications vs. graphics handler/store/renderer vs. keyboard input),
+so they can run as three isolated workstreams. They are **not** independent in
+three shared chokepoints the activation recon identified, and those drive the
+branch model:
+
+1. **`freminal-common` type crate** — the bottom of the dependency graph; every
+   crate recompiles when it changes. Task 99 extends `WindowManipulation`; Task 99
+   adds an `osc_99` config key; Task 101 conceptually needs new modifier state.
+2. **`InputEvent` (GUI→PTY boundary)** — Task 101's modifier work adds fields that
+   cross this channel.
+3. **`TerminalHandler` (`terminal_handler/mod.rs`)** — Task 99 adds a
+   pending-notification map field; Task 101 touches the stack region; Task 100's
+   handler dispatch is adjacent. New struct fields + `new()` initializers collide
+   here.
+
+### Branch topology (single v0.11.0 PR)
+
+```text
+main
+ └── v0.11.0-kitty                 integration branch; the eventual single PR
+      ├── task-99/osc99-notifications
+      ├── task-100/graphics-completion
+      └── task-101/keyboard-compliance
+```
+
+- Each task branches **off `v0.11.0-kitty`**, not off `main`, and merges **back
+  into `v0.11.0-kitty`** as its subtasks complete.
+- After each task branch merges, the other live task branches **rebase on
+  `v0.11.0-kitty`** to pick up the shared changes before continuing.
+- When all three are in, **one PR: `v0.11.0-kitty` → `main`** — the single v0.11.0
+  merge.
+
+### Execution order (audits parallel → foundation → staggered implementation)
+
+1. **Audits in parallel.** The READ-ONLY audit subtasks (100.1, 101.1, and a 99
+   design/seam pass) write no code and cannot collide — run them concurrently.
+2. **Foundation first (110.0), on `v0.11.0-kitty` directly.** Land the shared
+   `freminal-common` / `InputEvent` type _shells_ once, before the feature
+   branches fork, so no two branches race the same `freminal-common` edit. See
+   110.0 below.
+3. **Staggered implementation.** Feature branches fork from the
+   foundation-carrying `v0.11.0-kitty`. Keep **at most one actively-editing agent
+   per shared-file region at a time** (`terminal_handler/mod.rs`, `config.rs`);
+   rebase each branch after every merge. Branches isolate the files (no
+   corruption); staggering minimizes the merge-conflict + review-serialization
+   tax, which is inherent to shared-file edits and not removed by branching.
+
+Each subtask still stops at its review gate per `freminal-orchestrator-protocol`;
+"parallel" means parallel _branches/workstreams_, not three agents editing the
+same file at the same instant.
+
+### 110.0 — Shared foundation (land first, on `v0.11.0-kitty`)
+
+Scope: `freminal-common/src/buffer_states/window_manipulation.rs`
+(the `WindowManipulation::Notification` variant + `NotificationKind`),
+`freminal-common/src/config.rs` (`NotificationsConfig` + `ConfigPartial`),
+the `InputEvent` definition (`freminal-common` / the GUI input path) and
+`KeyModifiers` / `KeyEventMeta` in `freminal-terminal-emulator/src/input.rs`,
+snapshot transport in `freminal-terminal-emulator/src/.../snapshot.rs`.
+
+What: land the **type shells only** that Tasks 99 and 101 would otherwise each
+reach into `freminal-common` to add — so the churn happens once, up front, on the
+integration branch:
+
+- Extend `WindowManipulation::Notification` (and the snapshot payload) with the
+  OSC 99 superset fields (id, buttons, urgency, sound, icon spec, expiry,
+  report-wanted flags), all optional so existing OSC 9/777 producers fill
+  `None`/defaults. (This is the type half of 99.4.)
+- Add the `osc_99` field to `NotificationsConfig` with the **full**
+  `ConfigPartial` / `apply_partial` wiring per `freminal-config-options` (no
+  silent-drop), defaulted off. (This is the config-type half of 99.8.)
+- Add the missing modifier fields (super, hyper, meta, caps_lock, num_lock) to
+  `KeyModifiers` / `InputEvent` as data, defaulted to unset, **without** yet
+  populating them from winit or using them in encoding. (This is the transport
+  half of 101.2.)
+
+Deliverable: the type/field additions + a snapshot round-trip test + a config
+partial-merge test; **no behaviour change** (producers/consumers still emit the
+old shapes; `cargo test --all` stays green). 99.4, 99.8, and 101.2 then _consume
+and populate_ these shells rather than introducing them.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT add any behaviour (no GUI changes, no winit modifier capture,
+no encoding changes, no dispatch); do NOT touch the graphics path; do NOT proceed
+to feature work. This subtask is types-only by design.
+
+Stop: report + await review; then fork the three feature branches from
+`v0.11.0-kitty`.
+
+Note: 99.4, 99.8, and 101.2 in the task sections below retain their full
+descriptions, but with 110.0 landed they become "populate/extend the shell 110.0
+added" rather than "introduce the type". Re-scope their file lists at execution
+time to exclude the shared-type edit 110.0 already made.
+
+---
+
 ## Task 99 — Kitty Desktop Notifications (OSC 99)
 
 ### 99 Summary
@@ -653,6 +753,15 @@ activation.
   be implemented in parallel (Task 99 vs Task 100 vs Task 101) by separate
   sub-agents. Note Task 101 is now a compliance-gap task, not a verification pass,
   and 101.2 crosses the GUI→PTY `InputEvent` boundary (architecture-affecting).
+- **Single-PR branch model (2026-07-01 decision).** Work happens on an integration
+  branch `v0.11.0-kitty` off `main`; a shared-foundation subtask (110.0) lands the
+  `freminal-common` / `InputEvent` / config type shells there first; the three task
+  branches (`task-99/…`, `task-100/…`, `task-101/…`) fork from it, merge back into
+  it, and rebase on it after each merge; the whole version ships as one PR
+  `v0.11.0-kitty → main`. Audits run in parallel; implementation is staggered with
+  at most one active editor per shared-file region. See "Execution model" above for
+  the full rationale (the collision surface is `freminal-common`, `InputEvent`, and
+  `terminal_handler/mod.rs`).
 - **Activation decisions (2026-07-01):**
   - OSC 99 icon-data cache (`g=`) is **in-memory, session-lifetime** only.
   - macOS/untracked-close: emit the `untracked` close form and implement the
