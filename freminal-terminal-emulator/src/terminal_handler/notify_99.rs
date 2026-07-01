@@ -37,6 +37,8 @@ pub(in crate::terminal_handler) struct PendingNotification {
     body: Vec<u8>,
     /// Accumulated `p=icon` payload bytes.
     icon: Vec<u8>,
+    /// Accumulated `p=buttons` payload bytes (U+2028-separated labels).
+    buttons: Vec<u8>,
     /// The most-recent non-payload metadata (id, actions, urgency, occasion,
     /// sound, app name, icon names/cache key, close/report flags, expiry).
     ///
@@ -63,6 +65,9 @@ pub struct FinalizedNotification {
     pub body: Option<String>,
     /// The concatenated icon bytes, if any icon chunks arrived.
     pub icon: Option<Vec<u8>>,
+    /// Button labels (`p=buttons`), split from the U+2028-separated payload.
+    /// Empty if no button chunks arrived.
+    pub buttons: Vec<String>,
     /// The terminating chunk's metadata (id, actions, urgency, occasion, sound,
     /// app name, icon names/cache key, close/report flags, expiry, `payload_type`).
     pub meta: Osc99Command,
@@ -81,8 +86,8 @@ impl FinalizedNotification {
     /// maps `Always` to `None` (behaviourally identical to unset),
     /// `Unfocused`/`Invisible` to `Some("unfocused")`/`Some("invisible")`;
     /// `expire_ms` maps the spec's `-1` "OS default" sentinel to `None`, any
-    /// other value to `Some(v)`. `button_labels` is `Vec::new()` for now —
-    /// button-label extraction is tracked as cleanup 99.9.
+    /// other value to `Some(v)`. `button_labels` comes directly from
+    /// `self.buttons` (the split `p=buttons` payload).
     pub(in crate::terminal_handler) fn into_notification99_data(self) -> Notification99Data {
         let urgency = self.meta.urgency.map(|u| match u {
             NotificationUrgency::Low => 0u8,
@@ -104,8 +109,7 @@ impl FinalizedNotification {
             icon_data: self.icon,
             icon_names: self.meta.icon_names,
             icon_cache_key: self.meta.icon_cache_key,
-            // Button-label extraction is not implemented yet (plan cleanup 99.9).
-            button_labels: Vec::new(),
+            button_labels: self.buttons,
             report_activation: self.meta.actions.report_activation,
             focus_on_activation: self.meta.actions.focus_on_activation,
             close_report: self.meta.close_report,
@@ -121,13 +125,31 @@ impl FinalizedNotification {
 
 // ── Helper: build a FinalizedNotification from accumulated bytes + meta ───────
 
-/// Build a [`FinalizedNotification`] from the accumulated title/body/icon bytes
-/// and the final `meta` command. The terminating chunk's payload must already
-/// have been appended to the appropriate accumulator before this is called.
+/// Split an accumulated `p=buttons` payload into individual labels.
+///
+/// kitty separates button labels with U+2028 (LINE SEPARATOR). The payload is
+/// decoded as UTF-8 (lossy — never panics) and split on U+2028; empty labels
+/// (from leading/trailing/doubled separators) are dropped.
+fn split_button_labels(bytes: &[u8]) -> Vec<String> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(bytes)
+        .split('\u{2028}')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Build a [`FinalizedNotification`] from the accumulated title/body/icon/
+/// buttons bytes and the final `meta` command. The terminating chunk's
+/// payload must already have been appended to the appropriate accumulator
+/// before this is called.
 fn build_finalized(
     title_bytes: &[u8],
     body_bytes: &[u8],
     icon_bytes: Vec<u8>,
+    button_bytes: &[u8],
     meta: Osc99Command,
 ) -> FinalizedNotification {
     let title = if title_bytes.is_empty() {
@@ -149,6 +171,7 @@ fn build_finalized(
         title,
         body,
         icon,
+        buttons: split_button_labels(button_bytes),
         meta,
     }
 }
@@ -183,12 +206,13 @@ impl TerminalHandler {
             None => {
                 if chunk.done {
                     // Standalone, single-chunk notification — finalize immediately.
-                    let (title_bytes, body_bytes, icon_bytes) =
+                    let (title_bytes, body_bytes, icon_bytes, button_bytes) =
                         payload_into_accumulators(chunk.payload_type, chunk.payload.clone());
                     Some(build_finalized(
                         &title_bytes,
                         &body_bytes,
                         icon_bytes,
+                        &button_bytes,
                         chunk,
                     ))
                 } else {
@@ -221,7 +245,13 @@ impl TerminalHandler {
                     // so this is always Some when we removed a live entry.
                     let meta = entry.meta?;
 
-                    Some(build_finalized(&entry.title, &entry.body, entry.icon, meta))
+                    Some(build_finalized(
+                        &entry.title,
+                        &entry.body,
+                        entry.icon,
+                        &entry.buttons,
+                        meta,
+                    ))
                 } else {
                     None
                 }
@@ -232,39 +262,37 @@ impl TerminalHandler {
 
 /// Append `payload` bytes to the accumulator field selected by `payload_type`.
 ///
-/// For `Close`, `Alive`, `Buttons`, and `Query` payload types, the payload
-/// bytes are NOT accumulated into title/body/icon (they are not chunked content
+/// For `Close`, `Alive`, and `Query` payload types, the payload bytes are NOT
+/// accumulated into title/body/icon/buttons (they are not chunked content
 /// payloads); only the metadata is updated (done by the caller).
 fn append_payload(entry: &mut PendingNotification, payload_type: Osc99PayloadType, payload: &[u8]) {
     match payload_type {
         Osc99PayloadType::Title => entry.title.extend_from_slice(payload),
         Osc99PayloadType::Body => entry.body.extend_from_slice(payload),
         Osc99PayloadType::Icon => entry.icon.extend_from_slice(payload),
-        // Non-accumulating types: Close, Alive, Buttons, Query.
-        Osc99PayloadType::Close
-        | Osc99PayloadType::Alive
-        | Osc99PayloadType::Buttons
-        | Osc99PayloadType::Query => {}
+        Osc99PayloadType::Buttons => entry.buttons.extend_from_slice(payload),
+        // Non-accumulating types: Close, Alive, Query.
+        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {}
     }
 }
 
-/// Convert a standalone chunk's payload into the three accumulator vecs
-/// `(title, body, icon)` based on `payload_type`.
+/// Convert a standalone chunk's payload into the four accumulator vecs
+/// `(title, body, icon, buttons)` based on `payload_type`.
 ///
 /// For non-content payload types, the payload goes to no accumulator
-/// (all three vecs stay empty; the meta carries the data).
+/// (all four vecs stay empty; the meta carries the data).
 fn payload_into_accumulators(
     payload_type: Osc99PayloadType,
     payload: Vec<u8>,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     match payload_type {
-        Osc99PayloadType::Title => (payload, Vec::new(), Vec::new()),
-        Osc99PayloadType::Body => (Vec::new(), payload, Vec::new()),
-        Osc99PayloadType::Icon => (Vec::new(), Vec::new(), payload),
-        Osc99PayloadType::Close
-        | Osc99PayloadType::Alive
-        | Osc99PayloadType::Buttons
-        | Osc99PayloadType::Query => (Vec::new(), Vec::new(), Vec::new()),
+        Osc99PayloadType::Title => (payload, Vec::new(), Vec::new(), Vec::new()),
+        Osc99PayloadType::Body => (Vec::new(), payload, Vec::new(), Vec::new()),
+        Osc99PayloadType::Icon => (Vec::new(), Vec::new(), payload, Vec::new()),
+        Osc99PayloadType::Buttons => (Vec::new(), Vec::new(), Vec::new(), payload),
+        Osc99PayloadType::Close | Osc99PayloadType::Alive | Osc99PayloadType::Query => {
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        }
     }
 }
 
@@ -300,6 +328,7 @@ mod tests {
             title: None,
             body: None,
             icon: None,
+            buttons: Vec::new(),
             meta: default_cmd(),
         }
     }
@@ -416,6 +445,7 @@ mod tests {
             title: Some("Title".to_owned()),
             body: Some("Body".to_owned()),
             icon: Some(vec![1, 2, 3]),
+            buttons: Vec::new(),
             meta: Osc99Command {
                 id: Some("id-1".to_owned()),
                 close_report: true,
@@ -435,5 +465,89 @@ mod tests {
         assert!(!data.focus_on_activation);
         assert!(data.close_report);
         assert!(data.button_labels.is_empty());
+    }
+
+    // ── 99.9: button-label extraction ────────────────────────────────────────
+
+    #[test]
+    fn split_button_labels_splits_on_u2028() {
+        assert_eq!(
+            split_button_labels("OK\u{2028}Cancel".as_bytes()),
+            vec!["OK".to_owned(), "Cancel".to_owned()]
+        );
+    }
+
+    #[test]
+    fn split_button_labels_empty_input_yields_empty_vec() {
+        assert!(split_button_labels(b"").is_empty());
+    }
+
+    #[test]
+    fn split_button_labels_drops_leading_trailing_and_doubled_separators() {
+        // Leading, trailing, and doubled U+2028 separators must not produce
+        // empty-string labels.
+        let input = "\u{2028}OK\u{2028}\u{2028}Cancel\u{2028}".as_bytes();
+        assert_eq!(
+            split_button_labels(input),
+            vec!["OK".to_owned(), "Cancel".to_owned()]
+        );
+    }
+
+    /// Standalone (no-id), single-chunk `done` `Buttons` payload finalizes
+    /// immediately with the split labels.
+    #[test]
+    fn standalone_done_buttons_no_id_splits_labels() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            payload_type: Osc99PayloadType::Buttons,
+            payload: "OK\u{2028}Cancel".as_bytes().to_vec(),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(cmd)
+            .expect("single done Buttons chunk must finalize");
+        assert_eq!(
+            finalized.buttons,
+            vec!["OK".to_owned(), "Cancel".to_owned()]
+        );
+    }
+
+    /// Two `Buttons` chunks sharing an id, split across the U+2028 boundary,
+    /// concatenate correctly before splitting.
+    #[test]
+    fn chunked_buttons_by_id_concatenate_across_separator_boundary() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let chunk1 = Osc99Command {
+            id: Some("btn-1".to_owned()),
+            payload_type: Osc99PayloadType::Buttons,
+            done: false,
+            payload: "Yes\u{2028}N".as_bytes().to_vec(),
+            ..default_cmd()
+        };
+        let r1 = handler.reassemble_osc99(chunk1);
+        assert!(r1.is_none(), "first chunk must not finalize");
+
+        let chunk2 = Osc99Command {
+            id: Some("btn-1".to_owned()),
+            payload_type: Osc99PayloadType::Buttons,
+            done: true,
+            payload: b"o".to_vec(),
+            ..default_cmd()
+        };
+        let finalized = handler
+            .reassemble_osc99(chunk2)
+            .expect("terminating chunk must finalize");
+        assert_eq!(finalized.buttons, vec!["Yes".to_owned(), "No".to_owned()]);
+    }
+
+    #[test]
+    fn buttons_mapped_into_notification99_data() {
+        let finalized = FinalizedNotification {
+            buttons: vec!["A".to_owned(), "B".to_owned()],
+            ..default_finalized()
+        };
+        let data = finalized.into_notification99_data();
+        assert_eq!(data.button_labels, vec!["A".to_owned(), "B".to_owned()]);
     }
 }
