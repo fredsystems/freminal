@@ -19,8 +19,12 @@
 //! helpers. The system leg additionally requires that `notify-rust` is the
 //! intended sink; the toast leg never spawns a thread.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use conv2::ValueInto;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
-use freminal_common::buffer_states::window_manipulation::NotificationKind;
+use freminal_common::buffer_states::window_manipulation::{Notification99Data, NotificationKind};
 use freminal_common::config::{NotificationRouting, NotificationsConfig};
 
 use super::command_blocks::format_command_duration;
@@ -325,6 +329,266 @@ impl NotificationRouter {
             }
         }) {
             tracing::warn!("failed to spawn notification thread: {e}");
+        }
+    }
+}
+
+/// Record of a live OSC 99 notification (for update/close reconciliation).
+///
+/// Populated by [`NotificationRouter::route_osc99`] whenever the source
+/// notification carried an `i=` id. 99.5a only records identity plus the
+/// report flags 99.6 needs; it does not retain a `notify-rust` handle (that
+/// is 99.5b).
+#[derive(Debug, Clone)]
+pub(super) struct Osc99LiveEntry {
+    /// Whether `a=report` was requested (activation reports wanted — 99.6).
+    pub report_activation: bool,
+    /// Whether `c=1` was requested (close report wanted — 99.6).
+    pub close_report: bool,
+}
+
+/// Display-gate context for an OSC 99 notification.
+///
+/// Carries the window state inputs needed to evaluate the `o=` occasion
+/// gate ([`NotificationRouter::occasion_allows_display`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Osc99DisplayContext {
+    /// Whether the source window currently has OS focus.
+    pub window_focused: bool,
+    /// Whether the source window is currently minimized.
+    pub window_minimized: bool,
+}
+
+/// Monotonic counter disambiguating concurrent OSC 99 icon temp files within
+/// a single process run (paired with the process id in the filename).
+static OSC99_ICON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl NotificationRouter {
+    /// Route an OSC 99 stateful notification to the toast leg and/or the OS
+    /// notification daemon, honouring the occasion gate, urgency, sound,
+    /// expiry, buttons, and icon. 99.5a is fire-and-forget (no handle
+    /// retention — that is 99.5b); it records the notification id in `live`
+    /// for later update/close reconciliation.
+    ///
+    /// Does nothing when the notification system is disabled
+    /// ([`NotificationsConfig::enabled`] is `false`) or when the occasion
+    /// gate says the notification should not be displayed right now (in
+    /// which case it is also not recorded in `live` — an occasion-suppressed
+    /// notification never happened as far as later update/close tracking is
+    /// concerned).
+    pub(super) fn route_osc99(
+        data: &Notification99Data,
+        config: &NotificationsConfig,
+        ctx: Osc99DisplayContext,
+        toasts: &mut ToastStack,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        live: &mut HashMap<String, Osc99LiveEntry>,
+    ) {
+        if !config.enabled {
+            return;
+        }
+
+        if !Self::occasion_allows_display(data.occasion.as_deref(), ctx) {
+            return;
+        }
+
+        let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
+
+        // Toast leg: OSC 99 has no per-category routing config row, so
+        // 99.5a always attempts both legs (toast + OS notification) —
+        // simple, honest, and works without a notification daemon.
+        let summary = data
+            .title
+            .clone()
+            .or_else(|| data.body.clone())
+            .unwrap_or_default();
+        let detail = data
+            .body
+            .as_deref()
+            .filter(|body| !body.is_empty())
+            .map(str::to_owned);
+        if data.urgency == Some(2) {
+            toasts.error(summary, detail);
+        } else {
+            toasts.info(summary, detail);
+        }
+
+        Self::show_system_osc99(data, resolved_icon);
+
+        if let Some(id) = &data.id {
+            let entry = Osc99LiveEntry {
+                report_activation: data.report_activation,
+                close_report: data.close_report,
+            };
+            tracing::trace!(
+                id,
+                report_activation = entry.report_activation,
+                close_report = entry.close_report,
+                "tracking live OSC 99 notification"
+            );
+            live.insert(id.clone(), entry);
+        }
+    }
+
+    /// Evaluate the OSC 99 `o=` occasion gate.
+    ///
+    /// - `None` (Always) — always display.
+    /// - `Some("unfocused")` — display only when the source window lacks
+    ///   focus.
+    /// - `Some("invisible")` — display only when the source window is
+    ///   minimized. Background-tab occlusion is out of scope for 99.5a
+    ///   (documented, not silently dropped — see the 99.5 execution
+    ///   decisions in `PLAN_VERSION_110.md`).
+    /// - Any other value — treated as Always (forward-compat with occasion
+    ///   values not yet recognised by the parser).
+    fn occasion_allows_display(occasion: Option<&str>, ctx: Osc99DisplayContext) -> bool {
+        match occasion {
+            Some("unfocused") => !ctx.window_focused,
+            Some("invisible") => ctx.window_minimized,
+            // `None` (Always) and any other/unrecognised value both display
+            // unconditionally.
+            None | Some(_) => true,
+        }
+    }
+
+    /// Resolve the icon bytes to display, applying the `g=` cache.
+    ///
+    /// - Transmitted bytes (`icon_data`) always win and are cached under
+    ///   `icon_cache_key` (`g=`) when present, so a later `g=`-only
+    ///   notification can reuse them.
+    /// - Otherwise, a `g=`-only notification looks up the cache.
+    /// - `None` when neither is available (the OS leg then falls back to
+    ///   icon-by-name).
+    fn resolve_icon_bytes(
+        data: &Notification99Data,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+    ) -> Option<Vec<u8>> {
+        if let Some(bytes) = &data.icon_data {
+            if let Some(key) = &data.icon_cache_key {
+                icon_cache.insert(key.clone(), bytes.clone());
+            }
+            Some(bytes.clone())
+        } else {
+            data.icon_cache_key
+                .as_ref()
+                .and_then(|key| icon_cache.get(key).cloned())
+        }
+    }
+
+    /// Write transmitted icon bytes to a uniquely-named temp file.
+    ///
+    /// `tempfile` is only a dev-dependency of the `freminal` crate (not a
+    /// production dependency), so this writes directly into
+    /// [`std::env::temp_dir`] with a name disambiguated by the notification
+    /// id, a monotonic per-process counter, and the process id. The caller
+    /// is responsible for best-effort removal after use.
+    fn write_icon_temp_file(id: Option<&str>, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+        let counter = OSC99_ICON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let sanitized_id: String = id
+            .unwrap_or("noid")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+        let filename = format!("freminal-osc99-icon-{sanitized_id}-{pid}-{counter}.png");
+        let path = std::env::temp_dir().join(filename);
+        std::fs::write(&path, bytes)?;
+        Ok(path)
+    }
+
+    /// Fire-and-forget OS notification for an OSC 99 notification.
+    ///
+    /// 99.5a does NOT retain the handle (that is 99.5b); this mirrors
+    /// [`Self::show_system`]'s detached thread + best-effort `.show()`. The
+    /// icon temp file (if any) is removed on a best-effort basis after
+    /// `.show()` returns; cleanup failure never fails the notification.
+    fn show_system_osc99(data: &Notification99Data, resolved_icon_bytes: Option<Vec<u8>>) {
+        let id = data.id.clone();
+        let title = data.title.clone();
+        let body = data.body.clone().unwrap_or_default();
+        let app_name = data.app_name.clone();
+        let button_labels = data.button_labels.clone();
+        let urgency = data.urgency;
+        let sound = data.sound.clone();
+        let expire_ms = data.expire_ms;
+        let icon_names = data.icon_names.clone();
+
+        let builder = std::thread::Builder::new().name("freminal-notify-99".to_owned());
+        if let Err(e) = builder.spawn(move || {
+            let mut notification = notify_rust::Notification::new();
+            notification
+                .appname(app_name.as_deref().unwrap_or("freminal"))
+                .summary(title.as_deref().unwrap_or(&body))
+                .body(&body);
+
+            // See `Self::show_system` for the platform rationale: `urgency()`
+            // is unavailable on macOS.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let urgency_level = match urgency {
+                    Some(0) => notify_rust::Urgency::Low,
+                    Some(2) => notify_rust::Urgency::Critical,
+                    _ => notify_rust::Urgency::Normal,
+                };
+                notification.urgency(urgency_level);
+            }
+            #[cfg(target_os = "macos")]
+            let _ = urgency;
+
+            for (idx, label) in button_labels.iter().enumerate() {
+                notification.action(&idx.to_string(), label);
+            }
+
+            if let Some(sound_name) = &sound {
+                notification.sound_name(sound_name);
+            }
+
+            let timeout = match expire_ms {
+                Some(0) => notify_rust::Timeout::Never,
+                Some(ms) if ms > 0 => {
+                    let ms: u32 = ms.value_into().unwrap_or(u32::MAX);
+                    notify_rust::Timeout::Milliseconds(ms)
+                }
+                // `None` (OS default) and negative-and-nonzero (not a value
+                // the 99.4 mapping produces -- `-1` is normalised to `None`
+                // -- but matched exhaustively rather than relying on that
+                // invariant) both fall back to the server default.
+                None | Some(_) => notify_rust::Timeout::Default,
+            };
+            notification.timeout(timeout);
+
+            let mut icon_temp_path: Option<std::path::PathBuf> = None;
+            if let Some(bytes) = resolved_icon_bytes {
+                match Self::write_icon_temp_file(id.as_deref(), &bytes) {
+                    Ok(path) => {
+                        if let Some(path_str) = path.to_str() {
+                            notification.image_path(path_str);
+                        }
+                        icon_temp_path = Some(path);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to write OSC 99 icon temp file: {e}");
+                    }
+                }
+            } else if let Some(first) = icon_names.first() {
+                notification.icon(first);
+            }
+
+            if let Err(e) = notification.show() {
+                tracing::warn!("failed to show OSC 99 desktop notification: {e}");
+            }
+
+            // Best-effort cleanup; a leftover temp file is not fatal.
+            if let Some(path) = icon_temp_path
+                && let Err(e) = std::fs::remove_file(&path)
+            {
+                tracing::debug!(
+                    "failed to remove OSC 99 icon temp file {}: {e}",
+                    path.display()
+                );
+            }
+        }) {
+            tracing::warn!("failed to spawn OSC 99 notification thread: {e}");
         }
     }
 }
@@ -679,5 +943,346 @@ mod tests {
         assert_eq!(req.body, "test finished in 30s (exit 2)");
         // Non-zero exit -> Error kind.
         assert_eq!(req.kind, NotificationKind::Error);
+    }
+
+    // ── OSC 99 (Task 99.5a) ──────────────────────────────────────────
+
+    fn default_n99() -> Notification99Data {
+        Notification99Data {
+            id: None,
+            title: Some("Title".to_owned()),
+            body: Some("Body".to_owned()),
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            button_labels: Vec::new(),
+            report_activation: false,
+            focus_on_activation: true,
+            close_report: false,
+            urgency: None,
+            occasion: None,
+            sound: None,
+            app_name: None,
+            notification_type: Vec::new(),
+            expire_ms: None,
+        }
+    }
+
+    fn osc99_ctx(window_focused: bool, window_minimized: bool) -> Osc99DisplayContext {
+        Osc99DisplayContext {
+            window_focused,
+            window_minimized,
+        }
+    }
+
+    #[test]
+    fn route_osc99_master_gate_disabled_does_nothing() {
+        let config = NotificationsConfig::default(); // enabled = false
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_occasion_always_displays_regardless_of_focus() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = default_n99(); // occasion: None => Always
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert_eq!(
+            toasts.len(),
+            1,
+            "Always occasion must display even when focused"
+        );
+    }
+
+    #[test]
+    fn route_osc99_occasion_unfocused_gates_on_focus() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("unfocused".to_owned()),
+            ..default_n99()
+        };
+
+        // Focused: must NOT display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+        assert_eq!(
+            toasts.len(),
+            0,
+            "unfocused occasion must not fire while focused"
+        );
+        assert!(live.is_empty());
+
+        // Unfocused: must display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(false, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+        assert_eq!(
+            toasts.len(),
+            1,
+            "unfocused occasion must fire while unfocused"
+        );
+    }
+
+    #[test]
+    fn route_osc99_occasion_invisible_gates_on_minimized() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("invisible".to_owned()),
+            ..default_n99()
+        };
+
+        // Not minimized: must NOT display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+        assert_eq!(
+            toasts.len(),
+            0,
+            "invisible occasion must not fire while visible"
+        );
+
+        // Minimized: must display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, true),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+        assert_eq!(
+            toasts.len(),
+            1,
+            "invisible occasion must fire while minimized"
+        );
+    }
+
+    #[test]
+    fn route_osc99_unrecognised_occasion_treated_as_always() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("something_new".to_owned()),
+            ..default_n99()
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_populated_from_transmitted_bytes() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = Notification99Data {
+            icon_data: Some(vec![1, 2, 3, 4]),
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+
+        let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+
+        assert_eq!(resolved, Some(vec![1, 2, 3, 4]));
+        assert_eq!(icon_cache.get("k"), Some(&vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_reused_on_subsequent_g_only_notification() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        icon_cache.insert("k".to_owned(), vec![9, 9, 9]);
+
+        let data = Notification99Data {
+            icon_data: None,
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+
+        let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+
+        assert_eq!(resolved, Some(vec![9, 9, 9]));
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_miss_returns_none() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = Notification99Data {
+            icon_data: None,
+            icon_cache_key: Some("missing".to_owned()),
+            ..default_n99()
+        };
+
+        assert_eq!(
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
+            None
+        );
+    }
+
+    #[test]
+    fn route_osc99_no_icon_data_or_key_returns_none() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = default_n99();
+
+        assert_eq!(
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
+            None
+        );
+    }
+
+    #[test]
+    fn route_osc99_records_live_entry_when_id_present() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = Notification99Data {
+            id: Some("n1".to_owned()),
+            report_activation: true,
+            close_report: true,
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        let entry = live.get("n1").expect("live entry recorded");
+        assert!(entry.report_activation);
+        assert!(entry.close_report);
+    }
+
+    #[test]
+    fn route_osc99_no_live_entry_when_id_absent() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = default_n99(); // id: None
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_title_and_body_push_a_toast() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn route_osc99_occasion_suppressed_records_no_live_entry() {
+        // An occasion-suppressed notification is not displayed, so it must
+        // not be tracked for update/close either -- as far as later
+        // reconciliation is concerned, it never happened.
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let data = Notification99Data {
+            id: Some("n2".to_owned()),
+            occasion: Some("unfocused".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
     }
 }

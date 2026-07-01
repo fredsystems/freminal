@@ -470,6 +470,58 @@ Prohibitions: do NOT wire the reverse-write yet (99.6); do NOT proceed.
 
 Stop: report + await review.
 
+##### 99.5 execution decisions (recorded 2026-07-01, against the real seams)
+
+A recon of the GUI notification machinery found 99.5 is larger than one
+Sonnet-sized subtask and crosses shared-state / dependency / platform lines that
+need explicit resolution. Maintainer-approved decisions:
+
+- **Split into 99.5a and 99.5b.**
+  - **99.5a — render leg + state:** keep `NotificationRouter` the stateless unit
+    type it is (additive — do NOT rewire the existing `route`/`route_test` call
+    sites); add a live-notification-by-id map and a session `g=` icon-data cache
+    (`HashMap<String, Vec<u8>>`) as fields on `FreminalGui` (app-level, `RefCell`,
+    alongside `toasts` — matching that precedent); add a `route_osc99` associated
+    function taking a `Notification99Data` plus the maps by `&mut`. The OSC 99
+    command is collected into an out-param `Vec` in `rendering.rs` (mirroring the
+    OSC 9/777 `NotificationRequest` collection) and routed after the pane loop in
+    `app_impl.rs` where `self.config`, `self.toasts`, and the maps are borrowable.
+    Render the toast leg + the OS-notification leg with
+    buttons/urgency/sound/expiry/icon-by-name (`.icon()`) / icon-by-data (temp
+    file + `.image_path()`) and the occasion gate. **No handle retention yet**
+    (still fire-and-forget in 99.5a); no reverse-write.
+  - **99.5b — handle retention:** change the OSC 99 OS-notification path so the
+    spawned per-notification thread **keeps** the `notify-rust` handle and calls
+    `wait_for_action` / `on_close`, turning observed activation/close into events
+    delivered back toward the PTY. 99.5b pairs with 99.6 (the reverse-write that
+    consumes those events). Written per `freminal-architecture`; no new
+    steady-state GUI↔PTY shared lock.
+- **Handle retention = per-notification thread keeps the handle** (not a
+  synchronous GUI-thread `.show()`). Preserves Task 76's off-thread D-Bus model.
+  The Linux handle is `Send` (zbus `Connection`); macOS/Windows handle types
+  differ — 99.5b keeps the retention logic behind the same `#[cfg]` structure
+  `show_system` already uses, and only assumes the common
+  `wait_for_action`/`close`/`on_close` shape.
+- **Icon-by-data = temp file + `notify-rust` `.image_path()`** (no Cargo feature
+  change, no new system dep). `.image_data()` is behind the unset
+  `images_no_default_features` feature; the temp-file path avoids touching the
+  dependency. Icon-by-name uses `.icon()`. The `g=` cache stores the transmitted
+  bytes for the session so later `g=`-only notifications reuse them.
+- **`expire_ms` mapping:** `None` → `notify-rust` `Timeout::Default`; `Some(0)` →
+  `Timeout::Never` (kitty `w=0` = "never expire", which matches `notify-rust`'s
+  `Timeout::from(0)` = Never); `Some(n>0)` → `Timeout::Milliseconds(n)`.
+- **Occasion gate:** `None`(=Always) → always display; `unfocused` → gate on
+  `!flags.window_focused` (already threaded); `invisible` → gate on window
+  minimized (`ui.ctx().input(|i| i.viewport().minimized)`, already reachable in
+  `handle_window_manipulation`) OR the imperfect `!flags.is_active` background
+  proxy — 99.5a uses minimized as the honest signal and treats background-tab
+  occlusion as out of scope (documented, not silently dropped).
+- **Truthful-advertisement gaps to carry into 99.7:** `sound` is only a
+  freedesktop hint (no guaranteed playback); `notification_type` has no clean
+  `notify-rust` mapping; on macOS there is no urgency setter (matches the
+  existing Task 76 `#[cfg(not(target_os = "macos"))]` gate). 99.7 must not
+  over-advertise these.
+
 #### 99.6 — Reverse path: activation + close + alive reports to the PTY
 
 Scope: `freminal/src/gui/notifications.rs` (capture `notify-rust` action/close events),

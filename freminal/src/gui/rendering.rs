@@ -10,7 +10,7 @@ use conv2::ConvUtil;
 use crossbeam_channel::{Receiver, Sender};
 use egui::{self, Pos2, Vec2, ViewportCommand};
 use freminal_common::base64::encode;
-use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+use freminal_common::buffer_states::window_manipulation::{Notification99Data, WindowManipulation};
 use freminal_common::config::BellMode;
 use freminal_common::gui_theme::GuiTheme;
 use freminal_common::pty_write::PtyWrite;
@@ -199,6 +199,7 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
+    osc99_notifications: &mut Vec<Notification99Data>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
     // by the caller to clear any user-assigned custom tab name, so
@@ -534,12 +535,13 @@ pub(super) fn handle_window_manipulation(
             WindowManipulation::Notification { kind, title, body } => {
                 notifications.push(NotificationRequest { kind, title, body });
             }
-            // OSC 99 stateful notification (Task 99). The full GUI rendering
-            // (identity, buttons, icons, expiry, reverse-path reports) lands in
-            // Task 99.5; this inert arm exists only so the exhaustive match
-            // compiles after 110.0 adds the variant. Drop it for now.
-            WindowManipulation::Notification99(_) => {
-                tracing::trace!("OSC 99 Notification99 received (not yet handled; Task 99.5)");
+            // OSC 99 stateful notification (Task 99.5a). Collect for
+            // post-loop routing in `app_impl::update()`, where `self.config`,
+            // the toast stack, and the OSC 99 session maps on `FreminalGui`
+            // are all borrowable. The reverse-path reports (activation/close
+            // to the PTY) land in Task 99.6.
+            WindowManipulation::Notification99(data) => {
+                osc99_notifications.push((*data).clone());
             }
         }
     }

@@ -1092,6 +1092,12 @@ impl freminal_windowing::App for FreminalGui {
             // frame, routed after the loop (Task 76.4).
             let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
                 Vec::new();
+            // OSC 99 stateful notifications collected from every pane this
+            // frame, routed after the loop (Task 99.5a) alongside
+            // `osc_notifications`.
+            let mut osc99_notifications: Vec<
+                freminal_common::buffer_states::window_manipulation::Notification99Data,
+            > = Vec::new();
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -1124,6 +1130,7 @@ impl freminal_windowing::App for FreminalGui {
                                 is_only_pane,
                             },
                             &mut osc_notifications,
+                            &mut osc99_notifications,
                         );
                         if shell_set {
                             tab_shell_set_title = true;
@@ -1149,6 +1156,35 @@ impl freminal_windowing::App for FreminalGui {
                         window_focused,
                         &mut toasts,
                     );
+                }
+            }
+
+            // Route OSC 99 stateful notifications collected above (Task
+            // 99.5a). Done after the pane loop so `self.config`, the toast
+            // stack, and the OSC 99 session maps are borrowable without
+            // conflicting with the `win.tabs` borrow.
+            if !osc99_notifications.is_empty() {
+                let window_minimized =
+                    ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+                if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
+                    self.toasts.try_borrow_mut(),
+                    self.osc99_icon_cache.try_borrow_mut(),
+                    self.osc99_live.try_borrow_mut(),
+                ) {
+                    let ctx = crate::gui::notifications::Osc99DisplayContext {
+                        window_focused,
+                        window_minimized,
+                    };
+                    for data in &osc99_notifications {
+                        crate::gui::notifications::NotificationRouter::route_osc99(
+                            data,
+                            &self.config.notifications,
+                            ctx,
+                            &mut toasts,
+                            &mut icon_cache,
+                            &mut live,
+                        );
+                    }
                 }
             }
 
