@@ -24,7 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use conv2::ValueInto;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
-use freminal_common::buffer_states::window_manipulation::{Notification99Data, NotificationKind};
+use freminal_common::buffer_states::window_manipulation::{
+    Notification99Data, NotificationKind, Osc99ControlKind,
+};
 use freminal_common::config::{NotificationRouting, NotificationsConfig};
 
 use super::command_blocks::format_command_duration;
@@ -345,6 +347,34 @@ pub(super) struct Osc99LiveEntry {
     pub report_activation: bool,
     /// Whether `c=1` was requested (close report wanted — 99.6).
     pub close_report: bool,
+}
+
+/// Remove a notification id from the live map.
+///
+/// Used by Task 99.6 when a close is observed (activation-thread `__closed`
+/// event) or an app-driven `p=close` control sequence arrives, to keep the
+/// `p=alive` response accurate. Not yet called from production code (Task
+/// 99.5c is plumbing-only); exercised directly by the test below.
+///
+/// Returns whether an entry was actually removed.
+// TODO(Task 99.6): wire this into the close-observed and p=close paths; the
+// `#[allow]` below is temporary scaffolding, not a permanent suppression.
+#[allow(dead_code)]
+pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str) -> bool {
+    live.remove(id).is_some()
+}
+
+/// An OSC 99 app→terminal control sequence collected from
+/// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
+/// (Task 99.5c). Inert placeholder: paired with a cloned `pty_write_tx` in
+/// `app_impl::update()`'s post-loop routing, but not yet answered — that is
+/// Tasks 99.6 (close/alive) and 99.7 (query).
+#[derive(Debug, Clone)]
+pub(super) struct Osc99Control {
+    /// Notification id (`i=`) the control refers to, if any.
+    pub id: Option<String>,
+    /// Which control payload type this is.
+    pub kind: Osc99ControlKind,
 }
 
 /// Display-gate context for an OSC 99 notification.
@@ -1284,5 +1314,33 @@ mod tests {
 
         assert_eq!(toasts.len(), 0);
         assert!(live.is_empty());
+    }
+
+    // ── 99.5c: forget_osc99 prune helper ──────────────────────────────────────
+
+    #[test]
+    fn forget_osc99_removes_existing_entry() {
+        let mut live = HashMap::new();
+        live.insert(
+            "n1".to_owned(),
+            Osc99LiveEntry {
+                report_activation: true,
+                close_report: true,
+            },
+        );
+
+        let removed = forget_osc99(&mut live, "n1");
+
+        assert!(removed);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn forget_osc99_missing_id_returns_false() {
+        let mut live: HashMap<String, Osc99LiveEntry> = HashMap::new();
+
+        let removed = forget_osc99(&mut live, "does-not-exist");
+
+        assert!(!removed);
     }
 }

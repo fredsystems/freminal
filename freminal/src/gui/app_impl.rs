@@ -1094,10 +1094,20 @@ impl freminal_windowing::App for FreminalGui {
                 Vec::new();
             // OSC 99 stateful notifications collected from every pane this
             // frame, routed after the loop (Task 99.5a) alongside
-            // `osc_notifications`.
-            let mut osc99_notifications: Vec<
+            // `osc_notifications`. Each item is paired with a clone of the
+            // originating pane's `pty_write_tx` (Task 99.5c Gap 2) so future
+            // reverse-path writes (Task 99.6) can target the right pane.
+            let mut osc99_notifications: Vec<(
                 freminal_common::buffer_states::window_manipulation::Notification99Data,
-            > = Vec::new();
+                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+            )> = Vec::new();
+            // OSC 99 app→terminal control sequences (p=close/p=alive/p=?)
+            // collected from every pane this frame (Task 99.5c). Inert for
+            // now — logged after the loop, not yet answered (Tasks 99.6/99.7).
+            let mut osc99_controls: Vec<(
+                crate::gui::notifications::Osc99Control,
+                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+            )> = Vec::new();
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -1131,6 +1141,7 @@ impl freminal_windowing::App for FreminalGui {
                             },
                             &mut osc_notifications,
                             &mut osc99_notifications,
+                            &mut osc99_controls,
                         );
                         if shell_set {
                             tab_shell_set_title = true;
@@ -1175,7 +1186,10 @@ impl freminal_windowing::App for FreminalGui {
                         window_focused,
                         window_minimized,
                     };
-                    for data in &osc99_notifications {
+                    // `_tx` (the originating pane's `pty_write_tx` clone) is
+                    // threaded here per Task 99.5c Gap 2 but not yet used —
+                    // 99.6 wires it into the reverse-write path.
+                    for (data, _tx) in &osc99_notifications {
                         crate::gui::notifications::NotificationRouter::route_osc99(
                             data,
                             &self.config.notifications,
@@ -1186,6 +1200,17 @@ impl freminal_windowing::App for FreminalGui {
                         );
                     }
                 }
+            }
+
+            // Log OSC 99 control sequences collected above (Task 99.5c).
+            // Inert placeholder: close/alive/query handling lands in Tasks
+            // 99.6/99.7, which will use `_tx` (the originating pane's
+            // `pty_write_tx` clone) to write reverse reports.
+            for (control, _tx) in &osc99_controls {
+                trace!(
+                    "OSC 99 control received (handled in 99.6/99.7): kind={:?} id={:?}",
+                    control.kind, control.id
+                );
             }
 
             // ── Multi-pane rendering loop ────────────────────────────

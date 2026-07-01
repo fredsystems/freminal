@@ -79,6 +79,19 @@ pub struct Notification99Data {
     pub expire_ms: Option<i64>,
 }
 
+/// The three OSC 99 app→terminal control payload types that are NOT display
+/// requests: they require a terminal response or state change rather than a
+/// notification banner (Task 99).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99ControlKind {
+    /// `p=close`: the application asks to close the notification with this id.
+    Close,
+    /// `p=alive`: liveness poll; the terminal answers with the live-id list.
+    Alive,
+    /// `p=?`: capability query; the terminal answers with its supported keys.
+    Query,
+}
+
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
 ///
 /// This enum covers two categories:
@@ -180,6 +193,18 @@ pub enum WindowManipulation {
     /// that parser, not here.  Transported via the `WindowCommand` channel
     /// (not the snapshot) and rendered by Task 99.5.
     Notification99(Box<Notification99Data>),
+    /// OSC 99 app→terminal control sequence (`p=close`/`p=alive`/`p=?`, Task 99).
+    ///
+    /// Routed distinctly from display notifications: it drives a terminal
+    /// response (close reconciliation, alive-id list, or capability
+    /// handshake) rather than a banner. The reverse writes land in Tasks
+    /// 99.6/99.7.
+    Osc99Control {
+        /// Notification id (`i=`) the control refers to, if any.
+        id: Option<String>,
+        /// Which control payload type this is.
+        kind: Osc99ControlKind,
+    },
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {

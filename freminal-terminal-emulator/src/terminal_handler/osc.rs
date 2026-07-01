@@ -19,7 +19,7 @@ use freminal_common::buffer_states::{
     window_manipulation::{NotificationKind, WindowManipulation},
 };
 
-use super::{TerminalHandler, shell_integration};
+use super::{TerminalHandler, notify_99, shell_integration};
 
 impl TerminalHandler {
     /// Handle an APC (Application Program Command) sequence.
@@ -161,14 +161,22 @@ impl TerminalHandler {
             }
 
             // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
-            // reassembly machine; on finalize, map to WindowManipulation::Notification99
-            // and forward to the GUI via the window-command channel (Task 99.4).
+            // reassembly machine; on finalize, branch on the payload type (Task 99.5c):
+            // control payloads (p=close/p=alive/p=?) push Osc99Control, display payloads
+            // (title/body/icon/buttons) push Notification99 as before (Task 99.4).
             AnsiOscType::Notify99(cmd) => {
                 if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
-                    self.window_commands
-                        .push(WindowManipulation::Notification99(Box::new(
-                            finalized.into_notification99_data(),
-                        )));
+                    if let Some(kind) = notify_99::control_kind(finalized.meta.payload_type) {
+                        self.window_commands.push(WindowManipulation::Osc99Control {
+                            id: finalized.meta.id,
+                            kind,
+                        });
+                    } else {
+                        self.window_commands
+                            .push(WindowManipulation::Notification99(Box::new(
+                                finalized.into_notification99_data(),
+                            )));
+                    }
                 }
             }
 
@@ -228,7 +236,7 @@ mod tests {
     };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
-        NotificationKind, WindowManipulation,
+        NotificationKind, Osc99ControlKind, WindowManipulation,
     };
 
     // ── Existing OSC 9/777 tests ──────────────────────────────────────────────
@@ -564,5 +572,97 @@ mod tests {
             handler.window_commands.is_empty(),
             "non-final chunk must not emit a window command"
         );
+    }
+
+    // ── OSC 99 control routing (Task 99.5c) ───────────────────────────────────
+
+    /// A `p=close` payload finalizing must push `Osc99Control { kind: Close }`,
+    /// NOT a `Notification99` (Gap 1 fix — control payloads were previously
+    /// misrouted as empty display notifications).
+    #[test]
+    fn osc_notify99_close_pushes_osc99_control_close() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("close-1".to_owned()),
+            payload_type: Osc99PayloadType::Close,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(id.as_deref(), Some("close-1"));
+                assert_eq!(*kind, Osc99ControlKind::Close);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A `p=alive` payload finalizing must push `Osc99Control { kind: Alive }`.
+    #[test]
+    fn osc_notify99_alive_pushes_osc99_control_alive() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: None,
+            payload_type: Osc99PayloadType::Alive,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(*id, None);
+                assert_eq!(*kind, Osc99ControlKind::Alive);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A `p=?` payload finalizing must push `Osc99Control { kind: Query }`.
+    #[test]
+    fn osc_notify99_query_pushes_osc99_control_query() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("query-1".to_owned()),
+            payload_type: Osc99PayloadType::Query,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(id.as_deref(), Some("query-1"));
+                assert_eq!(*kind, Osc99ControlKind::Query);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A display payload type (`Title`) still produces `Notification99`, not
+    /// `Osc99Control` — the display path is unchanged by the 99.5c branch.
+    #[test]
+    fn osc_notify99_title_still_pushes_notification99_not_control() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            payload_type: Osc99PayloadType::Title,
+            payload: b"Hello".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("Hello"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
     }
 }

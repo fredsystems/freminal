@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use freminal_common::buffer_states::osc_notify_99::{
     NotificationOccasion, NotificationUrgency, Osc99Command, Osc99PayloadType,
 };
-use freminal_common::buffer_states::window_manipulation::Notification99Data;
+use freminal_common::buffer_states::window_manipulation::{Notification99Data, Osc99ControlKind};
 
 use super::TerminalHandler;
 
@@ -120,6 +120,32 @@ impl FinalizedNotification {
             notification_type: self.meta.notification_type,
             expire_ms,
         }
+    }
+}
+
+// ── Control payload routing (Task 99.5c) ─────────────────────────────────────
+
+/// Map an OSC 99 payload type to its control kind, if it is a control
+/// payload (`p=close`/`p=alive`/`p=?`).
+///
+/// Display payload types (`Title`/`Body`/`Icon`/`Buttons`) return `None` —
+/// they keep flowing to `WindowManipulation::Notification99` in
+/// `terminal_handler/osc.rs`.
+///
+/// `Osc99PayloadType` is defined in `freminal-common`, so this cannot be an
+/// inherent method on it from this crate (orphan rule) — a free function is
+/// the correct shape.
+pub(in crate::terminal_handler) const fn control_kind(
+    payload_type: Osc99PayloadType,
+) -> Option<Osc99ControlKind> {
+    match payload_type {
+        Osc99PayloadType::Close => Some(Osc99ControlKind::Close),
+        Osc99PayloadType::Alive => Some(Osc99ControlKind::Alive),
+        Osc99PayloadType::Query => Some(Osc99ControlKind::Query),
+        Osc99PayloadType::Title
+        | Osc99PayloadType::Body
+        | Osc99PayloadType::Icon
+        | Osc99PayloadType::Buttons => None,
     }
 }
 
@@ -549,5 +575,31 @@ mod tests {
         };
         let data = finalized.into_notification99_data();
         assert_eq!(data.button_labels, vec!["A".to_owned(), "B".to_owned()]);
+    }
+
+    // ── 99.5c: control_kind mapping ───────────────────────────────────────────
+
+    #[test]
+    fn control_kind_maps_close_alive_query() {
+        assert_eq!(
+            control_kind(Osc99PayloadType::Close),
+            Some(Osc99ControlKind::Close)
+        );
+        assert_eq!(
+            control_kind(Osc99PayloadType::Alive),
+            Some(Osc99ControlKind::Alive)
+        );
+        assert_eq!(
+            control_kind(Osc99PayloadType::Query),
+            Some(Osc99ControlKind::Query)
+        );
+    }
+
+    #[test]
+    fn control_kind_maps_display_types_to_none() {
+        assert_eq!(control_kind(Osc99PayloadType::Title), None);
+        assert_eq!(control_kind(Osc99PayloadType::Body), None);
+        assert_eq!(control_kind(Osc99PayloadType::Icon), None);
+        assert_eq!(control_kind(Osc99PayloadType::Buttons), None);
     }
 }

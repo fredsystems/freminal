@@ -19,7 +19,7 @@ use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::io::WindowCommand;
 
 use crate::gui::chrome_style;
-use crate::gui::notifications::NotificationRequest;
+use crate::gui::notifications::{NotificationRequest, Osc99Control};
 
 /// Apply the full palette-derived chrome [`Visuals`](egui::Visuals) and
 /// spacing for the initial / window-creation style setup.
@@ -199,7 +199,8 @@ pub(super) fn handle_window_manipulation(
     bell_mode: BellMode,
     flags: &WindowManipFlags,
     notifications: &mut Vec<NotificationRequest>,
-    osc99_notifications: &mut Vec<Notification99Data>,
+    osc99_notifications: &mut Vec<(Notification99Data, Sender<PtyWrite>)>,
+    osc99_controls: &mut Vec<(Osc99Control, Sender<PtyWrite>)>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
     // by the caller to clear any user-assigned custom tab name, so
@@ -539,9 +540,18 @@ pub(super) fn handle_window_manipulation(
             // post-loop routing in `app_impl::update()`, where `self.config`,
             // the toast stack, and the OSC 99 session maps on `FreminalGui`
             // are all borrowable. The reverse-path reports (activation/close
-            // to the PTY) land in Task 99.6.
+            // to the PTY) land in Task 99.6. `pty_write_tx` is cloned
+            // alongside the data (Task 99.5c Gap 2) so the post-loop router
+            // can write reverse reports back to the originating pane.
             WindowManipulation::Notification99(data) => {
-                osc99_notifications.push((*data).clone());
+                osc99_notifications.push(((*data).clone(), pty_write_tx.clone()));
+            }
+            // OSC 99 app→terminal control sequence (Task 99.5c). Inert
+            // placeholder: collected alongside a cloned `pty_write_tx` for
+            // the originating pane, but not yet answered — close/alive/query
+            // handling lands in Tasks 99.6/99.7.
+            WindowManipulation::Osc99Control { id, kind } => {
+                osc99_controls.push((Osc99Control { id, kind }, pty_write_tx.clone()));
             }
         }
     }

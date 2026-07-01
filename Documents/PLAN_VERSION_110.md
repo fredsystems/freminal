@@ -522,6 +522,85 @@ need explicit resolution. Maintainer-approved decisions:
   existing Task 76 `#[cfg(not(target_os = "macos"))]` gate). 99.7 must not
   over-advertise these.
 
+##### Reverse-path gaps found during 99.5b/99.6 recon (2026-07-01)
+
+The recon of the reverse-write path found two correctness gaps and a lifecycle
+gap that reshape the reverse-path work. Maintainer-approved resolutions:
+
+- **Gap 1 — control payload types were misrouted (bug).**
+  `FinalizedNotification::into_notification99_data()` discards
+  `Osc99PayloadType`, so `p=close` (close request), `p=alive` (liveness poll),
+  and `p=?` (capability query) currently reach the GUI as empty `Notification99`
+  display requests and get wrongly toasted / OS-notified. **Resolution: a new
+  `WindowManipulation::Osc99Control { id: Option<String>, kind: Osc99ControlKind }`
+  variant** (with `enum Osc99ControlKind { Close, Alive, Query }` in
+  `freminal-common`), emitted by the `handle_osc` `Notify99` arm in
+  `terminal_handler/osc.rs` when `finalized.meta.payload_type` is
+  `Close`/`Alive`/`Query`; the display types (`Title`/`Body`/`Icon`/`Buttons`)
+  keep flowing as `Notification99`. Display stays clean; control routes to
+  distinct GUI handling (close-request/alive-response in 99.6, query in 99.7).
+- **Gap 2 — pane identity is lost.** The reverse report must reach the
+  **originating pane's** `pty_write_tx`, but `Notification99Data` carries no pane
+  id and 99.5a's post-loop routing site has no pane context. `pty_write_tx` IS in
+  scope at the per-pane `rendering.rs` `Notification99`/`Osc99Control` arm.
+  **Resolution: clone `pty_write_tx` at the rendering site and carry the clone
+  alongside each collected item** — the OSC 99 out-param becomes
+  `Vec<(Notification99Data, Sender<PtyWrite>)>` (and a parallel one for
+  `Osc99Control`), so the post-loop router writes reports back to the correct
+  pane. Cloning the existing `Sender<PtyWrite>` (already `Send + Clone`, precedent
+  in `layout_ops.rs`) satisfies the "no new channel" rule.
+- **Gap 3 — `osc99_live` never pruned.** Entries are only inserted (99.5a),
+  never removed, so the map grows unbounded and a `p=alive` response would over-
+  report. **Resolution: remove the entry on observed close** (99.5b/99.6) and on
+  an app-driven `p=close`.
+
+##### 99.5c — Reverse-path prerequisites (control variant + pane-tx + prune scaffolding)
+
+Scope: `freminal-common/src/buffer_states/window_manipulation.rs`
+(`Osc99Control` variant + `Osc99ControlKind`), `freminal-common` `osc_notify_99.rs`
+(expose `payload_type` on the finalized path if needed),
+`freminal-terminal-emulator/src/terminal_handler/osc.rs` (branch on
+`payload_type`; emit `Notification99` vs `Osc99Control`),
+`freminal-terminal-emulator/src/terminal_handler/notify_99.rs`
+(carry `payload_type` to the emit site),
+`freminal/src/gui/rendering.rs` (clone `pty_write_tx` into the OSC 99 out-param
+tuples; add an inert `Osc99Control` arm), `freminal/src/gui/app_impl.rs`
+(thread the tupled out-params), `freminal/src/gui/pty.rs` (classify
+`Notification99` and `Osc99Control` as `Report`, not `Viewport`, since they now
+drive reverse-writes).
+
+What: land the type/routing shells so 99.5b/99.6 can be a focused behaviour
+change. **No handle retention, no report bytes yet** — the `Osc99Control` GUI arm
+and the tupled `pty_write_tx` are inert placeholders (routing + plumbing only).
+Add the `pty.rs` `Report` reclassification here (it is a pure classification
+change; both wrappers unwrap identically GUI-side, so it is behaviour-neutral
+until 99.6 uses the write path). Prune-on-close scaffolding: add a `remove`-capable
+path for `osc99_live` (used by 99.6).
+
+Deliverable: the variant + routing split + pane-tx threading + tests (a
+`p=close`/`p=alive`/`p=?` sequence produces `Osc99Control{kind}` not
+`Notification99`; a display sequence still produces `Notification99`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT retain the notify-rust handle or write report bytes (99.5b/99.6);
+do NOT change display rendering (99.5a).
+
+Stop: report + await review.
+
+##### 99.5b + 99.6 (combined) — handle retention + reverse reports
+
+Per the recon, 99.5b (retain the handle, produce `(id, action-string)` events) and
+99.6 (turn events into report bytes on the originating pane's `pty_write_tx`) are
+structurally inseparable and land as **one reviewed change** on top of 99.5c: the
+per-notification thread keeps the handle, calls `wait_for_action` (Linux; covers
+both activation `"default"`/button-index and close `"__closed"`), and — using the
+`pty_write_tx` clone threaded in 99.5c — writes `ESC ] 99 ; i=<id> ; <btn> ST`
+(activation, when `a=report`), `ESC ] 99 ; i=<id> : p=close ; ST` (close, when
+`c=1`), pruning `osc99_live` on close. The `Osc99Control{Alive}` arm answers the
+`p=alive` poll with `ESC ] 99 ; i=<id> : p=alive ; <live-ids> ST`. macOS/Windows:
+`untracked` close form + `p=alive` (main-run-loop hazard confirmed in recon).
+
 #### 99.6 — Reverse path: activation + close + alive reports to the PTY
 
 Scope: `freminal/src/gui/notifications.rs` (capture `notify-rust` action/close events),
