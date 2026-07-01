@@ -156,6 +156,13 @@ impl TerminalHandler {
                 });
             }
 
+            // OSC 99 stateful notification (Task 99). Chunk reassembly, identity, and
+            // transport to the GUI are implemented in Task 99.3+. This inert arm exists
+            // so the exhaustive match compiles after 99.2 adds the AnsiOscType variant.
+            AnsiOscType::Notify99(_cmd) => {
+                tracing::trace!("OSC 99 parsed (chunk reassembly/transport pending: Task 99.3)");
+            }
+
             AnsiOscType::NoOp => {}
         }
     }
