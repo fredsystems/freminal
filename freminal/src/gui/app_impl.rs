@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
+use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::ThemeMode;
+use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::WindowId;
@@ -1186,10 +1188,12 @@ impl freminal_windowing::App for FreminalGui {
                         window_focused,
                         window_minimized,
                     };
-                    // `_tx` (the originating pane's `pty_write_tx` clone) is
-                    // threaded here per Task 99.5c Gap 2 but not yet used —
-                    // 99.6 wires it into the reverse-write path.
-                    for (data, _tx) in &osc99_notifications {
+                    // `tx` (the originating pane's `pty_write_tx` clone) is
+                    // threaded into the reverse-write path (Task 99.6): the
+                    // notification thread uses it to write activation/close
+                    // reports back to the pane that produced this OSC 99
+                    // sequence.
+                    for (data, tx) in &osc99_notifications {
                         crate::gui::notifications::NotificationRouter::route_osc99(
                             data,
                             &self.config.notifications,
@@ -1197,20 +1201,52 @@ impl freminal_windowing::App for FreminalGui {
                             &mut toasts,
                             &mut icon_cache,
                             &mut live,
+                            tx,
                         );
                     }
                 }
             }
 
-            // Log OSC 99 control sequences collected above (Task 99.5c).
-            // Inert placeholder: close/alive/query handling lands in Tasks
-            // 99.6/99.7, which will use `_tx` (the originating pane's
-            // `pty_write_tx` clone) to write reverse reports.
-            for (control, _tx) in &osc99_controls {
-                trace!(
-                    "OSC 99 control received (handled in 99.6/99.7): kind={:?} id={:?}",
-                    control.kind, control.id
-                );
+            // Answer OSC 99 control sequences collected above (Task 99.6 for
+            // Close/Alive; the Query capability handshake is Task 99.7). Run
+            // after the display-routing block above so its `osc99_live`
+            // borrow has already been released.
+            for (control, tx) in &osc99_controls {
+                match control.kind {
+                    Osc99ControlKind::Alive => {
+                        // Answer the poll with the current live notification ids.
+                        if let Ok(live) = self.osc99_live.try_borrow() {
+                            let ids = crate::gui::notifications::live_ids_sorted(&live);
+                            let bytes = crate::gui::notifications::osc99_alive_report(
+                                control.id.as_deref(),
+                                &ids,
+                            );
+                            send_or_log!(
+                                tx,
+                                PtyWrite::Write(bytes),
+                                "Failed to send OSC 99 alive report"
+                            );
+                        }
+                    }
+                    Osc99ControlKind::Close => {
+                        // App-driven close request: prune the live entry.
+                        // freminal cannot programmatically close an OS
+                        // notification it already delegated to the desktop
+                        // environment, so this only reconciles our liveness
+                        // map — no report is sent here (the close report is
+                        // emitted only when WE observe a close on the
+                        // notification thread with `c=1`).
+                        if let (Some(id), Ok(mut live)) =
+                            (control.id.as_deref(), self.osc99_live.try_borrow_mut())
+                        {
+                            crate::gui::notifications::forget_osc99(&mut live, id);
+                        }
+                    }
+                    Osc99ControlKind::Query => {
+                        // Capability handshake is Task 99.7.
+                        trace!("OSC 99 p=? query received (handshake pending Task 99.7)");
+                    }
+                }
             }
 
             // ── Multi-pane rendering loop ────────────────────────────
