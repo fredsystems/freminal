@@ -971,6 +971,12 @@ pub struct NotificationsConfig {
     /// notifications.  Default: `true`.
     pub osc_777: bool,
 
+    /// When `true`, OSC 99 (kitty stateful) notifications are honoured.
+    /// Default: `true`. (This is the on/off kill-switch; the per-notification
+    /// occasion gating is separate. The drain-site enforcement lands in
+    /// Task 99.8 — 110.0 only makes the option loadable.)
+    pub osc_99: bool,
+
     /// When `true`, an OSC 133 `D` (command finished) event fires a
     /// notification.  Default: `true`.
     pub on_command_finished: bool,
@@ -1015,6 +1021,7 @@ impl Default for NotificationsConfig {
             enabled: false,
             osc_9: true,
             osc_777: true,
+            osc_99: true,
             on_command_finished: true,
             command_finished_threshold_secs: 10.0,
             routing_error: NotificationRouting::Both,
@@ -2126,6 +2133,7 @@ size = 14.0
         cfg.notifications.enabled = true;
         cfg.notifications.osc_9 = false;
         cfg.notifications.osc_777 = false;
+        cfg.notifications.osc_99 = false;
         cfg.notifications.on_command_finished = false;
         cfg.notifications.command_finished_threshold_secs = 3.5;
         cfg.notifications.routing_error = NotificationRouting::System;
@@ -2139,6 +2147,7 @@ size = 14.0
         assert!(parsed.notifications.enabled);
         assert!(!parsed.notifications.osc_9);
         assert!(!parsed.notifications.osc_777);
+        assert!(!parsed.notifications.osc_99);
         assert!(!parsed.notifications.on_command_finished);
         assert!(
             (parsed.notifications.command_finished_threshold_secs - 3.5_f32).abs() < f32::EPSILON
@@ -3170,6 +3179,31 @@ enabled = true
             cfg.notifications.enabled,
             "[notifications] enabled must merge through ConfigPartial"
         );
+    }
+
+    #[test]
+    fn notifications_osc_99_survives_partial_merge() {
+        // Regression guard: osc_99 = false must merge through ConfigPartial
+        // into Config.notifications.osc_99 without being silently dropped.
+        let mut cfg = Config::default();
+        assert!(cfg.notifications.osc_99, "default osc_99 is true");
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[notifications]
+osc_99 = false
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(
+            !cfg.notifications.osc_99,
+            "[notifications] osc_99 must merge through ConfigPartial"
+        );
+        // Untouched fields keep their defaults.
+        assert!(!cfg.notifications.enabled);
+        assert!(cfg.notifications.osc_9);
+        assert!(cfg.notifications.osc_777);
     }
 
     #[test]

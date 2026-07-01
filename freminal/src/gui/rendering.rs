@@ -534,6 +534,13 @@ pub(super) fn handle_window_manipulation(
             WindowManipulation::Notification { kind, title, body } => {
                 notifications.push(NotificationRequest { kind, title, body });
             }
+            // OSC 99 stateful notification (Task 99). The full GUI rendering
+            // (identity, buttons, icons, expiry, reverse-path reports) lands in
+            // Task 99.5; this inert arm exists only so the exhaustive match
+            // compiles after 110.0 adds the variant. Drop it for now.
+            WindowManipulation::Notification99(_) => {
+                tracing::trace!("OSC 99 Notification99 received (not yet handled; Task 99.5)");
+            }
         }
     }
     shell_set_title

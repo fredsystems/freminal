@@ -77,14 +77,14 @@ const fn char_to_ctrl_code(c: u8) -> u8 {
 /// Build an xterm-style modified key sequence: `ESC [ 1 ; <mod> <final>`.
 ///
 /// Used for arrow keys and Home/End when a modifier is held.
-fn modified_csi_final(modifier: u8, final_byte: u8) -> TerminalInputPayload {
+fn modified_csi_final(modifier: u16, final_byte: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes())
 }
 
 /// Build an xterm-style modified tilde key sequence: `ESC [ <code> ; <mod> ~`.
 ///
 /// Used for Insert/Delete/PageUp/PageDown and F5–F12 when a modifier is held.
-fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
+fn modified_csi_tilde(code: u8, modifier: u16) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
 }
 
@@ -99,7 +99,7 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
 /// sequence (e.g. `ESC O B`) carries no event-type information and would be
 /// wrongly read by applications as a fresh key *press*, duplicating the
 /// key — this builder exists to avoid exactly that bug.
-fn kkp_csi_final_event(modifier: u8, event: u8, final_byte: u8) -> TerminalInputPayload {
+fn kkp_csi_final_event(modifier: u16, event: u8, final_byte: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(
         format!("\x1b[1;{modifier}:{event}{}", final_byte as char).into_bytes(),
     )
@@ -112,7 +112,7 @@ fn kkp_csi_final_event(modifier: u8, event: u8, final_byte: u8) -> TerminalInput
 /// Protocol `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a
 /// repeat or release.  See [`kkp_csi_final_event`] for why a bare legacy
 /// tilde sequence is unsafe for non-press events.
-fn kkp_csi_tilde_event(code: u8, modifier: u8, event: u8) -> TerminalInputPayload {
+fn kkp_csi_tilde_event(code: u8, modifier: u16, event: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}:{event}~").into_bytes())
 }
 
@@ -200,11 +200,27 @@ pub fn raw_ascii_bytes_to_terminal_input(buf: &[u8]) -> Cow<'static, [TerminalIn
 /// | 6 | Ctrl+Shift      |
 /// | 7 | Ctrl+Alt        |
 /// | 8 | Ctrl+Alt+Shift  |
+///
+/// The kitty keyboard protocol extends this to 8 bits (`super`, `hyper`,
+/// `meta`, `caps_lock`, `num_lock`), for a maximum parameter value of 256.
+// Requires 8 bool fields to model the 8-bit kitty modifier mask exactly;
+// collapsing into flags/enum would add conversion boilerplate without benefit.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    /// Super modifier (bit 8).
+    pub super_key: bool,
+    /// Hyper modifier (bit 16).
+    pub hyper: bool,
+    /// Meta modifier (bit 32).
+    pub meta: bool,
+    /// Caps Lock active (bit 64).
+    pub caps_lock: bool,
+    /// Num Lock active (bit 128).
+    pub num_lock: bool,
 }
 
 impl KeyModifiers {
@@ -213,24 +229,44 @@ impl KeyModifiers {
         shift: false,
         ctrl: false,
         alt: false,
+        super_key: false,
+        hyper: false,
+        meta: false,
+        caps_lock: false,
+        num_lock: false,
     };
 
     /// Returns `true` when no modifier is held.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        !self.shift && !self.ctrl && !self.alt
+        !self.shift
+            && !self.ctrl
+            && !self.alt
+            && !self.super_key
+            && !self.hyper
+            && !self.meta
+            && !self.caps_lock
+            && !self.num_lock
     }
 
-    /// Compute the xterm modifier parameter (2–8), or `None` if no modifier
-    /// is held.
+    /// Compute the xterm / kitty modifier parameter (2–256), or `None` if no
+    /// modifier is held.
     ///
-    /// Encoding: `1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)`
+    /// Encoding across 8 bits (each bit adds a power of two):
+    ///
+    /// ```text
+    /// 1 + shift*1 + alt*2 + ctrl*4 + super_key*8
+    ///   + hyper*16 + meta*32 + caps_lock*64 + num_lock*128
+    /// ```
+    ///
+    /// The result is `u16` because the maximum value (all 8 bits set) is 256,
+    /// which overflows `u8`. All arithmetic stays within `u16`.
     #[must_use]
-    pub const fn modifier_param(self) -> Option<u8> {
+    pub const fn modifier_param(self) -> Option<u16> {
         if self.is_empty() {
             return None;
         }
-        let mut n: u8 = 1;
+        let mut n: u16 = 1;
         if self.shift {
             n += 1;
         }
@@ -239,6 +275,21 @@ impl KeyModifiers {
         }
         if self.ctrl {
             n += 4;
+        }
+        if self.super_key {
+            n += 8;
+        }
+        if self.hyper {
+            n += 16;
+        }
+        if self.meta {
+            n += 32;
+        }
+        if self.caps_lock {
+            n += 64;
+        }
+        if self.num_lock {
+            n += 128;
         }
         Some(n)
     }
@@ -520,7 +571,7 @@ impl TerminalInput {
     /// Trailing default fields and sub-fields are omitted.
     fn build_csi_u(
         codepoint: u32,
-        modifier_param: Option<u8>,
+        modifier_param: Option<u16>,
         flags: u32,
         meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
@@ -1050,8 +1101,7 @@ mod tests {
     fn arrow_right_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2C".to_vec()));
@@ -1146,9 +1196,8 @@ mod tests {
     #[test]
     fn home_with_ctrl_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Home(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5H".to_vec()));
@@ -1187,8 +1236,7 @@ mod tests {
     fn delete_with_shift() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Delete(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[3;2~".to_vec()));
@@ -1203,9 +1251,8 @@ mod tests {
     #[test]
     fn insert_with_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Insert(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[2;5~".to_vec()));
@@ -1221,8 +1268,7 @@ mod tests {
     fn pageup_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::PageUp(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[5;2~".to_vec()));
@@ -1239,7 +1285,7 @@ mod tests {
         let mods = KeyModifiers {
             shift: true,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::PageDown(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;6~".to_vec()));
@@ -1321,8 +1367,7 @@ mod tests {
     fn function_key_f1_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(1, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2P".to_vec()));
@@ -1331,9 +1376,8 @@ mod tests {
     #[test]
     fn function_key_f5_with_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(5, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;5~".to_vec()));
@@ -1343,8 +1387,7 @@ mod tests {
     fn function_key_f12_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(12, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[24;2~".to_vec()));
@@ -1819,9 +1862,8 @@ mod tests {
     fn kkp_arrow_release_with_modifier_keeps_modifier_param() {
         // Ctrl held: modifier param is 5 (1 + ctrl*4), event 3 appended.
         let ctrl = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_kkp_event(&TerminalInput::ArrowRight(ctrl), 3, KeyEventType::Release);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5:3C".to_vec()));
@@ -1957,8 +1999,7 @@ mod tests {
     fn kkp_function_key_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_kkp(&TerminalInput::FunctionKey(5, mods), 1);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;2~".to_vec()));
@@ -2140,8 +2181,7 @@ mod tests {
         assert_eq!(
             KeyModifiers {
                 shift: true,
-                ctrl: false,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(2)
@@ -2149,9 +2189,8 @@ mod tests {
         // Alt only
         assert_eq!(
             KeyModifiers {
-                shift: false,
-                ctrl: false,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(3)
@@ -2160,8 +2199,8 @@ mod tests {
         assert_eq!(
             KeyModifiers {
                 shift: true,
-                ctrl: false,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(4)
@@ -2169,9 +2208,8 @@ mod tests {
         // Ctrl only
         assert_eq!(
             KeyModifiers {
-                shift: false,
                 ctrl: true,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(5)
@@ -2181,7 +2219,7 @@ mod tests {
             KeyModifiers {
                 shift: true,
                 ctrl: true,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(6)
@@ -2189,9 +2227,9 @@ mod tests {
         // Ctrl+Alt
         assert_eq!(
             KeyModifiers {
-                shift: false,
                 ctrl: true,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(7)
@@ -2201,10 +2239,53 @@ mod tests {
             KeyModifiers {
                 shift: true,
                 ctrl: true,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(8)
+        );
+    }
+
+    #[test]
+    fn modifier_param_new_bits() {
+        // New bits are inert when false: KeyModifiers::default() → None.
+        assert_eq!(KeyModifiers::default().modifier_param(), None);
+
+        // super_key (bit 8): 1 + 8 = 9.
+        assert_eq!(
+            KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::NONE
+            }
+            .modifier_param(),
+            Some(9)
+        );
+
+        // caps_lock (bit 64): 1 + 64 = 65.
+        assert_eq!(
+            KeyModifiers {
+                caps_lock: true,
+                ..KeyModifiers::NONE
+            }
+            .modifier_param(),
+            Some(65)
+        );
+
+        // All eight bits set: 1 + 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128 = 256.
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: true,
+                super_key: true,
+                hyper: true,
+                meta: true,
+                caps_lock: true,
+                num_lock: true,
+            }
+            .modifier_param(),
+            Some(256)
         );
     }
 
@@ -2214,6 +2295,11 @@ mod tests {
         shift: true,
         ctrl: false,
         alt: false,
+        super_key: false,
+        hyper: false,
+        meta: false,
+        caps_lock: false,
+        num_lock: false,
     };
 
     #[test]

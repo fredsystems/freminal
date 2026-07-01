@@ -379,8 +379,7 @@ fn payload_bytes_decckm(input: &TerminalInput) -> Vec<u8> {
 fn shift_arrow_up_sends_csi_1_2_a() {
     let mods = KeyModifiers {
         shift: true,
-        ctrl: false,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::ArrowUp(mods));
     assert_eq!(got, b"\x1b[1;2A".to_vec());
@@ -390,9 +389,8 @@ fn shift_arrow_up_sends_csi_1_2_a() {
 #[test]
 fn ctrl_arrow_left_sends_csi_1_5_d() {
     let mods = KeyModifiers {
-        shift: false,
         ctrl: true,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::ArrowLeft(mods));
     assert_eq!(got, b"\x1b[1;5D".to_vec());
@@ -402,9 +400,8 @@ fn ctrl_arrow_left_sends_csi_1_5_d() {
 #[test]
 fn alt_home_sends_csi_1_3_h() {
     let mods = KeyModifiers {
-        shift: false,
-        ctrl: false,
         alt: true,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::Home(mods));
     assert_eq!(got, b"\x1b[1;3H".to_vec());
@@ -416,7 +413,7 @@ fn ctrl_shift_f5_sends_csi_15_6_tilde() {
     let mods = KeyModifiers {
         shift: true,
         ctrl: true,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::FunctionKey(5, mods));
     assert_eq!(got, b"\x1b[15;6~".to_vec());
@@ -427,8 +424,7 @@ fn ctrl_shift_f5_sends_csi_15_6_tilde() {
 fn shift_delete_sends_csi_3_2_tilde() {
     let mods = KeyModifiers {
         shift: true,
-        ctrl: false,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::Delete(mods));
     assert_eq!(got, b"\x1b[3;2~".to_vec());
@@ -454,8 +450,7 @@ fn unmodified_arrow_up_decckm_mode() {
 fn modified_arrow_up_decckm_uses_csi_not_ss3() {
     let mods = KeyModifiers {
         shift: true,
-        ctrl: false,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes_decckm(&TerminalInput::ArrowUp(mods));
     assert_eq!(
@@ -476,6 +471,7 @@ fn all_modifiers_arrow_right() {
         shift: true,
         ctrl: true,
         alt: true,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::ArrowRight(mods));
     assert_eq!(got, b"\x1b[1;8C".to_vec());
@@ -486,8 +482,7 @@ fn all_modifiers_arrow_right() {
 fn shift_f1_sends_csi_1_2_p() {
     let mods = KeyModifiers {
         shift: true,
-        ctrl: false,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::FunctionKey(1, mods));
     assert_eq!(got, b"\x1b[1;2P".to_vec());
@@ -497,9 +492,8 @@ fn shift_f1_sends_csi_1_2_p() {
 #[test]
 fn ctrl_insert_sends_csi_2_5_tilde() {
     let mods = KeyModifiers {
-        shift: false,
         ctrl: true,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::Insert(mods));
     assert_eq!(got, b"\x1b[2;5~".to_vec());
@@ -509,9 +503,8 @@ fn ctrl_insert_sends_csi_2_5_tilde() {
 #[test]
 fn alt_page_down_sends_csi_6_3_tilde() {
     let mods = KeyModifiers {
-        shift: false,
-        ctrl: false,
         alt: true,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::PageDown(mods));
     assert_eq!(got, b"\x1b[6;3~".to_vec());
@@ -521,9 +514,8 @@ fn alt_page_down_sends_csi_6_3_tilde() {
 #[test]
 fn ctrl_end_sends_csi_1_5_f() {
     let mods = KeyModifiers {
-        shift: false,
         ctrl: true,
-        alt: false,
+        ..KeyModifiers::NONE
     };
     let got = payload_bytes(&TerminalInput::End(mods));
     assert_eq!(got, b"\x1b[1;5F".to_vec());
@@ -540,7 +532,8 @@ fn key_modifiers_none_has_no_param() {
 #[test]
 fn key_modifiers_all_combinations() {
     // Shift=2, Alt=3, Shift+Alt=4, Ctrl=5, Ctrl+Shift=6, Ctrl+Alt=7, Ctrl+Alt+Shift=8
-    let cases: &[(bool, bool, bool, u8)] = &[
+    // Expected values are u16 now that modifier_param() returns Option<u16>.
+    let cases: &[(bool, bool, bool, u16)] = &[
         (true, false, false, 2), // Shift
         (false, false, true, 3), // Alt
         (true, false, true, 4),  // Shift+Alt
@@ -550,7 +543,12 @@ fn key_modifiers_all_combinations() {
         (true, true, true, 8),   // Ctrl+Alt+Shift
     ];
     for &(shift, ctrl, alt, expected) in cases {
-        let mods = KeyModifiers { shift, ctrl, alt };
+        let mods = KeyModifiers {
+            shift,
+            ctrl,
+            alt,
+            ..KeyModifiers::NONE
+        };
         assert_eq!(
             mods.modifier_param(),
             Some(expected),

@@ -154,6 +154,7 @@ let
           enabled
           osc_9
           osc_777
+          osc_99
           on_command_finished
           command_finished_threshold_secs
           routing_error
@@ -823,6 +824,15 @@ in
           description = ''
             When true, OSC 777 ("notify;TITLE;BODY", urxvt) payloads create
             notifications.
+            Null uses the default (true).
+          '';
+        };
+
+        osc_99 = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            When true, OSC 99 (kitty stateful) notifications are honoured.
             Null uses the default (true).
           '';
         };

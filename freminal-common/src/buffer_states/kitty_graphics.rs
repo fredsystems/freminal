@@ -177,6 +177,16 @@ pub struct KittyControlData {
     /// `C` — Cursor movement: 0 = move cursor after image (default), 1 = don't move.
     pub no_cursor_movement: bool,
 
+    // Relative-placement keys (Task 100.4).
+    /// Parent image id (`P`) — relative placement (Task 100.4).
+    pub parent_image_id: Option<u32>,
+    /// Parent placement id (`Q`) — relative placement (Task 100.4).
+    pub parent_placement_id: Option<u32>,
+    /// Horizontal cell offset from parent (`H`) — relative placement.
+    pub h_offset: Option<i32>,
+    /// Vertical cell offset from parent (`V`) — relative placement.
+    pub v_offset: Option<i32>,
+
     /// `d` — Delete target (only used when action is `Delete`).
     pub delete_target: Option<KittyDeleteTarget>,
 
@@ -353,6 +363,11 @@ fn apply_control_pair(
         b'C' => ctrl.no_cursor_movement = parse_u32(value)? != 0,
         b'd' => ctrl.delete_target = Some(parse_delete_target(value[0])?),
         b'U' => ctrl.unicode_placeholder = parse_u32(value)? != 0,
+        // Relative-placement keys (Task 100.4). P/Q are unsigned; H/V are signed.
+        b'P' => ctrl.parent_image_id = Some(parse_u32(value)?),
+        b'Q' => ctrl.parent_placement_id = Some(parse_u32(value)?),
+        b'H' => ctrl.h_offset = Some(parse_i32(value)?),
+        b'V' => ctrl.v_offset = Some(parse_i32(value)?),
         // Unknown keys are silently ignored per the protocol spec.
         _ => {}
     }
@@ -817,6 +832,19 @@ mod tests {
         let apc = make_apc("a=p,i=1,p=7", "");
         let cmd = parse_kitty_graphics(&apc).unwrap();
         assert_eq!(cmd.control.placement_id, Some(7));
+    }
+
+    #[test]
+    fn parse_relative_placement_keys() {
+        // P and Q are unsigned (u32); H and V are signed (i32).
+        let apc = make_apc("a=p,i=1,P=5,Q=3,H=-2,V=4", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.action, Some(KittyAction::Put));
+        assert_eq!(cmd.control.image_id, Some(1));
+        assert_eq!(cmd.control.parent_image_id, Some(5));
+        assert_eq!(cmd.control.parent_placement_id, Some(3));
+        assert_eq!(cmd.control.h_offset, Some(-2));
+        assert_eq!(cmd.control.v_offset, Some(4));
     }
 
     #[test]

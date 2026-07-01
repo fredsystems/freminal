@@ -162,7 +162,6 @@ same file at the same instant.
 ### 110.0 — Shared foundation (land first, on `v0.11.0-kitty`)
 
 Scope: `freminal-common/src/buffer_states/window_manipulation.rs`
-Scope: `freminal-common/src/buffer_states/window_manipulation.rs`
 (a **new** `WindowManipulation::Notification99` variant + `NotificationKind`),
 `freminal-common/src/config.rs` (`NotificationsConfig` + `ConfigPartial` +
 `apply_partial`), `freminal-common/src/buffer_states/kitty_graphics.rs`
@@ -217,6 +216,70 @@ Note: 99.4, 99.8, 100.4, and 101.2 in the task sections below retain their full
 descriptions, but with 110.0 landed they become "populate/extend the shell 110.0
 added" rather than "introduce the type". Re-scope their file lists at execution
 time to exclude the shared-type edits 110.0 already made.
+
+#### 110.0 execution decisions (recorded 2026-07-01, at execution against the real seams)
+
+Recon of the four seams confirmed the plan and resolved the open shape choices.
+These are the Opus decisions the implementer must follow (they are not open
+questions):
+
+- **`Notification99` field types are primitive shells, refined later.** The
+  variant carries `id: Option<String>`, `title: Option<String>`,
+  `body: Option<String>`, `icon_data: Option<Vec<u8>>`, `icon_names: Vec<String>`,
+  `icon_cache_key: Option<String>`, `button_labels: Vec<String>`,
+  `report_activation: bool` (the `a=report` flag), `close_report: bool` (the `c=1`
+  flag), `urgency: Option<u8>` (0/1/2), `occasion: Option<String>`,
+  `sound: Option<String>`, `app_name: Option<String>`,
+  `notification_type: Vec<String>`, `expire_ms: Option<i64>`. Domain enums for
+  urgency/occasion/action are **owned by 99.1's typed parser** in
+  `freminal-common`; 110.0 does **not** invent a competing enum family, and 99.4
+  refines these primitive fields to the parser's typed enums when it wires the
+  real path. `NotificationKind` is **not** modified (it stays OSC 9/777-only).
+- **Transport is the `WindowCommand` channel, not the snapshot.** Per
+  `KITTY_PROTOCOL_REFERENCE.md`, the new variant travels
+  `terminal_handler` → `window_commands` → `pty.rs` classification
+  (`WindowCommand::Viewport`/`Report`) → GUI `rendering.rs`. The 110.0
+  deliverable's "snapshot round-trip test" wording is superseded: the test is a
+  **construct + clone + pattern-match** unit test on the `Notification99` variant
+  (and, if cheap, a `WindowCommand::Report(Notification99{…})` wrap/unwrap
+  assertion). No `TerminalSnapshot` field is added.
+- **One unavoidable inert GUI arm.** `freminal/src/gui/rendering.rs`
+  `handle_window_manipulation` is the only **exhaustive** match on
+  `WindowManipulation` (no wildcard). Adding the variant forces a new arm there or
+  the workspace will not compile. 110.0 adds a **behaviour-free placeholder** arm
+  (log at `trace!`, drop the command, comment pointing to 99.5) — this is the
+  minimum to keep `cargo test --all` green and is **not** OSC 99 GUI behaviour
+  (that is 99.5). `pty.rs` needs no change: its `_ => WindowCommand::Viewport(cmd)`
+  wildcard already absorbs the new variant (99.x will reclassify it to `Report`).
+- **Config `osc_99` is wired end-to-end as a _loadable_ option now; the routing
+  gate stays in 99.8.** Because `NotificationsConfig` already merges atomically
+  through `ConfigPartial`/`apply_partial`, the new field rides the existing section
+  merge (no new `apply_partial` arm). "Full `freminal-config-options` wiring" for
+  a _loadable/persistable_ option means, in addition to the field + `Default`:
+  `config_example.toml` (`[notifications]` block), the Nix home-manager module
+  mirror (`nix/home-manager-module.nix`: add `osc_99` to the
+  `notificationsSection` `inherit` list **and** an `osc_99` `mkOption`), the
+  Settings-UI toggle (`freminal/src/gui/settings.rs`, mirroring the `osc_9`/
+  `osc_777` checkboxes), the round-trip test (`notifications_round_trip_through_toml`),
+  and a dedicated partial-merge test (mirror the existing `osc_9 = false` partial
+  test). The **drain-site behaviour gate** (actually consulting `osc_99` when
+  routing an OSC 99 notification) is explicitly **out of 110.0** and lands in 99.8.
+- **`modifier_param()` widens `Option<u8>` → `Option<u16>`.** Max is
+  `1 + 255 = 256`, which overflows `u8`. All ~15 callers are inside
+  `input.rs`; the four format helpers (`modified_csi_final`, `modified_csi_tilde`,
+  `kkp_csi_final_event`, `kkp_csi_tilde_event`) and `build_csi_u`'s
+  `modifier_param: Option<u8>` parameter widen to `u16` in tandem so no `as` cast
+  is introduced (values flow only into `format!` display). New `KeyModifiers`
+  bits (`super_key`=8, `hyper`=16, `meta`=32, `caps_lock`=64, `num_lock`=128)
+  default false and are added to `is_empty()` and the `NONE` constant; no bit is
+  populated from any input source in 110.0.
+- **Scope expansion (recorded).** The literal 110.0 Scope line named only the four
+  code files; this execution adds the config-companion files above
+  (`config_example.toml`, `nix/home-manager-module.nix`,
+  `freminal/src/gui/settings.rs`) and the one inert GUI arm
+  (`freminal/src/gui/rendering.rs`), all **required** by the plan's own
+  `freminal-config-options` reference and by the exhaustive-match compile
+  constraint. No behaviour is added.
 
 ---
 

@@ -1731,6 +1731,10 @@ impl SettingsModal {
             "OSC 777 (urxvt notify;TITLE;BODY)",
         );
         ui.checkbox(
+            &mut self.draft.notifications.osc_99,
+            "OSC 99 (kitty stateful notifications)",
+        );
+        ui.checkbox(
             &mut self.draft.notifications.on_command_finished,
             "Command finished (OSC 133 D)",
         );

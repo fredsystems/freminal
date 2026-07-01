@@ -161,6 +161,12 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers) -> KeyModifiers {
         shift: m.shift,
         ctrl: m.ctrl || m.command,
         alt: m.alt,
+        // super_key, hyper, meta, caps_lock, num_lock: populated by Task 101.2.
+        super_key: false,
+        hyper: false,
+        meta: false,
+        caps_lock: false,
+        num_lock: false,
     }
 }
 
