@@ -98,6 +98,7 @@ impl TerminalHandler {
             display_rows,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
         // In DECSDM display mode (?80 h), the cursor does not advance past

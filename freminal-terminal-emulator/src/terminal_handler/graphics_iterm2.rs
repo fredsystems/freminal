@@ -100,6 +100,7 @@ impl TerminalHandler {
             display_rows,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
         // Save cursor position if doNotMoveCursor is set — iTerm2 protocol

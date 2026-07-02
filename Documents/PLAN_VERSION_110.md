@@ -812,7 +812,16 @@ sub-passes** (mirroring the 99.5a/99.5b/99.5c precedent), each leaving
   behaviour, no GUI change. Leaves a single-frame image behaving exactly as today.
 - **100.2b — animation handler `a=f`/`a=a`/`a=c` + frame-chunking (behaviour,
   headless-testable).** Scope: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
-  only. Ingests frames into the 100.2a model with the **key re-aliasing table**
+  **and** `freminal-buffer/src/image_store.rs`. The `image_store.rs` inclusion
+  (a refinement of the 100.2a boundary): `a=a` control commands carry declarative
+  animation-playback state (run/stop mode `s=`, loop count `v=`, app-forced
+  current frame `c=`) that the handler must record on the image and the snapshot
+  must ship for the GUI's wall-clock selector (100.2c) to read. That state is
+  plain data (not wall-clock), so it lives on `InlineImage` as a new
+  `AnimationControl` — set here in 100.2b, consumed in 100.2c. Making the handler
+  headless-testable (assert frames added, gaps, compose results, loop/run state in
+  the buffer) requires this buffer-side state. Ingests frames into the 100.2a
+  model with the **key re-aliasing table**
   (parser stores animation keys under transmit/display-named fields; the handler
   re-interprets by action per `KITTY_PROTOCOL_REFERENCE.md`), including
   partial-frame rects, compose background (`c=`/`Y=`), blend (`X=`), edit (`r=`),

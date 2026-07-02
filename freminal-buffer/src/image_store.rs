@@ -48,6 +48,48 @@ pub struct ImageFrame {
     pub gap_ms: u32,
 }
 
+/// Animation run mode requested by `a=a s=` control commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnimationRunMode {
+    /// `s=1` — animation stopped (hold current frame).
+    #[default]
+    Stopped,
+    /// `s=2` — run, but in "loading" mode: when the last available frame is
+    /// reached, wait for more frames instead of looping.
+    RunLoading,
+    /// `s=3` — run normally (loop per `loop_count`).
+    Running,
+}
+
+/// Declarative animation-playback state carried on an animated image.
+///
+/// Set by kitty `a=a` control commands on the PTY thread; shipped in the
+/// snapshot; consumed by the GUI's wall-clock frame selector (100.2c). Holds
+/// only *declared* parameters — NOT the wall-clock playback cursor (that is
+/// GUI-side, ephemeral, and never in the buffer or snapshot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationControl {
+    /// Run/stop mode (`s=`).
+    pub run_mode: AnimationRunMode,
+    /// Loop count (`v=`): `0` ignored (keep prior), `1` = infinite (default),
+    /// `N>=2` = play `N-1` loops then stop.
+    pub loop_count: u32,
+    /// App-forced current frame (`a=a c=`, 1-based). `0` = not forced; the GUI
+    /// advances by wall-clock. When non-zero, the GUI shows this frame and (if
+    /// running) resumes advancing from it.
+    pub current_frame: u32,
+}
+
+impl Default for AnimationControl {
+    fn default() -> Self {
+        Self {
+            run_mode: AnimationRunMode::Stopped,
+            loop_count: 1,
+            current_frame: 0,
+        }
+    }
+}
+
 /// An inline image stored in the terminal buffer.
 ///
 /// The pixel data is behind an `Arc` so that snapshots can reference it without
@@ -82,6 +124,10 @@ pub struct InlineImage {
     /// Gap to the next frame for the ROOT frame (frame 1), in milliseconds
     /// (kitty root-frame gap, set via `a=a` control; default `0`).
     pub root_gap_ms: u32,
+
+    /// Declarative animation-playback state (set by `a=a`). Default for a
+    /// still image; only meaningful once `frames` is non-empty.
+    pub animation: AnimationControl,
 }
 
 impl InlineImage {
@@ -96,6 +142,83 @@ impl InlineImage {
     #[must_use]
     pub const fn is_animated(&self) -> bool {
         !self.frames.is_empty()
+    }
+
+    /// Borrow a frame's pixel buffer by 1-based frame number (1 = root).
+    ///
+    /// Returns `None` if the frame does not exist.
+    #[must_use]
+    pub fn frame_pixels(&self, frame_1based: u32) -> Option<&Arc<Vec<u8>>> {
+        match frame_1based {
+            0 => None,
+            1 => Some(&self.pixels),
+            n => {
+                let idx = usize::try_from(n - 2).ok()?;
+                self.frames.get(idx).map(|f| &f.pixels)
+            }
+        }
+    }
+
+    /// Number of RGBA bytes one full frame occupies
+    /// (`width_px * height_px * 4`).
+    #[must_use]
+    pub fn frame_byte_len(&self) -> usize {
+        let w = usize::try_from(self.width_px).unwrap_or(0);
+        let h = usize::try_from(self.height_px).unwrap_or(0);
+        w.saturating_mul(h).saturating_mul(4)
+    }
+
+    /// Append a new frame (its frame number becomes `frame_count() + 1`
+    /// as observed before this call).
+    pub fn push_frame(&mut self, pixels: Arc<Vec<u8>>, gap_ms: u32) {
+        self.frames.push(ImageFrame { pixels, gap_ms });
+    }
+
+    /// Replace an existing frame's pixel data by 1-based frame number
+    /// (1 = root). Returns `false` if the frame does not exist.
+    pub fn set_frame_pixels(&mut self, frame_1based: u32, pixels: Arc<Vec<u8>>) -> bool {
+        match frame_1based {
+            0 => false,
+            1 => {
+                self.pixels = pixels;
+                true
+            }
+            n => {
+                let Ok(idx) = usize::try_from(n - 2) else {
+                    return false;
+                };
+                if let Some(frame) = self.frames.get_mut(idx) {
+                    frame.pixels = pixels;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Set the gap (ms) for an existing frame by 1-based frame number
+    /// (1 = root, which stores its gap in `root_gap_ms`). Returns `false`
+    /// if the frame does not exist.
+    pub fn set_frame_gap(&mut self, frame_1based: u32, gap_ms: u32) -> bool {
+        match frame_1based {
+            0 => false,
+            1 => {
+                self.root_gap_ms = gap_ms;
+                true
+            }
+            n => {
+                let Ok(idx) = usize::try_from(n - 2) else {
+                    return false;
+                };
+                if let Some(frame) = self.frames.get_mut(idx) {
+                    frame.gap_ms = gap_ms;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 }
 
@@ -251,6 +374,7 @@ mod tests {
             display_rows: rows,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: AnimationControl::default(),
         }
     }
 
@@ -532,5 +656,122 @@ mod tests {
             "cloning InlineImage must share frame pixel Arcs by refcount, not deep copy"
         );
         assert_eq!(Arc::strong_count(&img.frames[0].pixels), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // InlineImage animation frame helpers (Task 100.2b)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn animation_control_default_is_stopped_with_infinite_loop() {
+        let ctrl = AnimationControl::default();
+        assert_eq!(ctrl.run_mode, AnimationRunMode::Stopped);
+        assert_eq!(ctrl.loop_count, 1);
+        assert_eq!(ctrl.current_frame, 0);
+    }
+
+    #[test]
+    fn inline_image_default_animation_state_is_default() {
+        let img = make_test_image(1, 2, 2);
+        assert_eq!(img.animation, AnimationControl::default());
+    }
+
+    #[test]
+    fn frame_pixels_root_and_additional_frames() {
+        let mut img = make_test_image(1, 2, 2);
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![1u8; 16]),
+            gap_ms: 40,
+        });
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![2u8; 16]),
+            gap_ms: 40,
+        });
+
+        assert!(
+            Arc::ptr_eq(
+                img.frame_pixels(1).expect("frame 1 (root) should exist"),
+                &img.pixels
+            ),
+            "frame_pixels(1) should return the root pixels"
+        );
+        assert!(
+            Arc::ptr_eq(
+                img.frame_pixels(2).expect("frame 2 should exist"),
+                &img.frames[0].pixels
+            ),
+            "frame_pixels(2) should return frames[0]"
+        );
+        assert!(
+            Arc::ptr_eq(
+                img.frame_pixels(3).expect("frame 3 should exist"),
+                &img.frames[1].pixels
+            ),
+            "frame_pixels(3) should return frames[1]"
+        );
+        assert!(
+            img.frame_pixels(99).is_none(),
+            "frame_pixels(99) should be None for a nonexistent frame"
+        );
+        assert!(
+            img.frame_pixels(0).is_none(),
+            "frame_pixels(0) is not a valid 1-based frame number"
+        );
+    }
+
+    #[test]
+    fn frame_byte_len_computes_width_times_height_times_4() {
+        let img = make_test_image(1, 4, 3); // width_px = 32, height_px = 48
+        assert_eq!(img.frame_byte_len(), 32 * 48 * 4);
+    }
+
+    #[test]
+    fn push_frame_appends_and_is_visible_via_frame_pixels() {
+        let mut img = make_test_image(1, 2, 2);
+        assert_eq!(img.frame_count(), 1);
+
+        img.push_frame(Arc::new(vec![9u8; 16]), 40);
+
+        assert_eq!(img.frame_count(), 2);
+        assert!(img.is_animated());
+        assert_eq!(
+            img.frame_pixels(2).expect("frame 2 should exist").as_ref(),
+            &vec![9u8; 16]
+        );
+        assert_eq!(img.frames[0].gap_ms, 40);
+    }
+
+    #[test]
+    fn set_frame_pixels_edits_root_and_additional_frames() {
+        let mut img = make_test_image(1, 2, 2);
+        img.push_frame(Arc::new(vec![0u8; 16]), 40);
+
+        assert!(img.set_frame_pixels(1, Arc::new(vec![7u8; 16])));
+        assert_eq!(img.pixels.as_ref(), &vec![7u8; 16]);
+
+        assert!(img.set_frame_pixels(2, Arc::new(vec![8u8; 16])));
+        assert_eq!(img.frames[0].pixels.as_ref(), &vec![8u8; 16]);
+
+        assert!(
+            !img.set_frame_pixels(99, Arc::new(vec![0u8; 16])),
+            "editing a nonexistent frame should return false"
+        );
+    }
+
+    #[test]
+    fn set_frame_gap_updates_root_gap_ms_and_frame_gap_ms() {
+        let mut img = make_test_image(1, 2, 2);
+        img.push_frame(Arc::new(vec![0u8; 16]), 0);
+
+        assert!(img.set_frame_gap(1, 50));
+        assert_eq!(img.root_gap_ms, 50);
+
+        assert!(img.set_frame_gap(2, 75));
+        assert_eq!(img.frames[0].gap_ms, 75);
+
+        assert!(
+            !img.set_frame_gap(99, 10),
+            "setting gap on a nonexistent frame should return false"
+        );
     }
 }

@@ -25,10 +25,15 @@ use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, format_kitty_response,
 };
 
-use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{AnimationRunMode, ImageProtocol, InlineImage, next_image_id};
 
 use super::KittyImageState;
 use super::TerminalHandler;
+
+/// Default gap (ms) kitty applies to a newly-created animation frame when
+/// `z=` is absent or `0`. The root frame's default gap remains `0`
+/// (tracked separately via `InlineImage::root_gap_ms`).
+const DEFAULT_ANIMATION_FRAME_GAP_MS: u32 = 40;
 
 impl TerminalHandler {
     /// Dispatch a parsed Kitty graphics command.
@@ -77,12 +82,20 @@ impl TerminalHandler {
             KittyAction::Delete => {
                 self.handle_kitty_delete(&cmd);
             }
-            KittyAction::AnimationFrame
-            | KittyAction::AnimationControl
-            | KittyAction::AnimationCompose => {
-                tracing::warn!(
-                    "Kitty graphics: animation commands not yet supported (a={action:?})"
-                );
+            KittyAction::AnimationFrame => {
+                if cmd.control.more_data {
+                    // First chunk of a chunked animation-frame transfer —
+                    // reuse the same accumulation path as image transmit.
+                    self.handle_kitty_chunk_start(cmd);
+                } else {
+                    self.handle_kitty_animation_frame(&cmd);
+                }
+            }
+            KittyAction::AnimationControl => {
+                self.handle_kitty_animation_control(&cmd);
+            }
+            KittyAction::AnimationCompose => {
+                self.handle_kitty_animation_compose(&cmd);
             }
         }
     }
@@ -181,7 +194,11 @@ impl TerminalHandler {
                 control: final_state.control,
                 payload: final_state.accumulated_data,
             };
-            self.handle_kitty_single(&final_cmd, action);
+            if action == KittyAction::AnimationFrame {
+                self.handle_kitty_animation_frame(&final_cmd);
+            } else {
+                self.handle_kitty_single(&final_cmd, action);
+            }
         }
     }
 
@@ -289,6 +306,7 @@ impl TerminalHandler {
             display_rows,
             frames: stored_image.frames.clone(),
             root_gap_ms: stored_image.root_gap_ms,
+            animation: stored_image.animation,
         };
 
         // Update the store with the possibly-resized image.
@@ -659,6 +677,7 @@ impl TerminalHandler {
             display_rows,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
         self.buffer.image_store_mut().insert(inline_image.clone());
@@ -702,6 +721,339 @@ impl TerminalHandler {
         if quiet < 1 && assigned_id > 0 {
             let response_id = u32::value_from(assigned_id).unwrap_or(0);
             let response = format_kitty_response(response_id, control.placement_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
+    /// Handle `a=f` — transmit an animation frame.
+    ///
+    /// The transmitted rectangle (`x`/`y`/`s`/`v`) is composited onto a base
+    /// canvas — either an existing frame (`c=`) or a fresh background-filled
+    /// canvas (`Y=`) — using alpha-blend or overwrite (`X=`). The result is
+    /// either patched into an existing frame (`r=`) or appended as a new
+    /// frame, with an optional gap (`z=`) to the next frame.
+    fn handle_kitty_animation_frame(&mut self, cmd: &KittyGraphicsCommand) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+        let id = u64::from(image_id_hint);
+
+        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
+            return;
+        };
+
+        if cmd.payload.is_empty() {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENODATA:no payload");
+            return;
+        }
+
+        // Under `a=f`, `s`/`v` retain their transmit-group meaning (width and
+        // height of the transmitted rectangle); default to the full image
+        // dimensions when absent, per spec.
+        let mut effective_control = cmd.control.clone();
+        if effective_control.src_width.is_none() {
+            effective_control.src_width = Some(stored_image.width_px);
+        }
+        if effective_control.src_height.is_none() {
+            effective_control.src_height = Some(stored_image.height_px);
+        }
+        let effective_cmd = KittyGraphicsCommand {
+            control: effective_control,
+            payload: cmd.payload.clone(),
+        };
+
+        let Some((rect_pixels, rect_w, rect_h)) =
+            self.decode_kitty_payload(&effective_cmd, image_id_hint, placement_id, quiet)
+        else {
+            return; // Error already sent by decode_kitty_payload.
+        };
+
+        // Destination origin within the frame (`x`/`y`, default 0).
+        let dest_x = cmd.control.src_x.unwrap_or(0);
+        let dest_y = cmd.control.src_y.unwrap_or(0);
+
+        let canvas_w = stored_image.width_px;
+        let canvas_h = stored_image.height_px;
+
+        // Base canvas: `c=` (display_cols under a=f) seeds from an existing
+        // frame; otherwise a fresh background-colored (`Y=`) canvas.
+        let mut canvas: Vec<u8> = match cmd.control.display_cols {
+            Some(base_frame) if base_frame > 0 => {
+                let Some(base_pixels) = stored_image.frame_pixels(base_frame) else {
+                    self.send_kitty_error(
+                        image_id_hint,
+                        placement_id,
+                        quiet,
+                        "ENOENT:base frame not found",
+                    );
+                    return;
+                };
+                base_pixels.as_ref().clone()
+            }
+            _ => {
+                let bg = cmd.control.cell_y_offset.unwrap_or(0);
+                new_canvas_filled(canvas_w, canvas_h, bg)
+            }
+        };
+
+        // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
+        let overwrite = cmd.control.cell_x_offset.unwrap_or(0) != 0;
+        if let Err(msg) = composite_rect(
+            &mut canvas,
+            canvas_w,
+            canvas_h,
+            &rect_pixels,
+            rect_w,
+            rect_h,
+            dest_x,
+            dest_y,
+            overwrite,
+        ) {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, msg);
+            return;
+        }
+
+        // Gap-to-next-frame (`z=`).
+        let gap_ms = resolve_gap_ms(cmd.control.z_index);
+
+        let mut image_to_store = stored_image;
+        // Edit target: `r=` (display_rows under a=f) patches an existing
+        // frame; absent means append a new frame.
+        if let Some(edit_frame) = cmd.control.display_rows.filter(|&r| r > 0) {
+            if !image_to_store.set_frame_pixels(edit_frame, std::sync::Arc::new(canvas)) {
+                self.send_kitty_error(
+                    image_id_hint,
+                    placement_id,
+                    quiet,
+                    "ENOENT:edit frame not found",
+                );
+                return;
+            }
+            if let Some(gap) = gap_ms {
+                image_to_store.set_frame_gap(edit_frame, gap);
+            }
+        } else {
+            let new_gap = gap_ms.unwrap_or(DEFAULT_ANIMATION_FRAME_GAP_MS);
+            image_to_store.push_frame(std::sync::Arc::new(canvas), new_gap);
+        }
+
+        self.buffer.image_store_mut().insert(image_to_store);
+
+        if quiet < 1 {
+            let response = format_kitty_response(image_id_hint, placement_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
+    /// Handle `a=a` — control animation playback.
+    ///
+    /// Sets run/stop mode (`s=`), loop count (`v=`), app-forced current frame
+    /// (`c=`), and per-frame gap (`r=`/`z=`) on the image's declarative
+    /// `AnimationControl`. Per kitty convention, `a=a` never sends an OK
+    /// response (errors are still surfaced).
+    fn handle_kitty_animation_control(&mut self, cmd: &KittyGraphicsCommand) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+        let id = u64::from(image_id_hint);
+
+        let Some(mut stored_image) = self.buffer.image_store().get(id).cloned() else {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
+            return;
+        };
+
+        // `s` (src_width under a=a) — run mode.
+        if let Some(s) = cmd.control.src_width {
+            stored_image.animation.run_mode = match s {
+                1 => AnimationRunMode::Stopped,
+                2 => AnimationRunMode::RunLoading,
+                3 => AnimationRunMode::Running,
+                _ => stored_image.animation.run_mode,
+            };
+        }
+
+        // `v` (src_height under a=a) — loop count; `0` ignored.
+        if let Some(v) = cmd.control.src_height
+            && v != 0
+        {
+            stored_image.animation.loop_count = v;
+        }
+
+        // `c` (display_cols under a=a) — app-forced current frame.
+        if let Some(c) = cmd.control.display_cols {
+            stored_image.animation.current_frame = c;
+        }
+
+        // `r`/`z` (display_rows/z_index under a=a) — per-frame gap target.
+        if let Some(r) = cmd.control.display_rows
+            && let Some(gap) = resolve_gap_ms(cmd.control.z_index)
+        {
+            stored_image.set_frame_gap(r, gap);
+        }
+
+        self.buffer.image_store_mut().insert(stored_image);
+
+        // `a=a` is silent by kitty convention — no OK/ACK response is sent
+        // even when quiet < 1.
+    }
+
+    /// Resolve the `a=c` source (`r=`) and destination (`c=`) 1-based frame
+    /// numbers from control data, sending `EINVAL` and returning `None` if
+    /// either is missing.
+    fn require_compose_frame_numbers(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        image_id_hint: u32,
+        placement_id: Option<u32>,
+        quiet: u8,
+    ) -> Option<(u32, u32)> {
+        let Some(src_frame) = cmd.control.display_rows else {
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:missing source frame (r)",
+            );
+            return None;
+        };
+        let Some(dest_frame) = cmd.control.display_cols else {
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:missing destination frame (c)",
+            );
+            return None;
+        };
+        Some((src_frame, dest_frame))
+    }
+
+    /// Borrow (and clone the `Arc`) a frame's pixels by 1-based frame number,
+    /// sending `ENOENT` and returning `None` if the frame does not exist.
+    fn require_compose_frame_pixels(
+        &self,
+        image: &InlineImage,
+        frame: u32,
+        image_id_hint: u32,
+        placement_id: Option<u32>,
+        quiet: u8,
+    ) -> Option<std::sync::Arc<Vec<u8>>> {
+        let Some(pixels) = image.frame_pixels(frame).cloned() else {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:frame not found");
+            return None;
+        };
+        Some(pixels)
+    }
+
+    /// Handle `a=c` — compose animation frames.
+    ///
+    /// Copies a pixel rectangle from a source frame (`r=`, offset `X`/`Y`)
+    /// onto a destination frame (`c=`, offset `x`/`y`), sized `w`/`h`, using
+    /// alpha-blend or overwrite (`C=`).
+    fn handle_kitty_animation_compose(&mut self, cmd: &KittyGraphicsCommand) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+        let id = u64::from(image_id_hint);
+
+        let Some(mut stored_image) = self.buffer.image_store().get(id).cloned() else {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
+            return;
+        };
+
+        let Some((src_frame, dest_frame)) =
+            self.require_compose_frame_numbers(cmd, image_id_hint, placement_id, quiet)
+        else {
+            return;
+        };
+
+        let Some(src_pixels) = self.require_compose_frame_pixels(
+            &stored_image,
+            src_frame,
+            image_id_hint,
+            placement_id,
+            quiet,
+        ) else {
+            return;
+        };
+        let Some(dest_pixels) = self.require_compose_frame_pixels(
+            &stored_image,
+            dest_frame,
+            image_id_hint,
+            placement_id,
+            quiet,
+        ) else {
+            return;
+        };
+
+        let img_w = stored_image.width_px;
+        let img_h = stored_image.height_px;
+        let rect = resolve_compose_rect(cmd, img_w, img_h);
+
+        // Same-frame overlapping rects are invalid (reading and writing the
+        // same pixels in one compose is undefined).
+        if src_frame == dest_frame && rect.overlaps_self() {
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:overlapping same-frame rects",
+            );
+            return;
+        }
+
+        let Some(rect_pixels) = extract_rect(
+            &src_pixels,
+            img_w,
+            img_h,
+            rect.src_x,
+            rect.src_y,
+            rect.width,
+            rect.height,
+        ) else {
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:source rect out of bounds",
+            );
+            return;
+        };
+
+        // `C` (no_cursor_movement under a=c) — compose mode.
+        let overwrite = cmd.control.no_cursor_movement;
+
+        let mut dest_canvas = dest_pixels.as_ref().clone();
+        if let Err(msg) = composite_rect(
+            &mut dest_canvas,
+            img_w,
+            img_h,
+            &rect_pixels,
+            rect.width,
+            rect.height,
+            rect.dest_x,
+            rect.dest_y,
+            overwrite,
+        ) {
+            self.send_kitty_error(image_id_hint, placement_id, quiet, msg);
+            return;
+        }
+
+        if !stored_image.set_frame_pixels(dest_frame, std::sync::Arc::new(dest_canvas)) {
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "ENOENT:destination frame not found",
+            );
+            return;
+        }
+
+        self.buffer.image_store_mut().insert(stored_image);
+
+        if quiet < 1 {
+            let response = format_kitty_response(image_id_hint, placement_id, true, "");
             self.write_to_pty(&response);
         }
     }
@@ -813,6 +1165,221 @@ impl TerminalHandler {
             }
         }
     }
+}
+
+/// Resolved geometry for an `a=c` (animation compose) command: rect size
+/// plus the destination and source top-left coordinates.
+struct ComposeRect {
+    width: u32,
+    height: u32,
+    dest_x: u32,
+    dest_y: u32,
+    src_x: u32,
+    src_y: u32,
+}
+
+impl ComposeRect {
+    /// Returns `true` if the destination rect and source rect (same size,
+    /// different origins) overlap. Only meaningful when source and
+    /// destination are the same frame.
+    const fn overlaps_self(&self) -> bool {
+        let overlap_x = self.dest_x < self.src_x.saturating_add(self.width)
+            && self.src_x < self.dest_x.saturating_add(self.width);
+        let overlap_y = self.dest_y < self.src_y.saturating_add(self.height)
+            && self.src_y < self.dest_y.saturating_add(self.height);
+        overlap_x && overlap_y
+    }
+}
+
+/// Resolve `a=c` control data into compose rectangle geometry: `w`/`h`
+/// (`src_rect_width`/`src_rect_height`) default to the full image size when
+/// absent or `0`; `x`/`y` are the destination top-left, `X`/`Y`
+/// (`cell_x_offset`/`cell_y_offset`) are the source top-left.
+fn resolve_compose_rect(
+    cmd: &KittyGraphicsCommand,
+    img_width: u32,
+    img_height: u32,
+) -> ComposeRect {
+    let width = cmd
+        .control
+        .src_rect_width
+        .filter(|&w| w > 0)
+        .unwrap_or(img_width);
+    let height = cmd
+        .control
+        .src_rect_height
+        .filter(|&h| h > 0)
+        .unwrap_or(img_height);
+
+    ComposeRect {
+        width,
+        height,
+        dest_x: cmd.control.src_x.unwrap_or(0),
+        dest_y: cmd.control.src_y.unwrap_or(0),
+        src_x: cmd.control.cell_x_offset.unwrap_or(0),
+        src_y: cmd.control.cell_y_offset.unwrap_or(0),
+    }
+}
+
+/// Resolve a kitty `z=` gap value into a stored gap in milliseconds.
+///
+/// `None` or `Some(0)` means "leave the default unchanged" (returns `None`);
+/// a negative value means "gapless" (returns `Some(0)`); a positive value is
+/// used as-is.
+fn resolve_gap_ms(z: Option<i32>) -> Option<u32> {
+    match z {
+        None | Some(0) => None,
+        Some(v) if v < 0 => Some(0),
+        Some(v) => u32::try_from(v).ok(),
+    }
+}
+
+/// Build a fresh RGBA canvas of `width x height` pixels filled with `bg`, a
+/// packed 32-bit RGBA integer (`0xRRGGBBAA`). `bg == 0` yields transparent
+/// black.
+fn new_canvas_filled(width: u32, height: u32, bg: u32) -> Vec<u8> {
+    let width_px = usize::value_from(width).unwrap_or(0);
+    let height_px = usize::value_from(height).unwrap_or(0);
+    let pixel_count = width_px.saturating_mul(height_px);
+
+    let red = u8::try_from((bg >> 24) & 0xFF).unwrap_or(0);
+    let green = u8::try_from((bg >> 16) & 0xFF).unwrap_or(0);
+    let blue = u8::try_from((bg >> 8) & 0xFF).unwrap_or(0);
+    let alpha = u8::try_from(bg & 0xFF).unwrap_or(0);
+
+    let mut canvas = Vec::with_capacity(pixel_count.saturating_mul(4));
+    for _ in 0..pixel_count {
+        canvas.extend_from_slice(&[red, green, blue, alpha]);
+    }
+    canvas
+}
+
+/// Alpha-blend `src` over `dst` (straight, non-premultiplied RGBA), each a
+/// 4-byte `[r, g, b, a]` slice.
+fn alpha_blend(src: &[u8], dst: &[u8]) -> [u8; 4] {
+    let sa = u32::from(src[3]);
+    let da = u32::from(dst[3]);
+    let out_a = sa + da * (255 - sa) / 255;
+    if out_a == 0 {
+        return [0, 0, 0, 0];
+    }
+    let mut out = [0u8; 4];
+    for (channel, out_channel) in out.iter_mut().take(3).enumerate() {
+        let sc = u32::from(src[channel]);
+        let dc = u32::from(dst[channel]);
+        let mixed = (sc * sa + dc * da * (255 - sa) / 255) / out_a;
+        *out_channel = u8::try_from(mixed.min(255)).unwrap_or(255);
+    }
+    out[3] = u8::try_from(out_a.min(255)).unwrap_or(255);
+    out
+}
+
+/// Composite a decoded rectangle (`rect`, `rect_width x rect_height` RGBA)
+/// onto `canvas` (`canvas_width x canvas_height` RGBA) at `(dest_left,
+/// dest_top)`, either by alpha-blending (default) or overwriting.
+///
+/// Returns `Err(message)` if the rect does not fit within the canvas bounds.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+// Pixel-compositing geometry inherently needs all of these; grouping into a
+// struct would obscure the call sites without reducing coupling. The
+// width/height and x/y parameter pairs are the idiomatic naming for pixel
+// rects; renaming them away from that convention would reduce readability
+// without addressing any real ambiguity risk.
+fn composite_rect(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    rect: &[u8],
+    rect_width: u32,
+    rect_height: u32,
+    dest_left: u32,
+    dest_top: u32,
+    overwrite: bool,
+) -> Result<(), &'static str> {
+    let canvas_width_px = usize::value_from(canvas_width).unwrap_or(0);
+    let canvas_height_px = usize::value_from(canvas_height).unwrap_or(0);
+    let rect_width_px = usize::value_from(rect_width).unwrap_or(0);
+    let rect_height_px = usize::value_from(rect_height).unwrap_or(0);
+    let dest_left_px = usize::value_from(dest_left).unwrap_or(0);
+    let dest_top_px = usize::value_from(dest_top).unwrap_or(0);
+
+    if dest_left_px.saturating_add(rect_width_px) > canvas_width_px
+        || dest_top_px.saturating_add(rect_height_px) > canvas_height_px
+    {
+        return Err("EINVAL:rect out of bounds");
+    }
+
+    for row in 0..rect_height_px {
+        let src_row_start = row.saturating_mul(rect_width_px).saturating_mul(4);
+        let dst_row = dest_top_px + row;
+        for col in 0..rect_width_px {
+            let src_idx = src_row_start + col.saturating_mul(4);
+            let dst_col = dest_left_px + col;
+            let dst_idx = (dst_row.saturating_mul(canvas_width_px) + dst_col).saturating_mul(4);
+
+            let Some(src_px) = rect.get(src_idx..src_idx + 4) else {
+                continue;
+            };
+            let Some(dst_px) = canvas.get(dst_idx..dst_idx + 4) else {
+                continue;
+            };
+
+            let blended = if overwrite {
+                [src_px[0], src_px[1], src_px[2], src_px[3]]
+            } else {
+                alpha_blend(src_px, dst_px)
+            };
+
+            if let Some(dst) = canvas.get_mut(dst_idx..dst_idx + 4) {
+                dst.copy_from_slice(&blended);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract a `w x h` pixel rectangle at `(x, y)` from a full `img_w x img_h`
+/// RGBA buffer. Returns `None` if the rect is out of bounds.
+#[allow(clippy::similar_names)]
+// The width/height and x/y parameter pairs are the idiomatic naming for
+// pixel rects; renaming them away from that convention would reduce
+// readability without addressing any real ambiguity risk.
+fn extract_rect(
+    pixels: &[u8],
+    img_width: u32,
+    img_height: u32,
+    left: u32,
+    top: u32,
+    rect_width: u32,
+    rect_height: u32,
+) -> Option<Vec<u8>> {
+    let img_width_px = usize::value_from(img_width).unwrap_or(0);
+    let img_height_px = usize::value_from(img_height).unwrap_or(0);
+    let left_px = usize::value_from(left).unwrap_or(0);
+    let top_px = usize::value_from(top).unwrap_or(0);
+    let rect_width_px = usize::value_from(rect_width).unwrap_or(0);
+    let rect_height_px = usize::value_from(rect_height).unwrap_or(0);
+
+    if left_px.saturating_add(rect_width_px) > img_width_px
+        || top_px.saturating_add(rect_height_px) > img_height_px
+    {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(
+        rect_width_px
+            .saturating_mul(rect_height_px)
+            .saturating_mul(4),
+    );
+    for row in 0..rect_height_px {
+        let src_row = top_px + row;
+        let row_start = (src_row.saturating_mul(img_width_px) + left_px).saturating_mul(4);
+        let row_end = row_start.saturating_add(rect_width_px.saturating_mul(4));
+        let slice = pixels.get(row_start..row_end)?;
+        out.extend_from_slice(slice);
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -2343,18 +2910,13 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn kitty_animation_commands_not_supported() {
+    fn kitty_animation_commands_on_nonexistent_image_send_enoent() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyFormat,
         };
 
-        let (mut handler, _rx) = kitty_handler();
-
-        for action in [
-            KittyAction::AnimationFrame,
-            KittyAction::AnimationControl,
-            KittyAction::AnimationCompose,
-        ] {
+        for action in [KittyAction::AnimationFrame, KittyAction::AnimationCompose] {
+            let (mut handler, rx) = kitty_handler();
             let cmd = KittyGraphicsCommand {
                 control: KittyControlData {
                     action: Some(action),
@@ -2366,8 +2928,39 @@ mod tests {
                 },
                 payload: vec![0; 16],
             };
-            // Should not panic, just log a warning
             handler.handle_kitty_graphics(cmd);
+
+            let response = rx.try_recv().expect("expected an error response");
+            match response {
+                PtyWrite::Write(bytes) => {
+                    let s = String::from_utf8_lossy(&bytes);
+                    assert!(
+                        s.contains("ENOENT"),
+                        "expected ENOENT for {action:?}, got: {s}"
+                    );
+                }
+                PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+            }
+        }
+
+        // `a=a` is silent by convention on success, but still surfaces errors.
+        let (mut handler, rx) = kitty_handler();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(100),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(cmd);
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
         }
     }
 
@@ -3389,5 +3982,602 @@ mod tests {
             rx.try_recv().is_err(),
             "quiet=1 should suppress OK for supported format"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Kitty animation tests (Task 100.2b): a=f, a=a, a=c
+    // ------------------------------------------------------------------
+
+    /// Transmit a 2x2 opaque-black RGBA base image (store only) with the
+    /// given id and return the handler + receiver.
+    fn kitty_handler_with_black_2x2_base(
+        id: u32,
+    ) -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(id),
+                ..KittyControlData::default()
+            },
+            payload: [0, 0, 0, 255].repeat(4), // 4 opaque-black pixels
+        };
+        handler.handle_kitty_graphics(cmd);
+        // Drain the OK response from the transmit so later assertions on
+        // `rx` only see animation-command responses.
+        let _ = rx.try_recv();
+        (handler, rx)
+    }
+
+    /// Named parameters for [`kitty_animation_frame_cmd`], grouped into a
+    /// struct so the test helper doesn't trip `too_many_arguments` /
+    /// `many_single_char_names`.
+    #[derive(Default, Clone, Copy)]
+    struct AnimationFrameCmdParams {
+        rect_width: Option<u32>,
+        rect_height: Option<u32>,
+        dest_x: Option<u32>,
+        dest_y: Option<u32>,
+        base_frame: Option<u32>,
+        edit_frame: Option<u32>,
+        gap_ms: Option<i32>,
+        overwrite: bool,
+    }
+
+    fn kitty_animation_frame_cmd(
+        image_id: u32,
+        payload: Vec<u8>,
+        params: AnimationFrameCmdParams,
+    ) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationFrame),
+                format: Some(KittyFormat::Rgba),
+                src_width: params.rect_width,
+                src_height: params.rect_height,
+                src_x: params.dest_x,
+                src_y: params.dest_y,
+                display_cols: params.base_frame,
+                display_rows: params.edit_frame,
+                z_index: params.gap_ms,
+                cell_x_offset: if params.overwrite { Some(1) } else { None },
+                image_id: Some(image_id),
+                ..KittyControlData::default()
+            },
+            payload,
+        }
+    }
+
+    #[test]
+    fn kitty_animation_frame_creates_new_frame() {
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(60);
+
+        let payload: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+        let cmd = kitty_animation_frame_cmd(
+            60,
+            payload.clone(),
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(60)
+            .expect("image should still exist");
+        assert_eq!(img.frame_count(), 2, "root frame + 1 new frame");
+        assert_eq!(
+            img.frame_pixels(2).expect("frame 2 should exist").as_ref(),
+            &payload,
+            "opaque payload alpha-blended over a transparent canvas equals the payload"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_frame_edits_existing_frame_in_place() {
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(61);
+
+        // First, create frame 2 via a=f (no r=).
+        let first_payload: Vec<u8> = vec![1u8; 16];
+        let create_cmd = kitty_animation_frame_cmd(
+            61,
+            first_payload,
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(create_cmd);
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(61)
+                .expect("image exists")
+                .frame_count(),
+            2
+        );
+
+        // Now edit frame 2 in place (r=2).
+        let edit_payload: Vec<u8> = vec![2u8; 16];
+        let edit_cmd = kitty_animation_frame_cmd(
+            61,
+            edit_payload.clone(),
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                edit_frame: Some(2),
+                overwrite: true, // so blend math doesn't obscure the assertion
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(edit_cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(61)
+            .expect("image exists");
+        assert_eq!(
+            img.frame_count(),
+            2,
+            "editing in place must not add a frame"
+        );
+        assert_eq!(
+            img.frame_pixels(2).expect("frame 2 exists").as_ref(),
+            &edit_payload
+        );
+    }
+
+    #[test]
+    fn kitty_animation_frame_partial_rect_overwrite() {
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(62);
+
+        // Base canvas seeded from root (c=1); overwrite only the pixel at
+        // (x=1, y=0) with a distinct color.
+        let rect_payload: Vec<u8> = vec![10, 20, 30, 40];
+        let cmd = kitty_animation_frame_cmd(
+            62,
+            rect_payload.clone(),
+            AnimationFrameCmdParams {
+                rect_width: Some(1),
+                rect_height: Some(1),
+                dest_x: Some(1),
+                dest_y: Some(0),
+                base_frame: Some(1), // c=1: base canvas = root frame
+                overwrite: true,     // X=1: overwrite
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(62)
+            .expect("image exists");
+        let frame = img
+            .frame_pixels(2)
+            .expect("new frame should exist")
+            .as_ref();
+
+        // (0,0) and row 1 unchanged from the black base.
+        assert_eq!(&frame[0..4], &[0, 0, 0, 255], "pixel (0,0) unchanged");
+        assert_eq!(
+            &frame[8..16],
+            &[0, 0, 0, 255, 0, 0, 0, 255],
+            "row 1 unchanged"
+        );
+        // (1,0) overwritten with the rect payload.
+        assert_eq!(
+            &frame[4..8],
+            rect_payload.as_slice(),
+            "pixel (1,0) overwritten"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_frame_gap_ms_set_on_new_frame() {
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(63);
+
+        let cmd = kitty_animation_frame_cmd(
+            63,
+            vec![0u8; 16],
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                gap_ms: Some(100),
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(63)
+            .expect("image exists");
+        assert_eq!(img.frames[0].gap_ms, 100);
+    }
+
+    #[test]
+    fn kitty_animation_frame_missing_image_sends_enoent() {
+        let (mut handler, rx) = kitty_handler();
+        let cmd = kitty_animation_frame_cmd(
+            9999,
+            vec![0u8; 16],
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                ..Default::default()
+            },
+        );
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_animation_frame_chunked_transfer_reassembles() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(64);
+
+        let full_payload: Vec<u8> = vec![9, 9, 9, 255, 8, 8, 8, 255, 7, 7, 7, 255, 6, 6, 6, 255];
+
+        let chunk1 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationFrame),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(64),
+                more_data: true,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[..8].to_vec(),
+        };
+        let chunk2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                more_data: false,
+                ..KittyControlData::default()
+            },
+            payload: full_payload[8..].to_vec(),
+        };
+
+        handler.handle_kitty_graphics(chunk1);
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(64)
+                .expect("image exists")
+                .frame_count(),
+            1,
+            "frame should not appear until the final chunk"
+        );
+
+        handler.handle_kitty_graphics(chunk2);
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(64)
+            .expect("image exists");
+        assert_eq!(
+            img.frame_count(),
+            2,
+            "frame should appear after final chunk"
+        );
+        assert_eq!(
+            img.frame_pixels(2).expect("frame 2 exists").as_ref(),
+            &full_payload
+        );
+    }
+
+    #[test]
+    fn kitty_animation_control_updates_run_mode_loop_count_current_frame_and_gap() {
+        use freminal_buffer::image_store::AnimationRunMode;
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(65);
+
+        // v=3 sets loop_count.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(65),
+                src_height: Some(3), // v=
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(65)
+                .expect("image exists")
+                .animation
+                .loop_count,
+            3
+        );
+
+        // s=3 sets run_mode = Running.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(65),
+                src_width: Some(3), // s=
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(65)
+                .expect("image exists")
+                .animation
+                .run_mode,
+            AnimationRunMode::Running
+        );
+
+        // c=2 forces current_frame.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(65),
+                display_cols: Some(2), // c=
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(65)
+                .expect("image exists")
+                .animation
+                .current_frame,
+            2
+        );
+
+        // r=1,z=50 sets the root frame's gap.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(65),
+                display_rows: Some(1), // r=
+                z_index: Some(50),     // z=
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(65)
+                .expect("image exists")
+                .root_gap_ms,
+            50
+        );
+
+        // Loop count and run mode from earlier commands must have persisted
+        // (each a=a call re-reads then re-stores the image).
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(65)
+            .expect("image exists");
+        assert_eq!(img.animation.loop_count, 3);
+        assert_eq!(img.animation.run_mode, AnimationRunMode::Running);
+        assert_eq!(img.animation.current_frame, 2);
+    }
+
+    #[test]
+    fn kitty_animation_control_is_silent_on_success() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler_with_black_2x2_base(66);
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(66),
+                src_width: Some(3),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        assert!(
+            rx.try_recv().is_err(),
+            "a=a must not send an OK response even when quiet=0"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_control_missing_image_sends_enoent() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler();
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationControl),
+                image_id: Some(9998),
+                src_width: Some(3),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_animation_compose_overwrites_dest_rect_from_source_frame() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler_with_black_2x2_base(70);
+
+        // Create frame 2 (all-white) via a=f.
+        let white_payload: Vec<u8> = vec![255u8; 16];
+        handler.handle_kitty_graphics(kitty_animation_frame_cmd(
+            70,
+            white_payload,
+            AnimationFrameCmdParams {
+                rect_width: Some(2),
+                rect_height: Some(2),
+                overwrite: true,
+                ..Default::default()
+            },
+        ));
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(70)
+                .expect("image exists")
+                .frame_count(),
+            2
+        );
+
+        // Compose: copy pixel (0,0) from source frame 1 (root, black) onto
+        // destination frame 2 (white) at (0,0), overwrite mode.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationCompose),
+                image_id: Some(70),
+                display_rows: Some(1), // r= source frame
+                display_cols: Some(2), // c= destination frame
+                src_x: Some(0),
+                src_y: Some(0),
+                cell_x_offset: Some(0), // X= source rect x
+                cell_y_offset: Some(0), // Y= source rect y
+                src_rect_width: Some(1),
+                src_rect_height: Some(1),
+                no_cursor_movement: true, // C=1: overwrite
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(70)
+            .expect("image exists");
+        let dest = img.frame_pixels(2).expect("dest frame exists").as_ref();
+        assert_eq!(
+            &dest[0..4],
+            &[0, 0, 0, 255],
+            "composed pixel from black source"
+        );
+        assert_eq!(
+            &dest[4..16],
+            &[255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255],
+            "rest of dest frame unchanged"
+        );
+    }
+
+    #[test]
+    fn kitty_animation_compose_out_of_bounds_rect_sends_einval() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler_with_black_2x2_base(71);
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationCompose),
+                image_id: Some(71),
+                display_rows: Some(1),
+                display_cols: Some(1),
+                src_x: Some(0),
+                src_y: Some(0),
+                cell_x_offset: Some(0),
+                cell_y_offset: Some(0),
+                src_rect_width: Some(10), // out of bounds for a 2x2 image
+                src_rect_height: Some(10),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("EINVAL"), "expected EINVAL, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_animation_compose_missing_frame_sends_enoent() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, rx) = kitty_handler_with_black_2x2_base(72);
+
+        // Only frame 1 (root) exists — frame 2 does not.
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationCompose),
+                image_id: Some(72),
+                display_rows: Some(1),
+                display_cols: Some(2), // frame 2 does not exist
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
     }
 }

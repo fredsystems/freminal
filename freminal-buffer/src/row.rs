@@ -1487,6 +1487,7 @@ mod tests {
             display_rows: 1,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         });
 
         let mut row = Row::new(80);

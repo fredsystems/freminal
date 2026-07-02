@@ -3142,6 +3142,7 @@ mod image_tests {
             display_rows: rows,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         }
     }
 
@@ -7436,6 +7437,7 @@ mod coverage_gap_tests {
             display_rows: 1,
             frames: Vec::new(),
             root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         };
         // Place an image that spans 3 cols starting at col 4 → only col 4 fits
         buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0);
