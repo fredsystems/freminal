@@ -785,6 +785,68 @@ Prohibitions: do NOT touch unicode placeholders or relative placements; do NOT p
 
 Stop: report + await review.
 
+##### 100.2 execution decisions (recorded 2026-07-01, at execution against the real seams)
+
+A recon of the six 100.2 seams confirmed the plan and found that the literal
+single-subtask scope materially exceeds one Sonnet-sized pass: it spans 6 files
+across 3 crates and carries two subtle hazards — the renderer uploads exactly one
+GL texture per image id and never re-uploads when pixels change
+(`sync_image_textures` early-continues if the id already has a texture), so making
+it frame-aware is architecture-touching GPU work; and the compose-rectangle
+alpha-blend math plus the `a=f`/`a=a`/`a=c` key re-aliasing are error-prone.
+Maintainer-approved decision: **split 100.2 into three individually-reviewable
+sub-passes** (mirroring the 99.5a/99.5b/99.5c precedent), each leaving
+`cargo test --all` green, committed as `feat(v0.11.0): 100.2a/2b/2c`:
+
+- **100.2a — frame model + snapshot transport + response `p=` gap (data/types
+  layer).** Scope: `freminal-buffer/src/image_store.rs` (add a frame list to
+  `InlineImage` — per-frame pixels + gap-ms — keeping `ImageStore` pure and
+  time-free), `freminal-terminal-emulator/src/snapshot.rs` +
+  `freminal-terminal-emulator/src/interface.rs` (ship all frames per animated
+  image through `collect_visible_images`),
+  `freminal-common/src/buffer_states/kitty_graphics.rs` (add
+  `placement_id: Option<u32>` to `format_kitty_response`, emitting `,p=<pid>` when
+  non-zero) and its ~6 call sites + `send_kitty_error` in
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (query sites
+  pass `None`; put/place sites pass `control.placement_id`). No animation
+  behaviour, no GUI change. Leaves a single-frame image behaving exactly as today.
+- **100.2b — animation handler `a=f`/`a=a`/`a=c` + frame-chunking (behaviour,
+  headless-testable).** Scope: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  only. Ingests frames into the 100.2a model with the **key re-aliasing table**
+  (parser stores animation keys under transmit/display-named fields; the handler
+  re-interprets by action per `KITTY_PROTOCOL_REFERENCE.md`), including
+  partial-frame rects, compose background (`c=`/`Y=`), blend (`X=`), edit (`r=`),
+  gap (`z=`), control run/stop/loop (`s=`/`v=`/`c=`/`r=`/`z=`), compose
+  (`ENOENT`/`EINVAL`/`ENOSPC`), and correct routing of `a=f` + `m=1` chunked frame
+  transfers. Tested at buffer/handler level with no renderer dependency.
+- **100.2c — GUI wall-clock frame selector + renderer per-frame re-upload (the
+  display leg).** Scope: `freminal/src/gui/view_state.rs` (a wall-clock frame
+  selector in `ViewState`, mirroring the `text_blink_cycle`/`text_blink_last_tick`
+  tick precedent; the snapshot ships all frames, the GUI picks the current frame by
+  elapsed time — **no frame-index state in the snapshot**),
+  `freminal/src/gui/terminal/widget.rs` (plug the selector into the
+  `build_image_verts` call site where `view_state` is in scope),
+  `freminal/src/gui/renderer/vertex.rs` + `freminal/src/gui/renderer/gpu.rs` (make
+  `sync_image_textures`/`draw_images` frame-aware — re-upload / key textures by the
+  currently-selected frame so a frame change is drawn). Respects the lock-free
+  GUI/PTY split.
+
+**100.2a scope expansion (recorded).** Adding the two non-`Option` fields
+(`frames`, `root_gap_ms`) to `InlineImage` — which derives neither `Default` nor
+allows `..Default::default()` — forces a compile-break at every `InlineImage`
+struct literal in the workspace, not just the kitty ones. The 100.2a recon missed
+five: two **production** sites in the sixel and iTerm2 image handlers
+(`freminal-terminal-emulator/src/terminal_handler/graphics_sixel.rs`,
+`freminal-terminal-emulator/src/terminal_handler/graphics_iterm2.rs`) and three
+test literals (`freminal-buffer/src/buffer/mod.rs`, `freminal-buffer/src/row.rs`,
+`freminal-terminal-emulator/src/terminal_handler/mod.rs`). All five gain the
+still-image defaults (`frames: Vec::new(), root_gap_ms: 0`); this is a
+behaviour-neutral, compile-forced consequence, so 100.2a's file scope is expanded
+to include them. No behaviour changes in sixel/iTerm2 (both stay single-frame).
+
+The three sub-passes retain 100.2's overall deliverable and prohibitions; each
+stops at its own review gate.
+
 #### 100.3 — Unicode placeholders (U+10EEEE + diacritics)
 
 Scope: `terminal_handler/graphics_kitty.rs` (virtual placement on `a=p,U=1`), the cell

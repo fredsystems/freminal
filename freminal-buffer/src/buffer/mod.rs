@@ -3140,6 +3140,8 @@ mod image_tests {
             height_px: u32::try_from(rows * 16).unwrap(),
             display_cols: cols,
             display_rows: rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         }
     }
 
@@ -7432,6 +7434,8 @@ mod coverage_gap_tests {
             height_px: 1,
             display_cols: 3,
             display_rows: 1,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         };
         // Place an image that spans 3 cols starting at col 4 → only col 4 fits
         buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0);

@@ -29,6 +29,25 @@ pub fn next_image_id() -> u64 {
     NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// One additional animation frame (frame 2..N) for an animated image.
+///
+/// Frame 1 (the root frame) is the base image's `InlineImage.pixels`; these
+/// are the frames added by kitty `a=f` animation-frame commands. Frame pixels
+/// are RGBA (4 bytes/pixel), the same width/height as the root image, behind
+/// an `Arc` so snapshots clone by refcount, not deep copy.
+///
+/// This type carries NO wall-clock timing — only the per-frame gap in
+/// milliseconds. Frame *selection* by elapsed time is a GUI-side concern
+/// (`freminal`'s `ViewState`), never the buffer's.
+#[derive(Debug, Clone)]
+pub struct ImageFrame {
+    /// Decoded pixel data for this frame (RGBA, 4 bytes per pixel).
+    pub pixels: Arc<Vec<u8>>,
+    /// Gap to the next frame, in milliseconds (kitty `z=`, root default handled
+    /// separately). `0` means "use the protocol default".
+    pub gap_ms: u32,
+}
+
 /// An inline image stored in the terminal buffer.
 ///
 /// The pixel data is behind an `Arc` so that snapshots can reference it without
@@ -52,6 +71,32 @@ pub struct InlineImage {
 
     /// Display size in terminal rows.
     pub display_rows: usize,
+
+    /// Additional animation frames (frames 2..N). Empty for a still image.
+    ///
+    /// Frame 1 is the root frame in `pixels`; `frames[k]` is frame `k + 2`.
+    /// A still (non-animated) image has an empty `frames` vec and behaves
+    /// exactly as before this field existed.
+    pub frames: Vec<ImageFrame>,
+
+    /// Gap to the next frame for the ROOT frame (frame 1), in milliseconds
+    /// (kitty root-frame gap, set via `a=a` control; default `0`).
+    pub root_gap_ms: u32,
+}
+
+impl InlineImage {
+    /// Total number of frames including the root frame (frame 1).
+    /// A still image returns `1`.
+    #[must_use]
+    pub const fn frame_count(&self) -> usize {
+        1 + self.frames.len()
+    }
+
+    /// Returns `true` if this image has more than one frame (is animated).
+    #[must_use]
+    pub const fn is_animated(&self) -> bool {
+        !self.frames.is_empty()
+    }
 }
 
 /// Which image protocol placed this image.
@@ -204,6 +249,8 @@ mod tests {
             height_px: u32::try_from(rows * 16).unwrap(),
             display_cols: cols,
             display_rows: rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         }
     }
 
@@ -440,5 +487,50 @@ mod tests {
         assert_eq!(store.len(), 2, "both images should be retained");
         assert!(store.contains(id1));
         assert!(store.contains(id2));
+    }
+
+    // -----------------------------------------------------------------------
+    // InlineImage animation frame model (Task 100.2a)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn inline_image_with_frames_reports_correct_frame_count_and_is_animated() {
+        let mut img = make_test_image(1, 2, 2);
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![0u8; 16]),
+            gap_ms: 100,
+        });
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![0u8; 16]),
+            gap_ms: 100,
+        });
+
+        assert_eq!(img.frame_count(), 3, "root frame + 2 additional frames");
+        assert!(img.is_animated());
+    }
+
+    #[test]
+    fn inline_image_still_image_has_frame_count_one_and_is_not_animated() {
+        let img = make_test_image(1, 2, 2);
+
+        assert_eq!(img.frame_count(), 1, "still image is just the root frame");
+        assert!(!img.is_animated());
+    }
+
+    #[test]
+    fn inline_image_clone_shares_frame_pixel_arcs() {
+        let mut img = make_test_image(1, 2, 2);
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![1u8; 16]),
+            gap_ms: 50,
+        });
+
+        let cloned = img.clone();
+
+        assert!(
+            Arc::ptr_eq(&img.frames[0].pixels, &cloned.frames[0].pixels),
+            "cloning InlineImage must share frame pixel Arcs by refcount, not deep copy"
+        );
+        assert_eq!(Arc::strong_count(&img.frames[0].pixels), 2);
     }
 }

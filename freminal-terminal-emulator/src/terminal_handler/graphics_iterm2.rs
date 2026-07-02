@@ -98,6 +98,8 @@ impl TerminalHandler {
             height_px: img_height_px,
             display_cols,
             display_rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         };
 
         // Save cursor position if doNotMoveCursor is set — iTerm2 protocol

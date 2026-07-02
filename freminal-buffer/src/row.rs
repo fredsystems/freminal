@@ -1485,6 +1485,8 @@ mod tests {
             height_px: 16,
             display_cols: 1,
             display_rows: 1,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         });
 
         let mut row = Row::new(80);

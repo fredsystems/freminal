@@ -4547,6 +4547,8 @@ mod tests {
             height_px: 1,
             display_cols: 1,
             display_rows: 1,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         };
         handler.buffer.image_store_mut().insert(img);
 

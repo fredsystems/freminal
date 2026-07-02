@@ -111,9 +111,9 @@ impl TerminalHandler {
         }
 
         let response = if supported {
-            format_kitty_response(image_id, true, "")
+            format_kitty_response(image_id, None, true, "")
         } else {
-            format_kitty_response(image_id, false, "ENOTSUP:unsupported format")
+            format_kitty_response(image_id, None, false, "ENOTSUP:unsupported format")
         };
 
         self.write_to_pty(&response);
@@ -204,13 +204,18 @@ impl TerminalHandler {
 
         if cmd.payload.is_empty() {
             tracing::warn!("Kitty graphics: empty payload for a={action:?}; ignoring");
-            self.send_kitty_error(image_id_hint, quiet, "ENODATA:no payload");
+            self.send_kitty_error(
+                image_id_hint,
+                cmd.control.placement_id,
+                quiet,
+                "ENODATA:no payload",
+            );
             return;
         }
 
         // Decode payload into RGBA pixels + dimensions.
         let Some((rgba_pixels, img_width_px, img_height_px)) =
-            self.decode_kitty_payload(cmd, image_id_hint, quiet)
+            self.decode_kitty_payload(cmd, image_id_hint, cmd.control.placement_id, quiet)
         else {
             return; // Error already sent by decode_kitty_payload.
         };
@@ -247,7 +252,12 @@ impl TerminalHandler {
                     .map(|(k, _)| k)
                     .collect::<Vec<_>>(),
             );
-            self.send_kitty_error(image_id, quiet, "ENOENT:image not found");
+            self.send_kitty_error(
+                image_id,
+                cmd.control.placement_id,
+                quiet,
+                "ENOENT:image not found",
+            );
             return;
         };
 
@@ -277,6 +287,8 @@ impl TerminalHandler {
             height_px: stored_image.height_px,
             display_cols,
             display_rows,
+            frames: stored_image.frames.clone(),
+            root_gap_ms: stored_image.root_gap_ms,
         };
 
         // Update the store with the possibly-resized image.
@@ -325,7 +337,7 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && id > 0 {
             let response_id = u32::value_from(id).unwrap_or(0);
-            let response = format_kitty_response(response_id, true, "");
+            let response = format_kitty_response(response_id, cmd.control.placement_id, true, "");
             self.write_to_pty(&response);
         }
     }
@@ -341,6 +353,7 @@ impl TerminalHandler {
         &self,
         cmd: &KittyGraphicsCommand,
         image_id_hint: u32,
+        placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<(Vec<u8>, u32, u32)> {
         use freminal_common::buffer_states::kitty_graphics::KittyFormat;
@@ -350,6 +363,7 @@ impl TerminalHandler {
             &cmd.payload,
             cmd.control.transmission,
             image_id_hint,
+            placement_id,
             quiet,
         )?;
 
@@ -357,7 +371,8 @@ impl TerminalHandler {
 
         match format {
             KittyFormat::Rgba => {
-                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let (w, h) =
+                    self.require_kitty_dimensions(cmd, image_id_hint, placement_id, quiet)?;
                 // `w` and `h` are `u32`; on 32-bit platforms the multiplication
                 // could overflow, so use saturating arithmetic to avoid wrap.
                 let w_us = usize::value_from(w).unwrap_or(0);
@@ -368,13 +383,19 @@ impl TerminalHandler {
                         "Kitty RGBA: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    self.send_kitty_error(
+                        image_id_hint,
+                        placement_id,
+                        quiet,
+                        "EINVAL:payload size mismatch",
+                    );
                     return None;
                 }
                 Some((image_data, w, h))
             }
             KittyFormat::Rgb => {
-                let (w, h) = self.require_kitty_dimensions(cmd, image_id_hint, quiet)?;
+                let (w, h) =
+                    self.require_kitty_dimensions(cmd, image_id_hint, placement_id, quiet)?;
                 let w_us = usize::value_from(w).unwrap_or(0);
                 let h_us = usize::value_from(h).unwrap_or(0);
                 let expected = w_us.saturating_mul(h_us).saturating_mul(3);
@@ -383,7 +404,12 @@ impl TerminalHandler {
                         "Kitty RGB: expected {expected} bytes, got {}",
                         image_data.len()
                     );
-                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:payload size mismatch");
+                    self.send_kitty_error(
+                        image_id_hint,
+                        placement_id,
+                        quiet,
+                        "EINVAL:payload size mismatch",
+                    );
                     return None;
                 }
                 let pixel_count = w_us.saturating_mul(h_us);
@@ -402,6 +428,7 @@ impl TerminalHandler {
                     if w == 0 || h == 0 {
                         self.send_kitty_error(
                             image_id_hint,
+                            placement_id,
                             quiet,
                             "EINVAL:decoded image has zero dimensions",
                         );
@@ -411,7 +438,12 @@ impl TerminalHandler {
                 }
                 Err(e) => {
                     tracing::warn!("Kitty PNG decode failed: {e}");
-                    self.send_kitty_error(image_id_hint, quiet, "EINVAL:PNG decode failed");
+                    self.send_kitty_error(
+                        image_id_hint,
+                        placement_id,
+                        quiet,
+                        "EINVAL:PNG decode failed",
+                    );
                     None
                 }
             },
@@ -429,20 +461,24 @@ impl TerminalHandler {
         payload: &[u8],
         transmission: Option<freminal_common::buffer_states::kitty_graphics::KittyTransmission>,
         image_id_hint: u32,
+        placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<Vec<u8>> {
         use freminal_common::buffer_states::kitty_graphics::KittyTransmission;
 
         match transmission.unwrap_or(KittyTransmission::Direct) {
             KittyTransmission::Direct => Some(payload.to_vec()),
-            KittyTransmission::File => self.read_kitty_file(payload, image_id_hint, quiet, false),
+            KittyTransmission::File => {
+                self.read_kitty_file(payload, image_id_hint, placement_id, quiet, false)
+            }
             KittyTransmission::TempFile => {
-                self.read_kitty_file(payload, image_id_hint, quiet, true)
+                self.read_kitty_file(payload, image_id_hint, placement_id, quiet, true)
             }
             KittyTransmission::SharedMemory => {
                 tracing::warn!("Kitty graphics: shared memory transmission (t=s) is not supported");
                 self.send_kitty_error(
                     image_id_hint,
+                    placement_id,
                     quiet,
                     "ENOTSUP:shared memory transmission not supported",
                 );
@@ -459,6 +495,7 @@ impl TerminalHandler {
         &self,
         payload: &[u8],
         image_id_hint: u32,
+        placement_id: Option<u32>,
         quiet: u8,
         delete_after: bool,
     ) -> Option<Vec<u8>> {
@@ -466,7 +503,12 @@ impl TerminalHandler {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Kitty graphics file path is not valid UTF-8: {e}");
-                self.send_kitty_error(image_id_hint, quiet, "EINVAL:invalid file path encoding");
+                self.send_kitty_error(
+                    image_id_hint,
+                    placement_id,
+                    quiet,
+                    "EINVAL:invalid file path encoding",
+                );
                 return None;
             }
         };
@@ -476,7 +518,12 @@ impl TerminalHandler {
         // Security: reject non-absolute paths to prevent relative path traversal.
         if !path.is_absolute() {
             tracing::warn!("Kitty graphics: rejecting non-absolute file path: {path_str:?}");
-            self.send_kitty_error(image_id_hint, quiet, "EPERM:file path must be absolute");
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EPERM:file path must be absolute",
+            );
             return None;
         }
 
@@ -490,6 +537,7 @@ impl TerminalHandler {
                 tracing::warn!("Kitty graphics: failed to read file {path_str:?}: {e}");
                 self.send_kitty_error(
                     image_id_hint,
+                    placement_id,
                     quiet,
                     &format!("EIO:failed to read file: {e}"),
                 );
@@ -521,14 +569,25 @@ impl TerminalHandler {
         &self,
         cmd: &KittyGraphicsCommand,
         image_id_hint: u32,
+        placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<(u32, u32)> {
         let Some(w) = cmd.control.src_width else {
-            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing width (s)");
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:missing width (s)",
+            );
             return None;
         };
         let Some(h) = cmd.control.src_height else {
-            self.send_kitty_error(image_id_hint, quiet, "EINVAL:missing height (v)");
+            self.send_kitty_error(
+                image_id_hint,
+                placement_id,
+                quiet,
+                "EINVAL:missing height (v)",
+            );
             return None;
         };
         Some((w, h))
@@ -550,7 +609,12 @@ impl TerminalHandler {
         quiet: u8,
     ) {
         if img_width_px == 0 || img_height_px == 0 {
-            self.send_kitty_error(image_id_hint, quiet, "EINVAL:zero dimension");
+            self.send_kitty_error(
+                image_id_hint,
+                control.placement_id,
+                quiet,
+                "EINVAL:zero dimension",
+            );
             return;
         }
 
@@ -593,6 +657,8 @@ impl TerminalHandler {
             height_px: img_height_px,
             display_cols,
             display_rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         };
 
         self.buffer.image_store_mut().insert(inline_image.clone());
@@ -635,19 +701,19 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && assigned_id > 0 {
             let response_id = u32::value_from(assigned_id).unwrap_or(0);
-            let response = format_kitty_response(response_id, true, "");
+            let response = format_kitty_response(response_id, control.placement_id, true, "");
             self.write_to_pty(&response);
         }
     }
 
     /// Send a Kitty graphics error response, respecting quiet mode.
-    fn send_kitty_error(&self, image_id: u32, quiet: u8, message: &str) {
+    fn send_kitty_error(&self, image_id: u32, placement_id: Option<u32>, quiet: u8, message: &str) {
         // quiet=2 suppresses all responses (including errors).
         if quiet >= 2 {
             tracing::debug!("Kitty graphics: error suppressed by q=2: id={image_id} {message}");
             return;
         }
-        let response = format_kitty_response(image_id, false, message);
+        let response = format_kitty_response(image_id, placement_id, false, message);
         self.write_to_pty(&response);
     }
 

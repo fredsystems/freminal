@@ -464,13 +464,27 @@ pub fn parse_kitty_graphics(apc: &[u8]) -> Result<KittyGraphicsCommand, KittyPar
 
 /// Format a Kitty graphics response to be sent back to the PTY.
 ///
-/// The response format is: `ESC _ G i=<id> ; <message> ESC \`
+/// The response format is: `ESC _ G i=<id>[,p=<placement_id>] ; <message> ESC \`
 ///
 /// If `ok` is true, the message is `OK`. Otherwise it is the provided error string.
+///
+/// Per the kitty spec, `p=<placement_id>` is echoed in the response only when
+/// the originating request specified a non-zero placement id; `None` and
+/// `Some(0)` both omit it.
 #[must_use]
-pub fn format_kitty_response(image_id: u32, ok: bool, message: &str) -> String {
+pub fn format_kitty_response(
+    image_id: u32,
+    placement_id: Option<u32>,
+    ok: bool,
+    message: &str,
+) -> String {
     let msg = if ok { "OK" } else { message };
-    format!("\x1b_Gi={image_id};{msg}\x1b\\")
+    // Per the kitty spec, `p=` is echoed in the response ONLY when the request
+    // specified a non-zero placement id. `Some(0)` and `None` both omit it.
+    match placement_id {
+        Some(pid) if pid != 0 => format!("\x1b_Gi={image_id},p={pid};{msg}\x1b\\"),
+        _ => format!("\x1b_Gi={image_id};{msg}\x1b\\"),
+    }
 }
 
 #[cfg(test)]
@@ -665,14 +679,26 @@ mod tests {
 
     #[test]
     fn format_response_ok() {
-        let resp = format_kitty_response(42, true, "");
+        let resp = format_kitty_response(42, None, true, "");
         assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
     }
 
     #[test]
     fn format_response_error() {
-        let resp = format_kitty_response(42, false, "ENOENT:file not found");
+        let resp = format_kitty_response(42, None, false, "ENOENT:file not found");
         assert_eq!(resp, "\x1b_Gi=42;ENOENT:file not found\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_nonzero_placement_id_includes_p() {
+        let resp = format_kitty_response(42, Some(7), true, "");
+        assert_eq!(resp, "\x1b_Gi=42,p=7;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_zero_placement_id_omits_p() {
+        let resp = format_kitty_response(42, Some(0), true, "");
+        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
     }
 
     #[test]

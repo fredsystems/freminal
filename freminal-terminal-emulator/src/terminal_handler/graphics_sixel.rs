@@ -96,6 +96,8 @@ impl TerminalHandler {
             height_px: sixel_image.height,
             display_cols,
             display_rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
         };
 
         // In DECSDM display mode (?80 h), the cursor does not advance past
