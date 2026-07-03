@@ -961,6 +961,70 @@ Prohibitions: do NOT touch animation or placeholders; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.4 execution decisions (recorded 2026-07-01, against the real seams + maintainer direction)
+
+Recon revealed the plan's "handler/store work only" scoping materially
+under-estimated 100.4, and surfaced a **pre-existing, protocol-agnostic
+image-under-reflow bug** that must be fixed first. Findings and the
+maintainer-approved restructure:
+
+- **freminal has no first-class placement objects.** Every non-virtual placement
+  is only per-cell `ImagePlacement` stamps written into `Cell`s by
+  `Buffer::place_image`; there is no registry keyed by `(image_id, placement_id)`,
+  and a placement's screen origin is never stored (it exists transiently as the
+  cursor position at `place_image` time). The only placement-keyed map is
+  `virtual_placements` (Unicode-placeholder tile sizes, no parent link). So 100.4
+  builds the **first** real-placement registry.
+- **Image position is cell-anchored, so scroll/reflow tracking is _already_ solved
+  for every protocol** — an image lives in the row cells, which scroll and reflow.
+  The renderer draws each image "wherever its cells are". Relative placements only
+  add a _derived_ position (child at `parent_origin + (H,V)`).
+- **The real fail case is reflow, and it is a pre-existing, protocol-agnostic
+  bug.** `Buffer::reflow_to_width` re-wraps image-stamped cells by glyph width like
+  ordinary text (each image row is its own hard-break logical line), so a
+  primary-screen image wider than the new width gets **soft-wrapped and its
+  `(row_in_image, col_in_image)` rectangle fragments** — the renderer then draws it
+  distorted. This hits kitty/sixel/iTerm2 alike; it is latent today only because
+  images are effectively alt-screen (apps redraw on resize). Building relative
+  placements on this cracked foundation is wrong. **Maintainer decision: fix image
+  reflow atomicity first.**
+- **Renderer bounds images by `image_id` only** (not `(image_id, placement_id)`) in
+  `build_image_verts`, so two on-screen placements of the same image visually
+  merge — relevant to same-image relative placements; addressed in 100.4b if it
+  bites.
+- **`ETOODEEP`/`ECYCLE`/`ENOPARENT` error strings do not exist yet**; no
+  cascade-delete concept exists.
+
+**Restructure (maintainer-approved): 100.4.0 → 100.4a → 100.4b.**
+
+- **100.4.0 — Image reflow atomicity (protocol-agnostic prerequisite).** Scope:
+  `freminal-buffer/src/buffer/resize_and_alt.rs` (+ `buffer/images.rs` / `row.rs`
+  as needed). Make reflow treat an image's cell-rectangle atomically so images
+  survive reflow as coherent rectangles for **all** protocols (keep image rows off
+  the soft-wrap path — clamp/scale to the new width or preserve the block intact —
+  rather than re-wrapping image cells by glyph width). Fixes the actual fail case
+  the maintainer identified; a real bug fix, so it gets a regression test that
+  fails before / passes after. Recon the reflow path precisely before implementing.
+- **100.4a — Relative-placement registry + validation + real-parent positioning.**
+  Scope: `freminal-buffer/src/image_store.rs` (or a new registry) +
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`. Add the
+  first-class real-placement registry keyed by `(image_id, placement_id)` holding
+  the persisted screen origin + `parent` link + child list; cascade delete;
+  `ENOPARENT`/`ECYCLE`/`ETOODEEP` (depth ≥ 8); a virtual placement may be a parent
+  but cannot itself be relative (`EINVAL`); the cursor must not move after a
+  relative placement regardless of `C`. Position a child of a **real** parent by
+  cell-stamping at `parent_origin + (H,V)` (the child becomes real cells that
+  scroll/reflow correctly on their own, atop the 100.4.0 fix). Headless-testable.
+- **100.4b — Virtual-placeholder-parent live position derivation.** Scope: the
+  snapshot/render seam (recon first). When the parent is a **virtual** placement
+  (no fixed cells; the primary kitty use — a placeholder anchored in text), derive
+  the child's position each snapshot from the parent placeholder's live cell
+  positions (min-x / min-y of the placeholder cells, per spec) so it follows text
+  through scroll/reflow. This is the render-touching piece; recon its exact seam
+  before writing it.
+
+Each stops at its own review gate.
+
 #### 100.5 — Storage quotas + eviction policy
 
 Scope: `freminal-buffer/src/image_store.rs`.

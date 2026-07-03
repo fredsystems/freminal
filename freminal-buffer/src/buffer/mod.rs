@@ -3822,6 +3822,234 @@ mod image_tests {
             "all image cells should be cleared after erase_line"
         );
     }
+
+    // ── reflow_to_width: image rectangle preservation (Task 100.4.0) ──
+    //
+    // Regression tests for a pre-existing, protocol-agnostic bug: image cells
+    // are `TChar::Space` with `is_head() == false`, so `reflow_to_width`'s
+    // glyph-rewrap path treated them as stray width-1 continuations and
+    // could spread a single image row's cells across multiple new physical
+    // rows, fragmenting the `(row_in_image, col_in_image)` rectangle the
+    // renderer relies on.
+
+    /// Return the sorted list of physical row indices in `buf` that contain
+    /// at least one cell whose placement has the given `image_id` and
+    /// `row_in_image`.
+    fn physical_rows_for_image_row(buf: &Buffer, image_id: u64, row_in_image: usize) -> Vec<usize> {
+        buf.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.cells().iter().any(|c| {
+                    c.image_placement()
+                        .is_some_and(|p| p.image_id == image_id && p.row_in_image == row_in_image)
+                })
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Return the `col_in_image` values (in cell order) for cells on
+    /// `phys_row` that belong to `image_id`'s `row_in_image`.
+    fn cols_in_image_on_row(
+        buf: &Buffer,
+        phys_row: usize,
+        image_id: u64,
+        row_in_image: usize,
+    ) -> Vec<usize> {
+        buf.rows[phys_row]
+            .cells()
+            .iter()
+            .filter_map(|c| {
+                c.image_placement()
+                    .filter(|p| p.image_id == image_id && p.row_in_image == row_in_image)
+                    .map(|p| p.col_in_image)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reflow_narrower_keeps_image_rectangle_contiguous() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 10-col × 3-row image at (0,0).
+        let img = make_image(10, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+
+        // Sanity: before reflow, the image occupies a contiguous rectangle —
+        // each image row lives on exactly one physical row with col_in_image
+        // running 0..10.
+        for row_in_image in 0..3_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row before reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..10).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should be contiguous 0..10 before reflow"
+            );
+        }
+
+        // Reflow to a width (8) narrower than the image's 10 columns. Without
+        // the fix, the glyph-rewrap path would split each 10-cell image row
+        // across two new physical rows (8 cells + 2 cells), fragmenting the
+        // image's rectangle.
+        buf.reflow_to_width(8);
+
+        for row_in_image in 0..3_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should still be on exactly one physical row after \
+                 narrowing reflow (found on rows {phys_rows:?}) — the image must not fragment"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..8).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should be contiguous 0..8 (clipped to the \
+                 new width) after narrowing reflow"
+            );
+        }
+    }
+
+    #[test]
+    fn reflow_wider_keeps_image_rectangle() {
+        let mut buf = Buffer::new(10, 10);
+
+        // Place an 8-col × 2-row image at (0,0) — fits within the original width.
+        let img = make_image(8, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+
+        buf.reflow_to_width(20);
+
+        for row_in_image in 0..2_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row after \
+                 widening reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..8).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should remain contiguous 0..8 after \
+                 widening reflow (image is narrower than new width, so no clipping)"
+            );
+        }
+    }
+
+    #[test]
+    fn reflow_image_line_preserved_text_line_rewraps() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Row 0: a 20-char text logical line that fills the original width
+        // exactly and will need to wrap into multiple rows once narrowed.
+        let text: Vec<TChar> = (0..20)
+            .map(|i| TChar::Ascii(b'A' + u8::try_from(i % 26).unwrap_or(b'A')))
+            .collect();
+        buf.insert_text(&text);
+
+        // Start a new logical line below the text, then place an image there.
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        let img = make_image(5, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+
+        let rows_before = buf.rows.len();
+
+        // Narrow enough that the 20-char text line must wrap but the 5-col
+        // image does not need clipping.
+        buf.reflow_to_width(8);
+
+        // The text line should have rewrapped into more physical rows
+        // (ceil(20/8) = 3 rows instead of 1).
+        assert!(
+            buf.rows.len() > rows_before,
+            "expected more physical rows after narrowing reflow (text line should wrap): \
+             before={rows_before}, after={}",
+            buf.rows.len()
+        );
+
+        let row0 = cell_str_ignoring_images(&buf, 0);
+        assert_eq!(
+            row0, "ABCDEFGH",
+            "row0 should hold the first 8 chars of the text line"
+        );
+        let row1 = cell_str_ignoring_images(&buf, 1);
+        assert_eq!(
+            row1, "IJKLMNOP",
+            "row1 should hold the next 8 chars of the text line"
+        );
+
+        // The image (which is on its own logical line, unaffected by the
+        // text line's rewrap) must still be intact — one physical row per
+        // image row, contiguous columns.
+        for row_in_image in 0..2_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row after reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..5).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should remain contiguous 0..5 after reflow"
+            );
+        }
+    }
+
+    /// Render a row's non-image, non-continuation cells as a plain string
+    /// (mirrors `reflow_to_width_tests::cell_str` but lives in this module
+    /// since it's only needed here).
+    fn cell_str_ignoring_images(buf: &Buffer, row_idx: usize) -> String {
+        buf.rows[row_idx]
+            .characters()
+            .iter()
+            .filter(|c| !c.is_continuation() && !c.has_image())
+            .map(|c| match c.tchar() {
+                TChar::Ascii(b) => (*b as char).to_string(),
+                TChar::Space | TChar::NewLine => String::new(),
+                TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reflow_image_cell_count_consistent_after_reflow() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 10-col × 3-row image (30 cells total).
+        let img = make_image(10, 3);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        assert_eq!(buf.image_cell_count, 30);
+
+        // Narrow to width 8 — each of the 3 image rows is clipped from 10 to
+        // 8 columns, so 3 * 8 = 24 cells should remain.
+        buf.reflow_to_width(8);
+
+        let actual_image_cells: usize = buf.rows.iter().map(Row::count_image_cells).sum();
+        assert_eq!(
+            buf.image_cell_count, actual_image_cells,
+            "image_cell_count field must match the actual number of image cells after reflow"
+        );
+        assert_eq!(
+            buf.image_cell_count, 24,
+            "each of the 3 image rows should be clipped from 10 to 8 columns"
+        );
+    }
 }
 
 // ============================================================================
