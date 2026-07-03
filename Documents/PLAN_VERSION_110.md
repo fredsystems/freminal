@@ -838,7 +838,22 @@ sub-passes** (mirroring the 99.5a/99.5b/99.5c precedent), each leaving
   `freminal/src/gui/renderer/vertex.rs` + `freminal/src/gui/renderer/gpu.rs` (make
   `sync_image_textures`/`draw_images` frame-aware — re-upload / key textures by the
   currently-selected frame so a frame change is drawn). Respects the lock-free
-  GUI/PTY split.
+  GUI/PTY split. Scope additions at execution: (1) recon found the changed-content
+  texture re-upload is the correctness-critical piece (`sync_image_textures`
+  early-returns on a known id, so a same-id frame swap would silently no-op — it
+  gains Arc-pointer-identity tracking to detect frame swaps); `vertex.rs` needs no
+  change (`build_image_verts` reads only frame-invariant `display_cols`/rows).
+  (2) Repaint scheduling in `widget.rs`: a running animation re-arms
+  `ui.ctx().request_repaint_after(gap)` (alongside the existing cursor-trail
+  re-arm) so frames advance while the terminal is otherwise idle. (3) `freminal/benches/render_loop_bench.rs`: a new CPU bench for the
+  frame-selector tick (the GPU texture path is headless-excluded, and
+  `build_image_verts` is unchanged, so the tick is the benchable new hot path).
+  (4) One additive re-export line in `freminal-terminal-emulator/src/lib.rs`
+  (`AnimationControl`, `AnimationRunMode`, `ImageFrame` added to the existing
+  `image_store` `pub use`) so the `freminal` crate can name the animation types
+  without a direct `freminal-buffer` dependency — the re-export mechanism already
+  exists for `ImagePlacement`/`InlineImage`; 100.2a/2b simply did not need the
+  animation types GUI-side yet.
 
 **100.2a scope expansion (recorded).** Adding the two non-`Option` fields
 (`frames`, `root_gap_ms`) to `InlineImage` — which derives neither `Default` nor

@@ -1964,6 +1964,15 @@ impl FreminalTerminalWidget {
                 view_state.cursor_visual_row * row_h_f,
             );
 
+            // ── Kitty animated image playback (Task 100.2c) ─────────────────
+            // Advance the GUI-side wall-clock frame selector for every
+            // animated image visible in this snapshot. A frame change forces
+            // the full-rebuild path below (via `image_frame_changed`) so the
+            // cloned `snap_images` picks up the newly-selected frame's pixels
+            // before `sync_image_textures` runs.
+            let anim_tick = view_state.tick_image_animations(&snap.images);
+            let image_frame_changed = !anim_tick.changed.is_empty();
+
             // Determine whether we can take the cursor-only fast path.
             //
             // Cursor-only: content has not changed, the selection has not
@@ -1994,6 +2003,7 @@ impl FreminalTerminalWidget {
                 && !text_blink_changed
                 && !search_changed
                 && !hover_changed
+                && !image_frame_changed
                 && cursor_state_changed
                 && !render_state
                     .lock()
@@ -2040,6 +2050,7 @@ impl FreminalTerminalWidget {
                 || text_blink_changed
                 || search_changed
                 || hover_changed
+                || image_frame_changed
                 || render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2269,6 +2280,18 @@ impl FreminalTerminalWidget {
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
                 rs_ref.snap_images.clone_from(snap.images.as_ref());
+                // Overwrite each animated image's pixels with the frame
+                // currently selected by the GUI-side wall-clock playback
+                // clock (Task 100.2c). `build_image_verts` above only reads
+                // frame-invariant display dims, so only the texture-upload
+                // path (which reads `img.pixels`) needs the swapped frame.
+                for (id, img) in &mut rs_ref.snap_images {
+                    if img.is_animated()
+                        && let Some(px) = img.frame_pixels(view_state.selected_frame(*id))
+                    {
+                        img.pixels = Arc::clone(px);
+                    }
+                }
                 rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
                 rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
                 rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
@@ -2301,6 +2324,12 @@ impl FreminalTerminalWidget {
             if cursor_animating {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(16));
+            }
+
+            // Drive animated image playback: request a repaint when the next
+            // frame is due so animations keep advancing while otherwise idle.
+            if let Some(due) = anim_tick.next_due {
+                ui.ctx().request_repaint_after(due);
             }
         }
 

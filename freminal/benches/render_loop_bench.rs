@@ -634,6 +634,64 @@ fn bench_build_visuals(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_image_animation_tick — GUI wall-clock animation frame selector
+// (Task 100.2c). Measures the per-frame CPU cost of
+// `ViewState::tick_image_animations` against a representative set of
+// concurrently-animating kitty images (e.g. multiple animated GIFs/spinners
+// visible at once).
+// ---------------------------------------------------------------
+fn bench_image_animation_tick(c: &mut Criterion) {
+    use freminal::gui::view_state::ViewState;
+    use freminal_terminal_emulator::{AnimationControl, AnimationRunMode, ImageFrame, InlineImage};
+    use std::collections::HashMap;
+
+    const NUM_IMAGES: u64 = 8;
+    const EXTRA_FRAMES: usize = 9; // frame_count() == 10
+    const GAP_MS: u32 = 40;
+
+    let mut images: HashMap<u64, InlineImage> = HashMap::new();
+    for id in 1..=NUM_IMAGES {
+        let frames = (0..EXTRA_FRAMES)
+            .map(|_| ImageFrame {
+                pixels: Arc::new(vec![0u8; 4]),
+                gap_ms: GAP_MS,
+            })
+            .collect();
+        images.insert(
+            id,
+            InlineImage {
+                id,
+                pixels: Arc::new(vec![0u8; 4]),
+                width_px: 1,
+                height_px: 1,
+                display_cols: 1,
+                display_rows: 1,
+                frames,
+                root_gap_ms: GAP_MS,
+                animation: AnimationControl {
+                    run_mode: AnimationRunMode::Running,
+                    loop_count: 1,
+                    current_frame: 0,
+                },
+            },
+        );
+    }
+
+    let mut group = c.benchmark_group("image_animation_tick");
+    group.throughput(Throughput::Elements(NUM_IMAGES));
+    group.bench_function("tick_8_images_10_frames", |b| {
+        b.iter_batched(
+            ViewState::default,
+            |mut view_state| {
+                std::hint::black_box(view_state.tick_image_animations(&images));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -650,6 +708,7 @@ criterion_group!(
         bench_fg_instances,
         bench_shape_placeholder_line,
         bench_build_visuals,
+        bench_image_animation_tick,
 );
 
 criterion_main!(benches);

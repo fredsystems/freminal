@@ -91,6 +91,23 @@ const UNIT_QUAD: [f32; 12] = [
     1.0, 0.0, 1.0, 1.0, 0.0, 1.0, // triangle 2
 ];
 
+/// A GL texture uploaded for one `InlineImage`, plus enough bookkeeping to
+/// detect an animation frame swap (Task 100.2c) without re-uploading on
+/// every frame.
+struct ImageTexture {
+    /// The GL texture object.
+    texture: glow::Texture,
+    /// Pointer identity (as `usize`) of the pixel `Arc` last uploaded into
+    /// `texture`. Used only for identity comparison — never dereferenced —
+    /// to detect when the GUI's frame selector has swapped in a different
+    /// frame's pixels for the same image id.
+    uploaded_pixels_ptr: usize,
+    /// Width of the uploaded texture, in pixels.
+    width_px: u32,
+    /// Height of the uploaded texture, in pixels.
+    height_px: u32,
+}
+
 // ---------------------------------------------------------------------------
 //  TerminalRenderer
 // ---------------------------------------------------------------------------
@@ -132,7 +149,7 @@ pub struct TerminalRenderer {
     /// Per-image GL textures, keyed by `InlineImage::id`.
     ///
     /// Populated on first use and evicted when the image is no longer visible.
-    image_textures: std::collections::HashMap<u64, glow::Texture>,
+    image_textures: std::collections::HashMap<u64, ImageTexture>,
 
     // ---- background image pass ----
     /// Shader program for the background image quad.
@@ -765,6 +782,11 @@ impl TerminalRenderer {
     /// - New images (ID not yet in `self.image_textures`) are uploaded.
     /// - Stale images (ID in `self.image_textures` but not in `snap_images`)
     ///   are deleted.
+    /// - Animated images whose GUI-selected frame changed (Task 100.2c) are
+    ///   detected via `Arc` pointer identity on `img.pixels` and re-uploaded:
+    ///   via `tex_sub_image_2d` when the frame's dimensions are unchanged
+    ///   (the common case — animation frames share the root frame's size),
+    ///   or by deleting and recreating the texture when dimensions differ.
     fn sync_image_textures(
         &mut self,
         gl: &glow::Context,
@@ -775,68 +797,147 @@ impl TerminalRenderer {
             if snap_images.contains_key(id) {
                 true
             } else {
-                unsafe { gl.delete_texture(*tex) };
+                unsafe { gl.delete_texture(tex.texture) };
                 false
             }
         });
 
-        // Upload textures for new images.
         for (id, img) in snap_images {
-            if self.image_textures.contains_key(id) {
-                continue; // Already uploaded.
+            // Pointer identity of the currently-selected frame's pixel
+            // buffer. Used only for equality comparison — never
+            // dereferenced.
+            let cur_ptr = std::sync::Arc::as_ptr(&img.pixels).addr();
+
+            let up_to_date = self.image_textures.get(id).is_some_and(|existing| {
+                existing.uploaded_pixels_ptr == cur_ptr
+                    && existing.width_px == img.width_px
+                    && existing.height_px == img.height_px
+            });
+            if up_to_date {
+                continue;
             }
-            let tex = unsafe {
-                match gl.create_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        error!("create image texture {id}: {e}");
-                        continue;
-                    }
-                }
-            };
 
-            let w = gl_i32_u32(img.width_px);
-            let h = gl_i32_u32(img.height_px);
+            let dims_match = self.image_textures.get(id).is_some_and(|existing| {
+                existing.width_px == img.width_px && existing.height_px == img.height_px
+            });
 
+            if dims_match {
+                // Same id, same dimensions, different pixel `Arc`: this is an
+                // animation frame swap. Re-upload in place via a sub-image
+                // update instead of recreating the texture.
+                self.reupload_image_texture(gl, *id, img, cur_ptr);
+            } else {
+                // No existing texture, or dimensions changed: delete any stale
+                // texture and create a fresh one.
+                self.create_image_texture(gl, *id, img, cur_ptr);
+            }
+        }
+    }
+
+    /// Re-upload a changed frame's pixels into an existing, same-dimensioned
+    /// texture via `tex_sub_image_2d` (animation frame swap — Task 100.2c).
+    fn reupload_image_texture(
+        &mut self,
+        gl: &glow::Context,
+        id: u64,
+        img: &InlineImage,
+        cur_ptr: usize,
+    ) {
+        let w = gl_i32_u32(img.width_px);
+        let h = gl_i32_u32(img.height_px);
+        if let Some(existing) = self.image_textures.get_mut(&id) {
             unsafe {
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_MIN_FILTER,
-                    glow::LINEAR.cast_signed(),
-                );
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_MAG_FILTER,
-                    glow::LINEAR.cast_signed(),
-                );
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_WRAP_S,
-                    glow::CLAMP_TO_EDGE.cast_signed(),
-                );
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_WRAP_T,
-                    glow::CLAMP_TO_EDGE.cast_signed(),
-                );
+                gl.bind_texture(glow::TEXTURE_2D, Some(existing.texture));
                 gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.tex_image_2d(
+                gl.tex_sub_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::RGBA.cast_signed(),
+                    0,
+                    0,
                     w,
                     h,
-                    0,
                     glow::RGBA,
                     glow::UNSIGNED_BYTE,
                     glow::PixelUnpackData::Slice(Some(&img.pixels)),
                 );
                 gl.bind_texture(glow::TEXTURE_2D, None);
             }
-
-            self.image_textures.insert(*id, tex);
+            existing.uploaded_pixels_ptr = cur_ptr;
         }
+    }
+
+    /// Delete any stale texture for `id`, then create and upload a fresh GL
+    /// texture for `img`, recording its pixel-`Arc` identity and dimensions.
+    fn create_image_texture(
+        &mut self,
+        gl: &glow::Context,
+        id: u64,
+        img: &InlineImage,
+        cur_ptr: usize,
+    ) {
+        let w = gl_i32_u32(img.width_px);
+        let h = gl_i32_u32(img.height_px);
+
+        if let Some(stale) = self.image_textures.remove(&id) {
+            unsafe { gl.delete_texture(stale.texture) };
+        }
+
+        let tex = unsafe {
+            match gl.create_texture() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("create image texture {id}: {e}");
+                    return;
+                }
+            }
+        };
+
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE.cast_signed(),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE.cast_signed(),
+            );
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA.cast_signed(),
+                w,
+                h,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&img.pixels)),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+
+        self.image_textures.insert(
+            id,
+            ImageTexture {
+                texture: tex,
+                uploaded_pixels_ptr: cur_ptr,
+                width_px: img.width_px,
+                height_px: img.height_px,
+            },
+        );
     }
 
     /// Execute the image draw call.
@@ -903,7 +1004,7 @@ impl TerminalRenderer {
             }
             let first_vertex = quad_idx * gl_i32(VERTS_PER_QUAD);
             unsafe {
-                gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex.texture));
                 gl.draw_arrays(glow::TRIANGLES, first_vertex, gl_i32(VERTS_PER_QUAD));
             }
             quad_idx += 1;
@@ -1291,7 +1392,7 @@ impl TerminalRenderer {
                 }
             }
             for tex in self.image_textures.drain() {
-                gl.delete_texture(tex.1);
+                gl.delete_texture(tex.1.texture);
             }
             // Background image resources.
             if let Some(p) = self.bg_img_program.take() {
