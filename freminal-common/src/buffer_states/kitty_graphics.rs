@@ -462,29 +462,47 @@ pub fn parse_kitty_graphics(apc: &[u8]) -> Result<KittyGraphicsCommand, KittyPar
     Ok(KittyGraphicsCommand { control, payload })
 }
 
+/// The image-identity fields echoed in a kitty graphics response.
+///
+/// Per the kitty spec the response echoes `i=<id>`, plus `I=<number>` when the
+/// request used an image number, plus `p=<placement>` when the request used a
+/// non-zero placement id. Field order in the wire form is `i`, then `I`, then `p`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KittyResponseId {
+    /// The image id (always emitted).
+    pub image_id: u32,
+    /// The image number (`I=`), emitted when `Some`.
+    pub image_number: Option<u32>,
+    /// The placement id (`p=`), emitted when `Some` and non-zero.
+    pub placement_id: Option<u32>,
+}
+
 /// Format a Kitty graphics response to be sent back to the PTY.
 ///
-/// The response format is: `ESC _ G i=<id>[,p=<placement_id>] ; <message> ESC \`
+/// The response format is: `ESC _ G i=<id>[,I=<number>][,p=<placement_id>] ; <message> ESC \`
 ///
 /// If `ok` is true, the message is `OK`. Otherwise it is the provided error string.
 ///
-/// Per the kitty spec, `p=<placement_id>` is echoed in the response only when
-/// the originating request specified a non-zero placement id; `None` and
-/// `Some(0)` both omit it.
+/// Per the kitty spec, `I=<number>` is echoed only when the originating
+/// request specified an image number, and `p=<placement_id>` only when the
+/// originating request specified a non-zero placement id; `None` and
+/// `Some(0)` (for the placement id) both omit it.
 #[must_use]
-pub fn format_kitty_response(
-    image_id: u32,
-    placement_id: Option<u32>,
-    ok: bool,
-    message: &str,
-) -> String {
+pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> String {
+    use std::fmt::Write as _;
+
     let msg = if ok { "OK" } else { message };
-    // Per the kitty spec, `p=` is echoed in the response ONLY when the request
-    // specified a non-zero placement id. `Some(0)` and `None` both omit it.
-    match placement_id {
-        Some(pid) if pid != 0 => format!("\x1b_Gi={image_id},p={pid};{msg}\x1b\\"),
-        _ => format!("\x1b_Gi={image_id};{msg}\x1b\\"),
+    let mut key = format!("i={}", id.image_id);
+    if let Some(number) = id.image_number {
+        // `write!` into a `String` never fails.
+        let _ = write!(key, ",I={number}");
     }
+    if let Some(pid) = id.placement_id
+        && pid != 0
+    {
+        let _ = write!(key, ",p={pid}");
+    }
+    format!("\x1b_G{key};{msg}\x1b\\")
 }
 
 #[cfg(test)]
@@ -679,26 +697,86 @@ mod tests {
 
     #[test]
     fn format_response_ok() {
-        let resp = format_kitty_response(42, None, true, "");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: None,
+            },
+            true,
+            "",
+        );
         assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
     }
 
     #[test]
     fn format_response_error() {
-        let resp = format_kitty_response(42, None, false, "ENOENT:file not found");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: None,
+            },
+            false,
+            "ENOENT:file not found",
+        );
         assert_eq!(resp, "\x1b_Gi=42;ENOENT:file not found\x1b\\");
     }
 
     #[test]
     fn format_response_with_nonzero_placement_id_includes_p() {
-        let resp = format_kitty_response(42, Some(7), true, "");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: Some(7),
+            },
+            true,
+            "",
+        );
         assert_eq!(resp, "\x1b_Gi=42,p=7;OK\x1b\\");
     }
 
     #[test]
     fn format_response_with_zero_placement_id_omits_p() {
-        let resp = format_kitty_response(42, Some(0), true, "");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: Some(0),
+            },
+            true,
+            "",
+        );
         assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_image_number_includes_i_field() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 99,
+                image_number: Some(13),
+                placement_id: None,
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=99,I=13;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_image_number_and_placement_locks_field_order() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 99,
+                image_number: Some(13),
+                placement_id: Some(7),
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=99,I=13,p=7;OK\x1b\\");
     }
 
     #[test]

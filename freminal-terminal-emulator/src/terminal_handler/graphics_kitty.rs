@@ -22,7 +22,7 @@
 
 use conv2::ValueFrom;
 use freminal_common::buffer_states::kitty_graphics::{
-    KittyAction, KittyControlData, KittyGraphicsCommand, format_kitty_response,
+    KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
 };
 
 use freminal_buffer::image_store::{AnimationRunMode, ImageProtocol, InlineImage, next_image_id};
@@ -34,6 +34,21 @@ use super::TerminalHandler;
 /// `z=` is absent or `0`. The root frame's default gap remains `0`
 /// (tracked separately via `InlineImage::root_gap_ms`).
 const DEFAULT_ANIMATION_FRAME_GAP_MS: u32 = 40;
+
+/// Build a `KittyResponseId` that doesn't carry an image number (`I=`).
+///
+/// This covers the deep decode/transmission/compose error responses (which
+/// only ever had an `i=`-style hint to begin with) and the `a=c` (animation
+/// compose) success response — the spec only mandates the `I=` echo on
+/// successful transmit/put/animation-frame responses, which build their own
+/// `KittyResponseId` directly.
+const fn kitty_id_no_number(image_id: u32, placement_id: Option<u32>) -> KittyResponseId {
+    KittyResponseId {
+        image_id,
+        image_number: None,
+        placement_id,
+    }
+}
 
 impl TerminalHandler {
     /// Dispatch a parsed Kitty graphics command.
@@ -123,10 +138,11 @@ impl TerminalHandler {
             return;
         }
 
+        let id = kitty_id_no_number(image_id, None);
         let response = if supported {
-            format_kitty_response(image_id, None, true, "")
+            format_kitty_response(id, true, "")
         } else {
-            format_kitty_response(image_id, None, false, "ENOTSUP:unsupported format")
+            format_kitty_response(id, false, "ENOTSUP:unsupported format")
         };
 
         self.write_to_pty(&response);
@@ -222,8 +238,7 @@ impl TerminalHandler {
         if cmd.payload.is_empty() {
             tracing::warn!("Kitty graphics: empty payload for a={action:?}; ignoring");
             self.send_kitty_error(
-                image_id_hint,
-                cmd.control.placement_id,
+                kitty_id_no_number(image_id_hint, cmd.control.placement_id),
                 quiet,
                 "ENODATA:no payload",
             );
@@ -249,36 +264,65 @@ impl TerminalHandler {
         );
     }
 
-    /// Handle `a=p` (Put) — display a previously transmitted image.
+    /// Resolve the target image id for a by-reference command (`a=p` put,
+    /// `a=f` animation frame).
     ///
-    /// Looks up the image by `i=<image_id>` in the image store, applies any
-    /// display-size overrides (`c=`/`r=`) from the control data, and places
-    /// the image into the buffer.
-    fn handle_kitty_put(&mut self, cmd: &KittyGraphicsCommand, image_id: u32, quiet: u8) {
-        let id = u64::from(image_id);
+    /// Prefers a nonzero `i=` (image id). If `i=` is absent or zero, resolves
+    /// `I=` (image number) to the id of the newest image transmitted with
+    /// that number. Returns `None` if neither resolves to a stored image
+    /// reference — callers are responsible for sending the appropriate
+    /// `ENOENT` response.
+    fn resolve_kitty_image_id(&self, control: &KittyControlData) -> Option<u64> {
+        match control.image_id {
+            Some(id) if id != 0 => Some(u64::from(id)),
+            _ => control
+                .image_number
+                .and_then(|number| self.buffer.image_store().newest_id_for_number(number)),
+        }
+    }
 
-        // Look up the previously transmitted image.
-        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
-            tracing::warn!(
-                "Kitty graphics: a=p for unknown image id={image_id} \
-                 (store has {} images: {:?})",
-                self.buffer.image_store().len(),
-                self.buffer
-                    .image_store()
-                    .iter()
-                    .map(|(k, _)| k)
-                    .collect::<Vec<_>>(),
-            );
+    /// Resolve the target image id for a by-reference command (`a=p` put,
+    /// `a=f` animation frame), sending the `I=`-specific `ENOENT` response
+    /// and returning `None` if `I=` was given but does not resolve to a
+    /// stored image.
+    ///
+    /// When neither `i=` nor `I=` is given (or `i=` is stale), returns
+    /// `Some` wrapping the raw hint — the caller's subsequent image-store
+    /// lookup will fail and send the generic `ENOENT` response in that case.
+    fn resolve_kitty_reference_id(
+        &self,
+        control: &KittyControlData,
+        image_id_hint: u32,
+        placement_id: Option<u32>,
+        quiet: u8,
+    ) -> Option<u64> {
+        if let Some(id) = self.resolve_kitty_image_id(control) {
+            return Some(id);
+        }
+        if let Some(number) = control.image_number {
+            // `I=` was given but no image with that number is stored.
             self.send_kitty_error(
-                image_id,
-                cmd.control.placement_id,
+                KittyResponseId {
+                    image_id: 0,
+                    image_number: Some(number),
+                    placement_id,
+                },
                 quiet,
                 "ENOENT:image not found",
             );
-            return;
-        };
+            return None;
+        }
+        Some(u64::from(image_id_hint))
+    }
 
-        // Apply display-size overrides from the Put command, if present.
+    /// Apply `a=p` display-size overrides (`c=`/`r=`) to a stored image,
+    /// returning the resized `InlineImage` plus its (possibly overridden)
+    /// display dimensions in cells.
+    fn apply_put_display_overrides(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        stored_image: InlineImage,
+    ) -> (InlineImage, usize, usize) {
         let (term_width, term_height) = self.win_size();
 
         let display_cols = cmd
@@ -308,6 +352,55 @@ impl TerminalHandler {
             root_gap_ms: stored_image.root_gap_ms,
             animation: stored_image.animation,
         };
+
+        (image_to_place, display_cols, display_rows)
+    }
+
+    /// Handle `a=p` (Put) — display a previously transmitted image.
+    ///
+    /// Looks up the image by `i=<image_id>` (or, if absent, resolves `I=`
+    /// to the newest image with that number) in the image store, applies
+    /// any display-size overrides (`c=`/`r=`) from the control data, and
+    /// places the image into the buffer.
+    fn handle_kitty_put(&mut self, cmd: &KittyGraphicsCommand, image_id: u32, quiet: u8) {
+        let image_number = cmd.control.image_number;
+
+        let Some(id) = self.resolve_kitty_reference_id(
+            &cmd.control,
+            image_id,
+            cmd.control.placement_id,
+            quiet,
+        ) else {
+            return;
+        };
+
+        // Look up the previously transmitted image.
+        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
+            tracing::warn!(
+                "Kitty graphics: a=p for unknown image id={image_id} \
+                 (store has {} images: {:?})",
+                self.buffer.image_store().len(),
+                self.buffer
+                    .image_store()
+                    .iter()
+                    .map(|(k, _)| k)
+                    .collect::<Vec<_>>(),
+            );
+            self.send_kitty_error(
+                KittyResponseId {
+                    image_id,
+                    image_number,
+                    placement_id: cmd.control.placement_id,
+                },
+                quiet,
+                "ENOENT:image not found",
+            );
+            return;
+        };
+
+        // Apply display-size overrides from the Put command, if present.
+        let (image_to_place, display_cols, display_rows) =
+            self.apply_put_display_overrides(cmd, stored_image);
 
         // Update the store with the possibly-resized image.
         self.buffer.image_store_mut().insert(image_to_place.clone());
@@ -355,7 +448,15 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && id > 0 {
             let response_id = u32::value_from(id).unwrap_or(0);
-            let response = format_kitty_response(response_id, cmd.control.placement_id, true, "");
+            let response = format_kitty_response(
+                KittyResponseId {
+                    image_id: response_id,
+                    image_number,
+                    placement_id: cmd.control.placement_id,
+                },
+                true,
+                "",
+            );
             self.write_to_pty(&response);
         }
     }
@@ -402,8 +503,7 @@ impl TerminalHandler {
                         image_data.len()
                     );
                     self.send_kitty_error(
-                        image_id_hint,
-                        placement_id,
+                        kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
                     );
@@ -423,8 +523,7 @@ impl TerminalHandler {
                         image_data.len()
                     );
                     self.send_kitty_error(
-                        image_id_hint,
-                        placement_id,
+                        kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:payload size mismatch",
                     );
@@ -445,8 +544,7 @@ impl TerminalHandler {
                     let h = rgba_img.height();
                     if w == 0 || h == 0 {
                         self.send_kitty_error(
-                            image_id_hint,
-                            placement_id,
+                            kitty_id_no_number(image_id_hint, placement_id),
                             quiet,
                             "EINVAL:decoded image has zero dimensions",
                         );
@@ -457,8 +555,7 @@ impl TerminalHandler {
                 Err(e) => {
                     tracing::warn!("Kitty PNG decode failed: {e}");
                     self.send_kitty_error(
-                        image_id_hint,
-                        placement_id,
+                        kitty_id_no_number(image_id_hint, placement_id),
                         quiet,
                         "EINVAL:PNG decode failed",
                     );
@@ -495,8 +592,7 @@ impl TerminalHandler {
             KittyTransmission::SharedMemory => {
                 tracing::warn!("Kitty graphics: shared memory transmission (t=s) is not supported");
                 self.send_kitty_error(
-                    image_id_hint,
-                    placement_id,
+                    kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "ENOTSUP:shared memory transmission not supported",
                 );
@@ -522,8 +618,7 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics file path is not valid UTF-8: {e}");
                 self.send_kitty_error(
-                    image_id_hint,
-                    placement_id,
+                    kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "EINVAL:invalid file path encoding",
                 );
@@ -537,8 +632,7 @@ impl TerminalHandler {
         if !path.is_absolute() {
             tracing::warn!("Kitty graphics: rejecting non-absolute file path: {path_str:?}");
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EPERM:file path must be absolute",
             );
@@ -554,8 +648,7 @@ impl TerminalHandler {
             Err(e) => {
                 tracing::warn!("Kitty graphics: failed to read file {path_str:?}: {e}");
                 self.send_kitty_error(
-                    image_id_hint,
-                    placement_id,
+                    kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     &format!("EIO:failed to read file: {e}"),
                 );
@@ -592,8 +685,7 @@ impl TerminalHandler {
     ) -> Option<(u32, u32)> {
         let Some(w) = cmd.control.src_width else {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing width (s)",
             );
@@ -601,8 +693,7 @@ impl TerminalHandler {
         };
         let Some(h) = cmd.control.src_height else {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing height (v)",
             );
@@ -628,8 +719,7 @@ impl TerminalHandler {
     ) {
         if img_width_px == 0 || img_height_px == 0 {
             self.send_kitty_error(
-                image_id_hint,
-                control.placement_id,
+                kitty_id_no_number(image_id_hint, control.placement_id),
                 quiet,
                 "EINVAL:zero dimension",
             );
@@ -682,6 +772,16 @@ impl TerminalHandler {
 
         self.buffer.image_store_mut().insert(inline_image.clone());
 
+        // `I=` always creates a new image (already given a fresh id above,
+        // since a bare `I=<n>` has no `i=`) — record it as the newest image
+        // with that number so later by-number references (`a=p,I=`,
+        // `a=f,I=`, `d=n`) resolve to it.
+        if let Some(number) = control.image_number {
+            self.buffer
+                .image_store_mut()
+                .associate_number(number, assigned_id);
+        }
+
         // If this is a virtual (Unicode placeholder) placement, store it in
         // the virtual_placements table instead of placing cells in the buffer.
         if control.unicode_placeholder {
@@ -720,37 +820,33 @@ impl TerminalHandler {
         // Send OK response unless suppressed.
         if quiet < 1 && assigned_id > 0 {
             let response_id = u32::value_from(assigned_id).unwrap_or(0);
-            let response = format_kitty_response(response_id, control.placement_id, true, "");
+            let response = format_kitty_response(
+                KittyResponseId {
+                    image_id: response_id,
+                    image_number: control.image_number,
+                    placement_id: control.placement_id,
+                },
+                true,
+                "",
+            );
             self.write_to_pty(&response);
         }
     }
 
-    /// Handle `a=f` — transmit an animation frame.
+    /// Decode the transmitted rectangle for an `a=f` animation-frame
+    /// command.
     ///
-    /// The transmitted rectangle (`x`/`y`/`s`/`v`) is composited onto a base
-    /// canvas — either an existing frame (`c=`) or a fresh background-filled
-    /// canvas (`Y=`) — using alpha-blend or overwrite (`X=`). The result is
-    /// either patched into an existing frame (`r=`) or appended as a new
-    /// frame, with an optional gap (`z=`) to the next frame.
-    fn handle_kitty_animation_frame(&mut self, cmd: &KittyGraphicsCommand) {
-        let image_id_hint = cmd.control.image_id.unwrap_or(0);
-        let placement_id = cmd.control.placement_id;
-        let quiet = cmd.control.quiet;
-        let id = u64::from(image_id_hint);
-
-        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
-            return;
-        };
-
-        if cmd.payload.is_empty() {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENODATA:no payload");
-            return;
-        }
-
-        // Under `a=f`, `s`/`v` retain their transmit-group meaning (width and
-        // height of the transmitted rectangle); default to the full image
-        // dimensions when absent, per spec.
+    /// Under `a=f`, `s`/`v` retain their transmit-group meaning (width and
+    /// height of the transmitted rectangle); default to the full image
+    /// dimensions when absent, per spec.
+    fn decode_kitty_frame_rect(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        stored_image: &InlineImage,
+        image_id_hint: u32,
+        placement_id: Option<u32>,
+        quiet: u8,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let mut effective_control = cmd.control.clone();
         if effective_control.src_width.is_none() {
             effective_control.src_width = Some(stored_image.width_px);
@@ -763,8 +859,90 @@ impl TerminalHandler {
             payload: cmd.payload.clone(),
         };
 
+        self.decode_kitty_payload(&effective_cmd, image_id_hint, placement_id, quiet)
+    }
+
+    /// Resolve the base canvas for an `a=f` animation-frame composite.
+    ///
+    /// `c=` (`display_cols` under `a=f`) seeds the canvas from an existing
+    /// frame; otherwise a fresh background-colored (`Y=`) canvas is used.
+    /// Sends `ENOENT` and returns `None` if `c=` names a frame that doesn't
+    /// exist.
+    // All parameters are required composite inputs; grouping into a struct
+    // would obscure the call site without reducing coupling.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_frame_base_canvas(
+        &self,
+        cmd: &KittyGraphicsCommand,
+        stored_image: &InlineImage,
+        canvas_w: u32,
+        canvas_h: u32,
+        image_id_hint: u32,
+        placement_id: Option<u32>,
+        quiet: u8,
+    ) -> Option<Vec<u8>> {
+        match cmd.control.display_cols {
+            Some(base_frame) if base_frame > 0 => {
+                let Some(base_pixels) = stored_image.frame_pixels(base_frame) else {
+                    self.send_kitty_error(
+                        kitty_id_no_number(image_id_hint, placement_id),
+                        quiet,
+                        "ENOENT:base frame not found",
+                    );
+                    return None;
+                };
+                Some(base_pixels.as_ref().clone())
+            }
+            _ => {
+                let bg = cmd.control.cell_y_offset.unwrap_or(0);
+                Some(new_canvas_filled(canvas_w, canvas_h, bg))
+            }
+        }
+    }
+
+    /// Handle `a=f` — transmit an animation frame.
+    ///
+    /// The transmitted rectangle (`x`/`y`/`s`/`v`) is composited onto a base
+    /// canvas — either an existing frame (`c=`) or a fresh background-filled
+    /// canvas (`Y=`) — using alpha-blend or overwrite (`X=`). The result is
+    /// either patched into an existing frame (`r=`) or appended as a new
+    /// frame, with an optional gap (`z=`) to the next frame.
+    fn handle_kitty_animation_frame(&mut self, cmd: &KittyGraphicsCommand) {
+        let image_id_hint = cmd.control.image_id.unwrap_or(0);
+        let image_number = cmd.control.image_number;
+        let placement_id = cmd.control.placement_id;
+        let quiet = cmd.control.quiet;
+
+        let Some(id) =
+            self.resolve_kitty_reference_id(&cmd.control, image_id_hint, placement_id, quiet)
+        else {
+            return;
+        };
+
+        let Some(stored_image) = self.buffer.image_store().get(id).cloned() else {
+            self.send_kitty_error(
+                KittyResponseId {
+                    image_id: image_id_hint,
+                    image_number,
+                    placement_id,
+                },
+                quiet,
+                "ENOENT:image not found",
+            );
+            return;
+        };
+
+        if cmd.payload.is_empty() {
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "ENODATA:no payload",
+            );
+            return;
+        }
+
         let Some((rect_pixels, rect_w, rect_h)) =
-            self.decode_kitty_payload(&effective_cmd, image_id_hint, placement_id, quiet)
+            self.decode_kitty_frame_rect(cmd, &stored_image, image_id_hint, placement_id, quiet)
         else {
             return; // Error already sent by decode_kitty_payload.
         };
@@ -776,25 +954,16 @@ impl TerminalHandler {
         let canvas_w = stored_image.width_px;
         let canvas_h = stored_image.height_px;
 
-        // Base canvas: `c=` (display_cols under a=f) seeds from an existing
-        // frame; otherwise a fresh background-colored (`Y=`) canvas.
-        let mut canvas: Vec<u8> = match cmd.control.display_cols {
-            Some(base_frame) if base_frame > 0 => {
-                let Some(base_pixels) = stored_image.frame_pixels(base_frame) else {
-                    self.send_kitty_error(
-                        image_id_hint,
-                        placement_id,
-                        quiet,
-                        "ENOENT:base frame not found",
-                    );
-                    return;
-                };
-                base_pixels.as_ref().clone()
-            }
-            _ => {
-                let bg = cmd.control.cell_y_offset.unwrap_or(0);
-                new_canvas_filled(canvas_w, canvas_h, bg)
-            }
+        let Some(mut canvas) = self.resolve_frame_base_canvas(
+            cmd,
+            &stored_image,
+            canvas_w,
+            canvas_h,
+            image_id_hint,
+            placement_id,
+            quiet,
+        ) else {
+            return; // Error already sent by resolve_frame_base_canvas.
         };
 
         // Compose mode: `X=` (cell_x_offset under a=f), default alpha-blend.
@@ -810,7 +979,7 @@ impl TerminalHandler {
             dest_y,
             overwrite,
         ) {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, msg);
+            self.send_kitty_error(kitty_id_no_number(image_id_hint, placement_id), quiet, msg);
             return;
         }
 
@@ -823,8 +992,7 @@ impl TerminalHandler {
         if let Some(edit_frame) = cmd.control.display_rows.filter(|&r| r > 0) {
             if !image_to_store.set_frame_pixels(edit_frame, std::sync::Arc::new(canvas)) {
                 self.send_kitty_error(
-                    image_id_hint,
-                    placement_id,
+                    kitty_id_no_number(image_id_hint, placement_id),
                     quiet,
                     "ENOENT:edit frame not found",
                 );
@@ -841,7 +1009,16 @@ impl TerminalHandler {
         self.buffer.image_store_mut().insert(image_to_store);
 
         if quiet < 1 {
-            let response = format_kitty_response(image_id_hint, placement_id, true, "");
+            let response_id = u32::value_from(id).unwrap_or(image_id_hint);
+            let response = format_kitty_response(
+                KittyResponseId {
+                    image_id: response_id,
+                    image_number,
+                    placement_id,
+                },
+                true,
+                "",
+            );
             self.write_to_pty(&response);
         }
     }
@@ -859,7 +1036,11 @@ impl TerminalHandler {
         let id = u64::from(image_id_hint);
 
         let Some(mut stored_image) = self.buffer.image_store().get(id).cloned() else {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "ENOENT:image not found",
+            );
             return;
         };
 
@@ -910,8 +1091,7 @@ impl TerminalHandler {
     ) -> Option<(u32, u32)> {
         let Some(src_frame) = cmd.control.display_rows else {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing source frame (r)",
             );
@@ -919,8 +1099,7 @@ impl TerminalHandler {
         };
         let Some(dest_frame) = cmd.control.display_cols else {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:missing destination frame (c)",
             );
@@ -940,7 +1119,11 @@ impl TerminalHandler {
         quiet: u8,
     ) -> Option<std::sync::Arc<Vec<u8>>> {
         let Some(pixels) = image.frame_pixels(frame).cloned() else {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:frame not found");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "ENOENT:frame not found",
+            );
             return None;
         };
         Some(pixels)
@@ -958,7 +1141,11 @@ impl TerminalHandler {
         let id = u64::from(image_id_hint);
 
         let Some(mut stored_image) = self.buffer.image_store().get(id).cloned() else {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, "ENOENT:image not found");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "ENOENT:image not found",
+            );
             return;
         };
 
@@ -995,8 +1182,7 @@ impl TerminalHandler {
         // same pixels in one compose is undefined).
         if src_frame == dest_frame && rect.overlaps_self() {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:overlapping same-frame rects",
             );
@@ -1013,8 +1199,7 @@ impl TerminalHandler {
             rect.height,
         ) else {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "EINVAL:source rect out of bounds",
             );
@@ -1036,14 +1221,13 @@ impl TerminalHandler {
             rect.dest_y,
             overwrite,
         ) {
-            self.send_kitty_error(image_id_hint, placement_id, quiet, msg);
+            self.send_kitty_error(kitty_id_no_number(image_id_hint, placement_id), quiet, msg);
             return;
         }
 
         if !stored_image.set_frame_pixels(dest_frame, std::sync::Arc::new(dest_canvas)) {
             self.send_kitty_error(
-                image_id_hint,
-                placement_id,
+                kitty_id_no_number(image_id_hint, placement_id),
                 quiet,
                 "ENOENT:destination frame not found",
             );
@@ -1053,19 +1237,23 @@ impl TerminalHandler {
         self.buffer.image_store_mut().insert(stored_image);
 
         if quiet < 1 {
-            let response = format_kitty_response(image_id_hint, placement_id, true, "");
+            let response =
+                format_kitty_response(kitty_id_no_number(image_id_hint, placement_id), true, "");
             self.write_to_pty(&response);
         }
     }
 
     /// Send a Kitty graphics error response, respecting quiet mode.
-    fn send_kitty_error(&self, image_id: u32, placement_id: Option<u32>, quiet: u8, message: &str) {
+    fn send_kitty_error(&self, id: KittyResponseId, quiet: u8, message: &str) {
         // quiet=2 suppresses all responses (including errors).
         if quiet >= 2 {
-            tracing::debug!("Kitty graphics: error suppressed by q=2: id={image_id} {message}");
+            tracing::debug!(
+                "Kitty graphics: error suppressed by q=2: id={} {message}",
+                id.image_id
+            );
             return;
         }
-        let response = format_kitty_response(image_id, placement_id, false, message);
+        let response = format_kitty_response(id, false, message);
         self.write_to_pty(&response);
     }
 
@@ -1104,6 +1292,13 @@ impl TerminalHandler {
             {
                 tracing::debug!("Kitty graphics: deleting image number={number}");
                 self.buffer.clear_image_placements_by_number(number);
+                // Also prune any virtual (Unicode placeholder) placements for
+                // the newest image with this number — `clear_image_placements_by_number`
+                // only clears cell placements, not the virtual-placement table.
+                if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
+                    self.virtual_placements
+                        .retain(|&(img_id, _), _| img_id != id);
+                }
             }
             KittyDeleteTarget::ById
             | KittyDeleteTarget::ByIdCursorOrAfter
@@ -4579,5 +4774,295 @@ mod tests {
             }
             PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Kitty image number (`I=`) reference-by-number tests (Task 100.3)
+    // -----------------------------------------------------------------------
+
+    /// Parse the `i=<id>` field out of the next queued kitty graphics
+    /// response and return it. Panics if no response is queued or it cannot
+    /// be parsed as a `u64`.
+    fn extract_assigned_id(rx: &crossbeam_channel::Receiver<PtyWrite>) -> u64 {
+        let response = rx.try_recv().expect("expected a response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                let id_part = s
+                    .split("i=")
+                    .nth(1)
+                    .and_then(|rest| rest.split(',').next())
+                    .expect("response should contain i=<id>");
+                id_part.parse().expect("id should be numeric")
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_transmit_with_image_number_echoes_i_and_associates() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: vec![0u8; 16],
+        };
+        handler.handle_kitty_graphics(cmd);
+
+        let response = rx.try_recv().expect("expected an OK response");
+        let assigned_id = match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                assert!(s.contains("I=13"), "expected I=13 in response, got: {s}");
+                assert!(s.contains("OK"), "expected OK, got: {s}");
+                let id_part = s
+                    .split("i=")
+                    .nth(1)
+                    .and_then(|rest| rest.split(',').next())
+                    .expect("response should contain i=<id>");
+                id_part.parse::<u64>().expect("id should be numeric")
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        };
+
+        assert_eq!(
+            handler.buffer().image_store().newest_id_for_number(13),
+            Some(assigned_id),
+            "newest_id_for_number(13) should resolve to the assigned id"
+        );
+    }
+
+    #[test]
+    fn kitty_put_by_image_number_resolves_to_newest_image() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let (mut handler, rx) = kitty_handler();
+
+        let transmit_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: vec![0u8; 16],
+        };
+        handler.handle_kitty_graphics(transmit_cmd);
+        let assigned_id = extract_assigned_id(&rx);
+
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "transmit-only should not place cells"
+        );
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        assert!(
+            handler.buffer().has_any_image_cell(),
+            "put by I= should resolve to the transmitted image and place cells"
+        );
+
+        let response = rx.try_recv().expect("expected a Put OK response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("OK"), "expected OK, got: {s}");
+                assert!(s.contains("I=13"), "expected I=13 echoed, got: {s}");
+                assert!(
+                    s.contains(&format!("i={assigned_id}")),
+                    "expected the resolved id echoed, got: {s}"
+                );
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_put_unknown_image_number_sends_enoent() {
+        use freminal_common::buffer_states::kitty_graphics::KittyControlData;
+
+        let (mut handler, rx) = kitty_handler();
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_number: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let response = rx.try_recv().expect("expected an error response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(s.contains("ENOENT"), "expected ENOENT, got: {s}");
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_transmit_twice_same_number_newest_id_wins() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let (mut handler, rx) = kitty_handler();
+
+        let make_transmit = |fill: u8| KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: vec![fill; 16],
+        };
+
+        handler.handle_kitty_graphics(make_transmit(1));
+        let first_id = extract_assigned_id(&rx);
+
+        handler.handle_kitty_graphics(make_transmit(2));
+        let second_id = extract_assigned_id(&rx);
+
+        assert_ne!(first_id, second_id, "each I= transmit gets a fresh id");
+        assert_eq!(
+            handler.buffer().image_store().newest_id_for_number(5),
+            Some(second_id),
+            "newest_id_for_number should follow the most recent transmit"
+        );
+
+        // A put by number should target the newest (second) image.
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_number: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+        let response = rx.try_recv().expect("expected a Put OK response");
+        match response {
+            PtyWrite::Write(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                assert!(
+                    s.contains(&format!("i={second_id}")),
+                    "put by number should target the newest image, got: {s}"
+                );
+            }
+            PtyWrite::Resize(_) => panic!("Expected PtyWrite::Write"),
+        }
+    }
+
+    #[test]
+    fn kitty_animation_frame_by_image_number_targets_resolved_image() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyControlData, KittyFormat};
+
+        let (mut handler, rx) = kitty_handler();
+
+        let transmit_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: vec![0u8; 16],
+        };
+        handler.handle_kitty_graphics(transmit_cmd);
+        let assigned_id = extract_assigned_id(&rx);
+
+        let frame_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationFrame),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: vec![1u8; 16],
+        };
+        handler.handle_kitty_graphics(frame_cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(assigned_id)
+            .expect("resolved image should still exist");
+        assert_eq!(
+            img.frame_count(),
+            2,
+            "a=f,I= should add a frame to the resolved image"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_by_number_prunes_virtual_placement() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyControlData, KittyDeleteTarget, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let transmit_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_number: Some(13),
+                unicode_placeholder: true,
+                ..KittyControlData::default()
+            },
+            payload: vec![0u8; 16],
+        };
+        handler.handle_kitty_graphics(transmit_cmd);
+        let assigned_id = extract_assigned_id(&rx);
+
+        assert!(
+            handler.virtual_placements.contains_key(&(assigned_id, 0)),
+            "virtual placement should exist for the transmitted image"
+        );
+
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ByNumber),
+                image_number: Some(13),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            !handler.virtual_placements.contains_key(&(assigned_id, 0)),
+            "d=n should prune the virtual placement for the resolved image"
+        );
     }
 }

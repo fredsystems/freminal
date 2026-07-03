@@ -274,6 +274,11 @@ pub struct ImagePlacement {
 #[derive(Debug, Clone, Default)]
 pub struct ImageStore {
     images: HashMap<u64, InlineImage>,
+
+    /// Maps a kitty image *number* (`I=`) to the id of the NEWEST image
+    /// transmitted with that number. kitty resolves later by-number references
+    /// (`a=p,I=`, `a=f,I=`, `d=n`) to the most-recent image with that number.
+    number_to_id: HashMap<u32, u64>,
 }
 
 impl ImageStore {
@@ -282,6 +287,7 @@ impl ImageStore {
     pub fn new() -> Self {
         Self {
             images: HashMap::new(),
+            number_to_id: HashMap::new(),
         }
     }
 
@@ -299,7 +305,30 @@ impl ImageStore {
 
     /// Remove an image by ID.  Returns the removed image, if any.
     pub fn remove(&mut self, id: u64) -> Option<InlineImage> {
-        self.images.remove(&id)
+        let removed = self.images.remove(&id);
+        if removed.is_some() {
+            self.number_to_id.retain(|_, v| *v != id);
+        }
+        removed
+    }
+
+    /// Record that image `id` is now the newest image with number `number`.
+    /// Call this when an image is transmitted with an `I=` key.
+    pub fn associate_number(&mut self, number: u32, id: u64) {
+        self.number_to_id.insert(number, id);
+    }
+
+    /// Resolve a kitty image number (`I=`) to the id of the newest image with
+    /// that number, if any is still stored.
+    #[must_use]
+    pub fn newest_id_for_number(&self, number: u32) -> Option<u64> {
+        let id = *self.number_to_id.get(&number)?;
+        // Only report it if the image is still present.
+        if self.images.contains_key(&id) {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// Returns `true` if the store contains an image with the given ID.
@@ -345,6 +374,7 @@ impl ImageStore {
         }
 
         self.images.retain(|id, _| referenced.contains(id));
+        self.number_to_id.retain(|_, v| self.images.contains_key(v));
     }
 
     /// Iterate over all images.
@@ -355,6 +385,7 @@ impl ImageStore {
     /// Remove all stored images.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.number_to_id.clear();
     }
 }
 
@@ -772,6 +803,109 @@ mod tests {
         assert!(
             !img.set_frame_gap(99, 10),
             "setting gap on a nonexistent frame should return false"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Kitty image number (`I=`) index (Task 100.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn associate_number_then_resolve_returns_the_id() {
+        let mut store = ImageStore::new();
+        let id = next_image_id();
+        store.insert(make_test_image(id, 2, 2));
+
+        store.associate_number(13, id);
+
+        assert_eq!(store.newest_id_for_number(13), Some(id));
+    }
+
+    #[test]
+    fn newest_id_for_number_returns_none_for_unknown_number() {
+        let store = ImageStore::new();
+        assert_eq!(store.newest_id_for_number(999), None);
+    }
+
+    #[test]
+    fn newest_id_for_number_returns_none_after_image_removed() {
+        let mut store = ImageStore::new();
+        let id = next_image_id();
+        store.insert(make_test_image(id, 2, 2));
+        store.associate_number(13, id);
+        assert_eq!(store.newest_id_for_number(13), Some(id));
+
+        store.remove(id);
+
+        assert_eq!(
+            store.newest_id_for_number(13),
+            None,
+            "resolving a number whose image was removed should return None"
+        );
+    }
+
+    #[test]
+    fn associate_number_with_newer_image_overrides_older_id() {
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        let id2 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        store.insert(make_test_image(id2, 2, 2));
+
+        store.associate_number(5, id1);
+        assert_eq!(store.newest_id_for_number(5), Some(id1));
+
+        // A second transmit with the same number always creates a new image
+        // and becomes the "newest" — the index must follow it.
+        store.associate_number(5, id2);
+        assert_eq!(store.newest_id_for_number(5), Some(id2));
+    }
+
+    #[test]
+    fn clear_drops_the_number_index() {
+        let mut store = ImageStore::new();
+        let id = next_image_id();
+        store.insert(make_test_image(id, 2, 2));
+        store.associate_number(7, id);
+        assert_eq!(store.newest_id_for_number(7), Some(id));
+
+        store.clear();
+
+        assert_eq!(store.newest_id_for_number(7), None);
+    }
+
+    #[test]
+    fn retain_referenced_drops_number_index_entries_for_removed_images() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        let id2 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        store.insert(make_test_image(id2, 2, 2));
+        store.associate_number(1, id1);
+        store.associate_number(2, id2);
+
+        // Only id1 is referenced by a cell; id2 gets garbage-collected.
+        let placement = ImagePlacement {
+            image_id: id1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: Some(1),
+            placement_id: None,
+            z_index: 0,
+        };
+        let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+
+        assert_eq!(store.newest_id_for_number(1), Some(id1));
+        assert_eq!(
+            store.newest_id_for_number(2),
+            None,
+            "number index entry for a GC'd image should be dropped"
         );
     }
 }

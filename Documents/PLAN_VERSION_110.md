@@ -890,6 +890,49 @@ Prohibitions: do NOT touch animation or relative placements; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.3 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon confirmed the core placeholder machinery is **already complete and
+rendered** (`freminal-common/src/buffer_states/unicode_placeholder.rs`: 297-entry
+diacritic table, `PLACEHOLDER_UTF8`, `parse_placeholder_diacritics`,
+`color_to_image_id`/`color_to_placement_id`; `TerminalHandler` `handle_data_with_placeholders`
+/ `handle_placeholder_char` / `resolve_placeholder_diacritics` with the 3
+left-to-right inheritance rules and `PrevPlaceholder` state; virtual placements
+render through the generic `build_image_verts` path; tests cover diacritic decode,
+inheritance, creation, delete-by-id/all). So 100.3 does **not** rebuild any of
+that. The renderer needs no change; `build_image_verts` was miscited in the
+original scope line — it already handles placeholder cells generically.
+
+**The `image_number` (`I=`) gap, resolved against the upstream spec (kitty
+graphics-protocol, "Unicode placeholders" + "Requesting image ids").** The spec
+(re-read 2026-07-01) is unambiguous: a Unicode placeholder's foreground color
+_always_ encodes an image **id** (the 3rd diacritic extends its MSB) — there is
+**no** placeholder-references-by-number mechanism, so the earlier worry about a
+"number-vs-id bit in the placeholder" is void. The real gap is the general
+**`I=` reference-by-number** feature freminal lacks entirely: (1) transmitting
+with `I=<n>` (no `i=`) must create a new image, assign it an id, record a
+`number → newest-id` association, and reply `\e_Gi=<id>,I=<n>;OK\e\`; (2) later
+`a=p,I=<n>` (put) and `a=f,I=<n>` (animation frame) must resolve to the **newest**
+image with that number; (3) `d=n`/`d=N` delete-by-number must also prune
+`virtual_placements` (today it only clears cell placements). freminal has **no**
+`number → id` index anywhere (`ImageStore` is a flat `HashMap<u64, InlineImage>`;
+`image_number` lives only on per-cell `ImagePlacement`).
+
+Scope (single Sonnet pass — coherent "image-number resolution", no GPU/architecture
+hazard): `freminal-buffer/src/image_store.rs` (a `number_to_id: HashMap<u32, u64>`
+"newest id per number" index, maintained on `insert`/`remove`/`clear`, + a
+`newest_id_for_number(n) -> Option<u64>` resolver);
+`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (record the
+number→id association at transmit; resolve `I=` in `handle_kitty_put` and
+`handle_kitty_animation_frame` when `i=` is absent/0; prune `virtual_placements`
+in the `d=n`/`d=N` arms); `freminal-common/src/buffer_states/kitty_graphics.rs`
+(the OK response must echo `I=<n>` alongside `i=<id>` for an `I=` transmit — extend
+the response formatter, e.g. a `KittyResponseId { image_id, image_number:
+Option<u32>, placement_id: Option<u32> }` replacing the 100.2a `(image_id,
+placement_id)` args, so the 3 optional identity fields are carried without a
+4-scalar signature). Plus the "verify conformance" tests. Dual-doc update is
+100.8, not here.
+
 #### 100.4 — Relative placements (parent/child groups)
 
 Scope: `terminal_handler/graphics_kitty.rs`, `image_store.rs` (placement group links).
