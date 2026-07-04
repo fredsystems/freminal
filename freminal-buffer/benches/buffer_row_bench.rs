@@ -6,6 +6,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
+use freminal_buffer::image_store::{AnimationControl, ImageStore, InlineImage};
 use freminal_common::buffer_states::{
     cursor::StateColors,
     fonts::{FontDecorationFlags, FontWeight},
@@ -673,6 +674,50 @@ fn bench_command_block_record(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: ImageStore::insert per-insert quota-scan cost (100.5)
+//
+// Every insert() now scans all stored images to sum base/anim pool byte
+// totals via enforce_quota(). This measures that scan cost at a realistic
+// store size (256 stored images) without allocating anywhere near the real
+// 320 MB quota — the scan cost scales with image COUNT, not pixel size, so
+// images are kept intentionally small (4 KB) to keep setup fast.
+// ---------------------------------------------------------------
+fn make_bench_image(id: u64) -> InlineImage {
+    InlineImage {
+        id,
+        pixels: std::sync::Arc::new(vec![0u8; 4096]),
+        width_px: 32,
+        height_px: 32,
+        display_cols: 4,
+        display_rows: 2,
+        frames: Vec::new(),
+        root_gap_ms: 0,
+        animation: AnimationControl::default(),
+    }
+}
+
+fn bench_image_store_insert_at_quota(c: &mut Criterion) {
+    const PRELOAD_COUNT: u64 = 256;
+
+    c.bench_function("image_store_insert_at_quota", |b| {
+        b.iter_batched(
+            || {
+                let mut store = ImageStore::new();
+                for id in 0..PRELOAD_COUNT {
+                    store.insert(make_bench_image(id));
+                }
+                store
+            },
+            |mut store| {
+                store.insert(make_bench_image(PRELOAD_COUNT));
+                std::hint::black_box(&store);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -697,6 +742,7 @@ criterion_group!(
         bench_lf_heavy_bce,
         bench_erase_display_bce,
         bench_command_block_record,
+        bench_image_store_insert_at_quota,
 );
 
 criterion_main!(benches);

@@ -12,7 +12,7 @@
 //! single null pointer (8 bytes).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,6 +21,15 @@ use std::{
 
 /// Global monotonic counter for generating unique image IDs.
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Base-image storage budget per buffer, in bytes (kitty's reference value,
+/// 320 MB). Still-image (root-frame) pixel data is charged against this pool.
+pub const KITTY_IMAGE_BASE_QUOTA_BYTES: usize = 320 * 1024 * 1024;
+
+/// Animation-frame storage budget per buffer, in bytes (kitty's reference
+/// value, 5x the base pool). Animation frame pixel data (frames 2..N) is
+/// charged against this separate pool.
+pub const KITTY_IMAGE_ANIM_QUOTA_BYTES: usize = 5 * KITTY_IMAGE_BASE_QUOTA_BYTES;
 
 /// Generate a unique image ID.
 ///
@@ -279,6 +288,20 @@ pub struct ImageStore {
     /// transmitted with that number. kitty resolves later by-number references
     /// (`a=p,I=`, `a=f,I=`, `d=n`) to the most-recent image with that number.
     number_to_id: HashMap<u32, u64>,
+
+    /// Monotonic per-store insertion counter, stamped on each stored image for
+    /// LRU age ordering. NOT the protocol image id (which a client may choose
+    /// arbitrarily via `i=`), so this is the reliable age proxy.
+    next_seq: u64,
+
+    /// Insertion sequence per image id (age proxy for LRU eviction).
+    seq: HashMap<u64, u64>,
+
+    /// Ids known to be referenced by an on-screen placement, updated by
+    /// `retain_referenced`. Eviction prefers images NOT in this set
+    /// (placement-less first). May be slightly stale between refreshes —
+    /// acceptable for a DoS-guard quota.
+    placed: HashSet<u64>,
 }
 
 impl ImageStore {
@@ -288,13 +311,82 @@ impl ImageStore {
         Self {
             images: HashMap::new(),
             number_to_id: HashMap::new(),
+            next_seq: 0,
+            seq: HashMap::new(),
+            placed: HashSet::new(),
         }
     }
 
     /// Insert an image.  If an image with the same ID already exists, it is
     /// replaced.
+    ///
+    /// After inserting, enforces the kitty graphics storage quota
+    /// (`KITTY_IMAGE_BASE_QUOTA_BYTES` / `KITTY_IMAGE_ANIM_QUOTA_BYTES`),
+    /// evicting the least-recently-inserted, placement-less image(s) as
+    /// needed until the store is back under both caps (or only one image
+    /// remains — a single over-quota image is never evicted to zero).
     pub fn insert(&mut self, image: InlineImage) {
-        self.images.insert(image.id, image);
+        let id = image.id;
+        self.images.insert(id, image);
+        // Stamp/refresh the insertion sequence (a replace refreshes age — the
+        // image was just (re)transmitted, so it is "newest").
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        self.seq.insert(id, seq);
+        self.enforce_quota();
+    }
+
+    /// Enforce the real kitty graphics storage quota constants.
+    fn enforce_quota(&mut self) {
+        self.enforce_quota_with_caps(KITTY_IMAGE_BASE_QUOTA_BYTES, KITTY_IMAGE_ANIM_QUOTA_BYTES);
+    }
+
+    /// Evict images until both the base (root-frame) and animation-frame
+    /// byte totals are at or under the given caps, or only one image
+    /// remains in the store.
+    ///
+    /// Eviction order: images NOT known to be currently placed (see
+    /// `placed`) are preferred over placed ones; within that preference,
+    /// the oldest insertion (`seq`) is evicted first. Because a newly
+    /// inserted image always holds the highest `seq` in the store, it is
+    /// never chosen as the victim unless it is the sole remaining image —
+    /// which the "never evict to zero" floor below already prevents.
+    fn enforce_quota_with_caps(&mut self, base_cap: usize, anim_cap: usize) {
+        let mut base_bytes: usize = 0;
+        let mut anim_bytes: usize = 0;
+        for image in self.images.values() {
+            base_bytes = base_bytes.saturating_add(image.pixels.len());
+            for frame in &image.frames {
+                anim_bytes = anim_bytes.saturating_add(frame.pixels.len());
+            }
+        }
+
+        while (base_bytes > base_cap || anim_bytes > anim_cap) && self.images.len() > 1 {
+            let Some(victim) = self.pick_eviction_victim() else {
+                break;
+            };
+
+            if let Some(removed) = self.images.remove(&victim) {
+                base_bytes = base_bytes.saturating_sub(removed.pixels.len());
+                for frame in &removed.frames {
+                    anim_bytes = anim_bytes.saturating_sub(frame.pixels.len());
+                }
+            }
+            self.seq.remove(&victim);
+            self.placed.remove(&victim);
+            self.number_to_id.retain(|_, v| *v != victim);
+        }
+    }
+
+    /// Choose the eviction victim: prefer an id NOT in `placed`, then the
+    /// oldest (lowest `seq`) among the preferred set. Returns `None` only
+    /// if the store is empty.
+    fn pick_eviction_victim(&self) -> Option<u64> {
+        self.images.keys().copied().min_by_key(|id| {
+            let is_placed = self.placed.contains(id);
+            let age = self.seq.get(id).copied().unwrap_or(0);
+            (is_placed, age)
+        })
     }
 
     /// Look up an image by ID.
@@ -308,6 +400,8 @@ impl ImageStore {
         let removed = self.images.remove(&id);
         if removed.is_some() {
             self.number_to_id.retain(|_, v| *v != id);
+            self.seq.remove(&id);
+            self.placed.remove(&id);
         }
         removed
     }
@@ -362,8 +456,7 @@ impl ImageStore {
             return;
         }
 
-        let mut referenced: std::collections::HashSet<u64> =
-            std::collections::HashSet::with_capacity(self.images.len());
+        let mut referenced: HashSet<u64> = HashSet::with_capacity(self.images.len());
 
         for cells in rows {
             for cell in cells {
@@ -373,8 +466,11 @@ impl ImageStore {
             }
         }
 
+        self.placed.clone_from(&referenced);
         self.images.retain(|id, _| referenced.contains(id));
         self.number_to_id.retain(|_, v| self.images.contains_key(v));
+        self.seq.retain(|id, _| self.images.contains_key(id));
+        self.placed.retain(|id| self.images.contains_key(id));
     }
 
     /// Iterate over all images.
@@ -386,6 +482,9 @@ impl ImageStore {
     pub fn clear(&mut self) {
         self.images.clear();
         self.number_to_id.clear();
+        self.seq.clear();
+        self.placed.clear();
+        self.next_seq = 0;
     }
 }
 
@@ -407,6 +506,28 @@ mod tests {
             root_gap_ms: 0,
             animation: AnimationControl::default(),
         }
+    }
+
+    /// Build an image whose root-frame `pixels` buffer is exactly
+    /// `byte_len` bytes, for precisely controlling the base-pool byte
+    /// accounting exercised by quota/eviction tests.
+    fn make_test_image_with_pixel_bytes(id: u64, byte_len: usize) -> InlineImage {
+        let mut img = make_test_image(id, 1, 1);
+        img.pixels = Arc::new(vec![0u8; byte_len]);
+        img
+    }
+
+    /// Build an animated image with a root frame of `base_bytes` and a
+    /// single additional frame of `frame_bytes`, for precisely controlling
+    /// the base-pool vs. anim-pool byte accounting exercised by
+    /// quota/eviction tests.
+    fn make_test_image_with_frame(id: u64, base_bytes: usize, frame_bytes: usize) -> InlineImage {
+        let mut img = make_test_image_with_pixel_bytes(id, base_bytes);
+        img.frames.push(ImageFrame {
+            pixels: Arc::new(vec![0u8; frame_bytes]),
+            gap_ms: 0,
+        });
+        img
     }
 
     #[test]
@@ -906,6 +1027,205 @@ mod tests {
             store.newest_id_for_number(2),
             None,
             "number index entry for a GC'd image should be dropped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Storage quotas + LRU eviction (Task 100.5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn enforce_quota_evicts_oldest_first_when_all_unplaced() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image_with_pixel_bytes(1, 100)); // seq 0 (oldest)
+        store.insert(make_test_image_with_pixel_bytes(2, 100)); // seq 1
+        store.insert(make_test_image_with_pixel_bytes(3, 100)); // seq 2 (newest)
+        assert_eq!(store.len(), 3);
+
+        // Cap only allows one image's worth of base bytes; must evict the
+        // two oldest first, in age order, and stop at the floor of 1 image.
+        store.enforce_quota_with_caps(150, usize::MAX);
+
+        assert_eq!(store.len(), 1, "should evict down to the floor of 1 image");
+        assert!(
+            store.contains(3),
+            "the newest image (id 3) should survive; older images are evicted first"
+        );
+        assert!(!store.contains(1));
+        assert!(!store.contains(2));
+    }
+
+    #[test]
+    fn enforce_quota_prefers_evicting_unplaced_over_placed_even_if_older() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let id_placed = 1;
+        let id_unplaced = 2;
+
+        // id_placed is inserted first (older, seq 0)...
+        store.insert(make_test_image_with_pixel_bytes(id_placed, 100));
+
+        // ...and immediately confirmed on-screen via retain_referenced, which
+        // marks it `placed`.
+        let placement = ImagePlacement {
+            image_id: id_placed,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+        };
+        let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+        assert!(store.contains(id_placed));
+
+        // id_unplaced is inserted afterward (newer, seq 1) but has not yet
+        // been through a retain_referenced pass, so it is NOT in `placed`.
+        store.insert(make_test_image_with_pixel_bytes(id_unplaced, 100));
+
+        // Force eviction: total base bytes (200) exceeds the cap (150).
+        store.enforce_quota_with_caps(150, usize::MAX);
+
+        assert_eq!(store.len(), 1);
+        assert!(
+            store.contains(id_placed),
+            "the placed image should be kept even though it is older"
+        );
+        assert!(
+            !store.contains(id_unplaced),
+            "the unplaced (newer) image should be evicted first"
+        );
+    }
+
+    #[test]
+    fn enforce_quota_never_evicts_the_last_remaining_image() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image_with_pixel_bytes(1, 100_000));
+
+        // Wildly over both caps, but only one image exists — must be kept.
+        store.enforce_quota_with_caps(10, 10);
+
+        assert_eq!(
+            store.len(),
+            1,
+            "a single over-quota image must never be evicted to zero"
+        );
+        assert!(store.contains(1));
+    }
+
+    #[test]
+    fn enforce_quota_anim_pool_triggers_eviction_independent_of_base_pool() {
+        let mut store = ImageStore::new();
+        // Both images have tiny base (root-frame) pixels but large animation
+        // frames, so only the anim pool cap can trigger eviction here.
+        store.insert(make_test_image_with_frame(1, 10, 1000)); // seq 0 (oldest)
+        store.insert(make_test_image_with_frame(2, 10, 1000)); // seq 1 (newest)
+
+        // Base cap is effectively unlimited; anim cap (1500) is exceeded by
+        // the combined frame bytes (2000).
+        store.enforce_quota_with_caps(usize::MAX, 1500);
+
+        assert_eq!(
+            store.len(),
+            1,
+            "anim pool overage alone should force eviction"
+        );
+        assert!(
+            store.contains(2),
+            "the oldest image (id 1) should be evicted first"
+        );
+    }
+
+    #[test]
+    fn retain_referenced_updates_placed_set_and_prunes_seq_and_placed_for_removed_images() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        let mut store = ImageStore::new();
+        let id1 = next_image_id();
+        let id2 = next_image_id();
+        store.insert(make_test_image(id1, 2, 2));
+        store.insert(make_test_image(id2, 2, 2));
+
+        // Only id1 is referenced by a cell; id2 is unreferenced and GC'd.
+        let placement = ImagePlacement {
+            image_id: id1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+        };
+        let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+
+        assert!(
+            store.placed.contains(&id1),
+            "id1 is referenced on-screen, so it should be marked placed"
+        );
+        assert!(
+            !store.placed.contains(&id2),
+            "id2 was GC'd, so it must not remain in the placed set"
+        );
+        assert!(
+            store.seq.contains_key(&id1),
+            "seq entry for a surviving image should remain"
+        );
+        assert!(
+            !store.seq.contains_key(&id2),
+            "seq entry for a GC'd image should be pruned"
+        );
+    }
+
+    #[test]
+    fn remove_and_clear_keep_seq_and_placed_and_next_seq_in_sync() {
+        let mut store = ImageStore::new();
+        store.insert(make_test_image(1, 2, 2));
+        store.insert(make_test_image(2, 2, 2));
+        assert!(store.seq.contains_key(&1));
+        assert!(store.seq.contains_key(&2));
+
+        store.remove(1);
+        assert!(
+            !store.seq.contains_key(&1),
+            "remove() should drop the seq entry for the removed image"
+        );
+        assert!(
+            !store.placed.contains(&1),
+            "remove() should drop the placed entry for the removed image"
+        );
+        assert!(store.seq.contains_key(&2), "unrelated entries must survive");
+
+        store.clear();
+        assert!(store.seq.is_empty(), "clear() should empty the seq map");
+        assert!(
+            store.placed.is_empty(),
+            "clear() should empty the placed set"
+        );
+        assert_eq!(
+            store.next_seq, 0,
+            "clear() should reset the insertion sequence counter"
+        );
+    }
+
+    #[test]
+    fn normal_insert_under_real_quota_does_not_evict_anything() {
+        let mut store = ImageStore::new();
+        for i in 0..10u64 {
+            // 1 KB each, 10 KB total — far under the real 320 MB quota.
+            store.insert(make_test_image_with_pixel_bytes(i, 1024));
+        }
+
+        assert_eq!(
+            store.len(),
+            10,
+            "inserts well under the real quota must not trigger eviction"
         );
     }
 }

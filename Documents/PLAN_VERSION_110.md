@@ -1042,6 +1042,42 @@ Prohibitions: do NOT change protocol parsing; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.5 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon resolved three open shape questions:
+
+- **LRU age proxy: a dedicated insertion sequence, NOT the image id.** kitty's
+  `i=` lets a client pick an arbitrary id, so `InlineImage.id` is not a reliable
+  age proxy. `ImageStore` gains a monotonic `u64` insertion counter and stamps an
+  insertion sequence per stored image (independent of the protocol id); eviction
+  picks the lowest sequence (oldest).
+- **Placement-aware eviction via a `placed` set maintained by `retain_referenced`,
+  no plumbing through place/clear sites.** `ImageStore::insert` cannot see the cell
+  grid, and most inserts bypass `Buffer::place_image`, so a per-insert placement
+  oracle would need error-prone plumbing through ~7 place/clear sites. Instead,
+  `retain_referenced` (already driven by the `Buffer` on resize/scroll, and which
+  already removes truly-unreferenced images) also records the current referenced
+  id set into a `placed: HashSet<u64>` on the store. Eviction prefers images NOT
+  in `placed` (placement-less first), then falls back to oldest by insertion
+  sequence. The `placed` set may be slightly stale between `retain_referenced`
+  runs — acceptable: the quota is a DoS guard that only fires under memory
+  pressure, and the spec explicitly leaves the exact eviction count an
+  implementation choice ("at least a few full-screen images").
+- **Two separate byte pools (base vs animation), mirroring the spec's two-row
+  table.** Base pool = sum of root `pixels.len()` across all images, cap
+  `KITTY_IMAGE_BASE_QUOTA_BYTES = 320 * 1024 * 1024`. Animation pool = sum of
+  `frames[].pixels.len()`, cap `KITTY_IMAGE_ANIM_QUOTA_BYTES = 5 * base`. Eviction
+  fires when EITHER pool exceeds its cap (evicting whole images —
+  placement-less-then-oldest — until both pools are within budget). Named
+  constants so they can be tuned without a protocol change. (The spec is
+  ambiguous on single-vs-two-pool; two pools is the closer reading of kitty's
+  actual behaviour and is cleaner to reason about.)
+- **Benchmark: add one (none exists).** `freminal-buffer/benches/buffer_row_bench.rs`
+  has no image-store bench, so per `freminal-bench-table` a new
+  `bench_image_store_insert_at_quota` (insert-one-more at/near the cap, forcing an
+  eviction pass) is added and its baseline captured. `build_snapshot`'s image path
+  is not changed by 100.5, so no render-bench delta is expected.
+
 #### 100.6 — Shared-memory transmission (`t=s`) + zlib compression (`o=z`)
 
 Scope: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`,
