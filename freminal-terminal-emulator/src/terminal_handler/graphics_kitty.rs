@@ -49,7 +49,11 @@ const MAX_RELATIVE_PLACEMENT_DEPTH: usize = 8;
 /// Clamps to `0` on underflow and to `usize::MAX` on overflow — both are
 /// unreachable in practice for terminal-sized coordinates, but this keeps
 /// the conversion panic-free rather than relying on that assumption.
-fn signed_cell_offset(origin: usize, offset: i32) -> usize {
+///
+/// `pub(super)` so [`TerminalHandler::inject_virtual_parent_relatives`]
+/// (Task 100.4b, in `mod.rs`) can reuse it to derive a virtual-parent
+/// child's render-time origin from the parent's live placeholder cells.
+pub(super) fn signed_cell_offset(origin: usize, offset: i32) -> usize {
     let origin_i64 = i64::value_from(origin).unwrap_or(i64::MAX);
     let result = origin_i64.saturating_add(i64::from(offset)).max(0);
     usize::value_from(result).unwrap_or(usize::MAX)
@@ -460,6 +464,8 @@ impl TerminalHandler {
             display_rows,
             None,
             z_index,
+            0,
+            0,
         );
     }
 
@@ -482,6 +488,8 @@ impl TerminalHandler {
         display_rows: usize,
         parent: Option<(u64, u32)>,
         z_index: i32,
+        h_offset: i32,
+        v_offset: i32,
     ) {
         self.real_placements.insert(
             (image_id, placement_id),
@@ -494,6 +502,8 @@ impl TerminalHandler {
                 rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
                 parent,
                 z_index,
+                h_offset,
+                v_offset,
             },
         );
     }
@@ -1092,62 +1102,27 @@ impl TerminalHandler {
         let z_index = control.z_index.unwrap_or(0);
 
         if let Some(parent_real) = self.real_placements.get(&parent_key).copied() {
-            // Parent is a REAL placement — stamp the child at
-            // parent_origin + (H, V). `place_image_at` does not move the
-            // cursor, so a relative placement never moves the cursor
-            // regardless of `C=`.
-            let origin_row = signed_cell_offset(parent_real.origin_row, v_offset);
-            let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
-
-            tracing::debug!(
-                "Kitty graphics: relative placement child (image_id={child_image_id}, \
-                 placement_id={child_pid}) stamped at ({origin_row},{origin_col}) \
-                 (parent origin ({},{}) + H={h_offset},V={v_offset})",
-                parent_real.origin_row,
-                parent_real.origin_col,
-            );
-
-            self.buffer.place_image_at(
-                child_image_id,
-                origin_row,
-                origin_col,
-                display_cols,
-                display_rows,
-                ImageProtocol::Kitty,
-                control.image_number,
-                control.placement_id,
-                z_index,
-            );
-
-            self.insert_real_placement(
+            self.stamp_relative_placement_at_real_parent(
+                control,
                 child_image_id,
                 child_pid,
-                origin_row,
-                origin_col,
                 display_cols,
                 display_rows,
-                Some(parent_key),
+                parent_key,
+                parent_real,
+                h_offset,
+                v_offset,
                 z_index,
             );
         } else {
-            // Parent is a VIRTUAL placement — register the relationship
-            // only, with a placeholder origin. Positioning at render time
-            // is deferred to Task 100.4b.
-            tracing::debug!(
-                "Kitty graphics: relative placement child (image_id={child_image_id}, \
-                 placement_id={child_pid}) registered against virtual parent \
-                 (image_id={}, placement_id={}); positioning deferred to Task 100.4b",
-                parent_key.0,
-                parent_key.1,
-            );
-            self.insert_real_placement(
+            self.register_relative_placement_against_virtual_parent(
                 child_image_id,
                 child_pid,
-                0,
-                0,
                 display_cols,
                 display_rows,
-                Some(parent_key),
+                parent_key,
+                h_offset,
+                v_offset,
                 z_index,
             );
         }
@@ -1156,6 +1131,106 @@ impl TerminalHandler {
             let response = format_kitty_response(response_id, true, "");
             self.write_to_pty(&response);
         }
+    }
+
+    /// Stamp a relative placement's child cells at `parent_origin + (H, V)`
+    /// when the resolved parent is a REAL (cell-stamped) placement.
+    ///
+    /// `place_image_at` does not move the cursor, so a relative placement
+    /// never moves the cursor regardless of `C=`. Also records the child in
+    /// `real_placements` so it can itself act as a parent, be cascade-
+    /// deleted, or be re-derived if a future refactor changes it to a
+    /// virtual-parent chain.
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_relative_placement_at_real_parent(
+        &mut self,
+        control: &KittyControlData,
+        child_image_id: u64,
+        child_pid: u32,
+        display_cols: usize,
+        display_rows: usize,
+        parent_key: (u64, u32),
+        parent_real: RealPlacement,
+        h_offset: i32,
+        v_offset: i32,
+        z_index: i32,
+    ) {
+        let origin_row = signed_cell_offset(parent_real.origin_row, v_offset);
+        let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
+
+        tracing::debug!(
+            "Kitty graphics: relative placement child (image_id={child_image_id}, \
+             placement_id={child_pid}) stamped at ({origin_row},{origin_col}) \
+             (parent origin ({},{}) + H={h_offset},V={v_offset})",
+            parent_real.origin_row,
+            parent_real.origin_col,
+        );
+
+        self.buffer.place_image_at(
+            child_image_id,
+            origin_row,
+            origin_col,
+            display_cols,
+            display_rows,
+            ImageProtocol::Kitty,
+            control.image_number,
+            control.placement_id,
+            z_index,
+        );
+
+        self.insert_real_placement(
+            child_image_id,
+            child_pid,
+            origin_row,
+            origin_col,
+            display_cols,
+            display_rows,
+            Some(parent_key),
+            z_index,
+            h_offset,
+            v_offset,
+        );
+    }
+
+    /// Register a relative placement's child in `real_placements` with a
+    /// placeholder origin when the resolved parent is a VIRTUAL (Unicode
+    /// placeholder) placement.
+    ///
+    /// No cells are stamped here — positioning at render time from the
+    /// parent's live placeholder cells is handled by
+    /// `TerminalHandler::inject_virtual_parent_relatives` (Task 100.4b),
+    /// which reads the `h_offset`/`v_offset` recorded here.
+    #[allow(clippy::too_many_arguments)]
+    fn register_relative_placement_against_virtual_parent(
+        &mut self,
+        child_image_id: u64,
+        child_pid: u32,
+        display_cols: usize,
+        display_rows: usize,
+        parent_key: (u64, u32),
+        h_offset: i32,
+        v_offset: i32,
+        z_index: i32,
+    ) {
+        tracing::debug!(
+            "Kitty graphics: relative placement child (image_id={child_image_id}, \
+             placement_id={child_pid}) registered against virtual parent \
+             (image_id={}, placement_id={}); positioned at render time (Task 100.4b)",
+            parent_key.0,
+            parent_key.1,
+        );
+        self.insert_real_placement(
+            child_image_id,
+            child_pid,
+            0,
+            0,
+            display_cols,
+            display_rows,
+            Some(parent_key),
+            z_index,
+            h_offset,
+            v_offset,
+        );
     }
 
     /// Resolve a relative-placement parent reference (`P=`/`Q=`) to the key
@@ -3403,6 +3478,261 @@ mod tests {
         assert!(
             !has_image_99,
             "a child of a virtual parent must not be stamped yet (100.4b)"
+        );
+    }
+
+    // ── Task 100.4b: render-time positioning of virtual-parent relative
+    //    children in `visible_image_placements_extended` ──────────────────
+
+    /// Grow the buffer to at least `rows` rows by stamping a throwaway
+    /// single-column image down column 0. Used so tests can stamp parent
+    /// placeholder cells at rows beyond the buffer's initial single row.
+    fn grow_buffer_rows(handler: &mut TerminalHandler, rows: usize) {
+        let filler = freminal_buffer::image_store::InlineImage {
+            id: 9_000_000,
+            pixels: std::sync::Arc::new(vec![0; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: rows,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
+        };
+        handler.buffer_mut().place_image(
+            filler,
+            0,
+            freminal_buffer::image_store::ImageProtocol::Kitty,
+            None,
+            None,
+            0,
+        );
+    }
+
+    /// Directly stamp a `rows x cols` block of placeholder cells for
+    /// `(image_id, placement_id)` at `(start_row, start_col)`, bypassing the
+    /// APC/placeholder-text path. Used to simulate a virtual placement's
+    /// placeholder cells sitting at a known position (or having moved, to
+    /// simulate scroll/reflow) without driving the full text pipeline.
+    fn stamp_parent_placeholder_block(
+        handler: &mut TerminalHandler,
+        image_id: u64,
+        placement_id: u32,
+        start_row: usize,
+        start_col: usize,
+        rows: usize,
+        cols: usize,
+    ) {
+        for row_in_image in 0..rows {
+            for col_in_image in 0..cols {
+                let placement = freminal_buffer::image_store::ImagePlacement {
+                    image_id,
+                    col_in_image,
+                    row_in_image,
+                    protocol: freminal_buffer::image_store::ImageProtocol::Kitty,
+                    image_number: None,
+                    placement_id: Some(placement_id),
+                    z_index: 0,
+                };
+                handler.buffer_mut().set_image_cell_at(
+                    start_row + row_in_image,
+                    start_col + col_in_image,
+                    placement,
+                    FormatTag::default(),
+                );
+            }
+        }
+    }
+
+    /// Find every cell in `placements` carrying `image_id`, returning
+    /// `(min_row, min_col)` among them, or `None` if no such cell exists.
+    fn min_row_col_for_image(
+        placements: &[Option<freminal_buffer::image_store::ImagePlacement>],
+        term_width: usize,
+        image_id: u64,
+    ) -> Option<(usize, usize)> {
+        let mut result: Option<(usize, usize)> = None;
+        for (idx, cell) in placements.iter().enumerate() {
+            let Some(p) = cell else { continue };
+            if p.image_id != image_id {
+                continue;
+            }
+            let row = idx / term_width;
+            let col = idx % term_width;
+            result = Some(result.map_or((row, col), |(r, c)| (r.min(row), c.min(col))));
+        }
+        result
+    }
+
+    #[test]
+    fn virtual_parent_child_positioned_at_offset_from_placeholder_min() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let (mut handler, _rx) = kitty_handler();
+        grow_buffer_rows(&mut handler, 5);
+
+        // Parent virtual placement (42, 0), 2x2 tile.
+        handler.virtual_placements.insert(
+            (42, 0),
+            VirtualPlacement {
+                image_id: 42,
+                placement_id: 0,
+                rows: 2,
+                cols: 2,
+            },
+        );
+        // Parent's placeholder cells currently sit at rows 2-3, cols 5-6
+        // (min row=2, min col=5).
+        stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
+
+        // Child (99, 0), a single cell, registered with H=1, V=1.
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+
+        let term_width = handler.win_size().0;
+        let placements = handler.visible_image_placements_extended(0, 0);
+
+        let (row, col) = min_row_col_for_image(&placements, term_width, 99)
+            .expect("child (99) should be injected");
+        assert_eq!(row, 3, "child row = parent min row (2) + V=1");
+        assert_eq!(col, 6, "child col = parent min col (5) + H=1");
+    }
+
+    #[test]
+    fn virtual_parent_child_with_zero_offset_sits_on_parent_min_origin() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let (mut handler, _rx) = kitty_handler();
+        grow_buffer_rows(&mut handler, 5);
+
+        handler.virtual_placements.insert(
+            (42, 0),
+            VirtualPlacement {
+                image_id: 42,
+                placement_id: 0,
+                rows: 2,
+                cols: 2,
+            },
+        );
+        stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
+
+        // Child with H=0, V=0.
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 0, 0);
+
+        let term_width = handler.win_size().0;
+        let placements = handler.visible_image_placements_extended(0, 0);
+
+        let (row, col) = min_row_col_for_image(&placements, term_width, 99)
+            .expect("child (99) should be injected");
+        assert_eq!(row, 2, "H=0,V=0: child row = parent min row");
+        assert_eq!(col, 5, "H=0,V=0: child col = parent min col");
+    }
+
+    #[test]
+    fn virtual_parent_child_skipped_when_parent_fully_scrolled_off() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let (mut handler, _rx) = kitty_handler();
+        grow_buffer_rows(&mut handler, 5);
+
+        // Register the virtual parent, but never stamp any placeholder
+        // cells for it — simulates it having scrolled entirely out of the
+        // visible window.
+        handler.virtual_placements.insert(
+            (42, 0),
+            VirtualPlacement {
+                image_id: 42,
+                placement_id: 0,
+                rows: 2,
+                cols: 2,
+            },
+        );
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+
+        let term_width = handler.win_size().0;
+        let placements = handler.visible_image_placements_extended(0, 0);
+
+        assert!(
+            min_row_col_for_image(&placements, term_width, 99).is_none(),
+            "child of a fully-scrolled-off parent must not be injected"
+        );
+    }
+
+    #[test]
+    fn real_parent_child_not_double_injected() {
+        // A real-parent relative child is already stamped into the buffer
+        // by Task 100.4a; since its parent key lives in `real_placements`
+        // (not `virtual_placements`), `inject_virtual_parent_relatives`
+        // must skip it entirely rather than moving or duplicating it.
+        let (mut handler, _rx) = kitty_handler();
+        grow_buffer_rows(&mut handler, 3);
+
+        // Real (non-virtual) parent placement (42, 0).
+        handler.insert_real_placement(42, 0, 0, 0, 1, 1, None, 0, 0, 0);
+
+        // Child (99, 0) already stamped at (1, 0) — as 100.4a would have
+        // done via `place_image_at` — with parent = (42, 0), h=1, v=1
+        // (irrelevant here since the parent is real, not virtual).
+        stamp_parent_placeholder_block(&mut handler, 99, 0, 1, 0, 1, 1);
+        handler.insert_real_placement(99, 0, 1, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+
+        let term_width = handler.win_size().0;
+        let placements = handler.visible_image_placements_extended(0, 0);
+
+        let matches: Vec<(usize, usize)> = placements
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cell)| {
+                cell.as_ref()
+                    .filter(|p| p.image_id == 99)
+                    .map(|_| (idx / term_width, idx % term_width))
+            })
+            .collect();
+        assert_eq!(
+            matches,
+            vec![(1, 0)],
+            "real-parent child must remain exactly where 100.4a stamped it, not moved/duplicated"
+        );
+    }
+
+    #[test]
+    fn virtual_parent_child_follows_parent_across_snapshots() {
+        use freminal_common::buffer_states::unicode_placeholder::VirtualPlacement;
+
+        let (mut handler, _rx) = kitty_handler();
+        grow_buffer_rows(&mut handler, 10);
+
+        handler.virtual_placements.insert(
+            (42, 0),
+            VirtualPlacement {
+                image_id: 42,
+                placement_id: 0,
+                rows: 1,
+                cols: 1,
+            },
+        );
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 0);
+
+        // First position: parent placeholder at (2, 5).
+        stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 1, 1);
+        let term_width = handler.win_size().0;
+        let placements_before = handler.visible_image_placements_extended(0, 0);
+        let (row_before, col_before) = min_row_col_for_image(&placements_before, term_width, 99)
+            .expect("child should be injected at first parent position");
+        assert_eq!((row_before, col_before), (2, 6), "child follows H=1,V=0");
+
+        // Simulate scroll/reflow moving the parent's placeholder cell to a
+        // different position (7, 1) — clear the old cell first so it isn't
+        // also picked up as a (stale) parent cell.
+        handler.buffer_mut().clear_image_placements_by_id(42);
+        stamp_parent_placeholder_block(&mut handler, 42, 0, 7, 1, 1, 1);
+
+        let placements_after = handler.visible_image_placements_extended(0, 0);
+        let (row_after, col_after) = min_row_col_for_image(&placements_after, term_width, 99)
+            .expect("child should be injected at new parent position");
+        assert_eq!(
+            (row_after, col_after),
+            (7, 2),
+            "child must be re-derived from the parent's new position, not cached"
         );
     }
 
