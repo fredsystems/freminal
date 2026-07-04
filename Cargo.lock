@@ -1589,6 +1589,7 @@ dependencies = [
  "conv2",
  "criterion",
  "crossbeam-channel",
+ "flate2",
  "freminal-buffer",
  "freminal-common",
  "image",

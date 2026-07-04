@@ -135,6 +135,9 @@ pub struct KittyControlData {
     /// `S` — Total data size in bytes (for chunked transfers).
     pub data_size: Option<u32>,
 
+    /// `O` — byte offset to read from a file/shared-memory object.
+    pub data_offset: Option<u32>,
+
     /// `i` — Image ID (1–`u32::MAX`). 0 means auto-assign.
     pub image_id: Option<u32>,
 
@@ -347,6 +350,7 @@ fn apply_control_pair(
         b's' => ctrl.src_width = Some(parse_u32(value)?),
         b'v' => ctrl.src_height = Some(parse_u32(value)?),
         b'S' => ctrl.data_size = Some(parse_u32(value)?),
+        b'O' => ctrl.data_offset = Some(parse_u32(value)?),
         b'i' => ctrl.image_id = Some(parse_u32(value)?),
         b'I' => ctrl.image_number = Some(parse_u32(value)?),
         b'p' => ctrl.placement_id = Some(parse_u32(value)?),
@@ -922,6 +926,13 @@ mod tests {
         let apc = make_apc("a=t,S=65536,i=1", "AAAA");
         let cmd = parse_kitty_graphics(&apc).unwrap();
         assert_eq!(cmd.control.data_size, Some(65536));
+    }
+
+    #[test]
+    fn parse_data_offset() {
+        let apc = make_apc("a=t,O=123,i=1", "AAAA");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.data_offset, Some(123));
     }
 
     #[test]

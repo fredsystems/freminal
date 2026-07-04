@@ -1115,6 +1115,43 @@ NOT weaken the file/medium security checks; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.6 execution decisions (recorded 2026-07-01, against the real seams + maintainer direction)
+
+- **No flake stop-and-wait (maintainer-confirmed).** The plan and the orchestrator
+  brief anticipated a dependency-add STOP-and-wait for `nix develop`. Recon plus an
+  empirical `Cargo.lock` check showed neither dep pulls a **system** library:
+  `flate2 1.1.9` is already in `Cargo.lock` transitively (via `png`/`tiff`) and
+  resolves to the pure-Rust `miniz_oxide` backend (no `libz-sys`/`zlib-ng`
+  anywhere); the `nix` crate's `"mman"` feature is a thin libc wrapper (libc is
+  already a workspace dep). Per `flake-dev-shell-discipline`, the mandatory
+  stop-and-wait fires only when a **system tool/library** is added to `flake.nix` —
+  not for these. So 100.6 is pure Cargo.toml edits (workspace `Cargo.toml`:
+  `flate2` alphabetically, full semver; `freminal-terminal-emulator/Cargo.toml`:
+  `flate2.workspace = true` + add `"mman"` to the existing
+  `nix = { workspace = true, features = ["term"] }`), which cargo picks up in the
+  current shell with no `flake.nix` change and no `nix develop` re-enter.
+- **Scope expansion: add `O=` (byte offset) parsing (maintainer-confirmed).** The
+  spec's `O=` key ("read `S` bytes at offset `O`" from file/shm) is **not** parsed
+  in `freminal-common` today (only `S=`/`data_size` is). Full `t=s` correctness
+  needs it, so 100.6's scope is expanded to add a `data_offset: Option<u32>` field
+  and an `O` parser arm to `freminal-common/src/buffer_states/kitty_graphics.rs`
+  (mechanical, mirrors `S=`), honoured in the shm read (and available to `t=f`/`t=t`
+  too).
+- **`t=s` security = spec's special-file / sensitive-path refusal (new code).**
+  Recon found the reference doc's claim that `t=f`/`t=t` already "refuse special
+  files / restrict temp dirs" is **aspirational** — the real `read_kitty_file`
+  only checks `is_absolute()`. 100.6 writes the spec's refusal (reject
+  device/socket/special files; refuse `/proc`, `/sys`, `/dev`) for the **shm**
+  path per the plan, and does NOT weaken the existing `t=f`/`t=t` checks. The
+  doc-vs-code discrepancy on `t=f`/`t=t` hardening is noted for the 100.8 dual-doc
+  pass (do not silently "fix" `t=f`/`t=t` here — out of scope).
+- **Decompress in `decode_kitty_payload`** right after `resolve_kitty_transmission`
+  yields the raw bytes and **before** the RGB/RGBA/PNG format branch (the single
+  choke point; `o=z` applies to every `f=`). Windows shm uses a new
+  `#[cfg(windows)]` path (winapi file-mapping); POSIX uses `nix` `"mman"`
+  (`shm_open`/`mmap`/`shm_unlink`), inline `#[cfg(unix)]`/`#[cfg(windows)]`
+  matching the `io/pty.rs` precedent.
+
 #### 100.7 — Delete-target correctness + z-index render order
 
 Scope: `freminal-common/src/buffer_states/kitty_graphics.rs` (`KittyDeleteTarget`
