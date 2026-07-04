@@ -454,4 +454,54 @@ impl Buffer {
         self.debug_assert_invariants();
         current_offset
     }
+
+    /// Stamp an image's cell grid at an explicit screen origin `(origin_row,
+    /// origin_col)` WITHOUT moving the cursor or scrolling the buffer.
+    ///
+    /// Used for relative kitty graphics placements (Task 100.4a), whose
+    /// position is derived from a parent placement's origin plus an offset,
+    /// not from the cursor. Cells outside the current buffer bounds are
+    /// silently skipped (the visible part is stamped). The image must
+    /// already be in the image store — this method only writes the
+    /// per-cell `ImagePlacement` references, mirroring the inner stamping
+    /// loop of [`Self::place_image`] but positioned explicitly.
+    #[allow(clippy::too_many_arguments)]
+    // All parameters are required image placement inputs; grouping into a
+    // struct would obscure the data flow without reducing coupling, matching
+    // the established convention for `place_image`-adjacent methods.
+    pub fn place_image_at(
+        &mut self,
+        image_id: u64,
+        origin_row: usize,
+        origin_col: usize,
+        display_cols: usize,
+        display_rows: usize,
+        protocol: ImageProtocol,
+        image_number: Option<u32>,
+        placement_id: Option<u32>,
+        z_index: i32,
+    ) {
+        for img_row in 0..display_rows {
+            let target_row = origin_row + img_row;
+            if target_row >= self.rows.len() {
+                break; // below the buffer — skip (visible part only)
+            }
+            for img_col in 0..display_cols {
+                let col = origin_col + img_col;
+                if col >= self.width {
+                    break;
+                }
+                let placement = ImagePlacement {
+                    image_id,
+                    col_in_image: img_col,
+                    row_in_image: img_row,
+                    protocol,
+                    image_number,
+                    placement_id,
+                    z_index,
+                };
+                self.set_image_cell_at(target_row, col, placement, self.current_tag.clone());
+            }
+        }
+    }
 }

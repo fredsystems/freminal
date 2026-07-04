@@ -125,6 +125,34 @@ struct PrevPlaceholder {
     underline_color: TerminalColor,
 }
 
+/// A first-class record of a real (cell-stamped) kitty image placement.
+///
+/// Unlike per-cell `ImagePlacement` stamps, this records the placement's screen
+/// origin (top-left cell) and, for a relative placement, its parent — so a
+/// child can be positioned at `parent_origin + (H, V)` and the group can be
+/// cascade-deleted. Keyed by `(image_id, placement_id)` in
+/// `TerminalHandler::real_placements`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RealPlacement {
+    /// The image this placement displays.
+    pub image_id: u64,
+    /// This placement's id (`p=`; 0 if unspecified).
+    pub placement_id: u32,
+    /// Screen origin: the top-left cell row where the image was stamped.
+    pub origin_row: usize,
+    /// Screen origin: the top-left cell column.
+    pub origin_col: usize,
+    /// Display size in cells.
+    pub cols: u32,
+    /// Display size in cells.
+    pub rows: u32,
+    /// Parent placement `(image_id, placement_id)` for a relative placement,
+    /// else `None`.
+    pub parent: Option<(u64, u32)>,
+    /// z-index (`z=`).
+    pub z_index: i32,
+}
+
 /// Processes parsed terminal output sequences and drives mutations on the underlying [`Buffer`].
 ///
 /// `TerminalHandler` owns the buffer plus all terminal mode state (cursor style, color palette,
@@ -229,6 +257,10 @@ pub struct TerminalHandler {
     /// appear in the text stream, these are looked up to determine image tile
     /// dimensions.
     virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
+    /// First-class real (cell-stamped) placements, keyed by (`image_id`,
+    /// `placement_id`). Enables relative placements (parent link) and
+    /// cascade delete (Task 100.4a).
+    real_placements: HashMap<(u64, u32), RealPlacement>,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -384,6 +416,7 @@ impl TerminalHandler {
             multipart_state: None,
             kitty_state: None,
             virtual_placements: HashMap::new(),
+            real_placements: HashMap::new(),
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
@@ -489,6 +522,7 @@ impl TerminalHandler {
         self.pointer_shape = PointerShape::Default;
         self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
         self.virtual_placements.clear();
+        self.real_placements.clear();
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;

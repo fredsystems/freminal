@@ -20,6 +20,8 @@
 //! - Error response (`send_kitty_error`) — sends error APC to the PTY
 //! - Delete (`handle_kitty_delete`) — removes images by various targets
 
+use std::collections::HashSet;
+
 use conv2::ValueFrom;
 use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
@@ -28,12 +30,30 @@ use freminal_common::buffer_states::kitty_graphics::{
 use freminal_buffer::image_store::{AnimationRunMode, ImageProtocol, InlineImage, next_image_id};
 
 use super::KittyImageState;
+use super::RealPlacement;
 use super::TerminalHandler;
 
 /// Default gap (ms) kitty applies to a newly-created animation frame when
 /// `z=` is absent or `0`. The root frame's default gap remains `0`
 /// (tracked separately via `InlineImage::root_gap_ms`).
 const DEFAULT_ANIMATION_FRAME_GAP_MS: u32 = 40;
+
+/// Maximum relative-placement chain depth (Task 100.4a, `ETOODEEP`).
+///
+/// The kitty spec requires implementations to support a chain depth of at
+/// least 8; a 9th link is rejected.
+const MAX_RELATIVE_PLACEMENT_DEPTH: usize = 8;
+
+/// Apply a signed cell offset (`H=`/`V=`) to a `usize` origin coordinate.
+///
+/// Clamps to `0` on underflow and to `usize::MAX` on overflow — both are
+/// unreachable in practice for terminal-sized coordinates, but this keeps
+/// the conversion panic-free rather than relying on that assumption.
+fn signed_cell_offset(origin: usize, offset: i32) -> usize {
+    let origin_i64 = i64::value_from(origin).unwrap_or(i64::MAX);
+    let result = origin_i64.saturating_add(i64::from(offset)).max(0);
+    usize::value_from(result).unwrap_or(usize::MAX)
+}
 
 /// Build a `KittyResponseId` that doesn't carry an image number (`I=`).
 ///
@@ -356,6 +376,128 @@ impl TerminalHandler {
         (image_to_place, display_cols, display_rows)
     }
 
+    /// Compute display dimensions in cells for a freshly transmitted image
+    /// (not yet in the store), applying `c=`/`r=` overrides when present
+    /// and clamping to the terminal size. Falls back to the natural size
+    /// (`img_*_px` divided by cell pixel size) when no override is given.
+    fn compute_display_size_from_pixels(
+        &self,
+        control: &KittyControlData,
+        img_width_px: u32,
+        img_height_px: u32,
+    ) -> (usize, usize) {
+        let (term_width, term_height) = self.win_size();
+
+        let display_cols = control.display_cols.map_or_else(
+            || {
+                let cols =
+                    usize::value_from(img_width_px.div_ceil(self.cell_pixel_width)).unwrap_or(0);
+                cols.min(term_width).max(1)
+            },
+            |c| {
+                let cols = usize::value_from(c).unwrap_or(0);
+                cols.min(term_width).max(1)
+            },
+        );
+
+        let display_rows = control.display_rows.map_or_else(
+            || {
+                let rows =
+                    usize::value_from(img_height_px.div_ceil(self.cell_pixel_height)).unwrap_or(0);
+                rows.min(term_height).max(1)
+            },
+            |r| {
+                let rows = usize::value_from(r).unwrap_or(0);
+                rows.min(term_height).max(1)
+            },
+        );
+
+        (display_cols, display_rows)
+    }
+
+    /// Register a virtual (Unicode placeholder) placement in
+    /// `virtual_placements`. Shared by [`Self::handle_kitty_put`] and
+    /// [`Self::place_kitty_image`].
+    fn register_virtual_placement(
+        &mut self,
+        image_id: u64,
+        placement_id: u32,
+        display_cols: usize,
+        display_rows: usize,
+    ) {
+        let vp = super::VirtualPlacement {
+            image_id,
+            placement_id,
+            cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
+            rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+        };
+        self.virtual_placements.insert((image_id, placement_id), vp);
+    }
+
+    /// Record a plain (non-relative) real (cell-stamped) placement's origin
+    /// so future relative placements can reference it as a parent (Task
+    /// 100.4a).
+    // All parameters are required placement fields; grouping into a struct
+    // would obscure the data flow without reducing coupling, matching the
+    // established convention for `place_kitty_image`-adjacent methods.
+    #[allow(clippy::too_many_arguments)]
+    fn record_real_placement(
+        &mut self,
+        image_id: u64,
+        placement_id: u32,
+        origin_row: usize,
+        origin_col: usize,
+        display_cols: usize,
+        display_rows: usize,
+        z_index: i32,
+    ) {
+        self.insert_real_placement(
+            image_id,
+            placement_id,
+            origin_row,
+            origin_col,
+            display_cols,
+            display_rows,
+            None,
+            z_index,
+        );
+    }
+
+    /// Insert (or overwrite) a `real_placements` entry, real (cell-stamped)
+    /// or a virtual-parent registration. Shared by [`Self::record_real_placement`]
+    /// (plain placements, `parent: None`) and
+    /// [`Self::handle_kitty_relative_placement`] (relative placements,
+    /// `parent: Some(..)`).
+    // All parameters are required placement fields; grouping into a struct
+    // would obscure the data flow without reducing coupling, matching the
+    // established convention for `place_kitty_image`-adjacent methods.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_real_placement(
+        &mut self,
+        image_id: u64,
+        placement_id: u32,
+        origin_row: usize,
+        origin_col: usize,
+        display_cols: usize,
+        display_rows: usize,
+        parent: Option<(u64, u32)>,
+        z_index: i32,
+    ) {
+        self.real_placements.insert(
+            (image_id, placement_id),
+            RealPlacement {
+                image_id,
+                placement_id,
+                origin_row,
+                origin_col,
+                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
+                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+                parent,
+                z_index,
+            },
+        );
+    }
+
     /// Handle `a=p` (Put) — display a previously transmitted image.
     ///
     /// Looks up the image by `i=<image_id>` (or, if absent, resolves `I=`
@@ -405,15 +547,23 @@ impl TerminalHandler {
         // Update the store with the possibly-resized image.
         self.buffer.image_store_mut().insert(image_to_place.clone());
 
+        // Relative placement (`P=` present) — intercept before the
+        // virtual/normal placement paths below; it sends its own response
+        // (Task 100.4a).
+        if cmd.control.parent_image_id.is_some() {
+            self.handle_kitty_relative_placement(
+                &cmd.control,
+                id,
+                display_cols,
+                display_rows,
+                quiet,
+            );
+            return;
+        }
+
         if cmd.control.unicode_placeholder {
             let pid = cmd.control.placement_id.unwrap_or(0);
-            let vp = super::VirtualPlacement {
-                image_id: id,
-                placement_id: pid,
-                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
-                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
-            };
-            self.virtual_placements.insert((id, pid), vp);
+            self.register_virtual_placement(id, pid, display_cols, display_rows);
         } else {
             // Save cursor position if `C=1` (no cursor movement).
             let saved_cursor = if cmd.control.no_cursor_movement {
@@ -443,6 +593,19 @@ impl TerminalHandler {
             if let Some(pos) = saved_cursor {
                 self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
             }
+
+            // Record this real (cell-stamped) placement's origin so future
+            // relative placements can reference it as a parent (Task 100.4a).
+            let pid = cmd.control.placement_id.unwrap_or(0);
+            self.record_real_placement(
+                id,
+                pid,
+                cursor.y,
+                cursor.x,
+                display_cols,
+                display_rows,
+                cmd.control.z_index.unwrap_or(0),
+            );
         }
 
         // Send OK response unless suppressed.
@@ -726,31 +889,8 @@ impl TerminalHandler {
             return;
         }
 
-        let (term_width, term_height) = self.win_size();
-
-        let display_cols = control.display_cols.map_or_else(
-            || {
-                let cols =
-                    usize::value_from(img_width_px.div_ceil(self.cell_pixel_width)).unwrap_or(0);
-                cols.min(term_width).max(1)
-            },
-            |c| {
-                let cols = usize::value_from(c).unwrap_or(0);
-                cols.min(term_width).max(1)
-            },
-        );
-
-        let display_rows = control.display_rows.map_or_else(
-            || {
-                let rows =
-                    usize::value_from(img_height_px.div_ceil(self.cell_pixel_height)).unwrap_or(0);
-                rows.min(term_height).max(1)
-            },
-            |r| {
-                let rows = usize::value_from(r).unwrap_or(0);
-                rows.min(term_height).max(1)
-            },
-        );
+        let (display_cols, display_rows) =
+            self.compute_display_size_from_pixels(control, img_width_px, img_height_px);
 
         let assigned_id = if image_id_hint > 0 {
             u64::from(image_id_hint)
@@ -782,39 +922,61 @@ impl TerminalHandler {
                 .associate_number(number, assigned_id);
         }
 
+        let should_display = matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
+
+        // Relative placement (`P=` present) — intercept before the
+        // virtual/normal placement paths below; it sends its own response
+        // (Task 100.4a). Only meaningful when the action actually displays
+        // the image; a plain `a=t` transmit with stray `P=`/`Q=` fields
+        // falls through to the normal store-only path below.
+        if control.parent_image_id.is_some() && should_display {
+            self.handle_kitty_relative_placement(
+                control,
+                assigned_id,
+                display_cols,
+                display_rows,
+                quiet,
+            );
+            return;
+        }
+
         // If this is a virtual (Unicode placeholder) placement, store it in
         // the virtual_placements table instead of placing cells in the buffer.
         if control.unicode_placeholder {
             let pid = control.placement_id.unwrap_or(0);
-            let vp = super::VirtualPlacement {
-                image_id: assigned_id,
-                placement_id: pid,
-                cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
-                rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
-            };
-            self.virtual_placements.insert((assigned_id, pid), vp);
+            self.register_virtual_placement(assigned_id, pid, display_cols, display_rows);
+        } else if should_display {
+            tracing::debug!(
+                "Kitty graphics: placing image id={assigned_id} at cursor, \
+                 {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
+            );
+            let cursor = self.buffer.cursor().pos;
+            let _new_offset = self.buffer.place_image(
+                inline_image,
+                0,
+                ImageProtocol::Kitty,
+                control.image_number,
+                control.placement_id,
+                control.z_index.unwrap_or(0),
+            );
+
+            // Record this real (cell-stamped) placement's origin so future
+            // relative placements can reference it as a parent (Task 100.4a).
+            let pid = control.placement_id.unwrap_or(0);
+            self.record_real_placement(
+                assigned_id,
+                pid,
+                cursor.y,
+                cursor.x,
+                display_cols,
+                display_rows,
+                control.z_index.unwrap_or(0),
+            );
         } else {
-            let should_display =
-                matches!(action, KittyAction::TransmitAndDisplay | KittyAction::Put);
-            if should_display {
-                tracing::debug!(
-                    "Kitty graphics: placing image id={assigned_id} at cursor, \
-                     {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
-                );
-                let _new_offset = self.buffer.place_image(
-                    inline_image,
-                    0,
-                    ImageProtocol::Kitty,
-                    control.image_number,
-                    control.placement_id,
-                    control.z_index.unwrap_or(0),
-                );
-            } else {
-                tracing::debug!(
-                    "Kitty graphics: stored image id={assigned_id} (a={action:?}, not placing), \
-                     {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
-                );
-            }
+            tracing::debug!(
+                "Kitty graphics: stored image id={assigned_id} (a={action:?}, not placing), \
+                 {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
+            );
         }
 
         // Send OK response unless suppressed.
@@ -831,6 +993,269 @@ impl TerminalHandler {
             );
             self.write_to_pty(&response);
         }
+    }
+
+    /// Handle a Kitty relative placement (`P=`/`Q=`/`H=`/`V=` present on
+    /// `a=p` or `a=T`, Task 100.4a).
+    ///
+    /// Validates the parent reference (`ENOPARENT`), rejects a relative
+    /// placement that is itself virtual (`EINVAL`), rejects chains deeper
+    /// than [`MAX_RELATIVE_PLACEMENT_DEPTH`] (`ETOODEEP`), and rejects
+    /// cycles (`ECYCLE`). If the resolved parent is a REAL (cell-stamped)
+    /// placement, the child is stamped at `parent_origin + (H, V)` cells
+    /// via [`freminal_buffer::buffer::Buffer::place_image_at`] — which does
+    /// NOT move the cursor, matching the spec's positioning-by-parent
+    /// semantics. If the resolved parent is a VIRTUAL (Unicode placeholder)
+    /// placement, the child is registered in `real_placements` with the
+    /// parent link but is NOT stamped — positioning a child of a virtual
+    /// parent happens at render time and is deferred to Task 100.4b.
+    ///
+    /// Sends its own success/error APC response; callers must not send an
+    /// additional response after calling this.
+    fn handle_kitty_relative_placement(
+        &mut self,
+        control: &KittyControlData,
+        child_image_id: u64,
+        display_cols: usize,
+        display_rows: usize,
+        quiet: u8,
+    ) {
+        let child_pid = control.placement_id.unwrap_or(0);
+        let response_child_id = u32::value_from(child_image_id).unwrap_or(0);
+        let response_id = KittyResponseId {
+            image_id: response_child_id,
+            image_number: control.image_number,
+            placement_id: control.placement_id,
+        };
+
+        // Rule: EINVAL — a relative placement cannot itself be virtual.
+        // (A virtual placement MAY be a parent; it just can't also be `U=1`
+        // while carrying `P=`.)
+        if control.unicode_placeholder {
+            self.send_kitty_error(
+                response_id,
+                quiet,
+                "EINVAL:relative placement cannot be virtual",
+            );
+            return;
+        }
+
+        let Some(parent_image_id) = control.parent_image_id else {
+            // Only called when `parent_image_id.is_some()`; defensive guard.
+            return;
+        };
+        let parent_img = u64::from(parent_image_id);
+        let parent_pid = control.parent_placement_id.unwrap_or(0);
+
+        // Rule: ENOPARENT — resolve the parent (real or virtual placement).
+        let Some(parent_key) = self.resolve_kitty_parent_key(parent_img, parent_pid) else {
+            self.send_kitty_error(response_id, quiet, "ENOPARENT:parent placement not found");
+            return;
+        };
+
+        // Walk the ancestor chain from the parent upward through
+        // `real_placements` (a virtual placement is always a root — it has
+        // no `parent` link, so the walk stops there).
+        let chain = self.real_placement_ancestor_chain(parent_key);
+
+        // Rule: ECYCLE — this child would appear in its own ancestor chain.
+        let child_key = (child_image_id, child_pid);
+        if chain.contains(&child_key) {
+            self.send_kitty_error(
+                response_id,
+                quiet,
+                "ECYCLE:relative placement would form a cycle",
+            );
+            return;
+        }
+
+        // Rule: ETOODEEP — adding this child would exceed the max depth.
+        //
+        // `chain.len()` is the parent's depth (a root's own chain has
+        // length 1, i.e. depth 0; its first child has parent-chain length 1
+        // so the child reaches depth 1, and so on). The new child's depth
+        // equals `chain.len()`. The spec requires implementations to
+        // support depth >= `MAX_RELATIVE_PLACEMENT_DEPTH` (8), so only a
+        // child that would reach depth 9 (the 9th link) is rejected —
+        // i.e. `chain.len() > MAX_RELATIVE_PLACEMENT_DEPTH`.
+        if chain.len() > MAX_RELATIVE_PLACEMENT_DEPTH {
+            self.send_kitty_error(
+                response_id,
+                quiet,
+                "ETOODEEP:relative placement chain too deep",
+            );
+            return;
+        }
+
+        let h_offset = control.h_offset.unwrap_or(0);
+        let v_offset = control.v_offset.unwrap_or(0);
+        let z_index = control.z_index.unwrap_or(0);
+
+        if let Some(parent_real) = self.real_placements.get(&parent_key).copied() {
+            // Parent is a REAL placement — stamp the child at
+            // parent_origin + (H, V). `place_image_at` does not move the
+            // cursor, so a relative placement never moves the cursor
+            // regardless of `C=`.
+            let origin_row = signed_cell_offset(parent_real.origin_row, v_offset);
+            let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
+
+            tracing::debug!(
+                "Kitty graphics: relative placement child (image_id={child_image_id}, \
+                 placement_id={child_pid}) stamped at ({origin_row},{origin_col}) \
+                 (parent origin ({},{}) + H={h_offset},V={v_offset})",
+                parent_real.origin_row,
+                parent_real.origin_col,
+            );
+
+            self.buffer.place_image_at(
+                child_image_id,
+                origin_row,
+                origin_col,
+                display_cols,
+                display_rows,
+                ImageProtocol::Kitty,
+                control.image_number,
+                control.placement_id,
+                z_index,
+            );
+
+            self.insert_real_placement(
+                child_image_id,
+                child_pid,
+                origin_row,
+                origin_col,
+                display_cols,
+                display_rows,
+                Some(parent_key),
+                z_index,
+            );
+        } else {
+            // Parent is a VIRTUAL placement — register the relationship
+            // only, with a placeholder origin. Positioning at render time
+            // is deferred to Task 100.4b.
+            tracing::debug!(
+                "Kitty graphics: relative placement child (image_id={child_image_id}, \
+                 placement_id={child_pid}) registered against virtual parent \
+                 (image_id={}, placement_id={}); positioning deferred to Task 100.4b",
+                parent_key.0,
+                parent_key.1,
+            );
+            self.insert_real_placement(
+                child_image_id,
+                child_pid,
+                0,
+                0,
+                display_cols,
+                display_rows,
+                Some(parent_key),
+                z_index,
+            );
+        }
+
+        if quiet < 1 {
+            let response = format_kitty_response(response_id, true, "");
+            self.write_to_pty(&response);
+        }
+    }
+
+    /// Resolve a relative-placement parent reference (`P=`/`Q=`) to the key
+    /// of an existing placement, real or virtual.
+    ///
+    /// Tries the exact `(parent_img, parent_pid)` key first; if
+    /// `parent_pid == 0` (unspecified), falls back to any placement (real
+    /// or virtual) for that image id.
+    fn resolve_kitty_parent_key(&self, parent_img: u64, parent_pid: u32) -> Option<(u64, u32)> {
+        let exact = (parent_img, parent_pid);
+        if self.real_placements.contains_key(&exact) || self.virtual_placements.contains_key(&exact)
+        {
+            return Some(exact);
+        }
+        if parent_pid == 0 {
+            if let Some(&key) = self
+                .real_placements
+                .keys()
+                .find(|&&(img, _)| img == parent_img)
+            {
+                return Some(key);
+            }
+            if let Some(&key) = self
+                .virtual_placements
+                .keys()
+                .find(|&&(img, _)| img == parent_img)
+            {
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    /// Walk the ancestor chain starting at `start` (inclusive) via the
+    /// `real_placements` `parent` link.
+    ///
+    /// Stops when a key has no entry in `real_placements` (either it's a
+    /// virtual placement, which is always a root, or the chain is broken),
+    /// or defensively if a cycle is somehow already present in existing
+    /// data (new cycles are rejected before insertion by the caller).
+    fn real_placement_ancestor_chain(&self, start: (u64, u32)) -> Vec<(u64, u32)> {
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = Some(start);
+        while let Some(key) = current {
+            if !visited.insert(key) {
+                break;
+            }
+            chain.push(key);
+            current = self.real_placements.get(&key).and_then(|rp| rp.parent);
+        }
+        chain
+    }
+
+    /// Cascade-delete a set of root `real_placements` keys and all
+    /// descendants reachable via the `parent` link.
+    ///
+    /// For each key (root or descendant), clears the stamped image cells
+    /// for its image id (coarse — matches the existing by-id delete
+    /// behaviour elsewhere in this handler, which clears all cells for an
+    /// image id rather than a single placement's cells) and removes the
+    /// entry from `real_placements`. Used by `a=d` (delete) so a deleted
+    /// placement's relative children never reference a pruned parent.
+    fn cascade_delete_real_placements(&mut self, roots: &[(u64, u32)]) {
+        let mut to_delete: Vec<(u64, u32)> = roots.to_vec();
+        let mut i = 0;
+        while i < to_delete.len() {
+            let key = to_delete[i];
+            let children: Vec<(u64, u32)> = self
+                .real_placements
+                .iter()
+                .filter(|(_, rp)| rp.parent == Some(key))
+                .map(|(&k, _)| k)
+                .collect();
+            for child in children {
+                if !to_delete.contains(&child) {
+                    to_delete.push(child);
+                }
+            }
+            i += 1;
+        }
+
+        for key in &to_delete {
+            self.buffer.clear_image_placements_by_id(key.0);
+            self.real_placements.remove(key);
+        }
+    }
+
+    /// Convenience wrapper: cascade-delete every `real_placements` entry for
+    /// the given image id (across all its placement ids), plus their
+    /// relative children. Used by the `a=d` (delete) by-id and by-number
+    /// arms (Task 100.4a).
+    fn cascade_delete_real_placements_for_image(&mut self, image_id: u64) {
+        let roots: Vec<(u64, u32)> = self
+            .real_placements
+            .keys()
+            .filter(|&&(img_id, _)| img_id == image_id)
+            .copied()
+            .collect();
+        self.cascade_delete_real_placements(&roots);
     }
 
     /// Decode the transmitted rectangle for an `a=f` animation-frame
@@ -1276,6 +1701,7 @@ impl TerminalHandler {
                 self.buffer.clear_all_image_placements();
                 self.buffer.image_store_mut().clear();
                 self.virtual_placements.clear();
+                self.real_placements.clear();
             }
             KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter
                 if let Some(image_id) = cmd.control.image_id =>
@@ -1286,6 +1712,9 @@ impl TerminalHandler {
                 self.buffer.image_store_mut().remove(id);
                 self.virtual_placements
                     .retain(|&(img_id, _), _| img_id != id);
+                // Cascade-delete this image's real placements and their
+                // relative children (Task 100.4a).
+                self.cascade_delete_real_placements_for_image(id);
             }
             KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter
                 if let Some(number) = cmd.control.image_number =>
@@ -1298,6 +1727,9 @@ impl TerminalHandler {
                 if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
                     self.virtual_placements
                         .retain(|&(img_id, _), _| img_id != id);
+                    // Cascade-delete this image's real placements and their
+                    // relative children (Task 100.4a).
+                    self.cascade_delete_real_placements_for_image(id);
                 }
             }
             KittyDeleteTarget::ById
@@ -1583,7 +2015,7 @@ mod tests {
     use freminal_common::{
         buffer_states::{
             format_tag::FormatTag,
-            kitty_graphics::{KittyAction, KittyGraphicsCommand},
+            kitty_graphics::{KittyAction, KittyControlData, KittyGraphicsCommand},
         },
         colors::TerminalColor,
         pty_write::PtyWrite,
@@ -2576,6 +3008,401 @@ mod tests {
         assert_eq!(
             cursor.pos.x, 11,
             "Cursor should be at column 11 after 'Hello World'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Kitty relative placement tests (Task 100.4a)
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a bare `a=p` (Put) command with the given control data
+    /// overrides layered onto sensible defaults for relative-placement
+    /// tests.
+    fn kitty_put_cmd(control: &KittyControlData) -> KittyGraphicsCommand {
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                ..control.clone()
+            },
+            payload: Vec::new(),
+        }
+    }
+
+    /// Helper: transmit (store only, `a=t`) a 2x2 RGBA image with the given
+    /// id, without displaying it.
+    fn transmit_only(handler: &mut TerminalHandler, image_id: u32) {
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        cmd.control.image_id = Some(image_id);
+        handler.handle_kitty_graphics(cmd);
+    }
+
+    /// Read the next PTY response and return it as a `String`, panicking if
+    /// none is available or it isn't a `PtyWrite::Write`.
+    fn recv_response(rx: &crossbeam_channel::Receiver<PtyWrite>) -> String {
+        match rx.try_recv().expect("expected a PTY response") {
+            PtyWrite::Write(bytes) => String::from_utf8(bytes).expect("valid UTF-8 response"),
+            resize @ PtyWrite::Resize(_) => panic!("expected PtyWrite::Write, got {resize:?}"),
+        }
+    }
+
+    #[test]
+    fn kitty_plain_put_registers_real_placement_with_correct_origin() {
+        let (mut handler, _rx) = kitty_handler();
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(5));
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        let placement = handler
+            .real_placements
+            .get(&(42, 0))
+            .copied()
+            .expect("expected a RealPlacement for (42, 0)");
+        assert_eq!(placement.image_id, 42);
+        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_col, 3);
+        assert_eq!(placement.parent, None);
+    }
+
+    #[test]
+    fn kitty_relative_placement_with_real_parent_stamps_at_offset() {
+        let (mut handler, rx) = kitty_handler();
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(5));
+
+        // Parent image A (id=42), displayed at (row=5, col=3). Override the
+        // display size to 10x5 cells so the buffer grows enough rows for
+        // the relative child's V=1 offset to land inside existing bounds
+        // (the buffer starts with a single row and grows only as far as
+        // whatever is placed into it).
+        let mut cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd_a.control.display_cols = Some(5);
+        cmd_a.control.display_rows = Some(10);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx); // A's OK response.
+        let parent = handler
+            .real_placements
+            .get(&(42, 0))
+            .copied()
+            .expect("parent A registered");
+
+        // Child image B (id=99), transmitted but not displayed yet.
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx); // B's transmit-only OK response.
+
+        // Put B relative to A: H=2, V=1.
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(42),
+            h_offset: Some(2),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+
+        let response = recv_response(&rx);
+        assert!(
+            !response.contains("ENOPARENT")
+                && !response.contains("EINVAL")
+                && !response.contains("ECYCLE")
+                && !response.contains("ETOODEEP"),
+            "expected success response, got: {response}"
+        );
+
+        let child = handler
+            .real_placements
+            .get(&(99, 0))
+            .copied()
+            .expect("child B registered in real_placements");
+        assert_eq!(child.parent, Some((42, 0)));
+        assert_eq!(child.origin_row, parent.origin_row + 1);
+        assert_eq!(child.origin_col, parent.origin_col + 2);
+
+        // The child's image cells are actually stamped at that offset.
+        let cell = &handler.buffer().rows()[child.origin_row].cells()[child.origin_col];
+        assert!(cell.has_image(), "expected an image cell at child origin");
+        assert_eq!(
+            cell.image_placement().map(|p| p.image_id),
+            Some(99),
+            "expected the stamped cell to reference image id 99"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_enoparent_when_parent_missing() {
+        let (mut handler, rx) = kitty_handler();
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx);
+
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(9999),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+
+        let response = recv_response(&rx);
+        assert!(
+            response.contains("ENOPARENT"),
+            "expected ENOPARENT, got: {response}"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_einval_when_also_virtual() {
+        let (mut handler, rx) = kitty_handler();
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx);
+
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(1),
+            unicode_placeholder: true,
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+
+        let response = recv_response(&rx);
+        assert!(
+            response.contains("EINVAL"),
+            "expected EINVAL, got: {response}"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_etoodeep_beyond_depth_8() {
+        let (mut handler, rx) = kitty_handler();
+
+        // Root: image id 0, displayed normally (no parent).
+        let mut cmd_root = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd_root.control.image_id = Some(1);
+        handler.handle_kitty_graphics(cmd_root);
+        let _ = recv_response(&rx);
+
+        // Build a chain of relative placements 2..=9, each relative to the
+        // previous one. ids 2..=9 reach depths 1..=8 — all must succeed.
+        for id in 2..=9u32 {
+            transmit_only(&mut handler, id);
+            let _ = recv_response(&rx);
+
+            let put_cmd = kitty_put_cmd(&KittyControlData {
+                image_id: Some(id),
+                parent_image_id: Some(id - 1),
+                h_offset: Some(1),
+                v_offset: Some(0),
+                ..KittyControlData::default()
+            });
+            handler.handle_kitty_graphics(put_cmd);
+            let response = recv_response(&rx);
+            assert!(
+                !response.contains("ETOODEEP"),
+                "id={id} (depth {}) must be allowed, got: {response}",
+                id - 1
+            );
+        }
+
+        // The 10th image (id=10), relative to id=9 (depth 8), would reach
+        // depth 9 — the 9th link — and must be rejected.
+        transmit_only(&mut handler, 10);
+        let _ = recv_response(&rx);
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(10),
+            parent_image_id: Some(9),
+            h_offset: Some(1),
+            v_offset: Some(0),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+        let response = recv_response(&rx);
+        assert!(
+            response.contains("ETOODEEP"),
+            "expected ETOODEEP, got: {response}"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_ecycle_on_self_reference() {
+        let (mut handler, rx) = kitty_handler();
+
+        // Root placement (image=42, placement=0), no parent.
+        let cmd_root = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd_root);
+        let _ = recv_response(&rx);
+
+        // A second placement of the SAME image (42, placement=1), relative
+        // to (42, 0).
+        let put_child = kitty_put_cmd(&KittyControlData {
+            image_id: Some(42),
+            placement_id: Some(1),
+            parent_image_id: Some(42),
+            parent_placement_id: Some(0),
+            h_offset: Some(1),
+            v_offset: Some(0),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_child);
+        let response = recv_response(&rx);
+        assert!(
+            !response.contains("ECYCLE"),
+            "expected success registering (42,1), got: {response}"
+        );
+
+        // Now attempt to redefine (42, 0) as relative to (42, 1) — since
+        // (42, 1)'s ancestor chain already contains (42, 0), this forms a
+        // cycle.
+        let put_cycle = kitty_put_cmd(&KittyControlData {
+            image_id: Some(42),
+            placement_id: Some(0),
+            parent_image_id: Some(42),
+            parent_placement_id: Some(1),
+            h_offset: Some(1),
+            v_offset: Some(0),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cycle);
+        let response = recv_response(&rx);
+        assert!(
+            response.contains("ECYCLE"),
+            "expected ECYCLE, got: {response}"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_does_not_move_cursor() {
+        let (mut handler, rx) = kitty_handler();
+        handler.buffer_mut().set_cursor_pos(Some(10), Some(2));
+
+        let cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx);
+
+        // Cursor moved after placing A (place_image always advances it).
+        let cursor_after_a = handler.buffer().cursor().pos;
+
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx);
+
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(42),
+            h_offset: Some(1),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+        let _ = recv_response(&rx);
+
+        let cursor_after_relative = handler.buffer().cursor().pos;
+        assert_eq!(
+            cursor_after_a, cursor_after_relative,
+            "a relative placement must not move the cursor"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_by_id_cascades_to_relative_children() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyDeleteTarget};
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Parent A (id=42).
+        let cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx);
+
+        // Child B (id=99) relative to A.
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx);
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(42),
+            h_offset: Some(1),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+        let _ = recv_response(&rx);
+
+        assert!(handler.real_placements.contains_key(&(42, 0)));
+        assert!(handler.real_placements.contains_key(&(99, 0)));
+
+        // Delete A by id.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            !handler.real_placements.contains_key(&(42, 0)),
+            "deleted parent must be removed from real_placements"
+        );
+        assert!(
+            !handler.real_placements.contains_key(&(99, 0)),
+            "cascade-deleted child must be removed from real_placements"
+        );
+
+        let has_image_99 = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(|c| c.image_placement().is_some_and(|p| p.image_id == 99))
+        });
+        assert!(
+            !has_image_99,
+            "cascade delete must clear the child's stamped cells"
+        );
+    }
+
+    #[test]
+    fn kitty_relative_placement_virtual_parent_registers_without_stamping() {
+        let (mut handler, rx) = kitty_handler();
+
+        // Virtual parent A (id=42, U=1).
+        let cmd_a = kitty_virtual_2x2_cmd();
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx);
+        assert!(handler.virtual_placements.contains_key(&(42, 0)));
+
+        // Child B (id=99) relative to virtual A.
+        transmit_only(&mut handler, 99);
+        let _ = recv_response(&rx);
+        let put_cmd = kitty_put_cmd(&KittyControlData {
+            image_id: Some(99),
+            parent_image_id: Some(42),
+            ..KittyControlData::default()
+        });
+        handler.handle_kitty_graphics(put_cmd);
+
+        let response = recv_response(&rx);
+        assert!(
+            !response.contains("ENOPARENT")
+                && !response.contains("EINVAL")
+                && !response.contains("ECYCLE")
+                && !response.contains("ETOODEEP"),
+            "expected success (register-only), got: {response}"
+        );
+
+        let child = handler
+            .real_placements
+            .get(&(99, 0))
+            .copied()
+            .expect("child B registered against virtual parent");
+        assert_eq!(child.parent, Some((42, 0)));
+
+        // No image cells were stamped for B — positioning is deferred to
+        // Task 100.4b.
+        let has_image_99 = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(|c| c.image_placement().is_some_and(|p| p.image_id == 99))
+        });
+        assert!(
+            !has_image_99,
+            "a child of a virtual parent must not be stamped yet (100.4b)"
         );
     }
 
