@@ -1291,6 +1291,20 @@ maps the pixel crop into the UV sub-rectangle). Recon the exact UV math first.
 Deliverable: source-rect crop applied on display + tests (a placement with a
 sub-rect crop yields the expected UV sub-region; no crop = full image, unchanged).
 
+Scope expansion (recorded): adding the non-`Option`-defaultable `source_crop`
+field to `ImagePlacement` and a `source_crop` param to
+`Buffer::place_image`/`place_image_at` is compile-forced across every
+`ImagePlacement` literal and `place_image*` call site in the workspace
+(`freminal-buffer/src/buffer/mod.rs`, `row.rs`; the sixel/iTerm2 handlers;
+`terminal_handler/mod.rs`'s placeholder + virtual-parent injection). All get the
+still-image default (`source_crop: None` / trailing `None`) — behaviour-neutral
+for every non-`a=p`/`a=T` path. `SourceCrop` is re-exported from
+`freminal-terminal-emulator/src/lib.rs` (one-line, mirroring `ImageProtocol`) so
+the renderer can name it. The `ImageBounds` map remains keyed by `image_id`
+(not `(image_id, placement_id)`), so two on-screen placements of the same image
+with different crops collapse to first-seen — a pre-existing limitation shared
+with `z_index` (100.7b), out of 100.9 scope.
+
 Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
 Prohibitions: do NOT change `a=c` compose (which already uses `x/y/w/h`

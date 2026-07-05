@@ -115,7 +115,7 @@ impl TerminalHandler {
         // PTY thread always operates at the live bottom.
         let _new_offset =
             self.buffer
-                .place_image(inline_image, 0, ImageProtocol::ITerm2, None, None, 0);
+                .place_image(inline_image, 0, ImageProtocol::ITerm2, None, None, 0, None);
 
         // Restore cursor position if doNotMoveCursor was requested.
         if let Some(pos) = saved_cursor {

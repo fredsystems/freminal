@@ -711,6 +711,9 @@ impl TerminalHandler {
             image_number: None,
             placement_id: Some(placement_id),
             z_index: 0,
+            // Unicode placeholder cells are not an `a=p`/`a=T` display path —
+            // source-crop (Task 100.9) does not apply here.
+            source_crop: None,
         };
 
         let cursor_pos = self.buffer.cursor().pos;
@@ -1084,6 +1087,11 @@ impl TerminalHandler {
                         image_number: None,
                         placement_id: Some(child_pid),
                         z_index: child.z_index,
+                        // Virtual-parent relative placements don't currently
+                        // carry crop data (out of Task 100.9 scope — see
+                        // `stamp_relative_placement_at_real_parent` for the
+                        // real-parent path, which does).
+                        source_crop: None,
                     });
                 }
             }

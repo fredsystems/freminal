@@ -112,7 +112,7 @@ impl TerminalHandler {
 
         let _new_offset =
             self.buffer
-                .place_image(inline_image, 0, ImageProtocol::Sixel, None, None, 0);
+                .place_image(inline_image, 0, ImageProtocol::Sixel, None, None, 0, None);
 
         // Restore cursor position for DECSDM display mode.
         if let Some(pos) = saved_cursor {

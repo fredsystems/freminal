@@ -121,10 +121,9 @@ None, aside from two narrow items below. Sixel (DCS), Kitty graphics protocol
 to the Kitty handler; non-Kitty APCs are logged and ignored, which is
 spec-compliant.
 
-| Item                                     | Importance | Type | Planned | Notes                                                                                                                                                                                  |
-| ---------------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Kitty `t=s` shared memory (Windows)      | ⬜         | 🚧   | —       | Implemented on POSIX (Unix) via `shm_open`/`mmap`/`shm_unlink`; returns `ENOTSUP` on Windows (winapi file-mapping deferred, needs `winapi` dependency in `freminal-terminal-emulator`) |
-| Kitty `a=p` source-rect crop (`x/y/w/h`) | ⬜         | 🚧   | —       | Keys are parsed but only applied under `a=c` (compose); a placement (`a=p`) always displays the full image, ignoring a source-crop rectangle                                           |
+| Item                                | Importance | Type | Planned | Notes                                                                                                                                                                                  |
+| ----------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kitty `t=s` shared memory (Windows) | ⬜         | 🚧   | —       | Implemented on POSIX (Unix) via `shm_open`/`mmap`/`shm_unlink`; returns `ENOTSUP` on Windows (winapi file-mapping deferred, needs `winapi` dependency in `freminal-terminal-emulator`) |
 
 ---
 

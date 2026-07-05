@@ -1057,6 +1057,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         }
     }
 

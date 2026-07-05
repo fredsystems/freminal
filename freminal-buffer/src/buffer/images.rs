@@ -12,7 +12,7 @@
 use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
 
 use crate::{
-    image_store::{ImagePlacement, ImageProtocol, ImageStore, InlineImage},
+    image_store::{ImagePlacement, ImageProtocol, ImageStore, InlineImage, SourceCrop},
     row::{RowJoin, RowOrigin},
 };
 
@@ -401,6 +401,10 @@ impl Buffer {
     /// clipped to the terminal width (cells beyond the edge are not placed).
     /// If the image extends below the visible area, new rows are created
     /// (scrolling if necessary in the primary buffer).
+    #[allow(clippy::too_many_arguments)]
+    // All parameters are required image placement inputs; grouping into a
+    // struct would obscure the data flow without reducing coupling, matching
+    // the established convention for `place_image`-adjacent methods.
     pub fn place_image(
         &mut self,
         image: InlineImage,
@@ -409,6 +413,7 @@ impl Buffer {
         image_number: Option<u32>,
         placement_id: Option<u32>,
         z_index: i32,
+        source_crop: Option<SourceCrop>,
     ) -> usize {
         let image_id = image.id;
         let display_cols = image.display_cols;
@@ -490,6 +495,7 @@ impl Buffer {
                     image_number,
                     placement_id,
                     z_index,
+                    source_crop,
                 };
                 row.set_image_cell(col, placement, self.current_tag.clone());
                 placed_count += 1;
@@ -544,6 +550,7 @@ impl Buffer {
         image_number: Option<u32>,
         placement_id: Option<u32>,
         z_index: i32,
+        source_crop: Option<SourceCrop>,
     ) {
         for img_row in 0..display_rows {
             let target_row = origin_row + img_row;
@@ -563,6 +570,7 @@ impl Buffer {
                     image_number,
                     placement_id,
                     z_index,
+                    source_crop,
                 };
                 self.set_image_cell_at(target_row, col, placement, self.current_tag.clone());
             }

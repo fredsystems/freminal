@@ -28,7 +28,7 @@ use freminal_common::buffer_states::kitty_graphics::{
 };
 
 use freminal_buffer::image_store::{
-    AnimationControl, AnimationRunMode, ImageProtocol, InlineImage, next_image_id,
+    AnimationControl, AnimationRunMode, ImageProtocol, InlineImage, SourceCrop, next_image_id,
 };
 
 use super::KittyImageState;
@@ -694,47 +694,7 @@ impl TerminalHandler {
             let pid = cmd.control.placement_id.unwrap_or(0);
             self.register_virtual_placement(id, pid, display_cols, display_rows);
         } else {
-            // Save cursor position if `C=1` (no cursor movement).
-            let saved_cursor = if cmd.control.no_cursor_movement {
-                Some(self.buffer.cursor().pos)
-            } else {
-                None
-            };
-
-            let cursor = self.buffer.cursor().pos;
-            tracing::debug!(
-                "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
-                 {display_cols}x{display_rows} cells, C={}",
-                cursor.x,
-                cursor.y,
-                u8::from(cmd.control.no_cursor_movement),
-            );
-            let _new_offset = self.buffer.place_image(
-                image_to_place,
-                0,
-                ImageProtocol::Kitty,
-                cmd.control.image_number,
-                cmd.control.placement_id,
-                cmd.control.z_index.unwrap_or(0),
-            );
-
-            // Restore cursor if `C=1`.
-            if let Some(pos) = saved_cursor {
-                self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
-            }
-
-            // Record this real (cell-stamped) placement's origin so future
-            // relative placements can reference it as a parent (Task 100.4a).
-            let pid = cmd.control.placement_id.unwrap_or(0);
-            self.record_real_placement(
-                id,
-                pid,
-                cursor.y,
-                cursor.x,
-                display_cols,
-                display_rows,
-                cmd.control.z_index.unwrap_or(0),
-            );
+            self.stamp_kitty_put(cmd, id, image_to_place, display_cols, display_rows);
         }
 
         // Send OK response unless suppressed.
@@ -751,6 +711,71 @@ impl TerminalHandler {
             );
             self.write_to_pty(&response);
         }
+    }
+
+    /// Stamp a non-virtual (cell-materialized) `a=p` placement at the
+    /// cursor, restoring the cursor afterward if `C=1` was requested, and
+    /// record it as a real placement so it can act as a future relative-
+    /// placement parent (Task 100.4a). Resolves the `x=`/`y=`/`w=`/`h=`
+    /// source-crop (Task 100.9) against the image's own pixel dimensions.
+    ///
+    /// Split out of [`Self::handle_kitty_put`] to keep that function within
+    /// the line-count lint limit.
+    fn stamp_kitty_put(
+        &mut self,
+        cmd: &KittyGraphicsCommand,
+        id: u64,
+        image_to_place: InlineImage,
+        display_cols: usize,
+        display_rows: usize,
+    ) {
+        // Save cursor position if `C=1` (no cursor movement).
+        let saved_cursor = if cmd.control.no_cursor_movement {
+            Some(self.buffer.cursor().pos)
+        } else {
+            None
+        };
+
+        let cursor = self.buffer.cursor().pos;
+        tracing::debug!(
+            "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
+             {display_cols}x{display_rows} cells, C={}",
+            cursor.x,
+            cursor.y,
+            u8::from(cmd.control.no_cursor_movement),
+        );
+        let source_crop = resolve_source_crop(
+            &cmd.control,
+            image_to_place.width_px,
+            image_to_place.height_px,
+        );
+        let _new_offset = self.buffer.place_image(
+            image_to_place,
+            0,
+            ImageProtocol::Kitty,
+            cmd.control.image_number,
+            cmd.control.placement_id,
+            cmd.control.z_index.unwrap_or(0),
+            source_crop,
+        );
+
+        // Restore cursor if `C=1`.
+        if let Some(pos) = saved_cursor {
+            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        }
+
+        // Record this real (cell-stamped) placement's origin so future
+        // relative placements can reference it as a parent (Task 100.4a).
+        let pid = cmd.control.placement_id.unwrap_or(0);
+        self.record_real_placement(
+            id,
+            pid,
+            cursor.y,
+            cursor.x,
+            display_cols,
+            display_rows,
+            cmd.control.z_index.unwrap_or(0),
+        );
     }
 
     /// Decode a Kitty graphics payload into RGBA pixel data.
@@ -1257,6 +1282,7 @@ impl TerminalHandler {
                  {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
             );
             let cursor = self.buffer.cursor().pos;
+            let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
             let _new_offset = self.buffer.place_image(
                 inline_image,
                 0,
@@ -1264,6 +1290,7 @@ impl TerminalHandler {
                 control.image_number,
                 control.placement_id,
                 control.z_index.unwrap_or(0),
+                source_crop,
             );
 
             // Record this real (cell-stamped) placement's origin so future
@@ -1462,6 +1489,16 @@ impl TerminalHandler {
             parent_real.origin_col,
         );
 
+        // Resolve the crop against the CHILD image's own pixel dimensions —
+        // `x=`/`y=`/`w=`/`h=` on a relative `a=p` crop the child, not the
+        // parent.
+        let (child_width_px, child_height_px) = self
+            .buffer
+            .image_store()
+            .get(child_image_id)
+            .map_or((0, 0), |img| (img.width_px, img.height_px));
+        let source_crop = resolve_source_crop(control, child_width_px, child_height_px);
+
         self.buffer.place_image_at(
             child_image_id,
             origin_row,
@@ -1472,6 +1509,7 @@ impl TerminalHandler {
             control.image_number,
             control.placement_id,
             z_index,
+            source_crop,
         );
 
         self.insert_real_placement(
@@ -2435,6 +2473,56 @@ fn resolve_compose_rect(
     }
 }
 
+/// Resolve `a=p`/`a=T` `x=`/`y=`/`w=`/`h=` control keys into a
+/// [`SourceCrop`] for the display path only (Task 100.9).
+///
+/// `x=`/`y=` default to `0` (top-left) when absent; `w=`/`h=` (`0` or
+/// absent) default to "the rest of the image" from that origin — matching
+/// the same "0/absent means full" idiom as [`resolve_compose_rect`]. If the
+/// resolved rectangle covers the whole image from the origin, `None` is
+/// returned so the renderer's full-image fast path is used. The rectangle
+/// is defensively clamped to the image's pixel bounds — a client could
+/// request `x`/`w` past the edge.
+fn resolve_source_crop(
+    control: &KittyControlData,
+    img_width_px: u32,
+    img_height_px: u32,
+) -> Option<SourceCrop> {
+    let x = control.src_x.unwrap_or(0);
+    let y = control.src_y.unwrap_or(0);
+    let width = control
+        .src_rect_width
+        .filter(|&w| w > 0)
+        .unwrap_or_else(|| img_width_px.saturating_sub(x));
+    let height = control
+        .src_rect_height
+        .filter(|&h| h > 0)
+        .unwrap_or_else(|| img_height_px.saturating_sub(y));
+
+    // No crop at all (full image from origin) → None, so the renderer's
+    // fast path is used.
+    if x == 0 && y == 0 && width >= img_width_px && height >= img_height_px {
+        None
+    } else {
+        // Clamp the crop to the image bounds (defensive; a client could
+        // send x/w past the edge).
+        let x = x.min(img_width_px);
+        let y = y.min(img_height_px);
+        let width = width.min(img_width_px.saturating_sub(x));
+        let height = height.min(img_height_px.saturating_sub(y));
+        if width == 0 || height == 0 {
+            None
+        } else {
+            Some(SourceCrop {
+                x,
+                y,
+                width,
+                height,
+            })
+        }
+    }
+}
+
 /// Resolve a kitty `z=` gap value into a stored gap in milliseconds.
 ///
 /// `None` or `Some(0)` means "leave the default unchanged" (returns `None`);
@@ -2607,6 +2695,8 @@ mod tests {
         colors::TerminalColor,
         pty_write::PtyWrite,
     };
+
+    use super::SourceCrop;
 
     use super::super::TerminalHandler;
 
@@ -4166,6 +4256,7 @@ mod tests {
             None,
             None,
             0,
+            None,
         );
     }
 
@@ -4193,6 +4284,7 @@ mod tests {
                     image_number: None,
                     placement_id: Some(placement_id),
                     z_index: 0,
+                    source_crop: None,
                 };
                 handler.buffer_mut().set_image_cell_at(
                     start_row + row_in_image,
@@ -7375,6 +7467,139 @@ mod tests {
         assert!(
             !handler.virtual_placements.contains_key(&(assigned_id, 0)),
             "d=n should prune the virtual placement for the resolved image"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Source-crop (`a=p`/`a=T` x/y/w/h, Task 100.9)
+    // ------------------------------------------------------------------
+
+    /// Transmit (store-only, no display) a 10x10 opaque-black RGBA base
+    /// image with the given id and return the handler + receiver, for
+    /// source-crop tests that need a non-trivial pixel size.
+    fn kitty_handler_with_black_10x10_base(
+        id: u32,
+    ) -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(10),
+                src_height: Some(10),
+                image_id: Some(id),
+                ..KittyControlData::default()
+            },
+            payload: vec![0u8; 10 * 10 * 4],
+        };
+        handler.handle_kitty_graphics(cmd);
+        // Drain the OK response from the transmit so later assertions on
+        // `rx` only see the Put command's response.
+        let _ = rx.try_recv();
+        (handler, rx)
+    }
+
+    /// `a=p,x=,y=,w=,h=` on a stored image must stamp the resolved
+    /// [`SourceCrop`] onto every placed cell.
+    #[test]
+    fn kitty_put_with_source_crop_stamps_resolved_crop_onto_placed_cells() {
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                src_x: Some(2),
+                src_y: Some(3),
+                src_rect_width: Some(4),
+                src_rect_height: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let expected = SourceCrop {
+            x: 2,
+            y: 3,
+            width: 4,
+            height: 5,
+        };
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.source_crop,
+            Some(expected),
+            "a=p x/y/w/h should stamp the resolved SourceCrop onto placed cells"
+        );
+    }
+
+    /// `a=p` with no `x=`/`y=`/`w=`/`h=` keys must leave `source_crop` as
+    /// `None` (display the full image).
+    #[test]
+    fn kitty_put_without_crop_keys_yields_full_image_none() {
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.source_crop, None,
+            "a=p with no crop keys should display the full image (None)"
+        );
+    }
+
+    /// `w=0` (explicitly zero) must be treated the same as absent — "full
+    /// width from `x`" — matching the same 0/absent idiom as
+    /// `resolve_compose_rect`.
+    #[test]
+    fn kitty_put_with_zero_width_uses_full_width_from_x() {
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                src_x: Some(3),
+                src_rect_width: Some(0),
+                src_rect_height: Some(4),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let expected = SourceCrop {
+            x: 3,
+            y: 0,
+            width: 7, // 10 (image width) - 3 (x) = 7, the rest from x
+            height: 4,
+        };
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.source_crop,
+            Some(expected),
+            "w=0 should default to the full remaining width from x"
         );
     }
 }

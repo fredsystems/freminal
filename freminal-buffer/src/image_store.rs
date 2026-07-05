@@ -245,6 +245,22 @@ pub enum ImageProtocol {
     ITerm2,
 }
 
+/// A pixel-space source-crop rectangle for a kitty `a=p` placement.
+///
+/// The sub-region of the transmitted image this placement displays (`x=`/
+/// `y=` = top-left px, `w=`/`h=` = size px). `None` = display the full image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceCrop {
+    /// Left edge of the crop rectangle, in pixels.
+    pub x: u32,
+    /// Top edge of the crop rectangle, in pixels.
+    pub y: u32,
+    /// Width of the crop rectangle, in pixels.
+    pub width: u32,
+    /// Height of the crop rectangle, in pixels.
+    pub height: u32,
+}
+
 /// A reference to a portion of an image within a single cell.
 ///
 /// Each cell in the image's rectangular footprint carries one of these,
@@ -274,6 +290,9 @@ pub struct ImagePlacement {
 
     /// Z-index for layering (Kitty `z=`).  Default 0.
     pub z_index: i32,
+
+    /// Source-crop rectangle (kitty `a=p` `x/y/w/h`); `None` = full image.
+    pub source_crop: Option<SourceCrop>,
 }
 
 /// Central storage for all inline images in a buffer.
@@ -609,6 +628,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let p2 = ImagePlacement {
             image_id: 1,
@@ -618,6 +638,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let p3 = ImagePlacement {
             image_id: 1,
@@ -627,10 +648,58 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
 
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn image_placement_with_source_crop_round_trips_via_equality() {
+        let cropped = SourceCrop {
+            x: 25,
+            y: 25,
+            width: 50,
+            height: 50,
+        };
+        let p1 = ImagePlacement {
+            image_id: 1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: Some(cropped),
+        };
+        let p2 = ImagePlacement {
+            image_id: 1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: Some(cropped),
+        };
+        let p3 = ImagePlacement {
+            image_id: 1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+        };
+
+        assert_eq!(p1, p2, "identical source_crop values must compare equal");
+        assert_eq!(p1.source_crop, Some(cropped));
+        assert_ne!(
+            p1, p3,
+            "Some(crop) vs None source_crop must not compare equal"
+        );
     }
 
     #[test]
@@ -668,6 +737,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let image_cell = Cell::image_cell(placement_id1, FormatTag::default());
         let plain_cell = Cell::blank_with_tag(FormatTag::default());
@@ -741,6 +811,7 @@ mod tests {
                 image_number: None,
                 placement_id: None,
                 z_index: 0,
+                source_crop: None,
             },
             FormatTag::default(),
         );
@@ -753,6 +824,7 @@ mod tests {
                 image_number: None,
                 placement_id: None,
                 z_index: 0,
+                source_crop: None,
             },
             FormatTag::default(),
         );
@@ -1017,6 +1089,7 @@ mod tests {
             image_number: Some(1),
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
@@ -1077,6 +1150,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
@@ -1160,6 +1234,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];

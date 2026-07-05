@@ -270,10 +270,10 @@ transmit/put/delete/query and unicode placeholders; Task 100 added animation
 (frame transfer/control/compose), image-number (`I=`) references, relative
 placements (`P`/`Q`/`H`/`V`, incl. their parser keys), storage quotas +
 eviction, compression (`o=z`), shared memory (`t=s`, POSIX; Windows stub),
-delete-target correctness, `p=` in responses, and z-index render ordering.
-See the "freminal current-state" section below for the full done list and
-the two items that remain unconfirmed/unimplemented (source-rect crop for
-`a=p`, and the Windows `t=s` stub).
+source-rect crop (`a=p` `x/y/w/h`), delete-target correctness, `p=` in
+responses, and z-index render ordering. See the "freminal current-state"
+section below for the full done list and the one item that remains
+(the Windows `t=s` stub).
 
 ### Envelope (graphics)
 
@@ -543,21 +543,21 @@ implementation choice.
 - Image quads render in `(z-index, id)` order, with higher z-index drawn on
   top of lower (Task 100.7b) — the earlier id-only sort order was a real
   stacking bug and is fixed.
+- Source-rect crop for `a=p`/`a=T` (Task 100.9): the `x`/`y`/`w`/`h` display
+  keys select a pixel sub-rectangle of the transmitted image; the crop rides
+  the per-placement `ImagePlacement.source_crop` and `compute_image_quad`
+  composes it into the UV window (`w=0`/`h=0`/absent = full from the offset).
 - Images survive a terminal reflow as coherent rectangles across all three
   supported protocols (Task 100.4.0 atomicity fix).
 
 **Confirmed still remaining (not resolved by Task 100):**
 
-- **Source-rect crop for `a=p` is NOT implemented.** The `x`/`y`/`w`/`h` keys
-  (`src_x`/`src_y`/`src_rect_width`/`src_rect_height` on `KittyControlData`)
-  are only consulted by the `a=c` (compose) rectangle resolver
-  (`resolve_compose_rect`); a plain `a=p` placement always displays the full
-  transmitted image, ignoring any source-crop rectangle. Sub-cell `X`/`Y`
-  offsets are likewise not applied to placement rendering — the renderer's
-  `compute_image_quad` UV logic remains cell-grid based (min/max
-  col/row_in_image), not pixel based. This was flagged as a gap in the
-  original 100.1 audit and confirmed still open by direct code inspection
-  during the 100.8 documentation pass; it has no assigned subtask.
+- **Sub-cell `X`/`Y` pixel offsets are not applied to placement rendering.** The
+  `X`/`Y` display keys (`cell_x_offset`/`cell_y_offset`) — a sub-cell pixel
+  offset for where drawing starts within the first cell — are parsed but not
+  applied by `compute_image_quad` (whose quad geometry is whole-cell aligned).
+  Distinct from the `a=p` source-rect crop (`x/y/w/h`), which **is** implemented
+  (Task 100.9). Minor; no assigned subtask.
 - **Windows `t=s` remains an `ENOTSUP` stub** (`read_kitty_shared_memory` under
   `#[cfg(windows)]`): `OpenFileMappingW`/`MapViewOfFile` support requires
   adding `winapi` (or an equivalent) as a dependency of

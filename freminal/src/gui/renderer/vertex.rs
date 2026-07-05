@@ -14,7 +14,7 @@ use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, Underli
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::LineWidth;
-use freminal_terminal_emulator::{ImagePlacement, InlineImage};
+use freminal_terminal_emulator::{ImagePlacement, InlineImage, SourceCrop};
 use std::sync::Arc;
 
 use super::super::{
@@ -146,6 +146,12 @@ struct ImageBounds {
     /// placement for this image id; all cells of one image share the same
     /// z-index, so later cells must not overwrite it.
     z_index: i32,
+    /// Source-crop (kitty `a=p` x/y/w/h); read from the first-seen placement,
+    /// like `z_index`. `None` = full image. (Keyed by `image_id` like
+    /// `z_index`, so two placements of the same image with different crops
+    /// collapse to the first-seen — a pre-existing limitation shared with
+    /// `z_index`; out of 100.9 scope.)
+    crop: Option<SourceCrop>,
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +687,7 @@ pub fn build_image_verts(
             max_col_in_image: p.col_in_image,
             max_row_in_image: p.row_in_image,
             z_index: p.z_index,
+            crop: p.source_crop,
         });
         entry.x0 = entry.x0.min(x0);
         entry.y0 = entry.y0.min(y0);
@@ -732,6 +739,11 @@ pub fn build_image_verts(
 /// The quad pixel size is determined by the bounding box `b`, which is already
 /// computed in renderer cell pixels.  This means the image is scaled to fill
 /// exactly the declared cell grid — matching the Kitty protocol intent.
+///
+/// If `b.crop` is set (kitty `a=p` source-crop, Task 100.9), the cell-grid
+/// UV fractions above are re-mapped into the crop's pixel-space UV window
+/// instead of the full texture, so the placement displays only that
+/// sub-rectangle of the transmitted image.
 fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
     let (u0, v0, u1, v1) = if let Some(img) = img
         && img.display_cols > 0
@@ -750,6 +762,29 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
     } else {
         // Fallback: map full texture if image metadata is unavailable.
         (0.0, 0.0, 1.0, 1.0)
+    };
+
+    // Compose a kitty `a=p` source-crop (Task 100.9) on top of the
+    // cell-visibility UV fractions computed above: the crop defines the
+    // outer texture-space UV window `[cu0,cu1]x[cv0,cv1]`, and the
+    // cell-visibility fractions `u0..u1`/`v0..v1` are re-mapped INTO that
+    // window via lerp. When there's no crop, the UVs are unchanged.
+    let (u0, v0, u1, v1) = match (b.crop, img) {
+        (Some(crop), Some(img)) if img.width_px > 0 && img.height_px > 0 => {
+            let w = gl_f32_u32(img.width_px);
+            let h = gl_f32_u32(img.height_px);
+            let cu0 = gl_f32_u32(crop.x) / w;
+            let cu1 = gl_f32_u32(crop.x.saturating_add(crop.width)) / w;
+            let cv0 = gl_f32_u32(crop.y) / h;
+            let cv1 = gl_f32_u32(crop.y.saturating_add(crop.height)) / h;
+            (
+                (cu1 - cu0).mul_add(u0, cu0),
+                (cv1 - cv0).mul_add(v0, cv0),
+                (cu1 - cu0).mul_add(u1, cu0),
+                (cv1 - cv0).mul_add(v1, cv0),
+            )
+        }
+        _ => (u0, v0, u1, v1),
     };
 
     [
@@ -2550,6 +2585,7 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index,
+            source_crop: None,
         }
     }
 
@@ -2663,5 +2699,148 @@ mod tests {
         );
 
         assert_eq!(draw_order, vec![7]);
+    }
+
+    // ── compute_image_quad UV composition (Task 100.9 source-crop) ────
+
+    /// Build an `InlineImage` with caller-specified pixel dimensions and a
+    /// single-cell display grid, for `compute_image_quad` UV tests where the
+    /// pixel-space crop math must be exercised against a non-trivial image
+    /// size (unlike the 1x1-pixel `make_inline_image` helper above).
+    fn make_inline_image_sized(id: u64, width_px: u32, height_px: u32) -> InlineImage {
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px,
+            height_px,
+            display_cols: 1,
+            display_rows: 1,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        }
+    }
+
+    /// Build a fully-visible single-cell `ImageBounds` (min == max == 0),
+    /// with the given optional source-crop, for `compute_image_quad` tests.
+    fn make_bounds(crop: Option<SourceCrop>) -> ImageBounds {
+        ImageBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 8.0,
+            y1: 16.0,
+            min_col_in_image: 0,
+            min_row_in_image: 0,
+            max_col_in_image: 0,
+            max_row_in_image: 0,
+            z_index: 0,
+            crop,
+        }
+    }
+
+    /// Extract the (u, v) pair from vertex `idx` (0-based) of a
+    /// `compute_image_quad` result. Each vertex is `[x, y, u, v]` (stride 4).
+    fn quad_uv(quad: &[f32; 4 * VERTS_PER_QUAD], idx: usize) -> (f32, f32) {
+        (quad[idx * 4 + 2], quad[idx * 4 + 3])
+    }
+
+    const UV_EPSILON: f32 = 1e-6;
+
+    /// With no crop, a fully-visible single-cell image (1x1 display grid)
+    /// must map to the full 0..1 UV range — this also covers the
+    /// previously-untested plain (no-crop) UV path.
+    #[test]
+    fn compute_image_quad_no_crop_maps_full_uv_range() {
+        let bounds = make_bounds(None);
+        let img = make_inline_image_sized(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+
+        // Triangle 1: (x0,y0,u0,v0) (x1,y0,u1,v0) (x0,y1,u0,v1)
+        let corner_a = quad_uv(&quad, 0);
+        let corner_b = quad_uv(&quad, 1);
+        let corner_c = quad_uv(&quad, 2);
+
+        assert!(
+            (corner_a.0 - 0.0).abs() < UV_EPSILON,
+            "u0 should be 0.0, got {}",
+            corner_a.0
+        );
+        assert!(
+            (corner_a.1 - 0.0).abs() < UV_EPSILON,
+            "v0 should be 0.0, got {}",
+            corner_a.1
+        );
+        assert!(
+            (corner_b.0 - 1.0).abs() < UV_EPSILON,
+            "u1 should be 1.0, got {}",
+            corner_b.0
+        );
+        assert!(
+            (corner_b.1 - 0.0).abs() < UV_EPSILON,
+            "v0 should be 0.0, got {}",
+            corner_b.1
+        );
+        assert!(
+            (corner_c.0 - 0.0).abs() < UV_EPSILON,
+            "u0 should be 0.0, got {}",
+            corner_c.0
+        );
+        assert!(
+            (corner_c.1 - 1.0).abs() < UV_EPSILON,
+            "v1 should be 1.0, got {}",
+            corner_c.1
+        );
+    }
+
+    /// A source-crop (kitty `a=p` x/y/w/h) on a fully-visible single-cell
+    /// image must re-map the UV range into the crop's pixel-space window
+    /// instead of the full texture (Task 100.9).
+    #[test]
+    fn compute_image_quad_with_crop_maps_to_crop_sub_range() {
+        let bounds = make_bounds(Some(SourceCrop {
+            x: 25,
+            y: 25,
+            width: 50,
+            height: 50,
+        }));
+        let img = make_inline_image_sized(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+
+        let corner_a = quad_uv(&quad, 0);
+        let corner_b = quad_uv(&quad, 1);
+        let corner_c = quad_uv(&quad, 2);
+
+        assert!(
+            (corner_a.0 - 0.25).abs() < UV_EPSILON,
+            "u0 should be 0.25, got {}",
+            corner_a.0
+        );
+        assert!(
+            (corner_a.1 - 0.25).abs() < UV_EPSILON,
+            "v0 should be 0.25, got {}",
+            corner_a.1
+        );
+        assert!(
+            (corner_b.0 - 0.75).abs() < UV_EPSILON,
+            "u1 should be 0.75, got {}",
+            corner_b.0
+        );
+        assert!(
+            (corner_b.1 - 0.25).abs() < UV_EPSILON,
+            "v0 should be 0.25, got {}",
+            corner_b.1
+        );
+        assert!(
+            (corner_c.0 - 0.25).abs() < UV_EPSILON,
+            "u0 should be 0.25, got {}",
+            corner_c.0
+        );
+        assert!(
+            (corner_c.1 - 0.75).abs() < UV_EPSILON,
+            "v1 should be 0.75, got {}",
+            corner_c.1
+        );
     }
 }
