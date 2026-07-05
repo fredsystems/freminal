@@ -18,6 +18,28 @@ use crate::{
 
 use super::Buffer;
 
+/// Result of [`Buffer::place_image`]: the scroll offset adjustment made by
+/// scrollback trimming, plus the TRUE stamped origin of the image.
+///
+/// `origin_row`/`origin_col` reflect where the image's top-left cell
+/// (`row_in_image == 0`, `col_in_image == 0`) actually landed *after* any
+/// `enforce_scrollback_limit` drain that occurred as part of this call —
+/// they are not simply the pre-call cursor position. Callers that need to
+/// record a placement's origin (e.g. Kitty relative-placement parents, Task
+/// 100.14) must use these fields rather than re-reading the cursor before
+/// calling `place_image`, since a scrollback drain during placement can
+/// shift the image upward relative to the pre-call cursor row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceImageResult {
+    /// The (possibly adjusted) scroll offset, mirroring the value
+    /// previously returned directly by `place_image`.
+    pub scroll_offset: usize,
+    /// The row at which the image's top-left cell was actually stamped.
+    pub origin_row: usize,
+    /// The column at which the image's top-left cell was actually stamped.
+    pub origin_col: usize,
+}
+
 impl Buffer {
     /// Advance the cursor by one column, wrapping to the next line if needed.
     ///
@@ -401,6 +423,13 @@ impl Buffer {
     /// clipped to the terminal width (cells beyond the edge are not placed).
     /// If the image extends below the visible area, new rows are created
     /// (scrolling if necessary in the primary buffer).
+    ///
+    /// Returns a [`PlaceImageResult`] describing the (possibly adjusted)
+    /// scroll offset and the TRUE stamped origin row/column of the image —
+    /// the origin reflects any `enforce_scrollback_limit` drain that
+    /// occurred during placement, so callers must use it (not a
+    /// pre-call cursor read) when recording where the image actually
+    /// landed (Task 100.14).
     #[allow(clippy::too_many_arguments)]
     // All parameters are required image placement inputs; grouping into a
     // struct would obscure the data flow without reducing coupling, matching
@@ -414,7 +443,7 @@ impl Buffer {
         placement_id: Option<u32>,
         z_index: i32,
         source_crop: Option<SourceCrop>,
-    ) -> usize {
+    ) -> PlaceImageResult {
         let image_id = image.id;
         let display_cols = image.display_cols;
         let display_rows = image.display_rows;
@@ -522,7 +551,11 @@ impl Buffer {
         self.cursor.pos.x = 0;
 
         self.debug_assert_invariants();
-        current_offset
+        PlaceImageResult {
+            scroll_offset: current_offset,
+            origin_row: base_row,
+            origin_col: start_col,
+        }
     }
 
     /// Stamp an image's cell grid at an explicit screen origin `(origin_row,

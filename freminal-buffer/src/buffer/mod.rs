@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub use flatten::{AutoUrlRange, RowCacheEntry};
+pub use images::PlaceImageResult;
 
 #[cfg(test)]
 use crate::cell::Cell;

@@ -763,7 +763,7 @@ impl TerminalHandler {
             image_to_place.width_px,
             image_to_place.height_px,
         );
-        let _new_offset = self.buffer.place_image(
+        let place_result = self.buffer.place_image(
             image_to_place,
             0,
             ImageProtocol::Kitty,
@@ -780,12 +780,18 @@ impl TerminalHandler {
 
         // Record this real (cell-stamped) placement's origin so future
         // relative placements can reference it as a parent (Task 100.4a).
+        //
+        // Use the TRUE stamped origin from `place_result`, not the
+        // pre-call `cursor` read above: `place_image` may drain scrollback
+        // rows during placement, which shifts the image's actual row
+        // upward relative to the cursor position captured before the call
+        // (Task 100.14).
         let pid = cmd.control.placement_id.unwrap_or(0);
         self.record_real_placement(
             id,
             pid,
-            cursor.y,
-            cursor.x,
+            place_result.origin_row,
+            place_result.origin_col,
             display_cols,
             display_rows,
             cmd.control.z_index.unwrap_or(0),
@@ -1416,9 +1422,8 @@ impl TerminalHandler {
                 "Kitty graphics: placing image id={assigned_id} at cursor, \
                  {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
             );
-            let cursor = self.buffer.cursor().pos;
             let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
-            let _new_offset = self.buffer.place_image(
+            let place_result = self.buffer.place_image(
                 inline_image,
                 0,
                 ImageProtocol::Kitty,
@@ -1430,12 +1435,18 @@ impl TerminalHandler {
 
             // Record this real (cell-stamped) placement's origin so future
             // relative placements can reference it as a parent (Task 100.4a).
+            //
+            // Use the TRUE stamped origin from `place_result`, not a
+            // pre-call cursor read: `place_image` may drain scrollback rows
+            // during placement, which shifts the image's actual row
+            // upward relative to the cursor position captured before the
+            // call (Task 100.14).
             let pid = control.placement_id.unwrap_or(0);
             self.record_real_placement(
                 assigned_id,
                 pid,
-                cursor.y,
-                cursor.x,
+                place_result.origin_row,
+                place_result.origin_col,
                 display_cols,
                 display_rows,
                 control.z_index.unwrap_or(0),
@@ -4080,6 +4091,82 @@ mod tests {
             cell.image_placement().map(|p| p.image_id),
             Some(99),
             "expected the stamped cell to reference image id 99"
+        );
+    }
+
+    /// Task 100.14 regression test: `place_kitty_image` used to capture the
+    /// cursor row/col *before* calling `Buffer::place_image`, then pass that
+    /// stale position straight to `record_real_placement`. But
+    /// `Buffer::place_image` may call `enforce_scrollback_limit` internally,
+    /// which drains rows from the top of the buffer and shifts the image's
+    /// TRUE stamped origin upward by the drained row count. Small,
+    /// fresh-buffer unit tests never exercise this because they never fill
+    /// scrollback — it only bites in a live session with real scrollback
+    /// history. This test forces a drain to happen *during* the same
+    /// `place_image` call that stamps a real placement, and asserts the
+    /// recorded `RealPlacement::origin_row` matches the row where the
+    /// image's cells were *actually* stamped (ground truth), not the stale
+    /// pre-call cursor row.
+    #[test]
+    fn kitty_real_placement_origin_survives_scrollback_drain() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+        // max_rows = height(24) + scrollback_limit(3) = 27.
+
+        // Grow the buffer to 20 rows (below max_rows — no drain yet),
+        // leaving the cursor at the last row (19), analogous to a
+        // long-running session that has accumulated some scrollback.
+        grow_buffer_rows(&mut handler, 20);
+        assert_eq!(handler.buffer().rows().len(), 20);
+        assert_eq!(handler.buffer().cursor().pos.y, 19);
+        let stale_cursor_row = handler.buffer().cursor().pos.y;
+
+        // Place a real (cell-stamped) image tall enough that stamping it
+        // grows the buffer well past max_rows (27), forcing
+        // `enforce_scrollback_limit` to drain rows from the top *during*
+        // this same `place_image` call. base_row(19) + display_rows(15)
+        // = 34 rows needed; overflow beyond max_rows(27) = 7; the true
+        // origin_row is 19 - 7 = 12, not the stale cursor row (19).
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(77);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(15);
+        handler.handle_kitty_graphics(cmd);
+
+        let placement = handler
+            .real_placements
+            .get(&(77, 0))
+            .copied()
+            .expect("expected a RealPlacement for (77, 0)");
+
+        let expected_rows_after_stamp = stale_cursor_row + 15; // 19 + 15 = 34
+        let expected_drained = expected_rows_after_stamp - 27; // 34 - 27 = 7
+        let expected_origin_row = stale_cursor_row - expected_drained; // 19 - 7 = 12
+
+        assert_ne!(
+            expected_origin_row, stale_cursor_row,
+            "test setup must actually force a drain, or it can't distinguish \
+             the fix from the bug"
+        );
+        assert_eq!(
+            placement.origin_row, expected_origin_row,
+            "100.14: origin_row must reflect the post-drain stamped row, not \
+             the stale pre-call cursor row"
+        );
+        assert_eq!(placement.origin_col, 0);
+
+        // Ground truth: the image's cells are actually stamped at the
+        // recorded origin.
+        let cell = &handler.buffer().rows()[placement.origin_row].cells()[placement.origin_col];
+        assert!(
+            cell.has_image(),
+            "expected an image cell at the recorded origin_row/origin_col"
+        );
+        assert_eq!(
+            cell.image_placement().map(|p| p.image_id),
+            Some(77),
+            "expected the stamped cell to reference image id 77"
         );
     }
 
