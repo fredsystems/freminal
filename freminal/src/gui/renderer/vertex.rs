@@ -1349,7 +1349,7 @@ mod tests {
     use freminal_common::buffer_states::cursor::StateColors;
     use freminal_common::buffer_states::fonts::FontWeight;
     use freminal_common::colors::TerminalColor;
-    use freminal_terminal_emulator::{AnimationControl, ImageProtocol};
+    use freminal_terminal_emulator::{AnimationControl, ImageProtocol, ImageSizeMode};
 
     /// Default `StateColors` for test runs.
     fn default_colors() -> StateColors {
@@ -2568,6 +2568,7 @@ mod tests {
             height_px: 1,
             display_cols: 1,
             display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: AnimationControl::default(),
@@ -2715,6 +2716,7 @@ mod tests {
             height_px,
             display_cols: 1,
             display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: AnimationControl::default(),

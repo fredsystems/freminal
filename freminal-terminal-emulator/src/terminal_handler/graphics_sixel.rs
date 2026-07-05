@@ -96,6 +96,11 @@ impl TerminalHandler {
             height_px: sixel_image.height,
             display_cols,
             display_rows,
+            // Sixel has no display-size argument (unlike kitty `c=`/`r=` or
+            // iTerm2 explicit width/height): the display grid is always
+            // derived from the decoded image's native pixel size, so this is
+            // unconditionally `NativePixels` (Task 100.17).
+            size_mode: freminal_buffer::image_store::ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: freminal_buffer::image_store::AnimationControl::default(),
@@ -144,6 +149,30 @@ mod tests {
         v.extend_from_slice(sixel_body);
         v.extend_from_slice(b"\x1b\\");
         v
+    }
+
+    #[test]
+    fn sixel_image_always_uses_native_pixels_size_mode() {
+        use freminal_buffer::image_store::ImageSizeMode;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let sixel_body = b"#1;2;100;0;0#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::NativePixels,
+            "Sixel has no display-size argument, so it must always be NativePixels"
+        );
     }
 
     #[test]

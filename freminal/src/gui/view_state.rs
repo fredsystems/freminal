@@ -2303,7 +2303,7 @@ mod tests {
 
     // ── Kitty animated image playback (Task 100.2c) ──────────────────
 
-    use freminal_terminal_emulator::{AnimationControl, ImageFrame};
+    use freminal_terminal_emulator::{AnimationControl, ImageFrame, ImageSizeMode};
 
     /// Build a tiny (1x1 pixel) `InlineImage` for animation-tick tests.
     ///
@@ -2330,6 +2330,7 @@ mod tests {
             height_px: 1,
             display_cols: 1,
             display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
             frames,
             root_gap_ms: gap_ms,
             animation: AnimationControl {

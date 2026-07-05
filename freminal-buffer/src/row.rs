@@ -1486,6 +1486,7 @@ mod tests {
             height_px: 16,
             display_cols: 1,
             display_rows: 1,
+            size_mode: crate::image_store::ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: crate::image_store::AnimationControl::default(),

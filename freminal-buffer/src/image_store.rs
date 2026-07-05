@@ -99,6 +99,22 @@ impl Default for AnimationControl {
     }
 }
 
+/// How a displayed image's on-screen size is determined.
+///
+/// `NativePixels` (the default for kitty without `c`/`r`, iTerm2 `auto`, and
+/// ALWAYS for sixel) means the image is drawn at its intrinsic
+/// `width_px`x`height_px`, anchored at the top-left of its origin cell.
+/// `ExplicitCells` (kitty `c`/`r`, iTerm2 explicit width/height) means the
+/// image is scaled to fill its declared `display_cols`x`display_rows` grid.
+/// Consumed by the renderer in Task 100.17b; set at handler-construction
+/// time here in 100.17a while the protocol provenance is still known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageSizeMode {
+    #[default]
+    NativePixels,
+    ExplicitCells,
+}
+
 /// An inline image stored in the terminal buffer.
 ///
 /// The pixel data is behind an `Arc` so that snapshots can reference it without
@@ -122,6 +138,12 @@ pub struct InlineImage {
 
     /// Display size in terminal rows.
     pub display_rows: usize,
+
+    /// How `display_cols`x`display_rows` should be interpreted when drawing
+    /// this image: at native pixel size, or scaled to fill the cell grid
+    /// (Task 100.17). Set at construction time from protocol provenance;
+    /// consumed by the renderer starting in Task 100.17b.
+    pub size_mode: ImageSizeMode,
 
     /// Additional animation frames (frames 2..N). Empty for a still image.
     ///
@@ -521,6 +543,7 @@ mod tests {
             height_px: u32::try_from(rows * 16).unwrap(),
             display_cols: cols,
             display_rows: rows,
+            size_mode: ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: AnimationControl::default(),

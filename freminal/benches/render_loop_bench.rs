@@ -642,7 +642,9 @@ fn bench_build_visuals(c: &mut Criterion) {
 // ---------------------------------------------------------------
 fn bench_image_animation_tick(c: &mut Criterion) {
     use freminal::gui::view_state::ViewState;
-    use freminal_terminal_emulator::{AnimationControl, AnimationRunMode, ImageFrame, InlineImage};
+    use freminal_terminal_emulator::{
+        AnimationControl, AnimationRunMode, ImageFrame, ImageSizeMode, InlineImage,
+    };
     use std::collections::HashMap;
 
     const NUM_IMAGES: u64 = 8;
@@ -666,6 +668,7 @@ fn bench_image_animation_tick(c: &mut Criterion) {
                 height_px: 1,
                 display_cols: 1,
                 display_rows: 1,
+                size_mode: ImageSizeMode::NativePixels,
                 frames,
                 root_gap_ms: GAP_MS,
                 animation: AnimationControl {

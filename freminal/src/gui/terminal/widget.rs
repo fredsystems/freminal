@@ -3300,7 +3300,9 @@ mod image_pixels_changed_tests {
     //! `build_image_pixel_ptrs` are the pure, GUI-free predicate that catches
     //! this by comparing selected-frame pixel `Arc` pointers across frames.
     use super::*;
-    use freminal_terminal_emulator::{AnimationControl, AnimationRunMode, ImageFrame};
+    use freminal_terminal_emulator::{
+        AnimationControl, AnimationRunMode, ImageFrame, ImageSizeMode,
+    };
 
     /// Build a 1x1-pixel `InlineImage`. `frame_pixels` (frames 2..N) share
     /// `id`'s allocation unless overridden by the caller after construction.
@@ -3312,6 +3314,7 @@ mod image_pixels_changed_tests {
             height_px: 1,
             display_cols: 1,
             display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: AnimationControl {

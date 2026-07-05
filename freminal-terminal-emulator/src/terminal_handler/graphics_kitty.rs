@@ -28,7 +28,8 @@ use freminal_common::buffer_states::kitty_graphics::{
 };
 
 use freminal_buffer::image_store::{
-    AnimationControl, AnimationRunMode, ImageProtocol, InlineImage, SourceCrop, next_image_id,
+    AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
+    next_image_id,
 };
 
 use super::KittyImageState;
@@ -59,6 +60,19 @@ pub(super) fn signed_cell_offset(origin: usize, offset: i32) -> usize {
     let origin_i64 = i64::value_from(origin).unwrap_or(i64::MAX);
     let result = origin_i64.saturating_add(i64::from(offset)).max(0);
     usize::value_from(result).unwrap_or(usize::MAX)
+}
+
+/// Determine the `ImageSizeMode` for an image from a kitty command's control
+/// data: if EITHER `c=`/`r=` is present, kitty derives/scales the display
+/// grid, so the image is drawn scaled to fill it (`ExplicitCells`);
+/// otherwise the display grid was derived from the image's native pixel
+/// size (`NativePixels`) (Task 100.17).
+const fn kitty_image_size_mode(control: &KittyControlData) -> ImageSizeMode {
+    if control.display_cols.is_some() || control.display_rows.is_some() {
+        ImageSizeMode::ExplicitCells
+    } else {
+        ImageSizeMode::NativePixels
+    }
 }
 
 /// Build a `KittyResponseId` that doesn't carry an image number (`I=`).
@@ -498,6 +512,8 @@ impl TerminalHandler {
                 rows.min(term_height).max(1)
             });
 
+        let size_mode = kitty_image_size_mode(&cmd.control);
+
         let image_to_place = InlineImage {
             id: stored_image.id,
             pixels: stored_image.pixels,
@@ -505,6 +521,7 @@ impl TerminalHandler {
             height_px: stored_image.height_px,
             display_cols,
             display_rows,
+            size_mode,
             frames: stored_image.frames.clone(),
             root_gap_ms: stored_image.root_gap_ms,
             animation: stored_image.animation,
@@ -1370,6 +1387,8 @@ impl TerminalHandler {
             next_image_id()
         };
 
+        let size_mode = kitty_image_size_mode(control);
+
         let inline_image = InlineImage {
             id: assigned_id,
             pixels: std::sync::Arc::new(rgba_pixels),
@@ -1377,6 +1396,7 @@ impl TerminalHandler {
             height_px: img_height_px,
             display_cols,
             display_rows,
+            size_mode,
             frames: Vec::new(),
             root_gap_ms: 0,
             animation: freminal_buffer::image_store::AnimationControl::default(),
@@ -2862,6 +2882,7 @@ mod tests {
         pty_write::PtyWrite,
     };
 
+    use super::ImageSizeMode;
     use super::SourceCrop;
 
     use super::super::TerminalHandler;
@@ -3565,6 +3586,118 @@ mod tests {
         let img = handler.buffer().image_store().get(55).unwrap();
         assert_eq!(img.display_cols, 10);
         assert_eq!(img.display_rows, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // ImageSizeMode provenance (Task 100.17a)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kitty_transmit_with_display_cols_and_rows_sets_explicit_cells_mode() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(60),
+                display_cols: Some(10),
+                display_rows: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(60).unwrap();
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::ExplicitCells,
+            "explicit c=/r= on a=T should set ExplicitCells"
+        );
+    }
+
+    #[test]
+    fn kitty_transmit_without_display_cols_and_rows_sets_native_pixels_mode() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        let img = handler.buffer().image_store().get(42).unwrap();
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::NativePixels,
+            "no c=/r= on a=T should default to NativePixels"
+        );
+    }
+
+    #[test]
+    fn kitty_put_with_display_cols_and_rows_sets_explicit_cells_mode() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Transmit only (no display), then Put it with an explicit c=/r= override.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(cmd);
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(6),
+                display_rows: Some(3),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let img = handler.buffer().image_store().get(42).unwrap();
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::ExplicitCells,
+            "explicit c=/r= on a=p should set ExplicitCells"
+        );
+    }
+
+    #[test]
+    fn kitty_put_without_display_cols_and_rows_sets_native_pixels_mode() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(cmd);
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let img = handler.buffer().image_store().get(42).unwrap();
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::NativePixels,
+            "no c=/r= on a=p should default to NativePixels"
+        );
     }
 
     #[test]

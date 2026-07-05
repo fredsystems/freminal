@@ -6,7 +6,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
-use freminal_buffer::image_store::{AnimationControl, ImageStore, InlineImage};
+use freminal_buffer::image_store::{AnimationControl, ImageSizeMode, ImageStore, InlineImage};
 use freminal_common::buffer_states::{
     cursor::StateColors,
     fonts::{FontDecorationFlags, FontWeight},
@@ -690,6 +690,7 @@ fn make_bench_image(id: u64) -> InlineImage {
         height_px: 32,
         display_cols: 4,
         display_rows: 2,
+        size_mode: ImageSizeMode::NativePixels,
         frames: Vec::new(),
         root_gap_ms: 0,
         animation: AnimationControl::default(),
