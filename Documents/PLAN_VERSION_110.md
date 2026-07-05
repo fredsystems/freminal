@@ -1345,6 +1345,126 @@ security refusal; do NOT add a flake change (winapi needs none); do NOT proceed.
 
 Stop: report + await review.
 
+#### 100.11 — Live render bug: animation does not animate (`a=a`)
+
+Surfaced 2026-07-02 by a maintainer live-window run of `test-scripts/kitty_graphics.py`
+step 7, on top of `4561a275`. Unit tests (handler/store/`ViewState` state) are green;
+the state-only tests could not catch a GUI repaint/frame-clock defect.
+
+- **Surface point:** commit `4561a275` (manual test script); the animation display leg
+  landed in 100.2c (`f48ac368`).
+- **Impact:** after `a=a,i=3,s=3,v=1` (run, infinite loop), the image never cycles
+  red→green→blue; it holds on the first frame. `a=a` is intentionally silent (no PTY
+  response, per spec — 100.2b), which is correct and not the bug.
+- **Scope:** `freminal/src/gui/view_state.rs` (`tick_image_animations` /
+  `ImageAnimationClock`); `freminal/src/gui/terminal/widget.rs` (the full-rebuild
+  trigger set + `request_repaint_after` re-arm). READ-ONLY recon (2026-07-02) found a
+  confirmed defect: the GUI clock's `frame_started` is anchored the first time an image
+  is observed with `is_animated()` (which ignores `run_mode`), i.e. as soon as the first
+  `a=f` frame arrives while still `Stopped`, and is never re-anchored on the
+  `Stopped → Running` transition at `a=a`. Whether this alone freezes playback vs. only
+  skips an initial frame is a runtime-timing question the recon could not close
+  statically.
+- **Approach:** pending confirmation from a live `.frec` capture of the exact step-7
+  bytes + behavior (per `freminal-frec-decoder`). Candidate fix: re-anchor
+  `clock.frame_started = now` (and reset `loops_done`) on a `Stopped → Running`
+  transition, so playback starts cleanly from the run point.
+- **Verification:** a regression test closer to end-to-end than the state-only tests —
+  assert `tick_image_animations` advances the selected frame over successive wall-clock
+  ticks given a `Running` image in the snapshot map (using the `#[cfg(test)]`
+  back-dated-clock seeding helper).
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.12 — Live render bug: animation compose does nothing (`a=c`)
+
+Surfaced 2026-07-02 by the same live run (step 8), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the compose handler landed in 100.2b
+  (`17e1f28b`), the display leg in 100.2c (`f48ac368`).
+- **Impact:** `a=c,i=3,r=1,c=2` composes frame 1 pixels onto frame 2 (a store-mutation
+  that changes no cell and no `run_mode`). Nothing visibly happens.
+- **Scope:** `freminal/src/gui/terminal/widget.rs` (the full-rebuild trigger set at the
+  `show()` rebuild decision). READ-ONLY recon (2026-07-02) found the **definitive** root
+  cause: the PTY thread republishes the snapshot unconditionally after every batch (not
+  damage-gated), so the new composed-frame pixel `Arc` reaches the GUI — but the widget's
+  full-rebuild trigger set has **no term for a store-only image-pixel mutation**.
+  `image_frame_changed` fires only from `tick_image_animations`'s `changed` set
+  (wall-clock stepping or app-forced `current_frame`), never from a raw store mutation.
+  The full-rebuild path is the only path that refreshes `RenderState.snap_images` and the
+  only path that calls `sync_image_textures` (`draw_with_cursor_only_update` never does),
+  so the GPU texture stays stale until an unrelated trigger forces a full rebuild.
+- **Approach:** give the widget a trigger that detects an image-pixel change independent
+  of the wall-clock clock — e.g. track the per-id pixel-`Arc` pointer identity of the
+  snapshot images against the previous frame's, and force the full rebuild when any
+  animated image's selected-frame pixel `Arc` differs. (Shares the same architectural
+  seam as 100.11 but is a distinct fix.)
+- **Verification:** a regression test that a compose-mutated image's changed pixels are
+  reflected in the rebuilt `RenderState.snap_images` (or the rebuild-trigger predicate
+  fires) — closer to end-to-end than the state-only compose test.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.13 — Live render bug: unicode placeholder does not render (`U=1`)
+
+Surfaced 2026-07-02 by the same live run (step 9), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the placeholder machinery predates Task 100 and
+  was audited complete in 100.3 (`f2c08209`).
+- **Impact:** transmit quietly (`a=t,…,q=2`), create a virtual placement
+  (`a=p,i=4,U=1,c=2,r=2`), print U+10EEEE cells with SGR-truecolor fg (image id) +
+  row/col diacritics — nothing renders in the placeholder cells.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+  (`handle_data_with_placeholders` / `handle_placeholder_char` fast-path guard),
+  `graphics_kitty.rs` (the `a=p,U=1` virtual-placement registration + the `q=2` transmit
+  decode path), `freminal-common/src/buffer_states/unicode_placeholder.rs`
+  (`color_to_image_id`). READ-ONLY recon (2026-07-02) found **no code-logic break** — the
+  ordering, id extraction, cell stamping, and snapshot transport are all sound and the
+  unit test mirrors the script and passes. Leading hypothesis (live-only): the `q=2`
+  transmit's payload size may not match `s=2,v=2,f=32`, so `decode_kitty_payload` fails
+  silently (`q=2` suppresses the error), the image is never stored, and the subsequent
+  `a=p,U=1` hits `handle_kitty_put`'s `ENOENT` early-return **before**
+  `register_virtual_placement` runs — so no virtual placement is ever created and the
+  placeholder cells fall through to the space fallback.
+- **Approach:** pending a live `.frec` capture (per `freminal-frec-decoder`,
+  `sequence_decoder.py --convert-escape`) to see the exact bytes freminal receives —
+  specifically the transmit payload byte-count, the `a=p,U=1` control keys, and the SGR
+  fg. Fix shape decided once the capture identifies the real break.
+- **Verification:** a regression test closer to end-to-end than the state-only test —
+  drive the exact step-9 byte sequence through the handler and assert the placeholder
+  cells carry `ImagePlacement`s that reach a built `TerminalSnapshot`'s visible image
+  placements.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.14 — Live render bug: relative placement (real parent) lands at wrong offset (`P=`)
+
+Surfaced 2026-07-02 by the same live run (step 10), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the real-parent positioning landed in 100.4a
+  (`1dfd82eb`).
+- **Impact:** `a=T,i=5` (cyan) displays; `a=t,i=6` stored; `a=p,i=6,P=5,H=2,V=1` should
+  render magenta offset from cyan — but the child does not appear clearly at
+  parent+offset, and parent behavior is unclear.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`place_kitty_image` / `stamp_kitty_put` — the `record_real_placement` origin capture);
+  possibly `freminal-buffer/src/buffer/images.rs` (`place_image` return value). READ-ONLY
+  recon (2026-07-02) found a **concrete, evidenced candidate**: `record_real_placement`
+  captures `self.buffer.cursor().pos` **before** `place_image()` is called, but
+  `place_image` may call `enforce_scrollback_limit`, which drains rows from the top and
+  decrements the buffer's own `cursor.pos.y`. The recorded `origin_row` is then stale
+  (too large by the drained-row count), so the child origin derived as
+  `parent_origin.row + V` lands wrong. Only manifests in a live session with accumulated
+  scrollback (unit tests use a fresh small buffer, so the drain never fires) — which
+  matches "unit-green but live-broken".
+- **Approach:** capture the placement origin from the **actual** post-`place_image` row
+  index rather than the stale pre-drain cursor copy — either capture the cursor after
+  `place_image` returns, or have `place_image`/`place_image_at` return the true stamped
+  origin and use that in `record_real_placement`. Applies to both the `a=T`/`a=t`-display
+  branch (`place_kitty_image`) and the `a=p` branch (`stamp_kitty_put`).
+- **Verification:** a regression test that grows the buffer past `scrollback_limit` so a
+  placement triggers a scrollback drain, then asserts the recorded real-placement origin
+  matches the actual stamped cell row (fails before / passes after) — the specific gap no
+  existing test exercises.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
 ### 100 Open questions (resolved at activation, 2026-07-01)
 
 - **Quota numbers: mirror kitty's defaults as named constants.** Base image
