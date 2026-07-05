@@ -142,6 +142,10 @@ struct ImageBounds {
     min_row_in_image: usize,
     max_col_in_image: usize,
     max_row_in_image: usize,
+    /// Kitty `z=` layering value (Task 100.7b). Read from the first-seen
+    /// placement for this image id; all cells of one image share the same
+    /// z-index, so later cells must not overwrite it.
+    z_index: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -644,9 +648,11 @@ pub fn build_image_verts(
     cell_width: u32,
     cell_height: u32,
     verts: &mut Vec<f32>,
+    draw_order: &mut Vec<u64>,
 ) {
     // Reuse existing heap allocation — clear but keep capacity.
     verts.clear();
+    draw_order.clear();
 
     if placements.is_empty() || snap_images.is_empty() {
         return;
@@ -674,6 +680,7 @@ pub fn build_image_verts(
             min_row_in_image: p.row_in_image,
             max_col_in_image: p.col_in_image,
             max_row_in_image: p.row_in_image,
+            z_index: p.z_index,
         });
         entry.x0 = entry.x0.min(x0);
         entry.y0 = entry.y0.min(y0);
@@ -685,13 +692,20 @@ pub fn build_image_verts(
         entry.max_row_in_image = entry.max_row_in_image.max(p.row_in_image);
     }
 
-    // Emit quads sorted by image ID (must match draw_images iteration order).
-    let mut sorted_ids: Vec<u64> = bounds.keys().copied().collect();
-    sorted_ids.sort_unstable();
+    // Emit quads in (z_index, id) order so higher z-index images render above
+    // lower ones (ties broken by id for determinism). `draw_images` iterates the
+    // SAME order (via `draw_order`), so vertex slab N corresponds to
+    // `draw_order[N]` — the vertex-emission order and the draw order are
+    // guaranteed identical because they share this one authoritative list.
+    draw_order.extend(bounds.keys().copied());
+    draw_order.sort_unstable_by_key(|id| {
+        let z = bounds.get(id).map_or(0, |b| b.z_index);
+        (z, *id)
+    });
 
-    verts.reserve(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+    verts.reserve(draw_order.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
 
-    for id in &sorted_ids {
+    for id in draw_order.iter() {
         let Some(b) = bounds.get(id) else {
             continue;
         };
@@ -1300,6 +1314,7 @@ mod tests {
     use freminal_common::buffer_states::cursor::StateColors;
     use freminal_common::buffer_states::fonts::FontWeight;
     use freminal_common::colors::TerminalColor;
+    use freminal_terminal_emulator::{AnimationControl, ImageProtocol};
 
     /// Default `StateColors` for test runs.
     fn default_colors() -> StateColors {
@@ -2505,5 +2520,148 @@ mod tests {
             deco.is_empty(),
             "expected no deco quads when term_width_cols == 0"
         );
+    }
+
+    // ── build_image_verts z-order (Task 100.7b) ──────────────────────
+
+    /// Build a minimal 1x1-pixel `InlineImage` for `build_image_verts` tests.
+    fn make_inline_image(id: u64) -> InlineImage {
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        }
+    }
+
+    /// Build a single-cell `ImagePlacement` with the given image id and
+    /// z-index.
+    fn make_placement(image_id: u64, z_index: i32) -> ImagePlacement {
+        ImagePlacement {
+            image_id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index,
+        }
+    }
+
+    /// Higher z-index images must be emitted (and therefore drawn) after
+    /// lower z-index ones, so they render on top (Task 100.7b).
+    #[test]
+    fn build_image_verts_orders_by_z_index() {
+        let term_width = 4;
+        // Cell 0 -> image A (id=1, z=5); cell 1 -> image B (id=2, z=1).
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(1, 5)),
+            Some(make_placement(2, 1)),
+            None,
+            None,
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(1, make_inline_image(1));
+        snap_images.insert(2, make_inline_image(2));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        // B (lower z) drawn first = bottom; A (higher z) drawn last = on top.
+        assert_eq!(draw_order, vec![2, 1]);
+    }
+
+    /// Images with equal z-index are ordered by ascending id for
+    /// determinism.
+    #[test]
+    fn build_image_verts_ties_broken_by_id() {
+        let term_width = 4;
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(3, 0)),
+            Some(make_placement(1, 0)),
+            None,
+            None,
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(3, make_inline_image(3));
+        snap_images.insert(1, make_inline_image(1));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(draw_order, vec![1, 3]);
+    }
+
+    /// Empty placements must clear `draw_order`, even if it held stale
+    /// entries from a previous frame.
+    #[test]
+    fn build_image_verts_empty_placements_clears_draw_order() {
+        let placements: Vec<Option<ImagePlacement>> = vec![None, None];
+        let snap_images = std::collections::HashMap::new();
+
+        let mut verts = Vec::new();
+        // Pre-fill with stale junk to confirm the early-return path clears it.
+        let mut draw_order = vec![99, 98];
+        build_image_verts(
+            &placements,
+            &snap_images,
+            4,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert!(
+            draw_order.is_empty(),
+            "draw_order should be cleared on the empty-input path"
+        );
+        assert!(verts.is_empty());
+    }
+
+    /// A single placed image yields exactly one entry in `draw_order`.
+    #[test]
+    fn build_image_verts_single_image_single_draw_order_entry() {
+        let term_width = 4;
+        let placements: Vec<Option<ImagePlacement>> = vec![Some(make_placement(7, 3)), None];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(7, make_inline_image(7));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(draw_order, vec![7]);
     }
 }

@@ -532,6 +532,7 @@ impl TerminalRenderer {
         deco_verts: &[f32],
         fg_instances: &[f32],
         image_verts: &[f32],
+        image_draw_order: &[u64],
         snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
@@ -580,7 +581,7 @@ impl TerminalRenderer {
         );
         self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
         self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
-        self.draw_images(gl, image_verts.len(), snap_images, vp_w, vp_h, buf_idx);
+        self.draw_images(gl, image_verts.len(), image_draw_order, vp_w, vp_h, buf_idx);
 
         // 4. Restore egui's framebuffer binding.
         unsafe {
@@ -619,7 +620,7 @@ impl TerminalRenderer {
         cursor_verts: &[f32],
         fg_total_floats: usize,
         image_total_floats: usize,
-        snap_images: &std::collections::HashMap<u64, InlineImage>,
+        image_draw_order: &[u64],
         viewport_width: i32,
         viewport_height: i32,
         cell_width: f32,
@@ -672,7 +673,14 @@ impl TerminalRenderer {
         );
         self.draw_decorations(gl, deco_total_floats, vp_w, vp_h, buf_idx);
         self.draw_foreground(gl, fg_total_floats, vp_w, vp_h, buf_idx);
-        self.draw_images(gl, image_total_floats, snap_images, vp_w, vp_h, buf_idx);
+        self.draw_images(
+            gl,
+            image_total_floats,
+            image_draw_order,
+            vp_w,
+            vp_h,
+            buf_idx,
+        );
 
         // 4. Restore egui's framebuffer binding.
         unsafe {
@@ -943,9 +951,10 @@ impl TerminalRenderer {
     /// Execute the image draw call.
     ///
     /// Draws one textured quad per image that has vertices in `image_verts`.
-    /// Iterates images in the order they appear (by ID from the map); each
-    /// image is bound to `TEXTURE1` and drawn with the corresponding 6-vertex
-    /// slab from `image_verts`.
+    /// Iterates `image_draw_order` — the authoritative `(z_index, id)` order
+    /// computed by [`super::vertex::build_image_verts`] — so that higher
+    /// z-index images render on top of lower ones, and so the draw order is
+    /// guaranteed to match the vertex slab order (Task 100.7b).
     // All parameters are required GPU context and data. Image rendering requires separate
     // texture binding, program, and geometry inputs that cannot be sensibly grouped.
     #[allow(clippy::too_many_arguments)]
@@ -953,7 +962,7 @@ impl TerminalRenderer {
         &self,
         gl: &glow::Context,
         vert_floats: usize,
-        snap_images: &std::collections::HashMap<u64, InlineImage>,
+        image_draw_order: &[u64],
         vp_w: f32,
         vp_h: f32,
         buf_idx: usize,
@@ -988,12 +997,11 @@ impl TerminalRenderer {
             setup_img_attribs(gl);
         }
 
-        // Draw one quad (6 vertices) per image, in snap_images iteration order.
-        // `build_image_verts` emits quads in the same order (sorted by image ID).
+        // Draw one quad (6 vertices) per image, in `image_draw_order`.
+        // `build_image_verts` emits quads in this exact same order, so vertex
+        // slab N corresponds to `image_draw_order[N]`.
         let mut quad_idx: i32 = 0;
-        let mut sorted_ids: Vec<u64> = snap_images.keys().copied().collect();
-        sorted_ids.sort_unstable();
-        for id in &sorted_ids {
+        for id in image_draw_order {
             let Some(tex) = self.image_textures.get(id) else {
                 // Texture not uploaded yet (race) — skip.
                 quad_idx += 1;

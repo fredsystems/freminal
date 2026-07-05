@@ -1243,6 +1243,13 @@ material misreading and resolved the renderer data-flow question:
   recomputing its own `u64`-ascending sort. Vertex-emission order and draw order
   then share one authoritative list (no fragile "both independently reproduce the
   same sort" invariant). Higher z renders above lower z; ties break by id.
+- **100.7b scope expansion (recorded):** the mandatory `build_image_verts`
+  z-order unit tests need to construct `ImagePlacement` literals, which requires
+  naming `ImageProtocol` — not previously re-exported from
+  `freminal-terminal-emulator`. A one-line, behaviour-free addition of
+  `ImageProtocol` to the existing `image_store` `pub use` in
+  `freminal-terminal-emulator/src/lib.rs` (mirroring the 100.2c re-export
+  expansion) unblocks the tests; 100.7b's scope includes it.
 
 #### 100.8 — Escape-sequence docs
 

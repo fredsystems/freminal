@@ -892,6 +892,12 @@ pub struct RenderState {
     pub(super) fg_instances: Vec<f32>,
     /// Pre-built image vertex data (one quad per unique inline image).
     pub(super) image_verts: Vec<f32>,
+    /// Authoritative `(z_index, id)` draw order for the quads in
+    /// `image_verts`, computed by [`build_image_verts`] (Task 100.7b).
+    /// `draw_images` iterates this SAME list so the vertex slab order and the
+    /// draw order can never drift apart. Retained (not recomputed) on the
+    /// cursor-only fast path, alongside `image_verts` and `snap_images`.
+    pub(super) image_draw_order: Vec<u64>,
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
     /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
     pub(super) snap_images: std::collections::HashMap<u64, InlineImage>,
@@ -964,6 +970,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         deco_verts: Vec::new(),
         fg_instances: Vec::new(),
         image_verts: Vec::new(),
+        image_draw_order: Vec::new(),
         snap_images: std::collections::HashMap::new(),
         cursor_vert_float_offset: 0,
         cell_width_px: 0.0,
@@ -2276,6 +2283,7 @@ impl FreminalTerminalWidget {
                     cell_w,
                     cell_h,
                     &mut rs_ref.image_verts,
+                    &mut rs_ref.image_draw_order,
                 );
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
@@ -2433,11 +2441,15 @@ impl FreminalTerminalWidget {
                     let bg_image_opacity = rs.bg_image_opacity;
                     let bg_image_mode = rs.bg_image_mode;
                     // Split borrow: renderer + atlas are disjoint from the
-                    // scalar fields and snap_images.
+                    // scalar fields and image_draw_order.
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
-                    let images = &rs_ref.snap_images;
+                    // Reuse the draw order retained from the last full
+                    // rebuild — the cursor-only path does not recompute
+                    // image state, so this is the same list `draw_images`
+                    // used to emit `rs_ref.image_verts` last time.
+                    let draw_order = &rs_ref.image_draw_order;
                     renderer.draw_with_cursor_only_update(
                         gl,
                         atlas,
@@ -2447,7 +2459,7 @@ impl FreminalTerminalWidget {
                         &cursor_only_verts,
                         fg_len,
                         img_len,
-                        images,
+                        draw_order,
                         vp.width_px,
                         vp.height_px,
                         cw,
@@ -2476,6 +2488,7 @@ impl FreminalTerminalWidget {
                         &rs_ref.deco_verts,
                         &rs_ref.fg_instances,
                         &rs_ref.image_verts,
+                        &rs_ref.image_draw_order,
                         &rs_ref.snap_images,
                         vp.width_px,
                         vp.height_px,
@@ -3122,6 +3135,7 @@ mod subtask_1_7_tests {
             fg_instances: Vec::new(),
             cursor_vert_float_offset: 0,
             image_verts: Vec::new(),
+            image_draw_order: Vec::new(),
             snap_images: std::collections::HashMap::new(),
             cell_width_px: 0.0,
             cell_height_px: 0.0,
