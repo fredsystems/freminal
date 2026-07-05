@@ -1403,6 +1403,25 @@ Surfaced 2026-07-02 by the same live run (step 8), on top of `4561a275`.
   fires) — closer to end-to-end than the state-only compose test.
 - **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
 
+##### 100.12 execution decisions (recorded 2026-07-02, fix landed `f7d77ac2`)
+
+Root cause confirmed definitively as recon predicted. The fix adds an
+`image_pixels_changed` full-rebuild trigger in `freminal/src/gui/terminal/widget.rs`.
+`PaneRenderCache` gains `last_rendered_image_pixel_ptrs: HashMap<u64, usize>` recording
+each visible image's selected-frame pixel-`Arc` pointer address as of the last full
+rebuild; `show()` rebuilds that map from the current snapshot and forces a full rebuild
+(and excludes the cursor-only fast path) when it differs. The map is built by the pure
+free function `build_image_pixel_ptrs`, which mirrors exactly which `Arc` the rebuild
+block uploads (animated → `frame_pixels(selected_frame(id))` with a root-`pixels`
+fallback; still → root `pixels`), so the trigger and the upload always agree. The cache
+is refreshed on every full rebuild, so a one-off mutation cannot pin the pane in
+perpetual full-rebuild (no CPU spin). The predicate is a pure function tested directly
+(no live GUI): a selected-frame pixel-`Arc` replacement is flagged; an unchanged pointer
+and an unselected-frame mutation are not (fail-before / pass-after verified). Chosen
+over widening the snapshot/`content_changed` signal because the change is entirely
+GUI-side, respects the lock-free read-only `update()` contract, and adds no snapshot
+transport. Per-frame cost for the no-image common case is a zero-iteration map build.
+
 #### 100.13 — Live render bug: unicode placeholder does not render (`U=1`)
 
 Surfaced 2026-07-02 by the same live run (step 9), on top of `4561a275`.
@@ -1464,6 +1483,22 @@ Surfaced 2026-07-02 by the same live run (step 10), on top of `4561a275`.
   matches the actual stamped cell row (fails before / passes after) — the specific gap no
   existing test exercises.
 - **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+##### 100.14 execution decisions (recorded 2026-07-02, fix landed `004d2eb2`)
+
+Root cause confirmed exactly as recon predicted. `Buffer::place_image` now returns
+a `PlaceImageResult { scroll_offset, origin_row, origin_col }` (a new public struct
+in `freminal-buffer/src/buffer/images.rs`, re-exported from `buffer/mod.rs`) instead
+of a bare `usize` scroll offset. `origin_row` is the post-drain `base_row` and
+`origin_col` is the pre-placement `start_col` — the image's true stamped top-left.
+The two Kitty real-placement sites (`place_kitty_image`, `stamp_kitty_put`) record
+that origin; `graphics_sixel.rs` / `graphics_iterm2.rs` consume `.scroll_offset` for
+byte-identical behaviour. Chosen over the alternatives (hidden `last_placement_origin`
+buffer field; changing the return to only the drained count) because the explicit
+struct is the most testable and keeps `freminal-buffer` a pure, side-effect-free data
+model. Regression test `kitty_real_placement_origin_survives_scrollback_drain` grows
+the buffer past `scrollback_limit` so the placing call drains, and asserts the
+recorded origin matches the actual stamped row (fail-before / pass-after verified).
 
 ### 100 Open questions (resolved at activation, 2026-07-01)
 
