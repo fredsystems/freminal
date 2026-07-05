@@ -115,15 +115,14 @@ Fully implemented and removed from prior gap lists during v0.3.0–v0.7.0:
 
 ## DCS / Graphics Gaps
 
-None, aside from two narrow items below. Sixel (DCS), Kitty graphics protocol
-(APC `_G`, Tasks 13, 100), and iTerm2 inline images (OSC 1337 `File=` /
-`MultipartFile=`) are all fully implemented. The APC parser dispatches `_G…`
-to the Kitty handler; non-Kitty APCs are logged and ignored, which is
-spec-compliant.
-
-| Item                                | Importance | Type | Planned | Notes                                                                                                                                                                                  |
-| ----------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Kitty `t=s` shared memory (Windows) | ⬜         | 🚧   | —       | Implemented on POSIX (Unix) via `shm_open`/`mmap`/`shm_unlink`; returns `ENOTSUP` on Windows (winapi file-mapping deferred, needs `winapi` dependency in `freminal-terminal-emulator`) |
+None. Sixel (DCS), the Kitty graphics protocol (APC `_G`, Tasks 13, 100), and
+iTerm2 inline images (OSC 1337 `File=` / `MultipartFile=`) are all fully
+implemented. Task 100 completed the Kitty graphics surface — animation,
+image-number references, relative placements, storage quotas + eviction,
+shared memory (`t=s`, POSIX and Windows), zlib (`o=z`), source-rect crop,
+delete-target correctness, and z-index render ordering. The APC parser
+dispatches `_G…` to the Kitty handler; non-Kitty APCs are logged and ignored,
+which is spec-compliant.
 
 ---
 

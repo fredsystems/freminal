@@ -99,7 +99,13 @@ fn inflate_zlib(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
 /// arbitrary filesystem path on implementations that map shm names onto
 /// `/dev/shm/...` (or similar): a NUL byte, `..` traversal, an empty name,
 /// or an embedded slash after stripping a single leading one.
-#[cfg(unix)]
+///
+/// This is a plain string check with no platform-specific API, so it is
+/// shared by both the POSIX (`shm_open`) and Windows (`OpenFileMappingW`)
+/// `read_kitty_shared_memory` implementations below — kitty clients use
+/// the same POSIX-style shm name on every platform, so this refusal is a
+/// meaningful security floor even on Windows, where named mappings
+/// otherwise use different separator conventions (`Local\...`).
 fn shm_name_is_safe(name: &str) -> bool {
     if name.is_empty() || name.contains('\0') || name.contains("..") {
         return false;
@@ -114,7 +120,15 @@ fn shm_name_is_safe(name: &str) -> bool {
 ///
 /// Returns `None` if the resulting range doesn't fit within the object
 /// (including on `u64` overflow while adding offset and length).
-#[cfg(unix)]
+///
+/// This is pure arithmetic with no platform-specific API, so it is shared
+/// by both the POSIX and Windows `read_kitty_shared_memory`
+/// implementations. The Windows path has no equivalent to POSIX `fstat`
+/// (a Windows file-mapping handle doesn't expose its own size), so it
+/// passes `u64::MAX` as `object_len` — this still gets the checked
+/// `offset + read_len` overflow protection, just without a real upper
+/// bound; the real bound is enforced by `MapViewOfFile` failing if the
+/// mapping is smaller than requested.
 fn shm_read_bounds(object_len: u64, offset: u64, data_size: Option<u32>) -> Option<(u64, u64)> {
     let read_len = data_size.map_or_else(|| object_len.saturating_sub(offset), u64::from);
     let end = offset.checked_add(read_len)?;
@@ -1139,32 +1153,153 @@ impl TerminalHandler {
         result
     }
 
-    /// Read a Kitty shared-memory object (`t=s`) — Windows stub.
+    /// Read a Kitty shared-memory object (`t=s`) — Windows implementation.
     ///
-    /// Windows shared memory (`OpenFileMappingW`/`MapViewOfFile`) requires
-    /// adding `winapi` (or an equivalent) as a dependency of
-    /// `freminal-terminal-emulator`, which is out of scope for this change.
-    /// Until that dependency is added, `t=s` is reported as unsupported on
-    /// Windows.
+    /// The payload bytes are the UTF-8 named-mapping object name — kitty
+    /// clients use the same POSIX-style shm name (e.g. `/kitty-shm-1234`)
+    /// on every platform, so this opens it via `OpenFileMappingW` rather
+    /// than `shm_open`. `data_size` (the `S=` control key) is **required**
+    /// on Windows: unlike POSIX (where `fstat` reports the shm object's
+    /// size, letting `S=` be omitted to mean "read to the end"), a Windows
+    /// file-mapping handle does not expose its own length, so there is no
+    /// way to resolve an implicit read length. `data_offset` (`O=`)
+    /// defaults to `0`, as on POSIX.
+    ///
+    /// Security: the same [`shm_name_is_safe`] refusal used on POSIX
+    /// applies here before any `OpenFileMappingW` call is attempted — see
+    /// its doc comment for why this floor still applies on Windows.
+    ///
+    /// Unlike POSIX (which unlinks the shm object after reading — the
+    /// kitty spec expects the reader to destroy it), Windows named file
+    /// mappings have no unlink-by-name equivalent: the object is
+    /// destroyed only once every handle to it (across every process) is
+    /// closed. This function closes *its own* handle after reading; it
+    /// cannot and does not destroy the underlying object.
     #[cfg(windows)]
     fn read_kitty_shared_memory(
         &self,
-        _payload: &[u8],
-        _data_size: Option<u32>,
-        _data_offset: Option<u32>,
+        payload: &[u8],
+        data_size: Option<u32>,
+        data_offset: Option<u32>,
         image_id_hint: u32,
         placement_id: Option<u32>,
         quiet: u8,
     ) -> Option<Vec<u8>> {
-        tracing::warn!(
-            "Kitty graphics: shared memory transmission (t=s) is not supported on Windows"
-        );
-        self.send_kitty_error(
-            kitty_id_no_number(image_id_hint, placement_id),
-            quiet,
-            "ENOTSUP:shared memory not supported on this platform",
-        );
-        None
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::memoryapi::{
+            FILE_MAP_READ, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
+        };
+
+        let name = match std::str::from_utf8(payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Kitty graphics: shared memory name is not valid UTF-8: {e}");
+                self.send_kitty_error(
+                    kitty_id_no_number(image_id_hint, placement_id),
+                    quiet,
+                    "EINVAL:invalid shared memory object name",
+                );
+                return None;
+            }
+        };
+
+        if !shm_name_is_safe(name) {
+            tracing::warn!("Kitty graphics: refusing shared memory object name: {name:?}");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "EPERM:refused shared memory object name",
+            );
+            return None;
+        }
+
+        // Windows file-mapping handles don't expose their own size (unlike
+        // POSIX `fstat`), so an explicit, non-zero `S=` is required to know
+        // how much to read.
+        let Some(data_size) = data_size.filter(|&size| size > 0) else {
+            tracing::warn!(
+                "Kitty graphics: shared memory read on Windows requires an explicit S= size (object {name:?})"
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "EINVAL:shared memory read requires S= on Windows",
+            );
+            return None;
+        };
+
+        let offset = u64::from(data_offset.unwrap_or(0));
+        let Some((offset, read_len)) = shm_read_bounds(u64::MAX, offset, Some(data_size)) else {
+            tracing::warn!(
+                "Kitty graphics: shared memory read range overflows for object {name:?} (offset={offset}, data_size={data_size})"
+            );
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "EINVAL:shared memory read out of bounds",
+            );
+            return None;
+        };
+
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // SAFETY: FFI call; `wide` is a NUL-terminated UTF-16 string built
+        // just above and is kept alive for the duration of this call.
+        let handle = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
+        if handle.is_null() {
+            tracing::warn!("Kitty graphics: shared memory object {name:?} not found");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "ENOENT:shared memory object not found",
+            );
+            return None;
+        }
+
+        // Map from the start of the object up to `offset + read_len` bytes
+        // rather than starting the mapping at `offset` — this sidesteps
+        // `MapViewOfFile`'s allocation-granularity alignment requirement on
+        // the file offset (which only applies to
+        // `dwFileOffsetHigh`/`dwFileOffsetLow`, both `0` here). `offset +
+        // read_len` cannot overflow `u64`: `shm_read_bounds` above already
+        // performed that checked addition and returned `Some`.
+        let map_len = usize::value_from(offset + read_len).unwrap_or(usize::MAX);
+
+        // SAFETY: FFI call; `handle` is the valid, just-opened mapping
+        // handle from `OpenFileMappingW` above and has not been closed.
+        let base = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, map_len) };
+        if base.is_null() {
+            tracing::warn!("Kitty graphics: failed to map shared memory object {name:?}");
+            self.send_kitty_error(
+                kitty_id_no_number(image_id_hint, placement_id),
+                quiet,
+                "EIO:failed to map shared memory object",
+            );
+            // SAFETY: `handle` was returned by the successful
+            // `OpenFileMappingW` call above and has not been closed yet.
+            unsafe { CloseHandle(handle) };
+            return None;
+        }
+
+        let offset_usize = usize::value_from(offset).unwrap_or(0);
+        let read_len_usize = usize::value_from(read_len).unwrap_or(0);
+
+        // SAFETY: `base` is valid for `map_len` bytes (the mapping length
+        // just requested above); `offset_usize + read_len_usize ==
+        // map_len`, so the range read here is fully within the mapping.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(base.cast::<u8>().add(offset_usize), read_len_usize)
+        };
+        let copied = bytes.to_vec();
+
+        // SAFETY: `base` is exactly the pointer returned by the matching
+        // `MapViewOfFile` call above and has not been unmapped yet.
+        unsafe { UnmapViewOfFile(base) };
+        // SAFETY: `handle` is exactly the handle returned by the matching
+        // `OpenFileMappingW` call above and has not been closed yet.
+        unsafe { CloseHandle(handle) };
+
+        Some(copied)
     }
 
     /// Extract required `s` (width) and `v` (height) from Kitty control data.
@@ -4676,13 +4811,67 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn kitty_shared_memory_transmission_unsupported_on_windows() {
+    fn kitty_shared_memory_nonexistent_object_returns_enoent_windows() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyFormat, KittyTransmission,
         };
 
         let (mut handler, rx) = kitty_handler();
 
+        let name = format!(
+            "/freminal_test_shm_nonexistent_{}_{}",
+            std::process::id(),
+            line!()
+        );
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(1),
+                src_height: Some(1),
+                data_size: Some(4),
+                image_id: Some(995),
+                ..KittyControlData::default()
+            },
+            payload: name.into_bytes(),
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(
+            handler.buffer().image_store().get(995).is_none(),
+            "No image should be stored for a nonexistent shared memory object"
+        );
+
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if text.contains("ENOENT") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            found_error,
+            "Expected an ENOENT error response for a nonexistent shared memory object"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_shared_memory_missing_data_size_rejected_windows() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // No `S=` (`data_size`) supplied — Windows has no equivalent to
+        // POSIX `fstat` to learn the object's size, so this must be
+        // rejected before any `OpenFileMappingW` call.
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::TransmitAndDisplay),
@@ -4693,32 +4882,204 @@ mod tests {
                 image_id: Some(995),
                 ..KittyControlData::default()
             },
-            payload: b"/shm_name".to_vec(),
+            payload: b"/kitty_shm_missing_size".to_vec(),
         };
 
         handler.handle_kitty_graphics(cmd);
 
-        // Should NOT be in the store.
         assert!(
             handler.buffer().image_store().get(995).is_none(),
-            "No image should be stored for shared memory transmission on Windows"
+            "No image should be stored when S= is missing on Windows"
         );
 
-        // An ENOTSUP error response should have been sent (Task 100.6 defers
-        // the Windows shared-memory implementation — see doc comment on
-        // `read_kitty_shared_memory`'s `#[cfg(windows)]` variant).
         let mut found_error = false;
         while let Ok(msg) = rx.try_recv() {
             if let PtyWrite::Write(bytes) = msg {
                 let text = String::from_utf8_lossy(&bytes);
-                if text.contains("ENOTSUP") {
+                if text.contains("EINVAL") {
                     found_error = true;
                 }
             }
         }
         assert!(
             found_error,
-            "Expected an ENOTSUP error response for shared memory on Windows"
+            "Expected an EINVAL error response when S= is missing on Windows"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_shared_memory_unsafe_name_rejected_windows() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+
+        for bad_name in ["/foo/bar", "/../etc/passwd"] {
+            let (mut handler, rx) = kitty_handler();
+
+            let cmd = KittyGraphicsCommand {
+                control: KittyControlData {
+                    action: Some(KittyAction::TransmitAndDisplay),
+                    format: Some(KittyFormat::Rgba),
+                    transmission: Some(KittyTransmission::SharedMemory),
+                    src_width: Some(1),
+                    src_height: Some(1),
+                    data_size: Some(4),
+                    image_id: Some(995),
+                    ..KittyControlData::default()
+                },
+                payload: bad_name.as_bytes().to_vec(),
+            };
+
+            handler.handle_kitty_graphics(cmd);
+
+            assert!(
+                handler.buffer().image_store().get(995).is_none(),
+                "No image should be stored for unsafe shared memory name {bad_name:?}"
+            );
+
+            let mut found_error = false;
+            while let Ok(msg) = rx.try_recv() {
+                if let PtyWrite::Write(bytes) = msg {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if text.contains("EPERM") {
+                        found_error = true;
+                    }
+                }
+            }
+            assert!(
+                found_error,
+                "Expected an EPERM error response for unsafe shared memory name {bad_name:?}"
+            );
+        }
+    }
+
+    /// Create a Windows named file-mapping object of `data.len().max(1)`
+    /// bytes containing `data`, returning its name and the creating
+    /// handle. Test-only helper for the `t=s` round-trip test below.
+    ///
+    /// The returned handle **must** be kept alive (not closed) until after
+    /// the code under test has had a chance to `OpenFileMappingW` its own
+    /// handle — Windows destroys a named mapping once every handle to it
+    /// is closed, and this test is the only thing creating (and thus
+    /// keeping alive) the object.
+    #[cfg(windows)]
+    fn create_test_shm_object_windows(
+        unique: &str,
+        data: &[u8],
+    ) -> (String, winapi::um::winnt::HANDLE) {
+        use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+        use winapi::um::memoryapi::{
+            CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile,
+        };
+        use winapi::um::winnt::PAGE_READWRITE;
+
+        let name = format!("/freminal_test_shm_{}_{unique}", std::process::id());
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let size = u32::try_from(data.len().max(1)).expect("test data length fits in u32");
+
+        // SAFETY: FFI call; `wide` is a NUL-terminated UTF-16 string that
+        // lives for the duration of this call. `INVALID_HANDLE_VALUE`
+        // backs the mapping with the system paging file rather than a
+        // real file, per the Win32 API contract for `CreateFileMappingW`.
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null_mut(),
+                PAGE_READWRITE,
+                0,
+                size,
+                wide.as_ptr(),
+            )
+        };
+        assert!(
+            !handle.is_null(),
+            "CreateFileMappingW should succeed in test"
+        );
+
+        if !data.is_empty() {
+            // SAFETY: FFI call; `handle` was just created above with
+            // capacity `size` (== `data.len()`).
+            let base = unsafe { MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, data.len()) };
+            assert!(
+                !base.is_null(),
+                "MapViewOfFile (write) should succeed in test"
+            );
+            // SAFETY: `base` is valid for `data.len()` writable bytes (the
+            // mapping length just requested above).
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), base.cast::<u8>(), data.len());
+            }
+            // SAFETY: `base` is exactly the pointer returned by the
+            // matching `MapViewOfFile` call above and has not been
+            // unmapped yet.
+            unsafe { UnmapViewOfFile(base) };
+        }
+
+        (name, handle)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn kitty_shared_memory_transmission_round_trip_windows() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat, KittyTransmission,
+        };
+        use winapi::um::handleapi::CloseHandle;
+
+        // 2x1 RGBA image: red pixel, green pixel.
+        let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
+        let (name, creator_handle) = create_test_shm_object_windows("round_trip", &pixels);
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                transmission: Some(KittyTransmission::SharedMemory),
+                src_width: Some(2),
+                src_height: Some(1),
+                data_size: Some(u32::try_from(pixels.len()).unwrap()),
+                image_id: Some(993),
+                ..KittyControlData::default()
+            },
+            payload: name.clone().into_bytes(),
+        };
+
+        handler.handle_kitty_graphics(cmd);
+
+        // Only close the creating handle *after* the code under test has
+        // opened (and closed) its own handle — see the doc comment on
+        // `create_test_shm_object_windows`.
+        //
+        // SAFETY: `creator_handle` is exactly the handle returned by the
+        // matching `CreateFileMappingW` call above and has not been
+        // closed yet.
+        unsafe { CloseHandle(creator_handle) };
+
+        let stored = handler
+            .buffer()
+            .image_store()
+            .get(993)
+            .expect("image should be stored from shared memory transmission");
+        assert_eq!(*stored.pixels, pixels);
+        assert_eq!(stored.width_px, 2);
+        assert_eq!(stored.height_px, 1);
+
+        // No error response should have been sent.
+        let mut found_error = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let PtyWrite::Write(bytes) = msg {
+                let text = String::from_utf8_lossy(&bytes);
+                if !text.contains("OK") {
+                    found_error = true;
+                }
+            }
+        }
+        assert!(
+            !found_error,
+            "Expected no error response for a valid t=s transmission on Windows"
         );
     }
 

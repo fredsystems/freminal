@@ -269,11 +269,12 @@ Reference for Task 100, now implemented (v0.11.0). Task 13 shipped
 transmit/put/delete/query and unicode placeholders; Task 100 added animation
 (frame transfer/control/compose), image-number (`I=`) references, relative
 placements (`P`/`Q`/`H`/`V`, incl. their parser keys), storage quotas +
-eviction, compression (`o=z`), shared memory (`t=s`, POSIX; Windows stub),
+eviction, compression (`o=z`), shared memory (`t=s`, POSIX + Windows),
 source-rect crop (`a=p` `x/y/w/h`), delete-target correctness, `p=` in
 responses, and z-index render ordering. See the "freminal current-state"
-section below for the full done list and the one item that remains
-(the Windows `t=s` stub).
+section below for the full done list; the graphics surface is complete
+(only the minor sub-cell `X/Y` offset and the `t=f`/`t=t` security-hardening
+notes remain, neither a Task 100 item).
 
 ### Envelope (graphics)
 
@@ -458,12 +459,12 @@ first. A delete received mid-chunked-upload aborts the partial upload.
 
 ### Transmission media (`t=`)
 
-| `t=` | Medium                                                                                                                                                                                                                                 |
-| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                     |
-| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below). |
-| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.            |
-| `s`  | POSIX shared-memory object (`shm_open`/`mmap`/`shm_unlink`, implemented); read `S` bytes at offset `O`, then unlink+close. **Windows: `ENOTSUP` stub** (winapi file-mapping deferred). Payload = object name.                          |
+| `t=` | Medium                                                                                                                                                                                                                                    |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                        |
+| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below).    |
+| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.               |
+| `s`  | Shared-memory object; read `S` bytes at offset `O`. POSIX: `shm_open`/`mmap`, then `shm_unlink`+close. Windows: `OpenFileMappingW`/`MapViewOfFile`, then unmap+close (no unlink; `S=` required). Payload = object name. Both implemented. |
 
 Security (upstream spec): refuse device/socket/special files; may refuse
 `/proc`, `/sys`, `/dev`. **freminal current state:** only the absolute-path
@@ -522,11 +523,11 @@ implementation choice.
   newest-transmitted image with that number; the response echoes
   `i=<id>,I=<n>` (Task 100.3).
 - `o=z` (RFC 1950 zlib, via `flate2`) is decompressed before interpreting
-  pixels/PNG; `t=s` shared memory is implemented on POSIX
+  pixels/PNG; `t=s` shared memory is implemented on both POSIX
   (`shm_open`/`mmap`/`shm_unlink` via the `nix` crate's `"mman"` feature) and
-  returns `ENOTSUP` on Windows (winapi file-mapping deferred — see the
-  remaining-gaps note below); `O=` byte offset is applied when reading a
-  file/shm object (Task 100.6).
+  Windows (`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle`
+  via `winapi`; Task 100.10); `O=` byte offset is applied when reading a
+  file/shm object (Tasks 100.6, 100.10).
 - `format_kitty_response(image_id, ok, message)` and `send_kitty_error` now
   take a placement id and emit `,p=<pid>` in the response when the request had
   a non-zero placement id (Tasks 100.2a, 100.3).
@@ -558,11 +559,6 @@ implementation choice.
   applied by `compute_image_quad` (whose quad geometry is whole-cell aligned).
   Distinct from the `a=p` source-rect crop (`x/y/w/h`), which **is** implemented
   (Task 100.9). Minor; no assigned subtask.
-- **Windows `t=s` remains an `ENOTSUP` stub** (`read_kitty_shared_memory` under
-  `#[cfg(windows)]`): `OpenFileMappingW`/`MapViewOfFile` support requires
-  adding `winapi` (or an equivalent) as a dependency of
-  `freminal-terminal-emulator`, which was out of scope for Task 100.6. POSIX
-  (`shm_open`/`mmap`/`shm_unlink`) is fully implemented.
 - **`t=f`/`t=t` file-path security is narrower than the upstream spec
   suggests.** `read_kitty_file` only rejects non-absolute paths
   (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not

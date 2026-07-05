@@ -40,6 +40,9 @@ vergen.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["mman", "term"] }
 
+[target.'cfg(windows)'.dependencies]
+winapi = { workspace = true, features = ["handleapi", "memoryapi", "winnt"] }
+
 # dev dependencies
 [dev-dependencies]
 anyhow.workspace = true

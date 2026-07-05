@@ -1605,6 +1605,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "vergen",
+ "winapi",
 ]
 
 [[package]]
