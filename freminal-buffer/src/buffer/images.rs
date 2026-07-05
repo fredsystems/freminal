@@ -416,8 +416,18 @@ impl Buffer {
     /// `ImagePlacement` references.
     ///
     /// After placement the cursor is moved to the row immediately below
-    /// the image (or the last visible row if the image extends to the
-    /// bottom), at column 0 — matching iTerm2 behaviour.
+    /// the image, at column 0 — matching iTerm2/Kitty behaviour. If no row
+    /// already exists below the image (the common case: the image was
+    /// placed at the buffer's tail), a fresh blank row is appended so
+    /// subsequent output never overwrites the image's own cells (Task
+    /// 100.15 — previously the cursor was parked on the image's own last
+    /// row in this case, so the very next character write destroyed the
+    /// image via [`Self::clear_images_overwritten_by_text`]). The only
+    /// exception is a primary-buffer image tall enough that appending
+    /// this row and re-enforcing the scrollback limit drains the image
+    /// itself off the top — an edge case limited to images taller than
+    /// the entire scrollback, where the cursor falls back to the last
+    /// remaining row.
     ///
     /// If the image extends beyond the right edge of the terminal, it is
     /// clipped to the terminal width (cells beyond the edge are not placed).
@@ -542,7 +552,22 @@ impl Buffer {
         }
 
         // Move cursor below the image, column 0 (iTerm2 behaviour).
-        let final_row = base_row + display_rows;
+        let mut final_row = base_row + display_rows;
+        if final_row >= self.rows.len() {
+            // No row exists below the image yet (the common case: the image
+            // was placed at the buffer's tail). Append one so subsequent
+            // output lands below the image instead of overwriting it.
+            self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
+
+            if self.kind == BufferType::Primary {
+                let rows_before = self.rows.len();
+                current_offset = self.enforce_scrollback_limit(current_offset);
+                let drained = rows_before - self.rows.len();
+                base_row = base_row.saturating_sub(drained);
+            }
+
+            final_row = base_row + display_rows;
+        }
         if final_row < self.rows.len() {
             self.cursor.pos.y = final_row;
         } else {

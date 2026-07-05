@@ -1423,6 +1423,18 @@ impl TerminalHandler {
                  {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
             );
             let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
+
+            // Save cursor position if `C=1` (no cursor movement) — mirrors
+            // `stamp_kitty_put`'s handling of the same flag on `a=p` (Task
+            // 100.16). Without this, `a=T`/Put ignored `C=1` entirely:
+            // `place_image` (Task 100.15) now always moves the cursor below
+            // the image, so `C=1` must explicitly restore it here.
+            let saved_cursor = if control.no_cursor_movement {
+                Some(self.buffer.cursor().pos)
+            } else {
+                None
+            };
+
             let place_result = self.buffer.place_image(
                 inline_image,
                 0,
@@ -1433,6 +1445,11 @@ impl TerminalHandler {
                 source_crop,
             );
 
+            // Restore cursor if `C=1`.
+            if let Some(pos) = saved_cursor {
+                self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+            }
+
             // Record this real (cell-stamped) placement's origin so future
             // relative placements can reference it as a parent (Task 100.4a).
             //
@@ -1440,7 +1457,10 @@ impl TerminalHandler {
             // pre-call cursor read: `place_image` may drain scrollback rows
             // during placement, which shifts the image's actual row
             // upward relative to the cursor position captured before the
-            // call (Task 100.14).
+            // call (Task 100.14). This is unaffected by the `C=1` cursor
+            // restore above — the recorded origin always reflects where the
+            // image was actually stamped, regardless of where the cursor
+            // ends up afterward.
             let pid = control.placement_id.unwrap_or(0);
             self.record_real_placement(
                 assigned_id,
@@ -4107,6 +4127,21 @@ mod tests {
     /// recorded `RealPlacement::origin_row` matches the row where the
     /// image's cells were *actually* stamped (ground truth), not the stale
     /// pre-call cursor row.
+    ///
+    /// The expected-origin arithmetic accounts for a second Task 100.15
+    /// effect: whenever placing an image forces a scrollback drain, the
+    /// post-drain cursor target always lands exactly one row past the
+    /// image's new last row — i.e. exactly at the trimmed buffer's tail —
+    /// so `place_image`'s "append a blank row below the image" step always
+    /// finds no such row, appends one, and that freshly appended row is
+    /// itself immediately drained by exactly one more row. See the
+    /// two-stage derivation inline below (this is not a coincidence of
+    /// this test's specific numbers — `origin_row` in this
+    /// drain-triggering regime always works out to
+    /// `max_rows - display_rows - 1`, independent of the starting cursor
+    /// row, which is exactly why the pre-100.15 `origin_row` and the
+    /// post-100.15 `origin_row` differ by a fixed amount rather than by
+    /// however many rows `grow_buffer_rows` happened to produce).
     #[test]
     fn kitty_real_placement_origin_survives_scrollback_drain() {
         let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
@@ -4117,6 +4152,9 @@ mod tests {
         // Grow the buffer to 20 rows (below max_rows — no drain yet),
         // leaving the cursor at the last row (19), analogous to a
         // long-running session that has accumulated some scrollback.
+        // `grow_buffer_rows` drives plain line feeds (not `place_image`),
+        // so this setup's row-count/cursor contract is independent of
+        // `place_image`'s own cursor-placement behavior.
         grow_buffer_rows(&mut handler, 20);
         assert_eq!(handler.buffer().rows().len(), 20);
         assert_eq!(handler.buffer().cursor().pos.y, 19);
@@ -4125,9 +4163,7 @@ mod tests {
         // Place a real (cell-stamped) image tall enough that stamping it
         // grows the buffer well past max_rows (27), forcing
         // `enforce_scrollback_limit` to drain rows from the top *during*
-        // this same `place_image` call. base_row(19) + display_rows(15)
-        // = 34 rows needed; overflow beyond max_rows(27) = 7; the true
-        // origin_row is 19 - 7 = 12, not the stale cursor row (19).
+        // this same `place_image` call.
         let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
         cmd.control.image_id = Some(77);
         cmd.control.display_cols = Some(1);
@@ -4140,9 +4176,22 @@ mod tests {
             .copied()
             .expect("expected a RealPlacement for (77, 0)");
 
-        let expected_rows_after_stamp = stale_cursor_row + 15; // 19 + 15 = 34
-        let expected_drained = expected_rows_after_stamp - 27; // 34 - 27 = 7
-        let expected_origin_row = stale_cursor_row - expected_drained; // 19 - 7 = 12
+        // Stage 1: stamping the image grows the buffer to
+        // stale_cursor_row(19) + display_rows(15) = 34 rows, then
+        // `enforce_scrollback_limit` drains it back to max_rows(27):
+        // first_drain = 34 - 27 = 7.
+        let rows_after_stamp = stale_cursor_row + 15; // 19 + 15 = 34
+        let first_drain = rows_after_stamp - 27; // 34 - 27 = 7
+        let row_after_first_drain = stale_cursor_row - first_drain; // 19 - 7 = 12
+
+        // Stage 2 (Task 100.15): the post-first-drain cursor target
+        // (row_after_first_drain + display_rows = 12 + 15 = 27) lands
+        // exactly at max_rows(27) — one past the image's now-last row —
+        // so `place_image` appends a fresh row there and immediately
+        // drains it again by exactly 1.
+        let second_drain = 1;
+        let expected_origin_row = row_after_first_drain - second_drain; // 12 - 1 = 11
+        let expected_drained_total = first_drain + second_drain; // 8
 
         assert_ne!(
             expected_origin_row, stale_cursor_row,
@@ -4153,6 +4202,12 @@ mod tests {
             placement.origin_row, expected_origin_row,
             "100.14: origin_row must reflect the post-drain stamped row, not \
              the stale pre-call cursor row"
+        );
+        assert_eq!(
+            stale_cursor_row - expected_drained_total,
+            expected_origin_row,
+            "sanity: origin_row = stale_cursor_row - total rows drained \
+             across both 100.15 drain stages"
         );
         assert_eq!(placement.origin_col, 0);
 
@@ -4456,30 +4511,30 @@ mod tests {
     // ── Task 100.4b: render-time positioning of virtual-parent relative
     //    children in `visible_image_placements_extended` ──────────────────
 
-    /// Grow the buffer to at least `rows` rows by stamping a throwaway
-    /// single-column image down column 0. Used so tests can stamp parent
-    /// placeholder cells at rows beyond the buffer's initial single row.
+    /// Grow the buffer to at least `rows` rows by driving `rows - 1` line
+    /// feeds down column 0, from the buffer's initial single row. Used so
+    /// tests can stamp parent placeholder cells at rows beyond the
+    /// buffer's initial single row.
+    ///
+    /// This previously grew the buffer by stamping a throwaway image via
+    /// `Buffer::place_image`. Task 100.15 changed `place_image` to append
+    /// an extra blank row and move the cursor onto it after a tail
+    /// placement — entirely correct production behavior, but it meant
+    /// this generic row-growth test helper silently inherited whatever
+    /// cursor-placement quirks `place_image` had, coupling unrelated
+    /// tests (virtual-parent/relative-placement tests below, which only
+    /// need *some* rows to exist and never read the resulting cursor
+    /// position) to `place_image`'s internals. Driving plain line feeds
+    /// instead keeps this helper's contract fixed and independent of
+    /// `place_image`: after `grow_buffer_rows(handler, rows)`,
+    /// `rows().len() == rows` and `cursor().pos.y == rows - 1` (assuming
+    /// the buffer started at its default single row with the cursor at
+    /// row 0 — true for every caller of this helper, which all operate on
+    /// a freshly constructed handler).
     fn grow_buffer_rows(handler: &mut TerminalHandler, rows: usize) {
-        let filler = freminal_buffer::image_store::InlineImage {
-            id: 9_000_000,
-            pixels: std::sync::Arc::new(vec![0; 4]),
-            width_px: 1,
-            height_px: 1,
-            display_cols: 1,
-            display_rows: rows,
-            frames: Vec::new(),
-            root_gap_ms: 0,
-            animation: freminal_buffer::image_store::AnimationControl::default(),
-        };
-        handler.buffer_mut().place_image(
-            filler,
-            0,
-            freminal_buffer::image_store::ImageProtocol::Kitty,
-            None,
-            None,
-            0,
-            None,
-        );
+        for _ in 1..rows {
+            handler.buffer_mut().handle_lf();
+        }
     }
 
     /// Directly stamp a `rows x cols` block of placeholder cells for
@@ -6902,6 +6957,21 @@ mod tests {
         );
     }
 
+    /// Task 100.16 regression test: `place_kitty_image`'s `a=T`/Put display
+    /// branch used to call `Buffer::place_image` + `record_real_placement`
+    /// without ever checking `control.no_cursor_movement` — only the `a=p`
+    /// path (`stamp_kitty_put`) implemented the C=1 save/restore. This test
+    /// previously passed for the WRONG reason: with a 1-row image, the old
+    /// (pre-100.15) `place_image` parked the cursor back on the image's own
+    /// single row, which happened to coincide with `cursor_before` in a
+    /// fresh single-row buffer, masking the missing C=1 handling entirely.
+    ///
+    /// Using an explicit `r=2` (2-row) image makes that coincidental clamp
+    /// impossible: without a genuine save/restore, the cursor would land
+    /// either on the image's second row or on the fresh blank row
+    /// `place_image` (Task 100.15) appends below it — never back at
+    /// `cursor_before` — so this can only pass if `place_kitty_image`
+    /// actually saves and restores the cursor for C=1.
     #[test]
     fn kitty_transmit_and_display_with_no_cursor_movement() {
         // TransmitAndDisplay with C=1 should place image but keep cursor at original position.
@@ -6920,6 +6990,8 @@ mod tests {
                 format: Some(KittyFormat::Rgba),
                 src_width: Some(2),
                 src_height: Some(2),
+                display_cols: Some(2),
+                display_rows: Some(2),
                 image_id: Some(830),
                 no_cursor_movement: true,
                 ..KittyControlData::default()
@@ -6932,6 +7004,63 @@ mod tests {
         assert_eq!(
             cursor_before, cursor_after,
             "Cursor should not move with C=1 on TransmitAndDisplay"
+        );
+
+        // Ground truth: C=1 only preserves the cursor, it must not skip
+        // placement — the image must still have been stamped into cells.
+        assert!(
+            handler.buffer().has_any_image_cell(),
+            "C=1 must still place the image; only the cursor is preserved"
+        );
+    }
+
+    /// Companion to `kitty_transmit_and_display_with_no_cursor_movement`:
+    /// locks in the other half of Task 100.16's behavior. Without `C=1`,
+    /// `a=T`/Put must let the cursor move below the placed image — to the
+    /// fresh row `Buffer::place_image` (Task 100.15) appends below it — not
+    /// leave it at the pre-call position and not clamp it onto the image's
+    /// own last row.
+    #[test]
+    fn kitty_transmit_and_display_without_no_cursor_movement_moves_cursor_below_image() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cursor_before = handler.buffer.cursor().pos;
+
+        let rgba_data: Vec<u8> = vec![255; 16]; // 2x2 RGBA
+        let cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                display_cols: Some(2),
+                display_rows: Some(2),
+                image_id: Some(831),
+                no_cursor_movement: false,
+                ..KittyControlData::default()
+            },
+            payload: rgba_data,
+        };
+        handler.handle_kitty_graphics(cmd);
+
+        let cursor_after = handler.buffer.cursor().pos;
+        let image_last_row = cursor_before.y + 2 - 1; // 2-row image placed at cursor_before.y.
+        assert!(
+            cursor_after.y > image_last_row,
+            "cursor (row {}) must be strictly below the image's last row \
+             ({image_last_row}) — a fresh blank row, not the image's own \
+             last row, and not left at the pre-call row ({})",
+            cursor_after.y,
+            cursor_before.y,
+        );
+        assert_eq!(cursor_after.x, 0);
+        assert_ne!(
+            cursor_after, cursor_before,
+            "without C=1 the cursor must actually move"
         );
     }
 

@@ -3198,6 +3198,103 @@ mod image_tests {
         assert_eq!(buf.cursor.pos.x, 0);
     }
 
+    /// Regression test for Task 100.15: a real (Kitty) image placed at the
+    /// buffer's tail — the common real-world case, since `Buffer::new`
+    /// starts with a single row and grows one at a time as output arrives,
+    /// so there is usually NO pre-existing blank row below a freshly
+    /// placed image — must leave the cursor on a genuinely fresh blank
+    /// row below the image, not parked on the image's own last row.
+    ///
+    /// Before the fix, `place_image` parked the cursor on the image's own
+    /// last row in exactly this scenario, so the very next character
+    /// write destroyed the entire image via
+    /// `clear_images_overwritten_by_text`. This test drives the real
+    /// sequence (place image, then write ordinary text at wherever the
+    /// cursor naturally landed — no manual cursor repositioning) and
+    /// asserts the image survives.
+    #[test]
+    fn place_image_at_buffer_tail_leaves_blank_row_so_next_text_write_does_not_destroy_it() {
+        let mut buf = Buffer::new(20, 10);
+
+        // 3 cols x 2 rows image, placed at the fresh buffer's only
+        // (tail) row.
+        let img = make_image(3, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None);
+
+        let image_last_row = 1; // image occupies rows 0 and 1.
+        assert!(
+            buf.cursor.pos.y > image_last_row,
+            "cursor (row {}) must be strictly below the image's last row \
+             ({image_last_row}) — a fresh blank row, not the image's own \
+             last row",
+            buf.cursor.pos.y,
+        );
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // Sanity check: the image is intact before the text write.
+        assert_eq!(count_image_cells(&buf, img_id), 6);
+
+        // Write ordinary text at wherever `place_image` naturally parked
+        // the cursor — do NOT manually reposition it; that is the real
+        // bug path (a shell echoing the next character after an inline
+        // image, with no explicit cursor movement in between).
+        buf.insert_text(&[TChar::Ascii(b'X')]);
+
+        // The image must have survived: the text landed on the fresh
+        // blank row below the image, not on any of the image's own rows,
+        // so all 6 of its cells must still carry the placement stamp.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            6,
+            "image must survive a text write immediately after placement"
+        );
+    }
+
+    /// Same regression as
+    /// `place_image_at_buffer_tail_leaves_blank_row_so_next_text_write_does_not_destroy_it`,
+    /// but for a taller (4-row) Sixel image placed a few rows down from
+    /// the buffer's origin (still at the buffer's tail). Confirms the fix
+    /// generalizes across image height and protocol, and covers the
+    /// "append one row" path when more than one row must be pushed to
+    /// clear the image before a blank row appears.
+    #[test]
+    fn place_sixel_multirow_image_at_buffer_tail_survives_subsequent_text_write() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Advance a couple of lines first so the image lands away from
+        // row 0 but is still at the buffer's tail (no pre-existing rows
+        // below it) — matches an ordinary terminal session shape.
+        buf.insert_text(&[TChar::Ascii(b'$')]);
+        buf.handle_lf();
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.rows.len(), 3);
+        assert_eq!(buf.cursor.pos.y, 2);
+
+        let img = make_image(4, 4);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None);
+
+        let image_last_row = 2 + 4 - 1; // rows 2..=5.
+        assert!(
+            buf.cursor.pos.y > image_last_row,
+            "cursor (row {}) must be strictly below the image's last row \
+             ({image_last_row})",
+            buf.cursor.pos.y,
+        );
+
+        assert_eq!(count_image_cells(&buf, img_id), 16);
+
+        buf.insert_text(&[TChar::Ascii(b'Y')]);
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            16,
+            "multi-row image must survive a text write immediately after placement"
+        );
+    }
+
     #[test]
     fn place_image_clips_to_terminal_width() {
         // Terminal is 5 columns wide; image wants 10 columns.
