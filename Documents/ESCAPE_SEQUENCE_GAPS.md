@@ -1,9 +1,14 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-01 — OSC 99 (kitty desktop notifications) implemented
-directly (Task 99, v0.11.0); it was never a tracked gap, so no GAPS entry is
-removed.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99)
+Last updated: 2026-07-01 — Task 100 (kitty graphics protocol completion,
+v0.11.0) closed animation, relative placements, storage quotas, `t=s`/`o=z`
+transmission, delete-target correctness, and z-index ordering. These were
+tracked as open items in `KITTY_PROTOCOL_REFERENCE.md`'s 100.1 audit, not as
+itemized rows in this GAPS file, so no GAPS entry is removed — the
+"DCS / Graphics Gaps: None" claim below is now accurate. OSC 99 (kitty
+desktop notifications) implemented directly (Task 99, v0.11.0); it was never
+a tracked gap, so no GAPS entry is removed for that either.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -21,9 +26,9 @@ DECNKM, DECBKM, DECLRMM, bracketed paste, mouse tracking, focus events, DECOM, D
 DECCOLM, DECARM, ReverseWrapAround, synchronized output, alternate-scroll, adaptive theme)
 are parsed and wired. DECDWL/DECDHL are rendered. Bell is visual + audible.
 Blinking text renders. IRM is implemented. DCS sub-commands (DECRQSS, XTGETTCAP) and the
-APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel, Kitty graphics,
-and iTerm2 inline images (OSC 1337) are fully implemented (Task 13). Kitty keyboard
-protocol is complete (Task 35). The remaining gaps are:
+APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel and iTerm2 inline
+images (OSC 1337) are fully implemented (Task 13). Kitty graphics is fully implemented
+(Tasks 13, 100). Kitty keyboard protocol is complete (Task 35). The remaining gaps are:
 
 - **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
 - **OSC gaps:** OSC 66 (recognized but no effect)
@@ -110,10 +115,16 @@ Fully implemented and removed from prior gap lists during v0.3.0–v0.7.0:
 
 ## DCS / Graphics Gaps
 
-None. Sixel (DCS), Kitty graphics protocol (APC `_G`), and iTerm2 inline images
-(OSC 1337 `File=` / `MultipartFile=`) are all fully implemented. The APC parser
-dispatches `_G…` to the Kitty handler; non-Kitty APCs are logged and ignored,
-which is spec-compliant.
+None, aside from two narrow items below. Sixel (DCS), Kitty graphics protocol
+(APC `_G`, Tasks 13, 100), and iTerm2 inline images (OSC 1337 `File=` /
+`MultipartFile=`) are all fully implemented. The APC parser dispatches `_G…`
+to the Kitty handler; non-Kitty APCs are logged and ignored, which is
+spec-compliant.
+
+| Item                                     | Importance | Type | Planned | Notes                                                                                                                                                                                  |
+| ---------------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kitty `t=s` shared memory (Windows)      | ⬜         | 🚧   | —       | Implemented on POSIX (Unix) via `shm_open`/`mmap`/`shm_unlink`; returns `ENOTSUP` on Windows (winapi file-mapping deferred, needs `winapi` dependency in `freminal-terminal-emulator`) |
+| Kitty `a=p` source-rect crop (`x/y/w/h`) | ⬜         | 🚧   | —       | Keys are parsed but only applied under `a=c` (compose); a placement (`a=p`) always displays the full image, ignoring a source-crop rectangle                                           |
 
 ---
 

@@ -1270,6 +1270,67 @@ Prohibitions: none beyond scope.
 
 Stop: report + await review.
 
+#### 100.9 — Source-rect crop for `a=p` (`x/y/w/h`)
+
+Added 2026-07-01 (maintainer-approved gap closure). The 100.1 audit listed
+source-rect crop as a gap but it was never given its own subtask — a planning
+omission surfaced at Task-100 doc time. kitty's `a=p` display keys `x=`/`y=`
+(top-left of the source region, px) and `w=`/`h=` (its size, px) select a
+SUB-RECTANGLE of the image to display; freminal parses them but a placement
+always shows the full image because the renderer's `compute_image_quad`
+(`vertex.rs`) derives UVs from the cell grid (`min/max col/row_in_image`), not a
+pixel source-rect.
+
+Scope: `freminal-buffer/src/image_store.rs` (`ImagePlacement` gains an optional
+pixel source-crop rect), the handler place path
+(`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`, stamp the
+crop onto the placement), the snapshot (rides the existing per-cell
+`ImagePlacement`), and `freminal/src/gui/renderer/vertex.rs` (`compute_image_quad`
+maps the pixel crop into the UV sub-rectangle). Recon the exact UV math first.
+
+Deliverable: source-rect crop applied on display + tests (a placement with a
+sub-rect crop yields the expected UV sub-region; no crop = full image, unchanged).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT change `a=c` compose (which already uses `x/y/w/h`
+correctly); do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.10 — Windows `t=s` shared memory (winapi file-mapping)
+
+Added 2026-07-01 (maintainer-approved gap closure). 100.6 implemented `t=s` on
+POSIX (real `shm_open`/`mmap`/`shm_unlink` via `nix` `mman`) but left the Windows
+path a compile-safe `ENOTSUP` stub, deferring the `winapi` dependency add. This
+closes it: `winapi` is already a workspace dependency (used by `portable-pty`),
+so adding it to `freminal-terminal-emulator` is a small, non-flake Cargo.toml
+change plus the `#[cfg(windows)]` file-mapping read.
+
+Scope: `freminal-terminal-emulator/Cargo.toml` (add a
+`[target.'cfg(windows)'.dependencies]` block with `winapi.workspace = true` +
+the file-mapping features — `memoryapi`, `handleapi`, and any others
+`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle` need),
+`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (replace the
+Windows `read_kitty_shared_memory` ENOTSUP stub with a real
+`OpenFileMappingW`(FILE_MAP_READ) → `MapViewOfFile` → copy `S` bytes at offset
+`O` → `UnmapViewOfFile` + `CloseHandle` read; mirror the POSIX security
+refusal). No flake change (winapi is a Windows-only Rust crate, no system lib).
+
+Deliverable: Windows `t=s` read + a `#[cfg(windows)]` test (a real
+`CreateFileMappingW`-backed object round-trip, hermetic), mirroring the POSIX
+test shape. If a Windows CI runner is unavailable, ensure the code compiles under
+`--target x86_64-pc-windows-*` gating and the POSIX suite stays green.
+
+Verification: `cargo test --all` (POSIX); `cargo clippy --all-targets --all-features -- -D warnings`;
+confirm the `#[cfg(windows)]` code compiles (cargo check for the windows target
+if the toolchain is available, else careful cfg review).
+
+Prohibitions: do NOT touch the POSIX path (already correct); do NOT weaken the
+security refusal; do NOT add a flake change (winapi needs none); do NOT proceed.
+
+Stop: report + await review.
+
 ### 100 Open questions (resolved at activation, 2026-07-01)
 
 - **Quota numbers: mirror kitty's defaults as named constants.** Base image
