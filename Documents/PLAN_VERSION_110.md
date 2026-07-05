@@ -1550,6 +1550,61 @@ masking.
   unmasks 100.16 — so they ship as one atomic, suite-green commit per
   `commit-discipline`).
 
+#### 100.17 — Images scaled to cell grid instead of drawn at native pixel size (all protocols)
+
+Surfaced 2026-07-02 by a maintainer live comparison against kitty; confirmed by
+READ-ONLY recon against the kitty, iTerm2, and sixel specs. A cross-protocol
+rendering-fidelity bug, pre-existing since Task 13, distinct from the four live render
+bugs (100.11–100.14, all fixed).
+
+- **Surface point:** predates Task 100 (Task 13 renderer); exposed by Task 100 live
+  testing on `4561a275`.
+- **Impact:** freminal ALWAYS scales a displayed image to fill its `div_ceil(px, cell_px)`
+  cell grid, but the specs require **native pixel size by default**. A 4×4px image
+  reserves 1 cell (correct) but is stretched to fill the whole ~8×16px cell (~4× too
+  large). Affects all three supported protocols; correct only when an explicit display
+  size was requested.
+- **Spec basis (upstream wins):**
+  - kitty graphics-protocol, "Controlling displayed image layout": with no `c`/`r`, the
+    image is "rendered at the current cursor position, from the upper left corner of the
+    current cell" at native size; scaling happens **only** when `c`/`r` are given (if only
+    one is given, the other is derived to preserve aspect ratio). freminal is wrong for
+    kitty-default, correct for kitty-with-`c`/`r`.
+  - iTerm2 (`iterm2.com/documentation-images.html`): default `width`/`height` = `auto` =
+    the image's inherent (native) size; `imgcat` displays "at their full size". Wrong for
+    iTerm2-default, correct for explicit `width`/`height`.
+  - sixel (`vt100.net/shuford/terminal/all_about_sixels.txt`): strictly 1:1 native pixels,
+    no cell-grid concept in the protocol at all. Wrong for **every** sixel image (sixel has
+    no size arg).
+- **Scope:** `freminal-buffer/src/image_store.rs` (`InlineImage` gains a size-mode signal),
+  the three handlers (`graphics_kitty.rs`, `graphics_sixel.rs`, `graphics_iterm2.rs` — set
+  the mode at construction while the `c`/`r`/`width`/`height` provenance is still known),
+  the snapshot transport (the mode rides `InlineImage`, already shipped), and
+  `freminal/src/gui/renderer/vertex.rs` (`compute_image_quad` — the shared render path;
+  no per-protocol branch exists today).
+- **Approach:** add a `SizeMode` enum (`NativePixels` | `ExplicitCells`) to `InlineImage`,
+  set `ExplicitCells` when the protocol carried an explicit display size (kitty `c`/`r`,
+  iTerm2 `width`/`height` non-auto) and `NativePixels` otherwise (kitty default, iTerm2
+  auto, **always** sixel). `compute_image_quad` draws the quad at
+  `InlineImage.width_px`/`height_px` (native, already stored and already passed in) anchored
+  at the placement's top-left cell for `NativePixels`, and keeps the current scale-to-cell
+  behaviour for `ExplicitCells`. The mode cannot be inferred downstream (comparing
+  `display_cols == div_ceil(px)` false-positives when a user explicitly requests a
+  native-equivalent size), so the signal must be set at construction time. Interacts with
+  the documented sub-cell `X`/`Y` pixel-offset limitation — native-size rendering makes that
+  gap distinctly visible (image sits exactly at the cell corner), so note it (do not
+  necessarily fix it here).
+- **Decomposition:** 100.17a (data + all-three-handler mode-setting + snapshot transport,
+  behaviour-neutral wiring) → 100.17b (renderer branch in `compute_image_quad` + tests +
+  a before/after Criterion capture on `build_image_verts`/`compute_image_quad` per
+  `freminal-bench-table`, ≤15% regression).
+- **Verification:** regression tests — a `NativePixels` image yields a native-pixel-sized
+  quad; an `ExplicitCells` image still fills the declared cell grid; per-protocol
+  construction sets the right mode. Criterion before/after on the render hot path. Live
+  re-test that images now match kitty's size.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge (maintainer directed
+  fixing it before the merge — all protocols need it).
+
 ##### 100.15 + 100.16 execution decisions (recorded 2026-07-02, fix landed `091b1caa`)
 
 Root cause confirmed exactly as the maintainer hypothesised and recon traced. `place_image`
