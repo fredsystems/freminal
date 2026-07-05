@@ -1484,6 +1484,95 @@ Surfaced 2026-07-02 by the same live run (step 10), on top of `4561a275`.
   existing test exercises.
 - **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
 
+#### 100.15 — Live render bug: displayed image destroyed by subsequent output (shared root cause of 100.11/100.13)
+
+Surfaced 2026-07-02 by a maintainer live comparison against real kitty, then confirmed
+by READ-ONLY recon. This is the **shared root cause** behind the "animation does
+nothing" (100.11) and "placeholder does not render" (100.13) symptoms: the displayed
+image is destroyed before any effect can be observed.
+
+- **Surface point:** predates Task 100 (a latent `Buffer::place_image` defect), exposed
+  by the Task 100 live testing on `4561a275`.
+- **Impact:** after an image is displayed at the buffer tail (the normal case), the next
+  character write (shell prompt, the test-script menu re-print, an animation frame's
+  surrounding text) fully destroys the image — it disappears entirely rather than
+  scrolling with the text as in kitty.
+- **Scope:** `freminal-buffer/src/buffer/images.rs` (`place_image` cursor-final-position
+  logic, ~544-551). ROOT CAUSE (recon-confirmed): when the image is placed at the tail,
+  the row-creation loop leaves `self.rows.len() == base_row + display_rows == final_row`
+  exactly, so the guard `if final_row < self.rows.len()` is false (equality), the `else`
+  branch fires, and the cursor is parked on the image's **own last row** instead of a
+  fresh row below it — contradicting `place_image`'s own doc comment. The next text write
+  then overwrites the image's cells (`insert_text` → `clear_images_overwritten_by_text`).
+  Protocol-agnostic trigger; total for short/1-row images. Existing tests missed it by
+  pre-padding rows or manually resetting the cursor before writing.
+- **Approach:** guarantee a fresh blank row exists **below** the placed image and move
+  the cursor there (append one more row when `final_row == rows.len()`, then set
+  `cursor.pos.y = final_row`), so subsequent output goes below the image and never
+  overwrites it — matching kitty/iTerm2. Honours the plan's cell-anchored decision (the
+  scroll path already carries image cells correctly); this only fixes where the cursor
+  lands. Must not double-append when rows already exist below, and must interoperate with
+  the 100.14 post-drain origin capture (the extra pushed row may itself trigger a
+  scrollback drain).
+- **Verification:** a regression test that places an image at the buffer tail with NO
+  pre-padding and NO manual cursor reset, then writes text, and asserts the image's cells
+  survive and the cursor is on a fresh row below (fails before / passes after). After this
+  lands, re-test steps 7 (animation) and 9 (placeholder) live to determine any residual
+  100.11/100.13 work.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge. Likely subsumes the
+  visible symptoms of 100.11 and 100.13.
+
+#### 100.16 — `C=1` (no cursor movement) not honoured on `a=T`/Put
+
+Surfaced 2026-07-02 while implementing 100.15: the corrected cursor positioning
+unmasked a genuine pre-existing gap that the old off-by-one had been coincidentally
+masking.
+
+- **Surface point:** exposed by the 100.15 cursor fix; the gap itself predates Task 100.
+- **Impact:** kitty `C=1` (do not move the cursor after displaying) is honoured only on
+  the `a=p` path (`stamp_kitty_put` saves/restores the cursor), NOT on the `a=T` /
+  `TransmitAndDisplay` (and `Put` via `place_kitty_image`) path. The test
+  `kitty_transmit_and_display_with_no_cursor_movement` passed only because the old
+  cursor bug clamped a 1-row image's cursor back to its origin (== the pre-call cursor),
+  coincidentally matching the `C=1` expectation.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`place_kitty_image` display branch). Save the cursor before `place_image` and restore
+  it when `control.no_cursor_movement` is set, mirroring `stamp_kitty_put`.
+- **Approach:** in the `else if should_display` branch of `place_kitty_image`, capture
+  the cursor before placement and, if `no_cursor_movement`, restore it after — matching
+  the existing `stamp_kitty_put` save/restore. The real-placement origin recorded via
+  `record_real_placement` must remain the image's true stamped origin (100.14), not the
+  restored cursor.
+- **Verification:** `kitty_transmit_and_display_with_no_cursor_movement` passes for the
+  right reason (cursor genuinely restored, not coincidentally clamped); add/confirm a
+  companion test that the cursor DOES move below the image when `C` is absent/0.
+- **Scheduling:** landed together with 100.15 (the fixes are tightly coupled — 100.15
+  unmasks 100.16 — so they ship as one atomic, suite-green commit per
+  `commit-discipline`).
+
+##### 100.15 + 100.16 execution decisions (recorded 2026-07-02, fix landed `091b1caa`)
+
+Root cause confirmed exactly as the maintainer hypothesised and recon traced. `place_image`
+now appends a fresh blank row below a tail-placed image and moves the cursor onto it, and
+re-runs `enforce_scrollback_limit` after the append (re-deriving `base_row` by the same
+delta) so the append can never push the primary buffer over its cap and the 100.14
+post-drain `origin_row` invariant still holds. This honours the plan's cell-anchored
+decision (line ~978) — the scroll path already carries image cells; only the cursor final
+position was wrong. 100.16 (unmasked by 100.15) adds the `C=1` save/restore to
+`place_kitty_image`'s `a=T`/Put branch, mirroring `stamp_kitty_put`; the recorded
+real-placement origin is unchanged (only the cursor is restored). The two fixes shipped as
+one atomic commit because 100.15 unmasks 100.16 and splitting would leave a
+suite-red intermediate. Two durable test decisions: (1) the `grow_buffer_rows` test helper
+was decoupled from `place_image` (now drives plain `handle_lf`) so unrelated
+relative-placement tests do not inherit `place_image`'s cursor behaviour; (2) the 100.14
+regression test's expected origin was recomputed for the two-stage drain 100.15 introduces
+(a tail placement that drains always lands the append-row exactly at the cap, so it is
+drained again by one) — `origin_row` in the drain regime is `max_rows - display_rows - 1`,
+independent of the starting cursor row. New/strengthened tests: image survives a following
+text write (buffer, 2 tests); `C=1` on a 2-row `a=T` genuinely restores the cursor;
+cursor moves below the image when `C` is absent. Whether the animation (100.11) and
+placeholder (100.13) symptoms are now resolved is pending a live re-test.
+
 ##### 100.14 execution decisions (recorded 2026-07-02, fix landed `004d2eb2`)
 
 Root cause confirmed exactly as recon predicted. `Buffer::place_image` now returns
