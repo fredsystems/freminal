@@ -27,7 +27,9 @@ use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
 };
 
-use freminal_buffer::image_store::{AnimationRunMode, ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{
+    AnimationControl, AnimationRunMode, ImageProtocol, InlineImage, next_image_id,
+};
 
 use super::KittyImageState;
 use super::RealPlacement;
@@ -2060,106 +2062,322 @@ impl TerminalHandler {
         use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget;
 
         let target = cmd.control.delete_target.unwrap_or(KittyDeleteTarget::All);
+        let free_data = cmd.control.delete_free_data;
 
         match target {
-            KittyDeleteTarget::All | KittyDeleteTarget::AllIncludingNonVisible => {
-                tracing::debug!(
-                    "Kitty graphics: deleting ALL images ({} in store)",
-                    self.buffer.image_store().len(),
-                );
-                self.buffer.clear_all_image_placements();
-                self.buffer.image_store_mut().clear();
-                self.virtual_placements.clear();
-                self.real_placements.clear();
+            KittyDeleteTarget::All => self.handle_kitty_delete_all(free_data),
+            KittyDeleteTarget::ById => self.handle_kitty_delete_by_id(cmd, free_data),
+            KittyDeleteTarget::ByNumber => self.handle_kitty_delete_by_number(cmd, free_data),
+            KittyDeleteTarget::AtCursor => self.handle_kitty_delete_at_cursor(free_data),
+            KittyDeleteTarget::Frames => self.handle_kitty_delete_frames(cmd, free_data),
+            KittyDeleteTarget::AtCell => self.handle_kitty_delete_at_cell(cmd, free_data),
+            KittyDeleteTarget::AtCellZIndex => {
+                self.handle_kitty_delete_at_cell_z_index(cmd, free_data);
             }
-            KittyDeleteTarget::ById | KittyDeleteTarget::ByIdCursorOrAfter
-                if let Some(image_id) = cmd.control.image_id =>
-            {
-                let id = u64::from(image_id);
-                tracing::debug!("Kitty graphics: deleting image id={id}");
-                self.buffer.clear_image_placements_by_id(id);
-                self.buffer.image_store_mut().remove(id);
-                self.virtual_placements
-                    .retain(|&(img_id, _), _| img_id != id);
-                // Cascade-delete this image's real placements and their
-                // relative children (Task 100.4a).
-                self.cascade_delete_real_placements_for_image(id);
-            }
-            KittyDeleteTarget::ByNumber | KittyDeleteTarget::ByNumberCursorOrAfter
-                if let Some(number) = cmd.control.image_number =>
-            {
-                tracing::debug!("Kitty graphics: deleting image number={number}");
-                self.buffer.clear_image_placements_by_number(number);
-                // Also prune any virtual (Unicode placeholder) placements for
-                // the newest image with this number — `clear_image_placements_by_number`
-                // only clears cell placements, not the virtual-placement table.
-                if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
-                    self.virtual_placements
-                        .retain(|&(img_id, _), _| img_id != id);
-                    // Cascade-delete this image's real placements and their
-                    // relative children (Task 100.4a).
-                    self.cascade_delete_real_placements_for_image(id);
-                }
-            }
-            KittyDeleteTarget::ById
-            | KittyDeleteTarget::ByIdCursorOrAfter
-            | KittyDeleteTarget::ByNumber
-            | KittyDeleteTarget::ByNumberCursorOrAfter => {}
-            KittyDeleteTarget::AtCursor => {
-                tracing::debug!("Kitty graphics: deleting images at cursor");
-                self.buffer.clear_image_placements_at_cursor();
-            }
-            KittyDeleteTarget::AtCursorAndAfter => {
-                tracing::debug!("Kitty graphics: deleting images at cursor and after");
-                self.buffer.clear_image_placements_at_cursor_and_after();
-            }
-            KittyDeleteTarget::AtCellRange | KittyDeleteTarget::AtCellRangeAndAfter => {
-                // Uses the x and y from the control data to define the cell range.
-                // Per Kitty spec, x/y default to cursor position if not specified.
-                let cursor = self.buffer.cursor().pos;
-                let col = cmd
-                    .control
-                    .src_x
-                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-                let row = cmd
-                    .control
-                    .src_y
-                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
-                tracing::debug!("Kitty graphics: deleting images at cell ({row},{col})");
-                // For the "and after" variant, clear from that position onward.
-                if matches!(target, KittyDeleteTarget::AtCellRangeAndAfter) {
-                    self.buffer
-                        .clear_image_placements_at_cell_and_after(row, col);
-                } else {
-                    self.buffer.clear_image_placements_at_cell(row, col);
-                }
-            }
-            KittyDeleteTarget::InColumnRange | KittyDeleteTarget::InColumnRangeAndAfter => {
-                // Delete images that intersect the specified column.
-                let cursor = self.buffer.cursor().pos;
-                let col = cmd
-                    .control
-                    .src_x
-                    .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-                tracing::debug!("Kitty graphics: deleting images in column {col}");
-                self.buffer.clear_image_placements_in_column(col);
-            }
-            KittyDeleteTarget::InRowRange | KittyDeleteTarget::InRowRangeAndAfter => {
-                // Delete images that intersect the specified row.
-                let cursor = self.buffer.cursor().pos;
-                let row = cmd
-                    .control
-                    .src_y
-                    .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
-                tracing::debug!("Kitty graphics: deleting images in row {row}");
-                self.buffer.clear_image_placements_in_row(row);
-            }
-            KittyDeleteTarget::AtZIndex | KittyDeleteTarget::AtZIndexAndAfter => {
-                let z = cmd.control.z_index.unwrap_or(0);
-                tracing::debug!("Kitty graphics: deleting images at z-index {z}");
-                self.buffer.clear_image_placements_by_z_index(z);
+            KittyDeleteTarget::IdRange => self.handle_kitty_delete_id_range(cmd, free_data),
+            KittyDeleteTarget::InColumn => self.handle_kitty_delete_in_column(cmd, free_data),
+            KittyDeleteTarget::InRow => self.handle_kitty_delete_in_row(cmd, free_data),
+            KittyDeleteTarget::AtZIndex => self.handle_kitty_delete_at_z_index(cmd, free_data),
+        }
+    }
+
+    /// `d=a`/`d=A` — delete all placements VISIBLE ON SCREEN.
+    fn handle_kitty_delete_all(&mut self, free_data: bool) {
+        let ids = self.buffer.clear_image_placements_visible(0);
+        tracing::debug!(
+            "Kitty graphics: deleting {} VISIBLE placement(s) (free_data={free_data})",
+            ids.len(),
+        );
+        // Virtual (Unicode placeholder) and real-placement bookkeeping is
+        // not tracked per visible row, so `d=a`/`d=A` clears it in full —
+        // only the CELL clear above is scoped to the visible window, per
+        // spec.
+        self.virtual_placements.clear();
+        self.real_placements.clear();
+        if free_data {
+            for id in ids {
+                self.free_image_if_unreferenced(id);
             }
         }
+    }
+
+    /// `d=i`/`d=I` — delete placements for image id `i=`.
+    fn handle_kitty_delete_by_id(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let Some(image_id) = cmd.control.image_id else {
+            return;
+        };
+        let id = u64::from(image_id);
+        tracing::debug!(
+            "Kitty graphics: deleting placements for image id={id} (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_by_id(id);
+        self.virtual_placements
+            .retain(|&(img_id, _), _| img_id != id);
+        if free_data {
+            self.free_image_if_unreferenced(id);
+        }
+    }
+
+    /// `d=n`/`d=N` — delete placements for the newest image with number `I=`.
+    fn handle_kitty_delete_by_number(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let Some(number) = cmd.control.image_number else {
+            return;
+        };
+        tracing::debug!(
+            "Kitty graphics: deleting placements for image number={number} (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_by_number(number);
+        // `clear_image_placements_by_number` only clears cell placements,
+        // not the virtual-placement table.
+        if let Some(id) = self.buffer.image_store().newest_id_for_number(number) {
+            self.virtual_placements
+                .retain(|&(img_id, _), _| img_id != id);
+            if free_data {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// `d=c`/`d=C` — delete placements intersecting the cursor cell.
+    fn handle_kitty_delete_at_cursor(&mut self, free_data: bool) {
+        let cursor_row = self.buffer.cursor().pos.y;
+        let ids = self.image_ids_in_row(cursor_row);
+        tracing::debug!(
+            "Kitty graphics: deleting placements at cursor row {cursor_row} (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_at_cursor();
+        if free_data {
+            for id in ids {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// `d=f`/`d=F` — delete animation frames for the `i=`/`I=` image.
+    fn handle_kitty_delete_frames(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let Some(id) = self.resolve_kitty_image_id(&cmd.control) else {
+            tracing::debug!("Kitty graphics: d=f/d=F with no resolvable image id; ignoring");
+            return;
+        };
+        let Some(mut stored_image) = self.buffer.image_store().get(id).cloned() else {
+            return;
+        };
+        tracing::debug!(
+            "Kitty graphics: clearing animation frames for image id={id} (free_data={free_data})"
+        );
+        stored_image.frames.clear();
+        stored_image.animation = AnimationControl::default();
+        self.buffer.image_store_mut().insert(stored_image);
+        if free_data {
+            self.free_image_if_unreferenced(id);
+        }
+    }
+
+    /// `d=p`/`d=P` — delete placements intersecting cell `x=`,`y=`.
+    fn handle_kitty_delete_at_cell(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        // Per Kitty spec, x/y default to cursor position if not specified.
+        let cursor = self.buffer.cursor().pos;
+        let col = cmd
+            .control
+            .src_x
+            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+        let row = cmd
+            .control
+            .src_y
+            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+        let id = self.image_id_at_cell(row, col);
+        tracing::debug!(
+            "Kitty graphics: deleting placements at cell ({row},{col}) (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_at_cell(row, col);
+        if free_data && let Some(id) = id {
+            self.free_image_if_unreferenced(id);
+        }
+    }
+
+    /// `d=q`/`d=Q` — delete placements intersecting cell `x=`,`y=` with
+    /// z-index `z=`.
+    fn handle_kitty_delete_at_cell_z_index(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let cursor = self.buffer.cursor().pos;
+        let col = cmd
+            .control
+            .src_x
+            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+        let row = cmd
+            .control
+            .src_y
+            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+        let z = cmd.control.z_index.unwrap_or(0);
+        tracing::debug!(
+            "Kitty graphics: deleting placements at cell ({row},{col}) z={z} (free_data={free_data})"
+        );
+        if let Some(id) = self
+            .buffer
+            .clear_image_placements_at_cell_with_z(row, col, z)
+            && free_data
+        {
+            self.free_image_if_unreferenced(id);
+        }
+    }
+
+    /// `d=r`/`d=R` — delete images with id in `[x=, y=]`.
+    fn handle_kitty_delete_id_range(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let low = u64::from(cmd.control.src_x.unwrap_or(0));
+        let high = u64::from(cmd.control.src_y.unwrap_or(0));
+        tracing::debug!(
+            "Kitty graphics: deleting images with id in [{low},{high}] (free_data={free_data})"
+        );
+        let ids: Vec<u64> = self
+            .buffer
+            .image_store()
+            .iter()
+            .map(|(&id, _)| id)
+            .filter(|&id| id >= low && id <= high)
+            .collect();
+        for id in ids {
+            self.buffer.clear_image_placements_by_id(id);
+            self.virtual_placements
+                .retain(|&(img_id, _), _| img_id != id);
+            if free_data {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// `d=x`/`d=X` — delete placements intersecting column `x=`.
+    fn handle_kitty_delete_in_column(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let cursor = self.buffer.cursor().pos;
+        let col = cmd
+            .control
+            .src_x
+            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+        let ids = self.image_ids_in_column(col);
+        tracing::debug!(
+            "Kitty graphics: deleting placements in column {col} (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_in_column(col);
+        if free_data {
+            for id in ids {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// `d=y`/`d=Y` — delete placements intersecting row `y=`.
+    fn handle_kitty_delete_in_row(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let cursor = self.buffer.cursor().pos;
+        let row = cmd
+            .control
+            .src_y
+            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+        let ids = self.image_ids_in_row(row);
+        tracing::debug!("Kitty graphics: deleting placements in row {row} (free_data={free_data})");
+        self.buffer.clear_image_placements_in_row(row);
+        if free_data {
+            for id in ids {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// `d=z`/`d=Z` — delete placements with z-index `z=`.
+    fn handle_kitty_delete_at_z_index(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let z = cmd.control.z_index.unwrap_or(0);
+        let ids = self.image_ids_by_z_index(z);
+        tracing::debug!(
+            "Kitty graphics: deleting placements at z-index {z} (free_data={free_data})"
+        );
+        self.buffer.clear_image_placements_by_z_index(z);
+        if free_data {
+            for id in ids {
+                self.free_image_if_unreferenced(id);
+            }
+        }
+    }
+
+    /// Free image `id`'s store data (and prune its bookkeeping) if, AFTER
+    /// the caller has already cleared the targeted placements, no cell
+    /// anywhere in the buffer (including scrollback) still references it.
+    ///
+    /// Only called from the uppercase (`delete_free_data`) delete paths —
+    /// lowercase deletes remove placements only and never call this, per
+    /// the kitty spec's data-preservation guarantee for the lowercase
+    /// delete targets.
+    fn free_image_if_unreferenced(&mut self, id: u64) {
+        let still_referenced = self.buffer.rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(|c| c.image_placement().is_some_and(|p| p.image_id == id))
+        });
+        if !still_referenced {
+            self.buffer.image_store_mut().remove(id);
+            self.virtual_placements
+                .retain(|&(img_id, _), _| img_id != id);
+            // Cascade-delete this image's real placements and their
+            // relative children (Task 100.4a) — safe now that no cell
+            // references the image anywhere.
+            self.cascade_delete_real_placements_for_image(id);
+        }
+    }
+
+    /// Collect the image id at a single cell, if any (Kitty `d=p`/`d=P`).
+    fn image_id_at_cell(&self, row: usize, col: usize) -> Option<u64> {
+        self.buffer
+            .rows()
+            .get(row)?
+            .cells()
+            .get(col)?
+            .image_placement()
+            .map(|p| p.image_id)
+    }
+
+    /// Collect the distinct image ids intersecting a full row (Kitty
+    /// `d=c`/`d=C`, `d=y`/`d=Y`).
+    fn image_ids_in_row(&self, row: usize) -> Vec<u64> {
+        let Some(row) = self.buffer.rows().get(row) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for cell in row.cells() {
+            if let Some(p) = cell.image_placement()
+                && !ids.contains(&p.image_id)
+            {
+                ids.push(p.image_id);
+            }
+        }
+        ids
+    }
+
+    /// Collect the distinct image ids intersecting a full column (Kitty
+    /// `d=x`/`d=X`).
+    fn image_ids_in_column(&self, col: usize) -> Vec<u64> {
+        let mut ids = Vec::new();
+        for row in self.buffer.rows() {
+            if let Some(cell) = row.cells().get(col)
+                && let Some(p) = cell.image_placement()
+                && !ids.contains(&p.image_id)
+            {
+                ids.push(p.image_id);
+            }
+        }
+        ids
+    }
+
+    /// Collect the distinct image ids with a matching z-index anywhere in
+    /// the buffer (Kitty `d=z`/`d=Z`).
+    fn image_ids_by_z_index(&self, z: i32) -> Vec<u64> {
+        let mut ids = Vec::new();
+        for row in self.buffer.rows() {
+            for cell in row.cells() {
+                if let Some(p) = cell.image_placement()
+                    && p.z_index == z
+                    && !ids.contains(&p.image_id)
+                {
+                    ids.push(p.image_id);
+                }
+            }
+        }
+        ids
     }
 }
 
@@ -2755,7 +2973,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_all_clears_images() {
+    fn kitty_delete_all_lowercase_keeps_store_data() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
@@ -2767,34 +2985,72 @@ mod tests {
         handler.handle_kitty_graphics(cmd);
         assert!(handler.buffer().image_store().get(42).is_some());
 
-        // Now delete all.
+        // Delete all (lowercase `a`) — placements only, data kept.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::All),
+                delete_free_data: false,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(delete_cmd);
 
-        // Image should be gone from the store.
+        // Store data must survive a lowercase `d=a`.
         assert!(
-            handler.buffer().image_store().get(42).is_none(),
-            "Delete all should remove all images"
+            handler.buffer().image_store().get(42).is_some(),
+            "lowercase 'a' must keep the image data in the store"
         );
 
-        // No image cells should remain.
+        // No image cells should remain (visible placements are cleared).
         let has_image = handler.buffer().rows().iter().any(|row| {
             row.cells()
                 .iter()
                 .any(freminal_buffer::cell::Cell::has_image)
         });
-        assert!(!has_image, "Delete all should clear image cells");
+        assert!(!has_image, "Delete all should clear visible image cells");
     }
 
     #[test]
-    fn kitty_delete_by_id_removes_only_target() {
+    fn kitty_delete_all_uppercase_frees_store_data() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.buffer().image_store().get(42).is_some());
+
+        // Delete all (uppercase `A`) — placements AND (unreferenced) data.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::All),
+                delete_free_data: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "uppercase 'A' should free the now-unreferenced image data"
+        );
+
+        let has_image = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(freminal_buffer::cell::Cell::has_image)
+        });
+        assert!(!has_image, "Delete all should clear visible image cells");
+    }
+
+    #[test]
+    fn kitty_delete_by_id_lowercase_keeps_store_data() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget, KittyFormat,
         };
@@ -2824,12 +3080,74 @@ mod tests {
         assert!(handler.buffer().image_store().get(42).is_some());
         assert!(handler.buffer().image_store().get(99).is_some());
 
-        // Delete only id=42.
+        // Delete only id=42, lowercase `i` — placements only, data kept.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::ById),
                 image_id: Some(42),
+                delete_free_data: false,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "lowercase 'i' must keep id=42's data in the store"
+        );
+        assert!(
+            handler.buffer().image_store().get(99).is_some(),
+            "id=99 should be unaffected by delete-by-id of 42"
+        );
+        // But the placement (cells) for id=42 must be gone.
+        let has_image_42 = handler.buffer().rows().iter().any(|row| {
+            row.cells()
+                .iter()
+                .any(|c| c.image_placement().is_some_and(|p| p.image_id == 42))
+        });
+        assert!(!has_image_42, "id=42's placement should be cleared");
+    }
+
+    #[test]
+    fn kitty_delete_by_id_uppercase_frees_only_target() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place image id=42.
+        let cmd1 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd1);
+
+        // Place image id=99.
+        let cmd2 = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Transmit),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+        handler.handle_kitty_graphics(cmd2);
+
+        assert!(handler.buffer().image_store().get(42).is_some());
+        assert!(handler.buffer().image_store().get(99).is_some());
+
+        // Delete only id=42, uppercase `I` — placements AND unreferenced data.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                delete_free_data: true,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
@@ -2844,6 +3162,59 @@ mod tests {
             handler.buffer().image_store().get(99).is_some(),
             "id=99 should survive delete-by-id of 42"
         );
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_uppercase_keeps_data_if_referenced_elsewhere() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, _rx) = kitty_handler();
+
+        // Place image id=42 at the cursor (row 0).
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd);
+
+        // Place the SAME image again, elsewhere (row 5), via `a=p` (Put) —
+        // a second on-screen reference to image id=42.
+        handler.buffer_mut().set_cursor_pos(Some(5), Some(3));
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                placement_id: Some(1),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        // Delete AtCursor (uppercase `C`) targets only the cursor's row
+        // (row 0), leaving row 5's placement of the same image intact —
+        // so the data must survive even though `free_data` was requested.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::AtCursor),
+                delete_free_data: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "id=42 is still referenced at row 5; data must be kept"
+        );
+        let row0_has_image = handler.buffer().rows()[0]
+            .cells()
+            .iter()
+            .any(freminal_buffer::cell::Cell::has_image);
+        assert!(!row0_has_image, "row 0's placement should still be cleared");
     }
 
     #[test]
@@ -2881,40 +3252,31 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_at_cursor_and_after_clears_remaining_rows() {
+    fn kitty_delete_at_cursor_uppercase_frees_unreferenced_data() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
 
         let (mut handler, _rx) = kitty_handler();
 
-        // Place an image at row 0 (2x2 px → 1x1 cell with 8x16 cell size).
         let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
         handler.handle_kitty_graphics(cmd);
-
-        // Move cursor to row 0.
         handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
 
-        // Delete at cursor and after.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AtCursorAndAfter),
+                delete_target: Some(KittyDeleteTarget::AtCursor),
+                delete_free_data: true,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(delete_cmd);
 
-        // All rows from cursor onward should have no image cells.
-        let any_image = handler.buffer().rows().iter().any(|row| {
-            row.cells()
-                .iter()
-                .any(freminal_buffer::cell::Cell::has_image)
-        });
         assert!(
-            !any_image,
-            "AtCursorAndAfter should clear all image cells from cursor onward"
+            handler.buffer().image_store().get(42).is_none(),
+            "uppercase 'C' should free the now-unreferenced image data"
         );
     }
 
@@ -3694,12 +4056,16 @@ mod tests {
         assert!(handler.real_placements.contains_key(&(42, 0)));
         assert!(handler.real_placements.contains_key(&(99, 0)));
 
-        // Delete A by id.
+        // Delete A by id, uppercase `I` — the cascade to relative children
+        // (real_placements pruning + child cell clearing) only fires on the
+        // data-freeing path (Task 100.7a), so this must use the uppercase
+        // form rather than lowercase `i`.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::ById),
                 image_id: Some(42),
+                delete_free_data: true,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
@@ -5293,6 +5659,54 @@ mod tests {
     }
 
     #[test]
+    fn kitty_delete_by_number_lowercase_keeps_data_uppercase_frees() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_number = Some(7);
+        handler.handle_kitty_graphics(cmd);
+        let _ = rx.try_recv();
+
+        // Lowercase `n` — keeps data.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ByNumber),
+                image_number: Some(7),
+                delete_free_data: false,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "lowercase 'n' must keep the image data"
+        );
+
+        // Uppercase `N` — frees the now-unreferenced data.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ByNumber),
+                image_number: Some(7),
+                delete_free_data: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+        assert!(
+            handler.buffer().image_store().get(42).is_none(),
+            "uppercase 'N' must free the unreferenced image data"
+        );
+    }
+
+    #[test]
     fn kitty_delete_at_cursor() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
@@ -5315,29 +5729,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_at_cursor_and_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AtCursorAndAfter),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
-    }
-
-    #[test]
-    fn kitty_delete_at_cell_range() {
+    fn kitty_delete_at_cell() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
@@ -5351,7 +5743,7 @@ mod tests {
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AtCellRange),
+                delete_target: Some(KittyDeleteTarget::AtCell),
                 src_x: Some(0),
                 src_y: Some(0),
                 ..KittyControlData::default()
@@ -5362,31 +5754,64 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_at_cell_range_and_after() {
+    fn kitty_delete_at_cell_z_index_only_clears_matching_z() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
 
-        let (mut handler, _rx) = kitty_handler();
+        let (mut handler, rx) = kitty_handler();
 
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
+        // Image A (id=42) at (0,0), z=0.
+        let cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = rx.try_recv();
 
+        // Image B (id=99) placed at the SAME cell (0,0), z=5.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let cmd_b = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(freminal_common::buffer_states::kitty_graphics::KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                z_index: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ],
+        };
+        handler.handle_kitty_graphics(cmd_b);
+        let _ = rx.try_recv();
+
+        // Delete at cell (0,0) with z=5 — should only clear image B.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AtCellRangeAndAfter),
+                delete_target: Some(KittyDeleteTarget::AtCellZIndex),
                 src_x: Some(0),
                 src_y: Some(0),
+                z_index: Some(5),
+                delete_free_data: true,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(99).is_none(),
+            "z=5 placement (image 99) should be cleared and freed"
+        );
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "z=0 placement (image 42) should be unaffected"
+        );
     }
 
     #[test]
-    fn kitty_delete_in_column_range() {
+    fn kitty_delete_in_column() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
@@ -5399,7 +5824,7 @@ mod tests {
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::InColumnRange),
+                delete_target: Some(KittyDeleteTarget::InColumn),
                 src_x: Some(0),
                 ..KittyControlData::default()
             },
@@ -5409,7 +5834,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_in_row_range() {
+    fn kitty_delete_in_row() {
         use freminal_common::buffer_states::kitty_graphics::{
             KittyAction, KittyControlData, KittyDeleteTarget,
         };
@@ -5422,7 +5847,7 @@ mod tests {
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::InRowRange),
+                delete_target: Some(KittyDeleteTarget::InRow),
                 src_y: Some(0),
                 ..KittyControlData::default()
             },
@@ -5455,21 +5880,153 @@ mod tests {
     }
 
     #[test]
-    fn kitty_delete_all_including_non_visible() {
+    fn kitty_delete_id_range_removes_only_ids_in_bounds() {
         use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
+            KittyAction, KittyControlData, KittyDeleteTarget, KittyFormat,
         };
 
         let (mut handler, _rx) = kitty_handler();
 
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-        assert!(handler.buffer().image_store().get(42).is_some());
+        for id in [5u32, 6, 7] {
+            let cmd = KittyGraphicsCommand {
+                control: KittyControlData {
+                    action: Some(KittyAction::Transmit),
+                    format: Some(KittyFormat::Rgba),
+                    src_width: Some(2),
+                    src_height: Some(2),
+                    image_id: Some(id),
+                    ..KittyControlData::default()
+                },
+                payload: vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                ],
+            };
+            handler.handle_kitty_graphics(cmd);
+        }
+        assert!(handler.buffer().image_store().get(5).is_some());
+        assert!(handler.buffer().image_store().get(6).is_some());
+        assert!(handler.buffer().image_store().get(7).is_some());
 
+        // d=R with x=5 (low), y=6 (high) — free_data — removes 5 and 6.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AllIncludingNonVisible),
+                delete_target: Some(KittyDeleteTarget::IdRange),
+                src_x: Some(5),
+                src_y: Some(6),
+                delete_free_data: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert!(
+            handler.buffer().image_store().get(5).is_none(),
+            "id 5 in range must be removed"
+        );
+        assert!(
+            handler.buffer().image_store().get(6).is_none(),
+            "id 6 in range must be removed"
+        );
+        assert!(
+            handler.buffer().image_store().get(7).is_some(),
+            "id 7 out of range must survive"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_frames_clears_animation_keeps_image() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Transmit a base image (id=42), then add a second animation frame.
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(cmd);
+        let _ = rx.try_recv();
+
+        let frame_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationFrame),
+                image_id: Some(42),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            payload: vec![1u8; 16],
+        };
+        handler.handle_kitty_graphics(frame_cmd);
+        let _ = rx.try_recv();
+
+        assert_eq!(
+            handler
+                .buffer()
+                .image_store()
+                .get(42)
+                .expect("image exists")
+                .frame_count(),
+            2,
+            "setup should have produced a 2-frame animated image"
+        );
+
+        // Lowercase `f` — clears frames, keeps the image in the store.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::Frames),
+                image_id: Some(42),
+                delete_free_data: false,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        let img = handler
+            .buffer()
+            .image_store()
+            .get(42)
+            .expect("image must still be in the store after lowercase 'f'");
+        assert_eq!(img.frame_count(), 1, "frames must be cleared");
+        assert!(!img.is_animated());
+    }
+
+    #[test]
+    fn kitty_delete_frames_uppercase_also_frees_if_unreferenced() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        let cmd = kitty_rgba_2x2_cmd(KittyAction::Transmit);
+        handler.handle_kitty_graphics(cmd);
+        let _ = rx.try_recv();
+
+        let frame_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::AnimationFrame),
+                image_id: Some(42),
+                src_width: Some(2),
+                src_height: Some(2),
+                ..KittyControlData::default()
+            },
+            payload: vec![1u8; 16],
+        };
+        handler.handle_kitty_graphics(frame_cmd);
+        let _ = rx.try_recv();
+
+        // The image was only ever transmitted (`a=t`), never displayed, so
+        // it has no cell references — uppercase `F` frees it entirely.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::Frames),
+                image_id: Some(42),
+                delete_free_data: true,
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
@@ -5478,31 +6035,8 @@ mod tests {
 
         assert!(
             handler.buffer().image_store().get(42).is_none(),
-            "Delete all including non-visible should remove all images"
+            "uppercase 'F' should free the unreferenced image after clearing frames"
         );
-    }
-
-    #[test]
-    fn kitty_delete_by_number_cursor_or_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::ByNumberCursorOrAfter),
-                image_number: Some(1),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
     }
 
     #[test]
@@ -5560,104 +6094,6 @@ mod tests {
             has_image,
             "Put should place the previously transmitted image"
         );
-    }
-
-    #[test]
-    fn kitty_delete_by_id_cursor_or_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-        assert!(handler.buffer().image_store().get(42).is_some());
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::ByIdCursorOrAfter),
-                image_id: Some(42),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
-
-        assert!(
-            handler.buffer().image_store().get(42).is_none(),
-            "Delete by ID should remove the image"
-        );
-    }
-
-    #[test]
-    fn kitty_delete_in_column_range_and_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::InColumnRangeAndAfter),
-                src_x: Some(0),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
-    }
-
-    #[test]
-    fn kitty_delete_in_row_range_and_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::InRowRangeAndAfter),
-                src_y: Some(0),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
-    }
-
-    #[test]
-    fn kitty_delete_at_z_index_and_after() {
-        use freminal_common::buffer_states::kitty_graphics::{
-            KittyAction, KittyControlData, KittyDeleteTarget,
-        };
-
-        let (mut handler, _rx) = kitty_handler();
-
-        let cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
-        handler.handle_kitty_graphics(cmd);
-
-        let delete_cmd = KittyGraphicsCommand {
-            control: KittyControlData {
-                action: Some(KittyAction::Delete),
-                delete_target: Some(KittyDeleteTarget::AtZIndexAndAfter),
-                z_index: Some(0),
-                ..KittyControlData::default()
-            },
-            payload: Vec::new(),
-        };
-        handler.handle_kitty_graphics(delete_cmd);
     }
 
     #[test]

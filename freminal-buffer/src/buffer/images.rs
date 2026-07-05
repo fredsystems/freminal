@@ -276,6 +276,70 @@ impl Buffer {
         }
     }
 
+    /// Clear image placements from every cell in the VISIBLE window only
+    /// (Kitty `d=a`/`d=A` — "all placements visible on screen").
+    ///
+    /// Scrollback rows above the visible window are left untouched, unlike
+    /// [`Self::clear_all_image_placements`] which clears the entire buffer.
+    /// Returns the distinct image ids that had a cleared placement, so the
+    /// caller can decide (per the `d=a`/`d=A` case) whether to also free
+    /// the underlying store data for images no longer referenced anywhere.
+    ///
+    /// `scroll_offset` is always `0` from the PTY thread (see
+    /// [`Self::visible_window_start`]).
+    pub fn clear_image_placements_visible(&mut self, scroll_offset: usize) -> Vec<u64> {
+        let start = self.visible_window_start(scroll_offset);
+        let mut ids: Vec<u64> = Vec::new();
+        let mut cleared = 0usize;
+        for i in start..self.rows.len() {
+            let row = &mut self.rows[i];
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if let Some(placement) = cell.image_placement() {
+                    let id = placement.image_id;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+        self.image_cell_count -= cleared;
+        ids
+    }
+
+    /// Clear image placements at a specific cell position, but only when
+    /// the cell's placement z-index matches `z` (Kitty `d=q`/`d=Q` — cell +
+    /// z-index intersection).
+    ///
+    /// Mirrors [`Self::clear_image_placements_at_cell`]'s "clear the whole
+    /// image, not just the one cell" behaviour once a match is found.
+    /// Returns the cleared image's id, if any cell matched, so the caller
+    /// can free the underlying store data when requested (`d=Q`).
+    pub fn clear_image_placements_at_cell_with_z(
+        &mut self,
+        row: usize,
+        col: usize,
+        z: i32,
+    ) -> Option<u64> {
+        let cells = self.rows.get(row)?.cells();
+        let id = cells
+            .get(col)?
+            .image_placement()
+            .filter(|p| p.z_index == z)
+            .map(|p| p.image_id)?;
+        self.clear_image_placements_by_id(id);
+        Some(id)
+    }
+
     /// Clear all image placements with the given z-index.
     pub fn clear_image_placements_by_z_index(&mut self, z: i32) {
         let mut cleared = 0usize;

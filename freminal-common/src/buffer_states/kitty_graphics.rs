@@ -69,47 +69,52 @@ pub enum KittyCompression {
     Zlib,
 }
 
-/// Delete target specifier.
+/// Delete target specifier (Task 100.7a).
+///
+/// The kitty spec's `d=` targets come in lowercase/uppercase pairs where
+/// the case does **not** change which placements are targeted — it changes
+/// whether the underlying image data is freed once no placement anywhere
+/// (including scrollback) still references it. There is no "and-after"
+/// concept for any target (a prior misreading in this enum's earlier
+/// revision). This type carries only the POSITIONAL target; the
+/// data-freeing axis is carried separately by
+/// [`KittyControlData::delete_free_data`], set from the case of the `d=`
+/// character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KittyDeleteTarget {
-    /// `d=a` — Delete all images visible on screen.
+    /// `d=a`/`d=A` — placements visible on screen.
     All,
-    /// `d=A` — Delete all images, including those not visible.
-    AllIncludingNonVisible,
-    /// `d=i` — Delete image with specified ID.
+    /// `d=i`/`d=I` — images with id `i=` (optionally placement `p=`).
     ById,
-    /// `d=I` — Delete newest image with specified ID on cursor or after.
-    ByIdCursorOrAfter,
-    /// `d=n` — Delete newest image with specified number.
+    /// `d=n`/`d=N` — newest image with number `I=` (optionally placement `p=`).
     ByNumber,
-    /// `d=N` — Delete newest image with number on cursor or after.
-    ByNumberCursorOrAfter,
-    /// `d=c` — Delete all images at cursor position.
+    /// `d=c`/`d=C` — placements intersecting the current cursor cell.
     AtCursor,
-    /// `d=C` — Delete all images at cursor position and after.
-    AtCursorAndAfter,
-    /// `d=p` — Delete all images that intersect a cell range.
-    AtCellRange,
-    /// `d=P` — Delete all images that intersect a cell range and after.
-    AtCellRangeAndAfter,
-    /// `d=x` — Delete all images in column range.
-    InColumnRange,
-    /// `d=X` — Delete all images in column range and after.
-    InColumnRangeAndAfter,
-    /// `d=y` — Delete all images in row range.
-    InRowRange,
-    /// `d=Y` — Delete all images in row range and after.
-    InRowRangeAndAfter,
-    /// `d=z` — Delete all images at z-index.
+    /// `d=f`/`d=F` — delete animation frames.
+    Frames,
+    /// `d=p`/`d=P` — placements intersecting cell `x=`,`y=`.
+    AtCell,
+    /// `d=q`/`d=Q` — placements intersecting cell `x=`,`y=` with z-index `z=`.
+    AtCellZIndex,
+    /// `d=r`/`d=R` — images with id in `[x=, y=]` (kitty 0.33.0+).
+    IdRange,
+    /// `d=x`/`d=X` — placements intersecting column `x=`.
+    InColumn,
+    /// `d=y`/`d=Y` — placements intersecting row `y=`.
+    InRow,
+    /// `d=z`/`d=Z` — placements with z-index `z=`.
     AtZIndex,
-    /// `d=Z` — Delete all images at z-index and after.
-    AtZIndexAndAfter,
 }
 
 /// Parsed control data from a Kitty graphics command.
 ///
 /// All fields are optional; missing keys use protocol defaults.
+// This struct mirrors the kitty graphics protocol's key/value control data
+// 1:1 — each bool is an independent single-bit protocol key (`m=`, `C=`,
+// `U=`, and the `d=` case), not a set of related flags that would be
+// clearer as a state machine or enum.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct KittyControlData {
     /// `a` — Action. Defaults to `Transmit`.
     pub action: Option<KittyAction>,
@@ -192,6 +197,13 @@ pub struct KittyControlData {
 
     /// `d` — Delete target (only used when action is `Delete`).
     pub delete_target: Option<KittyDeleteTarget>,
+
+    /// Whether the `d=` value was uppercase — per spec, the uppercase form
+    /// of every delete target ALSO frees the underlying image data
+    /// (provided it is not referenced elsewhere, e.g. in scrollback),
+    /// while the lowercase form only removes placements. Defaults to
+    /// `false` (lowercase / data-preserving).
+    pub delete_free_data: bool,
 
     /// `U` — Unicode placeholder mode: 0 = off (default), 1 = on.
     pub unicode_placeholder: bool,
@@ -300,25 +312,22 @@ const fn parse_transmission(c: u8) -> Result<KittyTransmission, KittyParseError>
     }
 }
 
-/// Parse the delete target.
+/// Parse the delete target's POSITIONAL kind, ignoring case — the case
+/// (uppercase = also free data) is captured separately by the caller via
+/// [`KittyControlData::delete_free_data`].
 const fn parse_delete_target(c: u8) -> Result<KittyDeleteTarget, KittyParseError> {
-    match c {
+    match c.to_ascii_lowercase() {
         b'a' => Ok(KittyDeleteTarget::All),
-        b'A' => Ok(KittyDeleteTarget::AllIncludingNonVisible),
         b'i' => Ok(KittyDeleteTarget::ById),
-        b'I' => Ok(KittyDeleteTarget::ByIdCursorOrAfter),
         b'n' => Ok(KittyDeleteTarget::ByNumber),
-        b'N' => Ok(KittyDeleteTarget::ByNumberCursorOrAfter),
         b'c' => Ok(KittyDeleteTarget::AtCursor),
-        b'C' => Ok(KittyDeleteTarget::AtCursorAndAfter),
-        b'p' => Ok(KittyDeleteTarget::AtCellRange),
-        b'P' => Ok(KittyDeleteTarget::AtCellRangeAndAfter),
-        b'x' => Ok(KittyDeleteTarget::InColumnRange),
-        b'X' => Ok(KittyDeleteTarget::InColumnRangeAndAfter),
-        b'y' => Ok(KittyDeleteTarget::InRowRange),
-        b'Y' => Ok(KittyDeleteTarget::InRowRangeAndAfter),
+        b'f' => Ok(KittyDeleteTarget::Frames),
+        b'p' => Ok(KittyDeleteTarget::AtCell),
+        b'q' => Ok(KittyDeleteTarget::AtCellZIndex),
+        b'r' => Ok(KittyDeleteTarget::IdRange),
+        b'x' => Ok(KittyDeleteTarget::InColumn),
+        b'y' => Ok(KittyDeleteTarget::InRow),
         b'z' => Ok(KittyDeleteTarget::AtZIndex),
-        b'Z' => Ok(KittyDeleteTarget::AtZIndexAndAfter),
         _ => Err(KittyParseError::UnknownDeleteTarget(c)),
     }
 }
@@ -365,7 +374,10 @@ fn apply_control_pair(
         b'Y' => ctrl.cell_y_offset = Some(parse_u32(value)?),
         b'z' => ctrl.z_index = Some(parse_i32(value)?),
         b'C' => ctrl.no_cursor_movement = parse_u32(value)? != 0,
-        b'd' => ctrl.delete_target = Some(parse_delete_target(value[0])?),
+        b'd' => {
+            ctrl.delete_target = Some(parse_delete_target(value[0])?);
+            ctrl.delete_free_data = value[0].is_ascii_uppercase();
+        }
         b'U' => ctrl.unicode_placeholder = parse_u32(value)? != 0,
         // Relative-placement keys (Task 100.4). P/Q are unsigned; H/V are signed.
         b'P' => ctrl.parent_image_id = Some(parse_u32(value)?),
@@ -561,7 +573,18 @@ mod tests {
 
         assert_eq!(cmd.control.action, Some(KittyAction::Delete));
         assert_eq!(cmd.control.delete_target, Some(KittyDeleteTarget::All));
+        assert!(!cmd.control.delete_free_data, "lowercase 'a' keeps data");
         assert!(cmd.payload.is_empty());
+    }
+
+    #[test]
+    fn parse_delete_all_uppercase_frees_data() {
+        let apc = make_apc("a=d,d=A", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+
+        assert_eq!(cmd.control.action, Some(KittyAction::Delete));
+        assert_eq!(cmd.control.delete_target, Some(KittyDeleteTarget::All));
+        assert!(cmd.control.delete_free_data, "uppercase 'A' frees data");
     }
 
     #[test]
@@ -785,32 +808,44 @@ mod tests {
 
     #[test]
     fn parse_all_delete_targets() {
+        // (char, expected positional target, expected delete_free_data)
         let targets = [
-            (b'a', KittyDeleteTarget::All),
-            (b'A', KittyDeleteTarget::AllIncludingNonVisible),
-            (b'i', KittyDeleteTarget::ById),
-            (b'I', KittyDeleteTarget::ByIdCursorOrAfter),
-            (b'n', KittyDeleteTarget::ByNumber),
-            (b'N', KittyDeleteTarget::ByNumberCursorOrAfter),
-            (b'c', KittyDeleteTarget::AtCursor),
-            (b'C', KittyDeleteTarget::AtCursorAndAfter),
-            (b'p', KittyDeleteTarget::AtCellRange),
-            (b'P', KittyDeleteTarget::AtCellRangeAndAfter),
-            (b'x', KittyDeleteTarget::InColumnRange),
-            (b'X', KittyDeleteTarget::InColumnRangeAndAfter),
-            (b'y', KittyDeleteTarget::InRowRange),
-            (b'Y', KittyDeleteTarget::InRowRangeAndAfter),
-            (b'z', KittyDeleteTarget::AtZIndex),
-            (b'Z', KittyDeleteTarget::AtZIndexAndAfter),
+            (b'a', KittyDeleteTarget::All, false),
+            (b'A', KittyDeleteTarget::All, true),
+            (b'i', KittyDeleteTarget::ById, false),
+            (b'I', KittyDeleteTarget::ById, true),
+            (b'n', KittyDeleteTarget::ByNumber, false),
+            (b'N', KittyDeleteTarget::ByNumber, true),
+            (b'c', KittyDeleteTarget::AtCursor, false),
+            (b'C', KittyDeleteTarget::AtCursor, true),
+            (b'f', KittyDeleteTarget::Frames, false),
+            (b'F', KittyDeleteTarget::Frames, true),
+            (b'p', KittyDeleteTarget::AtCell, false),
+            (b'P', KittyDeleteTarget::AtCell, true),
+            (b'q', KittyDeleteTarget::AtCellZIndex, false),
+            (b'Q', KittyDeleteTarget::AtCellZIndex, true),
+            (b'r', KittyDeleteTarget::IdRange, false),
+            (b'R', KittyDeleteTarget::IdRange, true),
+            (b'x', KittyDeleteTarget::InColumn, false),
+            (b'X', KittyDeleteTarget::InColumn, true),
+            (b'y', KittyDeleteTarget::InRow, false),
+            (b'Y', KittyDeleteTarget::InRow, true),
+            (b'z', KittyDeleteTarget::AtZIndex, false),
+            (b'Z', KittyDeleteTarget::AtZIndex, true),
         ];
 
-        for (ch, expected) in targets {
+        for (ch, expected, expected_free_data) in targets {
             let apc = make_apc(&format!("a=d,d={}", ch as char), "");
             let cmd = parse_kitty_graphics(&apc).unwrap();
             assert_eq!(
                 cmd.control.delete_target,
                 Some(expected),
                 "Failed for delete target '{}'",
+                ch as char
+            );
+            assert_eq!(
+                cmd.control.delete_free_data, expected_free_data,
+                "Failed delete_free_data for delete target '{}'",
                 ch as char
             );
         }

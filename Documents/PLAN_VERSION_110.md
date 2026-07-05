@@ -1166,26 +1166,83 @@ What: close the delete-target and stacking gaps the 100.1 audit enumerated.
   free image data. Today lowercase `d=i` also removes the image from the store.
 - **Visible vs all:** `d=a` deletes visible placements only; `d=A` deletes all
   including non-visible/scrollback. Today both clear the whole store.
-- **"And-after" variants:** `d=X`/`d=Y`/`d=Z` (column/row/z-index "and after")
-  currently collapse to their non-after counterparts — implement the rightward/
-  downward/higher-z semantics.
+- **~~"And-after" variants~~ (CORRECTED — see 100.7 execution decisions):** the
+  plan's "and-after" framing is a **misreading of the spec**. There is no
+  "and-after" concept; the lowercase/UPPERCASE axis is the data-freeing axis for
+  EVERY `d=` target (uppercase also frees the image data). The misnamed enum
+  variants are repurposed accordingly.
 - **Missing enum variants:** add `d=f`/`d=F` (delete animation frames — pairs with
-  100.2) and `d=r`/`d=R` (delete images with id in `[x, y]`, kitty 0.33.0); both
-  currently return `UnknownDeleteTarget` and are ignored.
+  100.2), `d=r`/`d=R` (delete images with id in `[x, y]`, kitty 0.33.0), and
+  `d=q`/`d=Q` (placements at cell `x,y` with z-index `z`); all currently return
+  `UnknownDeleteTarget` and are ignored.
 - **Z-index render order:** `build_image_verts` / `draw_images` sort quads by
   `image_id`, not `z_index`; higher z must render above lower z. Sort by z-index
   (then id for stability).
 
 Deliverable: corrected delete handling + z-ordered rendering + tests (lowercase
-keeps data, uppercase frees, visible-vs-all, and-after semantics, `d=f`/`d=r`,
-a two-image z-order assertion).
+keeps data, uppercase frees, visible-vs-all, `d=f`/`d=r`/`d=q`, a two-image
+z-order assertion).
 
 Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
-Prohibitions: do NOT change transmit/put/query parsing beyond adding the two
+Prohibitions: do NOT change transmit/put/query parsing beyond adding the new
 delete-target variants; do NOT proceed.
 
 Stop: report + await review.
+
+##### 100.7 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon + the authoritative kitty graphics spec ("Deleting images") corrected a
+material misreading and resolved the renderer data-flow question:
+
+- **There is NO "and-after" concept — the case axis is data-freeing.** The spec
+  is explicit: for EVERY `d=` target, lowercase deletes placements only (keeps the
+  stored image data so it can be re-displayed without resending); UPPERCASE
+  additionally frees the image data **provided the image is not referenced
+  elsewhere (e.g. in scrollback)**. So freminal's enum variant names
+  `*AndAfter`/`*CursorOrAfter` (and their doc-comments) are **wrong** — uppercase
+  `A/I/N/C/P/Q/X/Y/Z` mean "same target + free data", not "and after". The
+  existing handler collapses each lowercase|uppercase pair to identical behaviour,
+  so today no uppercase actually frees data correctly, and `d=n`/`d=N` never frees
+  store data at all (a latent bug). Maintainer-approved: implement the real spec.
+- **Enum correction (maintainer-approved option 1).** Rename the misnamed
+  `KittyDeleteTarget` variants to the data-freeing axis (e.g. a lowercase target +
+  an uppercase "…FreeData" sibling per letter, OR a `free_data: bool` on unified
+  variants — the implementer picks the cleaner shape and records it), fix the
+  stale doc-comments, and ADD `d=f`/`d=F`, `d=r`/`d=R`, `d=q`/`d=Q`. `d=a` deletes
+  visible-on-screen placements only; `d=A` all. "Uppercase frees data if not
+  referenced elsewhere" reuses the existing cell-reference check (the same idea as
+  `ImageStore::retain_referenced`): after clearing the targeted cells, an
+  uppercase delete removes the image from the store only if no remaining cell (in
+  the full `self.rows`, scrollback included) still references it. The 10
+  `clear_image_placements_*` Buffer methods touch cell-stamps only (never the
+  store), so data-freeing stays a handler concern layered on top.
+- **`d=a` visible-only needs a visible-window-scoped clear (new).** No existing
+  clear method scopes to the visible window — all iterate the full `self.rows`.
+  `d=a` (visible on screen) uses `visible_window_start(0)..rows.len()` (the live
+  bottom `height` rows — the PTY thread's only notion of "on screen", since the
+  GUI scroll offset lives in `ViewState`); `d=A` keeps the full-`self.rows`
+  behaviour. A small buffer helper is added for the visible-scoped clear.
+- **Cascade + registry hygiene.** Positional deletes (`c/p/q/x/y/z`) currently do
+  NOT prune `virtual_placements`/`real_placements`; the id/number arms do (via
+  `cascade_delete_real_placements_for_image`). Keep the existing cascade for
+  id/number; for the new/positional arms, prune `real_placements`/`virtual_placements`
+  for any image whose last cell was just cleared (so no stale parent-link metadata
+  survives). Do not regress the 100.4a cascade.
+- **Two commits: 100.7a (delete correctness) + 100.7b (z-index render order).**
+  They are independent; splitting keeps each reviewable. 100.7a =
+  `freminal-common` enum/parser + `graphics_kitty.rs` handler + `freminal-buffer`
+  visible-scoped clear helper. 100.7b = the renderer z-index sort.
+- **Z-index render order via an explicit draw-order side-channel (maintainer-approved).**
+  `build_image_verts` (GUI thread) has each image's `z_index` via the per-cell
+  `ImagePlacement`s; `draw_images` runs in the `Send+Sync+'static` `PaintCallback`
+  and only receives `snap_images` (no z-index). Rather than pollute `InlineImage`
+  with placement-level z, `build_image_verts` computes the authoritative
+  `(z_index, id)` draw order and records it as a `Vec<u64>` in `RenderState`
+  alongside `image_verts`; `draw_images` consumes that list directly instead of
+  recomputing its own `u64`-ascending sort. Vertex-emission order and draw order
+  then share one authoritative list (no fragile "both independently reproduce the
+  same sort" invariant). Higher z renders above lower z; ties break by id.
 
 #### 100.8 — Escape-sequence docs
 
