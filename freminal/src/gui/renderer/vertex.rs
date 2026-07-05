@@ -14,7 +14,7 @@ use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, Underli
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::LineWidth;
-use freminal_terminal_emulator::{ImagePlacement, InlineImage, SourceCrop};
+use freminal_terminal_emulator::{ImagePlacement, ImageSizeMode, InlineImage, SourceCrop};
 use std::sync::Arc;
 
 use super::super::{
@@ -736,14 +736,27 @@ pub fn build_image_verts(
 /// `display_rows` grid; partial visibility (e.g. image clipped at the terminal
 /// edge) produces a UV sub-range.
 ///
-/// The quad pixel size is determined by the bounding box `b`, which is already
-/// computed in renderer cell pixels.  This means the image is scaled to fill
-/// exactly the declared cell grid — matching the Kitty protocol intent.
+/// The quad's PIXEL EXTENT depends on the image's [`ImageSizeMode`]
+/// (Task 100.17b):
+///
+/// - `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
+///   or when image metadata is unavailable: the quad fills the bounding box
+///   `b` exactly — the image is scaled to fill the declared cell grid. This
+///   is the pre-100.17 behaviour, unchanged.
+/// - `NativePixels` (kitty without `c=`/`r=`, iTerm2 `auto`, and ALWAYS for
+///   sixel — the spec-mandated default): the quad is anchored at the cell
+///   top-left `(b.x0, b.y0)` and sized to the image's *native* pixel
+///   dimensions instead of stretching to fill the cell box. See
+///   [`compute_image_quad_position`] for how this interacts with
+///   source-crop and partial cell-grid visibility.
 ///
 /// If `b.crop` is set (kitty `a=p` source-crop, Task 100.9), the cell-grid
 /// UV fractions above are re-mapped into the crop's pixel-space UV window
 /// instead of the full texture, so the placement displays only that
-/// sub-rectangle of the transmitted image.
+/// sub-rectangle of the transmitted image. For `NativePixels` images the
+/// crop's pixel dimensions also become the quad's native extent (rather
+/// than the full image's), so a cropped native-size image is drawn at the
+/// crop's actual pixel size.
 fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
     let (u0, v0, u1, v1) = if let Some(img) = img
         && img.display_cols > 0
@@ -787,11 +800,77 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
         _ => (u0, v0, u1, v1),
     };
 
+    let (qx0, qy0, qx1, qy1) = compute_image_quad_position(b, img);
+
     [
         // Triangle 1
-        b.x0, b.y0, u0, v0, b.x1, b.y0, u1, v0, b.x0, b.y1, u0, v1, // Triangle 2
-        b.x1, b.y0, u1, v0, b.x1, b.y1, u1, v1, b.x0, b.y1, u0, v1,
+        qx0, qy0, u0, v0, qx1, qy0, u1, v0, qx0, qy1, u0, v1, // Triangle 2
+        qx1, qy0, u1, v0, qx1, qy1, u1, v1, qx0, qy1, u0, v1,
     ]
+}
+
+/// Compute the pixel-space quad rectangle `(x0, y0, x1, y1)` for an image,
+/// honoring its [`ImageSizeMode`] (Task 100.17b).
+///
+/// - `ImageSizeMode::ExplicitCells`, or when `img` is `None` (metadata
+///   unavailable): returns the cell bounding box `b` unchanged — the
+///   pre-100.17 behaviour.
+/// - `ImageSizeMode::NativePixels`: returns a quad anchored at the cell
+///   top-left `(b.x0, b.y0)` and sized to the image's native pixel
+///   dimensions. If a source-crop (`b.crop`, Task 100.9) is active, the
+///   crop's pixel dimensions are used instead of the full image's — the
+///   displayed native size is the size of the cropped region, not the
+///   original image.
+///
+///   When only part of the image's cell grid is visible (`b`'s
+///   `min`/`max_col_in_image` / `row_in_image` span narrower than the
+///   full `display_cols` × `display_rows` grid — e.g. the placement is
+///   clipped at the terminal's right/bottom edge or by scroll), the
+///   native extent is scaled by that same visible-cell fraction, mirroring
+///   the UV sub-range computed in [`compute_image_quad`]. This keeps quad
+///   geometry and texture sampling proportionally aligned in both the
+///   fully-visible case (fraction == 1, full native size) and the
+///   partially-visible case, without needing a separate fallback path.
+///
+/// Task 100.17: sub-cell X/Y pixel offset (kitty `X=`/`Y=`) is not applied
+/// here — the quad's top-left always sits exactly at the cell origin.
+fn compute_image_quad_position(b: &ImageBounds, img: Option<&InlineImage>) -> (f32, f32, f32, f32) {
+    let Some(img) = img else {
+        return (b.x0, b.y0, b.x1, b.y1);
+    };
+
+    if img.size_mode == ImageSizeMode::ExplicitCells {
+        return (b.x0, b.y0, b.x1, b.y1);
+    }
+
+    // NativePixels: the crop's pixel size (if any) takes precedence over
+    // the full image's — a cropped native-size image displays at the
+    // crop's actual dimensions. `resolve_source_crop` (terminal-emulator
+    // side) never stores a zero-sized crop, but we guard defensively
+    // rather than trust that invariant across the snapshot boundary.
+    let (native_w, native_h) = match b.crop {
+        Some(crop) if crop.width > 0 && crop.height > 0 => (crop.width, crop.height),
+        _ => (img.width_px, img.height_px),
+    };
+
+    if native_w == 0 || native_h == 0 || img.display_cols == 0 || img.display_rows == 0 {
+        // Degenerate metadata — fall back to the cell bounding box rather
+        // than emit a zero-size (invisible) quad.
+        return (b.x0, b.y0, b.x1, b.y1);
+    }
+
+    // Fraction of the image's declared cell grid that is actually visible
+    // in `b`, in each axis. `max >= min` always holds by construction
+    // (bounds are seeded with `min == max` and only ever widened).
+    let visible_cols = gl_f32(b.max_col_in_image - b.min_col_in_image + 1);
+    let visible_rows = gl_f32(b.max_row_in_image - b.min_row_in_image + 1);
+    let display_cols = gl_f32(img.display_cols);
+    let display_rows = gl_f32(img.display_rows);
+
+    let w = gl_f32_u32(native_w) * (visible_cols / display_cols);
+    let h = gl_f32_u32(native_h) * (visible_rows / display_rows);
+
+    (b.x0, b.y0, b.x0 + w, b.y0 + h)
 }
 
 /// Per-row rendering parameters for glyph emission: scaling factors,
@@ -2723,6 +2802,21 @@ mod tests {
         }
     }
 
+    /// Like [`make_inline_image_sized`], but with `size_mode` set to
+    /// `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
+    /// for Task 100.17b quad-sizing tests that need to lock in the
+    /// unchanged "scale to the declared cell grid" behaviour for that mode.
+    fn make_inline_image_sized_explicit_cells(
+        id: u64,
+        width_px: u32,
+        height_px: u32,
+    ) -> InlineImage {
+        InlineImage {
+            size_mode: ImageSizeMode::ExplicitCells,
+            ..make_inline_image_sized(id, width_px, height_px)
+        }
+    }
+
     /// Build a fully-visible single-cell `ImageBounds` (min == max == 0),
     /// with the given optional source-crop, for `compute_image_quad` tests.
     fn make_bounds(crop: Option<SourceCrop>) -> ImageBounds {
@@ -2744,6 +2838,12 @@ mod tests {
     /// `compute_image_quad` result. Each vertex is `[x, y, u, v]` (stride 4).
     fn quad_uv(quad: &[f32; 4 * VERTS_PER_QUAD], idx: usize) -> (f32, f32) {
         (quad[idx * 4 + 2], quad[idx * 4 + 3])
+    }
+
+    /// Extract the (x, y) pair from vertex `idx` (0-based) of a
+    /// `compute_image_quad` result. Each vertex is `[x, y, u, v]` (stride 4).
+    fn quad_pos(quad: &[f32; 4 * VERTS_PER_QUAD], idx: usize) -> (f32, f32) {
+        (quad[idx * 4], quad[idx * 4 + 1])
     }
 
     const UV_EPSILON: f32 = 1e-6;
@@ -2843,6 +2943,151 @@ mod tests {
             (corner_c.1 - 0.75).abs() < UV_EPSILON,
             "v1 should be 0.75, got {}",
             corner_c.1
+        );
+    }
+
+    // ── compute_image_quad position sizing (Task 100.17b) ────
+
+    const POS_EPSILON: f32 = 1e-4;
+
+    /// `ImageSizeMode::NativePixels` with a native size SMALLER than the
+    /// cell bounding box must produce a quad sized to the native pixels
+    /// (anchored at `b.x0`/`b.y0`), NOT stretched to fill the full cell
+    /// box. This is the core Task 100.17 fail-before/pass-after
+    /// assertion: before this fix, `x1-x0`/`y1-y0` equalled the 8x16 cell
+    /// box regardless of the 4x4 native size.
+    #[test]
+    fn compute_image_quad_native_pixels_sizes_to_native_dimensions_not_cell_box() {
+        let bounds = make_bounds(None); // 8x16 cell box (b.x1=8, b.y1=16)
+        let img = make_inline_image_sized(1, 4, 4); // native 4x4px, size_mode NativePixels
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON, "x0 should be 0.0, got {x0}");
+        assert!((y0 - 0.0).abs() < POS_EPSILON, "y0 should be 0.0, got {y0}");
+        assert!(
+            (x1 - 4.0).abs() < POS_EPSILON,
+            "x1-x0 should equal native width_px (4), got x1={x1}"
+        );
+        assert!(
+            (y1 - 4.0).abs() < POS_EPSILON,
+            "y1-y0 should equal native height_px (4), got y1={y1}"
+        );
+    }
+
+    /// `ImageSizeMode::ExplicitCells` must still scale the quad to fill the
+    /// full cell bounding box — unchanged pre-100.17 behaviour, locked in
+    /// so a future regression can't silently apply native sizing to
+    /// explicitly-sized (kitty `c=`/`r=`, iTerm2 explicit width/height)
+    /// images.
+    #[test]
+    fn compute_image_quad_explicit_cells_sizes_to_cell_box() {
+        let bounds = make_bounds(None); // 8x16 cell box
+        let img = make_inline_image_sized_explicit_cells(1, 4, 4); // native 4x4px, but ExplicitCells
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        assert!(
+            (x1 - 8.0).abs() < POS_EPSILON,
+            "x1 should equal the full cell box x1 (8), got {x1}"
+        );
+        assert!(
+            (y1 - 16.0).abs() < POS_EPSILON,
+            "y1 should equal the full cell box y1 (16), got {y1}"
+        );
+    }
+
+    /// `NativePixels` composed with a source-crop (kitty `a=p`, Task 100.9)
+    /// must size the quad to the CROP's pixel dimensions, not the full
+    /// image's — a cropped native-size image displays at the crop's actual
+    /// size while the UV window (covered by the existing crop UV test)
+    /// still samples only that sub-rectangle of the texture.
+    #[test]
+    fn compute_image_quad_native_pixels_with_crop_sizes_to_crop_dimensions() {
+        let bounds = make_bounds(Some(SourceCrop {
+            x: 10,
+            y: 10,
+            width: 50,
+            height: 30,
+        }));
+        let img = make_inline_image_sized(1, 100, 100); // full image is 100x100, crop is 50x30
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        assert!(
+            (x1 - 50.0).abs() < POS_EPSILON,
+            "x1-x0 should equal the crop width (50), got x1={x1}"
+        );
+        assert!(
+            (y1 - 30.0).abs() < POS_EPSILON,
+            "y1-y0 should equal the crop height (30), got y1={y1}"
+        );
+    }
+
+    /// `NativePixels` on a partially-visible image (only some of the
+    /// image's declared cell grid is within `b`, e.g. clipped at the
+    /// terminal's right edge) must scale the native pixel extent by the
+    /// same visible-cell fraction used for the UV sub-range, so quad
+    /// geometry and texture sampling stay proportionally aligned.
+    #[test]
+    fn compute_image_quad_native_pixels_partial_visibility_scales_proportionally() {
+        // A 20x10px native image declared across a 2x1 cell grid; only the
+        // first column (col_in_image == 0) is visible (e.g. the second
+        // column was clipped at the terminal edge) => 1 of 2 cols visible.
+        let bounds = ImageBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 8.0,
+            y1: 16.0,
+            min_col_in_image: 0,
+            min_row_in_image: 0,
+            max_col_in_image: 0,
+            max_row_in_image: 0,
+            z_index: 0,
+            crop: None,
+        };
+        let img = InlineImage {
+            id: 1,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 20,
+            height_px: 10,
+            display_cols: 2,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        };
+
+        let quad = compute_image_quad(&bounds, Some(&img));
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        // 1 of 2 cols visible => half the native 20px width.
+        assert!(
+            (x1 - 10.0).abs() < POS_EPSILON,
+            "x1-x0 should be half the native width (10), got x1={x1}"
+        );
+        // Full row visible (1 of 1) => full native 10px height.
+        assert!(
+            (y1 - 10.0).abs() < POS_EPSILON,
+            "y1-y0 should equal the full native height (10), got y1={y1}"
         );
     }
 }
