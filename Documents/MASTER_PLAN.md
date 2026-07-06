@@ -182,7 +182,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 110 | Focus Follows Mouse (Toggleable)          | `PLAN_VERSION_090.md` (Task 110)              | Complete      | Task 58                |
 | 111 | Bundled Font / Icon (CaskaydiaCove)       | `PLAN_VERSION_100.md` (Task 111)              | Complete      | v0.8.0, v0.9.0         |
 | 112 | UI Beautification (ChromeStyle)           | `PLAN_VERSION_100.md` (Task 112)              | Complete      | Task 111               |
-| 114 | Kitty Keyboard: egui-blocked keys         | `PLAN_VERSION_110.md` (Task 114)              | Stub          | Task 101               |
+| 114 | Kitty Keyboard: egui-blocked keys         | `PLAN_VERSION_110.md` (Task 114)              | Active        | Task 101               |
 
 ---
 
