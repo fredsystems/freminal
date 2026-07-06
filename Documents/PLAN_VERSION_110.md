@@ -1928,8 +1928,25 @@ egui version is then in use).
 
 ### 114 In scope (the egui-blocked remainder)
 
-- **True `caps_lock` / `num_lock` modifier state** (bits 64/128): no egui API;
-  needs raw winit `ModifiersChanged` or lock-key press tracking.
+- **True `caps_lock` / `num_lock` modifier state** (bits 64/128), plus
+  **scroll-lock** state for the `ScrollLock`-as-key path below: no egui API — and,
+  critically, **no winit API either.** winit 0.30.13's `ModifiersState` exposes only
+  shift/ctrl/alt/super (split L/R); it has **no** `caps_lock`/`num_lock`/`scroll_lock`
+  accessor, and `ModifiersChanged` never carries toggle state. winit _does_ deliver
+  the key **press/release events** (`KeyCode::CapsLock`/`NumLock`/`ScrollLock`), so a
+  local toggle bit can track _changes_ — but a press-tracked bit has **no correct
+  cold-start value**: if the OS lock is already ON when freminal launches, the local
+  bit defaults `false`, is silently **inverted** from reality, and stays wrong until
+  the next physical lock-key press re-syncs it. That is a correctness bug, not a
+  cosmetic one. **Mandatory 114 activation investigation: query the true OS lock
+  state at startup (and, ideally, on focus-gain) per platform, and do it ourselves if
+  winit/egui won't.** The OS-level query exists on every platform we support — X11
+  `XkbGetState`, Win32 `GetKeyState(VK_CAPITAL/VK_NUMLOCK/VK_SCROLL)`, macOS
+  IOKit / `CGEventSourceKeyState`. **Wayland is the known-hard case** and the
+  investigation must resolve it explicitly (there is no portable Wayland lock-state
+  query; determine the real answer — a compositor protocol, a fallback, or a
+  documented degradation — rather than assuming). Do NOT ship the lock bits driven by
+  a cold-start guess.
 - **Keypad operators and directional keys:** KP_Divide, KP_Multiply, KP_Subtract,
   KP_Add, KP_Enter, KP_Equal, KP_Separator, KP_Left/Right/Up/Down,
   KP_PageUp/PageDown, KP_Home/End, KP_Insert/Delete, KP_Begin (57410–57427). Absent
@@ -1953,6 +1970,28 @@ part is delivery, not encoding.
   choice is deferred to this task's activation (an egui upgrade may by then be
   desirable for other reasons). Either way it is architecture-affecting — invoke
   `freminal-architecture` and get sign-off before rewiring the input path.
+- **The intercept seam already exists (recon 2026-07-05).** `Handler::window_event`
+  in `freminal-windowing/src/event_loop.rs` is the single chokepoint where raw
+  `WindowEvent::KeyboardInput` / `ModifiersChanged` are observed before egui. There
+  is already precedent for peeking a raw key event and conditionally bypassing egui:
+  the Wayland clipboard-paste interceptor at `event_loop.rs:357-400` reads
+  `winit::event::KeyEvent.logical_key` and `return`s early (`:396`) without calling
+  `state.egui.on_window_event(...)` (`:404`); the mouse-motion short-circuit at
+  `:329-348` is a second precedent. A 114 intercept extends this pattern. **Both
+  existing precedents are _narrow_** (egui stays the primary translator; only the
+  special-cased event is swallowed) — a "raw-winit-primary" rewrite is a much bigger,
+  riskier change and is NOT what these precedents establish.
+- **winit 0.30.13 _does_ carry every dropped key.** `PhysicalKey::Code(KeyCode::…)`
+  distinguishes all numpad operators/directional keys, media keys, lock keys,
+  PrintScreen, Pause, ContextMenu, and ISO-level keys (verified against the vendored
+  winit source, 2026-07-05). The block is egui 0.35's `Key` enum, not winit —
+  delivery is achievable, matching "the hard part is delivery, not encoding".
+- **Downstream is already wired.** `KeyModifiers` already has the
+  `super_key`/`hyper`/`meta`/`caps_lock`/`num_lock` fields, and
+  `InputEvent::Key` / `TerminalInput::to_payload` already encode the full kitty
+  functional-key table. A 114 intercept changes only how keys are observed/classified
+  in `freminal-windowing`; nothing below the GUI input layer (channel, snapshot,
+  `ArcSwap`, PTY thread) changes.
 - **This is why v0.11.0 keyboard is "substantially compliant, not 100%".** The gap
   is explicit and tracked, not silent.
 
@@ -1961,9 +2000,43 @@ part is delivery, not encoding.
 - Raw-winit intercept vs egui/egui-winit upgrade — which, and what is the
   regression surface for the existing input path?
 - Can the intercept be scoped to only the missing keys, leaving egui-winit as the
-  primary translator for everything else, to minimize risk?
+  primary translator for everything else, to minimize risk? (The existing
+  `event_loop.rs` precedents are all narrow; a raw-winit-**primary** rewrite is the
+  only variant that would justify resequencing 114 before 101 — decide explicitly
+  whether narrow or primary, and record why.)
 - Are `hyper`/`meta` modifiers ever reachable on any target platform, or do they
   stay permanently `0`?
+
+### 114 Mandatory activation investigation: OS lock-state query (blocking subtask)
+
+**This is a required first subtask when Task 114 activates, not an optional
+question.** The `caps_lock`/`num_lock`/`scroll_lock` bits MUST reflect the true OS
+state, including at cold start — a press-tracked local bit alone is a correctness
+bug (silent inversion; see "In scope" above). Neither winit nor egui exposes the
+toggle state, so freminal queries the OS directly. The investigation must, per
+platform we support, determine and prototype the query:
+
+- **X11:** `XkbGetState` (or `XkbGetIndicatorState`) — read `locked_mods`
+  caps/num/scroll bits. Confirm the crate path (`x11rb`/`x11-dl`) and whether it can
+  run alongside winit's X11 connection without conflict.
+- **Windows:** `GetKeyState(VK_CAPITAL)` / `VK_NUMLOCK` / `VK_SCROLL`, low bit =
+  toggle state. Trivial; confirm the `winapi`/`windows` binding already available.
+- **macOS:** IOKit HID element state or `CGEventSourceKeyState` for the lock
+  modifiers; confirm reachability and entitlement/sandbox implications.
+- **Wayland (KNOWN HARD — resolve explicitly, do not hand-wave):** there is no
+  portable client-side lock-state query. Investigate whether a compositor protocol
+  (or libxkbcommon state derived from the seat's keymap + modifier events winit
+  already forwards) can supply it, and if not, decide and DOCUMENT the honest
+  fallback (e.g. press-tracked-only with a stated cold-start caveat on Wayland,
+  correct everywhere else). The deliverable is a real answer for Wayland, not an
+  assumption.
+
+Deliverable of the investigation subtask: a per-platform query plan (with the
+concrete API + crate for each), the Wayland resolution, where the query is invoked
+(startup + focus-gain into `WindowState`), and how the queried truth reconciles with
+the press-event tracking that maintains it thereafter. Any new system-level
+dependency triggers `flake-dev-shell-discipline` (add to `flake.nix`, stop, wait for
+`nix develop`). Only after this lands does the rest of Task 114 wire the bits.
 
 ---
 
