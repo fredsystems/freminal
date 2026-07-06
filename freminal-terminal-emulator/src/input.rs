@@ -1108,6 +1108,29 @@ mod tests {
     }
 
     #[test]
+    fn arrow_right_with_super_modifier() {
+        // super_key alone → modifier param 1 + 8 = 9.
+        let mods = KeyModifiers {
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;9C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_right_with_ctrl_super_modifier() {
+        // ctrl + super → modifier param 1 + 4 + 8 = 13.
+        let mods = KeyModifiers {
+            ctrl: true,
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;13C".to_vec()));
+    }
+
+    #[test]
     fn arrow_left_normal_mode() {
         let p = to_payload_defaults(&TerminalInput::ArrowLeft(KeyModifiers::NONE));
         assert_eq!(p, TerminalInputPayload::Many(b"\x1b[D"));

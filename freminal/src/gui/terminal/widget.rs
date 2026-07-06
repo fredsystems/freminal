@@ -1000,6 +1000,12 @@ pub struct PaneRenderCache {
     pub(super) previous_mouse_state: Option<PreviousMouseState>,
     /// Last key processed by input handling.
     pub(super) previous_key: Option<Key>,
+    /// Physical Super/Command key hold-state from the most recently
+    /// processed frame (Task 101.2). egui exposes no `Modifiers` bit for the
+    /// physical Super/Windows key on Linux/Windows, so this is tracked
+    /// across frames via discrete `SuperLeft`/`SuperRight` press/release
+    /// events observed in `write_input_to_terminal`.
+    pub(super) super_pressed: bool,
     /// Last scroll amount processed.
     pub(super) previous_scroll_amount: f32,
     /// Cursor blink state from the most recently rendered frame.
@@ -1107,6 +1113,7 @@ impl PaneRenderCache {
         Self {
             previous_mouse_state: None,
             previous_key: None,
+            super_pressed: false,
             previous_scroll_amount: 0.0,
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
@@ -1642,6 +1649,7 @@ impl FreminalTerminalWidget {
                 scroll_amount,
                 clipboard_pending,
                 actions,
+                super_pressed,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -1660,12 +1668,14 @@ impl FreminalTerminalWidget {
                     recording_ctx,
                     &cache.placeholder_hit_rects,
                     key_broadcast_targets,
+                    cache.super_pressed,
                 )
             });
             left_mouse_button_pressed |= left_mouse_button_pressed_inner;
             cache.previous_mouse_state = new_mouse_pos;
             cache.previous_key = previous_key;
             cache.previous_scroll_amount = scroll_amount;
+            cache.super_pressed = super_pressed;
             deferred_actions = actions;
 
             // Perform the clipboard copy OUTSIDE the ui.input() closure.
