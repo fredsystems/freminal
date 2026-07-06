@@ -28,7 +28,7 @@ use super::shaders::{
 };
 use super::vertex::{
     BG_INSTANCE_FLOATS, CURSOR_QUAD_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS,
-    IMG_VERTEX_FLOATS, VERTS_PER_QUAD, extract_atlas_rect,
+    IMG_VERTEX_FLOATS, ImageDrawEntry, VERTS_PER_QUAD, extract_atlas_rect,
 };
 use freminal_terminal_emulator::InlineImage;
 
@@ -532,7 +532,7 @@ impl TerminalRenderer {
         deco_verts: &[f32],
         fg_instances: &[f32],
         image_verts: &[f32],
-        image_draw_order: &[u64],
+        image_draw_order: &[ImageDrawEntry],
         snap_images: &std::collections::HashMap<u64, InlineImage>,
         viewport_width: i32,
         viewport_height: i32,
@@ -620,7 +620,7 @@ impl TerminalRenderer {
         cursor_verts: &[f32],
         fg_total_floats: usize,
         image_total_floats: usize,
-        image_draw_order: &[u64],
+        image_draw_order: &[ImageDrawEntry],
         viewport_width: i32,
         viewport_height: i32,
         cell_width: f32,
@@ -962,7 +962,7 @@ impl TerminalRenderer {
         &self,
         gl: &glow::Context,
         vert_floats: usize,
-        image_draw_order: &[u64],
+        image_draw_order: &[ImageDrawEntry],
         vp_w: f32,
         vp_h: f32,
         buf_idx: usize,
@@ -997,12 +997,15 @@ impl TerminalRenderer {
             setup_img_attribs(gl);
         }
 
-        // Draw one quad (6 vertices) per image, in `image_draw_order`.
+        // Draw one quad (6 vertices) per PLACEMENT, in `image_draw_order`.
         // `build_image_verts` emits quads in this exact same order, so vertex
-        // slab N corresponds to `image_draw_order[N]`.
+        // slab N corresponds to `image_draw_order[N]`. The texture lookup
+        // key is `entry.image_id` (the underlying pixel data), not
+        // `entry.instance_id` (Task 100.18) — several placements may share
+        // one uploaded texture.
         let mut quad_idx: i32 = 0;
-        for id in image_draw_order {
-            let Some(tex) = self.image_textures.get(id) else {
+        for entry in image_draw_order {
+            let Some(tex) = self.image_textures.get(&entry.image_id) else {
                 // Texture not uploaded yet (race) — skip.
                 quad_idx += 1;
                 continue;

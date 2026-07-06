@@ -17,7 +17,9 @@ use freminal_common::buffer_states::{
     modes::decsdm::Decsdm, modes::private_color_registers::PrivateColorRegisters,
 };
 
-use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{
+    ImageProtocol, InlineImage, next_image_id, next_placement_instance_id,
+};
 
 use super::TerminalHandler;
 
@@ -115,9 +117,24 @@ impl TerminalHandler {
             None
         };
 
+        // Sixel has no placement-id concept and no `X=`/`Y=` sub-cell
+        // control key — mint a fresh placement-instance id (Task 100.18)
+        // so this placement never merges with an unrelated one, and pass
+        // `None` sub-cell offset (Task 100.19, kitty-only).
+        let placement_instance = next_placement_instance_id();
         let _new_offset = self
             .buffer
-            .place_image(inline_image, 0, ImageProtocol::Sixel, None, None, 0, None)
+            .place_image(
+                inline_image,
+                0,
+                ImageProtocol::Sixel,
+                None,
+                None,
+                0,
+                None,
+                placement_instance,
+                None,
+            )
             .scroll_offset;
 
         // Restore cursor position for DECSDM display mode.

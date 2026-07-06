@@ -754,6 +754,13 @@ fn bench_build_image_verts(c: &mut Criterion) {
                     placement_id: None,
                     z_index: 0,
                     source_crop: None,
+                    // Distinct per-image instance id (Task 100.18) — each
+                    // of the 8 images is its own separate on-screen
+                    // placement, so bucketing must keep them as 8 separate
+                    // draw_order entries, matching the pre-100.18 (keyed by
+                    // image_id) benchmark workload shape.
+                    placement_instance: id,
+                    subcell_offset: None,
                 });
             }
         }

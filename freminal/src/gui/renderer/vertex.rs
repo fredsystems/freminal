@@ -14,7 +14,9 @@ use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, Underli
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::LineWidth;
-use freminal_terminal_emulator::{ImagePlacement, ImageSizeMode, InlineImage, SourceCrop};
+use freminal_terminal_emulator::{
+    ImagePlacement, ImageSizeMode, InlineImage, SourceCrop, SubCellOffset,
+};
 use std::sync::Arc;
 
 use super::super::{
@@ -128,11 +130,16 @@ impl FgRenderOptions {
     }
 }
 
-/// Per-image tracking: pixel bounding box and cell-grid extent within the
-/// image.  The cell-grid extent (min/max `col_in_image`, `row_in_image`) tells
-/// us which portion of the texture is visible, so we can compute UV
-/// coordinates that preserve aspect ratio even when the image is partially
-/// clipped by the terminal edge.
+/// Per-image-PLACEMENT tracking: pixel bounding box and cell-grid extent
+/// within the image.  The cell-grid extent (min/max `col_in_image`,
+/// `row_in_image`) tells us which portion of the texture is visible, so we
+/// can compute UV coordinates that preserve aspect ratio even when the
+/// image is partially clipped by the terminal edge.
+///
+/// Bucketed by `placement_instance` (Task 100.18), NOT by `image_id` — two
+/// independent on-screen placements of the SAME image (e.g. two `a=p` puts
+/// with `p=0`/unspecified) are two separate `ImageBounds` entries, each
+/// producing its own quad, rather than merging into one oversized bucket.
 struct ImageBounds {
     x0: f32,
     y0: f32,
@@ -142,16 +149,41 @@ struct ImageBounds {
     min_row_in_image: usize,
     max_col_in_image: usize,
     max_row_in_image: usize,
+    /// The underlying image id (texture lookup key) this placement
+    /// displays. Captured from the first cell of the bucket — correct
+    /// because every cell of one placement instance shares one image id.
+    image_id: u64,
     /// Kitty `z=` layering value (Task 100.7b). Read from the first-seen
-    /// placement for this image id; all cells of one image share the same
-    /// z-index, so later cells must not overwrite it.
+    /// placement for this placement instance; all cells of one placement
+    /// share the same z-index, so later cells must not overwrite it.
     z_index: i32,
-    /// Source-crop (kitty `a=p` x/y/w/h); read from the first-seen placement,
-    /// like `z_index`. `None` = full image. (Keyed by `image_id` like
-    /// `z_index`, so two placements of the same image with different crops
-    /// collapse to the first-seen — a pre-existing limitation shared with
-    /// `z_index`; out of 100.9 scope.)
+    /// Source-crop (kitty `a=p` x/y/w/h); read from the first-seen
+    /// placement, like `z_index`. `None` = full image. Bucketing by
+    /// `placement_instance` (Task 100.18) means two DIFFERENT placements of
+    /// the same image with different crops no longer collapse — each gets
+    /// its own bucket and therefore its own crop.
     crop: Option<SourceCrop>,
+    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19);
+    /// read from the first-seen placement, like `z_index`/`crop`.
+    subcell_offset: Option<SubCellOffset>,
+}
+
+/// One entry in the authoritative image draw order (Task 100.18).
+///
+/// Carries BOTH the placement instance id (the key into the vertex-slab
+/// bucketing done by [`build_image_verts`]) and the underlying image id
+/// (the key into the GPU texture cache in `gpu.rs`'s `image_textures`
+/// map) — the two are no longer the same key, since bucketing moved from
+/// `image_id` to `placement_instance`, but texture upload/lookup is still
+/// keyed by `image_id` (the pixel data, which may be shared by several
+/// placements).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDrawEntry {
+    /// The placement-instance id (Task 100.18) — identifies which vertex
+    /// slab in the image VBO this entry corresponds to.
+    pub instance_id: u64,
+    /// The underlying image id — identifies which GPU texture to bind.
+    pub image_id: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -654,7 +686,7 @@ pub fn build_image_verts(
     cell_width: u32,
     cell_height: u32,
     verts: &mut Vec<f32>,
-    draw_order: &mut Vec<u64>,
+    draw_order: &mut Vec<ImageDrawEntry>,
 ) {
     // Reuse existing heap allocation — clear but keep capacity.
     verts.clear();
@@ -664,6 +696,10 @@ pub fn build_image_verts(
         return;
     }
 
+    // Bucketed by `placement_instance` (Task 100.18), NOT `image_id` — two
+    // independent placements of the same image id (e.g. two `a=p` puts with
+    // `p=0`/unspecified) must land in two separate buckets so they render
+    // as two separate quads instead of merging into one oversized quad.
     let mut bounds: std::collections::HashMap<u64, ImageBounds> = std::collections::HashMap::new();
 
     for (cell_idx, placement) in placements.iter().enumerate() {
@@ -676,8 +712,8 @@ pub fn build_image_verts(
         let x1 = x0 + gl_f32_u32(cell_width);
         let y1 = y0 + gl_f32_u32(cell_height);
 
-        let id = p.image_id;
-        let entry = bounds.entry(id).or_insert(ImageBounds {
+        let instance_id = p.placement_instance;
+        let entry = bounds.entry(instance_id).or_insert(ImageBounds {
             x0,
             y0,
             x1,
@@ -686,8 +722,10 @@ pub fn build_image_verts(
             min_row_in_image: p.row_in_image,
             max_col_in_image: p.col_in_image,
             max_row_in_image: p.row_in_image,
+            image_id: p.image_id,
             z_index: p.z_index,
             crop: p.source_crop,
+            subcell_offset: p.subcell_offset,
         });
         entry.x0 = entry.x0.min(x0);
         entry.y0 = entry.y0.min(y0);
@@ -699,25 +737,29 @@ pub fn build_image_verts(
         entry.max_row_in_image = entry.max_row_in_image.max(p.row_in_image);
     }
 
-    // Emit quads in (z_index, id) order so higher z-index images render above
-    // lower ones (ties broken by id for determinism). `draw_images` iterates the
-    // SAME order (via `draw_order`), so vertex slab N corresponds to
-    // `draw_order[N]` — the vertex-emission order and the draw order are
-    // guaranteed identical because they share this one authoritative list.
-    draw_order.extend(bounds.keys().copied());
-    draw_order.sort_unstable_by_key(|id| {
-        let z = bounds.get(id).map_or(0, |b| b.z_index);
-        (z, *id)
+    // Emit quads in (z_index, instance_id) order so higher z-index
+    // placements render above lower ones (ties broken by instance id for
+    // determinism). `draw_images` iterates the SAME order (via
+    // `draw_order`), so vertex slab N corresponds to `draw_order[N]` — the
+    // vertex-emission order and the draw order are guaranteed identical
+    // because they share this one authoritative list.
+    draw_order.extend(bounds.iter().map(|(&instance_id, b)| ImageDrawEntry {
+        instance_id,
+        image_id: b.image_id,
+    }));
+    draw_order.sort_unstable_by_key(|entry| {
+        let z = bounds.get(&entry.instance_id).map_or(0, |b| b.z_index);
+        (z, entry.instance_id)
     });
 
     verts.reserve(draw_order.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
 
-    for id in draw_order.iter() {
-        let Some(b) = bounds.get(id) else {
+    for entry in draw_order.iter() {
+        let Some(b) = bounds.get(&entry.instance_id) else {
             continue;
         };
 
-        let quad = compute_image_quad(b, snap_images.get(id));
+        let quad = compute_image_quad(b, snap_images.get(&entry.image_id), cell_width, cell_height);
         verts.extend_from_slice(&quad);
     }
 }
@@ -757,7 +799,21 @@ pub fn build_image_verts(
 /// crop's pixel dimensions also become the quad's native extent (rather
 /// than the full image's), so a cropped native-size image is drawn at the
 /// crop's actual pixel size.
-fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
+///
+/// If `b.subcell_offset` is set (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19),
+/// the quad's position (all four corners) is translated by that many
+/// pixels after [`compute_image_quad_position`] resolves the base
+/// position — orthogonal to both size mode (a position-only shift) and
+/// crop (which only affects UVs, not position). Defensively re-clamped to
+/// `< cell_width`/`< cell_height` here as well, in case a future caller
+/// constructs an `ImageBounds` directly without going through the
+/// resolving handler's own clamp.
+fn compute_image_quad(
+    b: &ImageBounds,
+    img: Option<&InlineImage>,
+    cell_width: u32,
+    cell_height: u32,
+) -> [f32; 4 * VERTS_PER_QUAD] {
     let (u0, v0, u1, v1) = if let Some(img) = img
         && img.display_cols > 0
         && img.display_rows > 0
@@ -802,6 +858,15 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
 
     let (qx0, qy0, qx1, qy1) = compute_image_quad_position(b, img);
 
+    // Apply the kitty `X=`/`Y=` sub-cell pixel offset (Task 100.19) as a
+    // pure translation of all four corners — position only, independent of
+    // size mode and crop (both already resolved above).
+    let (qx0, qy0, qx1, qy1) = b.subcell_offset.map_or((qx0, qy0, qx1, qy1), |offset| {
+        let dx = gl_f32_u32(offset.x.min(cell_width.saturating_sub(1)));
+        let dy = gl_f32_u32(offset.y.min(cell_height.saturating_sub(1)));
+        (qx0 + dx, qy0 + dy, qx1 + dx, qy1 + dy)
+    });
+
     [
         // Triangle 1
         qx0, qy0, u0, v0, qx1, qy0, u1, v0, qx0, qy1, u0, v1, // Triangle 2
@@ -832,8 +897,10 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
 ///   fully-visible case (fraction == 1, full native size) and the
 ///   partially-visible case, without needing a separate fallback path.
 ///
-/// Task 100.17: sub-cell X/Y pixel offset (kitty `X=`/`Y=`) is not applied
-/// here — the quad's top-left always sits exactly at the cell origin.
+/// Sub-cell X/Y pixel offset (kitty `X=`/`Y=`, Task 100.19) is NOT applied
+/// here — this function returns the quad anchored exactly at the cell
+/// origin; the offset translation is applied by the caller,
+/// [`compute_image_quad`], after this function returns.
 fn compute_image_quad_position(b: &ImageBounds, img: Option<&InlineImage>) -> (f32, f32, f32, f32) {
     let Some(img) = img else {
         return (b.x0, b.y0, b.x1, b.y1);
@@ -2654,9 +2721,13 @@ mod tests {
         }
     }
 
-    /// Build a single-cell `ImagePlacement` with the given image id and
-    /// z-index.
-    fn make_placement(image_id: u64, z_index: i32) -> ImagePlacement {
+    /// Build a single-cell `ImagePlacement` with the given image id,
+    /// z-index, and placement instance id.
+    ///
+    /// `instance_id` (Task 100.18) must be explicit rather than derived from
+    /// `image_id` so tests can build two DISTINCT placements of the SAME
+    /// image id and confirm they are bucketed separately.
+    fn make_placement(image_id: u64, z_index: i32, instance_id: u64) -> ImagePlacement {
         ImagePlacement {
             image_id,
             col_in_image: 0,
@@ -2666,6 +2737,8 @@ mod tests {
             placement_id: None,
             z_index,
             source_crop: None,
+            placement_instance: instance_id,
+            subcell_offset: None,
         }
     }
 
@@ -2676,8 +2749,8 @@ mod tests {
         let term_width = 4;
         // Cell 0 -> image A (id=1, z=5); cell 1 -> image B (id=2, z=1).
         let placements: Vec<Option<ImagePlacement>> = vec![
-            Some(make_placement(1, 5)),
-            Some(make_placement(2, 1)),
+            Some(make_placement(1, 5, 1)),
+            Some(make_placement(2, 1, 2)),
             None,
             None,
         ];
@@ -2698,17 +2771,29 @@ mod tests {
         );
 
         // B (lower z) drawn first = bottom; A (higher z) drawn last = on top.
-        assert_eq!(draw_order, vec![2, 1]);
+        assert_eq!(
+            draw_order,
+            vec![
+                ImageDrawEntry {
+                    instance_id: 2,
+                    image_id: 2
+                },
+                ImageDrawEntry {
+                    instance_id: 1,
+                    image_id: 1
+                },
+            ]
+        );
     }
 
-    /// Images with equal z-index are ordered by ascending id for
+    /// Images with equal z-index are ordered by ascending instance id for
     /// determinism.
     #[test]
     fn build_image_verts_ties_broken_by_id() {
         let term_width = 4;
         let placements: Vec<Option<ImagePlacement>> = vec![
-            Some(make_placement(3, 0)),
-            Some(make_placement(1, 0)),
+            Some(make_placement(3, 0, 3)),
+            Some(make_placement(1, 0, 1)),
             None,
             None,
         ];
@@ -2728,7 +2813,19 @@ mod tests {
             &mut draw_order,
         );
 
-        assert_eq!(draw_order, vec![1, 3]);
+        assert_eq!(
+            draw_order,
+            vec![
+                ImageDrawEntry {
+                    instance_id: 1,
+                    image_id: 1
+                },
+                ImageDrawEntry {
+                    instance_id: 3,
+                    image_id: 3
+                },
+            ]
+        );
     }
 
     /// Empty placements must clear `draw_order`, even if it held stale
@@ -2740,7 +2837,16 @@ mod tests {
 
         let mut verts = Vec::new();
         // Pre-fill with stale junk to confirm the early-return path clears it.
-        let mut draw_order = vec![99, 98];
+        let mut draw_order = vec![
+            ImageDrawEntry {
+                instance_id: 99,
+                image_id: 99,
+            },
+            ImageDrawEntry {
+                instance_id: 98,
+                image_id: 98,
+            },
+        ];
         build_image_verts(
             &placements,
             &snap_images,
@@ -2762,7 +2868,7 @@ mod tests {
     #[test]
     fn build_image_verts_single_image_single_draw_order_entry() {
         let term_width = 4;
-        let placements: Vec<Option<ImagePlacement>> = vec![Some(make_placement(7, 3)), None];
+        let placements: Vec<Option<ImagePlacement>> = vec![Some(make_placement(7, 3, 7)), None];
         let mut snap_images = std::collections::HashMap::new();
         snap_images.insert(7, make_inline_image(7));
 
@@ -2778,7 +2884,108 @@ mod tests {
             &mut draw_order,
         );
 
-        assert_eq!(draw_order, vec![7]);
+        assert_eq!(
+            draw_order,
+            vec![ImageDrawEntry {
+                instance_id: 7,
+                image_id: 7
+            }]
+        );
+    }
+
+    /// Two independent placements of the SAME image id (e.g. two `a=p`
+    /// puts with `p=0`/unspecified) must produce TWO separate `ImageBounds`
+    /// buckets/draw-order entries with distinct instance ids and
+    /// correctly-sized separate quads — not one merged, oversized quad
+    /// (Task 100.18).
+    ///
+    /// This is the fail-before/pass-after assertion for 100.18: before the
+    /// fix, bucketing by `image_id` would have collapsed both placements'
+    /// cells into a single `ImageBounds` entry spanning cells from BOTH
+    /// placements (an oversized bounding box), yielding exactly one
+    /// `draw_order` entry instead of two.
+    #[test]
+    fn build_image_verts_two_placements_of_same_image_id_stay_separate() {
+        let term_width = 4;
+        // Placement A: image id 5, instance 100, occupies cell 0 only.
+        // Placement B: image id 5 (SAME image), instance 200, occupies
+        // cells 2 and 3 (a 1x2 placement, distinct region on screen).
+        let mut placement_b_col0 = make_placement(5, 0, 200);
+        placement_b_col0.col_in_image = 0;
+        let mut placement_b_col1 = make_placement(5, 0, 200);
+        placement_b_col1.col_in_image = 1;
+
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(5, 0, 100)),
+            None,
+            Some(placement_b_col0),
+            Some(placement_b_col1),
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(5, make_inline_image(5));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order.len(),
+            2,
+            "two independent placements of the same image id must yield \
+             two separate draw_order entries, not one merged bucket"
+        );
+        let instance_ids: Vec<u64> = draw_order.iter().map(|e| e.instance_id).collect();
+        assert!(instance_ids.contains(&100));
+        assert!(instance_ids.contains(&200));
+        // Both entries reference the same underlying image id for texture
+        // lookup purposes.
+        assert!(draw_order.iter().all(|e| e.image_id == 5));
+        // Two separate quads => 2 * VERTS_PER_QUAD * IMG_VERTEX_FLOATS floats.
+        assert_eq!(verts.len(), 2 * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+    }
+
+    /// A same NON-ZERO `placement_id` re-put (kitty spec REPLACE
+    /// semantics, Task 100.18/100.20) is exercised at the
+    /// `Buffer::clear_image_placements_by_placement` level in
+    /// `freminal-buffer`; here we only confirm that once the OLD
+    /// placement's cells are cleared (as that lower-level call does), only
+    /// the NEW placement's instance remains in `draw_order`.
+    #[test]
+    fn build_image_verts_after_replace_only_new_instance_remains() {
+        let term_width = 4;
+        // Simulates the buffer state AFTER a same-`p=` re-put replaced the
+        // old placement's cells: only the new instance's cell is present.
+        let placements: Vec<Option<ImagePlacement>> =
+            vec![Some(make_placement(9, 0, 300)), None, None, None];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(9, make_inline_image(9));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order.len(),
+            1,
+            "only the replacement placement remains"
+        );
+        assert_eq!(draw_order[0].instance_id, 300);
     }
 
     // ── compute_image_quad UV composition (Task 100.9 source-crop) ────
@@ -2829,8 +3036,10 @@ mod tests {
             min_row_in_image: 0,
             max_col_in_image: 0,
             max_row_in_image: 0,
+            image_id: 1,
             z_index: 0,
             crop,
+            subcell_offset: None,
         }
     }
 
@@ -2856,7 +3065,7 @@ mod tests {
         let bounds = make_bounds(None);
         let img = make_inline_image_sized(1, 100, 100);
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
 
         // Triangle 1: (x0,y0,u0,v0) (x1,y0,u1,v0) (x0,y1,u0,v1)
         let corner_a = quad_uv(&quad, 0);
@@ -2908,7 +3117,7 @@ mod tests {
         }));
         let img = make_inline_image_sized(1, 100, 100);
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
 
         let corner_a = quad_uv(&quad, 0);
         let corner_b = quad_uv(&quad, 1);
@@ -2961,7 +3170,7 @@ mod tests {
         let bounds = make_bounds(None); // 8x16 cell box (b.x1=8, b.y1=16)
         let img = make_inline_image_sized(1, 4, 4); // native 4x4px, size_mode NativePixels
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
         let (x0, y0) = quad_pos(&quad, 0);
         let (x1, _) = quad_pos(&quad, 1);
         let (_, y1) = quad_pos(&quad, 2);
@@ -2988,7 +3197,7 @@ mod tests {
         let bounds = make_bounds(None); // 8x16 cell box
         let img = make_inline_image_sized_explicit_cells(1, 4, 4); // native 4x4px, but ExplicitCells
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
         let (x0, y0) = quad_pos(&quad, 0);
         let (x1, _) = quad_pos(&quad, 1);
         let (_, y1) = quad_pos(&quad, 2);
@@ -3020,7 +3229,7 @@ mod tests {
         }));
         let img = make_inline_image_sized(1, 100, 100); // full image is 100x100, crop is 50x30
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
         let (x0, y0) = quad_pos(&quad, 0);
         let (x1, _) = quad_pos(&quad, 1);
         let (_, y1) = quad_pos(&quad, 2);
@@ -3056,8 +3265,10 @@ mod tests {
             min_row_in_image: 0,
             max_col_in_image: 0,
             max_row_in_image: 0,
+            image_id: 1,
             z_index: 0,
             crop: None,
+            subcell_offset: None,
         };
         let img = InlineImage {
             id: 1,
@@ -3072,7 +3283,7 @@ mod tests {
             animation: AnimationControl::default(),
         };
 
-        let quad = compute_image_quad(&bounds, Some(&img));
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
         let (x0, y0) = quad_pos(&quad, 0);
         let (x1, _) = quad_pos(&quad, 1);
         let (_, y1) = quad_pos(&quad, 2);
@@ -3089,5 +3300,77 @@ mod tests {
             (y1 - 10.0).abs() < POS_EPSILON,
             "y1-y0 should equal the full native height (10), got y1={y1}"
         );
+    }
+
+    // ── compute_image_quad sub-cell X/Y offset (Task 100.19) ────
+
+    /// A kitty `X=`/`Y=` sub-cell offset must translate the quad's origin
+    /// (all four corners) by that many pixels — position only, UVs
+    /// unaffected.
+    #[test]
+    fn compute_image_quad_subcell_offset_translates_quad_position() {
+        let mut bounds = make_bounds(None); // 8x16 cell box (x0=0,y0=0,x1=8,y1=16)
+        bounds.subcell_offset = Some(SubCellOffset { x: 3, y: 5 });
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!(
+            (x0 - 3.0).abs() < POS_EPSILON,
+            "x0 should be translated by the offset (3), got {x0}"
+        );
+        assert!(
+            (y0 - 5.0).abs() < POS_EPSILON,
+            "y0 should be translated by the offset (5), got {y0}"
+        );
+        // ExplicitCells sizes to the full 8x16 cell box; translated by the
+        // offset, x1 = 8 + 3 = 11, y1 = 16 + 5 = 21.
+        assert!(
+            (x1 - 11.0).abs() < POS_EPSILON,
+            "x1 should also be translated by the offset, got {x1}"
+        );
+        assert!(
+            (y1 - 21.0).abs() < POS_EPSILON,
+            "y1 should also be translated by the offset, got {y1}"
+        );
+    }
+
+    /// A sub-cell offset at or beyond the cell's pixel dimensions must be
+    /// defensively re-clamped to strictly less than `cell_width`/
+    /// `cell_height`, even though the resolving handler already clamps.
+    #[test]
+    fn compute_image_quad_subcell_offset_defensively_clamped_to_cell_size() {
+        let mut bounds = make_bounds(None);
+        bounds.subcell_offset = Some(SubCellOffset { x: 100, y: 100 });
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+
+        assert!(
+            (x0 - 7.0).abs() < POS_EPSILON,
+            "x offset should clamp to cell_width - 1 (7), got {x0}"
+        );
+        assert!(
+            (y0 - 15.0).abs() < POS_EPSILON,
+            "y offset should clamp to cell_height - 1 (15), got {y0}"
+        );
+    }
+
+    /// No sub-cell offset (`None`) must leave the quad position exactly as
+    /// `compute_image_quad_position` computed it — no translation applied.
+    #[test]
+    fn compute_image_quad_no_subcell_offset_is_untranslated() {
+        let bounds = make_bounds(None);
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
     }
 }

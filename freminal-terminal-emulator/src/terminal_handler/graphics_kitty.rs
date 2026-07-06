@@ -29,7 +29,7 @@ use freminal_common::buffer_states::kitty_graphics::{
 
 use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
-    next_image_id,
+    SubCellOffset, next_image_id, next_placement_instance_id,
 };
 
 use super::KittyImageState;
@@ -584,6 +584,12 @@ impl TerminalHandler {
             placement_id,
             cols: u32::try_from(display_cols).unwrap_or(u32::MAX),
             rows: u32::try_from(display_rows).unwrap_or(u32::MAX),
+            // Task 100.20: a fresh instance id every time this is
+            // (re-)registered, so placeholder cells stamped from an earlier
+            // registration (which keep their own already-stamped instance
+            // id) remain a distinct renderer bucket from placeholder cells
+            // stamped after this new registration.
+            placement_instance: next_placement_instance_id(),
         };
         self.virtual_placements.insert((image_id, placement_id), vp);
     }
@@ -604,6 +610,7 @@ impl TerminalHandler {
         display_cols: usize,
         display_rows: usize,
         z_index: i32,
+        placement_instance: u64,
     ) {
         self.insert_real_placement(
             image_id,
@@ -616,6 +623,7 @@ impl TerminalHandler {
             z_index,
             0,
             0,
+            placement_instance,
         );
     }
 
@@ -640,6 +648,7 @@ impl TerminalHandler {
         z_index: i32,
         h_offset: i32,
         v_offset: i32,
+        placement_instance: u64,
     ) {
         self.real_placements.insert(
             (image_id, placement_id),
@@ -654,6 +663,7 @@ impl TerminalHandler {
                 z_index,
                 h_offset,
                 v_offset,
+                placement_instance,
             },
         );
     }
@@ -780,6 +790,23 @@ impl TerminalHandler {
             image_to_place.width_px,
             image_to_place.height_px,
         );
+        let subcell_offset = self.resolve_subcell_offset(&cmd.control);
+
+        // Kitty spec REPLACE semantics (Task 100.18): a second `a=p` put
+        // with the SAME non-zero `p=` replaces that one placement; `p=0`/
+        // unspecified means multiple, independently-coexisting placements,
+        // so it must NOT clear anything here.
+        if let Some(pid) = cmd.control.placement_id
+            && pid != 0
+        {
+            self.buffer.clear_image_placements_by_placement(id, pid);
+        }
+
+        // Mint a fresh placement-instance id for this DISPLAY put — every
+        // `a=p` put is a distinct on-screen placement, even a `p=0`/
+        // unspecified one that shares an image id with another placement
+        // (Task 100.18).
+        let placement_instance = next_placement_instance_id();
         let place_result = self.buffer.place_image(
             image_to_place,
             0,
@@ -788,6 +815,8 @@ impl TerminalHandler {
             cmd.control.placement_id,
             cmd.control.z_index.unwrap_or(0),
             source_crop,
+            placement_instance,
+            subcell_offset,
         );
 
         // Restore cursor if `C=1`.
@@ -812,6 +841,7 @@ impl TerminalHandler {
             display_cols,
             display_rows,
             cmd.control.z_index.unwrap_or(0),
+            place_result.placement_instance,
         );
     }
 
@@ -1438,58 +1468,14 @@ impl TerminalHandler {
             let pid = control.placement_id.unwrap_or(0);
             self.register_virtual_placement(assigned_id, pid, display_cols, display_rows);
         } else if should_display {
-            tracing::debug!(
-                "Kitty graphics: placing image id={assigned_id} at cursor, \
-                 {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
-            );
-            let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
-
-            // Save cursor position if `C=1` (no cursor movement) — mirrors
-            // `stamp_kitty_put`'s handling of the same flag on `a=p` (Task
-            // 100.16). Without this, `a=T`/Put ignored `C=1` entirely:
-            // `place_image` (Task 100.15) now always moves the cursor below
-            // the image, so `C=1` must explicitly restore it here.
-            let saved_cursor = if control.no_cursor_movement {
-                Some(self.buffer.cursor().pos)
-            } else {
-                None
-            };
-
-            let place_result = self.buffer.place_image(
-                inline_image,
-                0,
-                ImageProtocol::Kitty,
-                control.image_number,
-                control.placement_id,
-                control.z_index.unwrap_or(0),
-                source_crop,
-            );
-
-            // Restore cursor if `C=1`.
-            if let Some(pos) = saved_cursor {
-                self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
-            }
-
-            // Record this real (cell-stamped) placement's origin so future
-            // relative placements can reference it as a parent (Task 100.4a).
-            //
-            // Use the TRUE stamped origin from `place_result`, not a
-            // pre-call cursor read: `place_image` may drain scrollback rows
-            // during placement, which shifts the image's actual row
-            // upward relative to the cursor position captured before the
-            // call (Task 100.14). This is unaffected by the `C=1` cursor
-            // restore above — the recorded origin always reflects where the
-            // image was actually stamped, regardless of where the cursor
-            // ends up afterward.
-            let pid = control.placement_id.unwrap_or(0);
-            self.record_real_placement(
+            self.stamp_kitty_transmit_display(
+                control,
                 assigned_id,
-                pid,
-                place_result.origin_row,
-                place_result.origin_col,
+                inline_image,
                 display_cols,
                 display_rows,
-                control.z_index.unwrap_or(0),
+                img_width_px,
+                img_height_px,
             );
         } else {
             tracing::debug!(
@@ -1512,6 +1498,106 @@ impl TerminalHandler {
             );
             self.write_to_pty(&response);
         }
+    }
+
+    /// Stamp a non-virtual, non-relative `a=T` (transmit-and-display) or
+    /// `a=t` immediately-displayed placement at the cursor, restoring the
+    /// cursor afterward if `C=1` was requested, and record it as a real
+    /// placement so it can act as a future relative-placement parent (Task
+    /// 100.4a). Mirrors [`Self::stamp_kitty_put`]'s handling of
+    /// source-crop (Task 100.9), sub-cell offset (Task 100.19), and REPLACE
+    /// semantics (Task 100.18) for the `a=p` (Put) path.
+    ///
+    /// Split out of [`Self::place_kitty_image`] to keep that function
+    /// within the line-count lint limit.
+    #[allow(clippy::too_many_arguments)]
+    // All parameters are required placement inputs already resolved by the
+    // caller; grouping into a struct would obscure the data flow without
+    // reducing coupling, matching the established convention for
+    // `place_kitty_image`-adjacent methods.
+    fn stamp_kitty_transmit_display(
+        &mut self,
+        control: &KittyControlData,
+        assigned_id: u64,
+        inline_image: InlineImage,
+        display_cols: usize,
+        display_rows: usize,
+        img_width_px: u32,
+        img_height_px: u32,
+    ) {
+        tracing::debug!(
+            "Kitty graphics: placing image id={assigned_id} at cursor, \
+             {display_cols}x{display_rows} cells, {img_width_px}x{img_height_px} px",
+        );
+        let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
+        let subcell_offset = self.resolve_subcell_offset(control);
+
+        // Save cursor position if `C=1` (no cursor movement) — mirrors
+        // `stamp_kitty_put`'s handling of the same flag on `a=p` (Task
+        // 100.16). Without this, `a=T`/Put ignored `C=1` entirely:
+        // `place_image` (Task 100.15) now always moves the cursor below
+        // the image, so `C=1` must explicitly restore it here.
+        let saved_cursor = if control.no_cursor_movement {
+            Some(self.buffer.cursor().pos)
+        } else {
+            None
+        };
+
+        // Kitty spec REPLACE semantics (Task 100.18): a second `a=T`
+        // with the SAME non-zero `p=` replaces that one placement;
+        // `p=0`/unspecified means multiple, independently-coexisting
+        // placements, so it must NOT clear anything here.
+        if let Some(pid) = control.placement_id
+            && pid != 0
+        {
+            self.buffer
+                .clear_image_placements_by_placement(assigned_id, pid);
+        }
+
+        // Mint a fresh placement-instance id for this DISPLAY put —
+        // every `a=T` display is a distinct on-screen placement, even a
+        // `p=0`/unspecified one that shares an image id with another
+        // placement (Task 100.18).
+        let placement_instance = next_placement_instance_id();
+        let place_result = self.buffer.place_image(
+            inline_image,
+            0,
+            ImageProtocol::Kitty,
+            control.image_number,
+            control.placement_id,
+            control.z_index.unwrap_or(0),
+            source_crop,
+            placement_instance,
+            subcell_offset,
+        );
+
+        // Restore cursor if `C=1`.
+        if let Some(pos) = saved_cursor {
+            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        }
+
+        // Record this real (cell-stamped) placement's origin so future
+        // relative placements can reference it as a parent (Task 100.4a).
+        //
+        // Use the TRUE stamped origin from `place_result`, not a
+        // pre-call cursor read: `place_image` may drain scrollback rows
+        // during placement, which shifts the image's actual row
+        // upward relative to the cursor position captured before the
+        // call (Task 100.14). This is unaffected by the `C=1` cursor
+        // restore above — the recorded origin always reflects where the
+        // image was actually stamped, regardless of where the cursor
+        // ends up afterward.
+        let pid = control.placement_id.unwrap_or(0);
+        self.record_real_placement(
+            assigned_id,
+            pid,
+            place_result.origin_row,
+            place_result.origin_col,
+            display_cols,
+            display_rows,
+            control.z_index.unwrap_or(0),
+            place_result.placement_instance,
+        );
     }
 
     /// Handle a Kitty relative placement (`P=`/`Q=`/`H=`/`V=` present on
@@ -1684,6 +1770,12 @@ impl TerminalHandler {
             .get(child_image_id)
             .map_or((0, 0), |img| (img.width_px, img.height_px));
         let source_crop = resolve_source_crop(control, child_width_px, child_height_px);
+        let subcell_offset = self.resolve_subcell_offset(control);
+
+        // Mint a fresh placement-instance id for the child — it is a
+        // DISTINCT on-screen placement from its parent (Task 100.18), even
+        // though it shares the parent's origin plus an offset.
+        let placement_instance = next_placement_instance_id();
 
         self.buffer.place_image_at(
             child_image_id,
@@ -1696,6 +1788,8 @@ impl TerminalHandler {
             control.placement_id,
             z_index,
             source_crop,
+            placement_instance,
+            subcell_offset,
         );
 
         self.insert_real_placement(
@@ -1709,6 +1803,7 @@ impl TerminalHandler {
             z_index,
             h_offset,
             v_offset,
+            placement_instance,
         );
     }
 
@@ -1739,6 +1834,13 @@ impl TerminalHandler {
             parent_key.0,
             parent_key.1,
         );
+        // Mint the child's placement-instance id now, at registration time
+        // (Task 100.18/100.20) — no cells are stamped here, but the id must
+        // be minted ONCE and stay stable across every subsequent
+        // `inject_virtual_parent_relatives` re-derivation (`RealPlacement`
+        // is a first-class, persistent record; a per-frame mint would make
+        // each frame's re-derived cells look like a brand-new placement).
+        let placement_instance = next_placement_instance_id();
         self.insert_real_placement(
             child_image_id,
             child_pid,
@@ -1750,6 +1852,7 @@ impl TerminalHandler {
             z_index,
             h_offset,
             v_offset,
+            placement_instance,
         );
     }
 
@@ -2325,16 +2428,29 @@ impl TerminalHandler {
         }
     }
 
-    /// `d=i`/`d=I` — delete placements for image id `i=`.
+    /// `d=i`/`d=I` — delete placements for image id `i=`, optionally
+    /// narrowed to a single placement id `p=` (Task 100.20).
     fn handle_kitty_delete_by_id(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
         let Some(image_id) = cmd.control.image_id else {
             return;
         };
         let id = u64::from(image_id);
-        tracing::debug!(
-            "Kitty graphics: deleting placements for image id={id} (free_data={free_data})"
-        );
-        self.buffer.clear_image_placements_by_id(id);
+        match cmd.control.placement_id {
+            Some(pid) if pid != 0 => {
+                tracing::debug!(
+                    "Kitty graphics: deleting placement id={pid} of image id={id} \
+                     (free_data={free_data})"
+                );
+                self.buffer.clear_image_placements_by_placement(id, pid);
+            }
+            _ => {
+                tracing::debug!(
+                    "Kitty graphics: deleting all placements for image id={id} \
+                     (free_data={free_data})"
+                );
+                self.buffer.clear_image_placements_by_id(id);
+            }
+        }
         self.virtual_placements
             .retain(|&(img_id, _), _| img_id != id);
         if free_data {
@@ -2602,6 +2718,34 @@ impl TerminalHandler {
             }
         }
         ids
+    }
+
+    /// Resolve `a=p`/`a=T` `X=`/`Y=` control keys into a [`SubCellOffset`]
+    /// for the display path only (Task 100.19).
+    ///
+    /// `X=`/`Y=` (`cell_x_offset`/`cell_y_offset`) shift the drawing origin
+    /// within the placement's top-left cell by that many PIXELS. Clamped to
+    /// strictly less than the current cell pixel dimensions (a client could
+    /// request an offset at or past the cell edge — kitty requires it be
+    /// less than the cell size). Returns `None` when both axes are absent
+    /// or `0`, so the renderer's "no offset" fast path is used.
+    ///
+    /// Must be called ONLY from the DISPLAY sites ([`Self::stamp_kitty_put`],
+    /// [`Self::place_kitty_image`]'s display branch, and
+    /// [`Self::stamp_relative_placement_at_real_parent`]) — `cell_x_offset`/
+    /// `cell_y_offset` are the SAME control-data fields read by
+    /// [`resolve_compose_rect`] for `a=c` (compose) with different meaning
+    /// (source top-left there, not a display sub-cell shift), and are not
+    /// meaningful at all on the Unicode-placeholder path.
+    fn resolve_subcell_offset(&self, control: &KittyControlData) -> Option<SubCellOffset> {
+        let x = control.cell_x_offset.unwrap_or(0);
+        let y = control.cell_y_offset.unwrap_or(0);
+        if x == 0 && y == 0 {
+            return None;
+        }
+        let x = x.min(self.cell_pixel_width.saturating_sub(1));
+        let y = y.min(self.cell_pixel_height.saturating_sub(1));
+        Some(SubCellOffset { x, y })
     }
 }
 
@@ -2884,6 +3028,9 @@ mod tests {
 
     use super::ImageSizeMode;
     use super::SourceCrop;
+
+    use freminal_buffer::cell::Cell;
+    use freminal_buffer::row::Row;
 
     use super::super::TerminalHandler;
 
@@ -3441,6 +3588,73 @@ mod tests {
         );
     }
 
+    /// `d=i,p=<n>` (Task 100.20) must narrow deletion to the ONE named
+    /// placement — a second, independent placement of the SAME image id
+    /// with a DIFFERENT `p=` must survive.
+    #[test]
+    fn kitty_delete_by_id_with_placement_id_narrows_to_named_placement() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget,
+        };
+
+        let (mut handler, rx) = kitty_handler();
+
+        // Placement p=5 of image id=42 at (col=0, row=0).
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let mut cmd_p5 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd_p5.control.placement_id = Some(5);
+        handler.handle_kitty_graphics(cmd_p5);
+        let _ = recv_response(&rx);
+
+        // Placement p=9 of the SAME image id=42, via `a=p` (Put), at a
+        // different screen position.
+        handler.buffer_mut().set_cursor_pos(Some(5), Some(3));
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                placement_id: Some(9),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+        let _ = recv_response(&rx);
+
+        assert!(
+            count_placement_with_id(&handler, 42, 5) > 0,
+            "p=5 should exist before delete"
+        );
+        assert!(
+            count_placement_with_id(&handler, 42, 9) > 0,
+            "p=9 should exist before delete"
+        );
+
+        // Delete only p=5 of image id=42.
+        let delete_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(KittyDeleteTarget::ById),
+                image_id: Some(42),
+                placement_id: Some(5),
+                delete_free_data: false,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(delete_cmd);
+
+        assert_eq!(
+            count_placement_with_id(&handler, 42, 5),
+            0,
+            "p=5's cells should be cleared"
+        );
+        assert!(
+            count_placement_with_id(&handler, 42, 9) > 0,
+            "p=9's cells must survive deletion of p=5"
+        );
+    }
+
     #[test]
     fn kitty_delete_at_cursor_uppercase_keeps_data_if_referenced_elsewhere() {
         use freminal_common::buffer_states::kitty_graphics::{
@@ -3951,6 +4165,58 @@ mod tests {
         assert_eq!(p1.col_in_image, 1);
     }
 
+    /// Two INDEPENDENT `a=p,U=1` registrations of the SAME image with
+    /// `p=0`/unspecified (Task 100.20) must stamp their respective
+    /// placeholder cells with DISTINCT `placement_instance` ids — even
+    /// though both registrations share the same `(image_id, placement_id)`
+    /// key in `virtual_placements` (the second registration overwrites the
+    /// first in that map), the placeholder cells stamped from EACH
+    /// registration keep whichever instance id was live at the moment they
+    /// were processed, so the two sets of cells coexist as distinct
+    /// renderer buckets instead of collapsing into one.
+    #[test]
+    fn kitty_two_p_zero_virtual_registrations_stamp_distinct_instances() {
+        let (mut handler, _rx) = kitty_handler();
+
+        // First registration of the virtual placement (image=42, p=0).
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+
+        let fmt = format_for_placeholder(42, 0);
+        handler.set_format(fmt.clone());
+
+        // Stamp a placeholder cell resolving against the FIRST registration.
+        let first = placeholder_with_row_col(0, 0);
+        handler.handle_data(&first);
+
+        // Second, independent registration of the SAME (image_id,
+        // placement_id) key — overwrites the `virtual_placements` entry
+        // with a fresh `placement_instance`.
+        handler.handle_kitty_graphics(kitty_virtual_2x2_cmd());
+        handler.set_format(fmt);
+
+        // Stamp a second placeholder cell — this one resolves against the
+        // SECOND (fresh) registration.
+        let second = placeholder_with_row_col(0, 1);
+        handler.handle_data(&second);
+
+        let row0 = &handler.buffer().rows()[0];
+        let first_instance = row0.cells()[0]
+            .image_placement()
+            .expect("first placeholder cell should have an image")
+            .placement_instance;
+        let second_instance = row0.cells()[1]
+            .image_placement()
+            .expect("second placeholder cell should have an image")
+            .placement_instance;
+
+        assert_ne!(
+            first_instance, second_instance,
+            "two independent p=0 virtual-placement registrations must stamp \
+             distinct placement_instance ids so their placeholder cells \
+             coexist as separate renderer buckets"
+        );
+    }
+
     #[test]
     fn kitty_placeholder_inheritance_no_diacritics() {
         let (mut handler, _rx) = kitty_handler();
@@ -4165,6 +4431,25 @@ mod tests {
         }
     }
 
+    /// Count cells whose placement matches BOTH `image_id` and
+    /// `placement_id` (Task 100.20 narrowing tests).
+    fn count_placement_with_id(
+        handler: &TerminalHandler,
+        image_id: u64,
+        placement_id: u32,
+    ) -> usize {
+        handler
+            .buffer()
+            .rows()
+            .iter()
+            .flat_map(Row::cells)
+            .filter(|c| {
+                c.image_placement()
+                    .is_some_and(|p| p.image_id == image_id && p.placement_id == Some(placement_id))
+            })
+            .count()
+    }
+
     #[test]
     fn kitty_plain_put_registers_real_placement_with_correct_origin() {
         let (mut handler, _rx) = kitty_handler();
@@ -4182,6 +4467,117 @@ mod tests {
         assert_eq!(placement.origin_row, 5);
         assert_eq!(placement.origin_col, 3);
         assert_eq!(placement.parent, None);
+    }
+
+    /// Two `a=p`/`a=T` puts of the SAME image with `p=0`/unspecified are
+    /// MULTIPLE COEXISTING placements per the kitty spec (Task 100.18):
+    /// both sets of cells must remain on screen, each stamped with its
+    /// OWN, distinct `placement_instance` id (so the renderer buckets them
+    /// as two separate quads instead of merging into one).
+    #[test]
+    fn kitty_two_displays_same_image_p_unspecified_coexist_with_distinct_instances() {
+        let (mut handler, rx) = kitty_handler();
+
+        // First display at (col=0, row=0). `kitty_rgba_2x2_cmd`'s 2x2px
+        // image resolves to a 1x1 CELL footprint at the default 8x16px
+        // cell size, so only the origin cell itself carries the placement.
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let cmd1 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        handler.handle_kitty_graphics(cmd1);
+        let _ = recv_response(&rx);
+
+        // Second, independent display of the SAME image id=42 at a
+        // DIFFERENT screen position (col=3, row=5), still `p=0`/unspecified.
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(5));
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+        let _ = recv_response(&rx);
+
+        let instance_at = |row: usize, col: usize| {
+            handler
+                .buffer()
+                .rows()
+                .get(row)
+                .and_then(|r| r.cells().get(col))
+                .and_then(|c| c.image_placement())
+                .map(|p| p.placement_instance)
+        };
+
+        let first_instance = instance_at(0, 0).expect("first placement cell should have image");
+        let second_instance = instance_at(5, 3).expect("second placement cell should have image");
+
+        assert_ne!(
+            first_instance, second_instance,
+            "two independent p=0 placements of the same image must get \
+             distinct placement_instance ids so they don't merge in the renderer"
+        );
+        // BOTH placements' cells must still be present — coexistence, not
+        // replacement.
+        assert!(instance_at(0, 0).is_some());
+        assert!(instance_at(5, 3).is_some());
+    }
+
+    /// A second `a=p`/`a=T` put with the SAME NON-ZERO `placement_id`
+    /// REPLACES the first placement (kitty spec, Task 100.18): the old
+    /// placement's cells must be cleared, leaving only the new placement's
+    /// cells (at its own screen position) on screen.
+    #[test]
+    fn kitty_second_put_same_nonzero_placement_id_replaces_first() {
+        let (mut handler, rx) = kitty_handler();
+
+        // First put: image id=42, p=5, at (col=0, row=0).
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+        let mut cmd1 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd1.control.placement_id = Some(5);
+        handler.handle_kitty_graphics(cmd1);
+        let _ = recv_response(&rx);
+
+        let has_image_at = |h: &TerminalHandler, row: usize, col: usize| {
+            h.buffer()
+                .rows()
+                .get(row)
+                .and_then(|r| r.cells().get(col))
+                .is_some_and(Cell::has_image)
+        };
+        assert!(
+            has_image_at(&handler, 0, 0),
+            "first put's cell should exist before replace"
+        );
+
+        // Second put: SAME image id=42, SAME p=5, but at a DIFFERENT
+        // screen position (col=3, row=5) — this must REPLACE, clearing
+        // the first put's cells.
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(5));
+        let mut cmd2 = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd2.control.placement_id = Some(5);
+        handler.handle_kitty_graphics(cmd2);
+        let _ = recv_response(&rx);
+
+        assert!(
+            !has_image_at(&handler, 0, 0),
+            "REPLACE must clear the old placement's cells"
+        );
+        assert!(
+            has_image_at(&handler, 5, 3),
+            "the new placement's cells must be present"
+        );
+
+        // Exactly one entry in real_placements for (42, 5), pointing at
+        // the NEW origin.
+        let placement = handler
+            .real_placements
+            .get(&(42, 5))
+            .copied()
+            .expect("expected a RealPlacement for (42, 5)");
+        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_col, 3);
     }
 
     #[test]
@@ -4695,6 +5091,8 @@ mod tests {
                     placement_id: Some(placement_id),
                     z_index: 0,
                     source_crop: None,
+                    placement_instance: 1,
+                    subcell_offset: None,
                 };
                 handler.buffer_mut().set_image_cell_at(
                     start_row + row_in_image,
@@ -4741,6 +5139,7 @@ mod tests {
                 placement_id: 0,
                 rows: 2,
                 cols: 2,
+                placement_instance: 1,
             },
         );
         // Parent's placeholder cells currently sit at rows 2-3, cols 5-6
@@ -4748,7 +5147,7 @@ mod tests {
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child (99, 0), a single cell, registered with H=1, V=1.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -4773,12 +5172,13 @@ mod tests {
                 placement_id: 0,
                 rows: 2,
                 cols: 2,
+                placement_instance: 1,
             },
         );
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child with H=0, V=0.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 0, 0);
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 0, 0, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -4806,9 +5206,10 @@ mod tests {
                 placement_id: 0,
                 rows: 2,
                 cols: 2,
+                placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -4829,13 +5230,13 @@ mod tests {
         grow_buffer_rows(&mut handler, 3);
 
         // Real (non-virtual) parent placement (42, 0).
-        handler.insert_real_placement(42, 0, 0, 0, 1, 1, None, 0, 0, 0);
+        handler.insert_real_placement(42, 0, 0, 0, 1, 1, None, 0, 0, 0, 1);
 
         // Child (99, 0) already stamped at (1, 0) — as 100.4a would have
         // done via `place_image_at` — with parent = (42, 0), h=1, v=1
         // (irrelevant here since the parent is real, not virtual).
         stamp_parent_placeholder_block(&mut handler, 99, 0, 1, 0, 1, 1);
-        handler.insert_real_placement(99, 0, 1, 0, 1, 1, Some((42, 0)), 0, 1, 1);
+        handler.insert_real_placement(99, 0, 1, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -4870,9 +5271,10 @@ mod tests {
                 placement_id: 0,
                 rows: 1,
                 cols: 1,
+                placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 0);
+        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 0, 1);
 
         // First position: parent placeholder at (2, 5).
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 1, 1);
@@ -8273,6 +8675,95 @@ mod tests {
         assert_eq!(
             placed.source_crop, None,
             "a=p with no crop keys should display the full image (None)"
+        );
+    }
+
+    /// `a=p,X=,Y=` (Task 100.19) must stamp the resolved [`SubCellOffset`]
+    /// onto every placed cell.
+    #[test]
+    fn kitty_put_with_subcell_offset_stamps_resolved_offset_onto_placed_cells() {
+        use freminal_buffer::image_store::SubCellOffset;
+
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                cell_x_offset: Some(3),
+                cell_y_offset: Some(5),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.subcell_offset,
+            Some(SubCellOffset { x: 3, y: 5 }),
+            "a=p X/Y should stamp the resolved SubCellOffset onto placed cells"
+        );
+    }
+
+    /// `X=`/`Y=` at or beyond the cell's pixel dimensions must be clamped
+    /// to strictly less than the cell size (Task 100.19) — the default
+    /// handler cell size is 8x16px, so `X=100` clamps to 7 and `Y=100`
+    /// clamps to 15.
+    #[test]
+    fn kitty_put_with_subcell_offset_beyond_cell_size_is_clamped() {
+        use freminal_buffer::image_store::SubCellOffset;
+
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                cell_x_offset: Some(100),
+                cell_y_offset: Some(100),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.subcell_offset,
+            Some(SubCellOffset { x: 7, y: 15 }),
+            "an offset at/beyond the cell size must clamp to cell_size - 1"
+        );
+    }
+
+    /// `a=p` with no `X=`/`Y=` keys must leave `subcell_offset` as `None`.
+    #[test]
+    fn kitty_put_without_subcell_offset_keys_yields_none() {
+        let (mut handler, _rx) = kitty_handler_with_black_10x10_base(42);
+        handler.buffer_mut().set_cursor_pos(Some(0), Some(0));
+
+        let put_cmd = KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        };
+        handler.handle_kitty_graphics(put_cmd);
+
+        let placed = handler.buffer().rows()[0].cells()[0]
+            .image_placement()
+            .expect("cell should carry a placement after a=p");
+        assert_eq!(
+            placed.subcell_offset, None,
+            "a=p with no X/Y keys should have no sub-cell offset"
         );
     }
 

@@ -17,7 +17,9 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
 
-use freminal_buffer::image_store::{ImageProtocol, ImageSizeMode, InlineImage, next_image_id};
+use freminal_buffer::image_store::{
+    ImageProtocol, ImageSizeMode, InlineImage, next_image_id, next_placement_instance_id,
+};
 
 use super::{MultipartImageState, TerminalHandler};
 
@@ -128,9 +130,25 @@ impl TerminalHandler {
 
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
+        //
+        // iTerm2 has no placement-id concept and no `X=`/`Y=` sub-cell
+        // control key — mint a fresh placement-instance id (Task 100.18)
+        // so this placement never merges with an unrelated one, and pass
+        // `None` sub-cell offset (Task 100.19, kitty-only).
+        let placement_instance = next_placement_instance_id();
         let _new_offset = self
             .buffer
-            .place_image(inline_image, 0, ImageProtocol::ITerm2, None, None, 0, None)
+            .place_image(
+                inline_image,
+                0,
+                ImageProtocol::ITerm2,
+                None,
+                None,
+                0,
+                None,
+                placement_instance,
+                None,
+            )
             .scroll_offset;
 
         // Restore cursor position if doNotMoveCursor was requested.

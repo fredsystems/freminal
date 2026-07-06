@@ -22,6 +22,16 @@ use std::{
 /// Global monotonic counter for generating unique image IDs.
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Global monotonic counter for generating unique placement INSTANCE ids.
+///
+/// Distinct from `NEXT_IMAGE_ID`: an image id identifies the pixel data
+/// (`InlineImage`); a placement instance id identifies one on-screen
+/// PLACEMENT of that image (Task 100.18). Two `a=p` puts of the same image
+/// id with `p=0`/unspecified are separate, coexisting placements — each
+/// must get its own instance id so the renderer buckets their cells into
+/// two independent quads instead of merging them into one oversized quad.
+static NEXT_PLACEMENT_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Base-image storage budget per buffer, in bytes (kitty's reference value,
 /// 320 MB). Still-image (root-frame) pixel data is charged against this pool.
 pub const KITTY_IMAGE_BASE_QUOTA_BYTES: usize = 320 * 1024 * 1024;
@@ -36,6 +46,16 @@ pub const KITTY_IMAGE_ANIM_QUOTA_BYTES: usize = 5 * KITTY_IMAGE_BASE_QUOTA_BYTES
 /// IDs are monotonically increasing and never reused within a process.
 pub fn next_image_id() -> u64 {
     NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Generate a unique placement INSTANCE ID (Task 100.18).
+///
+/// IDs are monotonically increasing and never reused within a process.
+/// Minted once per DISTINCT on-screen placement (not per image, and not per
+/// cell) — every cell belonging to the same placement shares one instance
+/// id, which the renderer uses to bucket cells into independent quads.
+pub fn next_placement_instance_id() -> u64 {
+    NEXT_PLACEMENT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// One additional animation frame (frame 2..N) for an animated image.
@@ -283,6 +303,21 @@ pub struct SourceCrop {
     pub height: u32,
 }
 
+/// A pixel-space sub-cell offset for a kitty `a=p`/`a=T` placement's `X=`/
+/// `Y=` control keys.
+///
+/// Shifts the drawing origin within the placement's top-left cell by this
+/// many PIXELS (must be `< cell_pixel_width`/`< cell_pixel_height` — the
+/// resolving handler clamps this). Kitty-only; iTerm2 and Sixel have no
+/// equivalent control key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubCellOffset {
+    /// Horizontal pixel offset within the top-left cell (`X=`).
+    pub x: u32,
+    /// Vertical pixel offset within the top-left cell (`Y=`).
+    pub y: u32,
+}
+
 /// A reference to a portion of an image within a single cell.
 ///
 /// Each cell in the image's rectangular footprint carries one of these,
@@ -315,6 +350,21 @@ pub struct ImagePlacement {
 
     /// Source-crop rectangle (kitty `a=p` `x/y/w/h`); `None` = full image.
     pub source_crop: Option<SourceCrop>,
+
+    /// Unique identity of the on-screen PLACEMENT this cell belongs to
+    /// (Task 100.18), minted via `next_placement_instance_id()`.
+    ///
+    /// Distinct from `image_id` (which identifies the pixel data, and may
+    /// be shared by many coexisting placements) and from `placement_id`
+    /// (the protocol-level `p=` value, which is often `0`/unspecified for
+    /// multiple independent placements). The renderer buckets cells by
+    /// this field, not `image_id`, so two placements of the same image
+    /// never merge into one oversized quad.
+    pub placement_instance: u64,
+
+    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19);
+    /// `None` = no offset (draw at the cell's exact top-left).
+    pub subcell_offset: Option<SubCellOffset>,
 }
 
 /// Central storage for all inline images in a buffer.
@@ -652,6 +702,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let p2 = ImagePlacement {
             image_id: 1,
@@ -662,6 +714,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let p3 = ImagePlacement {
             image_id: 1,
@@ -672,6 +726,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
 
         assert_eq!(p1, p2);
@@ -695,6 +751,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: Some(cropped),
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let p2 = ImagePlacement {
             image_id: 1,
@@ -705,6 +763,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: Some(cropped),
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let p3 = ImagePlacement {
             image_id: 1,
@@ -715,6 +775,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
 
         assert_eq!(p1, p2, "identical source_crop values must compare equal");
@@ -761,6 +823,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let image_cell = Cell::image_cell(placement_id1, FormatTag::default());
         let plain_cell = Cell::blank_with_tag(FormatTag::default());
@@ -835,6 +899,8 @@ mod tests {
                 placement_id: None,
                 z_index: 0,
                 source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
             },
             FormatTag::default(),
         );
@@ -848,6 +914,8 @@ mod tests {
                 placement_id: None,
                 z_index: 0,
                 source_crop: None,
+                placement_instance: 1,
+                subcell_offset: None,
             },
             FormatTag::default(),
         );
@@ -1113,6 +1181,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
@@ -1174,6 +1244,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
@@ -1258,6 +1330,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
         let rows: Vec<&[Cell]> = vec![row_data.as_slice()];

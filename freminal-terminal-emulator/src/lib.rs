@@ -67,7 +67,7 @@ extern crate tracing;
 // taking a direct dependency on `freminal-buffer`.
 pub use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageFrame, ImagePlacement, ImageProtocol, ImageSizeMode,
-    InlineImage, SourceCrop,
+    InlineImage, SourceCrop, SubCellOffset, next_placement_instance_id,
 };
 
 // Re-export `LineWidth` for the renderer to apply DECDWL / DECDHL scaling.

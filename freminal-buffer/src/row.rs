@@ -1058,6 +1058,8 @@ mod tests {
             placement_id: None,
             z_index: 0,
             source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         }
     }
 

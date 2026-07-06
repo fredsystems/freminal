@@ -159,6 +159,14 @@ pub(crate) struct RealPlacement {
     pub h_offset: i32,
     /// Vertical cell offset (`V=`) from the parent. `0` for non-relative.
     pub v_offset: i32,
+    /// Unique placement-instance id (Task 100.18), minted once when this
+    /// placement was first stamped/registered. Stable across frames — a
+    /// virtual-parent relative child re-derives its per-cell stamps on
+    /// every call to `inject_virtual_parent_relatives`, and must reuse
+    /// this SAME instance id each time rather than minting a fresh one, or
+    /// the renderer would treat every frame's re-derivation as a new,
+    /// distinct placement.
+    pub placement_instance: u64,
 }
 
 /// Processes parsed terminal output sequences and drives mutations on the underlying [`Buffer`].
@@ -691,7 +699,7 @@ impl TerminalHandler {
                 }
             });
 
-        let Some(_vp) = vp else {
+        let Some(vp) = vp else {
             tracing::warn!(
                 "Kitty placeholder: no virtual placement for image_id={full_image_id}, \
                  placement_id={placement_id}; inserting space"
@@ -703,6 +711,13 @@ impl TerminalHandler {
         };
 
         // Insert an image cell at the current cursor position.
+        //
+        // Stamp the placeholder cell with the virtual placement's own
+        // `placement_instance` (Task 100.20) — minted once at
+        // `register_virtual_placement` time and stable across every
+        // placeholder cell that resolves to this same virtual placement, so
+        // two independent `a=p,U=1` registrations of the same image with
+        // `p=0` (unspecified) coexist rather than merging into one bucket.
         let placement = ImagePlacement {
             image_id: full_image_id,
             col_in_image: usize::from(col),
@@ -714,6 +729,10 @@ impl TerminalHandler {
             // Unicode placeholder cells are not an `a=p`/`a=T` display path —
             // source-crop (Task 100.9) does not apply here.
             source_crop: None,
+            placement_instance: vp.placement_instance,
+            // Sub-cell X/Y offset (Task 100.19) only applies to the a=p/a=T
+            // display path's own quad, not placeholder-resolved cells.
+            subcell_offset: None,
         };
 
         let cursor_pos = self.buffer.cursor().pos;
@@ -1092,6 +1111,14 @@ impl TerminalHandler {
                         // `stamp_relative_placement_at_real_parent` for the
                         // real-parent path, which does).
                         source_crop: None,
+                        // Stable across frames: this child's `RealPlacement`
+                        // was minted its own `placement_instance` once, at
+                        // registration time (Task 100.18), so re-deriving
+                        // its synthetic per-cell stamp on every frame here
+                        // does not create a new (and therefore
+                        // re-bucketed) instance each call.
+                        placement_instance: child.placement_instance,
+                        subcell_offset: None,
                     });
                 }
             }
@@ -4673,6 +4700,7 @@ mod tests {
                 placement_id: 0,
                 rows: 1,
                 cols: 1,
+                placement_instance: 1,
             },
         );
 
@@ -4700,6 +4728,7 @@ mod tests {
                 placement_id: 0,
                 rows: 2,
                 cols: 2,
+                placement_instance: 1,
             },
         );
 

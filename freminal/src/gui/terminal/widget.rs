@@ -34,9 +34,9 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
-            WindowPostRenderer, build_background_instances, build_cursor_verts_only,
-            build_foreground_instances, build_image_verts,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
+            TerminalRenderer, WindowPostRenderer, build_background_instances,
+            build_cursor_verts_only, build_foreground_instances, build_image_verts,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -897,7 +897,7 @@ pub struct RenderState {
     /// `draw_images` iterates this SAME list so the vertex slab order and the
     /// draw order can never drift apart. Retained (not recomputed) on the
     /// cursor-only fast path, alongside `image_verts` and `snap_images`.
-    pub(super) image_draw_order: Vec<u64>,
+    pub(super) image_draw_order: Vec<ImageDrawEntry>,
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
     /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
     pub(super) snap_images: std::collections::HashMap<u64, InlineImage>,

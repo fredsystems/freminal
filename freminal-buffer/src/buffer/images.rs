@@ -12,7 +12,9 @@
 use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
 
 use crate::{
-    image_store::{ImagePlacement, ImageProtocol, ImageStore, InlineImage, SourceCrop},
+    image_store::{
+        ImagePlacement, ImageProtocol, ImageStore, InlineImage, SourceCrop, SubCellOffset,
+    },
     row::{RowJoin, RowOrigin},
 };
 
@@ -38,6 +40,11 @@ pub struct PlaceImageResult {
     pub origin_row: usize,
     /// The column at which the image's top-left cell was actually stamped.
     pub origin_col: usize,
+    /// The placement instance id (Task 100.18) this call stamped every
+    /// cell with — echoed back from the caller-supplied `placement_instance`
+    /// argument so the caller can feed it into `record_real_placement`
+    /// without having to keep a second copy around.
+    pub placement_instance: u64,
 }
 
 impl Buffer {
@@ -121,6 +128,40 @@ impl Buffer {
                 if cell
                     .image_placement()
                     .is_some_and(|p| p.image_id == image_id)
+                {
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+        self.image_cell_count -= cleared;
+    }
+
+    /// Clear image placements matching BOTH a specific image ID and a
+    /// specific (non-zero) Kitty placement ID (`p=`) from every cell.
+    ///
+    /// Unlike [`Self::clear_image_placements_by_id`] (which clears every
+    /// placement of an image regardless of `p=`), this narrows to the ONE
+    /// named placement — used to implement the kitty spec's REPLACE
+    /// semantics (a second `a=p` put with the same non-zero `p=` replaces
+    /// only that placement, leaving any other coexisting placements of the
+    /// same image untouched, Task 100.18/100.20) and `d=i,p=<n>` deletion
+    /// narrowing (Task 100.20).
+    pub fn clear_image_placements_by_placement(&mut self, image_id: u64, placement_id: u32) {
+        let mut cleared = 0usize;
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| p.image_id == image_id && p.placement_id == Some(placement_id))
                 {
                     cell.clear_image();
                     cleared += 1;
@@ -453,6 +494,8 @@ impl Buffer {
         placement_id: Option<u32>,
         z_index: i32,
         source_crop: Option<SourceCrop>,
+        placement_instance: u64,
+        subcell_offset: Option<SubCellOffset>,
     ) -> PlaceImageResult {
         let image_id = image.id;
         let display_cols = image.display_cols;
@@ -535,6 +578,8 @@ impl Buffer {
                     placement_id,
                     z_index,
                     source_crop,
+                    placement_instance,
+                    subcell_offset,
                 };
                 row.set_image_cell(col, placement, self.current_tag.clone());
                 placed_count += 1;
@@ -580,6 +625,7 @@ impl Buffer {
             scroll_offset: current_offset,
             origin_row: base_row,
             origin_col: start_col,
+            placement_instance,
         }
     }
 
@@ -609,6 +655,8 @@ impl Buffer {
         placement_id: Option<u32>,
         z_index: i32,
         source_crop: Option<SourceCrop>,
+        placement_instance: u64,
+        subcell_offset: Option<SubCellOffset>,
     ) {
         for img_row in 0..display_rows {
             let target_row = origin_row + img_row;
@@ -629,6 +677,8 @@ impl Buffer {
                     placement_id,
                     z_index,
                     source_crop,
+                    placement_instance,
+                    subcell_offset,
                 };
                 self.set_image_cell_at(target_row, col, placement, self.current_tag.clone());
             }
