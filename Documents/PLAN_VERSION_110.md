@@ -2417,16 +2417,43 @@ Respect the KKP flags (only emit functional-key escapes when the relevant flag i
 set; fall back to legacy behaviour otherwise, matching how egui-delivered keys
 behave today).
 
-**114.7 execution notes (recorded 2026-07-05 from the 114.5 review):**
+**114.7 execution decisions (recorded 2026-07-05 from the 114.5 review + 114.7 recon):**
 
-- **`RawKeyMods.super_key` from 114.5 is `egui::Modifiers.command`, which equals
-  `ctrl` on Linux/Windows** — so it over-reports super when Ctrl is held. For
-  correct KKP modifier encoding, 114.7 must source the true physical-Super state
-  the way the egui path already does (the per-pane/window `super_pressed` tracking
-  from Task 101.2), NOT `RawKeyMods.super_key` verbatim. Decide the cleanest reuse
-  at implementation (e.g. thread the tracked super state into the
-  `on_raw_key_event` handling, or have 114.5's mapping corrected). Do not ship the
-  `command`-as-super approximation into the actual encoding.
+- **BINDING ARCHITECTURE DECISION — queue at event time, encode at render time.**
+  The 114.7 recon found two problems with encoding directly inside
+  `on_raw_key_event`: (1) the callback fires at winit-event time, OUTSIDE the
+  render/`update()` path, but the entire input funnel (`write_input_to_terminal`,
+  `super_pressed` tracking, `InputModes::from_snapshot`, the active pane's
+  `input_tx`) lives INSIDE render; (2) `super_pressed` is per-pane and updated only
+  during render, so a Super+blocked-key chord in one event batch would read stale
+  super state (a real ordering hazard). **Resolution:** `on_raw_key_event` does NOT
+  encode. It pushes the `RawKeyEvent` (+ the `RawKeyMods`) onto a new
+  `pending_raw_keys: Vec<(RawKeyEvent, RawKeyMods)>` field on `PerWindowState`
+  (mirroring the existing `pending_menu_actions`/`pending_close_pane` deferred-queue
+  precedent on `PerWindowState`, all drained during `update()`). The queue is
+  DRAINED during the render path at a point where the active pane, its snapshot
+  (`InputModes`), the true per-pane `super_pressed`, and the per-window ambient
+  `LockState` are all in scope and correctly ordered — encode there via the existing
+  `send_terminal_inputs` funnel. This keeps ALL keyboard encoding on the render path
+  (one source of truth for modifier state), eliminates the stale-super hazard, and
+  respects the lock-free architecture (no new channel; the queue is GUI-thread-only
+  interior state). Decide the exact drain site during implementation (candidates:
+  inside `FreminalTerminalWidget::show` for the active pane, or in `update()` just
+  before/after the active pane's `show` call — wherever `super_pressed` for the
+  active pane is freshly available).
+- **`RawKeyMods.super_key` from 114.5 is `egui::Modifiers.command` (== `ctrl` on
+  Linux/Windows)** — so it over-reports super. Because encoding now happens at
+  render time, use the active pane's real `super_pressed` (Task 101.2 tracking) for
+  the `KeyModifiers.super_key` bit, NOT `RawKeyMods.super_key`. The queued
+  `RawKeyMods` may still supply shift/ctrl/alt (those ARE reliable from egui), but
+  super must come from `super_pressed`. Do NOT ship the `command`-as-super
+  approximation into the encoding.
+- **Visibility:** `InputModes`, `send_terminal_inputs`/`encode_terminal_inputs`, and
+  `PaneRenderCache::super_pressed` are `pub(super)` to `gui::terminal`; the drain
+  logic must live where it can reach them. If the drain lives in `gui::terminal`
+  (e.g. in `widget.rs`/`input.rs`), no visibility widening is needed. If it must be
+  reached from `app_impl.rs`, add narrow `pub(crate)` accessors — widen ONLY what is
+  needed, never blanket-`pub(crate)`.
 - **Codepoint mapping:** map each blocked `winit::keyboard::KeyCode` to the matching
   `freminal_terminal_emulator::input::KKP_*_CODEPOINT` (now `pub`) and build a
   `TerminalInput::KittyFunctional { codepoint, mods }`. `Numpad0..9` map to
