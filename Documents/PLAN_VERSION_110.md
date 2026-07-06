@@ -28,7 +28,7 @@ is deferred — the codebase may move.
 | 99  | Kitty Desktop Notifications (OSC 99)      | Medium-high | Planned  | v0.9.0 (Task 76) |
 | 100 | Kitty Graphics Protocol Completion        | Medium-high | Planned  | Task 13          |
 | 101 | Kitty Keyboard Compliance (encoding-only) | Medium      | Complete | Task 35          |
-| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Active   | Task 101         |
+| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Complete | Task 101         |
 
 > **Scope note (from 2026-07-01 activation audits).** The 101.1 audit found the
 > binding constraint for keyboard compliance is **egui 0.35**, not freminal's
@@ -1917,6 +1917,17 @@ Stop: report + await review.
 > subtasks (114.1–114.10) implement them. Branch: **`task-114/keyboard-egui-blocked`
 > off `v0.11.0-kitty`**, its own PR (Task 114 is explicitly separate from the
 > single v0.11.0 PR per the branch-model note).
+>
+> **Complete 2026-07-05.** All subtasks 114.1–114.10 landed on
+> `task-114/keyboard-egui-blocked`. Lock-state query: `evdev`/EVIOCGLED (Linux,
+> X11+Wayland), `GetKeyState` (Windows), `CGEventSourceFlagsState` (macOS caps
+> only). egui-dropped keys (keypad/media/lock/print/pause/menu) delivered via the
+> new `App::on_raw_key_event` raw-winit intercept and encoded through
+> `TerminalInput::KittyFunctional`. Residual gaps (both unschedulable, not
+> egui-blocked): **ISO_Level3/5_Shift** (no winit `KeyCode` variant) and
+> **hyper/meta** modifier bits (no platform source). macOS num/scroll are `false`
+> (don't exist on Mac keyboards); the macOS Input-Monitoring/TCC permission
+> behaviour is unverified on-device.
 
 ### 114 Summary
 
