@@ -178,9 +178,8 @@ pub(super) fn resend_scroll_window(
 /// `hyper` and `meta` remain `false`: egui has no producer for them at all,
 /// so they stay an unsourced permanent gap (tracked under Task 114).
 /// `caps_lock`/`num_lock` are likewise hardcoded `false` — ambient OS
-/// lock-key state was reverted (see Task 114 revert / GitHub tracking
-/// issues winit#1426, egui#3653); it cannot be sourced correctly and
-/// uniformly across platforms.
+/// lock-key state was reverted (see freminal#380 / winit#1426, egui#3653);
+/// it cannot be sourced correctly and uniformly across platforms.
 pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -> KeyModifiers {
     KeyModifiers {
         shift: m.shift,
@@ -191,8 +190,8 @@ pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -
         // permanent gap (Task 114).
         hyper: false,
         meta: false,
-        // caps_lock/num_lock: not sourced — see Task 114 revert / GitHub
-        // tracking issue (winit#1426, egui#3653).
+        // caps_lock/num_lock: not sourced — see freminal#380
+        // (winit#1426, egui#3653).
         caps_lock: false,
         num_lock: false,
     }
@@ -268,8 +267,8 @@ pub const fn kitty_keycode_to_codepoint(key: winit::keyboard::KeyCode) -> Option
 /// Super/Command hold-state (Task 101.2 tracking), read fresh on the render
 /// path where this is called. `hyper`/`meta` remain `false` (permanent gap,
 /// same as `egui_mods_to_key_modifiers`); `caps_lock`/`num_lock` are
-/// likewise hardcoded `false` — not sourced, see Task 114 revert / GitHub
-/// tracking issue (winit#1426, egui#3653).
+/// likewise hardcoded `false` — not sourced, see freminal#380
+/// (winit#1426, egui#3653).
 #[must_use]
 pub const fn raw_mods_to_key_modifiers(
     mods: freminal_windowing::RawKeyMods,

@@ -2614,7 +2614,7 @@ removed.
 (missing keys + modifier-key presses + super/meta reporting), egui#2041 "Caps Lock
 Key/Modifier", winit#1426 "get NumLock status" (`ModifiersState` has no lock bits).
 alacritty#7937 documents the identical limitation in another kitty-protocol terminal.
-See the freminal GitHub tracking issue for the live list.
+See freminal issue #380 for the live tracking list.
 
 **Verification:** `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`;
 `cargo machete` (evdev gone).
