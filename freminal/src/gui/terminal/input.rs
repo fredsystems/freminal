@@ -711,6 +711,17 @@ fn egui_key_to_terminal_input(
         Key::F10 => Some(TerminalInput::FunctionKey(10, km)),
         Key::F11 => Some(TerminalInput::FunctionKey(11, km)),
         Key::F12 => Some(TerminalInput::FunctionKey(12, km)),
+        // Modifier keys as keys (KKP flag 8) — used so a release of a bare
+        // modifier-key press can be reconstructed and forwarded (see the
+        // KKP flag 2 release-forwarding call site above).
+        Key::ShiftLeft => Some(TerminalInput::ShiftLeft(km)),
+        Key::ShiftRight => Some(TerminalInput::ShiftRight(km)),
+        Key::ControlLeft => Some(TerminalInput::ControlLeft(km)),
+        Key::ControlRight => Some(TerminalInput::ControlRight(km)),
+        Key::AltLeft => Some(TerminalInput::AltLeft(km)),
+        Key::AltRight => Some(TerminalInput::AltRight(km)),
+        Key::SuperLeft => Some(TerminalInput::SuperLeft(km)),
+        Key::SuperRight => Some(TerminalInput::SuperRight(km)),
         Key::Space => Some(TerminalInput::Ascii(b' ')),
         k if k >= Key::A && k <= Key::Z => {
             let name = k.name();
@@ -1537,6 +1548,100 @@ pub(super) fn write_input_to_terminal(
                 12,
                 egui_mods_to_key_modifiers(*modifiers, super_pressed),
             )]
+            .into(),
+
+            // ── KKP "modifier keys as keys" (flag 8 only) ─────────────────
+            //
+            // A bare press of a modifier key (no other key held) is reported
+            // as its own CSI u event when REPORT_ALL is active; encoding
+            // (via `TerminalInput::to_payload`) suppresses these entirely
+            // outside flag 8. Must be BEFORE the wildcard Ctrl+<letter> arm
+            // below, since egui reports these presses with the
+            // corresponding `Modifiers::ctrl`/`alt`/`shift` bit already set,
+            // which would otherwise be swallowed by that wildcard.
+            //
+            // `super_pressed` is updated by the observational block above
+            // before this match runs, so a Super press sees its own
+            // `super_key` bit set in the resulting modifier report.
+            Event::Key {
+                key: Key::ShiftLeft,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::ShiftLeft(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::ShiftRight,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::ShiftRight(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::ControlLeft,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::ControlLeft(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::ControlRight,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::ControlRight(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::AltLeft,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::AltLeft(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::AltRight,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::AltRight(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::SuperLeft,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::SuperLeft(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
+            .into(),
+            Event::Key {
+                key: Key::SuperRight,
+                pressed: true,
+                modifiers,
+                ..
+            } => vec![TerminalInput::SuperRight(egui_mods_to_key_modifiers(
+                *modifiers,
+                super_pressed,
+            ))]
             .into(),
 
             // Wildcard Ctrl+<letter> arm — must be AFTER all specific key arms
@@ -2587,5 +2692,45 @@ mod key_modifiers_tests {
     fn no_modifiers_no_super_held_is_empty() {
         let km = egui_mods_to_key_modifiers(Modifiers::default(), false);
         assert!(km.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod modifier_keys_as_keys_tests {
+    //! Tests for the Task 101.3 KKP "modifier keys as keys" GUI-side wiring:
+    //! [`egui_key_to_terminal_input`] must map the 8 physical modifier-key
+    //! `egui::Key` variants to their corresponding `TerminalInput` variants
+    //! so KKP flag 2 release-forwarding (see `write_input_to_terminal`) can
+    //! reconstruct the same event a press would have generated.
+
+    use super::*;
+
+    #[test]
+    fn shift_left_maps_to_terminal_input_variant() {
+        let ti = egui_key_to_terminal_input(Key::ShiftLeft, Modifiers::default(), false);
+        assert!(matches!(ti, Some(TerminalInput::ShiftLeft(_))));
+    }
+
+    #[test]
+    fn control_right_maps_to_terminal_input_variant() {
+        let ti = egui_key_to_terminal_input(Key::ControlRight, Modifiers::default(), false);
+        assert!(matches!(ti, Some(TerminalInput::ControlRight(_))));
+    }
+
+    #[test]
+    fn super_left_maps_to_terminal_input_variant_with_super_key_set() {
+        // super_held = true (as observed via the SuperLeft press itself)
+        // must set `super_key` in the resulting modifier report.
+        let ti = egui_key_to_terminal_input(Key::SuperLeft, Modifiers::default(), true);
+        match ti {
+            Some(TerminalInput::SuperLeft(km)) => assert!(km.super_key),
+            other => panic!("expected Some(TerminalInput::SuperLeft(_)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_right_maps_to_terminal_input_variant() {
+        let ti = egui_key_to_terminal_input(Key::AltRight, Modifiers::default(), false);
+        assert!(matches!(ti, Some(TerminalInput::AltRight(_))));
     }
 }
