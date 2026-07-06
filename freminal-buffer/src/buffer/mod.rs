@@ -3179,6 +3179,55 @@ mod image_tests {
         assert!(buf.image_store().contains(img_id));
     }
 
+    /// Regression: `clear_image_placements_at_cell_with_z` (Kitty `d=q`/`d=Q`)
+    /// must clear only the placement instance the matched cell belongs to,
+    /// not every placement sharing the same `image_id`. Two coexisting
+    /// placements of one image at different z-indexes must be deletable
+    /// independently.
+    #[test]
+    fn clear_placement_with_z_only_removes_matched_instance() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Two placements of the SAME image id at different z-indexes and
+        // different rows, distinguished by `placement_instance`.
+        let img_a = make_image(3, 1);
+        let img_id = img_a.id;
+        let img_b = img_a.clone(); // same id, second placement
+
+        // Placement instance 1 at row 0, z=0.
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+        buf.place_image(img_a, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+
+        // Placement instance 2 at row 2, z=5.
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 2;
+        buf.place_image(img_b, 0, ImageProtocol::Kitty, None, None, 5, None, 2, None);
+
+        // Both placements exist: 3 cells each.
+        assert_eq!(count_image_cells(&buf, img_id), 6);
+
+        // Clear the z=0 placement at its cell (row 0, col 0).
+        let cleared = buf.clear_image_placements_at_cell_with_z(0, 0, 0);
+        assert_eq!(cleared, Some(img_id));
+
+        // Only the z=0 instance (3 cells) was removed; the z=5 instance
+        // (3 cells at row 2) must survive.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            3,
+            "only the matched placement instance should be cleared"
+        );
+        for col in 0..3usize {
+            let cell = &buf.rows[2].cells()[col];
+            let p = cell
+                .image_placement()
+                .expect("z=5 placement must survive at row 2");
+            assert_eq!(p.z_index, 5);
+            assert_eq!(p.placement_instance, 2);
+        }
+    }
+
     #[test]
     fn place_image_moves_cursor_below_image() {
         let mut buf = Buffer::new(20, 10);

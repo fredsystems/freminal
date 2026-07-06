@@ -424,12 +424,23 @@ impl ImageStore {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.seq.insert(id, seq);
-        self.enforce_quota();
+        // Protect the just-inserted image from immediate eviction: it is
+        // still "unplaced" until the caller (`Buffer::place_image`) stamps
+        // its cells, and the victim picker prefers unplaced images. Without
+        // this, a store already full of placed images could evict `id`
+        // before its cells exist, leaving them pointing at missing data.
+        self.enforce_quota_protecting(Some(id));
     }
 
-    /// Enforce the real kitty graphics storage quota constants.
-    fn enforce_quota(&mut self) {
-        self.enforce_quota_with_caps(KITTY_IMAGE_BASE_QUOTA_BYTES, KITTY_IMAGE_ANIM_QUOTA_BYTES);
+    /// Enforce the real kitty graphics storage quota constants, never
+    /// evicting `protected_id` (the just-inserted image) while any other
+    /// image is available as a victim.
+    fn enforce_quota_protecting(&mut self, protected_id: Option<u64>) {
+        self.enforce_quota_with_caps(
+            KITTY_IMAGE_BASE_QUOTA_BYTES,
+            KITTY_IMAGE_ANIM_QUOTA_BYTES,
+            protected_id,
+        );
     }
 
     /// Evict images until both the base (root-frame) and animation-frame
@@ -442,7 +453,12 @@ impl ImageStore {
     /// inserted image always holds the highest `seq` in the store, it is
     /// never chosen as the victim unless it is the sole remaining image —
     /// which the "never evict to zero" floor below already prevents.
-    fn enforce_quota_with_caps(&mut self, base_cap: usize, anim_cap: usize) {
+    fn enforce_quota_with_caps(
+        &mut self,
+        base_cap: usize,
+        anim_cap: usize,
+        protected_id: Option<u64>,
+    ) {
         let mut base_bytes: usize = 0;
         let mut anim_bytes: usize = 0;
         for image in self.images.values() {
@@ -453,7 +469,7 @@ impl ImageStore {
         }
 
         while (base_bytes > base_cap || anim_bytes > anim_cap) && self.images.len() > 1 {
-            let Some(victim) = self.pick_eviction_victim() else {
+            let Some(victim) = self.pick_eviction_victim(protected_id) else {
                 break;
             };
 
@@ -470,14 +486,20 @@ impl ImageStore {
     }
 
     /// Choose the eviction victim: prefer an id NOT in `placed`, then the
-    /// oldest (lowest `seq`) among the preferred set. Returns `None` only
-    /// if the store is empty.
-    fn pick_eviction_victim(&self) -> Option<u64> {
-        self.images.keys().copied().min_by_key(|id| {
-            let is_placed = self.placed.contains(id);
-            let age = self.seq.get(id).copied().unwrap_or(0);
-            (is_placed, age)
-        })
+    /// oldest (lowest `seq`) among the preferred set. `protected_id` (the
+    /// just-inserted image) is skipped while any other image is available.
+    /// Returns `None` only if the store is empty or every remaining image is
+    /// the protected one.
+    fn pick_eviction_victim(&self, protected_id: Option<u64>) -> Option<u64> {
+        self.images
+            .keys()
+            .copied()
+            .filter(|id| protected_id != Some(*id))
+            .min_by_key(|id| {
+                let is_placed = self.placed.contains(id);
+                let age = self.seq.get(id).copied().unwrap_or(0);
+                (is_placed, age)
+            })
     }
 
     /// Look up an image by ID.
@@ -1210,7 +1232,7 @@ mod tests {
 
         // Cap only allows one image's worth of base bytes; must evict the
         // two oldest first, in age order, and stop at the floor of 1 image.
-        store.enforce_quota_with_caps(150, usize::MAX);
+        store.enforce_quota_with_caps(150, usize::MAX, None);
 
         assert_eq!(store.len(), 1, "should evict down to the floor of 1 image");
         assert!(
@@ -1257,7 +1279,7 @@ mod tests {
         store.insert(make_test_image_with_pixel_bytes(id_unplaced, 100));
 
         // Force eviction: total base bytes (200) exceeds the cap (150).
-        store.enforce_quota_with_caps(150, usize::MAX);
+        store.enforce_quota_with_caps(150, usize::MAX, None);
 
         assert_eq!(store.len(), 1);
         assert!(
@@ -1276,7 +1298,7 @@ mod tests {
         store.insert(make_test_image_with_pixel_bytes(1, 100_000));
 
         // Wildly over both caps, but only one image exists — must be kept.
-        store.enforce_quota_with_caps(10, 10);
+        store.enforce_quota_with_caps(10, 10, None);
 
         assert_eq!(
             store.len(),
@@ -1284,6 +1306,57 @@ mod tests {
             "a single over-quota image must never be evicted to zero"
         );
         assert!(store.contains(1));
+    }
+
+    #[test]
+    fn insert_protects_just_inserted_image_from_immediate_eviction() {
+        use crate::cell::Cell;
+        use freminal_common::buffer_states::format_tag::FormatTag;
+
+        // A tiny quota so any second image forces eviction.
+        // We cannot pass caps into `insert`, so use images sized to exceed
+        // the real base cap only in aggregate is impractical here; instead we
+        // exercise the protection directly via `enforce_quota_with_caps`.
+        let mut store = ImageStore::new();
+
+        // id_placed inserted first and marked placed.
+        let id_placed = 1;
+        store.insert(make_test_image_with_pixel_bytes(id_placed, 100));
+        let placement = ImagePlacement {
+            image_id: id_placed,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+        };
+        let row_data: Vec<Cell> = vec![Cell::image_cell(placement, FormatTag::default())];
+        let rows: Vec<&[Cell]> = vec![row_data.as_slice()];
+        store.retain_referenced(rows.into_iter());
+        assert!(store.contains(id_placed));
+
+        // id_new inserted second (unplaced, newest). Both images total 200
+        // bytes, over a 150-byte cap. Without protection the victim picker
+        // prefers the unplaced newest image (id_new) and would evict it,
+        // leaving cells with no data. With `protected_id = Some(id_new)` the
+        // placed older image is evicted instead.
+        let id_new = 2;
+        store.insert(make_test_image_with_pixel_bytes(id_new, 100));
+        store.enforce_quota_with_caps(150, usize::MAX, Some(id_new));
+
+        assert_eq!(store.len(), 1);
+        assert!(
+            store.contains(id_new),
+            "the just-inserted (protected) image must survive eviction"
+        );
+        assert!(
+            !store.contains(id_placed),
+            "the older placed image should be evicted to protect the new one"
+        );
     }
 
     #[test]
@@ -1296,7 +1369,7 @@ mod tests {
 
         // Base cap is effectively unlimited; anim cap (1500) is exceeded by
         // the combined frame bytes (2000).
-        store.enforce_quota_with_caps(usize::MAX, 1500);
+        store.enforce_quota_with_caps(usize::MAX, 1500, None);
 
         assert_eq!(
             store.len(),

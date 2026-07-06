@@ -383,23 +383,49 @@ impl Buffer {
     /// the cell's placement z-index matches `z` (Kitty `d=q`/`d=Q` — cell +
     /// z-index intersection).
     ///
-    /// Mirrors [`Self::clear_image_placements_at_cell`]'s "clear the whole
-    /// image, not just the one cell" behaviour once a match is found.
-    /// Returns the cleared image's id, if any cell matched, so the caller
-    /// can free the underlying store data when requested (`d=Q`).
+    /// Clears only the specific on-screen placement instance the matched
+    /// cell belongs to — not every placement sharing the same `image_id`.
+    /// With coexisting placements of one image, `d=q`/`d=Q` must not delete
+    /// unrelated placements at other cells or z-indexes. Returns the cleared
+    /// image's id, if any cell matched, so the caller can free the
+    /// underlying store data when requested (`d=Q`).
     pub fn clear_image_placements_at_cell_with_z(
         &mut self,
         row: usize,
         col: usize,
         z: i32,
     ) -> Option<u64> {
-        let cells = self.rows.get(row)?.cells();
-        let id = cells
+        let placement = self
+            .rows
+            .get(row)?
+            .cells()
             .get(col)?
             .image_placement()
-            .filter(|p| p.z_index == z)
-            .map(|p| p.image_id)?;
-        self.clear_image_placements_by_id(id);
+            .filter(|p| p.z_index == z)?;
+        let id = placement.image_id;
+        let instance = placement.placement_instance;
+
+        let mut cleared = 0usize;
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| p.placement_instance == instance)
+                {
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+        self.image_cell_count -= cleared;
         Some(id)
     }
 
