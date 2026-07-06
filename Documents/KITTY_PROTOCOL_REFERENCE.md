@@ -21,7 +21,9 @@ prose, rationale, or examples.
   - <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
   - <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 - Distilled from upstream as of **2026-07-05** (keyboard key tables reconfirmed
-  during Task 101), corresponding to kitty **~0.47.x**.
+  during Task 101 and Task 114 — the functional-key codepoint table was
+  re-checked against upstream when wiring the raw-winit delivery path),
+  corresponding to kitty **~0.47.x**.
 - Attribution: the kitty documentation is authored by Kovid Goyal and is
   licensed GPL-3.0. This file is a distilled derivative for implementation
   reference within freminal.
@@ -714,22 +716,34 @@ under flag 8.
 → 9. `ctrl+0` → 48, `ctrl+1` → 49 (no transform). Any other ASCII key is left
 untouched by ctrl.
 
-### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101)
+### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101 and Task 114)
 
-The audit found the real blocker is **egui 0.35 (via egui-winit)**, not freminal's
-encoding layer. Work splits into "encoding-only" (Task 101, **done**) and
-"egui-blocked" (Task 114, **pending** — a windowing-layer intercept or egui
-upgrade).
+The 101.1 audit found the real blocker was **egui 0.35 (via egui-winit)**, not
+freminal's encoding layer. Work split into "encoding-only" (Task 101, **done**)
+and "egui-blocked" (Task 114, **done** — a raw-winit intercept in
+`freminal-windowing`, since egui itself was never upgraded). Two items remain,
+and neither is egui-blocked any more: ISO_Level3/5_Shift is blocked on
+**winit** (no `KeyCode` variant), and `hyper`/`meta` remain unsourced on any
+platform.
 
 - Modifiers: `KeyModifiers` models all 8 bits (110.0); `modifier_param()` returns
   `Option<u16>` (max 256).
   - **✅ Done (101.2):** `super` (bit 8) is sourced by tracking
     `Key::SuperLeft`/`SuperRight` press/release in the GUI loop (macOS routes
     `Modifiers::mac_cmd` to `super_key`, split out of `ctrl`).
-  - **⏳ Task 114 (egui-blocked):** true `caps_lock`/`num_lock` (bits 64/128) — no
-    egui API; needs raw winit `ModifiersChanged`. `hyper`/`meta` (16/32)
-    unavailable on any current platform path. The `KeyModifiers` fields exist but
-    stay `0`.
+  - **✅ Done (Task 114):** true `caps_lock`/`num_lock` (bits 64/128) are sourced
+    from an OS lock-state query — `evdev`/`EVIOCGLED` kernel LED read on Linux
+    (one code path for X11 and Wayland; Wayland has no client-side lock-state
+    query by protocol design, so the kernel LED read sidesteps the display
+    server entirely), `GetKeyState(VK_CAPITAL/VK_NUMLOCK)` on Windows, and
+    `CGEventSourceFlagsState`/`kCGEventFlagMaskAlphaShift` on macOS (caps only;
+    num/scroll hardcoded `false` — the concept doesn't exist on Mac keyboards;
+    the Input-Monitoring/TCC permission question is unverified on-device). The
+    query is ambient (ran at cold-start + `WindowFocused(true)`, never emits a
+    synthetic event) and additionally toggled on an observed CapsLock/NumLock
+    key transition while focused.
+  - **⏳ Gap (no platform source):** `hyper`/`meta` (16/32) remain unavailable on
+    any current platform path. The `KeyModifiers` fields exist but stay `0`.
 - Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F35,
   Enter/Tab/Backspace/Escape, modifier-keys-as-keys. `KeyPad(u8)` carries only
   legacy bytes, not KKP codepoints.
@@ -737,11 +751,21 @@ upgrade).
     modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right, AltLeft/Right,
     SuperLeft/Right (57441–57444 / 57447–57450, under flag 8; Hyper/Meta omitted —
     egui has no such `Key` variants).
-  - **⏳ Task 114 (egui-blocked):** keypad operators/directional/KP_Enter/KP_Begin,
-    media keys, ISO_Level3/5_Shift, CapsLock/ScrollLock/NumLock/PrintScreen/Pause/
-    Menu — **absent from egui 0.35's `Key` enum entirely** (numpad digits are also
-    unified with main-row digits, egui#3653). Needs a raw-winit intercept in
-    `freminal-windowing` or an egui/egui-winit upgrade.
+  - **✅ Done (Task 114):** keypad operators/directional/KP_Enter/KP_Begin, media
+    keys, and CapsLock/ScrollLock/NumLock/PrintScreen/Pause/Menu-as-keys are now
+    delivered via a raw-winit `KeyboardInput` intercept
+    (`App::on_raw_key_event` in `freminal-windowing/src/lib.rs`, wired through
+    `event_loop.rs` before egui-winit translation) and encoded to
+    `TerminalInput::KittyFunctional { codepoint, mods }` on the existing
+    `build_csi_u` path — the same encoding Task 101 uses, just fed from a
+    different delivery seam. Numpad digits/decimal remain unified with
+    main-row digits per egui#3653.
+  - **⏳ Gap (no winit `KeyCode`, not egui):** ISO_Level3_Shift / ISO_Level5_Shift
+    (57453/57454) are still not delivered. The 114.5 recon confirmed the
+    blocker moved from egui to **winit itself**: winit 0.30.13's `KeyCode` enum
+    has no variant for these keys at all; the closest concept is the logical
+    `NamedKey::AltGraph`, which carries no physical-key identity to intercept.
+    Permanent, unscheduled gap pending upstream winit support.
 - **✅ Done (101.3):** F3 is normalized to `13 ~` under KKP (was `ESC O R` SS3,
   which collides with CPR). The legacy (non-KKP) path keeps `ESC O R` for xterm
   terminfo compatibility.

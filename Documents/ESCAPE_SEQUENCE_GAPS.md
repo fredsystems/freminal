@@ -1,10 +1,22 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-05 — Kitty keyboard encoding-only compliance (Task 101,
-v0.11.0): super modifier, F13–F35, modifier-keys-as-keys (flag 8), and F3 →
-`CSI 13 ~` are now implemented. A new **Keyboard Gaps** row tracks the
-egui-blocked remainder (keypad/media/ISO/lock/print/pause/menu keys +
-caps_lock/num_lock state), scheduled for Task 114. Earlier:
+Last updated: 2026-07-05 — Task 114 (v0.11.0) implemented the egui-blocked
+keyboard remainder: keypad operators/directional keys, media keys, and
+lock/print/pause/menu-as-keys are now delivered via a raw-winit intercept
+(`App::on_raw_key_event` in `freminal-windowing`) and encoded through the
+existing KKP `CSI u` path (114.5–114.7); true `caps_lock`/`num_lock` modifier
+bits (64/128) are now sourced from an OS lock-state query — `evdev`/EVIOCGLED
+on Linux (one code path for X11 and Wayland), `GetKeyState` on Windows,
+`CGEventSourceFlagsState` on macOS (caps only; num/scroll hardcoded `false` —
+the concept doesn't exist on Mac keyboards; the macOS Input-Monitoring/TCC
+permission question is unverified on-device) — queried at cold-start and
+focus-gain, plus toggled on observed CapsLock/NumLock presses while focused
+(114.4/114.7). The **Keyboard Gaps** section below is now much shorter: only
+ISO_Level3/5_Shift (no winit `KeyCode` variant — a winit limitation, not
+egui) and the `hyper`/`meta` modifier bits (no platform source on any target)
+remain tracked, both unscheduled. Same day — Task 101 (v0.11.0), kitty
+keyboard encoding-only compliance: super modifier, F13–F35,
+modifier-keys-as-keys (flag 8), and F3 → `CSI 13 ~` are implemented. Earlier:
 2026-07-02 — Kitty graphics render-path fixes (Tasks
 100.11–100.20, v0.11.0) closed the sub-cell `X`/`Y` offset and the
 native-vs-explicit display-sizing / per-placement-identity render gaps, plus
@@ -19,7 +31,7 @@ itemized rows in this GAPS file, so no GAPS entry is removed — the
 "DCS / Graphics Gaps: None" claim below is now accurate. OSC 99 (kitty
 desktop notifications) implemented directly (Task 99, v0.11.0); it was never
 a tracked gap, so no GAPS entry is removed for that either.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100)
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -39,14 +51,17 @@ are parsed and wired. DECDWL/DECDHL are rendered. Bell is visual + audible.
 Blinking text renders. IRM is implemented. DCS sub-commands (DECRQSS, XTGETTCAP) and the
 APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel and iTerm2 inline
 images (OSC 1337) are fully implemented (Task 13). Kitty graphics is fully implemented
-(Tasks 13, 100). Kitty keyboard protocol is substantially compliant: Task 35 plus the
+(Tasks 13, 100). Kitty keyboard protocol is now effectively complete: Task 35, the
 Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys under flag 8,
-F3 → `CSI 13 ~`); the egui-blocked remainder is tracked (Task 114). The remaining gaps are:
+F3 → `CSI 13 ~`), and Task 114 (raw-winit delivery of keypad/media/lock/print/pause/menu
+keys, plus true caps_lock/num_lock modifier bits via OS lock-state query). Only two
+permanent, unscheduled keyboard gaps remain (ISO_Level3/5_Shift, hyper/meta bits). The
+remaining gaps are:
 
 - **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
 - **OSC gaps:** OSC 66 (recognized but no effect)
-- **Keyboard gaps:** egui-blocked keys (keypad/media/ISO/lock/print/pause/menu +
-  caps_lock/num_lock state) — Task 114
+- **Keyboard gaps:** ISO_Level3/5_Shift (no winit `KeyCode` variant) and
+  hyper/meta modifier bits (no platform source) — both permanent, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
@@ -81,21 +96,27 @@ These features are tracked at the state-machine level but the renderer does not 
 
 ## Keyboard Gaps
 
-The kitty keyboard protocol is substantially compliant (Task 35 + the Task 101
-encoding-only wins). The remaining gaps are all **egui-blocked**: egui 0.35 (via
-egui-winit) either does not deliver these keys to freminal at all (absent from
-egui's `Key` enum) or exposes no API for the lock state. Closing them needs a
-raw-winit intercept in `freminal-windowing` or an egui/egui-winit upgrade —
-tracked as Task 114.
+The kitty keyboard protocol is now effectively complete (Task 35, the Task 101
+encoding-only wins, and Task 114's raw-winit key-delivery intercept + OS
+lock-state query). Task 114 delivered the previously egui-blocked keys —
+keypad operators/directional/KP_Begin, media keys, and lock/print/pause/menu
+keys (via `App::on_raw_key_event`) — and the true `caps_lock`/`num_lock`
+modifier bits (via an OS lock-state query: `evdev`/EVIOCGLED on Linux,
+`GetKeyState` on Windows, `CGEventSourceFlagsState` on macOS caps-only). Two
+gaps remain, neither one egui-blocked any longer:
 
-| Feature                                  | Importance | Type | Planned  | Notes                                                                                         |
-| ---------------------------------------- | ---------- | ---- | -------- | --------------------------------------------------------------------------------------------- |
-| Keypad operator / directional / KP_Begin | 🟨         | ⬜   | Task 114 | `CSI 57399 u`…`57427 u` — absent from egui's `Key` enum (numpad unified with main-row digits) |
-| Media keys                               | ⬜         | ⬜   | Task 114 | `CSI 57428 u`…`57440 u` — not delivered by egui                                               |
-| ISO_Level3/5_Shift                       | ⬜         | ⬜   | Task 114 | `CSI 57453 u` / `57454 u` — not delivered by egui                                             |
-| Lock / print / pause / menu keys         | ⬜         | ⬜   | Task 114 | CapsLock/ScrollLock/NumLock/PrintScreen/Pause/Menu (`57358`…`57363 u`) — absent from egui     |
-| caps_lock / num_lock modifier state      | 🟨         | ⬜   | Task 114 | Modifier bits 64 / 128 — no egui API for lock state; `KeyModifiers` fields exist but stay `0` |
-| hyper / meta modifier bits               | ⬜         | ⬜   | Task 114 | Modifier bits 16 / 32 — no platform path via egui; `KeyModifiers` fields exist but stay `0`   |
+- **ISO_Level3/5_Shift** is blocked on **winit**, not egui: winit 0.30.13's
+  `KeyCode` enum has no variant for these keys at all (the closest concept is
+  the logical `NamedKey::AltGraph`, which carries no physical-key identity to
+  intercept).
+- **hyper/meta modifier bits** have no source on any platform freminal
+  targets — this is a permanent, unscheduled gap, not an egui or winit
+  limitation.
+
+| Feature                    | Importance | Type | Planned | Notes                                                                                                                                                       |
+| -------------------------- | ---------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ISO_Level3/5_Shift         | ⬜         | ⬜   | —       | `CSI 57453 u` / `57454 u` — no winit `KeyCode` variant (winit 0.30.13; closest is the logical `NamedKey::AltGraph`); blocked on upstream winit, unscheduled |
+| hyper / meta modifier bits | ⬜         | ⬜   | —       | Modifier bits 16 / 32 — no platform source on any target; `KeyModifiers` fields exist but stay `0`                                                          |
 
 ---
 
