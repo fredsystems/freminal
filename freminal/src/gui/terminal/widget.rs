@@ -1379,11 +1379,6 @@ impl FreminalTerminalWidget {
     /// - `key_broadcast_targets` — input senders of the other panes to mirror
     ///   keyboard input to when broadcast mode is active (Task 74); empty when
     ///   broadcast is off or this is not the active pane.
-    /// - `lock_state` — the window's ambient OS lock-key snapshot
-    ///   (`PerWindowState::lock_state`, Task 114.4); threaded through to
-    ///   `write_input_to_terminal` and returned (possibly refreshed on
-    ///   focus-gain) as the third element of the return tuple for the
-    ///   caller to write back.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
@@ -1413,12 +1408,7 @@ impl FreminalTerminalWidget {
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
-        lock_state: freminal_windowing::LockState,
-    ) -> (
-        bool,
-        Vec<freminal_common::keybindings::KeyAction>,
-        freminal_windowing::LockState,
-    ) {
+    ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
         // `sync_pixels_per_point()` has already been called by
@@ -1652,10 +1642,6 @@ impl FreminalTerminalWidget {
         // A gutter click never reaches `write_input_to_terminal` (it is outside
         // `terminal_rect`), so its click-to-focus intent is carried here.
         let mut left_mouse_button_pressed = left_mouse_button_pressed_gutter;
-        // Per-window ambient OS lock-key snapshot (Task 114.4), threaded in
-        // from `PerWindowState::lock_state` by the caller and written back
-        // below (possibly refreshed on focus-gain).
-        let mut lock_state = lock_state;
         if suppress_input
             || context_menu_open
             || view_state.search_state.is_open
@@ -1677,7 +1663,6 @@ impl FreminalTerminalWidget {
                 clipboard_pending,
                 actions,
                 super_pressed,
-                new_lock_state,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -1697,14 +1682,12 @@ impl FreminalTerminalWidget {
                     &cache.placeholder_hit_rects,
                     key_broadcast_targets,
                     cache.super_pressed,
-                    lock_state,
                 )
             });
             left_mouse_button_pressed |= left_mouse_button_pressed_inner;
             cache.previous_mouse_state = new_mouse_pos;
             cache.previous_key = previous_key;
             cache.previous_scroll_amount = scroll_amount;
-            lock_state = new_lock_state;
             cache.super_pressed = super_pressed;
             deferred_actions = actions;
 
@@ -3019,7 +3002,7 @@ impl FreminalTerminalWidget {
             &mut deferred_actions,
         );
 
-        (left_mouse_button_pressed, deferred_actions, lock_state)
+        (left_mouse_button_pressed, deferred_actions)
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.
