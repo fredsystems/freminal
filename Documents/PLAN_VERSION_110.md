@@ -1910,6 +1910,18 @@ Stop: report + await review.
 
 ## Task 114 — Kitty Keyboard: egui-blocked keys (windowing layer)
 
+> **⚠️ PARTIALLY REVERTED (2026-07-06). Read subtask 114.11 first.** The
+> **lock-state half** (caps/num/scroll decoration bits + lock-key transition
+> events, and the `evdev` / `GetKeyState` / `CGEventSourceFlagsState` queries)
+> was **reverted** — it cannot be done correctly/uniformly across platforms and
+> half-shipping it would over-advertise capability. The subtask records below
+> (114.1–114.4, and the lock parts of 114.5/114.7/114.8, plus the activation
+> "lock-state query resolved" decision) are **historical** — they document what
+> was built and then removed. **What actually shipped:** the keypad
+> operators/digits, media keys, and Print/Pause/Menu delivery (correct on every
+> platform). `caps_lock`/`num_lock` are a documented not-implemented gap tracked
+> upstream. See **114.11** for the authoritative current state and rationale.
+>
 > **Activated 2026-07-05.** Decomposed against the current code per
 > `freminal-version-activation`. The durable decisions below (lock-query per
 > platform, ambient-vs-transition model, evdev on Linux, new `App`-trait
@@ -2549,6 +2561,63 @@ Prohibitions: none beyond scope.
 
 Stop: report + await review; then the Task 114 PR (`task-114/keyboard-egui-blocked`
 → `main`, separate from the v0.11.0 PR).
+
+#### 114.11 — REVERTED: lock-state support removed (kept keypad/media/print/pause/menu)
+
+**Decision (2026-07-06, maintainer): the lock-key half of Task 114 is reverted.**
+Post-merge testing revealed it cannot be done correctly or uniformly across
+platforms, and half-shipping it would violate the truthful capability-advertisement
+rule the project holds elsewhere (Task 76 / OSC 99 `p=?`). The kitty keyboard spec
+asks for two things freminal cannot deliver for the lock keys:
+
+- **(a) decorate key reports with caps/num/scroll lock state**, and
+- **(b) emit press/release transition events for the lock keys themselves** (flag 8 /
+  flag 2).
+
+Why neither is achievable uniformly:
+
+- **Wayland:** the compositor consumes CapsLock/NumLock to update its own modifier
+  state and sends only `wl_keyboard.modifiers` (→ winit `ModifiersChanged`), **never
+  a `WindowEvent::KeyboardInput`**. So freminal never observes the transition —
+  **neither (a) nor (b) is obtainable.** (winit#1426, egui#3653.)
+- **Windows / macOS:** `GetKeyState` / `CGEventSourceFlagsState` are **level** queries
+  (current on/off), not **edges**. We can only sample them at cold-start and
+  focus-gain, so decoration (a) is **stale between focus changes** (exactly when the
+  user is typing), and the transition event (b) is **never observable** at all (the
+  key event we receive carries no lock semantics; the query is a level, not a
+  transition).
+- **X11:** both work — but that would make X11 behave fundamentally differently from
+  every other target.
+- **A Linux-only evdev `/dev/input` LED-watcher** (the earlier proposed fix) would
+  fix (a) on Linux only, still can't do (b) off X11, adds a fragile out-of-band
+  device-node dependency, and deepens the per-platform divergence.
+
+**What was reverted:** `evdev` + the Windows/macOS query FFI (`GetKeyState`,
+`CGEventSourceFlagsState`), the `LockState` type and `query_lock_state`, the entire
+GUI lock-state wiring (`PerWindowState.lock_state`, the `egui_mods_to_key_modifiers`
+/ `raw_mods_to_key_modifiers` / `write_input_to_terminal` `lock` threading, the
+`Event::WindowFocused` requery), and the CapsLock/NumLock/ScrollLock entries in the
+raw-winit intercept + the ambient-toggle. `caps_lock`/`num_lock` on `KeyModifiers`
+revert to a hardcoded `false` — a documented not-implemented gap.
+
+**What was kept (correct on every platform):** the keypad operators/digits, media
+keys, and PrintScreen/Pause/Menu delivery via the `App::on_raw_key_event` raw-winit
+intercept → `TerminalInput::KittyFunctional`. These are ordinary stateless keys that
+deliver as normal press/release events everywhere; egui merely lacked `Key` variants
+for them. The `KKP_CAPS_LOCK_CODEPOINT` / `KKP_NUM_LOCK_CODEPOINT` /
+`KKP_SCROLL_LOCK_CODEPOINT` constants **stay defined** in `freminal-terminal-emulator`
+(they document the full kitty functional-key codepoint table and are exercised by
+that crate's own encoding tests); only the GUI **delivery** of those three keys is
+removed.
+
+**Tracked upstream** (revisit if/when these land): egui#3653 "improve Key input"
+(missing keys + modifier-key presses + super/meta reporting), egui#2041 "Caps Lock
+Key/Modifier", winit#1426 "get NumLock status" (`ModifiersState` has no lock bits).
+alacritty#7937 documents the identical limitation in another kitty-protocol terminal.
+See freminal issue #380 for the live tracking list.
+
+**Verification:** `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`;
+`cargo machete` (evdev gone).
 
 ---
 

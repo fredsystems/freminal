@@ -33,11 +33,9 @@ pub mod error;
 mod egui_integration;
 mod event_loop;
 mod gl_context;
-mod lock_state;
 
 pub use error::Error;
 pub use event_loop::run;
-pub use lock_state::{LockState, query_lock_state};
 
 use std::time::Duration;
 
@@ -105,9 +103,9 @@ pub trait App {
     fn raw_input_hook(&mut self, _window_id: WindowId, _raw_input: &mut egui::RawInput) {}
 
     /// Called for keyboard keys that egui cannot deliver (keypad
-    /// operators/directional, media, ISO-level shifts, lock/print/pause/menu
-    /// keys — see Task 114). Delivered BEFORE egui-winit and only for that
-    /// narrow blocked set; all other keys reach the app through egui as usual.
+    /// operators/directional, media, print/pause/menu keys — see Task 114).
+    /// Delivered BEFORE egui-winit and only for that narrow blocked set; all
+    /// other keys reach the app through egui as usual.
     ///
     /// `event` carries the physical key code, press/release state, and
     /// auto-repeat flag. `mods` is the current chorded modifier state. The
@@ -118,9 +116,8 @@ pub trait App {
 /// Chorded modifier state accompanying a raw key event delivered via
 /// [`App::on_raw_key_event`].
 ///
-/// These are the "held-for-decoration" modifiers (Shift/Ctrl/Alt/Super), NOT
-/// lock state (the GUI reads ambient lock state from its own per-window
-/// cache — Task 114).
+/// These are the "held-for-decoration" modifiers: Shift/Ctrl/Alt/Super,
+/// chorded at the time of the raw key event.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // Four independent chorded-modifier flags mirroring egui::Modifiers; a state machine would add noise, not clarity.
 pub struct RawKeyMods {

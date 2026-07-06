@@ -58,25 +58,17 @@ fn logical_coord_to_i32(v: f64) -> i32 {
 }
 
 /// Returns `true` for the narrow set of physical keys that egui 0.35 cannot
-/// deliver: lock/print/pause/menu keys, keypad operators and digits, and the
+/// deliver: print/pause/menu keys, keypad operators and digits, and the
 /// media keys winit's `KeyCode` exposes (Task 114). These are intercepted
 /// BEFORE egui-winit sees them and routed to [`App::on_raw_key_event`]
 /// instead; every other key falls through to egui unchanged.
-///
-/// `ISO_Level3_Shift` / `ISO_Level5_Shift` are deliberately absent: winit's
-/// `KeyCode` enum has no dedicated variant for them (the closest physical key,
-/// `AltRight`, is already delivered as a modifier via egui) — this is a known
-/// gap tracked for the Task 114 documentation pass (114.9).
 const fn is_blocked_key(key_code: winit::keyboard::KeyCode) -> bool {
     use winit::keyboard::KeyCode;
 
     matches!(
         key_code,
-        // Lock / system keys.
-        KeyCode::CapsLock
-            | KeyCode::ScrollLock
-            | KeyCode::NumLock
-            | KeyCode::PrintScreen
+        // System keys.
+        KeyCode::PrintScreen
             | KeyCode::Pause
             | KeyCode::ContextMenu
             // Keypad operators.
@@ -458,7 +450,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         }
 
         // Intercept the narrow set of physical keys egui 0.35 cannot deliver
-        // (Task 114: keypad operators/digits, media, lock/print/pause/menu)
+        // (Task 114: keypad operators/digits, media, print/pause/menu)
         // BEFORE egui-winit sees them, and route them to
         // `App::on_raw_key_event` instead. Every other key falls through to
         // egui unchanged — this must stay narrow (see `is_blocked_key`).
@@ -988,9 +980,6 @@ mod tests {
     #[test]
     fn is_blocked_key_covers_the_egui_blocked_set() {
         // Task 114.5: a representative key from each blocked group.
-        assert!(is_blocked_key(KeyCode::CapsLock));
-        assert!(is_blocked_key(KeyCode::ScrollLock));
-        assert!(is_blocked_key(KeyCode::NumLock));
         assert!(is_blocked_key(KeyCode::PrintScreen));
         assert!(is_blocked_key(KeyCode::Pause));
         assert!(is_blocked_key(KeyCode::ContextMenu));
@@ -1017,7 +1006,12 @@ mod tests {
     #[test]
     fn is_blocked_key_does_not_intercept_normal_keys() {
         // egui delivers these keys today; the intercept must stay narrow
-        // and never swallow them.
+        // and never swallow them. CapsLock/NumLock/ScrollLock are no longer
+        // intercepted (Task 114 lock-state revert) — they fall through to
+        // egui like any other normal-ish key (accepted gap: egui drops them).
+        assert!(!is_blocked_key(KeyCode::CapsLock));
+        assert!(!is_blocked_key(KeyCode::ScrollLock));
+        assert!(!is_blocked_key(KeyCode::NumLock));
         assert!(!is_blocked_key(KeyCode::KeyA));
         assert!(!is_blocked_key(KeyCode::Digit1));
         assert!(!is_blocked_key(KeyCode::Enter));
