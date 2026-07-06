@@ -1685,6 +1685,28 @@ now").
   only the named placement while others survive.
 - **Scheduling:** landed with 100.18/100.19.
 
+##### 100.18 + 100.19 + 100.20 execution decisions (recorded 2026-07-02, fix landed `2370b84f`)
+
+Implemented as one combined pass (total site overlap; the two new `ImagePlacement`
+fields and the `place_image` param churn touch the same ~27 literals / ~37 call sites).
+Discriminator: a monotonic `next_placement_instance_id()` (mirrors `next_image_id`)
+stamped per put on `ImagePlacement.placement_instance`; `build_image_verts` buckets
+`ImageBounds` by it. Same non-zero `p=` re-put clears the prior placement first via
+`clear_image_placements_by_placement`; `p=0`/unspecified coexist (kitty spec lines
+1105/1111). The **critical, easily-missed** piece the design recon surfaced: the
+renderer's draw order was doing double duty as the vertex-slab key (now per-instance) and
+the GPU texture-lookup key (must stay per image id — `gpu.rs` `image_textures` is keyed by
+image id); it became a `Vec<ImageDrawEntry { instance_id, image_id }>`. Per-instance
+bucketing resolved the `z_index`/`source_crop` first-seen-collapse limitations
+(100.7b/100.9) for free. X/Y sub-cell offset (100.19) mirrors the 100.9 `source_crop`
+wiring (a display-only `resolve_subcell_offset` clamped `< cell`, applied as an additive
+quad-origin translation after `compute_image_quad_position`, orthogonal to size mode and
+crop). 100.20 closed both flagged edge gaps: `VirtualPlacement.placement_instance` for
+p=0 virtual coexistence, and `d=i,p=` delete narrowing. The same-z tie-break basis changed
+from image-id order to instance-id/creation order (harmless; noted). `build_image_verts`
+Criterion within noise (no regression). Fixes the live step-4 "huge image" bug (two
+coexisting p=0 placements of image 2 merging into one stretched quad).
+
 ##### 100.15 + 100.16 execution decisions (recorded 2026-07-02, fix landed `091b1caa`)
 
 Root cause confirmed exactly as the maintainer hypothesised and recon traced. `place_image`
