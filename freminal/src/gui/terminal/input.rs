@@ -388,6 +388,24 @@ pub fn drain_pending_raw_keys(
     }
 }
 
+/// The physical held-key tracking state (currently just physical Super) that
+/// should carry across a focus change (Task 114.8).
+///
+/// On focus-loss we clear held-key tracking: the terminal may miss the
+/// release of a key held at the moment focus left (the user releases it in
+/// another window), so retaining `true` would report a phantom-held key
+/// afterward. Per the transition-only binding decision no synthetic release is
+/// emitted — the next real key press rebuilds tracking honestly. On focus-gain
+/// the current value is preserved (real modifier state arrives via the
+/// compositor's `ModifiersChanged`).
+const fn held_keys_after_focus_change(focused: bool, current_super_pressed: bool) -> bool {
+    if focused {
+        current_super_pressed
+    } else {
+        false
+    }
+}
+
 /// Encode egui [`Modifiers`] as a packed `u8` for FREC v2 recording.
 ///
 /// Bit layout: 0=shift, 1=ctrl, 2=alt, 3=super/command.
@@ -1965,6 +1983,16 @@ pub(super) fn write_input_to_terminal(
                     view_state.mouse_position = None;
                     last_reported_mouse_pos = None;
                 }
+                // Task 114.8: clear the held-key tracking (physical Super) on
+                // focus-loss so stale "held" state cannot leak into a later
+                // key report. Per the transition-only binding decision we emit
+                // NO synthetic release for it — the next real key rebuilds
+                // tracking honestly on focus-gain. If the user released Super
+                // in another window while we were unfocused, we simply never
+                // saw it; resetting here avoids reporting a phantom-held Super
+                // afterward. Factored into `held_keys_after_focus_change` so
+                // the invariant is unit-testable without an egui harness.
+                super_pressed = held_keys_after_focus_change(*focused, super_pressed);
 
                 continue;
             }
@@ -2915,6 +2943,23 @@ mod key_modifiers_tests {
         );
         assert!(km.super_key);
         assert!(!km.ctrl);
+    }
+
+    #[test]
+    fn focus_loss_clears_held_super() {
+        // Task 114.8: on focus-loss, held-key tracking (physical Super) is
+        // cleared so a phantom-held Super cannot leak into a later report.
+        assert!(!held_keys_after_focus_change(false, true));
+        assert!(!held_keys_after_focus_change(false, false));
+    }
+
+    #[test]
+    fn focus_gain_preserves_held_super() {
+        // Task 114.8: focus-gain does not fabricate or drop held state — the
+        // current value carries through (real modifiers arrive via the
+        // compositor's ModifiersChanged).
+        assert!(held_keys_after_focus_change(true, true));
+        assert!(!held_keys_after_focus_change(true, false));
     }
 
     #[test]
