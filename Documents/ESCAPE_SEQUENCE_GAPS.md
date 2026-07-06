@@ -1,6 +1,11 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-02 — Kitty graphics render-path fixes (Tasks
+Last updated: 2026-07-05 — Kitty keyboard encoding-only compliance (Task 101,
+v0.11.0): super modifier, F13–F35, modifier-keys-as-keys (flag 8), and F3 →
+`CSI 13 ~` are now implemented. A new **Keyboard Gaps** row tracks the
+egui-blocked remainder (keypad/media/ISO/lock/print/pause/menu keys +
+caps_lock/num_lock state), scheduled for Task 114. Earlier:
+2026-07-02 — Kitty graphics render-path fixes (Tasks
 100.11–100.20, v0.11.0) closed the sub-cell `X`/`Y` offset and the
 native-vs-explicit display-sizing / per-placement-identity render gaps, plus
 animation/compose repaint, image persistence, and `C=1` on `a=T`. These were
@@ -34,10 +39,14 @@ are parsed and wired. DECDWL/DECDHL are rendered. Bell is visual + audible.
 Blinking text renders. IRM is implemented. DCS sub-commands (DECRQSS, XTGETTCAP) and the
 APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel and iTerm2 inline
 images (OSC 1337) are fully implemented (Task 13). Kitty graphics is fully implemented
-(Tasks 13, 100). Kitty keyboard protocol is complete (Task 35). The remaining gaps are:
+(Tasks 13, 100). Kitty keyboard protocol is substantially compliant: Task 35 plus the
+Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys under flag 8,
+F3 → `CSI 13 ~`); the egui-blocked remainder is tracked (Task 114). The remaining gaps are:
 
 - **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
 - **OSC gaps:** OSC 66 (recognized but no effect)
+- **Keyboard gaps:** egui-blocked keys (keypad/media/ISO/lock/print/pause/menu +
+  caps_lock/num_lock state) — Task 114
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
@@ -67,6 +76,26 @@ These features are tracked at the state-machine level but the renderer does not 
 | ---------- | ---------- | ---- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 66     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                     |
 | OSC 133 UI | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73 |
+
+---
+
+## Keyboard Gaps
+
+The kitty keyboard protocol is substantially compliant (Task 35 + the Task 101
+encoding-only wins). The remaining gaps are all **egui-blocked**: egui 0.35 (via
+egui-winit) either does not deliver these keys to freminal at all (absent from
+egui's `Key` enum) or exposes no API for the lock state. Closing them needs a
+raw-winit intercept in `freminal-windowing` or an egui/egui-winit upgrade —
+tracked as Task 114.
+
+| Feature                                  | Importance | Type | Planned  | Notes                                                                                         |
+| ---------------------------------------- | ---------- | ---- | -------- | --------------------------------------------------------------------------------------------- |
+| Keypad operator / directional / KP_Begin | 🟨         | ⬜   | Task 114 | `CSI 57399 u`…`57427 u` — absent from egui's `Key` enum (numpad unified with main-row digits) |
+| Media keys                               | ⬜         | ⬜   | Task 114 | `CSI 57428 u`…`57440 u` — not delivered by egui                                               |
+| ISO_Level3/5_Shift                       | ⬜         | ⬜   | Task 114 | `CSI 57453 u` / `57454 u` — not delivered by egui                                             |
+| Lock / print / pause / menu keys         | ⬜         | ⬜   | Task 114 | CapsLock/ScrollLock/NumLock/PrintScreen/Pause/Menu (`57358`…`57363 u`) — absent from egui     |
+| caps_lock / num_lock modifier state      | 🟨         | ⬜   | Task 114 | Modifier bits 64 / 128 — no egui API for lock state; `KeyModifiers` fields exist but stay `0` |
+| hyper / meta modifier bits               | ⬜         | ⬜   | Task 114 | Modifier bits 16 / 32 — no platform path via egui; `KeyModifiers` fields exist but stay `0`   |
 
 ---
 

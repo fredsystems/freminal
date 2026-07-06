@@ -20,8 +20,8 @@ prose, rationale, or examples.
   - <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
   - <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
   - <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
-- Distilled from upstream as of **2026-07-01**, corresponding to kitty
-  **~0.47.x**.
+- Distilled from upstream as of **2026-07-05** (keyboard key tables reconfirmed
+  during Task 101), corresponding to kitty **~0.47.x**.
 - Attribution: the kitty documentation is authored by Kovid Goyal and is
   licensed GPL-3.0. This file is a distilled derivative for implementation
   reference within freminal.
@@ -714,34 +714,37 @@ under flag 8.
 → 9. `ctrl+0` → 48, `ctrl+1` → 49 (no transform). Any other ASCII key is left
 untouched by ctrl.
 
-### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01)
+### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101)
 
 The audit found the real blocker is **egui 0.35 (via egui-winit)**, not freminal's
-encoding layer. Work splits into "encoding-only" (doable in Task 101) and
-"egui-blocked" (a separate windowing-layer task — see the roadmap).
+encoding layer. Work splits into "encoding-only" (Task 101, **done**) and
+"egui-blocked" (Task 114, **pending** — a windowing-layer intercept or egui
+upgrade).
 
-- Modifiers: `KeyModifiers` models only shift/alt/ctrl (bits 1/2/4);
-  `modifier_param()` returns 1+shift+alt·2+ctrl·4. `egui_mods_to_key_modifiers`
-  drops everything else (egui's `Modifiers` has no super/hyper/meta/caps/num).
-  - **Encoding-only (101.2):** add the 5 fields + arithmetic; source `super` (bit 8) by tracking `Key::SuperLeft`/`SuperRight` press/release in the GUI loop.
-    `modifier_param` return type must widen past `u8` (max is 1+255=256).
-  - **egui-blocked:** true `caps_lock`/`num_lock` (bits 64/128) — no egui API;
-    needs raw winit `ModifiersChanged`. `hyper`/`meta` (16/32) unavailable on any
-    current platform path.
-- Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F12,
-  Enter/Tab/Backspace/Escape. `KeyPad(u8)` carries only legacy bytes, not KKP
-  codepoints.
-  - **Encoding-only (101.3):** F13–F35 (`FunctionKey(u8)` silently drops n>12; add
-    57376–57398), and modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right,
-    AltLeft/Right, SuperLeft/Right (57441–57452; egui _does_ deliver these as
-    `Key::*Left/*Right`, but the event loop has no arm for them) — under flag 8.
-  - **egui-blocked (new task):** keypad operators/directional/KP_Enter/KP_Begin,
+- Modifiers: `KeyModifiers` models all 8 bits (110.0); `modifier_param()` returns
+  `Option<u16>` (max 256).
+  - **✅ Done (101.2):** `super` (bit 8) is sourced by tracking
+    `Key::SuperLeft`/`SuperRight` press/release in the GUI loop (macOS routes
+    `Modifiers::mac_cmd` to `super_key`, split out of `ctrl`).
+  - **⏳ Task 114 (egui-blocked):** true `caps_lock`/`num_lock` (bits 64/128) — no
+    egui API; needs raw winit `ModifiersChanged`. `hyper`/`meta` (16/32)
+    unavailable on any current platform path. The `KeyModifiers` fields exist but
+    stay `0`.
+- Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F35,
+  Enter/Tab/Backspace/Escape, modifier-keys-as-keys. `KeyPad(u8)` carries only
+  legacy bytes, not KKP codepoints.
+  - **✅ Done (101.3):** F13–F35 (`CSI 57376 u`…`57398 u`, KKP path only) and
+    modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right, AltLeft/Right,
+    SuperLeft/Right (57441–57444 / 57447–57450, under flag 8; Hyper/Meta omitted —
+    egui has no such `Key` variants).
+  - **⏳ Task 114 (egui-blocked):** keypad operators/directional/KP_Enter/KP_Begin,
     media keys, ISO_Level3/5_Shift, CapsLock/ScrollLock/NumLock/PrintScreen/Pause/
     Menu — **absent from egui 0.35's `Key` enum entirely** (numpad digits are also
     unified with main-row digits, egui#3653). Needs a raw-winit intercept in
     `freminal-windowing` or an egui/egui-winit upgrade.
-- F3: currently `ESC O R` (SS3), which is neither the prohibited `CSI R` nor the
-  spec's `13 ~`. 101.3 should confirm/normalize to `13 ~` under KKP.
+- **✅ Done (101.3):** F3 is normalized to `13 ~` under KKP (was `ESC O R` SS3,
+  which collides with CPR). The legacy (non-KKP) path keeps `ESC O R` for xterm
+  terminfo compatibility.
 - Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`,
   separate main/alt-screen stacks (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).
