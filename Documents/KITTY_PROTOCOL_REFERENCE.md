@@ -265,11 +265,20 @@ OSC 99 routing landed across Tasks 99.1–99.8:
 
 ## Graphics protocol completion
 
-Reference for Task 100. Task 13 shipped transmit/put/delete/query and unicode
-placeholders; the parser types most control keys (but **not** the relative-
-placement keys `P`/`Q`/`H`/`V` — see below). Remaining: animation, storage
-quotas, compression (`o=z`), shared memory (`t=s`), source-rect crop, relative
-placements (incl. adding their parser keys), and `p=` in responses.
+Reference for Task 100, now implemented (v0.11.0). Task 13 shipped
+transmit/put/delete/query and unicode placeholders; Task 100 added animation
+(frame transfer/control/compose), image-number (`I=`) references, relative
+placements (`P`/`Q`/`H`/`V`, incl. their parser keys), storage quotas +
+eviction, compression (`o=z`), shared memory (`t=s`, POSIX + Windows),
+source-rect crop (`a=p` `x/y/w/h`), delete-target correctness, `p=` in
+responses, and z-index render ordering. A follow-up live-testing pass
+(Tasks 100.11–100.20) fixed the end-to-end render path: animation/compose
+repaint, relative-placement origin under scrollback, image persistence across
+subsequent output, `C=1` on `a=T`, native-vs-explicit display sizing,
+per-placement identity (coexisting placements of one image), the sub-cell
+`X`/`Y` offset, and placement-scoped delete. See the "freminal current-state"
+section below for the full done list; the graphics surface is complete (only
+the `t=f`/`t=t` security-hardening note remains, not a Task 100 item).
 
 ### Envelope (graphics)
 
@@ -401,16 +410,17 @@ freminal already implements this (dedicated `unicode_placeholder.rs`, 297-entry
 diacritic table, inheritance rules, tests). Task 100.3 mainly verifies conformance
 and closes the `image_number` reference-by-number gap.
 
-### Relative placements (in scope — Task 100.4)
+### Relative placements (implemented — Task 100.4)
 
 Relative placements are part of the **graphics protocol proper**, transmitted in
 the same `ESC _ G ... ESC \` APC envelope with `a=p` — they are _not_ a separate
-CSI extension. **Correction (100.1 audit, 2026-07-01):** contrary to an earlier
-recon note, `P`/`Q`/`H`/`V` are **not** currently typed in `KittyControlData` —
-they hit the `_ => {}` wildcard in `apply_control_pair` and are silently dropped.
-Task 100.4 therefore requires adding the 4 fields + 4 parser arms in
-`freminal-common` (folded into foundation subtask 110.0) **before** the
-handler/store work.
+CSI extension. `P`/`Q`/`H`/`V` are typed fields on `KittyControlData` (added in
+foundation subtask 110.0) and are handled by a dedicated relative-placement path:
+real-parent placements get cell-stamp positioning (recorded at place time);
+virtual-placeholder parents get render-time position derivation. Error handling
+(`ENOPARENT`, `ECYCLE`, `ETOODEEP` at depth ≥ 8, and `EINVAL` for a
+virtual-relative parent) and cascade delete are implemented; the cursor never
+moves for a relative placement (Task 100.4a/100.4b).
 
 ```text
 ESC _ G a=p,i=<id>,p=<placement>,P=<parent_img>,Q=<parent_placement> ESC \
@@ -453,14 +463,16 @@ first. A delete received mid-chunked-upload aborts the partial upload.
 
 ### Transmission media (`t=`)
 
-| `t=` | Medium                                                                                                                                |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `d`  | Direct — data in the escape payload (already implemented).                                                                            |
-| `f`  | Regular file (implemented; follows symlinks, refuses special files).                                                                  |
-| `t`  | Temp file — deleted after read; only in known temp dirs and path contains `tty-graphics-protocol` (implemented).                      |
-| `s`  | POSIX/Windows shared-memory object; read `S` bytes at offset `O`, then unlink+close (POSIX) / close (Windows). Payload = object name. |
+| `t=` | Medium                                                                                                                                                                                                                                    |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                        |
+| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below).    |
+| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.               |
+| `s`  | Shared-memory object; read `S` bytes at offset `O`. POSIX: `shm_open`/`mmap`, then `shm_unlink`+close. Windows: `OpenFileMappingW`/`MapViewOfFile`, then unmap+close (no unlink; `S=` required). Payload = object name. Both implemented. |
 
-Security: refuse device/socket/special files; may refuse `/proc`, `/sys`, `/dev`.
+Security (upstream spec): refuse device/socket/special files; may refuse
+`/proc`, `/sys`, `/dev`. **freminal current state:** only the absolute-path
+check is enforced for `f`/`t` — see the graphics current-state section below.
 
 ### Responses and error codes
 
@@ -469,8 +481,8 @@ ESC _ G i=<id>[,p=<placement>] ; <OK-or-ERROR[:detail]> ESC \
 ```
 
 - `p=` is included in the response **only if** the request specified a non-zero
-  `p=`. (freminal's `format_kitty_response` currently emits `i=` only — a gap to
-  close in Task 100.)
+  `p=`. (freminal's `format_kitty_response` emits `p=<pid>` for non-zero
+  placements as of Task 100.)
 - `q=1` suppresses OK; `q=2` suppresses all. Message is printable ASCII.
 
 Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
@@ -480,8 +492,8 @@ Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
 
 `o=z` marks the payload as RFC 1950 zlib-deflated (before base64). Decompress
 before interpreting pixels/PNG. Valid for any `f=`. With PNG + compression,
-provide `S=` (source data size). freminal parses `o=z` but does not yet
-decompress — a gap in Task 100.
+provide `S=` (source data size). Implemented in Task 100 (RFC 1950 inflate
+via `flate2`/`miniz_oxide`).
 
 ### Storage quotas
 
@@ -497,40 +509,89 @@ Eviction: LRU on overflow, preferring images without placements. The protocol
 floor is "at least a few full-screen images"; the exact number is an
 implementation choice.
 
-### freminal current-state deltas: graphics (from 100.1 audit, 2026-07-01)
+### freminal current-state: graphics — implemented in v0.11.0 (Task 100)
 
-- Parser types most control keys, **but NOT `P`/`Q`/`H`/`V`** (relative
-  placements) — those hit the `_ => {}` wildcard in `apply_control_pair` and are
-  silently dropped. 100.4 must add 4 fields + 4 parser arms (via 110.0).
-- `a=f`/`a=a`/`a=c` are one warn-and-skip arm; `InlineImage` has no frame concept,
-  and there is no image-animation tick anywhere (the only animation infra is the
-  unrelated cursor-trail in `view_state.rs`). Animation needs a frame model on
-  `InlineImage` + a GUI-side wall-clock frame selector.
-- The parser stores animation keys under transmit/display-named fields (`s`→
-  `src_width`, `v`→`src_height`, `c`→`display_cols`, `r`→`display_rows`, `z`→
-  `z_index`, `X`→`cell_x_offset`, `Y`→`cell_y_offset`), so the handler must
-  re-interpret them per action (the key-aliasing table in this doc).
-- `o=z` parsed but never decompressed; no zlib crate in the workspace
-  (`flate2`/`miniz_oxide` must be added). `t=s` returns `ENOTSUP`; the `nix` dep
-  needs its `"mman"` feature for POSIX `shm_open`/`shm_unlink` (Windows: `winapi`).
-- Source-rect crop (`x/y/w/h`) and cell offsets (`X/Y`) parsed but not applied.
-  The renderer UV logic (`compute_image_quad`) is cell-grid based (min/max
-  col/row_in_image), not pixel based — sub-cell `X/Y` offsets need new geometry.
-- `format_kitty_response(image_id, ok, message)` omits `p=`; it needs a
-  `placement_id: Option<u32>` param, emitting `,p=<pid>` when the request had a
-  non-zero placement id. Same for the `send_kitty_error` helper. 5 call sites.
-- Renderer sorts image quads by id, not z-index (a real stacking bug).
-- No storage quota; only scrollback-driven `retain_referenced` GC. Byte size is
-  `InlineImage.pixels.len()`; a quota check + LRU (prefer placement-less) hooks in
-  `ImageStore::insert`.
-- Delete gaps: `d=a` vs `d=A` (both over-delete the store), `d=i` vs `d=I` (both
-  remove image data; lowercase should keep it), `d=x/X` `d=y/Y` `d=z/Z` (uppercase
-  "and-after" collapses to non-after). Missing enum variants entirely: `d=f`/`d=F`
-  (delete frames) and `d=r`/`d=R` (delete id-range, kitty 0.33.0).
-- **Correction to an earlier recon note:** an early sub-agent summary claimed
-  relative placements were "a separate CSI extension, out of scope". That is wrong
-  — relative placements are APC graphics commands (`a=p` + `P/Q/H/V`) and are in
-  scope as Task 100.4.
+- Relative placements: `P`/`Q`/`H`/`V` are typed fields on `KittyControlData`
+  (110.0) and fully handled: real-parent cell-stamp positioning at place time,
+  virtual-placeholder-parent render-time position derivation, `ENOPARENT`/
+  `ECYCLE`/`ETOODEEP` (depth ≥ 8)/virtual-relative `EINVAL`, cascade delete, and
+  the cursor never moves for a relative placement (Task 100.4a/100.4b).
+- Animation `a=f` (frame transfer), `a=a` (control: run/stop/loop, current
+  frame, per-frame gap), and `a=c` (compose) are implemented with the
+  action-dependent key re-aliasing documented in the control-key table above.
+  `InlineImage` carries a frame model (`frames`, `root_gap_ms`,
+  `AnimationControl`); the GUI selects the current frame by wall-clock and the
+  renderer re-uploads the texture on frame change (Tasks 100.2a/100.2b/100.2c).
+- Image number (`I=`) reference-by-number is implemented: transmit records
+  number→id in the image store; `a=p`/`a=f` resolve a bare `I=` to the
+  newest-transmitted image with that number; the response echoes
+  `i=<id>,I=<n>` (Task 100.3).
+- `o=z` (RFC 1950 zlib, via `flate2`) is decompressed before interpreting
+  pixels/PNG; `t=s` shared memory is implemented on both POSIX
+  (`shm_open`/`mmap`/`shm_unlink` via the `nix` crate's `"mman"` feature) and
+  Windows (`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle`
+  via `winapi`; Task 100.10); `O=` byte offset is applied when reading a
+  file/shm object (Tasks 100.6, 100.10).
+- `format_kitty_response(image_id, ok, message)` and `send_kitty_error` now
+  take a placement id and emit `,p=<pid>` in the response when the request had
+  a non-zero placement id (Tasks 100.2a, 100.3).
+- Image storage quota + LRU eviction is implemented in `ImageStore` (base
+  320 MB, animation budget 5× base; eviction prefers placement-less images,
+  then oldest) (Task 100.5).
+- Delete-target correctness (Task 100.7a): lowercase `d=` targets remove
+  placements only and keep image data; uppercase targets additionally free the
+  image data if no placement (including scrollback) still references it. Added
+  the previously-missing `d=q`/`d=Q` (cell + z-index), `d=r`/`d=R` (id range,
+  kitty 0.33.0+), and `d=f`/`d=F` (delete frames) variants; `d=a` (visible-only)
+  vs `d=A` (all) is distinguished; the earlier `d=n`/`d=N` store-free bug is
+  fixed.
+- Image quads render in `(z-index, placement-instance)` order, with higher
+  z-index drawn on top of lower (Task 100.7b; the tie-break basis changed from
+  image id to placement-instance in Task 100.18) — the earlier id-only sort
+  order was a real stacking bug and is fixed.
+- Source-rect crop for `a=p`/`a=T` (Task 100.9): the `x`/`y`/`w`/`h` display
+  keys select a pixel sub-rectangle of the transmitted image; the crop rides
+  the per-placement `ImagePlacement.source_crop` and `compute_image_quad`
+  composes it into the UV window (`w=0`/`h=0`/absent = full from the offset).
+- Images survive a terminal reflow as coherent rectangles across all three
+  supported protocols (Task 100.4.0 atomicity fix).
+- A displayed image survives subsequent output: `place_image` leaves a fresh
+  blank row below the image and moves the cursor there, so following text no
+  longer overwrites (destroys) the image's cells (Task 100.15). `C=1` (no
+  cursor movement) is honoured on `a=T`/Put, not only `a=p` (Task 100.16).
+- Display sizing honours the spec's native-vs-explicit distinction (Task
+  100.17): with no `c`/`r` (kitty), `auto` (iTerm2), or always (sixel) the image
+  is drawn at its native pixel size anchored at the cell top-left
+  (`ImageSizeMode::NativePixels`); with explicit `c`/`r` (kitty) or
+  `width`/`height` (iTerm2) it is scaled to fill the declared cell grid
+  (`ImageSizeMode::ExplicitCells`). Previously every image was stretched to fill
+  its cell grid.
+- Multiple placements of the same image coexist correctly (Task 100.18): per
+  the spec, `a=p` puts with placement id `0`/unspecified create distinct
+  coexisting placements, and a second put with the same non-zero placement id
+  replaces the first. Each placement carries a monotonic `placement_instance`
+  id; `build_image_verts` buckets by it (previously by `image_id` alone, which
+  merged two on-screen placements of one image into a single oversized quad).
+  This also resolved the earlier `z_index`/`source_crop` first-seen-collapse
+  limitations for free.
+- Sub-cell `X`/`Y` pixel offsets ARE applied (Task 100.19): the `X`/`Y` display
+  keys shift the drawing origin within the first cell by that many pixels
+  (clamped `< cell size`), via `ImagePlacement.subcell_offset` and an additive
+  quad-origin translation in `compute_image_quad`. Orthogonal to size mode
+  (position only) and source-crop (UV only). Kitty-only (iTerm2/sixel have no
+  such key).
+- Unicode-placeholder virtual placements with placement id `0` coexist
+  distinctly, and `d=i,p=<n>` deletes only the named placement (Task 100.20).
+
+**Confirmed still remaining (not resolved by Task 100):**
+
+- **`t=f`/`t=t` file-path security is narrower than the upstream spec
+  suggests.** `read_kitty_file` only rejects non-absolute paths
+  (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not
+  refuse device/socket/special files, and does not restrict temp-file reads to
+  known temp directories or require `tty-graphics-protocol` in the path. The
+  transmission-media table above has been corrected to describe this actual
+  behavior rather than the previously-documented (and inaccurate) protections.
 
 ---
 

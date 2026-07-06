@@ -19,7 +19,7 @@ pub mod vertex;
 
 pub use gpu::{TerminalRenderer, WindowPostRenderer};
 pub use vertex::{
-    BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight,
+    BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
     build_background_instances, build_cursor_verts_only, build_foreground_instances,
     build_image_verts,
 };

@@ -12,7 +12,7 @@
 //! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -20,8 +20,14 @@ use std::{
 use conv2::ConvUtil;
 use egui;
 use freminal_common::buffer_states::{command_block::CommandBlockId, tchar::TChar};
+use freminal_terminal_emulator::{AnimationRunMode, InlineImage};
 
 use super::mouse::PreviousMouseState;
+
+/// Default gap between animation frames, in milliseconds, used when a
+/// frame's declared gap is `0` ("use the protocol default"). Matches
+/// kitty's own default of 40 ms (25 fps).
+const DEFAULT_ANIMATION_FRAME_GAP_MS: u64 = 40;
 
 /// Duration of one text-blink tick (~167 ms).
 ///
@@ -46,6 +52,32 @@ pub(crate) const DOUBLE_CLICK_MAX_CELL_DISTANCE: usize = 1;
 pub struct CellCoord {
     pub col: usize,
     pub row: usize,
+}
+
+/// Ephemeral, GUI-side wall-clock playback cursor for one animated image.
+///
+/// This is NOT in the snapshot and NOT shared with the PTY thread — it is the
+/// GUI's view of "which frame of this animation is showing right now", advanced
+/// by elapsed wall-clock time against the frames' gaps. The frame DATA and the
+/// declared `AnimationControl` come from the snapshot; this tracks only the
+/// live playback position.
+#[derive(Debug, Clone, Copy)]
+struct ImageAnimationClock {
+    /// Currently-displayed frame, 1-based (1 = root).
+    current_frame: u32,
+    /// When the current frame started displaying.
+    frame_started: Instant,
+    /// Completed loops so far (for finite `loop_count`).
+    loops_done: u32,
+}
+
+/// Result of one [`ViewState::tick_image_animations`] call.
+pub struct ImageAnimationTick {
+    /// Image ids whose displayed frame changed this tick.
+    pub changed: Vec<u64>,
+    /// Shortest time until some running animation is due to advance again,
+    /// if any animation is currently running. `None` = nothing to schedule.
+    pub next_due: Option<Duration>,
 }
 
 /// Tracks an in-progress or completed text selection.
@@ -539,6 +571,11 @@ pub struct ViewState {
     /// owning pane's `history_seed` (shell-history seed file) and
     /// `recent_commands` (live OSC 133 captures) at render time.
     pub command_history: CommandHistoryState,
+
+    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+    /// Per-image animation playback clocks (GUI-side, ephemeral), keyed by
+    /// image id. Absent for still images / images not yet seen animating.
+    image_anim_clocks: HashMap<u64, ImageAnimationClock>,
 }
 
 impl Default for ViewState {
@@ -572,6 +609,7 @@ impl Default for ViewState {
             cursor_last_frame: None,
             search_state: SearchState::default(),
             command_history: CommandHistoryState::default(),
+            image_anim_clocks: HashMap::new(),
         }
     }
 }
@@ -848,6 +886,153 @@ impl ViewState {
         self.last_click_time = Some(now);
         self.last_click_pos = Some(coord);
         self.click_count
+    }
+
+    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+
+    /// The 1-based frame currently selected for `id`, or `1` if there is no
+    /// playback clock for `id` (still image, or not seen animating yet).
+    #[must_use]
+    pub fn selected_frame(&self, id: u64) -> u32 {
+        self.image_anim_clocks
+            .get(&id)
+            .map_or(1, |clock| clock.current_frame)
+    }
+
+    /// Advance the wall-clock animation cursor for every currently-visible
+    /// animated image, and return the set of image ids whose displayed frame
+    /// changed this tick (so the caller can refresh their pixels + repaint)
+    /// plus the shortest duration until the next frame is due (for repaint
+    /// scheduling).
+    ///
+    /// `images` is the snapshot's image map for this frame. Still images and
+    /// stopped animations are left alone. Clocks for ids no longer present
+    /// (or no longer animated) are pruned.
+    pub fn tick_image_animations(
+        &mut self,
+        images: &HashMap<u64, InlineImage>,
+    ) -> ImageAnimationTick {
+        let now = Instant::now();
+
+        // Prune clocks for ids that vanished or are no longer animated.
+        self.image_anim_clocks
+            .retain(|id, _| images.get(id).is_some_and(InlineImage::is_animated));
+
+        let mut changed = Vec::new();
+        let mut next_due: Option<Duration> = None;
+
+        for (id, img) in images {
+            if !img.is_animated() {
+                continue;
+            }
+            let control = img.animation;
+            // `frame_count()` is always >= 2 here (is_animated() is true).
+            let frame_count_u32 = img.frame_count().value_as::<u32>().unwrap_or(u32::MAX);
+            let is_loading = matches!(control.run_mode, AnimationRunMode::RunLoading);
+
+            let clock = self
+                .image_anim_clocks
+                .entry(*id)
+                .or_insert(ImageAnimationClock {
+                    current_frame: 1,
+                    frame_started: now,
+                    loops_done: 0,
+                });
+
+            // App-forced current frame: snap to it and treat this as the new
+            // starting point for wall-clock advancement.
+            if control.current_frame != 0 && control.current_frame != clock.current_frame {
+                clock.current_frame = control.current_frame.clamp(1, frame_count_u32);
+                clock.frame_started = now;
+                changed.push(*id);
+            }
+
+            if matches!(control.run_mode, AnimationRunMode::Stopped) {
+                // Hold at the current frame; nothing to schedule.
+                continue;
+            }
+
+            let mut stopped_at_end = false;
+            loop {
+                let gap = Duration::from_millis(frame_gap_ms(img, clock.current_frame));
+                let elapsed = now.saturating_duration_since(clock.frame_started);
+                if elapsed < gap {
+                    break;
+                }
+
+                if clock.current_frame >= frame_count_u32 {
+                    if is_loading {
+                        // Waiting for more frames to arrive — hold at the end.
+                        stopped_at_end = true;
+                        break;
+                    }
+                    if control.loop_count >= 2 && clock.loops_done >= control.loop_count - 1 {
+                        // Finite loop count exhausted — hold at the last frame.
+                        stopped_at_end = true;
+                        break;
+                    }
+                    clock.loops_done = clock.loops_done.saturating_add(1);
+                    clock.current_frame = 1;
+                } else {
+                    clock.current_frame += 1;
+                }
+                clock.frame_started += gap;
+                if !changed.contains(id) {
+                    changed.push(*id);
+                }
+            }
+
+            if !stopped_at_end {
+                let gap = Duration::from_millis(frame_gap_ms(img, clock.current_frame));
+                let elapsed = now.saturating_duration_since(clock.frame_started);
+                let remaining = gap.saturating_sub(elapsed).max(Duration::from_millis(1));
+                next_due = Some(next_due.map_or(remaining, |d| d.min(remaining)));
+            }
+        }
+
+        ImageAnimationTick { changed, next_due }
+    }
+
+    /// Test-only helper: seed a playback clock directly with a back-dated
+    /// `frame_started`, so tests can deterministically exercise wall-clock
+    /// advancement without real `sleep`s (see `flaky-tests-are-bugs`).
+    #[cfg(test)]
+    pub(crate) fn seed_anim_clock_for_test(
+        &mut self,
+        id: u64,
+        current_frame: u32,
+        started_ago: Duration,
+        loops_done: u32,
+    ) {
+        self.image_anim_clocks.insert(
+            id,
+            ImageAnimationClock {
+                current_frame,
+                frame_started: Instant::now()
+                    .checked_sub(started_ago)
+                    .unwrap_or_else(Instant::now),
+                loops_done,
+            },
+        );
+    }
+}
+
+/// Resolve the gap (in milliseconds) to the next frame after `frame_1based`
+/// for `img`, substituting [`DEFAULT_ANIMATION_FRAME_GAP_MS`] when the
+/// declared gap is `0` ("use the protocol default").
+fn frame_gap_ms(img: &InlineImage, frame_1based: u32) -> u64 {
+    let raw = if frame_1based <= 1 {
+        img.root_gap_ms
+    } else {
+        usize::try_from(frame_1based - 2)
+            .ok()
+            .and_then(|idx| img.frames.get(idx))
+            .map_or(0, |frame| frame.gap_ms)
+    };
+    if raw == 0 {
+        DEFAULT_ANIMATION_FRAME_GAP_MS
+    } else {
+        u64::from(raw)
     }
 }
 
@@ -2113,6 +2298,256 @@ mod tests {
         assert!(
             (vs.cursor_visual_row - 5.0).abs() < f32::EPSILON,
             "visual row should snap to target"
+        );
+    }
+
+    // ── Kitty animated image playback (Task 100.2c) ──────────────────
+
+    use freminal_terminal_emulator::{AnimationControl, ImageFrame, ImageSizeMode};
+
+    /// Build a tiny (1x1 pixel) `InlineImage` for animation-tick tests.
+    ///
+    /// `n_extra_frames` additional frames are appended (so `frame_count()` is
+    /// `1 + n_extra_frames`); every frame (root and extra) shares `gap_ms`.
+    fn anim_image(
+        id: u64,
+        n_extra_frames: usize,
+        gap_ms: u32,
+        run_mode: AnimationRunMode,
+        loop_count: u32,
+        current_frame: u32,
+    ) -> InlineImage {
+        let frames = (0..n_extra_frames)
+            .map(|_| ImageFrame {
+                pixels: Arc::new(vec![0u8; 4]),
+                gap_ms,
+            })
+            .collect();
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames,
+            root_gap_ms: gap_ms,
+            animation: AnimationControl {
+                run_mode,
+                loop_count,
+                current_frame,
+            },
+        }
+    }
+
+    #[test]
+    fn tick_still_image_is_noop() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        images.insert(1, anim_image(1, 0, 40, AnimationRunMode::Running, 1, 0));
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.is_empty(),
+            "a still image (no extra frames) must never report as changed"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            1,
+            "a still image has no clock and always reports frame 1"
+        );
+        assert!(
+            tick.next_due.is_none(),
+            "a still image must not schedule a repaint"
+        );
+    }
+
+    #[test]
+    fn tick_running_advances_by_wall_clock() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        // 3 total frames (root + 2 extra), 40ms gap each.
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Running, 1, 0));
+        // Seed the clock at frame 1, "started" 100ms ago: floor(100/40) = 2
+        // whole gaps have elapsed, so the clock should have advanced from
+        // frame 1 -> frame 2 -> frame 3. 100ms sits comfortably inside the
+        // [80ms, 120ms) window for "exactly 2 steps", so ordinary scheduling
+        // jitter cannot push this across a step boundary.
+        vs.seed_anim_clock_for_test(1, 1, Duration::from_millis(100), 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.contains(&1),
+            "image should be reported changed after advancing"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            3,
+            "100ms at a 40ms gap should advance exactly 2 steps: frame 1 -> 3"
+        );
+    }
+
+    #[test]
+    fn tick_running_wraps_to_first_frame_on_infinite_loop() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        // 3 total frames, infinite loop (loop_count = 1).
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Running, 1, 0));
+        // Seed at the LAST frame (3), started just over one gap ago so
+        // exactly one wrap occurs.
+        vs.seed_anim_clock_for_test(1, 3, Duration::from_millis(50), 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(tick.changed.contains(&1), "wrap must report a change");
+        assert_eq!(
+            vs.selected_frame(1),
+            1,
+            "infinite-loop animation must wrap from the last frame back to frame 1"
+        );
+    }
+
+    #[test]
+    fn tick_finite_loop_holds_at_last_frame_when_exhausted() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        // 3 total frames, finite loop_count = 2 (play 1 full loop then stop).
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Running, 2, 0));
+        // Already completed the one allowed loop (loops_done = 1), sitting at
+        // the last frame, started long enough ago that if it were going to
+        // advance again it definitely would have.
+        vs.seed_anim_clock_for_test(1, 3, Duration::from_secs(1), 1);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.is_empty(),
+            "an exhausted finite-loop animation must hold, not advance"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            3,
+            "must hold at the last frame once loop_count is exhausted"
+        );
+        assert!(
+            tick.next_due.is_none(),
+            "an animation holding at its end must not schedule further repaints"
+        );
+    }
+
+    #[test]
+    fn tick_stopped_holds_current_frame() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Stopped, 1, 0));
+        // Started long enough ago that a running animation would definitely
+        // have advanced by now — proving Stopped truly holds.
+        vs.seed_anim_clock_for_test(1, 2, Duration::from_secs(10), 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.is_empty(),
+            "a stopped animation must never advance"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            2,
+            "a stopped animation must hold its current frame"
+        );
+        assert!(
+            tick.next_due.is_none(),
+            "a stopped animation must not schedule a repaint"
+        );
+    }
+
+    #[test]
+    fn tick_app_forced_frame_snaps_immediately() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        // App forces frame 3 via `a=a c=3`.
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Running, 1, 3));
+        vs.seed_anim_clock_for_test(1, 1, Duration::ZERO, 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.contains(&1),
+            "an app-forced frame change must be reported as changed"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            3,
+            "must snap to the app-forced current_frame"
+        );
+    }
+
+    #[test]
+    fn tick_prunes_clocks_for_vanished_images() {
+        let mut vs = ViewState::new();
+        vs.seed_anim_clock_for_test(99, 2, Duration::from_secs(1), 0);
+
+        // `images` does not contain id 99 at all.
+        let images: HashMap<u64, InlineImage> = HashMap::new();
+        let _ = vs.tick_image_animations(&images);
+
+        assert_eq!(
+            vs.selected_frame(99),
+            1,
+            "clock for a vanished image id must be pruned, reverting to frame 1"
+        );
+    }
+
+    #[test]
+    fn tick_run_loading_holds_at_last_frame_without_wrapping() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        // 3 total frames, RunLoading: waiting for more frames to arrive.
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::RunLoading, 1, 0));
+        vs.seed_anim_clock_for_test(1, 3, Duration::from_secs(1), 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.is_empty(),
+            "RunLoading at the last frame must not advance"
+        );
+        assert_eq!(
+            vs.selected_frame(1),
+            3,
+            "RunLoading must hold at the last frame, never wrap to frame 1"
+        );
+    }
+
+    #[test]
+    fn tick_next_due_reflects_remaining_gap() {
+        let mut vs = ViewState::new();
+        let mut images = HashMap::new();
+        images.insert(1, anim_image(1, 2, 40, AnimationRunMode::Running, 1, 0));
+        // 10ms into a 40ms gap: 30ms remaining, well short of a full step.
+        vs.seed_anim_clock_for_test(1, 1, Duration::from_millis(10), 0);
+
+        let tick = vs.tick_image_animations(&images);
+
+        assert!(
+            tick.changed.is_empty(),
+            "10ms into a 40ms gap must not have advanced yet"
+        );
+        assert!(
+            tick.next_due.is_some(),
+            "a running, not-yet-due animation must schedule a repaint"
+        );
+        let due = tick.next_due.unwrap();
+        assert!(
+            due <= Duration::from_millis(40),
+            "next_due must not exceed the frame gap, got {due:?}"
+        );
+        assert!(
+            due > Duration::from_millis(0),
+            "next_due must be positive, got {due:?}"
         );
     }
 }

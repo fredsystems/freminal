@@ -34,9 +34,9 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, MatchHighlight, TerminalRenderer,
-            WindowPostRenderer, build_background_instances, build_cursor_verts_only,
-            build_foreground_instances, build_image_verts,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
+            TerminalRenderer, WindowPostRenderer, build_background_instances,
+            build_cursor_verts_only, build_foreground_instances, build_image_verts,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -892,6 +892,12 @@ pub struct RenderState {
     pub(super) fg_instances: Vec<f32>,
     /// Pre-built image vertex data (one quad per unique inline image).
     pub(super) image_verts: Vec<f32>,
+    /// Authoritative `(z_index, id)` draw order for the quads in
+    /// `image_verts`, computed by [`build_image_verts`] (Task 100.7b).
+    /// `draw_images` iterates this SAME list so the vertex slab order and the
+    /// draw order can never drift apart. Retained (not recomputed) on the
+    /// cursor-only fast path, alongside `image_verts` and `snap_images`.
+    pub(super) image_draw_order: Vec<ImageDrawEntry>,
     /// Snapshot image map from the last full rebuild, cloned into `RenderState`
     /// so the `PaintCallback` closure (`Send`+`Sync`) can pass it to `draw_with_verts`.
     pub(super) snap_images: std::collections::HashMap<u64, InlineImage>,
@@ -964,6 +970,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         deco_verts: Vec::new(),
         fg_instances: Vec::new(),
         image_verts: Vec::new(),
+        image_draw_order: Vec::new(),
         snap_images: std::collections::HashMap::new(),
         cursor_vert_float_offset: 0,
         cell_width_px: 0.0,
@@ -1078,6 +1085,19 @@ pub struct PaneRenderCache {
         Rect,
         freminal_common::buffer_states::command_block::CommandBlockId,
     )>,
+    /// Pointer identity of each visible image's *selected-frame* pixel
+    /// buffer, as of the last full vertex rebuild.
+    ///
+    /// Maps image id -> `Arc::as_ptr(..).addr()` of whichever `Arc<Vec<u8>>`
+    /// was uploaded to the GPU (root `pixels` for still images, the
+    /// GUI-selected animation frame for animated images — see
+    /// `build_image_pixel_ptrs`). A store-only pixel mutation that changes no
+    /// cell and no `run_mode` (e.g. a Kitty `a=c` animation compose, Task
+    /// 100.12) still swaps in a new `Arc` for the affected frame, so
+    /// comparing this map against the current snapshot's pixel pointers
+    /// detects the change and forces a full rebuild + texture re-upload even
+    /// though `content_changed`/`image_frame_changed` stay false.
+    pub(super) last_rendered_image_pixel_ptrs: std::collections::HashMap<u64, usize>,
 }
 
 impl PaneRenderCache {
@@ -1112,6 +1132,7 @@ impl PaneRenderCache {
             previous_term_height: 0,
             previous_fold_epoch: 0,
             placeholder_hit_rects: Vec::new(),
+            last_rendered_image_pixel_ptrs: std::collections::HashMap::new(),
         }
     }
 
@@ -1127,6 +1148,7 @@ impl PaneRenderCache {
         self.last_rendered_visible = None;
         self.last_rendered_line_widths = None;
         self.shaping_cache.clear();
+        self.last_rendered_image_pixel_ptrs.clear();
     }
 }
 
@@ -1134,6 +1156,51 @@ impl Default for PaneRenderCache {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build a map of image id -> pointer address of the currently-*selected*
+/// frame's pixel buffer, for every image in `images`.
+///
+/// This mirrors exactly which `Arc<Vec<u8>>` the full-rebuild path uploads to
+/// the GPU (see the `rs_ref.snap_images` frame-swap loop in `show()`): for an
+/// animated image, the selected frame (per `selected`, the GUI-side wall-clock
+/// playback cursor) via [`InlineImage::frame_pixels`], falling back to the
+/// root `pixels` if that frame no longer exists; for a still image, the root
+/// `pixels` directly.
+///
+/// Used to detect store-level pixel mutations (e.g. a Kitty `a=c` animation
+/// compose, Task 100.12) that change no cell and no `run_mode` — so none of
+/// the other full-rebuild triggers (`content_changed`, `image_frame_changed`,
+/// ...) would otherwise fire, and the GPU texture would go stale forever.
+fn build_image_pixel_ptrs(
+    images: &std::collections::HashMap<u64, InlineImage>,
+    selected: impl Fn(u64) -> u32,
+) -> std::collections::HashMap<u64, usize> {
+    images
+        .iter()
+        .map(|(id, img)| {
+            let px = if img.is_animated() {
+                img.frame_pixels(selected(*id)).unwrap_or(&img.pixels)
+            } else {
+                &img.pixels
+            };
+            (*id, Arc::as_ptr(px).addr())
+        })
+        .collect()
+}
+
+/// Returns `true` if the selected-frame pixel `Arc` pointer for any image in
+/// `images` differs from what is recorded in `prev` (including images that
+/// appeared or disappeared since `prev` was captured).
+///
+/// See [`build_image_pixel_ptrs`] for exactly which pixel buffer is compared
+/// per image.
+fn image_pixels_changed(
+    images: &std::collections::HashMap<u64, InlineImage>,
+    selected: impl Fn(u64) -> u32,
+    prev: &std::collections::HashMap<u64, usize>,
+) -> bool {
+    build_image_pixel_ptrs(images, selected) != *prev
 }
 
 /// The egui widget that owns and drives the terminal render pipeline.
@@ -1964,6 +2031,37 @@ impl FreminalTerminalWidget {
                 view_state.cursor_visual_row * row_h_f,
             );
 
+            // ── Kitty animated image playback (Task 100.2c) ─────────────────
+            // Advance the GUI-side wall-clock frame selector for every
+            // animated image visible in this snapshot. A frame change forces
+            // the full-rebuild path below (via `image_frame_changed`) so the
+            // cloned `snap_images` picks up the newly-selected frame's pixels
+            // before `sync_image_textures` runs.
+            let anim_tick = view_state.tick_image_animations(&snap.images);
+            let image_frame_changed = !anim_tick.changed.is_empty();
+
+            // ── Store-level image pixel mutation detection (Task 100.12) ────
+            // A Kitty `a=c` animation compose overwrites an existing frame's
+            // pixels in place (a new `Arc<Vec<u8>>` for that frame) without
+            // touching any cell or `run_mode`, so `content_changed` and
+            // `image_frame_changed` both stay false and the full-rebuild path
+            // (the only path that refreshes `snap_images` and therefore
+            // drives `sync_image_textures`) never runs. Compare the
+            // currently-selected-frame pixel pointer for every visible image
+            // against what was actually uploaded last frame to catch this
+            // case (and any other store-only pixel mutation) directly.
+            //
+            // This is recomputed unconditionally every frame (cheap — a
+            // `HashMap` build over visible images, typically empty) and the
+            // cache is refreshed only when a full rebuild actually runs (see
+            // below), so the comparison always reflects what the GPU last
+            // saw.
+            let image_pixels_changed = image_pixels_changed(
+                &snap.images,
+                |id| view_state.selected_frame(id),
+                &cache.last_rendered_image_pixel_ptrs,
+            );
+
             // Determine whether we can take the cursor-only fast path.
             //
             // Cursor-only: content has not changed, the selection has not
@@ -1994,6 +2092,8 @@ impl FreminalTerminalWidget {
                 && !text_blink_changed
                 && !search_changed
                 && !hover_changed
+                && !image_frame_changed
+                && !image_pixels_changed
                 && cursor_state_changed
                 && !render_state
                     .lock()
@@ -2040,6 +2140,8 @@ impl FreminalTerminalWidget {
                 || text_blink_changed
                 || search_changed
                 || hover_changed
+                || image_frame_changed
+                || image_pixels_changed
                 || render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2265,10 +2367,23 @@ impl FreminalTerminalWidget {
                     cell_w,
                     cell_h,
                     &mut rs_ref.image_verts,
+                    &mut rs_ref.image_draw_order,
                 );
                 // Clone the image map into RenderState so the PaintCallback
                 // (which must be Send+Sync+'static) can pass it to the renderer.
                 rs_ref.snap_images.clone_from(snap.images.as_ref());
+                // Overwrite each animated image's pixels with the frame
+                // currently selected by the GUI-side wall-clock playback
+                // clock (Task 100.2c). `build_image_verts` above only reads
+                // frame-invariant display dims, so only the texture-upload
+                // path (which reads `img.pixels`) needs the swapped frame.
+                for (id, img) in &mut rs_ref.snap_images {
+                    if img.is_animated()
+                        && let Some(px) = img.frame_pixels(view_state.selected_frame(*id))
+                    {
+                        img.pixels = Arc::clone(px);
+                    }
+                }
                 rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
                 rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
                 rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
@@ -2291,6 +2406,13 @@ impl FreminalTerminalWidget {
                 cache.previous_term_width = snap.term_width;
                 cache.previous_term_height = snap.term_height;
                 cache.previous_fold_epoch = fold_epoch;
+                // Record exactly which selected-frame pixel buffers were just
+                // uploaded (Task 100.12), so the next frame's
+                // `image_pixels_changed` comparison is against fresh state —
+                // otherwise a one-off pixel mutation would pin the pane in
+                // the full-rebuild path forever.
+                cache.last_rendered_image_pixel_ptrs =
+                    build_image_pixel_ptrs(&snap.images, |id| view_state.selected_frame(id));
             }
             // If neither path applies (content unchanged, cursor unchanged,
             // selection unchanged, buffers not empty) we simply re-draw the
@@ -2301,6 +2423,12 @@ impl FreminalTerminalWidget {
             if cursor_animating {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(16));
+            }
+
+            // Drive animated image playback: request a repaint when the next
+            // frame is due so animations keep advancing while otherwise idle.
+            if let Some(due) = anim_tick.next_due {
+                ui.ctx().request_repaint_after(due);
             }
         }
 
@@ -2404,11 +2532,15 @@ impl FreminalTerminalWidget {
                     let bg_image_opacity = rs.bg_image_opacity;
                     let bg_image_mode = rs.bg_image_mode;
                     // Split borrow: renderer + atlas are disjoint from the
-                    // scalar fields and snap_images.
+                    // scalar fields and image_draw_order.
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
-                    let images = &rs_ref.snap_images;
+                    // Reuse the draw order retained from the last full
+                    // rebuild — the cursor-only path does not recompute
+                    // image state, so this is the same list `draw_images`
+                    // used to emit `rs_ref.image_verts` last time.
+                    let draw_order = &rs_ref.image_draw_order;
                     renderer.draw_with_cursor_only_update(
                         gl,
                         atlas,
@@ -2418,7 +2550,7 @@ impl FreminalTerminalWidget {
                         &cursor_only_verts,
                         fg_len,
                         img_len,
-                        images,
+                        draw_order,
                         vp.width_px,
                         vp.height_px,
                         cw,
@@ -2447,6 +2579,7 @@ impl FreminalTerminalWidget {
                         &rs_ref.deco_verts,
                         &rs_ref.fg_instances,
                         &rs_ref.image_verts,
+                        &rs_ref.image_draw_order,
                         &rs_ref.snap_images,
                         vp.width_px,
                         vp.height_px,
@@ -3093,6 +3226,7 @@ mod subtask_1_7_tests {
             fg_instances: Vec::new(),
             cursor_vert_float_offset: 0,
             image_verts: Vec::new(),
+            image_draw_order: Vec::new(),
             snap_images: std::collections::HashMap::new(),
             cell_width_px: 0.0,
             cell_height_px: 0.0,
@@ -3151,6 +3285,146 @@ mod subtask_1_7_tests {
         assert_eq!(super::truncate_url(url, 5), "abcde");
         // One over — truncates.
         assert_eq!(super::truncate_url(url, 4), "abcd…");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_pixels_changed_tests {
+    //! Regression coverage for Task 100.12: a Kitty `a=c` animation compose
+    //! overwrites an existing frame's pixels in place (a new
+    //! `Arc<Vec<u8>>`) without changing any cell or `run_mode`, so neither
+    //! `content_changed` nor `image_frame_changed` fires and the full-rebuild
+    //! path (the only path that refreshes `snap_images` and drives
+    //! `sync_image_textures`) never runs. `image_pixels_changed` /
+    //! `build_image_pixel_ptrs` are the pure, GUI-free predicate that catches
+    //! this by comparing selected-frame pixel `Arc` pointers across frames.
+    use super::*;
+    use freminal_terminal_emulator::{
+        AnimationControl, AnimationRunMode, ImageFrame, ImageSizeMode,
+    };
+
+    /// Build a 1x1-pixel `InlineImage`. `frame_pixels` (frames 2..N) share
+    /// `id`'s allocation unless overridden by the caller after construction.
+    fn still_image(id: u64) -> InlineImage {
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl {
+                run_mode: AnimationRunMode::Running,
+                loop_count: 1,
+                current_frame: 0,
+            },
+        }
+    }
+
+    /// Build a 2-frame animated `InlineImage` (root frame 1 + one extra
+    /// frame 2), each frame getting its own fresh `Arc` allocation.
+    fn animated_image(id: u64) -> InlineImage {
+        InlineImage {
+            frames: vec![ImageFrame {
+                pixels: Arc::new(vec![0u8; 4]),
+                gap_ms: 40,
+            }],
+            ..still_image(id)
+        }
+    }
+
+    #[test]
+    fn unchanged_still_image_is_not_flagged() {
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, still_image(1));
+
+        let prev = build_image_pixel_ptrs(&images, |_| 1);
+
+        assert!(
+            !image_pixels_changed(&images, |_| 1, &prev),
+            "identical pixel pointers across frames must not trigger a rebuild"
+        );
+    }
+
+    #[test]
+    fn still_image_pixel_replacement_is_flagged() {
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, still_image(1));
+        let prev = build_image_pixel_ptrs(&images, |_| 1);
+
+        // Simulate a store-level mutation that replaces the root pixel
+        // buffer with a new allocation (same id, new `Arc`).
+        images.insert(1, still_image(1));
+
+        assert!(
+            image_pixels_changed(&images, |_| 1, &prev),
+            "a new pixel Arc for the same image id must trigger a rebuild"
+        );
+    }
+
+    #[test]
+    fn animation_compose_on_non_root_frame_is_flagged() {
+        // Frame 2 is the currently-selected/displayed frame (mirrors an
+        // animation whose playback clock has advanced to frame 2).
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, animated_image(1));
+        let prev = build_image_pixel_ptrs(&images, |_| 2);
+
+        // `a=c` compose: overwrite frame 2's pixels with a new `Arc`,
+        // in place, without touching any cell or `run_mode`.
+        {
+            let img = images.get_mut(&1).unwrap();
+            img.frames[0].pixels = Arc::new(vec![255u8; 4]);
+        }
+
+        assert!(
+            image_pixels_changed(&images, |_| 2, &prev),
+            "compose replacing the selected frame's pixels must trigger a rebuild"
+        );
+    }
+
+    #[test]
+    fn animation_compose_on_unselected_frame_is_not_flagged() {
+        // Frame 1 (root) is currently selected/displayed; the compose below
+        // targets frame 2, which is not currently visible.
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, animated_image(1));
+        let prev = build_image_pixel_ptrs(&images, |_| 1);
+
+        {
+            let img = images.get_mut(&1).unwrap();
+            img.frames[0].pixels = Arc::new(vec![255u8; 4]);
+        }
+
+        assert!(
+            !image_pixels_changed(&images, |_| 1, &prev),
+            "a mutation to a frame that isn't currently selected must not force a rebuild"
+        );
+    }
+
+    #[test]
+    fn new_and_removed_image_ids_are_flagged() {
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, still_image(1));
+        let prev = build_image_pixel_ptrs(&images, |_| 1);
+
+        // A new image id appears.
+        images.insert(2, still_image(2));
+        assert!(
+            image_pixels_changed(&images, |_| 1, &prev),
+            "an added image id must trigger a rebuild"
+        );
+
+        // The original id disappears, leaving only the new one.
+        images.remove(&1);
+        assert!(
+            image_pixels_changed(&images, |_| 1, &prev),
+            "a removed image id must trigger a rebuild"
+        );
     }
 }
 

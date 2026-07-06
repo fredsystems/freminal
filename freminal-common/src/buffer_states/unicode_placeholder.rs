@@ -143,6 +143,19 @@ pub struct VirtualPlacement {
     pub cols: u32,
     /// Display height in terminal rows.
     pub rows: u32,
+    /// Unique placement-instance id (Task 100.20), minted once at
+    /// registration time via `next_placement_instance_id()`.
+    ///
+    /// Stamped onto every placeholder cell that resolves to this virtual
+    /// placement AT THE TIME the placeholder character is processed. A
+    /// later `a=p,U=1` re-registration for the same `(image_id,
+    /// placement_id)` key overwrites this struct in `virtual_placements`
+    /// with a fresh instance id, but placeholder cells already stamped
+    /// from the earlier registration keep their (now-detached) instance
+    /// id — so two independent registrations of the same image with
+    /// `p=0`/unspecified still render as two coexisting placements rather
+    /// than collapsing into one renderer bucket.
+    pub placement_instance: u64,
 }
 
 /// Extract a 24-bit image ID from a `TerminalColor` foreground value.

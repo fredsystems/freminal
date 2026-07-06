@@ -785,6 +785,92 @@ Prohibitions: do NOT touch unicode placeholders or relative placements; do NOT p
 
 Stop: report + await review.
 
+##### 100.2 execution decisions (recorded 2026-07-01, at execution against the real seams)
+
+A recon of the six 100.2 seams confirmed the plan and found that the literal
+single-subtask scope materially exceeds one Sonnet-sized pass: it spans 6 files
+across 3 crates and carries two subtle hazards — the renderer uploads exactly one
+GL texture per image id and never re-uploads when pixels change
+(`sync_image_textures` early-continues if the id already has a texture), so making
+it frame-aware is architecture-touching GPU work; and the compose-rectangle
+alpha-blend math plus the `a=f`/`a=a`/`a=c` key re-aliasing are error-prone.
+Maintainer-approved decision: **split 100.2 into three individually-reviewable
+sub-passes** (mirroring the 99.5a/99.5b/99.5c precedent), each leaving
+`cargo test --all` green, committed as `feat(v0.11.0): 100.2a/2b/2c`:
+
+- **100.2a — frame model + snapshot transport + response `p=` gap (data/types
+  layer).** Scope: `freminal-buffer/src/image_store.rs` (add a frame list to
+  `InlineImage` — per-frame pixels + gap-ms — keeping `ImageStore` pure and
+  time-free), `freminal-terminal-emulator/src/snapshot.rs` +
+  `freminal-terminal-emulator/src/interface.rs` (ship all frames per animated
+  image through `collect_visible_images`),
+  `freminal-common/src/buffer_states/kitty_graphics.rs` (add
+  `placement_id: Option<u32>` to `format_kitty_response`, emitting `,p=<pid>` when
+  non-zero) and its ~6 call sites + `send_kitty_error` in
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (query sites
+  pass `None`; put/place sites pass `control.placement_id`). No animation
+  behaviour, no GUI change. Leaves a single-frame image behaving exactly as today.
+- **100.2b — animation handler `a=f`/`a=a`/`a=c` + frame-chunking (behaviour,
+  headless-testable).** Scope: `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  **and** `freminal-buffer/src/image_store.rs`. The `image_store.rs` inclusion
+  (a refinement of the 100.2a boundary): `a=a` control commands carry declarative
+  animation-playback state (run/stop mode `s=`, loop count `v=`, app-forced
+  current frame `c=`) that the handler must record on the image and the snapshot
+  must ship for the GUI's wall-clock selector (100.2c) to read. That state is
+  plain data (not wall-clock), so it lives on `InlineImage` as a new
+  `AnimationControl` — set here in 100.2b, consumed in 100.2c. Making the handler
+  headless-testable (assert frames added, gaps, compose results, loop/run state in
+  the buffer) requires this buffer-side state. Ingests frames into the 100.2a
+  model with the **key re-aliasing table**
+  (parser stores animation keys under transmit/display-named fields; the handler
+  re-interprets by action per `KITTY_PROTOCOL_REFERENCE.md`), including
+  partial-frame rects, compose background (`c=`/`Y=`), blend (`X=`), edit (`r=`),
+  gap (`z=`), control run/stop/loop (`s=`/`v=`/`c=`/`r=`/`z=`), compose
+  (`ENOENT`/`EINVAL`/`ENOSPC`), and correct routing of `a=f` + `m=1` chunked frame
+  transfers. Tested at buffer/handler level with no renderer dependency.
+- **100.2c — GUI wall-clock frame selector + renderer per-frame re-upload (the
+  display leg).** Scope: `freminal/src/gui/view_state.rs` (a wall-clock frame
+  selector in `ViewState`, mirroring the `text_blink_cycle`/`text_blink_last_tick`
+  tick precedent; the snapshot ships all frames, the GUI picks the current frame by
+  elapsed time — **no frame-index state in the snapshot**),
+  `freminal/src/gui/terminal/widget.rs` (plug the selector into the
+  `build_image_verts` call site where `view_state` is in scope),
+  `freminal/src/gui/renderer/vertex.rs` + `freminal/src/gui/renderer/gpu.rs` (make
+  `sync_image_textures`/`draw_images` frame-aware — re-upload / key textures by the
+  currently-selected frame so a frame change is drawn). Respects the lock-free
+  GUI/PTY split. Scope additions at execution: (1) recon found the changed-content
+  texture re-upload is the correctness-critical piece (`sync_image_textures`
+  early-returns on a known id, so a same-id frame swap would silently no-op — it
+  gains Arc-pointer-identity tracking to detect frame swaps); `vertex.rs` needs no
+  change (`build_image_verts` reads only frame-invariant `display_cols`/rows).
+  (2) Repaint scheduling in `widget.rs`: a running animation re-arms
+  `ui.ctx().request_repaint_after(gap)` (alongside the existing cursor-trail
+  re-arm) so frames advance while the terminal is otherwise idle. (3) `freminal/benches/render_loop_bench.rs`: a new CPU bench for the
+  frame-selector tick (the GPU texture path is headless-excluded, and
+  `build_image_verts` is unchanged, so the tick is the benchable new hot path).
+  (4) One additive re-export line in `freminal-terminal-emulator/src/lib.rs`
+  (`AnimationControl`, `AnimationRunMode`, `ImageFrame` added to the existing
+  `image_store` `pub use`) so the `freminal` crate can name the animation types
+  without a direct `freminal-buffer` dependency — the re-export mechanism already
+  exists for `ImagePlacement`/`InlineImage`; 100.2a/2b simply did not need the
+  animation types GUI-side yet.
+
+**100.2a scope expansion (recorded).** Adding the two non-`Option` fields
+(`frames`, `root_gap_ms`) to `InlineImage` — which derives neither `Default` nor
+allows `..Default::default()` — forces a compile-break at every `InlineImage`
+struct literal in the workspace, not just the kitty ones. The 100.2a recon missed
+five: two **production** sites in the sixel and iTerm2 image handlers
+(`freminal-terminal-emulator/src/terminal_handler/graphics_sixel.rs`,
+`freminal-terminal-emulator/src/terminal_handler/graphics_iterm2.rs`) and three
+test literals (`freminal-buffer/src/buffer/mod.rs`, `freminal-buffer/src/row.rs`,
+`freminal-terminal-emulator/src/terminal_handler/mod.rs`). All five gain the
+still-image defaults (`frames: Vec::new(), root_gap_ms: 0`); this is a
+behaviour-neutral, compile-forced consequence, so 100.2a's file scope is expanded
+to include them. No behaviour changes in sixel/iTerm2 (both stay single-frame).
+
+The three sub-passes retain 100.2's overall deliverable and prohibitions; each
+stops at its own review gate.
+
 #### 100.3 — Unicode placeholders (U+10EEEE + diacritics)
 
 Scope: `terminal_handler/graphics_kitty.rs` (virtual placement on `a=p,U=1`), the cell
@@ -803,6 +889,49 @@ Verification: `cargo test --all`; clippy.
 Prohibitions: do NOT touch animation or relative placements; do NOT proceed.
 
 Stop: report + await review.
+
+##### 100.3 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon confirmed the core placeholder machinery is **already complete and
+rendered** (`freminal-common/src/buffer_states/unicode_placeholder.rs`: 297-entry
+diacritic table, `PLACEHOLDER_UTF8`, `parse_placeholder_diacritics`,
+`color_to_image_id`/`color_to_placement_id`; `TerminalHandler` `handle_data_with_placeholders`
+/ `handle_placeholder_char` / `resolve_placeholder_diacritics` with the 3
+left-to-right inheritance rules and `PrevPlaceholder` state; virtual placements
+render through the generic `build_image_verts` path; tests cover diacritic decode,
+inheritance, creation, delete-by-id/all). So 100.3 does **not** rebuild any of
+that. The renderer needs no change; `build_image_verts` was miscited in the
+original scope line — it already handles placeholder cells generically.
+
+**The `image_number` (`I=`) gap, resolved against the upstream spec (kitty
+graphics-protocol, "Unicode placeholders" + "Requesting image ids").** The spec
+(re-read 2026-07-01) is unambiguous: a Unicode placeholder's foreground color
+_always_ encodes an image **id** (the 3rd diacritic extends its MSB) — there is
+**no** placeholder-references-by-number mechanism, so the earlier worry about a
+"number-vs-id bit in the placeholder" is void. The real gap is the general
+**`I=` reference-by-number** feature freminal lacks entirely: (1) transmitting
+with `I=<n>` (no `i=`) must create a new image, assign it an id, record a
+`number → newest-id` association, and reply `\e_Gi=<id>,I=<n>;OK\e\`; (2) later
+`a=p,I=<n>` (put) and `a=f,I=<n>` (animation frame) must resolve to the **newest**
+image with that number; (3) `d=n`/`d=N` delete-by-number must also prune
+`virtual_placements` (today it only clears cell placements). freminal has **no**
+`number → id` index anywhere (`ImageStore` is a flat `HashMap<u64, InlineImage>`;
+`image_number` lives only on per-cell `ImagePlacement`).
+
+Scope (single Sonnet pass — coherent "image-number resolution", no GPU/architecture
+hazard): `freminal-buffer/src/image_store.rs` (a `number_to_id: HashMap<u32, u64>`
+"newest id per number" index, maintained on `insert`/`remove`/`clear`, + a
+`newest_id_for_number(n) -> Option<u64>` resolver);
+`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (record the
+number→id association at transmit; resolve `I=` in `handle_kitty_put` and
+`handle_kitty_animation_frame` when `i=` is absent/0; prune `virtual_placements`
+in the `d=n`/`d=N` arms); `freminal-common/src/buffer_states/kitty_graphics.rs`
+(the OK response must echo `I=<n>` alongside `i=<id>` for an `I=` transmit — extend
+the response formatter, e.g. a `KittyResponseId { image_id, image_number:
+Option<u32>, placement_id: Option<u32> }` replacing the 100.2a `(image_id,
+placement_id)` args, so the 3 optional identity fields are carried without a
+4-scalar signature). Plus the "verify conformance" tests. Dual-doc update is
+100.8, not here.
 
 #### 100.4 — Relative placements (parent/child groups)
 
@@ -832,6 +961,70 @@ Prohibitions: do NOT touch animation or placeholders; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.4 execution decisions (recorded 2026-07-01, against the real seams + maintainer direction)
+
+Recon revealed the plan's "handler/store work only" scoping materially
+under-estimated 100.4, and surfaced a **pre-existing, protocol-agnostic
+image-under-reflow bug** that must be fixed first. Findings and the
+maintainer-approved restructure:
+
+- **freminal has no first-class placement objects.** Every non-virtual placement
+  is only per-cell `ImagePlacement` stamps written into `Cell`s by
+  `Buffer::place_image`; there is no registry keyed by `(image_id, placement_id)`,
+  and a placement's screen origin is never stored (it exists transiently as the
+  cursor position at `place_image` time). The only placement-keyed map is
+  `virtual_placements` (Unicode-placeholder tile sizes, no parent link). So 100.4
+  builds the **first** real-placement registry.
+- **Image position is cell-anchored, so scroll/reflow tracking is _already_ solved
+  for every protocol** — an image lives in the row cells, which scroll and reflow.
+  The renderer draws each image "wherever its cells are". Relative placements only
+  add a _derived_ position (child at `parent_origin + (H,V)`).
+- **The real fail case is reflow, and it is a pre-existing, protocol-agnostic
+  bug.** `Buffer::reflow_to_width` re-wraps image-stamped cells by glyph width like
+  ordinary text (each image row is its own hard-break logical line), so a
+  primary-screen image wider than the new width gets **soft-wrapped and its
+  `(row_in_image, col_in_image)` rectangle fragments** — the renderer then draws it
+  distorted. This hits kitty/sixel/iTerm2 alike; it is latent today only because
+  images are effectively alt-screen (apps redraw on resize). Building relative
+  placements on this cracked foundation is wrong. **Maintainer decision: fix image
+  reflow atomicity first.**
+- **Renderer bounds images by `image_id` only** (not `(image_id, placement_id)`) in
+  `build_image_verts`, so two on-screen placements of the same image visually
+  merge — relevant to same-image relative placements; addressed in 100.4b if it
+  bites.
+- **`ETOODEEP`/`ECYCLE`/`ENOPARENT` error strings do not exist yet**; no
+  cascade-delete concept exists.
+
+**Restructure (maintainer-approved): 100.4.0 → 100.4a → 100.4b.**
+
+- **100.4.0 — Image reflow atomicity (protocol-agnostic prerequisite).** Scope:
+  `freminal-buffer/src/buffer/resize_and_alt.rs` (+ `buffer/images.rs` / `row.rs`
+  as needed). Make reflow treat an image's cell-rectangle atomically so images
+  survive reflow as coherent rectangles for **all** protocols (keep image rows off
+  the soft-wrap path — clamp/scale to the new width or preserve the block intact —
+  rather than re-wrapping image cells by glyph width). Fixes the actual fail case
+  the maintainer identified; a real bug fix, so it gets a regression test that
+  fails before / passes after. Recon the reflow path precisely before implementing.
+- **100.4a — Relative-placement registry + validation + real-parent positioning.**
+  Scope: `freminal-buffer/src/image_store.rs` (or a new registry) +
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`. Add the
+  first-class real-placement registry keyed by `(image_id, placement_id)` holding
+  the persisted screen origin + `parent` link + child list; cascade delete;
+  `ENOPARENT`/`ECYCLE`/`ETOODEEP` (depth ≥ 8); a virtual placement may be a parent
+  but cannot itself be relative (`EINVAL`); the cursor must not move after a
+  relative placement regardless of `C`. Position a child of a **real** parent by
+  cell-stamping at `parent_origin + (H,V)` (the child becomes real cells that
+  scroll/reflow correctly on their own, atop the 100.4.0 fix). Headless-testable.
+- **100.4b — Virtual-placeholder-parent live position derivation.** Scope: the
+  snapshot/render seam (recon first). When the parent is a **virtual** placement
+  (no fixed cells; the primary kitty use — a placeholder anchored in text), derive
+  the child's position each snapshot from the parent placeholder's live cell
+  positions (min-x / min-y of the placeholder cells, per spec) so it follows text
+  through scroll/reflow. This is the render-touching piece; recon its exact seam
+  before writing it.
+
+Each stops at its own review gate.
+
 #### 100.5 — Storage quotas + eviction policy
 
 Scope: `freminal-buffer/src/image_store.rs`.
@@ -848,6 +1041,42 @@ before/after capture per `performance-benchmarks` + `freminal-bench-table`.
 Prohibitions: do NOT change protocol parsing; do NOT proceed.
 
 Stop: report + await review.
+
+##### 100.5 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon resolved three open shape questions:
+
+- **LRU age proxy: a dedicated insertion sequence, NOT the image id.** kitty's
+  `i=` lets a client pick an arbitrary id, so `InlineImage.id` is not a reliable
+  age proxy. `ImageStore` gains a monotonic `u64` insertion counter and stamps an
+  insertion sequence per stored image (independent of the protocol id); eviction
+  picks the lowest sequence (oldest).
+- **Placement-aware eviction via a `placed` set maintained by `retain_referenced`,
+  no plumbing through place/clear sites.** `ImageStore::insert` cannot see the cell
+  grid, and most inserts bypass `Buffer::place_image`, so a per-insert placement
+  oracle would need error-prone plumbing through ~7 place/clear sites. Instead,
+  `retain_referenced` (already driven by the `Buffer` on resize/scroll, and which
+  already removes truly-unreferenced images) also records the current referenced
+  id set into a `placed: HashSet<u64>` on the store. Eviction prefers images NOT
+  in `placed` (placement-less first), then falls back to oldest by insertion
+  sequence. The `placed` set may be slightly stale between `retain_referenced`
+  runs — acceptable: the quota is a DoS guard that only fires under memory
+  pressure, and the spec explicitly leaves the exact eviction count an
+  implementation choice ("at least a few full-screen images").
+- **Two separate byte pools (base vs animation), mirroring the spec's two-row
+  table.** Base pool = sum of root `pixels.len()` across all images, cap
+  `KITTY_IMAGE_BASE_QUOTA_BYTES = 320 * 1024 * 1024`. Animation pool = sum of
+  `frames[].pixels.len()`, cap `KITTY_IMAGE_ANIM_QUOTA_BYTES = 5 * base`. Eviction
+  fires when EITHER pool exceeds its cap (evicting whole images —
+  placement-less-then-oldest — until both pools are within budget). Named
+  constants so they can be tuned without a protocol change. (The spec is
+  ambiguous on single-vs-two-pool; two pools is the closer reading of kitty's
+  actual behaviour and is cleaner to reason about.)
+- **Benchmark: add one (none exists).** `freminal-buffer/benches/buffer_row_bench.rs`
+  has no image-store bench, so per `freminal-bench-table` a new
+  `bench_image_store_insert_at_quota` (insert-one-more at/near the cap, forcing an
+  eviction pass) is added and its baseline captured. `build_snapshot`'s image path
+  is not changed by 100.5, so no render-bench delta is expected.
 
 #### 100.6 — Shared-memory transmission (`t=s`) + zlib compression (`o=z`)
 
@@ -886,6 +1115,43 @@ NOT weaken the file/medium security checks; do NOT proceed.
 
 Stop: report + await review.
 
+##### 100.6 execution decisions (recorded 2026-07-01, against the real seams + maintainer direction)
+
+- **No flake stop-and-wait (maintainer-confirmed).** The plan and the orchestrator
+  brief anticipated a dependency-add STOP-and-wait for `nix develop`. Recon plus an
+  empirical `Cargo.lock` check showed neither dep pulls a **system** library:
+  `flate2 1.1.9` is already in `Cargo.lock` transitively (via `png`/`tiff`) and
+  resolves to the pure-Rust `miniz_oxide` backend (no `libz-sys`/`zlib-ng`
+  anywhere); the `nix` crate's `"mman"` feature is a thin libc wrapper (libc is
+  already a workspace dep). Per `flake-dev-shell-discipline`, the mandatory
+  stop-and-wait fires only when a **system tool/library** is added to `flake.nix` —
+  not for these. So 100.6 is pure Cargo.toml edits (workspace `Cargo.toml`:
+  `flate2` alphabetically, full semver; `freminal-terminal-emulator/Cargo.toml`:
+  `flate2.workspace = true` + add `"mman"` to the existing
+  `nix = { workspace = true, features = ["term"] }`), which cargo picks up in the
+  current shell with no `flake.nix` change and no `nix develop` re-enter.
+- **Scope expansion: add `O=` (byte offset) parsing (maintainer-confirmed).** The
+  spec's `O=` key ("read `S` bytes at offset `O`" from file/shm) is **not** parsed
+  in `freminal-common` today (only `S=`/`data_size` is). Full `t=s` correctness
+  needs it, so 100.6's scope is expanded to add a `data_offset: Option<u32>` field
+  and an `O` parser arm to `freminal-common/src/buffer_states/kitty_graphics.rs`
+  (mechanical, mirrors `S=`), honoured in the shm read (and available to `t=f`/`t=t`
+  too).
+- **`t=s` security = spec's special-file / sensitive-path refusal (new code).**
+  Recon found the reference doc's claim that `t=f`/`t=t` already "refuse special
+  files / restrict temp dirs" is **aspirational** — the real `read_kitty_file`
+  only checks `is_absolute()`. 100.6 writes the spec's refusal (reject
+  device/socket/special files; refuse `/proc`, `/sys`, `/dev`) for the **shm**
+  path per the plan, and does NOT weaken the existing `t=f`/`t=t` checks. The
+  doc-vs-code discrepancy on `t=f`/`t=t` hardening is noted for the 100.8 dual-doc
+  pass (do not silently "fix" `t=f`/`t=t` here — out of scope).
+- **Decompress in `decode_kitty_payload`** right after `resolve_kitty_transmission`
+  yields the raw bytes and **before** the RGB/RGBA/PNG format branch (the single
+  choke point; `o=z` applies to every `f=`). Windows shm uses a new
+  `#[cfg(windows)]` path (winapi file-mapping); POSIX uses `nix` `"mman"`
+  (`shm_open`/`mmap`/`shm_unlink`), inline `#[cfg(unix)]`/`#[cfg(windows)]`
+  matching the `io/pty.rs` precedent.
+
 #### 100.7 — Delete-target correctness + z-index render order
 
 Scope: `freminal-common/src/buffer_states/kitty_graphics.rs` (`KittyDeleteTarget`
@@ -900,26 +1166,90 @@ What: close the delete-target and stacking gaps the 100.1 audit enumerated.
   free image data. Today lowercase `d=i` also removes the image from the store.
 - **Visible vs all:** `d=a` deletes visible placements only; `d=A` deletes all
   including non-visible/scrollback. Today both clear the whole store.
-- **"And-after" variants:** `d=X`/`d=Y`/`d=Z` (column/row/z-index "and after")
-  currently collapse to their non-after counterparts — implement the rightward/
-  downward/higher-z semantics.
+- **~~"And-after" variants~~ (CORRECTED — see 100.7 execution decisions):** the
+  plan's "and-after" framing is a **misreading of the spec**. There is no
+  "and-after" concept; the lowercase/UPPERCASE axis is the data-freeing axis for
+  EVERY `d=` target (uppercase also frees the image data). The misnamed enum
+  variants are repurposed accordingly.
 - **Missing enum variants:** add `d=f`/`d=F` (delete animation frames — pairs with
-  100.2) and `d=r`/`d=R` (delete images with id in `[x, y]`, kitty 0.33.0); both
-  currently return `UnknownDeleteTarget` and are ignored.
+  100.2), `d=r`/`d=R` (delete images with id in `[x, y]`, kitty 0.33.0), and
+  `d=q`/`d=Q` (placements at cell `x,y` with z-index `z`); all currently return
+  `UnknownDeleteTarget` and are ignored.
 - **Z-index render order:** `build_image_verts` / `draw_images` sort quads by
   `image_id`, not `z_index`; higher z must render above lower z. Sort by z-index
   (then id for stability).
 
 Deliverable: corrected delete handling + z-ordered rendering + tests (lowercase
-keeps data, uppercase frees, visible-vs-all, and-after semantics, `d=f`/`d=r`,
-a two-image z-order assertion).
+keeps data, uppercase frees, visible-vs-all, `d=f`/`d=r`/`d=q`, a two-image
+z-order assertion).
 
 Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
-Prohibitions: do NOT change transmit/put/query parsing beyond adding the two
+Prohibitions: do NOT change transmit/put/query parsing beyond adding the new
 delete-target variants; do NOT proceed.
 
 Stop: report + await review.
+
+##### 100.7 execution decisions (recorded 2026-07-01, against the real seams + upstream spec)
+
+Recon + the authoritative kitty graphics spec ("Deleting images") corrected a
+material misreading and resolved the renderer data-flow question:
+
+- **There is NO "and-after" concept — the case axis is data-freeing.** The spec
+  is explicit: for EVERY `d=` target, lowercase deletes placements only (keeps the
+  stored image data so it can be re-displayed without resending); UPPERCASE
+  additionally frees the image data **provided the image is not referenced
+  elsewhere (e.g. in scrollback)**. So freminal's enum variant names
+  `*AndAfter`/`*CursorOrAfter` (and their doc-comments) are **wrong** — uppercase
+  `A/I/N/C/P/Q/X/Y/Z` mean "same target + free data", not "and after". The
+  existing handler collapses each lowercase|uppercase pair to identical behaviour,
+  so today no uppercase actually frees data correctly, and `d=n`/`d=N` never frees
+  store data at all (a latent bug). Maintainer-approved: implement the real spec.
+- **Enum correction (maintainer-approved option 1).** Rename the misnamed
+  `KittyDeleteTarget` variants to the data-freeing axis (e.g. a lowercase target +
+  an uppercase "…FreeData" sibling per letter, OR a `free_data: bool` on unified
+  variants — the implementer picks the cleaner shape and records it), fix the
+  stale doc-comments, and ADD `d=f`/`d=F`, `d=r`/`d=R`, `d=q`/`d=Q`. `d=a` deletes
+  visible-on-screen placements only; `d=A` all. "Uppercase frees data if not
+  referenced elsewhere" reuses the existing cell-reference check (the same idea as
+  `ImageStore::retain_referenced`): after clearing the targeted cells, an
+  uppercase delete removes the image from the store only if no remaining cell (in
+  the full `self.rows`, scrollback included) still references it. The 10
+  `clear_image_placements_*` Buffer methods touch cell-stamps only (never the
+  store), so data-freeing stays a handler concern layered on top.
+- **`d=a` visible-only needs a visible-window-scoped clear (new).** No existing
+  clear method scopes to the visible window — all iterate the full `self.rows`.
+  `d=a` (visible on screen) uses `visible_window_start(0)..rows.len()` (the live
+  bottom `height` rows — the PTY thread's only notion of "on screen", since the
+  GUI scroll offset lives in `ViewState`); `d=A` keeps the full-`self.rows`
+  behaviour. A small buffer helper is added for the visible-scoped clear.
+- **Cascade + registry hygiene.** Positional deletes (`c/p/q/x/y/z`) currently do
+  NOT prune `virtual_placements`/`real_placements`; the id/number arms do (via
+  `cascade_delete_real_placements_for_image`). Keep the existing cascade for
+  id/number; for the new/positional arms, prune `real_placements`/`virtual_placements`
+  for any image whose last cell was just cleared (so no stale parent-link metadata
+  survives). Do not regress the 100.4a cascade.
+- **Two commits: 100.7a (delete correctness) + 100.7b (z-index render order).**
+  They are independent; splitting keeps each reviewable. 100.7a =
+  `freminal-common` enum/parser + `graphics_kitty.rs` handler + `freminal-buffer`
+  visible-scoped clear helper. 100.7b = the renderer z-index sort.
+- **Z-index render order via an explicit draw-order side-channel (maintainer-approved).**
+  `build_image_verts` (GUI thread) has each image's `z_index` via the per-cell
+  `ImagePlacement`s; `draw_images` runs in the `Send+Sync+'static` `PaintCallback`
+  and only receives `snap_images` (no z-index). Rather than pollute `InlineImage`
+  with placement-level z, `build_image_verts` computes the authoritative
+  `(z_index, id)` draw order and records it as a `Vec<u64>` in `RenderState`
+  alongside `image_verts`; `draw_images` consumes that list directly instead of
+  recomputing its own `u64`-ascending sort. Vertex-emission order and draw order
+  then share one authoritative list (no fragile "both independently reproduce the
+  same sort" invariant). Higher z renders above lower z; ties break by id.
+- **100.7b scope expansion (recorded):** the mandatory `build_image_verts`
+  z-order unit tests need to construct `ImagePlacement` literals, which requires
+  naming `ImageProtocol` — not previously re-exported from
+  `freminal-terminal-emulator`. A one-line, behaviour-free addition of
+  `ImageProtocol` to the existing `image_store` `pub use` in
+  `freminal-terminal-emulator/src/lib.rs` (mirroring the 100.2c re-export
+  expansion) unblocks the tests; 100.7b's scope includes it.
 
 #### 100.8 — Escape-sequence docs
 
@@ -939,6 +1269,482 @@ Verification: markdownlint clean (`markdownlint-cli2`), prettier clean.
 Prohibitions: none beyond scope.
 
 Stop: report + await review.
+
+#### 100.9 — Source-rect crop for `a=p` (`x/y/w/h`)
+
+Added 2026-07-01 (maintainer-approved gap closure). The 100.1 audit listed
+source-rect crop as a gap but it was never given its own subtask — a planning
+omission surfaced at Task-100 doc time. kitty's `a=p` display keys `x=`/`y=`
+(top-left of the source region, px) and `w=`/`h=` (its size, px) select a
+SUB-RECTANGLE of the image to display; freminal parses them but a placement
+always shows the full image because the renderer's `compute_image_quad`
+(`vertex.rs`) derives UVs from the cell grid (`min/max col/row_in_image`), not a
+pixel source-rect.
+
+Scope: `freminal-buffer/src/image_store.rs` (`ImagePlacement` gains an optional
+pixel source-crop rect), the handler place path
+(`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`, stamp the
+crop onto the placement), the snapshot (rides the existing per-cell
+`ImagePlacement`), and `freminal/src/gui/renderer/vertex.rs` (`compute_image_quad`
+maps the pixel crop into the UV sub-rectangle). Recon the exact UV math first.
+
+Deliverable: source-rect crop applied on display + tests (a placement with a
+sub-rect crop yields the expected UV sub-region; no crop = full image, unchanged).
+
+Scope expansion (recorded): adding the non-`Option`-defaultable `source_crop`
+field to `ImagePlacement` and a `source_crop` param to
+`Buffer::place_image`/`place_image_at` is compile-forced across every
+`ImagePlacement` literal and `place_image*` call site in the workspace
+(`freminal-buffer/src/buffer/mod.rs`, `row.rs`; the sixel/iTerm2 handlers;
+`terminal_handler/mod.rs`'s placeholder + virtual-parent injection). All get the
+still-image default (`source_crop: None` / trailing `None`) — behaviour-neutral
+for every non-`a=p`/`a=T` path. `SourceCrop` is re-exported from
+`freminal-terminal-emulator/src/lib.rs` (one-line, mirroring `ImageProtocol`) so
+the renderer can name it. The `ImageBounds` map remains keyed by `image_id`
+(not `(image_id, placement_id)`), so two on-screen placements of the same image
+with different crops collapse to first-seen — a pre-existing limitation shared
+with `z_index` (100.7b), out of 100.9 scope.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT change `a=c` compose (which already uses `x/y/w/h`
+correctly); do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.10 — Windows `t=s` shared memory (winapi file-mapping)
+
+Added 2026-07-01 (maintainer-approved gap closure). 100.6 implemented `t=s` on
+POSIX (real `shm_open`/`mmap`/`shm_unlink` via `nix` `mman`) but left the Windows
+path a compile-safe `ENOTSUP` stub, deferring the `winapi` dependency add. This
+closes it: `winapi` is already a workspace dependency (used by `portable-pty`),
+so adding it to `freminal-terminal-emulator` is a small, non-flake Cargo.toml
+change plus the `#[cfg(windows)]` file-mapping read.
+
+Scope: `freminal-terminal-emulator/Cargo.toml` (add a
+`[target.'cfg(windows)'.dependencies]` block with `winapi.workspace = true` +
+the file-mapping features — `memoryapi`, `handleapi`, and any others
+`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle` need),
+`freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs` (replace the
+Windows `read_kitty_shared_memory` ENOTSUP stub with a real
+`OpenFileMappingW`(FILE_MAP_READ) → `MapViewOfFile` → copy `S` bytes at offset
+`O` → `UnmapViewOfFile` + `CloseHandle` read; mirror the POSIX security
+refusal). No flake change (winapi is a Windows-only Rust crate, no system lib).
+
+Deliverable: Windows `t=s` read + a `#[cfg(windows)]` test (a real
+`CreateFileMappingW`-backed object round-trip, hermetic), mirroring the POSIX
+test shape. If a Windows CI runner is unavailable, ensure the code compiles under
+`--target x86_64-pc-windows-*` gating and the POSIX suite stays green.
+
+Verification: `cargo test --all` (POSIX); `cargo clippy --all-targets --all-features -- -D warnings`;
+confirm the `#[cfg(windows)]` code compiles (cargo check for the windows target
+if the toolchain is available, else careful cfg review).
+
+Prohibitions: do NOT touch the POSIX path (already correct); do NOT weaken the
+security refusal; do NOT add a flake change (winapi needs none); do NOT proceed.
+
+Stop: report + await review.
+
+#### 100.11 — Live render bug: animation does not animate (`a=a`)
+
+Surfaced 2026-07-02 by a maintainer live-window run of `test-scripts/kitty_graphics.py`
+step 7, on top of `4561a275`. Unit tests (handler/store/`ViewState` state) are green;
+the state-only tests could not catch a GUI repaint/frame-clock defect.
+
+- **Surface point:** commit `4561a275` (manual test script); the animation display leg
+  landed in 100.2c (`f48ac368`).
+- **Impact:** after `a=a,i=3,s=3,v=1` (run, infinite loop), the image never cycles
+  red→green→blue; it holds on the first frame. `a=a` is intentionally silent (no PTY
+  response, per spec — 100.2b), which is correct and not the bug.
+- **Scope:** `freminal/src/gui/view_state.rs` (`tick_image_animations` /
+  `ImageAnimationClock`); `freminal/src/gui/terminal/widget.rs` (the full-rebuild
+  trigger set + `request_repaint_after` re-arm). READ-ONLY recon (2026-07-02) found a
+  confirmed defect: the GUI clock's `frame_started` is anchored the first time an image
+  is observed with `is_animated()` (which ignores `run_mode`), i.e. as soon as the first
+  `a=f` frame arrives while still `Stopped`, and is never re-anchored on the
+  `Stopped → Running` transition at `a=a`. Whether this alone freezes playback vs. only
+  skips an initial frame is a runtime-timing question the recon could not close
+  statically.
+- **Approach:** pending confirmation from a live `.frec` capture of the exact step-7
+  bytes + behavior (per `freminal-frec-decoder`). Candidate fix: re-anchor
+  `clock.frame_started = now` (and reset `loops_done`) on a `Stopped → Running`
+  transition, so playback starts cleanly from the run point.
+- **Verification:** a regression test closer to end-to-end than the state-only tests —
+  assert `tick_image_animations` advances the selected frame over successive wall-clock
+  ticks given a `Running` image in the snapshot map (using the `#[cfg(test)]`
+  back-dated-clock seeding helper).
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.12 — Live render bug: animation compose does nothing (`a=c`)
+
+Surfaced 2026-07-02 by the same live run (step 8), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the compose handler landed in 100.2b
+  (`17e1f28b`), the display leg in 100.2c (`f48ac368`).
+- **Impact:** `a=c,i=3,r=1,c=2` composes frame 1 pixels onto frame 2 (a store-mutation
+  that changes no cell and no `run_mode`). Nothing visibly happens.
+- **Scope:** `freminal/src/gui/terminal/widget.rs` (the full-rebuild trigger set at the
+  `show()` rebuild decision). READ-ONLY recon (2026-07-02) found the **definitive** root
+  cause: the PTY thread republishes the snapshot unconditionally after every batch (not
+  damage-gated), so the new composed-frame pixel `Arc` reaches the GUI — but the widget's
+  full-rebuild trigger set has **no term for a store-only image-pixel mutation**.
+  `image_frame_changed` fires only from `tick_image_animations`'s `changed` set
+  (wall-clock stepping or app-forced `current_frame`), never from a raw store mutation.
+  The full-rebuild path is the only path that refreshes `RenderState.snap_images` and the
+  only path that calls `sync_image_textures` (`draw_with_cursor_only_update` never does),
+  so the GPU texture stays stale until an unrelated trigger forces a full rebuild.
+- **Approach:** give the widget a trigger that detects an image-pixel change independent
+  of the wall-clock clock — e.g. track the per-id pixel-`Arc` pointer identity of the
+  snapshot images against the previous frame's, and force the full rebuild when any
+  animated image's selected-frame pixel `Arc` differs. (Shares the same architectural
+  seam as 100.11 but is a distinct fix.)
+- **Verification:** a regression test that a compose-mutated image's changed pixels are
+  reflected in the rebuilt `RenderState.snap_images` (or the rebuild-trigger predicate
+  fires) — closer to end-to-end than the state-only compose test.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+##### 100.12 execution decisions (recorded 2026-07-02, fix landed `f7d77ac2`)
+
+Root cause confirmed definitively as recon predicted. The fix adds an
+`image_pixels_changed` full-rebuild trigger in `freminal/src/gui/terminal/widget.rs`.
+`PaneRenderCache` gains `last_rendered_image_pixel_ptrs: HashMap<u64, usize>` recording
+each visible image's selected-frame pixel-`Arc` pointer address as of the last full
+rebuild; `show()` rebuilds that map from the current snapshot and forces a full rebuild
+(and excludes the cursor-only fast path) when it differs. The map is built by the pure
+free function `build_image_pixel_ptrs`, which mirrors exactly which `Arc` the rebuild
+block uploads (animated → `frame_pixels(selected_frame(id))` with a root-`pixels`
+fallback; still → root `pixels`), so the trigger and the upload always agree. The cache
+is refreshed on every full rebuild, so a one-off mutation cannot pin the pane in
+perpetual full-rebuild (no CPU spin). The predicate is a pure function tested directly
+(no live GUI): a selected-frame pixel-`Arc` replacement is flagged; an unchanged pointer
+and an unselected-frame mutation are not (fail-before / pass-after verified). Chosen
+over widening the snapshot/`content_changed` signal because the change is entirely
+GUI-side, respects the lock-free read-only `update()` contract, and adds no snapshot
+transport. Per-frame cost for the no-image common case is a zero-iteration map build.
+
+#### 100.13 — Live render bug: unicode placeholder does not render (`U=1`)
+
+Surfaced 2026-07-02 by the same live run (step 9), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the placeholder machinery predates Task 100 and
+  was audited complete in 100.3 (`f2c08209`).
+- **Impact:** transmit quietly (`a=t,…,q=2`), create a virtual placement
+  (`a=p,i=4,U=1,c=2,r=2`), print U+10EEEE cells with SGR-truecolor fg (image id) +
+  row/col diacritics — nothing renders in the placeholder cells.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+  (`handle_data_with_placeholders` / `handle_placeholder_char` fast-path guard),
+  `graphics_kitty.rs` (the `a=p,U=1` virtual-placement registration + the `q=2` transmit
+  decode path), `freminal-common/src/buffer_states/unicode_placeholder.rs`
+  (`color_to_image_id`). READ-ONLY recon (2026-07-02) found **no code-logic break** — the
+  ordering, id extraction, cell stamping, and snapshot transport are all sound and the
+  unit test mirrors the script and passes. Leading hypothesis (live-only): the `q=2`
+  transmit's payload size may not match `s=2,v=2,f=32`, so `decode_kitty_payload` fails
+  silently (`q=2` suppresses the error), the image is never stored, and the subsequent
+  `a=p,U=1` hits `handle_kitty_put`'s `ENOENT` early-return **before**
+  `register_virtual_placement` runs — so no virtual placement is ever created and the
+  placeholder cells fall through to the space fallback.
+- **Approach:** pending a live `.frec` capture (per `freminal-frec-decoder`,
+  `sequence_decoder.py --convert-escape`) to see the exact bytes freminal receives —
+  specifically the transmit payload byte-count, the `a=p,U=1` control keys, and the SGR
+  fg. Fix shape decided once the capture identifies the real break.
+- **Verification:** a regression test closer to end-to-end than the state-only test —
+  drive the exact step-9 byte sequence through the handler and assert the placeholder
+  cells carry `ImagePlacement`s that reach a built `TerminalSnapshot`'s visible image
+  placements.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.14 — Live render bug: relative placement (real parent) lands at wrong offset (`P=`)
+
+Surfaced 2026-07-02 by the same live run (step 10), on top of `4561a275`.
+
+- **Surface point:** commit `4561a275`; the real-parent positioning landed in 100.4a
+  (`1dfd82eb`).
+- **Impact:** `a=T,i=5` (cyan) displays; `a=t,i=6` stored; `a=p,i=6,P=5,H=2,V=1` should
+  render magenta offset from cyan — but the child does not appear clearly at
+  parent+offset, and parent behavior is unclear.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`place_kitty_image` / `stamp_kitty_put` — the `record_real_placement` origin capture);
+  possibly `freminal-buffer/src/buffer/images.rs` (`place_image` return value). READ-ONLY
+  recon (2026-07-02) found a **concrete, evidenced candidate**: `record_real_placement`
+  captures `self.buffer.cursor().pos` **before** `place_image()` is called, but
+  `place_image` may call `enforce_scrollback_limit`, which drains rows from the top and
+  decrements the buffer's own `cursor.pos.y`. The recorded `origin_row` is then stale
+  (too large by the drained-row count), so the child origin derived as
+  `parent_origin.row + V` lands wrong. Only manifests in a live session with accumulated
+  scrollback (unit tests use a fresh small buffer, so the drain never fires) — which
+  matches "unit-green but live-broken".
+- **Approach:** capture the placement origin from the **actual** post-`place_image` row
+  index rather than the stale pre-drain cursor copy — either capture the cursor after
+  `place_image` returns, or have `place_image`/`place_image_at` return the true stamped
+  origin and use that in `record_real_placement`. Applies to both the `a=T`/`a=t`-display
+  branch (`place_kitty_image`) and the `a=p` branch (`stamp_kitty_put`).
+- **Verification:** a regression test that grows the buffer past `scrollback_limit` so a
+  placement triggers a scrollback drain, then asserts the recorded real-placement origin
+  matches the actual stamped cell row (fails before / passes after) — the specific gap no
+  existing test exercises.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge.
+
+#### 100.15 — Live render bug: displayed image destroyed by subsequent output (shared root cause of 100.11/100.13)
+
+Surfaced 2026-07-02 by a maintainer live comparison against real kitty, then confirmed
+by READ-ONLY recon. This is the **shared root cause** behind the "animation does
+nothing" (100.11) and "placeholder does not render" (100.13) symptoms: the displayed
+image is destroyed before any effect can be observed.
+
+- **Surface point:** predates Task 100 (a latent `Buffer::place_image` defect), exposed
+  by the Task 100 live testing on `4561a275`.
+- **Impact:** after an image is displayed at the buffer tail (the normal case), the next
+  character write (shell prompt, the test-script menu re-print, an animation frame's
+  surrounding text) fully destroys the image — it disappears entirely rather than
+  scrolling with the text as in kitty.
+- **Scope:** `freminal-buffer/src/buffer/images.rs` (`place_image` cursor-final-position
+  logic, ~544-551). ROOT CAUSE (recon-confirmed): when the image is placed at the tail,
+  the row-creation loop leaves `self.rows.len() == base_row + display_rows == final_row`
+  exactly, so the guard `if final_row < self.rows.len()` is false (equality), the `else`
+  branch fires, and the cursor is parked on the image's **own last row** instead of a
+  fresh row below it — contradicting `place_image`'s own doc comment. The next text write
+  then overwrites the image's cells (`insert_text` → `clear_images_overwritten_by_text`).
+  Protocol-agnostic trigger; total for short/1-row images. Existing tests missed it by
+  pre-padding rows or manually resetting the cursor before writing.
+- **Approach:** guarantee a fresh blank row exists **below** the placed image and move
+  the cursor there (append one more row when `final_row == rows.len()`, then set
+  `cursor.pos.y = final_row`), so subsequent output goes below the image and never
+  overwrites it — matching kitty/iTerm2. Honours the plan's cell-anchored decision (the
+  scroll path already carries image cells correctly); this only fixes where the cursor
+  lands. Must not double-append when rows already exist below, and must interoperate with
+  the 100.14 post-drain origin capture (the extra pushed row may itself trigger a
+  scrollback drain).
+- **Verification:** a regression test that places an image at the buffer tail with NO
+  pre-padding and NO manual cursor reset, then writes text, and asserts the image's cells
+  survive and the cursor is on a fresh row below (fails before / passes after). After this
+  lands, re-test steps 7 (animation) and 9 (placeholder) live to determine any residual
+  100.11/100.13 work.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge. Likely subsumes the
+  visible symptoms of 100.11 and 100.13.
+
+#### 100.16 — `C=1` (no cursor movement) not honoured on `a=T`/Put
+
+Surfaced 2026-07-02 while implementing 100.15: the corrected cursor positioning
+unmasked a genuine pre-existing gap that the old off-by-one had been coincidentally
+masking.
+
+- **Surface point:** exposed by the 100.15 cursor fix; the gap itself predates Task 100.
+- **Impact:** kitty `C=1` (do not move the cursor after displaying) is honoured only on
+  the `a=p` path (`stamp_kitty_put` saves/restores the cursor), NOT on the `a=T` /
+  `TransmitAndDisplay` (and `Put` via `place_kitty_image`) path. The test
+  `kitty_transmit_and_display_with_no_cursor_movement` passed only because the old
+  cursor bug clamped a 1-row image's cursor back to its origin (== the pre-call cursor),
+  coincidentally matching the `C=1` expectation.
+- **Scope:** `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`place_kitty_image` display branch). Save the cursor before `place_image` and restore
+  it when `control.no_cursor_movement` is set, mirroring `stamp_kitty_put`.
+- **Approach:** in the `else if should_display` branch of `place_kitty_image`, capture
+  the cursor before placement and, if `no_cursor_movement`, restore it after — matching
+  the existing `stamp_kitty_put` save/restore. The real-placement origin recorded via
+  `record_real_placement` must remain the image's true stamped origin (100.14), not the
+  restored cursor.
+- **Verification:** `kitty_transmit_and_display_with_no_cursor_movement` passes for the
+  right reason (cursor genuinely restored, not coincidentally clamped); add/confirm a
+  companion test that the cursor DOES move below the image when `C` is absent/0.
+- **Scheduling:** landed together with 100.15 (the fixes are tightly coupled — 100.15
+  unmasks 100.16 — so they ship as one atomic, suite-green commit per
+  `commit-discipline`).
+
+#### 100.17 — Images scaled to cell grid instead of drawn at native pixel size (all protocols)
+
+Surfaced 2026-07-02 by a maintainer live comparison against kitty; confirmed by
+READ-ONLY recon against the kitty, iTerm2, and sixel specs. A cross-protocol
+rendering-fidelity bug, pre-existing since Task 13, distinct from the four live render
+bugs (100.11–100.14, all fixed).
+
+- **Surface point:** predates Task 100 (Task 13 renderer); exposed by Task 100 live
+  testing on `4561a275`.
+- **Impact:** freminal ALWAYS scales a displayed image to fill its `div_ceil(px, cell_px)`
+  cell grid, but the specs require **native pixel size by default**. A 4×4px image
+  reserves 1 cell (correct) but is stretched to fill the whole ~8×16px cell (~4× too
+  large). Affects all three supported protocols; correct only when an explicit display
+  size was requested.
+- **Spec basis (upstream wins):**
+  - kitty graphics-protocol, "Controlling displayed image layout": with no `c`/`r`, the
+    image is "rendered at the current cursor position, from the upper left corner of the
+    current cell" at native size; scaling happens **only** when `c`/`r` are given (if only
+    one is given, the other is derived to preserve aspect ratio). freminal is wrong for
+    kitty-default, correct for kitty-with-`c`/`r`.
+  - iTerm2 (`iterm2.com/documentation-images.html`): default `width`/`height` = `auto` =
+    the image's inherent (native) size; `imgcat` displays "at their full size". Wrong for
+    iTerm2-default, correct for explicit `width`/`height`.
+  - sixel (`vt100.net/shuford/terminal/all_about_sixels.txt`): strictly 1:1 native pixels,
+    no cell-grid concept in the protocol at all. Wrong for **every** sixel image (sixel has
+    no size arg).
+- **Scope:** `freminal-buffer/src/image_store.rs` (`InlineImage` gains a size-mode signal),
+  the three handlers (`graphics_kitty.rs`, `graphics_sixel.rs`, `graphics_iterm2.rs` — set
+  the mode at construction while the `c`/`r`/`width`/`height` provenance is still known),
+  the snapshot transport (the mode rides `InlineImage`, already shipped), and
+  `freminal/src/gui/renderer/vertex.rs` (`compute_image_quad` — the shared render path;
+  no per-protocol branch exists today).
+- **Approach:** add a `SizeMode` enum (`NativePixels` | `ExplicitCells`) to `InlineImage`,
+  set `ExplicitCells` when the protocol carried an explicit display size (kitty `c`/`r`,
+  iTerm2 `width`/`height` non-auto) and `NativePixels` otherwise (kitty default, iTerm2
+  auto, **always** sixel). `compute_image_quad` draws the quad at
+  `InlineImage.width_px`/`height_px` (native, already stored and already passed in) anchored
+  at the placement's top-left cell for `NativePixels`, and keeps the current scale-to-cell
+  behaviour for `ExplicitCells`. The mode cannot be inferred downstream (comparing
+  `display_cols == div_ceil(px)` false-positives when a user explicitly requests a
+  native-equivalent size), so the signal must be set at construction time. Interacts with
+  the documented sub-cell `X`/`Y` pixel-offset limitation — native-size rendering makes that
+  gap distinctly visible (image sits exactly at the cell corner), so note it (do not
+  necessarily fix it here).
+- **Decomposition:** 100.17a (data + all-three-handler mode-setting + snapshot transport,
+  behaviour-neutral wiring) → 100.17b (renderer branch in `compute_image_quad` + tests +
+  a before/after Criterion capture on `build_image_verts`/`compute_image_quad` per
+  `freminal-bench-table`, ≤15% regression).
+- **Verification:** regression tests — a `NativePixels` image yields a native-pixel-sized
+  quad; an `ExplicitCells` image still fills the declared cell grid; per-protocol
+  construction sets the right mode. Criterion before/after on the render hot path. Live
+  re-test that images now match kitty's size.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge (maintainer directed
+  fixing it before the merge — all protocols need it).
+
+#### 100.18 — Per-placement identity: coexisting placements of the same image
+
+Surfaced 2026-07-02 by a maintainer live run (step 4, `a=p,i=2,c=8,r=4` after a prior
+`a=p,i=2`), root-caused from a `.frec` (decoded with `sequence_decoder.py`) + the kitty
+spec. A pre-existing bug flagged (but never fixed) in the 100.4 and 100.9 execution
+decisions.
+
+- **Surface point:** predates Task 100; the id-only `ImageBounds` bucketing was flagged in
+  100.4 (`a3e29d50`/notes) and 100.9. Exposed by Task 100 live testing.
+- **Impact:** `build_image_verts` buckets `ImageBounds` by `image_id` alone, so two
+  on-screen placements of the same image merge into one oversized bounding box → a
+  grossly stretched/misplaced quad. Per the kitty spec (graphics-protocol lines
+  1105/1111): multiple `a=p` puts with placement id `0`/unspecified create MULTIPLE
+  COEXISTING placements; only two puts with the same NON-ZERO placement id replace each
+  other. freminal wrongly merges any two same-image-id placements.
+- **Scope:** `freminal-buffer/src/image_store.rs` (`next_placement_instance_id()`,
+  `ImagePlacement.placement_instance`, `PlaceImageResult.placement_instance`),
+  `freminal-buffer/src/buffer/images.rs` (`place_image`/`place_image_at` param;
+  `clear_image_placements_by_placement`), the handlers (mint + thread the instance id;
+  replace-clear on same non-zero `p=`), `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+  (`RealPlacement.placement_instance`), and the renderer
+  (`freminal/src/gui/renderer/vertex.rs` bucket by `placement_instance`;
+  `freminal/src/gui/renderer/gpu.rs` + `RenderState.image_draw_order`).
+- **Approach:** a monotonic per-put placement-instance id (mirroring `next_image_id`)
+  stamped on every cell of a placement; `build_image_verts` buckets by it. Same non-zero
+  `p=` re-put clears the prior placement's cells first (`clear_image_placements_by_placement`).
+  **Critical draw-order split:** `build_image_verts`'s `draw_order` is both the vertex-slab
+  bucket key (must become per-instance) AND the GPU texture-lookup key (must stay per
+  image id — `gpu.rs` `image_textures` is keyed by image id); it becomes a
+  `Vec<ImageDrawEntry { instance_id, image_id }>` so the slab is per-instance while
+  texture binding stays per-image-id. Per-instance bucketing also resolves the
+  `z_index`/`source_crop` first-seen-collapse limitations (100.7b/100.9) for free.
+- **Verification:** two same-image `p=0` puts render as two independent quads; a same
+  non-zero `p=` re-put replaces (one quad); z-index/crop no longer collapse across
+  placements; a `build_image_verts` Criterion before/after (the bench added in 100.17b),
+  ≤15% regression.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge. Landed as one combined
+  pass with 100.19 + 100.20 (total site overlap).
+
+#### 100.19 — Kitty sub-cell `X`/`Y` pixel offset on display
+
+Full-spec-compliance gap: kitty `X=`/`Y=` (parsed as `cell_x_offset`/`cell_y_offset`)
+shift an image's drawing origin within the top-left cell by that many pixels (< cell
+size). Parsed but never applied on the display path.
+
+- **Scope:** `freminal-buffer/src/image_store.rs` (`SubCellOffset` type +
+  `ImagePlacement.subcell_offset`), `place_image`/`place_image_at` param,
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`resolve_subcell_offset`, display-actions-only, clamped `< cell` — mirroring
+  `resolve_source_crop`), and `freminal/src/gui/renderer/vertex.rs` (`ImageBounds`
+  field; additive quad-origin shift applied after `compute_image_quad_position`, defensively
+  re-clamped against `cell_width`/`cell_height`).
+- **Spec basis:** kitty graphics-protocol line 1121 (X/Y offset within the first cell,
+  must be `< cell size`); KITTY-ONLY (iTerm2 and sixel have no sub-cell offset — confirmed).
+- **Approach:** mirror the Task 100.9 `source_crop` wiring exactly; orthogonal to size mode
+  (position only) and crop (UV only).
+- **Verification:** an `X`/`Y` offset shifts the quad origin by that many pixels, clamped
+  `< cell`; tests mirror the crop tests but assert position.
+- **Scheduling:** landed with 100.18 (combined render-path pass). Corrects a prior wrong
+  "out of scope" framing — full spec compliance requires it.
+
+#### 100.20 — Placement-identity edge cases (virtual p=0 coexist; `d=i,p=` narrowing)
+
+Two adjacent gaps completed alongside 100.18/100.19 (maintainer directed "do everything
+now").
+
+- **Virtual p=0 coexistence:** `VirtualPlacement` gains `placement_instance`, populated at
+  registration and read by `handle_placeholder_char`, so two independent `a=p,U=1`/`a=T,U=1`
+  registrations of the same image with `p=0` coexist as distinct placements (temporal
+  disambiguation via register-then-write order). Scope:
+  `freminal-common/src/buffer_states/unicode_placeholder.rs` (field) +
+  `freminal-terminal-emulator/src/terminal_handler/*` (populate/read).
+- **`d=i,p=` narrowing:** `handle_kitty_delete_by_id` currently ignores `p=` and clears all
+  placements of the image; per spec, `d=i,p=<n>` deletes only that `(image_id, placement_id)`.
+  Wire it to the `clear_image_placements_by_placement` method added in 100.18. Scope:
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`.
+- **Verification:** two `p=0` virtual placements of one image coexist; `d=i,p=<n>` removes
+  only the named placement while others survive.
+- **Scheduling:** landed with 100.18/100.19.
+
+##### 100.18 + 100.19 + 100.20 execution decisions (recorded 2026-07-02, fix landed `2370b84f`)
+
+Implemented as one combined pass (total site overlap; the two new `ImagePlacement`
+fields and the `place_image` param churn touch the same ~27 literals / ~37 call sites).
+Discriminator: a monotonic `next_placement_instance_id()` (mirrors `next_image_id`)
+stamped per put on `ImagePlacement.placement_instance`; `build_image_verts` buckets
+`ImageBounds` by it. Same non-zero `p=` re-put clears the prior placement first via
+`clear_image_placements_by_placement`; `p=0`/unspecified coexist (kitty spec lines
+1105/1111). The **critical, easily-missed** piece the design recon surfaced: the
+renderer's draw order was doing double duty as the vertex-slab key (now per-instance) and
+the GPU texture-lookup key (must stay per image id — `gpu.rs` `image_textures` is keyed by
+image id); it became a `Vec<ImageDrawEntry { instance_id, image_id }>`. Per-instance
+bucketing resolved the `z_index`/`source_crop` first-seen-collapse limitations
+(100.7b/100.9) for free. X/Y sub-cell offset (100.19) mirrors the 100.9 `source_crop`
+wiring (a display-only `resolve_subcell_offset` clamped `< cell`, applied as an additive
+quad-origin translation after `compute_image_quad_position`, orthogonal to size mode and
+crop). 100.20 closed both flagged edge gaps: `VirtualPlacement.placement_instance` for
+p=0 virtual coexistence, and `d=i,p=` delete narrowing. The same-z tie-break basis changed
+from image-id order to instance-id/creation order (harmless; noted). `build_image_verts`
+Criterion within noise (no regression). Fixes the live step-4 "huge image" bug (two
+coexisting p=0 placements of image 2 merging into one stretched quad).
+
+##### 100.15 + 100.16 execution decisions (recorded 2026-07-02, fix landed `091b1caa`)
+
+Root cause confirmed exactly as the maintainer hypothesised and recon traced. `place_image`
+now appends a fresh blank row below a tail-placed image and moves the cursor onto it, and
+re-runs `enforce_scrollback_limit` after the append (re-deriving `base_row` by the same
+delta) so the append can never push the primary buffer over its cap and the 100.14
+post-drain `origin_row` invariant still holds. This honours the plan's cell-anchored
+decision (line ~978) — the scroll path already carries image cells; only the cursor final
+position was wrong. 100.16 (unmasked by 100.15) adds the `C=1` save/restore to
+`place_kitty_image`'s `a=T`/Put branch, mirroring `stamp_kitty_put`; the recorded
+real-placement origin is unchanged (only the cursor is restored). The two fixes shipped as
+one atomic commit because 100.15 unmasks 100.16 and splitting would leave a
+suite-red intermediate. Two durable test decisions: (1) the `grow_buffer_rows` test helper
+was decoupled from `place_image` (now drives plain `handle_lf`) so unrelated
+relative-placement tests do not inherit `place_image`'s cursor behaviour; (2) the 100.14
+regression test's expected origin was recomputed for the two-stage drain 100.15 introduces
+(a tail placement that drains always lands the append-row exactly at the cap, so it is
+drained again by one) — `origin_row` in the drain regime is `max_rows - display_rows - 1`,
+independent of the starting cursor row. New/strengthened tests: image survives a following
+text write (buffer, 2 tests); `C=1` on a 2-row `a=T` genuinely restores the cursor;
+cursor moves below the image when `C` is absent. Whether the animation (100.11) and
+placeholder (100.13) symptoms are now resolved is pending a live re-test.
+
+##### 100.14 execution decisions (recorded 2026-07-02, fix landed `004d2eb2`)
+
+Root cause confirmed exactly as recon predicted. `Buffer::place_image` now returns
+a `PlaceImageResult { scroll_offset, origin_row, origin_col }` (a new public struct
+in `freminal-buffer/src/buffer/images.rs`, re-exported from `buffer/mod.rs`) instead
+of a bare `usize` scroll offset. `origin_row` is the post-drain `base_row` and
+`origin_col` is the pre-placement `start_col` — the image's true stamped top-left.
+The two Kitty real-placement sites (`place_kitty_image`, `stamp_kitty_put`) record
+that origin; `graphics_sixel.rs` / `graphics_iterm2.rs` consume `.scroll_offset` for
+byte-identical behaviour. Chosen over the alternatives (hidden `last_placement_origin`
+buffer field; changing the return to only the drained count) because the explicit
+struct is the most testable and keeps `freminal-buffer` a pure, side-effect-free data
+model. Regression test `kitty_real_placement_origin_survives_scrollback_drain` grows
+the buffer past `scrollback_limit` so the placing call drains, and asserts the
+recorded origin matches the actual stamped row (fail-before / pass-after verified).
 
 ### 100 Open questions (resolved at activation, 2026-07-01)
 

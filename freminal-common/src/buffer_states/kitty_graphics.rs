@@ -69,47 +69,52 @@ pub enum KittyCompression {
     Zlib,
 }
 
-/// Delete target specifier.
+/// Delete target specifier (Task 100.7a).
+///
+/// The kitty spec's `d=` targets come in lowercase/uppercase pairs where
+/// the case does **not** change which placements are targeted — it changes
+/// whether the underlying image data is freed once no placement anywhere
+/// (including scrollback) still references it. There is no "and-after"
+/// concept for any target (a prior misreading in this enum's earlier
+/// revision). This type carries only the POSITIONAL target; the
+/// data-freeing axis is carried separately by
+/// [`KittyControlData::delete_free_data`], set from the case of the `d=`
+/// character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KittyDeleteTarget {
-    /// `d=a` — Delete all images visible on screen.
+    /// `d=a`/`d=A` — placements visible on screen.
     All,
-    /// `d=A` — Delete all images, including those not visible.
-    AllIncludingNonVisible,
-    /// `d=i` — Delete image with specified ID.
+    /// `d=i`/`d=I` — images with id `i=` (optionally placement `p=`).
     ById,
-    /// `d=I` — Delete newest image with specified ID on cursor or after.
-    ByIdCursorOrAfter,
-    /// `d=n` — Delete newest image with specified number.
+    /// `d=n`/`d=N` — newest image with number `I=` (optionally placement `p=`).
     ByNumber,
-    /// `d=N` — Delete newest image with number on cursor or after.
-    ByNumberCursorOrAfter,
-    /// `d=c` — Delete all images at cursor position.
+    /// `d=c`/`d=C` — placements intersecting the current cursor cell.
     AtCursor,
-    /// `d=C` — Delete all images at cursor position and after.
-    AtCursorAndAfter,
-    /// `d=p` — Delete all images that intersect a cell range.
-    AtCellRange,
-    /// `d=P` — Delete all images that intersect a cell range and after.
-    AtCellRangeAndAfter,
-    /// `d=x` — Delete all images in column range.
-    InColumnRange,
-    /// `d=X` — Delete all images in column range and after.
-    InColumnRangeAndAfter,
-    /// `d=y` — Delete all images in row range.
-    InRowRange,
-    /// `d=Y` — Delete all images in row range and after.
-    InRowRangeAndAfter,
-    /// `d=z` — Delete all images at z-index.
+    /// `d=f`/`d=F` — delete animation frames.
+    Frames,
+    /// `d=p`/`d=P` — placements intersecting cell `x=`,`y=`.
+    AtCell,
+    /// `d=q`/`d=Q` — placements intersecting cell `x=`,`y=` with z-index `z=`.
+    AtCellZIndex,
+    /// `d=r`/`d=R` — images with id in `[x=, y=]` (kitty 0.33.0+).
+    IdRange,
+    /// `d=x`/`d=X` — placements intersecting column `x=`.
+    InColumn,
+    /// `d=y`/`d=Y` — placements intersecting row `y=`.
+    InRow,
+    /// `d=z`/`d=Z` — placements with z-index `z=`.
     AtZIndex,
-    /// `d=Z` — Delete all images at z-index and after.
-    AtZIndexAndAfter,
 }
 
 /// Parsed control data from a Kitty graphics command.
 ///
 /// All fields are optional; missing keys use protocol defaults.
+// This struct mirrors the kitty graphics protocol's key/value control data
+// 1:1 — each bool is an independent single-bit protocol key (`m=`, `C=`,
+// `U=`, and the `d=` case), not a set of related flags that would be
+// clearer as a state machine or enum.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct KittyControlData {
     /// `a` — Action. Defaults to `Transmit`.
     pub action: Option<KittyAction>,
@@ -134,6 +139,9 @@ pub struct KittyControlData {
 
     /// `S` — Total data size in bytes (for chunked transfers).
     pub data_size: Option<u32>,
+
+    /// `O` — byte offset to read from a file/shared-memory object.
+    pub data_offset: Option<u32>,
 
     /// `i` — Image ID (1–`u32::MAX`). 0 means auto-assign.
     pub image_id: Option<u32>,
@@ -189,6 +197,13 @@ pub struct KittyControlData {
 
     /// `d` — Delete target (only used when action is `Delete`).
     pub delete_target: Option<KittyDeleteTarget>,
+
+    /// Whether the `d=` value was uppercase — per spec, the uppercase form
+    /// of every delete target ALSO frees the underlying image data
+    /// (provided it is not referenced elsewhere, e.g. in scrollback),
+    /// while the lowercase form only removes placements. Defaults to
+    /// `false` (lowercase / data-preserving).
+    pub delete_free_data: bool,
 
     /// `U` — Unicode placeholder mode: 0 = off (default), 1 = on.
     pub unicode_placeholder: bool,
@@ -297,25 +312,22 @@ const fn parse_transmission(c: u8) -> Result<KittyTransmission, KittyParseError>
     }
 }
 
-/// Parse the delete target.
+/// Parse the delete target's POSITIONAL kind, ignoring case — the case
+/// (uppercase = also free data) is captured separately by the caller via
+/// [`KittyControlData::delete_free_data`].
 const fn parse_delete_target(c: u8) -> Result<KittyDeleteTarget, KittyParseError> {
-    match c {
+    match c.to_ascii_lowercase() {
         b'a' => Ok(KittyDeleteTarget::All),
-        b'A' => Ok(KittyDeleteTarget::AllIncludingNonVisible),
         b'i' => Ok(KittyDeleteTarget::ById),
-        b'I' => Ok(KittyDeleteTarget::ByIdCursorOrAfter),
         b'n' => Ok(KittyDeleteTarget::ByNumber),
-        b'N' => Ok(KittyDeleteTarget::ByNumberCursorOrAfter),
         b'c' => Ok(KittyDeleteTarget::AtCursor),
-        b'C' => Ok(KittyDeleteTarget::AtCursorAndAfter),
-        b'p' => Ok(KittyDeleteTarget::AtCellRange),
-        b'P' => Ok(KittyDeleteTarget::AtCellRangeAndAfter),
-        b'x' => Ok(KittyDeleteTarget::InColumnRange),
-        b'X' => Ok(KittyDeleteTarget::InColumnRangeAndAfter),
-        b'y' => Ok(KittyDeleteTarget::InRowRange),
-        b'Y' => Ok(KittyDeleteTarget::InRowRangeAndAfter),
+        b'f' => Ok(KittyDeleteTarget::Frames),
+        b'p' => Ok(KittyDeleteTarget::AtCell),
+        b'q' => Ok(KittyDeleteTarget::AtCellZIndex),
+        b'r' => Ok(KittyDeleteTarget::IdRange),
+        b'x' => Ok(KittyDeleteTarget::InColumn),
+        b'y' => Ok(KittyDeleteTarget::InRow),
         b'z' => Ok(KittyDeleteTarget::AtZIndex),
-        b'Z' => Ok(KittyDeleteTarget::AtZIndexAndAfter),
         _ => Err(KittyParseError::UnknownDeleteTarget(c)),
     }
 }
@@ -347,6 +359,7 @@ fn apply_control_pair(
         b's' => ctrl.src_width = Some(parse_u32(value)?),
         b'v' => ctrl.src_height = Some(parse_u32(value)?),
         b'S' => ctrl.data_size = Some(parse_u32(value)?),
+        b'O' => ctrl.data_offset = Some(parse_u32(value)?),
         b'i' => ctrl.image_id = Some(parse_u32(value)?),
         b'I' => ctrl.image_number = Some(parse_u32(value)?),
         b'p' => ctrl.placement_id = Some(parse_u32(value)?),
@@ -361,7 +374,10 @@ fn apply_control_pair(
         b'Y' => ctrl.cell_y_offset = Some(parse_u32(value)?),
         b'z' => ctrl.z_index = Some(parse_i32(value)?),
         b'C' => ctrl.no_cursor_movement = parse_u32(value)? != 0,
-        b'd' => ctrl.delete_target = Some(parse_delete_target(value[0])?),
+        b'd' => {
+            ctrl.delete_target = Some(parse_delete_target(value[0])?);
+            ctrl.delete_free_data = value[0].is_ascii_uppercase();
+        }
         b'U' => ctrl.unicode_placeholder = parse_u32(value)? != 0,
         // Relative-placement keys (Task 100.4). P/Q are unsigned; H/V are signed.
         b'P' => ctrl.parent_image_id = Some(parse_u32(value)?),
@@ -462,15 +478,47 @@ pub fn parse_kitty_graphics(apc: &[u8]) -> Result<KittyGraphicsCommand, KittyPar
     Ok(KittyGraphicsCommand { control, payload })
 }
 
+/// The image-identity fields echoed in a kitty graphics response.
+///
+/// Per the kitty spec the response echoes `i=<id>`, plus `I=<number>` when the
+/// request used an image number, plus `p=<placement>` when the request used a
+/// non-zero placement id. Field order in the wire form is `i`, then `I`, then `p`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KittyResponseId {
+    /// The image id (always emitted).
+    pub image_id: u32,
+    /// The image number (`I=`), emitted when `Some`.
+    pub image_number: Option<u32>,
+    /// The placement id (`p=`), emitted when `Some` and non-zero.
+    pub placement_id: Option<u32>,
+}
+
 /// Format a Kitty graphics response to be sent back to the PTY.
 ///
-/// The response format is: `ESC _ G i=<id> ; <message> ESC \`
+/// The response format is: `ESC _ G i=<id>[,I=<number>][,p=<placement_id>] ; <message> ESC \`
 ///
 /// If `ok` is true, the message is `OK`. Otherwise it is the provided error string.
+///
+/// Per the kitty spec, `I=<number>` is echoed only when the originating
+/// request specified an image number, and `p=<placement_id>` only when the
+/// originating request specified a non-zero placement id; `None` and
+/// `Some(0)` (for the placement id) both omit it.
 #[must_use]
-pub fn format_kitty_response(image_id: u32, ok: bool, message: &str) -> String {
+pub fn format_kitty_response(id: KittyResponseId, ok: bool, message: &str) -> String {
+    use std::fmt::Write as _;
+
     let msg = if ok { "OK" } else { message };
-    format!("\x1b_Gi={image_id};{msg}\x1b\\")
+    let mut key = format!("i={}", id.image_id);
+    if let Some(number) = id.image_number {
+        // `write!` into a `String` never fails.
+        let _ = write!(key, ",I={number}");
+    }
+    if let Some(pid) = id.placement_id
+        && pid != 0
+    {
+        let _ = write!(key, ",p={pid}");
+    }
+    format!("\x1b_G{key};{msg}\x1b\\")
 }
 
 #[cfg(test)]
@@ -525,7 +573,18 @@ mod tests {
 
         assert_eq!(cmd.control.action, Some(KittyAction::Delete));
         assert_eq!(cmd.control.delete_target, Some(KittyDeleteTarget::All));
+        assert!(!cmd.control.delete_free_data, "lowercase 'a' keeps data");
         assert!(cmd.payload.is_empty());
+    }
+
+    #[test]
+    fn parse_delete_all_uppercase_frees_data() {
+        let apc = make_apc("a=d,d=A", "");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+
+        assert_eq!(cmd.control.action, Some(KittyAction::Delete));
+        assert_eq!(cmd.control.delete_target, Some(KittyDeleteTarget::All));
+        assert!(cmd.control.delete_free_data, "uppercase 'A' frees data");
     }
 
     #[test]
@@ -665,44 +724,128 @@ mod tests {
 
     #[test]
     fn format_response_ok() {
-        let resp = format_kitty_response(42, true, "");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: None,
+            },
+            true,
+            "",
+        );
         assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
     }
 
     #[test]
     fn format_response_error() {
-        let resp = format_kitty_response(42, false, "ENOENT:file not found");
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: None,
+            },
+            false,
+            "ENOENT:file not found",
+        );
         assert_eq!(resp, "\x1b_Gi=42;ENOENT:file not found\x1b\\");
     }
 
     #[test]
+    fn format_response_with_nonzero_placement_id_includes_p() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: Some(7),
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=42,p=7;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_zero_placement_id_omits_p() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 42,
+                image_number: None,
+                placement_id: Some(0),
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=42;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_image_number_includes_i_field() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 99,
+                image_number: Some(13),
+                placement_id: None,
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=99,I=13;OK\x1b\\");
+    }
+
+    #[test]
+    fn format_response_with_image_number_and_placement_locks_field_order() {
+        let resp = format_kitty_response(
+            KittyResponseId {
+                image_id: 99,
+                image_number: Some(13),
+                placement_id: Some(7),
+            },
+            true,
+            "",
+        );
+        assert_eq!(resp, "\x1b_Gi=99,I=13,p=7;OK\x1b\\");
+    }
+
+    #[test]
     fn parse_all_delete_targets() {
+        // (char, expected positional target, expected delete_free_data)
         let targets = [
-            (b'a', KittyDeleteTarget::All),
-            (b'A', KittyDeleteTarget::AllIncludingNonVisible),
-            (b'i', KittyDeleteTarget::ById),
-            (b'I', KittyDeleteTarget::ByIdCursorOrAfter),
-            (b'n', KittyDeleteTarget::ByNumber),
-            (b'N', KittyDeleteTarget::ByNumberCursorOrAfter),
-            (b'c', KittyDeleteTarget::AtCursor),
-            (b'C', KittyDeleteTarget::AtCursorAndAfter),
-            (b'p', KittyDeleteTarget::AtCellRange),
-            (b'P', KittyDeleteTarget::AtCellRangeAndAfter),
-            (b'x', KittyDeleteTarget::InColumnRange),
-            (b'X', KittyDeleteTarget::InColumnRangeAndAfter),
-            (b'y', KittyDeleteTarget::InRowRange),
-            (b'Y', KittyDeleteTarget::InRowRangeAndAfter),
-            (b'z', KittyDeleteTarget::AtZIndex),
-            (b'Z', KittyDeleteTarget::AtZIndexAndAfter),
+            (b'a', KittyDeleteTarget::All, false),
+            (b'A', KittyDeleteTarget::All, true),
+            (b'i', KittyDeleteTarget::ById, false),
+            (b'I', KittyDeleteTarget::ById, true),
+            (b'n', KittyDeleteTarget::ByNumber, false),
+            (b'N', KittyDeleteTarget::ByNumber, true),
+            (b'c', KittyDeleteTarget::AtCursor, false),
+            (b'C', KittyDeleteTarget::AtCursor, true),
+            (b'f', KittyDeleteTarget::Frames, false),
+            (b'F', KittyDeleteTarget::Frames, true),
+            (b'p', KittyDeleteTarget::AtCell, false),
+            (b'P', KittyDeleteTarget::AtCell, true),
+            (b'q', KittyDeleteTarget::AtCellZIndex, false),
+            (b'Q', KittyDeleteTarget::AtCellZIndex, true),
+            (b'r', KittyDeleteTarget::IdRange, false),
+            (b'R', KittyDeleteTarget::IdRange, true),
+            (b'x', KittyDeleteTarget::InColumn, false),
+            (b'X', KittyDeleteTarget::InColumn, true),
+            (b'y', KittyDeleteTarget::InRow, false),
+            (b'Y', KittyDeleteTarget::InRow, true),
+            (b'z', KittyDeleteTarget::AtZIndex, false),
+            (b'Z', KittyDeleteTarget::AtZIndex, true),
         ];
 
-        for (ch, expected) in targets {
+        for (ch, expected, expected_free_data) in targets {
             let apc = make_apc(&format!("a=d,d={}", ch as char), "");
             let cmd = parse_kitty_graphics(&apc).unwrap();
             assert_eq!(
                 cmd.control.delete_target,
                 Some(expected),
                 "Failed for delete target '{}'",
+                ch as char
+            );
+            assert_eq!(
+                cmd.control.delete_free_data, expected_free_data,
+                "Failed delete_free_data for delete target '{}'",
                 ch as char
             );
         }
@@ -818,6 +961,13 @@ mod tests {
         let apc = make_apc("a=t,S=65536,i=1", "AAAA");
         let cmd = parse_kitty_graphics(&apc).unwrap();
         assert_eq!(cmd.control.data_size, Some(65536));
+    }
+
+    #[test]
+    fn parse_data_offset() {
+        let apc = make_apc("a=t,O=123,i=1", "AAAA");
+        let cmd = parse_kitty_graphics(&apc).unwrap();
+        assert_eq!(cmd.control.data_offset, Some(123));
     }
 
     #[test]

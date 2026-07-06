@@ -338,16 +338,82 @@ impl Buffer {
             let first_origin = line.first().map_or(RowOrigin::HardBreak, |r| r.origin);
             let is_cursor_line = cursor_logical_line == Some(line_idx);
 
+            // Record where this logical line's new rows start (for cursor and
+            // block/prompt row mapping).
+            let line_start_idx = new_rows.len();
+            line_new_starts.push(line_start_idx);
+
+            // A logical line that contains any image cell must NOT be
+            // glyph-rewrapped. Image cells are stamped with a per-cell
+            // `ImagePlacement { col_in_image, row_in_image, .. }`, and the
+            // renderer derives each image's on-screen quad from the min/max
+            // (col, row) of cells sharing an image_id. Image cells are
+            // `TChar::Space` with `is_head() == false`, so the glyph-rewrap
+            // path below (which treats non-head cells as stray width-1
+            // continuations) would spread a single image row's cells across
+            // multiple new physical rows, fragmenting the image's rectangle.
+            // Instead, emit this logical line's physical rows verbatim
+            // (clamped to the new width) so every image row's cells stay
+            // contiguous on one new physical row at their original columns.
+            let line_has_image = line.iter().any(|r| r.count_image_cells() > 0);
+            if line_has_image {
+                for (row_pos, old_row) in line.iter().enumerate() {
+                    let mut cells: Vec<crate::cell::Cell> = old_row.characters().clone();
+                    if cells.len() > new_width {
+                        // An image wider than the new terminal width is
+                        // clipped, not fragmented — per the kitty spec, only
+                        // part of the image is displayed on a size mismatch.
+                        cells.truncate(new_width);
+                    }
+                    // Preserve the logical-line structure: the first row
+                    // keeps the line's origin + NewLogicalLine; subsequent
+                    // rows continue the logical line, keeping their own
+                    // origin (e.g. SoftWrap) as before.
+                    let (origin, join) = if row_pos == 0 {
+                        (first_origin, RowJoin::NewLogicalLine)
+                    } else {
+                        (old_row.origin, RowJoin::ContinueLogicalLine)
+                    };
+                    new_rows.push(Row::from_cells(new_width, origin, join, cells));
+                }
+
+                // Cursor remap for an image-bearing line: mirror the
+                // glyph-rewrap cursor-remap logic below, but walk the rows
+                // just emitted for this line. In practice `images.rs` always
+                // parks the cursor below a placed image, so the cursor is
+                // essentially never inside an image row, but we still map it
+                // accurately for consistency.
+                if is_cursor_line {
+                    let mut flat_col: usize = 0;
+                    let mut found = false;
+                    for (i, new_row) in new_rows[line_start_idx..].iter().enumerate() {
+                        let row_cells = new_row.characters().len();
+                        if flat_col + row_cells > cursor_flat_offset {
+                            new_cursor_y = Some(line_start_idx + i);
+                            new_cursor_x = Some(cursor_flat_offset - flat_col);
+                            found = true;
+                            break;
+                        }
+                        flat_col += row_cells;
+                    }
+                    if !found {
+                        // Cursor is past the end of content (in blank space).
+                        // Place it on the last row of this logical line.
+                        let last_row_idx = new_rows.len() - 1;
+                        let last_row_len = new_rows[last_row_idx].characters().len();
+                        new_cursor_y = Some(last_row_idx);
+                        new_cursor_x =
+                            Some(cursor_flat_offset.saturating_sub(flat_col) + last_row_len);
+                    }
+                }
+                continue;
+            }
+
             // Flatten all rows in this logical line into a single Vec<Cell>
             let mut flat_cells: Vec<crate::cell::Cell> = Vec::new();
             for row in &line {
                 flat_cells.extend(row.characters().iter().cloned());
             }
-
-            // Record where this logical line's new rows start (for cursor and
-            // block/prompt row mapping).
-            let line_start_idx = new_rows.len();
-            line_new_starts.push(line_start_idx);
 
             if flat_cells.is_empty() {
                 // Empty logical line → keep a single empty row

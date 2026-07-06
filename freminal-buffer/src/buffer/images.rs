@@ -12,11 +12,40 @@
 use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
 
 use crate::{
-    image_store::{ImagePlacement, ImageProtocol, ImageStore, InlineImage},
+    image_store::{
+        ImagePlacement, ImageProtocol, ImageStore, InlineImage, SourceCrop, SubCellOffset,
+    },
     row::{RowJoin, RowOrigin},
 };
 
 use super::Buffer;
+
+/// Result of [`Buffer::place_image`]: the scroll offset adjustment made by
+/// scrollback trimming, plus the TRUE stamped origin of the image.
+///
+/// `origin_row`/`origin_col` reflect where the image's top-left cell
+/// (`row_in_image == 0`, `col_in_image == 0`) actually landed *after* any
+/// `enforce_scrollback_limit` drain that occurred as part of this call —
+/// they are not simply the pre-call cursor position. Callers that need to
+/// record a placement's origin (e.g. Kitty relative-placement parents, Task
+/// 100.14) must use these fields rather than re-reading the cursor before
+/// calling `place_image`, since a scrollback drain during placement can
+/// shift the image upward relative to the pre-call cursor row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceImageResult {
+    /// The (possibly adjusted) scroll offset, mirroring the value
+    /// previously returned directly by `place_image`.
+    pub scroll_offset: usize,
+    /// The row at which the image's top-left cell was actually stamped.
+    pub origin_row: usize,
+    /// The column at which the image's top-left cell was actually stamped.
+    pub origin_col: usize,
+    /// The placement instance id (Task 100.18) this call stamped every
+    /// cell with — echoed back from the caller-supplied `placement_instance`
+    /// argument so the caller can feed it into `record_real_placement`
+    /// without having to keep a second copy around.
+    pub placement_instance: u64,
+}
 
 impl Buffer {
     /// Advance the cursor by one column, wrapping to the next line if needed.
@@ -99,6 +128,40 @@ impl Buffer {
                 if cell
                     .image_placement()
                     .is_some_and(|p| p.image_id == image_id)
+                {
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+        self.image_cell_count -= cleared;
+    }
+
+    /// Clear image placements matching BOTH a specific image ID and a
+    /// specific (non-zero) Kitty placement ID (`p=`) from every cell.
+    ///
+    /// Unlike [`Self::clear_image_placements_by_id`] (which clears every
+    /// placement of an image regardless of `p=`), this narrows to the ONE
+    /// named placement — used to implement the kitty spec's REPLACE
+    /// semantics (a second `a=p` put with the same non-zero `p=` replaces
+    /// only that placement, leaving any other coexisting placements of the
+    /// same image untouched, Task 100.18/100.20) and `d=i,p=<n>` deletion
+    /// narrowing (Task 100.20).
+    pub fn clear_image_placements_by_placement(&mut self, image_id: u64, placement_id: u32) {
+        let mut cleared = 0usize;
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| p.image_id == image_id && p.placement_id == Some(placement_id))
                 {
                     cell.clear_image();
                     cleared += 1;
@@ -276,6 +339,70 @@ impl Buffer {
         }
     }
 
+    /// Clear image placements from every cell in the VISIBLE window only
+    /// (Kitty `d=a`/`d=A` — "all placements visible on screen").
+    ///
+    /// Scrollback rows above the visible window are left untouched, unlike
+    /// [`Self::clear_all_image_placements`] which clears the entire buffer.
+    /// Returns the distinct image ids that had a cleared placement, so the
+    /// caller can decide (per the `d=a`/`d=A` case) whether to also free
+    /// the underlying store data for images no longer referenced anywhere.
+    ///
+    /// `scroll_offset` is always `0` from the PTY thread (see
+    /// [`Self::visible_window_start`]).
+    pub fn clear_image_placements_visible(&mut self, scroll_offset: usize) -> Vec<u64> {
+        let start = self.visible_window_start(scroll_offset);
+        let mut ids: Vec<u64> = Vec::new();
+        let mut cleared = 0usize;
+        for i in start..self.rows.len() {
+            let row = &mut self.rows[i];
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if let Some(placement) = cell.image_placement() {
+                    let id = placement.image_id;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
+                }
+            }
+            if changed {
+                row.dirty = true;
+                if i < self.row_cache.len() {
+                    self.row_cache[i] = None;
+                }
+            }
+        }
+        self.image_cell_count -= cleared;
+        ids
+    }
+
+    /// Clear image placements at a specific cell position, but only when
+    /// the cell's placement z-index matches `z` (Kitty `d=q`/`d=Q` — cell +
+    /// z-index intersection).
+    ///
+    /// Mirrors [`Self::clear_image_placements_at_cell`]'s "clear the whole
+    /// image, not just the one cell" behaviour once a match is found.
+    /// Returns the cleared image's id, if any cell matched, so the caller
+    /// can free the underlying store data when requested (`d=Q`).
+    pub fn clear_image_placements_at_cell_with_z(
+        &mut self,
+        row: usize,
+        col: usize,
+        z: i32,
+    ) -> Option<u64> {
+        let cells = self.rows.get(row)?.cells();
+        let id = cells
+            .get(col)?
+            .image_placement()
+            .filter(|p| p.z_index == z)
+            .map(|p| p.image_id)?;
+        self.clear_image_placements_by_id(id);
+        Some(id)
+    }
+
     /// Clear all image placements with the given z-index.
     pub fn clear_image_placements_by_z_index(&mut self, z: i32) {
         let mut cleared = 0usize;
@@ -330,13 +457,34 @@ impl Buffer {
     /// `ImagePlacement` references.
     ///
     /// After placement the cursor is moved to the row immediately below
-    /// the image (or the last visible row if the image extends to the
-    /// bottom), at column 0 — matching iTerm2 behaviour.
+    /// the image, at column 0 — matching iTerm2/Kitty behaviour. If no row
+    /// already exists below the image (the common case: the image was
+    /// placed at the buffer's tail), a fresh blank row is appended so
+    /// subsequent output never overwrites the image's own cells (Task
+    /// 100.15 — previously the cursor was parked on the image's own last
+    /// row in this case, so the very next character write destroyed the
+    /// image via [`Self::clear_images_overwritten_by_text`]). The only
+    /// exception is a primary-buffer image tall enough that appending
+    /// this row and re-enforcing the scrollback limit drains the image
+    /// itself off the top — an edge case limited to images taller than
+    /// the entire scrollback, where the cursor falls back to the last
+    /// remaining row.
     ///
     /// If the image extends beyond the right edge of the terminal, it is
     /// clipped to the terminal width (cells beyond the edge are not placed).
     /// If the image extends below the visible area, new rows are created
     /// (scrolling if necessary in the primary buffer).
+    ///
+    /// Returns a [`PlaceImageResult`] describing the (possibly adjusted)
+    /// scroll offset and the TRUE stamped origin row/column of the image —
+    /// the origin reflects any `enforce_scrollback_limit` drain that
+    /// occurred during placement, so callers must use it (not a
+    /// pre-call cursor read) when recording where the image actually
+    /// landed (Task 100.14).
+    #[allow(clippy::too_many_arguments)]
+    // All parameters are required image placement inputs; grouping into a
+    // struct would obscure the data flow without reducing coupling, matching
+    // the established convention for `place_image`-adjacent methods.
     pub fn place_image(
         &mut self,
         image: InlineImage,
@@ -345,7 +493,10 @@ impl Buffer {
         image_number: Option<u32>,
         placement_id: Option<u32>,
         z_index: i32,
-    ) -> usize {
+        source_crop: Option<SourceCrop>,
+        placement_instance: u64,
+        subcell_offset: Option<SubCellOffset>,
+    ) -> PlaceImageResult {
         let image_id = image.id;
         let display_cols = image.display_cols;
         let display_rows = image.display_rows;
@@ -426,6 +577,9 @@ impl Buffer {
                     image_number,
                     placement_id,
                     z_index,
+                    source_crop,
+                    placement_instance,
+                    subcell_offset,
                 };
                 row.set_image_cell(col, placement, self.current_tag.clone());
                 placed_count += 1;
@@ -443,7 +597,22 @@ impl Buffer {
         }
 
         // Move cursor below the image, column 0 (iTerm2 behaviour).
-        let final_row = base_row + display_rows;
+        let mut final_row = base_row + display_rows;
+        if final_row >= self.rows.len() {
+            // No row exists below the image yet (the common case: the image
+            // was placed at the buffer's tail). Append one so subsequent
+            // output lands below the image instead of overwriting it.
+            self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
+
+            if self.kind == BufferType::Primary {
+                let rows_before = self.rows.len();
+                current_offset = self.enforce_scrollback_limit(current_offset);
+                let drained = rows_before - self.rows.len();
+                base_row = base_row.saturating_sub(drained);
+            }
+
+            final_row = base_row + display_rows;
+        }
         if final_row < self.rows.len() {
             self.cursor.pos.y = final_row;
         } else {
@@ -452,6 +621,67 @@ impl Buffer {
         self.cursor.pos.x = 0;
 
         self.debug_assert_invariants();
-        current_offset
+        PlaceImageResult {
+            scroll_offset: current_offset,
+            origin_row: base_row,
+            origin_col: start_col,
+            placement_instance,
+        }
+    }
+
+    /// Stamp an image's cell grid at an explicit screen origin `(origin_row,
+    /// origin_col)` WITHOUT moving the cursor or scrolling the buffer.
+    ///
+    /// Used for relative kitty graphics placements (Task 100.4a), whose
+    /// position is derived from a parent placement's origin plus an offset,
+    /// not from the cursor. Cells outside the current buffer bounds are
+    /// silently skipped (the visible part is stamped). The image must
+    /// already be in the image store — this method only writes the
+    /// per-cell `ImagePlacement` references, mirroring the inner stamping
+    /// loop of [`Self::place_image`] but positioned explicitly.
+    #[allow(clippy::too_many_arguments)]
+    // All parameters are required image placement inputs; grouping into a
+    // struct would obscure the data flow without reducing coupling, matching
+    // the established convention for `place_image`-adjacent methods.
+    pub fn place_image_at(
+        &mut self,
+        image_id: u64,
+        origin_row: usize,
+        origin_col: usize,
+        display_cols: usize,
+        display_rows: usize,
+        protocol: ImageProtocol,
+        image_number: Option<u32>,
+        placement_id: Option<u32>,
+        z_index: i32,
+        source_crop: Option<SourceCrop>,
+        placement_instance: u64,
+        subcell_offset: Option<SubCellOffset>,
+    ) {
+        for img_row in 0..display_rows {
+            let target_row = origin_row + img_row;
+            if target_row >= self.rows.len() {
+                break; // below the buffer — skip (visible part only)
+            }
+            for img_col in 0..display_cols {
+                let col = origin_col + img_col;
+                if col >= self.width {
+                    break;
+                }
+                let placement = ImagePlacement {
+                    image_id,
+                    col_in_image: img_col,
+                    row_in_image: img_row,
+                    protocol,
+                    image_number,
+                    placement_id,
+                    z_index,
+                    source_crop,
+                    placement_instance,
+                    subcell_offset,
+                };
+                self.set_image_cell_at(target_row, col, placement, self.current_tag.clone());
+            }
+        }
     }
 }

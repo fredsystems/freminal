@@ -1589,6 +1589,7 @@ dependencies = [
  "conv2",
  "criterion",
  "crossbeam-channel",
+ "flate2",
  "freminal-buffer",
  "freminal-common",
  "image",
@@ -1604,6 +1605,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "vergen",
+ "winapi",
 ]
 
 [[package]]

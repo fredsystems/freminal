@@ -634,6 +634,162 @@ fn bench_build_visuals(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_image_animation_tick — GUI wall-clock animation frame selector
+// (Task 100.2c). Measures the per-frame CPU cost of
+// `ViewState::tick_image_animations` against a representative set of
+// concurrently-animating kitty images (e.g. multiple animated GIFs/spinners
+// visible at once).
+// ---------------------------------------------------------------
+fn bench_image_animation_tick(c: &mut Criterion) {
+    use freminal::gui::view_state::ViewState;
+    use freminal_terminal_emulator::{
+        AnimationControl, AnimationRunMode, ImageFrame, ImageSizeMode, InlineImage,
+    };
+    use std::collections::HashMap;
+
+    const NUM_IMAGES: u64 = 8;
+    const EXTRA_FRAMES: usize = 9; // frame_count() == 10
+    const GAP_MS: u32 = 40;
+
+    let mut images: HashMap<u64, InlineImage> = HashMap::new();
+    for id in 1..=NUM_IMAGES {
+        let frames = (0..EXTRA_FRAMES)
+            .map(|_| ImageFrame {
+                pixels: Arc::new(vec![0u8; 4]),
+                gap_ms: GAP_MS,
+            })
+            .collect();
+        images.insert(
+            id,
+            InlineImage {
+                id,
+                pixels: Arc::new(vec![0u8; 4]),
+                width_px: 1,
+                height_px: 1,
+                display_cols: 1,
+                display_rows: 1,
+                size_mode: ImageSizeMode::NativePixels,
+                frames,
+                root_gap_ms: GAP_MS,
+                animation: AnimationControl {
+                    run_mode: AnimationRunMode::Running,
+                    loop_count: 1,
+                    current_frame: 0,
+                },
+            },
+        );
+    }
+
+    let mut group = c.benchmark_group("image_animation_tick");
+    group.throughput(Throughput::Elements(NUM_IMAGES));
+    group.bench_function("tick_8_images_10_frames", |b| {
+        b.iter_batched(
+            ViewState::default,
+            |mut view_state| {
+                std::hint::black_box(view_state.tick_image_animations(&images));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_build_image_verts — image-quad vertex generation (Task 100.17b).
+// Measures the per-frame CPU cost of `build_image_verts` (which calls
+// `compute_image_quad` per image, including the Task 100.17b size-mode
+// branch) against a representative set of concurrently-displayed images
+// stamped across the cell grid.
+// ---------------------------------------------------------------
+fn bench_build_image_verts(c: &mut Criterion) {
+    use freminal::gui::renderer::build_image_verts;
+    use freminal_terminal_emulator::{
+        AnimationControl, ImagePlacement, ImageProtocol, ImageSizeMode, InlineImage,
+    };
+    use std::collections::HashMap;
+
+    const NUM_IMAGES: u64 = 8;
+    const IMG_COLS: usize = 4;
+    const IMG_ROWS: usize = 4;
+    const TERM_WIDTH: usize = 80;
+    const TERM_ROWS: usize = IMG_ROWS;
+    const CELL_WIDTH: u32 = 8;
+    const CELL_HEIGHT: u32 = 16;
+
+    let mut images: HashMap<u64, InlineImage> = HashMap::new();
+    for id in 1..=NUM_IMAGES {
+        images.insert(
+            id,
+            InlineImage {
+                id,
+                pixels: Arc::new(vec![0u8; 4]),
+                width_px: 20,
+                height_px: 40,
+                display_cols: IMG_COLS,
+                display_rows: IMG_ROWS,
+                size_mode: ImageSizeMode::NativePixels,
+                frames: Vec::new(),
+                root_gap_ms: 0,
+                animation: AnimationControl::default(),
+            },
+        );
+    }
+
+    // Stamp each image into its own non-overlapping IMG_COLSxIMG_ROWS block
+    // of the cell grid: image `id` (1-indexed) occupies columns
+    // `(id-1)*IMG_COLS .. id*IMG_COLS`, all `TERM_ROWS` rows.
+    let mut placements: Vec<Option<ImagePlacement>> = vec![None; TERM_WIDTH * TERM_ROWS];
+    for id in 1..=NUM_IMAGES {
+        let col_base = usize::try_from(id - 1).unwrap_or(0) * IMG_COLS;
+        for row in 0..IMG_ROWS {
+            for col_in_image in 0..IMG_COLS {
+                let col = col_base + col_in_image;
+                let cell_idx = row * TERM_WIDTH + col;
+                placements[cell_idx] = Some(ImagePlacement {
+                    image_id: id,
+                    col_in_image,
+                    row_in_image: row,
+                    protocol: ImageProtocol::Kitty,
+                    image_number: None,
+                    placement_id: None,
+                    z_index: 0,
+                    source_crop: None,
+                    // Distinct per-image instance id (Task 100.18) — each
+                    // of the 8 images is its own separate on-screen
+                    // placement, so bucketing must keep them as 8 separate
+                    // draw_order entries, matching the pre-100.18 (keyed by
+                    // image_id) benchmark workload shape.
+                    placement_instance: id,
+                    subcell_offset: None,
+                });
+            }
+        }
+    }
+
+    let mut group = c.benchmark_group("build_image_verts");
+    group.throughput(Throughput::Elements(NUM_IMAGES));
+    group.bench_function("8_images_4x4_cells", |b| {
+        b.iter_batched(
+            || (Vec::new(), Vec::new()),
+            |(mut verts, mut draw_order)| {
+                build_image_verts(
+                    std::hint::black_box(&placements),
+                    std::hint::black_box(&images),
+                    TERM_WIDTH,
+                    CELL_WIDTH,
+                    CELL_HEIGHT,
+                    &mut verts,
+                    &mut draw_order,
+                );
+                std::hint::black_box((verts, draw_order));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -650,6 +806,8 @@ criterion_group!(
         bench_fg_instances,
         bench_shape_placeholder_line,
         bench_build_visuals,
+        bench_image_animation_tick,
+        bench_build_image_verts,
 );
 
 criterion_main!(benches);

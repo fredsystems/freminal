@@ -67,6 +67,7 @@ mod dcs;
 mod edit_ops;
 mod graphics_iterm2;
 mod graphics_kitty;
+use graphics_kitty::signed_cell_offset;
 mod graphics_sixel;
 mod notify_99;
 mod osc;
@@ -123,6 +124,49 @@ struct PrevPlaceholder {
     fg_color: TerminalColor,
     /// The underline color used for comparison.
     underline_color: TerminalColor,
+}
+
+/// A first-class record of a real (cell-stamped) kitty image placement.
+///
+/// Unlike per-cell `ImagePlacement` stamps, this records the placement's screen
+/// origin (top-left cell) and, for a relative placement, its parent — so a
+/// child can be positioned at `parent_origin + (H, V)` and the group can be
+/// cascade-deleted. Keyed by `(image_id, placement_id)` in
+/// `TerminalHandler::real_placements`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RealPlacement {
+    /// The image this placement displays.
+    pub image_id: u64,
+    /// This placement's id (`p=`; 0 if unspecified).
+    pub placement_id: u32,
+    /// Screen origin: the top-left cell row where the image was stamped.
+    pub origin_row: usize,
+    /// Screen origin: the top-left cell column.
+    pub origin_col: usize,
+    /// Display size in cells.
+    pub cols: u32,
+    /// Display size in cells.
+    pub rows: u32,
+    /// Parent placement `(image_id, placement_id)` for a relative placement,
+    /// else `None`.
+    pub parent: Option<(u64, u32)>,
+    /// z-index (`z=`).
+    pub z_index: i32,
+    /// Horizontal cell offset (`H=`) from the parent, for a relative
+    /// placement. `0` for a non-relative placement. Retained so a
+    /// virtual-parent child's position can be re-derived at render time
+    /// (Task 100.4b) from the parent's live placeholder cells.
+    pub h_offset: i32,
+    /// Vertical cell offset (`V=`) from the parent. `0` for non-relative.
+    pub v_offset: i32,
+    /// Unique placement-instance id (Task 100.18), minted once when this
+    /// placement was first stamped/registered. Stable across frames — a
+    /// virtual-parent relative child re-derives its per-cell stamps on
+    /// every call to `inject_virtual_parent_relatives`, and must reuse
+    /// this SAME instance id each time rather than minting a fresh one, or
+    /// the renderer would treat every frame's re-derivation as a new,
+    /// distinct placement.
+    pub placement_instance: u64,
 }
 
 /// Processes parsed terminal output sequences and drives mutations on the underlying [`Buffer`].
@@ -229,6 +273,10 @@ pub struct TerminalHandler {
     /// appear in the text stream, these are looked up to determine image tile
     /// dimensions.
     virtual_placements: HashMap<(u64, u32), VirtualPlacement>,
+    /// First-class real (cell-stamped) placements, keyed by (`image_id`,
+    /// `placement_id`). Enables relative placements (parent link) and
+    /// cascade delete (Task 100.4a).
+    real_placements: HashMap<(u64, u32), RealPlacement>,
     /// State of the most recent placeholder cell, for diacritic inheritance.
     ///
     /// Reset to `None` on any non-placeholder text insertion, newline, or
@@ -384,6 +432,7 @@ impl TerminalHandler {
             multipart_state: None,
             kitty_state: None,
             virtual_placements: HashMap::new(),
+            real_placements: HashMap::new(),
             prev_placeholder: None,
             cell_pixel_width: 8,
             cell_pixel_height: 16,
@@ -489,6 +538,7 @@ impl TerminalHandler {
         self.pointer_shape = PointerShape::Default;
         self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
         self.virtual_placements.clear();
+        self.real_placements.clear();
         self.prev_placeholder = None;
         self.modify_other_keys_level = 0;
         self.application_escape_key = ApplicationEscapeKey::Reset;
@@ -649,7 +699,7 @@ impl TerminalHandler {
                 }
             });
 
-        let Some(_vp) = vp else {
+        let Some(vp) = vp else {
             tracing::warn!(
                 "Kitty placeholder: no virtual placement for image_id={full_image_id}, \
                  placement_id={placement_id}; inserting space"
@@ -661,6 +711,13 @@ impl TerminalHandler {
         };
 
         // Insert an image cell at the current cursor position.
+        //
+        // Stamp the placeholder cell with the virtual placement's own
+        // `placement_instance` (Task 100.20) — minted once at
+        // `register_virtual_placement` time and stable across every
+        // placeholder cell that resolves to this same virtual placement, so
+        // two independent `a=p,U=1` registrations of the same image with
+        // `p=0` (unspecified) coexist rather than merging into one bucket.
         let placement = ImagePlacement {
             image_id: full_image_id,
             col_in_image: usize::from(col),
@@ -669,6 +726,13 @@ impl TerminalHandler {
             image_number: None,
             placement_id: Some(placement_id),
             z_index: 0,
+            // Unicode placeholder cells are not an `a=p`/`a=T` display path —
+            // source-crop (Task 100.9) does not apply here.
+            source_crop: None,
+            placement_instance: vp.placement_instance,
+            // Sub-cell X/Y offset (Task 100.19) only applies to the a=p/a=T
+            // display path's own quad, not placeholder-resolved cells.
+            subcell_offset: None,
         };
 
         let cursor_pos = self.buffer.cursor().pos;
@@ -924,14 +988,141 @@ impl TerminalHandler {
     /// Like [`Self::visible_image_placements`] but extends the window upward by
     /// `extra_rows` (command-block fold support). The returned vector matches
     /// the extended `visible_chars` layout.
+    ///
+    /// Also derives and injects the per-cell stamps for every relative
+    /// placement whose parent is a VIRTUAL (Unicode placeholder) placement
+    /// (Task 100.4b) — these are never written into the buffer itself, so
+    /// they must be computed fresh from the parent's current placeholder
+    /// cell positions on every call. This makes such a child follow its
+    /// parent through scroll and reflow with no buffer mutation.
     #[must_use]
     pub fn visible_image_placements_extended(
         &self,
         scroll_offset: usize,
         extra_rows: usize,
     ) -> Vec<Option<freminal_buffer::image_store::ImagePlacement>> {
-        self.buffer
-            .visible_image_placements_extended(scroll_offset, extra_rows)
+        let mut placements = self
+            .buffer
+            .visible_image_placements_extended(scroll_offset, extra_rows);
+        let term_width = self.win_size().0;
+        if term_width > 0 && !self.real_placements.is_empty() {
+            self.inject_virtual_parent_relatives(&mut placements, term_width);
+        }
+        placements
+    }
+
+    /// Derive and inject the per-cell placement stamps for every
+    /// `real_placements` entry whose parent is a VIRTUAL (Unicode
+    /// placeholder) placement (Task 100.4b).
+    ///
+    /// A real-parent relative child was already stamped into the buffer by
+    /// Task 100.4a and appears in `placements` from the base call; this only
+    /// handles the virtual-parent case, which is registered with a
+    /// placeholder origin and no stamped cells.
+    ///
+    /// For each such child, scans `placements` for the parent's live
+    /// placeholder cells (matched by `image_id`/`placement_id`), takes the
+    /// minimum row and column among them as the parent's current origin
+    /// (per spec), offsets by the child's stored `(h_offset, v_offset)`, and
+    /// writes the child's cell grid into `placements` at that position. If
+    /// the parent has no visible placeholder cells in the current window
+    /// (e.g. scrolled off), the child is skipped for this frame.
+    fn inject_virtual_parent_relatives(
+        &self,
+        placements: &mut [Option<ImagePlacement>],
+        term_width: usize,
+    ) {
+        if term_width == 0 {
+            return;
+        }
+        let window_rows = placements.len() / term_width;
+        if window_rows == 0 {
+            return;
+        }
+
+        for (&(child_img, child_pid), child) in &self.real_placements {
+            let Some(parent_key) = child.parent else {
+                continue;
+            };
+            if !self.virtual_placements.contains_key(&parent_key) {
+                // Real-parent child — already stamped into the buffer by
+                // Task 100.4a; nothing to derive here.
+                continue;
+            }
+
+            // Locate the parent's placeholder cells currently visible in
+            // the window and take the minimum row/col among them.
+            let mut min_row: Option<usize> = None;
+            let mut min_col: Option<usize> = None;
+            for (idx, cell) in placements.iter().enumerate() {
+                let Some(p) = cell else { continue };
+                if p.image_id != parent_key.0 {
+                    continue;
+                }
+                // A parent key with `placement_id == 0` was resolved from an
+                // unspecified `Q=`; match any placeholder placement id for
+                // that image. Otherwise require an exact placement id match.
+                let pid_matches = parent_key.1 == 0 || p.placement_id == Some(parent_key.1);
+                if !pid_matches {
+                    continue;
+                }
+                let row = idx / term_width;
+                let col = idx % term_width;
+                min_row = Some(min_row.map_or(row, |m: usize| m.min(row)));
+                min_col = Some(min_col.map_or(col, |m: usize| m.min(col)));
+            }
+
+            let (Some(min_row), Some(min_col)) = (min_row, min_col) else {
+                // Parent fully scrolled off — the child doesn't render this
+                // frame.
+                continue;
+            };
+
+            let child_row = signed_cell_offset(min_row, child.v_offset);
+            let child_col = signed_cell_offset(min_col, child.h_offset);
+
+            let child_cols = usize::value_from(child.cols).unwrap_or(0);
+            let child_rows = usize::value_from(child.rows).unwrap_or(0);
+
+            for img_row in 0..child_rows {
+                let row = child_row + img_row;
+                if row >= window_rows {
+                    break;
+                }
+                for img_col in 0..child_cols {
+                    let col = child_col + img_col;
+                    if col >= term_width {
+                        break;
+                    }
+                    let idx = row * term_width + col;
+                    if idx >= placements.len() {
+                        continue;
+                    }
+                    placements[idx] = Some(ImagePlacement {
+                        image_id: child_img,
+                        col_in_image: img_col,
+                        row_in_image: img_row,
+                        protocol: ImageProtocol::Kitty,
+                        image_number: None,
+                        placement_id: Some(child_pid),
+                        z_index: child.z_index,
+                        // Virtual-parent relative placements don't currently
+                        // carry crop data (out of Task 100.9 scope — see
+                        // `stamp_relative_placement_at_real_parent` for the
+                        // real-parent path, which does).
+                        source_crop: None,
+                        // Stable across frames: this child's `RealPlacement`
+                        // was minted its own `placement_instance` once, at
+                        // registration time (Task 100.18), so re-deriving
+                        // its synthetic per-cell stamp on every frame here
+                        // does not create a new (and therefore
+                        // re-bucketed) instance each call.
+                        placement_instance: child.placement_instance,
+                        subcell_offset: None,
+                    });
+                }
+            }
+        }
     }
 
     /// Returns `true` if any cell in the visible window carries an image placement.
@@ -4509,6 +4700,7 @@ mod tests {
                 placement_id: 0,
                 rows: 1,
                 cols: 1,
+                placement_instance: 1,
             },
         );
 
@@ -4536,6 +4728,7 @@ mod tests {
                 placement_id: 0,
                 rows: 2,
                 cols: 2,
+                placement_instance: 1,
             },
         );
 
@@ -4547,6 +4740,10 @@ mod tests {
             height_px: 1,
             display_cols: 1,
             display_rows: 1,
+            size_mode: freminal_buffer::image_store::ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
         };
         handler.buffer.image_store_mut().insert(img);
 

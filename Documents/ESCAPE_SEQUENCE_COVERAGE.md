@@ -2,11 +2,21 @@
 
 ## Last updated
 
-Last updated: 2026-07-01 — OSC 99 (kitty desktop notifications) implemented
-(Task 99, v0.11.0): stateful notifications with chunked title/body/icon/
-buttons, urgency/sound/occasion/expiry, activation/close/alive reverse
-reports, and the p=? capability handshake.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99)
+Last updated: 2026-07-02 — Kitty graphics render-path fixes (Tasks
+100.11–100.20, v0.11.0): animation/compose repaint, image persistence across
+subsequent output, `C=1` on `a=T`, native-vs-explicit display sizing,
+per-placement identity (coexisting placements), and the sub-cell `X`/`Y`
+offset. (No coverage-status change — the APC `_G` kitty graphics row remains
+✅; these were end-to-end render-fidelity fixes within already-supported
+sequences.) Earlier: 2026-07-01 — Kitty graphics protocol completion (Task 100,
+v0.11.0): animation (frame transfer/control/compose), image-number
+references, relative placements, storage quotas + eviction, shared-memory
+(`t=s`) and zlib (`o=z`) transmission, delete-target correctness, and
+z-index render ordering; plus OSC 99 (kitty desktop notifications)
+implemented (Task 99, v0.11.0): stateful notifications with chunked
+title/body/icon/buttons, urgency/sound/occasion/expiry, activation/close/
+alive reverse reports, and the p=? capability handshake.
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100)
 
 ## Overview
 
@@ -198,15 +208,15 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 ## DCS / APC — Device Control & Application Program Command
 
-| Sequence     | Name                  | Status | Notes                                                                                                     |
-| ------------ | --------------------- | ------ | --------------------------------------------------------------------------------------------------------- |
-| DCS (all)    | General DCS handling  | ✅     | Sub-command dispatch via `handle_device_control_string()`                                                 |
-| DCS $ q … ST | DECRQSS               | ✅     | Supports `m` (SGR), `r` (DECSTBM), `SP q` (DECSCUSR); unknown → error response                            |
-| DCS + q … ST | XTGETTCAP             | ✅     | Responds to common capability queries; unknown → error response                                           |
-| DCS tmux;…   | tmux passthrough      | ✅     | Un-doubles ESC and dispatches inner APC/CSI/OSC                                                           |
-| DCS Sixel    | Sixel Graphics        | ✅     | Full decoder: palette, repeat introducer, raster attributes, DECSDM (?80), private/shared palette (?1070) |
-| APC \_G… ST  | Kitty Graphics        | ✅     | Transmit/place/delete, RGB/RGBA/PNG, file and chunked transfers, quiet modes, query (`a=q`) (Task 13)     |
-| APC (other)  | Other APC sub-command | ⬜     | Non-Kitty APCs logged and ignored                                                                         |
+| Sequence     | Name                  | Status | Notes                                                                                                                                                                                                                                                                                   |
+| ------------ | --------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DCS (all)    | General DCS handling  | ✅     | Sub-command dispatch via `handle_device_control_string()`                                                                                                                                                                                                                               |
+| DCS $ q … ST | DECRQSS               | ✅     | Supports `m` (SGR), `r` (DECSTBM), `SP q` (DECSCUSR); unknown → error response                                                                                                                                                                                                          |
+| DCS + q … ST | XTGETTCAP             | ✅     | Responds to common capability queries; unknown → error response                                                                                                                                                                                                                         |
+| DCS tmux;…   | tmux passthrough      | ✅     | Un-doubles ESC and dispatches inner APC/CSI/OSC                                                                                                                                                                                                                                         |
+| DCS Sixel    | Sixel Graphics        | ✅     | Full decoder: palette, repeat introducer, raster attributes, DECSDM (?80), private/shared palette (?1070)                                                                                                                                                                               |
+| APC \_G… ST  | Kitty Graphics        | ✅     | Transmit/place/delete, RGB/RGBA/PNG, file/temp-file/shared-memory (`t=s`)/chunked transfers, zlib (`o=z`), quiet modes, query (`a=q`); animation (`a=f`/`a=a`/`a=c`), unicode placeholders, image numbers (`I=`), relative placements, storage quotas, z-index ordering (Tasks 13, 100) |
+| APC (other)  | Other APC sub-command | ⬜     | Non-Kitty APCs logged and ignored                                                                                                                                                                                                                                                       |
 
 ---
 
@@ -286,42 +296,42 @@ UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 
 ## Specification Coverage Summary
 
-| Category                        | Freminal Status | Common in VT/xterm | Notes                                                                                                                   |
-| ------------------------------- | --------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Core C0/C1                      | ✅              | ✅                 | BEL/BS/LF/CR/HT/VT/FF/ESC/NUL/DEL all handled correctly                                                                 |
-| ESC                             | ✅              | ✅                 | Save/restore cursor, IND, NEL, RI, HTS, RIS, DECPAM/DECPNM all working                                                  |
-| CSI Cursor + Erase              | ✅              | ✅                 | CUU/CUD/CUF/CUB/CHA/CUP/CNL/CPL/ED/EL all correct                                                                       |
-| CSI Edit (IL/DL/DCH/ICH/REP)    | ✅              | ✅                 | All working including REP; BCE-aware (Task 48)                                                                          |
-| CSI Scroll (SU/SD)              | ✅              | ✅                 | Implemented, respects scroll region                                                                                     |
-| Tab Stops (HT/HTS/TBC/CHT/CBT)  | ✅              | ✅                 | Full tab stop infrastructure with default 8-column stops                                                                |
-| SGR (Colors/Attrs)              | ✅              | ✅                 | 256 + TrueColor; colon-subparam underline styles; underline color (SGR 58) (Task 47)                                    |
-| Blinking Text (SGR 5/6)         | ✅              | ✅                 | Slow and fast blink rates; renderer toggles glyph visibility (Task 23)                                                  |
-| BCE (Background Color Erase)    | ✅              | ✅                 | All erase ops (ED/EL/ECH/ICH/DCH/IL/DL) use current SGR bg (Task 48)                                                    |
-| OSC 0/2 (Title)                 | ✅              | ✅                 | Implemented                                                                                                             |
-| OSC 4/104 (Palette)             | ✅              | ✅                 | Mutable 256-color palette with set/query/reset                                                                          |
-| OSC 7 (CWD)                     | ✅              | ✅                 | CWD parsed and stored                                                                                                   |
-| OSC 8 (Hyperlink)               | ✅              | ✅                 | Fully implemented                                                                                                       |
-| OSC 52 (Clipboard)              | ✅              | ✅                 | Clipboard copy/query via base64                                                                                         |
-| OSC 133 (FTCS)                  | ✅              | 🚧                 | All markers parsed with `freminal=1; fid=<id>` extension; foreign markers dropped; UI in Task 72 (v0.9.0)               |
-| Mouse Tracking                  | ✅              | ✅                 | Modes wired; GUI reads and forwards events                                                                              |
-| Bracketed Paste                 | ✅              | ✅                 | Mode wired; GUI wraps paste events                                                                                      |
-| DSR/DA Queries                  | ✅              | ✅                 | DA1/DA2/DSR all work correctly                                                                                          |
-| DECSET Modes                    | ✅              | ✅                 | All commonly-used modes handled; DECANM/DECNKM/DECBKM/DECLRMM/?2031 added in v0.3.0–v0.7.0                              |
-| DCS Sub-commands                | ✅              | 🚧                 | DECRQSS and XTGETTCAP fully implemented                                                                                 |
-| DECOM / Origin Mode             | ✅              | ✅                 | CUP addressing relative to scroll region when DECOM is set                                                              |
-| DECCOLM                         | ✅              | 🚧                 | Column switching works when AllowColumnModeSwitch (?40) is enabled                                                      |
-| DECSLRM / Left-Right Margins    | ✅              | 🚧                 | Gated by DECLRMM (?69); CSI Pl;Pr s (Task 20)                                                                           |
-| DECDWL / DECDHL                 | ✅              | 🚧                 | `LineWidth` enum; renderer applies 2× x-scale (DECDWL) and 2× y-scale (DECDHL); top-half-only per VT100 model (Task 49) |
-| VT52 Mode (DECANM)              | ✅              | ⬜                 | Full VT52 state machine (Task 20)                                                                                       |
-| SGR 7 / SGR 27 (Reverse Video)  | ✅              | ✅                 | Per-cell fg/bg swap via `StateColors::get_color` / `get_background_color`                                               |
-| DECSCNM (?5) Screen Reverse     | 🚧              | ✅                 | Mode tracked; renderer inverts panel_fill (white) but per-cell colors are not swapped                                   |
-| Kitty Keyboard Protocol         | ✅              | 🚧                 | Full protocol support (Task 35)                                                                                         |
-| Bell (BEL, 0x07)                | ✅              | ✅                 | `WindowCommand::Bell`; 200 ms tab-bar flash; optional audible beep; configurable `BellMode` (Task 41)                   |
-| SO/SI (G1 charset switching)    | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                                                                 |
-| Sixel Graphics                  | ✅              | ✅                 | Full DCS decoder + renderer; DECSDM (?80) display mode; private/shared palette registers (?1070)                        |
-| Kitty Graphics Protocol         | ✅              | 🚧                 | APC `_G` transmit/place/delete, RGB/RGBA/PNG, chunked + file transfers, `a=q` query (Task 13)                           |
-| iTerm2 Inline Images (OSC 1337) | ✅              | 🚧                 | `File=` single and `MultipartFile=`/`FilePart=`/`FileEnd` multipart (Task 13)                                           |
-| OSC 10/11 (FG/BG color query)   | ✅              | ✅                 | Query/set/reset fully implemented with theme-aware defaults                                                             |
+| Category                        | Freminal Status | Common in VT/xterm | Notes                                                                                                                                                                                                              |
+| ------------------------------- | --------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Core C0/C1                      | ✅              | ✅                 | BEL/BS/LF/CR/HT/VT/FF/ESC/NUL/DEL all handled correctly                                                                                                                                                            |
+| ESC                             | ✅              | ✅                 | Save/restore cursor, IND, NEL, RI, HTS, RIS, DECPAM/DECPNM all working                                                                                                                                             |
+| CSI Cursor + Erase              | ✅              | ✅                 | CUU/CUD/CUF/CUB/CHA/CUP/CNL/CPL/ED/EL all correct                                                                                                                                                                  |
+| CSI Edit (IL/DL/DCH/ICH/REP)    | ✅              | ✅                 | All working including REP; BCE-aware (Task 48)                                                                                                                                                                     |
+| CSI Scroll (SU/SD)              | ✅              | ✅                 | Implemented, respects scroll region                                                                                                                                                                                |
+| Tab Stops (HT/HTS/TBC/CHT/CBT)  | ✅              | ✅                 | Full tab stop infrastructure with default 8-column stops                                                                                                                                                           |
+| SGR (Colors/Attrs)              | ✅              | ✅                 | 256 + TrueColor; colon-subparam underline styles; underline color (SGR 58) (Task 47)                                                                                                                               |
+| Blinking Text (SGR 5/6)         | ✅              | ✅                 | Slow and fast blink rates; renderer toggles glyph visibility (Task 23)                                                                                                                                             |
+| BCE (Background Color Erase)    | ✅              | ✅                 | All erase ops (ED/EL/ECH/ICH/DCH/IL/DL) use current SGR bg (Task 48)                                                                                                                                               |
+| OSC 0/2 (Title)                 | ✅              | ✅                 | Implemented                                                                                                                                                                                                        |
+| OSC 4/104 (Palette)             | ✅              | ✅                 | Mutable 256-color palette with set/query/reset                                                                                                                                                                     |
+| OSC 7 (CWD)                     | ✅              | ✅                 | CWD parsed and stored                                                                                                                                                                                              |
+| OSC 8 (Hyperlink)               | ✅              | ✅                 | Fully implemented                                                                                                                                                                                                  |
+| OSC 52 (Clipboard)              | ✅              | ✅                 | Clipboard copy/query via base64                                                                                                                                                                                    |
+| OSC 133 (FTCS)                  | ✅              | 🚧                 | All markers parsed with `freminal=1; fid=<id>` extension; foreign markers dropped; UI in Task 72 (v0.9.0)                                                                                                          |
+| Mouse Tracking                  | ✅              | ✅                 | Modes wired; GUI reads and forwards events                                                                                                                                                                         |
+| Bracketed Paste                 | ✅              | ✅                 | Mode wired; GUI wraps paste events                                                                                                                                                                                 |
+| DSR/DA Queries                  | ✅              | ✅                 | DA1/DA2/DSR all work correctly                                                                                                                                                                                     |
+| DECSET Modes                    | ✅              | ✅                 | All commonly-used modes handled; DECANM/DECNKM/DECBKM/DECLRMM/?2031 added in v0.3.0–v0.7.0                                                                                                                         |
+| DCS Sub-commands                | ✅              | 🚧                 | DECRQSS and XTGETTCAP fully implemented                                                                                                                                                                            |
+| DECOM / Origin Mode             | ✅              | ✅                 | CUP addressing relative to scroll region when DECOM is set                                                                                                                                                         |
+| DECCOLM                         | ✅              | 🚧                 | Column switching works when AllowColumnModeSwitch (?40) is enabled                                                                                                                                                 |
+| DECSLRM / Left-Right Margins    | ✅              | 🚧                 | Gated by DECLRMM (?69); CSI Pl;Pr s (Task 20)                                                                                                                                                                      |
+| DECDWL / DECDHL                 | ✅              | 🚧                 | `LineWidth` enum; renderer applies 2× x-scale (DECDWL) and 2× y-scale (DECDHL); top-half-only per VT100 model (Task 49)                                                                                            |
+| VT52 Mode (DECANM)              | ✅              | ⬜                 | Full VT52 state machine (Task 20)                                                                                                                                                                                  |
+| SGR 7 / SGR 27 (Reverse Video)  | ✅              | ✅                 | Per-cell fg/bg swap via `StateColors::get_color` / `get_background_color`                                                                                                                                          |
+| DECSCNM (?5) Screen Reverse     | 🚧              | ✅                 | Mode tracked; renderer inverts panel_fill (white) but per-cell colors are not swapped                                                                                                                              |
+| Kitty Keyboard Protocol         | ✅              | 🚧                 | Full protocol support (Task 35)                                                                                                                                                                                    |
+| Bell (BEL, 0x07)                | ✅              | ✅                 | `WindowCommand::Bell`; 200 ms tab-bar flash; optional audible beep; configurable `BellMode` (Task 41)                                                                                                              |
+| SO/SI (G1 charset switching)    | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                                                                                                                                                            |
+| Sixel Graphics                  | ✅              | ✅                 | Full DCS decoder + renderer; DECSDM (?80) display mode; private/shared palette registers (?1070)                                                                                                                   |
+| Kitty Graphics Protocol         | ✅              | 🚧                 | APC `_G` transmit/place/delete, RGB/RGBA/PNG, chunked/file/temp-file/shm transfers, `a=q` query; animation, relative placements, storage quotas, zlib, delete-target correctness, z-index ordering (Tasks 13, 100) |
+| iTerm2 Inline Images (OSC 1337) | ✅              | 🚧                 | `File=` single and `MultipartFile=`/`FilePart=`/`FileEnd` multipart (Task 13)                                                                                                                                      |
+| OSC 10/11 (FG/BG color query)   | ✅              | ✅                 | Query/set/reset fully implemented with theme-aware defaults                                                                                                                                                        |
 
 ---
 
