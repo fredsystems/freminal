@@ -23,12 +23,12 @@ is deferred — the codebase may move.
 
 ## Task Summary
 
-| #   | Feature                                   | Scope       | Status  | Depends On       |
-| --- | ----------------------------------------- | ----------- | ------- | ---------------- |
-| 99  | Kitty Desktop Notifications (OSC 99)      | Medium-high | Planned | v0.9.0 (Task 76) |
-| 100 | Kitty Graphics Protocol Completion        | Medium-high | Planned | Task 13          |
-| 101 | Kitty Keyboard Compliance (encoding-only) | Medium      | Planned | Task 35          |
-| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Stub    | Task 101         |
+| #   | Feature                                   | Scope       | Status   | Depends On       |
+| --- | ----------------------------------------- | ----------- | -------- | ---------------- |
+| 99  | Kitty Desktop Notifications (OSC 99)      | Medium-high | Planned  | v0.9.0 (Task 76) |
+| 100 | Kitty Graphics Protocol Completion        | Medium-high | Planned  | Task 13          |
+| 101 | Kitty Keyboard Compliance (encoding-only) | Medium      | Complete | Task 35          |
+| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Stub     | Task 101         |
 
 > **Scope note (from 2026-07-01 activation audits).** The 101.1 audit found the
 > binding constraint for keyboard compliance is **egui 0.35**, not freminal's
@@ -1804,7 +1804,7 @@ Done. The audit produced the code-anchored gap list now reflected in the keyboar
 101.3 scopes below. Key finding: the split between encoding-only work (101.2/101.3)
 and egui-blocked work (separate task) — see Summary. No further audit needed.
 
-#### 101.2 — Modifier bits: 8-bit arithmetic + `super` (encoding-only)
+#### 101.2 — Modifier bits: 8-bit arithmetic + `super` (encoding-only) (COMPLETE, 2026-07-05)
 
 Scope: `KeyModifiers` + `modifier_param()` in
 `freminal-terminal-emulator/src/input.rs` (the field/arithmetic half is landed by
@@ -1842,7 +1842,7 @@ NOT proceed.
 
 Stop: report + await review.
 
-#### 101.3 — Encoding-only functional keys: F13–F35 + modifier-keys-as-keys
+#### 101.3 — Encoding-only functional keys: F13–F35 + modifier-keys-as-keys (COMPLETE, 2026-07-05)
 
 Scope: `freminal-terminal-emulator/src/input.rs` (`to_payload_kkp`, the
 `FunctionKey` encoder), the `TerminalInput` enum, and the GUI key-event loop in
@@ -1877,7 +1877,7 @@ NOT proceed.
 
 Stop: report + await review.
 
-#### 101.4 — Escape-sequence docs
+#### 101.4 — Escape-sequence docs (COMPLETE, 2026-07-05)
 
 Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
 `Documents/KITTY_PROTOCOL_REFERENCE.md`.

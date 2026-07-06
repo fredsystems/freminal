@@ -170,7 +170,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 98  | Block Close on Running Commands           | `PLAN_VERSION_090.md` (Task 98)               | Complete      | Task 72                |
 | 99  | Kitty Desktop Notifications (OSC 99)      | `PLAN_VERSION_110.md` (Task 99)               | Planned       | v0.9.0 (Task 76)       |
 | 100 | Kitty Graphics Protocol Completion        | `PLAN_VERSION_110.md` (Task 100)              | Planned       | Task 13                |
-| 101 | Kitty Keyboard Compliance (encoding-only) | `PLAN_VERSION_110.md` (Task 101)              | Planned       | Task 35                |
+| 101 | Kitty Keyboard Compliance (encoding-only) | `PLAN_VERSION_110.md` (Task 101)              | Complete      | Task 35                |
 | 102 | Kitty File Transfer (OSC 5113)            | `PLAN_VERSION_120.md` (Task 102)              | Planned       | Task 99                |
 | 103 | Multiple Cursors (CSI)                    | `PLAN_VERSION_120.md` (Task 103)              | Planned       | None                   |
 | 104 | Kitty Text Sizing (OSC 66)                | `PLAN_VERSION_130.md` (Task 104)              | Planned       | Task 13                |
@@ -644,6 +644,7 @@ Update this section as tasks complete:
 | 109  | 2026-06-14 | 2026-06-14 | 109.1 audit + 109.2 surround highlight (two-pane half-fill fallback); PR pending |
 | 111  | 2026-06-17 | 2026-06-17 | All 7 subtasks (111.1-111.7) on task-111/bundled-font; PR pending                |
 | 112  | 2026-06-17 | 2026-06-19 | All subtasks (112.1-112.13) on task-112/ui-beautification; PR pending            |
+| 101  | 2026-07-05 | 2026-07-05 | 101.1 audit + 101.2-101.4 on task-101/keyboard-compliance; egui-blocked -> 114   |
 
 ---
 
