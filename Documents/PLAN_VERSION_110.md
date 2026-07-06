@@ -2417,6 +2417,31 @@ Respect the KKP flags (only emit functional-key escapes when the relevant flag i
 set; fall back to legacy behaviour otherwise, matching how egui-delivered keys
 behave today).
 
+**114.7 execution notes (recorded 2026-07-05 from the 114.5 review):**
+
+- **`RawKeyMods.super_key` from 114.5 is `egui::Modifiers.command`, which equals
+  `ctrl` on Linux/Windows** — so it over-reports super when Ctrl is held. For
+  correct KKP modifier encoding, 114.7 must source the true physical-Super state
+  the way the egui path already does (the per-pane/window `super_pressed` tracking
+  from Task 101.2), NOT `RawKeyMods.super_key` verbatim. Decide the cleanest reuse
+  at implementation (e.g. thread the tracked super state into the
+  `on_raw_key_event` handling, or have 114.5's mapping corrected). Do not ship the
+  `command`-as-super approximation into the actual encoding.
+- **Codepoint mapping:** map each blocked `winit::keyboard::KeyCode` to the matching
+  `freminal_terminal_emulator::input::KKP_*_CODEPOINT` (now `pub`) and build a
+  `TerminalInput::KittyFunctional { codepoint, mods }`. `Numpad0..9` map to
+  `KKP_KP_0..9`; numpad operators to the KP operator codepoints; media to the media
+  codepoints; lock/system keys to 57358–57363.
+- **ISO_Level3/5_Shift have no winit `KeyCode`** (114.5 finding) and are therefore
+  not deliverable — they stay a documented permanent gap (114.9), same tier as
+  hyper/meta.
+- **Observed lock-key cache update (deferred here from 114.4):** when a
+  `CapsLock`/`NumLock` press is delivered via `on_raw_key_event` while focused,
+  toggle the per-window ambient `LockState` cache (114.4) so decoration stays
+  correct between requeries. This is the "transition updates ambient" half of the
+  binding decision; still emit the key's own event too (it is a real observed
+  transition under flag 8).
+
 Deliverable: end-to-end encoding for the blocked keys + tests (feed a synthetic
 `on_raw_key_event` for a keypad/media/lock key under flag 8 and assert the bytes on
 the input channel); existing keyboard tests green.
