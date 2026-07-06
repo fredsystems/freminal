@@ -912,6 +912,14 @@ impl ViewState {
         &mut self,
         images: &HashMap<u64, InlineImage>,
     ) -> ImageAnimationTick {
+        // Cap the number of frame advances per GUI tick. After a long
+        // suspend/background interval, or with tiny (or zero) declared frame
+        // gaps, the catch-up loop below could otherwise run thousands or
+        // millions of iterations in a single tick and freeze rendering. When
+        // the cap is hit we snap `frame_started` to `now` and stop, resuming
+        // normally next tick.
+        const MAX_FRAME_ADVANCES_PER_TICK: usize = 1024;
+
         let now = Instant::now();
 
         // Prune clocks for ids that vanished or are no longer animated.
@@ -953,7 +961,12 @@ impl ViewState {
             }
 
             let mut stopped_at_end = false;
+            let mut advances_this_tick = 0usize;
             loop {
+                if advances_this_tick >= MAX_FRAME_ADVANCES_PER_TICK {
+                    clock.frame_started = now;
+                    break;
+                }
                 let gap = Duration::from_millis(frame_gap_ms(img, clock.current_frame));
                 let elapsed = now.saturating_duration_since(clock.frame_started);
                 if elapsed < gap {
@@ -977,6 +990,7 @@ impl ViewState {
                     clock.current_frame += 1;
                 }
                 clock.frame_started += gap;
+                advances_this_tick += 1;
                 if !changed.contains(id) {
                     changed.push(*id);
                 }
