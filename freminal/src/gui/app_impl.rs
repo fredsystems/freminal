@@ -2244,6 +2244,22 @@ impl freminal_windowing::App for FreminalGui {
         //   - no request (true idle, steady cursor)  → 0 FPS
         raw_input.predicted_dt = 0.0;
     }
+
+    fn on_raw_key_event(
+        &mut self,
+        window_id: WindowId,
+        event: freminal_windowing::RawKeyEvent,
+        mods: freminal_windowing::RawKeyMods,
+    ) {
+        // Task 114.5: delivery seam only. Real encoding into TerminalInput
+        // lands in 114.7. For now, just trace so the intercept is observable.
+        tracing::trace!(
+            ?window_id,
+            ?event,
+            ?mods,
+            "raw key event (114.5 placeholder)"
+        );
+    }
 }
 
 impl FreminalGui {
