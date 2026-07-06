@@ -1605,6 +1605,86 @@ bugs (100.11–100.14, all fixed).
 - **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge (maintainer directed
   fixing it before the merge — all protocols need it).
 
+#### 100.18 — Per-placement identity: coexisting placements of the same image
+
+Surfaced 2026-07-02 by a maintainer live run (step 4, `a=p,i=2,c=8,r=4` after a prior
+`a=p,i=2`), root-caused from a `.frec` (decoded with `sequence_decoder.py`) + the kitty
+spec. A pre-existing bug flagged (but never fixed) in the 100.4 and 100.9 execution
+decisions.
+
+- **Surface point:** predates Task 100; the id-only `ImageBounds` bucketing was flagged in
+  100.4 (`a3e29d50`/notes) and 100.9. Exposed by Task 100 live testing.
+- **Impact:** `build_image_verts` buckets `ImageBounds` by `image_id` alone, so two
+  on-screen placements of the same image merge into one oversized bounding box → a
+  grossly stretched/misplaced quad. Per the kitty spec (graphics-protocol lines
+  1105/1111): multiple `a=p` puts with placement id `0`/unspecified create MULTIPLE
+  COEXISTING placements; only two puts with the same NON-ZERO placement id replace each
+  other. freminal wrongly merges any two same-image-id placements.
+- **Scope:** `freminal-buffer/src/image_store.rs` (`next_placement_instance_id()`,
+  `ImagePlacement.placement_instance`, `PlaceImageResult.placement_instance`),
+  `freminal-buffer/src/buffer/images.rs` (`place_image`/`place_image_at` param;
+  `clear_image_placements_by_placement`), the handlers (mint + thread the instance id;
+  replace-clear on same non-zero `p=`), `freminal-terminal-emulator/src/terminal_handler/mod.rs`
+  (`RealPlacement.placement_instance`), and the renderer
+  (`freminal/src/gui/renderer/vertex.rs` bucket by `placement_instance`;
+  `freminal/src/gui/renderer/gpu.rs` + `RenderState.image_draw_order`).
+- **Approach:** a monotonic per-put placement-instance id (mirroring `next_image_id`)
+  stamped on every cell of a placement; `build_image_verts` buckets by it. Same non-zero
+  `p=` re-put clears the prior placement's cells first (`clear_image_placements_by_placement`).
+  **Critical draw-order split:** `build_image_verts`'s `draw_order` is both the vertex-slab
+  bucket key (must become per-instance) AND the GPU texture-lookup key (must stay per
+  image id — `gpu.rs` `image_textures` is keyed by image id); it becomes a
+  `Vec<ImageDrawEntry { instance_id, image_id }>` so the slab is per-instance while
+  texture binding stays per-image-id. Per-instance bucketing also resolves the
+  `z_index`/`source_crop` first-seen-collapse limitations (100.7b/100.9) for free.
+- **Verification:** two same-image `p=0` puts render as two independent quads; a same
+  non-zero `p=` re-put replaces (one quad); z-index/crop no longer collapse across
+  placements; a `build_image_verts` Criterion before/after (the bench added in 100.17b),
+  ≤15% regression.
+- **Scheduling:** part of Task 100; blocks the v0.11.0-kitty merge. Landed as one combined
+  pass with 100.19 + 100.20 (total site overlap).
+
+#### 100.19 — Kitty sub-cell `X`/`Y` pixel offset on display
+
+Full-spec-compliance gap: kitty `X=`/`Y=` (parsed as `cell_x_offset`/`cell_y_offset`)
+shift an image's drawing origin within the top-left cell by that many pixels (< cell
+size). Parsed but never applied on the display path.
+
+- **Scope:** `freminal-buffer/src/image_store.rs` (`SubCellOffset` type +
+  `ImagePlacement.subcell_offset`), `place_image`/`place_image_at` param,
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`
+  (`resolve_subcell_offset`, display-actions-only, clamped `< cell` — mirroring
+  `resolve_source_crop`), and `freminal/src/gui/renderer/vertex.rs` (`ImageBounds`
+  field; additive quad-origin shift applied after `compute_image_quad_position`, defensively
+  re-clamped against `cell_width`/`cell_height`).
+- **Spec basis:** kitty graphics-protocol line 1121 (X/Y offset within the first cell,
+  must be `< cell size`); KITTY-ONLY (iTerm2 and sixel have no sub-cell offset — confirmed).
+- **Approach:** mirror the Task 100.9 `source_crop` wiring exactly; orthogonal to size mode
+  (position only) and crop (UV only).
+- **Verification:** an `X`/`Y` offset shifts the quad origin by that many pixels, clamped
+  `< cell`; tests mirror the crop tests but assert position.
+- **Scheduling:** landed with 100.18 (combined render-path pass). Corrects a prior wrong
+  "out of scope" framing — full spec compliance requires it.
+
+#### 100.20 — Placement-identity edge cases (virtual p=0 coexist; `d=i,p=` narrowing)
+
+Two adjacent gaps completed alongside 100.18/100.19 (maintainer directed "do everything
+now").
+
+- **Virtual p=0 coexistence:** `VirtualPlacement` gains `placement_instance`, populated at
+  registration and read by `handle_placeholder_char`, so two independent `a=p,U=1`/`a=T,U=1`
+  registrations of the same image with `p=0` coexist as distinct placements (temporal
+  disambiguation via register-then-write order). Scope:
+  `freminal-common/src/buffer_states/unicode_placeholder.rs` (field) +
+  `freminal-terminal-emulator/src/terminal_handler/*` (populate/read).
+- **`d=i,p=` narrowing:** `handle_kitty_delete_by_id` currently ignores `p=` and clears all
+  placements of the image; per spec, `d=i,p=<n>` deletes only that `(image_id, placement_id)`.
+  Wire it to the `clear_image_placements_by_placement` method added in 100.18. Scope:
+  `freminal-terminal-emulator/src/terminal_handler/graphics_kitty.rs`.
+- **Verification:** two `p=0` virtual placements of one image coexist; `d=i,p=<n>` removes
+  only the named placement while others survive.
+- **Scheduling:** landed with 100.18/100.19.
+
 ##### 100.15 + 100.16 execution decisions (recorded 2026-07-02, fix landed `091b1caa`)
 
 Root cause confirmed exactly as the maintainer hypothesised and recon traced. `place_image`
