@@ -128,6 +128,31 @@ fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
 }
 
+/// KKP codepoint for F13 (kitty function-key extended range).
+///
+/// F14–F35 have no legacy (SS3 / CSI-tilde) encoding; they only exist under
+/// the Kitty Keyboard Protocol as `CSI <codepoint> u`.  Their codepoints are
+/// `KKP_F13_CODEPOINT + (n - 13)`.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+const KKP_F13_CODEPOINT: u32 = 57376;
+
+/// KKP "modifier keys as keys" codepoints (flag 8,
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` only).  These report a bare press of a
+/// modifier key (e.g. tapping Left Shift by itself) as its own `CSI <code> u`
+/// event.  Hyper/Meta codepoints (57445/57446/57451/57452) are intentionally
+/// omitted — egui has no Hyper/Meta key variants to source them from.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+const KKP_LEFT_SHIFT_CODEPOINT: u32 = 57441;
+const KKP_LEFT_CONTROL_CODEPOINT: u32 = 57442;
+const KKP_LEFT_ALT_CODEPOINT: u32 = 57443;
+const KKP_LEFT_SUPER_CODEPOINT: u32 = 57444;
+const KKP_RIGHT_SHIFT_CODEPOINT: u32 = 57447;
+const KKP_RIGHT_CONTROL_CODEPOINT: u32 = 57448;
+const KKP_RIGHT_ALT_CODEPOINT: u32 = 57449;
+const KKP_RIGHT_SUPER_CODEPOINT: u32 = 57450;
+
 /// US QWERTY shifted-key mapping for KKP flag 4.
 ///
 /// Given a lowercase ASCII byte, returns the Unicode codepoint of the shifted
@@ -334,8 +359,19 @@ pub enum TerminalInput {
     InFocus,
     LostFocus,
     KeyPad(u8),
-    // Function keys F1–F12
+    // Function keys F1–F35 (F1–F12 have legacy encodings; F13–F35 are
+    // KKP-only, see `to_payload_kkp`'s `FunctionKey` arm).
     FunctionKey(u8, KeyModifiers),
+    // KKP "modifier keys as keys" (flag 8 only) — bare presses of a
+    // modifier key reported as their own event. No legacy encoding exists.
+    ShiftLeft(KeyModifiers),
+    ShiftRight(KeyModifiers),
+    ControlLeft(KeyModifiers),
+    ControlRight(KeyModifiers),
+    AltLeft(KeyModifiers),
+    AltRight(KeyModifiers),
+    SuperLeft(KeyModifiers),
+    SuperRight(KeyModifiers),
 }
 
 impl TerminalInput {
@@ -552,12 +588,25 @@ impl TerminalInput {
                     (10, None) => TerminalInputPayload::Many(b"\x1b[21~"),
                     (11, None) => TerminalInputPayload::Many(b"\x1b[23~"),
                     (12, None) => TerminalInputPayload::Many(b"\x1b[24~"),
+                    // F13–F35 and any out-of-range value: no legacy encoding
+                    // exists for F13–F35 (KKP-only, see `to_payload_kkp`),
+                    // so both fall through to the same empty fallback.
                     _ => {
                         warn!("Unhandled function key: F{n}");
                         TerminalInputPayload::Many(b"")
                     }
                 }
             }
+            // KKP "modifier keys as keys" (flag 8) have no legacy encoding —
+            // a bare press of a modifier key produces no bytes outside KKP.
+            Self::ShiftLeft(_)
+            | Self::ShiftRight(_)
+            | Self::ControlLeft(_)
+            | Self::ControlRight(_)
+            | Self::AltLeft(_)
+            | Self::AltRight(_)
+            | Self::SuperLeft(_)
+            | Self::SuperRight(_) => TerminalInputPayload::Many(b""),
         }
     }
 
@@ -925,17 +974,21 @@ impl TerminalInput {
             Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
             Self::FunctionKey(n, mods) => {
                 let mod_param = mods.modifier_param();
-                // F1–F4 use the CSI-final form (P/Q/R/S); F5–F12 use the
+                // F1, F2, F4 use the CSI-final form (P/Q/S); F5–F12 use the
                 // CSI-tilde form.  Under `REPORT_EVENT_TYPES`, repeats and
                 // releases must carry the `:<event-type>` sub-field instead of
                 // the bare legacy sequence (see the arrow-key arms above).
+                //
+                // F3 is a deliberate exception: under KKP it uses the tilde
+                // form (`CSI 13 ~`), NOT the legacy SS3/CSI-R form, because
+                // `CSI R` collides with the Cursor Position Report (CPR)
+                // response — see `f_tilde(13, ...)` below.
                 let f_final = |b: u8| match (functional_event_code, mod_param) {
                     (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b),
                     (None, Some(m)) => modified_csi_final(m, b),
                     (None, None) => match b {
                         b'P' => TerminalInputPayload::Many(b"\x1bOP"),
                         b'Q' => TerminalInputPayload::Many(b"\x1bOQ"),
-                        b'R' => TerminalInputPayload::Many(b"\x1bOR"),
                         _ => TerminalInputPayload::Many(b"\x1bOS"),
                     },
                 };
@@ -948,7 +1001,7 @@ impl TerminalInput {
                 match n {
                     1 => f_final(b'P'),
                     2 => f_final(b'Q'),
-                    3 => f_final(b'R'),
+                    3 => f_tilde(13, b"\x1b[13~"),
                     4 => f_final(b'S'),
                     5 => f_tilde(15, b"\x1b[15~"),
                     6 => f_tilde(17, b"\x1b[17~"),
@@ -958,10 +1011,100 @@ impl TerminalInput {
                     10 => f_tilde(21, b"\x1b[21~"),
                     11 => f_tilde(23, b"\x1b[23~"),
                     12 => f_tilde(24, b"\x1b[24~"),
+                    // F13–F35: KKP-only, no legacy/functional-event form —
+                    // always plain `CSI <codepoint> u` (event type, if any,
+                    // is embedded by `build_csi_u` itself via `flags`/`meta`).
+                    13..=35 => {
+                        let codepoint = KKP_F13_CODEPOINT + u32::from(*n - 13);
+                        Self::build_csi_u(codepoint, mod_param, flags, meta)
+                    }
                     _ => {
                         warn!("Unhandled function key: F{n}");
                         TerminalInputPayload::Many(b"")
                     }
+                }
+            }
+            // ── KKP "modifier keys as keys" (flag 8 only) ────────────────
+            //
+            // Kitty reports a bare press of a modifier key (e.g. tapping
+            // Left Shift by itself, with no other key) as its own CSI u
+            // event, but ONLY when REPORT_ALL (flag 8) is active — flag 1
+            // (disambiguate) alone does not enable this. There is no legacy
+            // encoding: outside flag 8 these produce no bytes.
+            Self::ShiftLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_SHIFT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ShiftRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_SHIFT_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ControlLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_LEFT_CONTROL_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ControlRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_CONTROL_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::AltLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::AltRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_RIGHT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::SuperLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_SUPER_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::SuperRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_SUPER_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
                 }
             }
         }
@@ -1105,6 +1248,29 @@ mod tests {
         };
         let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_right_with_super_modifier() {
+        // super_key alone → modifier param 1 + 8 = 9.
+        let mods = KeyModifiers {
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;9C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_right_with_ctrl_super_modifier() {
+        // ctrl + super → modifier param 1 + 4 + 8 = 13.
+        let mods = KeyModifiers {
+            ctrl: true,
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;13C".to_vec()));
     }
 
     #[test]
@@ -1973,9 +2139,11 @@ mod tests {
             to_payload_kkp(&TerminalInput::FunctionKey(2, KeyModifiers::NONE), 1),
             TerminalInputPayload::Many(b"\x1bOQ")
         );
+        // F3 is the deliberate exception: under KKP it uses the tilde form
+        // (`CSI 13 ~`), not SS3/CSI-R, because `CSI R` collides with CPR.
         assert_eq!(
             to_payload_kkp(&TerminalInput::FunctionKey(3, KeyModifiers::NONE), 1),
-            TerminalInputPayload::Many(b"\x1bOR")
+            TerminalInputPayload::Many(b"\x1b[13~")
         );
         assert_eq!(
             to_payload_kkp(&TerminalInput::FunctionKey(4, KeyModifiers::NONE), 1),
@@ -2007,7 +2175,39 @@ mod tests {
 
     #[test]
     fn kkp_function_key_unknown_returns_empty() {
-        let p = to_payload_kkp(&TerminalInput::FunctionKey(13, KeyModifiers::NONE), 1);
+        // F13 is now a valid KKP-only function key (see
+        // `kkp_function_key_f13_f20_f35`); use an actually out-of-range
+        // value to exercise the fallback arm.
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(36, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_function_key_f13_f20_f35() {
+        // F13 = 57376, a mid-range key F20 = 57376 + 7 = 57383, F35 = 57398.
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(13, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57376u".to_vec())
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(20, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57383u".to_vec())
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(35, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57398u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kkp_function_key_f13_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(13, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57376;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_function_key_f36_out_of_range_returns_empty() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(36, KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
@@ -2605,8 +2805,9 @@ mod tests {
 
     #[test]
     fn kkp_f3_with_modifier() {
+        // F3 under KKP uses the tilde form (code 13), not CSI-R.
         let p = to_payload_kkp(&TerminalInput::FunctionKey(3, SHIFT), 1);
-        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2R".to_vec()));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[13;2~".to_vec()));
     }
 
     #[test]
@@ -2715,6 +2916,132 @@ mod tests {
     fn kkp_f_unknown() {
         let p = to_payload_kkp(&TerminalInput::FunctionKey(99, KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    // ── 101.3: KKP "modifier keys as keys" (flag 8 only) ─────────────────────
+
+    #[test]
+    fn kkp_modifier_key_left_shift_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57441u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_shift_without_report_all_is_empty() {
+        // Flag 1 (disambiguate) only, no flag 8: no encoding for a bare
+        // modifier-key press.
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_shift_with_extra_modifier() {
+        // Left Shift pressed while Ctrl is already held: modifier param
+        // reflects ctrl (1 + 4 = 5).
+        let mods = KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(mods), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57441;5u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_shift_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ShiftRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57447u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_control_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ControlLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57442u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_control_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::ControlLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_control_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ControlRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57448u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_alt_report_all() {
+        let p = to_payload_kkp(&TerminalInput::AltLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57443u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_alt_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::AltLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_alt_report_all() {
+        let p = to_payload_kkp(&TerminalInput::AltRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57449u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_super_report_all() {
+        let p = to_payload_kkp(&TerminalInput::SuperLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57444u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_super_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::SuperLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_super_report_all() {
+        let p = to_payload_kkp(&TerminalInput::SuperRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57450u".to_vec()));
+    }
+
+    #[test]
+    fn legacy_modifier_keys_as_keys_are_always_empty() {
+        // No legacy encoding exists for any of these, regardless of flags
+        // (flags 0 forces the legacy path since neither bit 0 nor bit 3 is set).
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ShiftLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ShiftRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ControlLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ControlRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::AltLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::AltRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::SuperLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::SuperRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
     }
 
     // ── 70.A.1 regression: non-ASCII character encoding ─────────────────────
