@@ -16,10 +16,11 @@
 //! `evdev`, sidestepping the display server entirely -- see the durable
 //! decision in `Documents/PLAN_VERSION_110.md` ("114 Durable decision:
 //! per-platform lock-state query resolved") for the full rationale. On
-//! Windows, the query uses `GetKeyState` (subtask 114.2). macOS's real query
-//! lands in subtask 114.3; until then that platform (and any other
-//! non-Linux, non-Windows target) uses a stub that always reports all locks
-//! as inactive.
+//! Windows, the query uses `GetKeyState` (subtask 114.2). On macOS, the
+//! query uses CoreGraphics `CGEventSourceFlagsState` for Caps Lock only
+//! (subtask 114.3; Num Lock/Scroll Lock are hardcoded inactive since macOS
+//! keyboards don't meaningfully have them). Any other, unsupported target
+//! uses a stub that always reports all locks as inactive.
 
 /// The current state of the three standard lock keys.
 ///
@@ -124,14 +125,62 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
 mod imp {
     use super::LockState;
 
-    /// Non-Linux, non-Windows stub. macOS's real query
-    /// (`CGEventSourceFlagsState`) is implemented in subtask 114.3; until
-    /// then, and on any other platform, every lock is reported as inactive
-    /// so the crate compiles and runs everywhere.
+    // CoreGraphics event-source flags. `CGEventSourceFlagsState` returns the
+    // current modifier/lock flags for the given event-source state ID.
+    //
+    // NOTE (Input Monitoring / TCC): on some macOS versions the CoreGraphics
+    // event-source query APIs can be gated behind the "Input Monitoring"
+    // privacy permission. Whether `CGEventSourceFlagsState` (a *polling*
+    // query, as opposed to a `CGEventTap` interception) triggers a permission
+    // prompt is version-dependent and UNVERIFIED on freminal's target macOS
+    // versions -- this MUST be confirmed on a real device before macOS caps
+    // reporting is relied upon. See Documents/PLAN_VERSION_110.md subtask
+    // 114.3. If access is denied, the flags come back without the alpha-shift
+    // bit and we simply report caps=false (a silent, non-crashing degradation).
+
+    // kCGEventFlagMaskAlphaShift = 0x0001_0000 (NX_ALPHASHIFTMASK).
+    const CG_EVENT_FLAG_MASK_ALPHA_SHIFT: u64 = 0x0001_0000;
+    // kCGEventSourceStateCombinedSessionState = 0.
+    const CG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE: i32 = 0;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        // CGEventFlags CGEventSourceFlagsState(CGEventSourceStateID stateID);
+        fn CGEventSourceFlagsState(state_id: i32) -> u64;
+    }
+
+    /// macOS implementation: query Caps Lock via CoreGraphics
+    /// `CGEventSourceFlagsState`. Num Lock and Scroll Lock do not
+    /// meaningfully exist on macOS keyboards, so they are hardcoded false.
+    pub(super) fn query_lock_state() -> LockState {
+        // SAFETY: `CGEventSourceFlagsState` is a documented CoreGraphics C
+        // function taking a single integer state-id and returning a 64-bit
+        // flags bitmask. No pointers, no allocation, no lifetimes, no
+        // thread-affinity requirement for a read-only flags query. The extern
+        // declaration matches the framework signature. (114.3)
+        let flags =
+            unsafe { CGEventSourceFlagsState(CG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE) };
+        LockState {
+            caps: (flags & CG_EVENT_FLAG_MASK_ALPHA_SHIFT) != 0,
+            // Num Lock and Scroll Lock do not meaningfully exist on macOS
+            // keyboards; report them inactive rather than querying.
+            num: false,
+            scroll: false,
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+mod imp {
+    use super::LockState;
+
+    /// Stub for any platform other than Linux, Windows, or macOS. Every
+    /// lock is reported as inactive so the crate compiles and runs
+    /// everywhere.
     pub(super) fn query_lock_state() -> LockState {
         LockState::default()
     }
@@ -165,5 +214,15 @@ mod tests {
         // environment-dependent, so this only asserts the call completes
         // and returns a `LockState`.
         let _state: LockState = query_lock_state();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn query_lock_state_completes() {
+        // Mirrors the Linux/Windows smoke tests: the actual caps value is
+        // environment-dependent, and num/scroll are always false on macOS.
+        let state: LockState = query_lock_state();
+        assert!(!state.num);
+        assert!(!state.scroll);
     }
 }
