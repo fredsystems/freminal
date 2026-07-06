@@ -1,6 +1,12 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-01 — Task 100 (kitty graphics protocol completion,
+Last updated: 2026-07-02 — Kitty graphics render-path fixes (Tasks
+100.11–100.20, v0.11.0) closed the sub-cell `X`/`Y` offset and the
+native-vs-explicit display-sizing / per-placement-identity render gaps, plus
+animation/compose repaint, image persistence, and `C=1` on `a=T`. These were
+tracked in `KITTY_PROTOCOL_REFERENCE.md`'s current-state notes, not as itemized
+rows here, so no GAPS entry is removed — "DCS / Graphics Gaps: None" remains
+accurate. Earlier: 2026-07-01 — Task 100 (kitty graphics protocol completion,
 v0.11.0) closed animation, relative placements, storage quotas, `t=s`/`o=z`
 transmission, delete-target correctness, and z-index ordering. These were
 tracked as open items in `KITTY_PROTOCOL_REFERENCE.md`'s 100.1 audit, not as

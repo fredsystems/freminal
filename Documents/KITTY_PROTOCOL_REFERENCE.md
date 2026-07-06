@@ -271,10 +271,14 @@ transmit/put/delete/query and unicode placeholders; Task 100 added animation
 placements (`P`/`Q`/`H`/`V`, incl. their parser keys), storage quotas +
 eviction, compression (`o=z`), shared memory (`t=s`, POSIX + Windows),
 source-rect crop (`a=p` `x/y/w/h`), delete-target correctness, `p=` in
-responses, and z-index render ordering. See the "freminal current-state"
-section below for the full done list; the graphics surface is complete
-(only the minor sub-cell `X/Y` offset and the `t=f`/`t=t` security-hardening
-notes remain, neither a Task 100 item).
+responses, and z-index render ordering. A follow-up live-testing pass
+(Tasks 100.11–100.20) fixed the end-to-end render path: animation/compose
+repaint, relative-placement origin under scrollback, image persistence across
+subsequent output, `C=1` on `a=T`, native-vs-explicit display sizing,
+per-placement identity (coexisting placements of one image), the sub-cell
+`X`/`Y` offset, and placement-scoped delete. See the "freminal current-state"
+section below for the full done list; the graphics surface is complete (only
+the `t=f`/`t=t` security-hardening note remains, not a Task 100 item).
 
 ### Envelope (graphics)
 
@@ -541,24 +545,46 @@ implementation choice.
   kitty 0.33.0+), and `d=f`/`d=F` (delete frames) variants; `d=a` (visible-only)
   vs `d=A` (all) is distinguished; the earlier `d=n`/`d=N` store-free bug is
   fixed.
-- Image quads render in `(z-index, id)` order, with higher z-index drawn on
-  top of lower (Task 100.7b) — the earlier id-only sort order was a real
-  stacking bug and is fixed.
+- Image quads render in `(z-index, placement-instance)` order, with higher
+  z-index drawn on top of lower (Task 100.7b; the tie-break basis changed from
+  image id to placement-instance in Task 100.18) — the earlier id-only sort
+  order was a real stacking bug and is fixed.
 - Source-rect crop for `a=p`/`a=T` (Task 100.9): the `x`/`y`/`w`/`h` display
   keys select a pixel sub-rectangle of the transmitted image; the crop rides
   the per-placement `ImagePlacement.source_crop` and `compute_image_quad`
   composes it into the UV window (`w=0`/`h=0`/absent = full from the offset).
 - Images survive a terminal reflow as coherent rectangles across all three
   supported protocols (Task 100.4.0 atomicity fix).
+- A displayed image survives subsequent output: `place_image` leaves a fresh
+  blank row below the image and moves the cursor there, so following text no
+  longer overwrites (destroys) the image's cells (Task 100.15). `C=1` (no
+  cursor movement) is honoured on `a=T`/Put, not only `a=p` (Task 100.16).
+- Display sizing honours the spec's native-vs-explicit distinction (Task
+  100.17): with no `c`/`r` (kitty), `auto` (iTerm2), or always (sixel) the image
+  is drawn at its native pixel size anchored at the cell top-left
+  (`ImageSizeMode::NativePixels`); with explicit `c`/`r` (kitty) or
+  `width`/`height` (iTerm2) it is scaled to fill the declared cell grid
+  (`ImageSizeMode::ExplicitCells`). Previously every image was stretched to fill
+  its cell grid.
+- Multiple placements of the same image coexist correctly (Task 100.18): per
+  the spec, `a=p` puts with placement id `0`/unspecified create distinct
+  coexisting placements, and a second put with the same non-zero placement id
+  replaces the first. Each placement carries a monotonic `placement_instance`
+  id; `build_image_verts` buckets by it (previously by `image_id` alone, which
+  merged two on-screen placements of one image into a single oversized quad).
+  This also resolved the earlier `z_index`/`source_crop` first-seen-collapse
+  limitations for free.
+- Sub-cell `X`/`Y` pixel offsets ARE applied (Task 100.19): the `X`/`Y` display
+  keys shift the drawing origin within the first cell by that many pixels
+  (clamped `< cell size`), via `ImagePlacement.subcell_offset` and an additive
+  quad-origin translation in `compute_image_quad`. Orthogonal to size mode
+  (position only) and source-crop (UV only). Kitty-only (iTerm2/sixel have no
+  such key).
+- Unicode-placeholder virtual placements with placement id `0` coexist
+  distinctly, and `d=i,p=<n>` deletes only the named placement (Task 100.20).
 
 **Confirmed still remaining (not resolved by Task 100):**
 
-- **Sub-cell `X`/`Y` pixel offsets are not applied to placement rendering.** The
-  `X`/`Y` display keys (`cell_x_offset`/`cell_y_offset`) — a sub-cell pixel
-  offset for where drawing starts within the first cell — are parsed but not
-  applied by `compute_image_quad` (whose quad geometry is whole-cell aligned).
-  Distinct from the `a=p` source-rect crop (`x/y/w/h`), which **is** implemented
-  (Task 100.9). Minor; no assigned subtask.
 - **`t=f`/`t=t` file-path security is narrower than the upstream spec
   suggests.** `read_kitty_file` only rejects non-absolute paths
   (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not

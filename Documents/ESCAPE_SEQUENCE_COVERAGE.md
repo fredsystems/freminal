@@ -2,7 +2,13 @@
 
 ## Last updated
 
-Last updated: 2026-07-01 — Kitty graphics protocol completion (Task 100,
+Last updated: 2026-07-02 — Kitty graphics render-path fixes (Tasks
+100.11–100.20, v0.11.0): animation/compose repaint, image persistence across
+subsequent output, `C=1` on `a=T`, native-vs-explicit display sizing,
+per-placement identity (coexisting placements), and the sub-cell `X`/`Y`
+offset. (No coverage-status change — the APC `_G` kitty graphics row remains
+✅; these were end-to-end render-fidelity fixes within already-supported
+sequences.) Earlier: 2026-07-01 — Kitty graphics protocol completion (Task 100,
 v0.11.0): animation (frame transfer/control/compose), image-number
 references, relative placements, storage quotas + eviction, shared-memory
 (`t=s`) and zlib (`o=z`) transmission, delete-target correctness, and
