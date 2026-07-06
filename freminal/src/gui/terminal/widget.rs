@@ -1001,11 +1001,13 @@ pub struct PaneRenderCache {
     /// Last key processed by input handling.
     pub(super) previous_key: Option<Key>,
     /// Physical Super/Command key hold-state from the most recently
-    /// processed frame (Task 101.2). egui exposes no `Modifiers` bit for the
-    /// physical Super/Windows key on Linux/Windows, so this is tracked
-    /// across frames via discrete `SuperLeft`/`SuperRight` press/release
-    /// events observed in `write_input_to_terminal`.
-    pub(super) super_pressed: bool,
+    /// processed frame (Task 101.2), tracked per side. egui exposes no
+    /// `Modifiers` bit for the physical Super/Windows key on Linux/Windows,
+    /// so this is tracked across frames via discrete `SuperLeft`/`SuperRight`
+    /// press/release events observed in `write_input_to_terminal`. Tracking
+    /// each side independently avoids losing state when both are held and one
+    /// is released.
+    pub(super) super_state: super::input::SuperKeyState,
     /// Last scroll amount processed.
     pub(super) previous_scroll_amount: f32,
     /// Cursor blink state from the most recently rendered frame.
@@ -1113,7 +1115,7 @@ impl PaneRenderCache {
         Self {
             previous_mouse_state: None,
             previous_key: None,
-            super_pressed: false,
+            super_state: super::input::SuperKeyState::default(),
             previous_scroll_amount: 0.0,
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
@@ -1153,7 +1155,7 @@ impl PaneRenderCache {
     /// field's visibility.
     #[must_use]
     pub(crate) const fn super_pressed(&self) -> bool {
-        self.super_pressed
+        self.super_state.any()
     }
 
     /// Invalidate the cached theme pointer so the next frame forces a full
@@ -1662,7 +1664,7 @@ impl FreminalTerminalWidget {
                 scroll_amount,
                 clipboard_pending,
                 actions,
-                super_pressed,
+                super_state,
             ) = ui.input(|input_state| {
                 write_input_to_terminal(
                     input_state,
@@ -1681,14 +1683,14 @@ impl FreminalTerminalWidget {
                     recording_ctx,
                     &cache.placeholder_hit_rects,
                     key_broadcast_targets,
-                    cache.super_pressed,
+                    cache.super_state,
                 )
             });
             left_mouse_button_pressed |= left_mouse_button_pressed_inner;
             cache.previous_mouse_state = new_mouse_pos;
             cache.previous_key = previous_key;
             cache.previous_scroll_amount = scroll_amount;
-            cache.super_pressed = super_pressed;
+            cache.super_state = super_state;
             deferred_actions = actions;
 
             // Perform the clipboard copy OUTSIDE the ui.input() closure.
