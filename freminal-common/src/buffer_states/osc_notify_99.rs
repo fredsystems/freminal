@@ -76,6 +76,10 @@ pub enum Osc99ParseError {
     InvalidBase64(String),
     /// The payload was not valid escape-safe UTF-8 (non-base64 payloads).
     InvalidPayloadUtf8(String),
+    /// The metadata + payload region exceeded [`MAX_OSC99_SEQUENCE_BYTES`].
+    /// Rejected before any allocation/decode to bound memory use on
+    /// untrusted terminal input.
+    SequenceTooLarge(usize),
 }
 
 impl fmt::Display for Osc99ParseError {
@@ -87,9 +91,23 @@ impl fmt::Display for Osc99ParseError {
             Self::InvalidId(s) => write!(f, "invalid OSC 99 id: {s}"),
             Self::InvalidBase64(s) => write!(f, "invalid OSC 99 base64: {s}"),
             Self::InvalidPayloadUtf8(s) => write!(f, "invalid OSC 99 payload UTF-8: {s}"),
+            Self::SequenceTooLarge(n) => {
+                write!(f, "OSC 99 sequence too large: {n} bytes")
+            }
         }
     }
 }
+
+/// Maximum accepted size (in bytes) of a single OSC 99 metadata + payload
+/// region before decode.
+///
+/// Terminal escape-sequence input is untrusted, and `base64::decode`
+/// reserves `len * 3 / 4` up front, so an unbounded sequence could trigger a
+/// large allocation. A single chunk's payload is capped here; multi-chunk
+/// reassembly is additionally bounded by the terminal handler (see
+/// `notify_99.rs`). 1 MiB comfortably covers any realistic notification icon
+/// while refusing pathological input.
+pub const MAX_OSC99_SEQUENCE_BYTES: usize = 1_048_576;
 
 /// Activation behaviour flags from the `a=` metadata key.
 ///
@@ -389,6 +407,14 @@ fn decode_payload(state: &ParseState, payload: &[u8]) -> Result<Vec<u8>, Osc99Pa
 /// Returns [`Osc99ParseError`] if metadata is malformed, an id is unsafe, an
 /// integer/urgency is invalid, or the payload fails base64/UTF-8 decoding.
 pub fn parse_osc_99(metadata: &[u8], payload: &[u8]) -> Result<Osc99Command, Osc99ParseError> {
+    // Reject oversized input before any allocation/decode. `base64::decode`
+    // reserves proportional to the input length, so an unbounded payload on
+    // untrusted terminal input could force a large allocation.
+    let total = metadata.len().saturating_add(payload.len());
+    if total > MAX_OSC99_SEQUENCE_BYTES {
+        return Err(Osc99ParseError::SequenceTooLarge(total));
+    }
+
     let mut state = ParseState::default();
 
     // Parse the colon-separated key=value pairs in the metadata region.
@@ -913,10 +939,34 @@ mod tests {
             Osc99ParseError::InvalidId("bad!id".into()),
             Osc99ParseError::InvalidBase64("!!!".into()),
             Osc99ParseError::InvalidPayloadUtf8("bad".into()),
+            Osc99ParseError::SequenceTooLarge(2_000_000),
         ];
         for e in &errors {
             let s = format!("{e}");
             assert!(!s.is_empty(), "Display was empty for {e:?}");
         }
+    }
+
+    #[test]
+    fn parse_osc_99_rejects_oversized_sequence_before_decode() {
+        // A payload larger than the cap must be rejected up front, without
+        // attempting a (potentially huge) base64 allocation.
+        let payload = vec![b'A'; MAX_OSC99_SEQUENCE_BYTES + 1];
+        let err = parse_osc_99(b"p=title:e=1", &payload).unwrap_err();
+        match err {
+            Osc99ParseError::SequenceTooLarge(n) => {
+                assert!(n > MAX_OSC99_SEQUENCE_BYTES);
+            }
+            other => panic!("expected SequenceTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_osc_99_accepts_sequence_at_the_cap() {
+        // metadata + payload exactly at the cap is accepted (boundary).
+        let metadata = b"p=title";
+        let payload = vec![b'x'; MAX_OSC99_SEQUENCE_BYTES - metadata.len()];
+        // Not base64 (no e=1), so it is treated as raw UTF-8 title bytes.
+        assert!(parse_osc_99(metadata, &payload).is_ok());
     }
 }

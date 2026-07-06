@@ -512,11 +512,17 @@ impl NotificationRouter {
             return;
         }
 
+        // Resolve/cache icon bytes *before* the occasion gate: caching must
+        // not depend on whether this particular instance is displayed. An
+        // occasion-suppressed notification that transmits icon bytes with a
+        // `g=` cache key must still populate the cache, so a later
+        // (displayed) notification referencing the same `g=` key with bytes
+        // omitted can resolve the icon.
+        let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
+
         if !Self::occasion_allows_display(data.occasion.as_deref(), ctx) {
             return;
         }
-
-        let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
 
         // Toast leg: OSC 99 has no per-category routing config row, so
         // 99.5a always attempts both legs (toast + OS notification) —
@@ -597,7 +603,7 @@ impl NotificationRouter {
     ) -> Option<Vec<u8>> {
         if let Some(bytes) = &data.icon_data {
             if let Some(key) = &data.icon_cache_key {
-                icon_cache.insert(key.clone(), bytes.clone());
+                Self::insert_icon_cache_bounded(icon_cache, key.clone(), bytes.clone());
             }
             Some(bytes.clone())
         } else {
@@ -605,6 +611,59 @@ impl NotificationRouter {
                 .as_ref()
                 .and_then(|key| icon_cache.get(key).cloned())
         }
+    }
+
+    /// Insert into the session icon cache, enforcing a bound so a program
+    /// that repeatedly transmits distinct `g=` cache keys with icon bytes
+    /// cannot grow this map without limit for the lifetime of the GUI
+    /// process (terminal escape-sequence input is untrusted). Mirrors the
+    /// quota-style bounding used by the kitty graphics image store: when
+    /// either the entry-count or total-byte cap would be exceeded, existing
+    /// entries are evicted until the new one fits (or the cache is emptied,
+    /// in which case a later `g=`-only reference simply misses and the
+    /// program must re-transmit).
+    fn insert_icon_cache_bounded(
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        key: String,
+        bytes: Vec<u8>,
+    ) {
+        /// Max number of distinct `g=` icon entries retained per session.
+        const MAX_ICON_CACHE_ENTRIES: usize = 64;
+        /// Max total icon bytes retained per session (4 MiB).
+        const MAX_ICON_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+        // A single icon larger than the whole budget is not cacheable.
+        if bytes.len() > MAX_ICON_CACHE_BYTES {
+            icon_cache.remove(&key);
+            return;
+        }
+
+        // Account for a replace of an existing key.
+        let existing = icon_cache.get(&key).map_or(0, Vec::len);
+        let mut total: usize = icon_cache
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_sub(existing);
+
+        // Evict until both the incoming bytes and one more entry fit.
+        while (total.saturating_add(bytes.len()) > MAX_ICON_CACHE_BYTES
+            || icon_cache.len() >= MAX_ICON_CACHE_ENTRIES)
+            && !icon_cache.is_empty()
+        {
+            let Some(victim) = icon_cache
+                .iter()
+                .find(|(k, _)| *k != &key)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = icon_cache.remove(&victim) {
+                total = total.saturating_sub(removed.len());
+            }
+        }
+
+        icon_cache.insert(key, bytes);
     }
 
     /// Write transmitted icon bytes to a uniquely-named temp file.
@@ -615,17 +674,43 @@ impl NotificationRouter {
     /// id, a monotonic per-process counter, and the process id. The caller
     /// is responsible for best-effort removal after use.
     fn write_icon_temp_file(id: Option<&str>, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
-        let counter = OSC99_ICON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        use std::io::Write as _;
+
         let pid = std::process::id();
         let sanitized_id: String = id
             .unwrap_or("noid")
             .chars()
             .filter(char::is_ascii_alphanumeric)
             .collect();
-        let filename = format!("freminal-osc99-icon-{sanitized_id}-{pid}-{counter}.png");
-        let path = std::env::temp_dir().join(filename);
-        std::fs::write(&path, bytes)?;
-        Ok(path)
+
+        // The temp dir (e.g. `/tmp`) is typically world-writable, and the
+        // filename is predictable (pid + a per-process counter), so a plain
+        // `fs::write` (which follows symlinks and truncates) would be
+        // vulnerable to a symlink pre-creation attack: a local attacker could
+        // point a guessable future filename at a file the freminal user owns
+        // and have us overwrite it. Use `create_new(true)` (O_CREAT|O_EXCL,
+        // which refuses to follow an existing path/symlink) and retry on a
+        // name collision so the write always lands in a fresh, exclusively
+        // created file.
+        loop {
+            let counter = OSC99_ICON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let filename = format!("freminal-osc99-icon-{sanitized_id}-{pid}-{counter}.png");
+            let path = std::env::temp_dir().join(filename);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(bytes)?;
+                    return Ok(path);
+                }
+                // A collision on the guessable name (or a pre-created
+                // symlink) is retried with the next counter value.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Best-effort removal of an OSC 99 icon temp file; a leftover file is
@@ -1726,5 +1811,71 @@ mod tests {
         }
 
         assert_eq!(live_ids_sorted(&live), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn icon_cache_bounded_by_entry_count() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        // Insert well beyond the entry cap; the map must never exceed it.
+        for i in 0..500u32 {
+            let data = Notification99Data {
+                icon_data: Some(vec![0u8; 16]),
+                icon_cache_key: Some(format!("k{i}")),
+                ..default_n99()
+            };
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+            assert!(
+                icon_cache.len() <= 64,
+                "icon cache exceeded entry cap: {}",
+                icon_cache.len()
+            );
+        }
+    }
+
+    #[test]
+    fn icon_cache_bounded_by_total_bytes() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        // Each icon is 256 KiB; the 4 MiB budget holds ~16, so repeated
+        // inserts of distinct keys must keep total bytes bounded.
+        let chunk = 256 * 1024;
+        for i in 0..64u32 {
+            let data = Notification99Data {
+                icon_data: Some(vec![0u8; chunk]),
+                icon_cache_key: Some(format!("b{i}")),
+                ..default_n99()
+            };
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+            let total: usize = icon_cache.values().map(Vec::len).sum();
+            assert!(
+                total <= 4 * 1024 * 1024,
+                "icon cache exceeded byte budget: {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_icon_temp_file_uses_exclusive_create() {
+        // Two writes with the same id must not collide or overwrite; the
+        // monotonic counter + O_EXCL retry guarantees distinct fresh files.
+        let a = NotificationRouter::write_icon_temp_file(Some("id"), b"aaaa")
+            .expect("first temp write");
+        let b = NotificationRouter::write_icon_temp_file(Some("id"), b"bbbb")
+            .expect("second temp write");
+        assert_ne!(a, b, "temp files must be distinct");
+        assert_eq!(std::fs::read(&a).unwrap(), b"aaaa");
+        assert_eq!(std::fs::read(&b).unwrap(), b"bbbb");
+
+        // Writing to an existing path must not follow/truncate it: calling
+        // the raw create_new on an existing file fails.
+        let err = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&a)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Clean up.
+        NotificationRouter::remove_icon_temp_file(&a);
+        NotificationRouter::remove_icon_temp_file(&b);
     }
 }

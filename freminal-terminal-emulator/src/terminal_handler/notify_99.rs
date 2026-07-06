@@ -50,6 +50,28 @@ pub(in crate::terminal_handler) struct PendingNotification {
     meta: Option<Osc99Command>,
 }
 
+/// Maximum number of distinct in-flight (`i=`) OSC 99 notifications retained
+/// while awaiting their terminating chunk. A process emitting endless `d=0`
+/// chunks with unique ids could otherwise grow `pending_notifications`
+/// without bound. Terminal input is untrusted, so this is a hard cap.
+const MAX_PENDING_OSC99_NOTIFICATIONS: usize = 128;
+
+/// Maximum accumulated payload bytes for a single in-flight notification
+/// (across title/body/icon/buttons). A stream of `d=0` chunks under one id
+/// could otherwise grow a single accumulator without bound.
+const MAX_OSC99_NOTIFICATION_BYTES: usize = 1_048_576;
+
+impl PendingNotification {
+    /// Total accumulated payload bytes across all four content accumulators.
+    const fn accumulated_len(&self) -> usize {
+        self.title
+            .len()
+            .saturating_add(self.body.len())
+            .saturating_add(self.icon.len())
+            .saturating_add(self.buttons.len())
+    }
+}
+
 // ── Finalized output type ─────────────────────────────────────────────────────
 
 /// A fully-reassembled OSC 99 notification (all chunks concatenated).
@@ -253,20 +275,53 @@ impl TerminalHandler {
             // ── Has id: accumulate or finalize ────────────────────────────────
             Some(id) => {
                 let id = id.clone();
-                let entry = self.pending_notifications.entry(id).or_default();
+
+                // Bound the number of concurrent in-flight notifications: a
+                // new id is refused once the map is full (existing ids may
+                // still receive their remaining chunks and finalize).
+                if !self.pending_notifications.contains_key(&id)
+                    && self.pending_notifications.len() >= MAX_PENDING_OSC99_NOTIFICATIONS
+                {
+                    tracing::debug!(
+                        "OSC 99: dropping chunk; too many pending notifications ({})",
+                        MAX_PENDING_OSC99_NOTIFICATIONS
+                    );
+                    return None;
+                }
+
+                // Bound the accumulated payload for this id: if appending this
+                // chunk would exceed the per-notification cap, drop the whole
+                // in-flight accumulation rather than grow without limit.
+                let current_len = self
+                    .pending_notifications
+                    .get(&id)
+                    .map_or(0, PendingNotification::accumulated_len);
+                if current_len.saturating_add(chunk.payload.len()) > MAX_OSC99_NOTIFICATION_BYTES {
+                    self.pending_notifications.remove(&id);
+                    tracing::debug!(
+                        "OSC 99: dropping notification; accumulated payload exceeds {} bytes",
+                        MAX_OSC99_NOTIFICATION_BYTES
+                    );
+                    return None;
+                }
+
+                let entry = self.pending_notifications.entry(id.clone()).or_default();
 
                 // Append the chunk's payload bytes to the matching accumulator.
                 append_payload(entry, chunk.payload_type, &chunk.payload);
 
                 // Latest metadata wins (payload bytes are accumulated above, not here).
+                // Move (not clone) the payload out of the chunk before storing
+                // metadata, so a large final icon/body chunk is not retained
+                // twice (once in the accumulator, once in `meta`).
                 let done = chunk.done;
+                let mut chunk = chunk;
+                chunk.payload = Vec::new();
                 entry.meta = Some(chunk);
 
                 if done {
                     // Remove from the map and build the finalized notification.
-                    let id_key = entry.meta.as_ref().and_then(|m| m.id.clone());
-                    let removed = id_key.and_then(|k| self.pending_notifications.remove(&k));
-                    let entry = removed?;
+                    let entry = self.pending_notifications.remove(&id)?;
                     // SAFETY: we just set entry.meta = Some(chunk) before inserting,
                     // so this is always Some when we removed a live entry.
                     let meta = entry.meta?;
@@ -601,5 +656,108 @@ mod tests {
         assert_eq!(control_kind(Osc99PayloadType::Body), None);
         assert_eq!(control_kind(Osc99PayloadType::Icon), None);
         assert_eq!(control_kind(Osc99PayloadType::Buttons), None);
+    }
+
+    // ── Reassembly bounds (memory-growth guards) ──────────────────────────────
+
+    #[test]
+    fn reassembly_caps_number_of_pending_notifications() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Fill the pending map to the cap with distinct, unfinished ids.
+        for i in 0..MAX_PENDING_OSC99_NOTIFICATIONS {
+            let chunk = Osc99Command {
+                id: Some(format!("id-{i}")),
+                payload_type: Osc99PayloadType::Title,
+                done: false,
+                payload: b"x".to_vec(),
+                ..default_cmd()
+            };
+            assert!(handler.reassemble_osc99(chunk).is_none());
+        }
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+
+        // One more distinct id is refused; the map does not grow.
+        let overflow = Osc99Command {
+            id: Some("overflow".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: false,
+            payload: b"x".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(overflow).is_none());
+        assert_eq!(
+            handler.pending_notifications.len(),
+            MAX_PENDING_OSC99_NOTIFICATIONS
+        );
+
+        // An existing id can still receive chunks and finalize.
+        let finish = Osc99Command {
+            id: Some("id-0".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: true,
+            payload: b"y".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(finish).is_some());
+    }
+
+    #[test]
+    fn reassembly_drops_notification_exceeding_byte_cap() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let id = "big".to_owned();
+
+        // First chunk under the cap: accepted, still pending.
+        let chunk1 = Osc99Command {
+            id: Some(id.clone()),
+            payload_type: Osc99PayloadType::Body,
+            done: false,
+            payload: vec![b'a'; 1024],
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(chunk1).is_none());
+        assert!(handler.pending_notifications.contains_key(&id));
+
+        // Second chunk that would push the accumulation past the cap: the
+        // whole in-flight notification is dropped rather than grown.
+        let chunk2 = Osc99Command {
+            id: Some(id.clone()),
+            payload_type: Osc99PayloadType::Body,
+            done: false,
+            payload: vec![b'b'; MAX_OSC99_NOTIFICATION_BYTES],
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(chunk2).is_none());
+        assert!(!handler.pending_notifications.contains_key(&id));
+    }
+
+    #[test]
+    fn reassembly_does_not_retain_payload_bytes_twice_in_meta() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let id = "meta".to_owned();
+
+        let chunk = Osc99Command {
+            id: Some(id.clone()),
+            payload_type: Osc99PayloadType::Body,
+            done: false,
+            payload: b"hello".to_vec(),
+            ..default_cmd()
+        };
+        assert!(handler.reassemble_osc99(chunk).is_none());
+
+        // The stored metadata must not keep a copy of the payload bytes: they
+        // live only in the body accumulator now.
+        let entry = handler
+            .pending_notifications
+            .get(&id)
+            .expect("entry should be pending");
+        assert_eq!(entry.body, b"hello");
+        assert!(
+            entry.meta.as_ref().is_some_and(|m| m.payload.is_empty()),
+            "meta.payload must be cleared after accumulation"
+        );
     }
 }

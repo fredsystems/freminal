@@ -146,15 +146,16 @@ pub(super) fn handle_osc_notify_777(
 /// is logged at `debug!` level and the function returns without output.
 pub(super) fn handle_osc_notify_99(
     raw_params: &[u8],
-    seq_trace: &SequenceTracer,
+    // Intentionally unused: OSC 99 payloads can carry notification text,
+    // icon data, and other application metadata, so the raw sequence trace
+    // must never be copied into logs (even at `debug`). Diagnostics below
+    // describe the failure without echoing the payload.
+    _seq_trace: &SequenceTracer,
     output: &mut Vec<TerminalOutput>,
 ) {
     // Step 1: find the first `;`, separating "99" from the rest.
     let Some(first_semi) = raw_params.iter().position(|&b| b == b';') else {
-        tracing::debug!(
-            "OSC 99: missing first `;` (malformed sequence): recent='{}'",
-            seq_trace.as_str()
-        );
+        tracing::debug!("OSC 99: missing first `;` (malformed sequence)");
         return;
     };
 
@@ -176,10 +177,7 @@ pub(super) fn handle_osc_notify_99(
             output.push(TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd)));
         }
         Err(e) => {
-            tracing::debug!(
-                "OSC 99: parse error (ignored): {e}: recent='{}'",
-                seq_trace.as_str()
-            );
+            tracing::debug!("OSC 99: parse error (ignored): {e}");
         }
     }
 }
