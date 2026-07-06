@@ -189,4 +189,24 @@ pub(super) struct PerWindowState {
     /// window creation and re-queried on focus-gain (Task 114.4). This is an
     /// ambient snapshot, never a source of key events.
     pub(super) lock_state: freminal_windowing::LockState,
+
+    /// Raw key events for the egui-blocked key set (Task 114.5/114.7:
+    /// keypad operators/directional, media, ISO-level shifts,
+    /// lock/print/pause/menu keys), queued by `App::on_raw_key_event` at
+    /// winit-event time.
+    ///
+    /// Encoding cannot happen inside `on_raw_key_event` itself — that
+    /// callback fires outside the render/`update()` path, where the active
+    /// pane, its snapshot, and the true per-pane `super_pressed` state are
+    /// not in scope (and `super_pressed` is only updated during render, so
+    /// encoding at event time risks a stale-super hazard for chorded keys).
+    /// Instead, events are pushed here and drained once per frame on the
+    /// render path — mirroring the `pending_menu_actions` /
+    /// `pending_close_pane` deferred-queue precedent on this struct — at the
+    /// point where the active pane's fresh `super_pressed` and this
+    /// window's ambient `lock_state` are both available.
+    pub(super) pending_raw_keys: Vec<(
+        freminal_windowing::RawKeyEvent,
+        freminal_windowing::RawKeyMods,
+    )>,
 }

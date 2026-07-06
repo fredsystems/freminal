@@ -1567,6 +1567,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "unicode-width",
+ "winit",
 ]
 
 [[package]]

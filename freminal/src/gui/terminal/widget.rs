@@ -1143,6 +1143,19 @@ impl PaneRenderCache {
         }
     }
 
+    /// Physical Super/Command key hold-state as of the most recently
+    /// rendered frame (Task 114.7).
+    ///
+    /// `super_pressed` is `pub(super)` (visible only within `gui::terminal`)
+    /// because it is render-pipeline-internal state; this narrow accessor
+    /// lets `app_impl.rs`'s raw-key drain (Task 114.7) read the true
+    /// physical Super state for the active pane without widening the
+    /// field's visibility.
+    #[must_use]
+    pub(crate) const fn super_pressed(&self) -> bool {
+        self.super_pressed
+    }
+
     /// Invalidate the cached theme pointer so the next frame forces a full
     /// vertex rebuild with the new palette colors.
     pub const fn invalidate_theme_cache(&mut self) {
