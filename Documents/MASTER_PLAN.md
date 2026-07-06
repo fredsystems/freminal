@@ -432,9 +432,9 @@ relative-placement keys `P/Q/H/V` (added in foundation subtask 110.0), and confi
 compliance splits on the egui boundary: **Task 101** does the encoding-only wins achievable
 without windowing changes (8-bit modifier arithmetic + `super`; F13–F35 and modifier-keys-as-keys
 encodings), while **Task 114** does the egui-blocked remainder (keypad operators/directional,
-media, ISO-level shifts, lock/print/pause/menu keys, true caps_lock/num_lock) via a raw-winit
-intercept or egui upgrade. All target stable kitty specs; v0.11.0 keyboard ships "substantially
-compliant, remainder tracked (Task 114)".
+media, ISO-level shifts, print/pause/menu keys) via a raw-winit intercept; the lock-state half
+was reverted and is tracked separately. All target stable kitty specs; v0.11.0 keyboard ships
+"substantially compliant, remainder tracked (Task 114)".
 
 **Tasks 102–103 (v0.12.0, file transfer & cursors):** Task 102 (OSC 5113) is a stateful
 bidirectional session machine with a mandatory user-consent prompt; it reuses the reverse-write
