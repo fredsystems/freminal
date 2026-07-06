@@ -28,7 +28,7 @@ is deferred — the codebase may move.
 | 99  | Kitty Desktop Notifications (OSC 99)      | Medium-high | Planned  | v0.9.0 (Task 76) |
 | 100 | Kitty Graphics Protocol Completion        | Medium-high | Planned  | Task 13          |
 | 101 | Kitty Keyboard Compliance (encoding-only) | Medium      | Complete | Task 35          |
-| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Stub     | Task 101         |
+| 114 | Kitty Keyboard: egui-blocked keys (winit) | Medium-high | Complete | Task 101         |
 
 > **Scope note (from 2026-07-01 activation audits).** The 101.1 audit found the
 > binding constraint for keyboard compliance is **egui 0.35**, not freminal's
@@ -1908,7 +1908,26 @@ Stop: report + await review.
 
 ---
 
-## Task 114 — Kitty Keyboard: egui-blocked keys (windowing layer) [STUB]
+## Task 114 — Kitty Keyboard: egui-blocked keys (windowing layer)
+
+> **Activated 2026-07-05.** Decomposed against the current code per
+> `freminal-version-activation`. The durable decisions below (lock-query per
+> platform, ambient-vs-transition model, evdev on Linux, new `App`-trait
+> key-delivery seam, scoped `unsafe` for Win/macOS) are settled; the numbered
+> subtasks (114.1–114.10) implement them. Branch: **`task-114/keyboard-egui-blocked`
+> off `v0.11.0-kitty`**, its own PR (Task 114 is explicitly separate from the
+> single v0.11.0 PR per the branch-model note).
+>
+> **Complete 2026-07-05.** All subtasks 114.1–114.10 landed on
+> `task-114/keyboard-egui-blocked`. Lock-state query: `evdev`/EVIOCGLED (Linux,
+> X11+Wayland), `GetKeyState` (Windows), `CGEventSourceFlagsState` (macOS caps
+> only). egui-dropped keys (keypad/media/lock/print/pause/menu) delivered via the
+> new `App::on_raw_key_event` raw-winit intercept and encoded through
+> `TerminalInput::KittyFunctional`. Residual gaps (both unschedulable, not
+> egui-blocked): **ISO_Level3/5_Shift** (no winit `KeyCode` variant) and
+> **hyper/meta** modifier bits (no platform source). macOS num/scroll are `false`
+> (don't exist on Mac keyboards); the macOS Input-Monitoring/TCC permission
+> behaviour is unverified on-device.
 
 ### 114 Summary
 
@@ -2037,6 +2056,499 @@ concrete API + crate for each), the Wayland resolution, where the query is invok
 the press-event tracking that maintains it thereafter. Any new system-level
 dependency triggers `flake-dev-shell-discipline` (add to `flake.nix`, stop, wait for
 `nix develop`). Only after this lands does the rest of Task 114 wire the bits.
+
+### 114 Durable decision: per-platform lock-state query resolved (recorded 2026-07-05)
+
+The mandatory investigation above is **resolved**. Findings and the
+maintainer-approved decisions (these supersede the "investigate" framing; the
+first implementation subtask _consumes_ these, it does not re-derive them):
+
+- **Linux (X11 AND Wayland): `evdev` / `EVIOCGLED` kernel LED read — ONE code path
+  for both display servers.** Rationale (the key finding): Wayland has **no**
+  client-side global lock-state query by protocol design; the absolute
+  `wl_keyboard.modifiers.mods_locked` value IS delivered on every focus-enter, but
+  **winit owns the Wayland `wl_keyboard` and discards the `locked` field** before it
+  reaches freminal — so neither `xkbcommon` (a pure state-machine/keymap library
+  that can only _interpret_ events it is fed) nor any second Wayland client (a
+  non-focused snooping surface never receives `modifiers`) can recover it. Reading
+  the kernel LED state via `evdev` sidesteps the display server entirely and works
+  identically under X11 and Wayland. **Chosen over** X11 `XkbGetState`/`x11rb` XKB
+  (X11-only, would still leave Wayland unsolved) and over `xkbcommon` (cannot
+  cold-start-query Wayland at all). Confirmed in the dev environment: LED nodes
+  readable, user in `input` group, `numlock=1`/`caps=0`/`scroll=0` read correctly.
+  - **Crate: `evdev` 0.13.2** (the pure-Rust `cmr/evdev`, NOT the libevdev-FFI
+    `evdev-rs`). Pure Rust over `libc`/`nix`; **no system library**, so
+    `flake-dev-shell-discipline` does NOT fire — plain Cargo.toml add. Root
+    `workspace.dependencies`: `evdev = "0.13.2"` (alphabetical, full pin);
+    `freminal-windowing/Cargo.toml`:
+    `[target.'cfg(target_os = "linux")'.dependencies]` → `evdev = { workspace = true }`.
+  - **API:** `evdev::enumerate() -> impl Iterator<Item=(PathBuf, Device)>`;
+    filter by `Device::supported_leds()` containing the LED; read
+    `Device::get_led_state() -> io::Result<AttributeSet<LedCode>>`; variants
+    `LedCode::LED_CAPSL` / `LED_NUML` / `LED_SCROLLL` (note the doubled `L` on
+    scroll). Read-only `Device::open` suffices; `get_led_state()` is a single
+    synchronous `EVIOCGLED` ioctl (NOT a blocking event read) — safe to call at
+    startup + focus-gain, not in a per-keystroke hot path.
+  - **Aggregation: OR across all LED-capable devices** (the machine here has 29
+    input nodes; most are non-keyboards). Lock-LED state is kernel-synchronized
+    across physical keyboards, so OR-ing is safe. Do NOT "pick the first device."
+    Re-enumerate on each query rather than caching the device list (hotplug).
+- **Windows: `GetKeyState(VK_CAPITAL/VK_NUMLOCK/VK_SCROLL)`**, low bit = toggle,
+  via the existing `winapi` workspace dep (add the `"winuser"` feature); no new
+  crate. Focus-independent system query.
+- **macOS: Caps Lock only** via `CGEventSourceFlagsState` /
+  `kCGEventFlagMaskAlphaShift` (raw framework FFI). **Num Lock / Scroll Lock are
+  hardcoded `false`** (the concept does not exist on Mac keyboards). The
+  Input-Monitoring TCC-permission question for the polling API is UNRESOLVED from
+  docs and must be verified on a real target macOS build before that platform's
+  subtask is accepted; macOS is the lowest-priority platform and may ship the
+  caps-only path or defer with a documented caveat.
+- **`unsafe` FFI is unavoidable** on Windows/macOS (and `evdev` uses `unsafe`
+  internally but exposes a safe API — Linux needs no `unsafe` in freminal). Per the
+  "no unsafe unless explicitly requested" rule, the Windows/macOS query modules are
+  scoped, `# Safety`-documented `unsafe extern` blocks mirroring the existing
+  `graphics_kitty.rs` / `platform.rs::system_beep` precedent. **Linux (the primary
+  path) needs no freminal-side `unsafe`.**
+
+### 114 Durable decision: lock state is ambient; key events are transition-only (recorded 2026-07-05)
+
+This resolves the "how do we emit kitty events given a cold-start + focus-gain
+query" question and is **binding** — a sub-agent must NOT "helpfully" add a
+synthetic-release resync. The kitty keyboard protocol is a **transition-reporting**
+protocol, not a **state-diffing** one. Two concepts that look similar must be kept
+strictly separate:
+
+1. **Lock-state modifier bits (`caps_lock`=64, `num_lock`=128) reported _alongside_
+   another key's report.** These are an _ambient snapshot_ — "what was the lock
+   state when this key was pressed" — never an event in themselves. They only ever
+   appear decorating a real key report. The OS query (cold start + focus-gain)
+   exists **solely** to keep this snapshot correct.
+2. **Key _events_ for the lock/modifier keys themselves** (`CapsLock`-as-key 57358,
+   `Super`-as-key 57441/57447, etc., with the `:1`/`:2`/`:3` press/repeat/release
+   suffix under flag 8 + flag 2). These are emitted **only** from physical
+   `WindowEvent::KeyboardInput` transitions the terminal actually observed **while
+   focused**.
+
+**Binding rules:**
+
+- **Never synthesize a press/release from a state delta.** A `release` means the
+  terminal physically saw the key go up. Emitting a fabricated
+  `super released` / `caps_lock released` on focus-gain because the queried state
+  differs from tracked state is _inventing a transition that never happened_ — it
+  corrupts flag-8 event consumers (games, modal editors). The protocol has **no
+  resync/"state changed" event**; do not add one.
+- **Never track or report keys while unfocused.** An unfocused terminal's
+  keystrokes belong to whatever surface _is_ focused; reporting them injects
+  phantom input into the PTY. **No background keyboard-polling thread** (it would
+  also violate the lock-free architecture by adding a second keyboard-state writer
+  off the PTY/GUI threads, and still only produce fabricated deltas). The rejected
+  alternatives — "emit events on focus-gain where prior state differs" and "poll
+  keyboard state on a background thread while unfocused" — are **both rejected** for
+  these reasons.
+- **Cold start + focus-gain:** query OS lock state, update the ambient caps/num
+  bits, **emit nothing**. If a lock was toggled while unfocused, the focus-gain
+  requery silently corrects the ambient snapshot — no event.
+- **While focused:** real key transitions update tracking _and_ emit events (under
+  the active flags). Lock-key transitions additionally update the ambient bits.
+- **Focus-loss:** clear the _held-keys tracking set_ (so no stale "held" state
+  leaks into later reports), **emit nothing** (no synthetic releases for the held
+  set). Ambient lock bits are left as-is; they are re-queried on the next
+  focus-gain regardless.
+- **Only the _locks_ are OS-queried; the chorded modifiers are not.** The
+  Shift/Ctrl/Alt/Super _held-for-decoration_ modifiers keep coming from
+  winit/egui's `ModifiersChanged`, which the compositor already re-delivers on
+  focus-enter carrying current pressed-modifier state (correct-on-focus-enter by
+  protocol). Do NOT route the chorded modifiers through the xkb/OS lock query — the
+  query is scoped to `caps_lock`/`num_lock` (and `scroll_lock` for the
+  `ScrollLock`-as-key path) only.
+
+Rationale: the caps/num bits are read-on-use ambient state, so a silent
+focus-gain correction is invisible and correct; the held-for-decoration modifiers
+are compositor-refreshed on focus-enter; and transition events stay honest by only
+ever mirroring real observed key up/down while focused.
+
+### 114 Durable decision: key-delivery seam + unsafe scope (recorded 2026-07-05)
+
+- **Both halves ship this cycle:** (A) the true `caps_lock`/`num_lock` bits, and
+  (B) delivering the egui-dropped keys (keypad operators/directional, media,
+  ISO-level shifts, lock/print/pause/menu-as-keys). egui 0.35's `Key` enum has **no
+  variant** for the half-B keys, so the `inject_paste`/`raw_input_hook` route is
+  impossible — a raw key must be delivered to freminal **outside** egui.
+- **Delivery seam = a new `App`-trait method** (maintainer-approved), NOT a
+  `RefCell` side-channel. Add
+  `fn on_raw_key_event(&mut self, window_id: WindowId, event: &winit::event::KeyEvent, mods: RawKeyMods)`
+  (default empty body) to `trait App` in `freminal-windowing/src/lib.rs`, mirroring
+  the `on_close_requested` / `on_window_created` precedent. It is called from
+  `Handler::window_event`'s `WindowEvent::KeyboardInput` arm **only** for the
+  blocked physical-key set (a narrow intercept — egui-winit stays the primary
+  translator for everything else, matching the existing paste/mouse narrow-intercept
+  precedents in `event_loop.rs`). The `RawKeyMods` payload carries the chorded
+  Shift/Ctrl/Alt/Super state (from `state.egui.modifiers()`, already available) so
+  the GUI can encode; the ambient lock bits are read GUI-side from the lock-state
+  cache (half A), NOT passed here.
+- **Architecture note (`freminal-architecture`):** this changes only how keys are
+  _observed/classified_ in `freminal-windowing`; nothing below the GUI input layer
+  changes. The GUI's `App::on_raw_key_event` impl builds `Vec<TerminalInput>` and
+  routes through the existing `send_terminal_inputs` funnel → `InputEvent::Key`
+  channel → PTY thread. No new GUI↔PTY channel; the lock-free snapshot/`ArcSwap`
+  transport is untouched. Reviewed and signed off at activation.
+- **Scoped `unsafe` approved (maintainer) for Windows/macOS query modules only.**
+  `GetKeyState` (Windows) and `CGEventSourceFlagsState` (macOS) are wrapped in
+  scoped, `# Safety`-documented `unsafe extern` blocks mirroring
+  `freminal/src/gui/platform.rs::system_beep` and
+  `terminal_handler/graphics_kitty.rs`. **The Linux/evdev path (the primary target)
+  uses `evdev`'s safe API and needs NO freminal-side `unsafe`.**
+
+### 114 Subtask decomposition (activated 2026-07-05)
+
+Ordering: the mandatory lock-query investigation is resolved (decisions above), so
+114.1 is the Linux lock-query implementation (no audit subtask needed — the recon
+already produced the seam map). Half A (lock bits, 114.1–114.4) and half B (key
+delivery, 114.5–114.8) are largely independent but both touch
+`freminal/src/gui/terminal/input.rs` (the `egui_mods_to_key_modifiers` /
+`write_input_to_terminal` region) and `freminal-windowing`, so they are **staggered,
+not parallel-on-the-same-file** (one active editor per shared region at a time), per
+`freminal-orchestrator-protocol`. Each subtask stops at its review gate; each leaves
+`cargo test --all` green.
+
+#### 114.1 — Linux lock-state query (evdev) in `freminal-windowing`
+
+Scope: workspace `Cargo.toml` (add `evdev = "0.13.2"` to `workspace.dependencies`,
+alphabetical, full pin); `freminal-windowing/Cargo.toml` (add
+`[target.'cfg(target_os = "linux")'.dependencies]` → `evdev = { workspace = true }`);
+a **new** module `freminal-windowing/src/lock_state.rs`.
+
+What: add a `LockState { caps: bool, num: bool, scroll: bool }` struct and a
+`query_lock_state() -> LockState` free function. Linux impl: `evdev::enumerate()`,
+filter devices whose `supported_leds()` contains `LedCode::LED_CAPSL` (etc.), read
+`get_led_state()` on each, **OR** the results across all LED-capable devices (do NOT
+pick the first; re-enumerate each call for hotplug). Non-Linux impl (this subtask):
+a `#[cfg(not(target_os = "linux"))]` stub returning `LockState::default()` (all
+false) so the crate compiles on every platform — Windows/macOS real queries are
+114.2/114.3. No `unsafe` in this subtask.
+
+Deliverable: the module + a Linux `#[cfg(target_os = "linux")]` test that calls
+`query_lock_state()` and asserts it returns without error (state value is
+environment-dependent, so assert the call succeeds / does not panic; a
+device-capability-filter unit test on a synthetic `AttributeSet` if feasible).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT add Windows/macOS real queries (114.2/114.3); do NOT wire the
+result into `KeyModifiers` yet (114.4); do NOT touch the key-delivery half; do NOT
+proceed to 114.2. NO `unsafe`.
+
+Stop: report files changed + verification; await review.
+
+#### 114.2 — Windows lock-state query (`GetKeyState`)
+
+Scope: `freminal-windowing/src/lock_state.rs` (the `#[cfg(target_os = "windows")]`
+arm), `freminal-windowing/Cargo.toml` (add a
+`[target.'cfg(target_os = "windows")'.dependencies]` block with
+`winapi = { workspace = true, features = ["winuser"] }` — reuse the existing
+workspace `winapi` pin).
+
+What: implement `query_lock_state()` for Windows via
+`GetKeyState(VK_CAPITAL/VK_NUMLOCK/VK_SCROLL)`, `& 0x0001` for the toggle bit, in a
+scoped `# Safety`-documented `unsafe` block. Replaces the 114.1 stub on Windows.
+
+Deliverable: the Windows arm + (if a Windows toolchain/CI is reachable) a
+`#[cfg(target_os = "windows")]` smoke test; otherwise ensure it compiles under a
+windows target check and the POSIX suite stays green.
+
+Verification: `cargo test --all` (Linux); `cargo clippy --all-targets --all-features -- -D warnings`;
+`cargo check --target x86_64-pc-windows-gnu` if the target is installed, else careful
+cfg review.
+
+Prohibitions: do NOT touch the Linux path; do NOT add macOS (114.3); do NOT weaken
+`unsafe` documentation; do NOT proceed.
+
+Stop: report + await review.
+
+#### 114.3 — macOS lock-state query (Caps Lock only)
+
+Scope: `freminal-windowing/src/lock_state.rs` (the `#[cfg(target_os = "macos")]`
+arm), `freminal-windowing/Cargo.toml` if a framework-link is needed.
+
+What: implement Caps Lock via `CGEventSourceFlagsState` /
+`kCGEventFlagMaskAlphaShift` in a scoped `# Safety`-documented `unsafe extern`
+block linking the `CoreGraphics` framework (mirroring `platform.rs::system_beep`'s
+`NSBeep` pattern). `num`/`scroll` hardcoded `false` with a one-line rationale
+comment. **Flag the Input-Monitoring TCC-permission risk in a code comment**; if the
+query triggers a permission prompt on the target macOS version, that is a
+known-caveat to record (do not silently degrade).
+
+Deliverable: the macOS arm; compiles under a macOS target check (real runtime
+verification of the permission behaviour is deferred to a maintainer on-device pass
+and noted as such).
+
+Verification: `cargo test --all` (Linux stays green); clippy; `cargo check --target
+aarch64-apple-darwin` if available, else careful cfg review.
+
+Prohibitions: do NOT attempt num/scroll on macOS; do NOT touch Linux/Windows; do
+NOT proceed.
+
+Stop: report + await review, explicitly surfacing the TCC-permission caveat.
+
+#### 114.4 — Wire lock state into the GUI ambient cache + `KeyModifiers` (half-A integration)
+
+##### 114.4 execution decisions (recorded 2026-07-05, from the wiring recon)
+
+The 114.4 seam recon resolved the two open shape questions and found one scope gap.
+Opus decisions (binding for the implementer):
+
+- **Requery via the GUI-layer `Event::WindowFocused`, NOT a windowing-layer
+  `WindowEvent::Focused` + new `App::on_lock_state` callback.** The recon found
+  `write_input_to_terminal` already handles `Event::WindowFocused(focused)`
+  (`input.rs:1705`), and `freminal` already depends on `freminal-windowing` (so
+  calling the exported `freminal_windowing::query_lock_state()` directly from the
+  GUI is a downward, legal dependency). This is strictly simpler than the plan's
+  original `WindowEvent::Focused` route: **no new `App` trait method, no new
+  windowing-layer focus arm.** The original "add `on_lock_state` / `WindowEvent::Focused`"
+  scope line is **superseded**. (`freminal-windowing/src/event_loop.rs` is therefore
+  NOT touched by 114.4.)
+- **Storage granularity: per-window ambient cache on `PerWindowState`
+  (`freminal/src/gui/window.rs`), NOT per-pane `PaneRenderCache`.** Lock state is a
+  per-window/OS-global fact; storing it once per window (not once per pane) avoids N
+  redundant caches. `write_input_to_terminal` receives it as a parameter (mirroring
+  how `super_pressed` is threaded, but sourced from `PerWindowState`, not the pane
+  cache) — thread the current `LockState` in, and thread any focus-gain-updated
+  value back out so the caller writes it to `PerWindowState`.
+- **Scope gap (moved to 114.7): the "update ambient cache on observed
+  CapsLock/NumLock key-down while focused" half is IMPOSSIBLE in 114.4.** egui's
+  `Key` enum has NO CapsLock/NumLock variant (recon-confirmed against egui 0.35
+  `key.rs`), so no `Event::Key` arm can observe a lock-key transition. That half
+  requires 114.5's raw-winit intercept and is therefore **deferred to 114.7** (which
+  already consumes delivered raw keys). 114.4 delivers ONLY the cold-start +
+  focus-gain requery half.
+- **Cold-start query:** call `query_lock_state()` when `PerWindowState` is first
+  built (in the `FreminalGui` window-creation path, `app_impl.rs` `on_window_created`
+  / wherever `PerWindowState` is constructed) and seed the ambient field.
+- **No held-key set here.** The focus-loss held-key clearing is 114.8; 114.4 adds no
+  stub for it (the held set does not exist until 114.7).
+
+Scope: `freminal/src/gui/window.rs` (`PerWindowState`: add a
+`lock_state: LockState` field, seed from `query_lock_state()` at construction);
+`freminal/src/gui/terminal/input.rs` (`egui_mods_to_key_modifiers` gains a
+`lock_state: LockState` param and populates `caps_lock`/`num_lock`;
+`egui_key_to_terminal_input` threads it; `write_input_to_terminal` gains a
+`lock_state` parameter + returns the possibly-refreshed value; the
+`Event::WindowFocused(true)` arm at `input.rs:1705` calls
+`freminal_windowing::query_lock_state()` and updates the local `lock_state`);
+`freminal/src/gui/terminal/widget.rs` (thread `PerWindowState.lock_state` into the
+`write_input_to_terminal` call + write back the returned value);
+`freminal/src/gui/app_impl.rs` if the window-creation seed needs it.
+
+What: freminal seeds the per-window ambient `LockState` at cold start and re-queries
+it on `Event::WindowFocused(true)`; `egui_mods_to_key_modifiers` reads it to set the
+`caps_lock`/`num_lock` bits on every emitted `KeyModifiers`. **Emit no events on
+requery** (ambient only — binding decision).
+
+Deliverable: caps/num bits reflect true OS state at cold start and after focus-gain;
+a unit test that `egui_mods_to_key_modifiers` maps a `LockState { caps, num }` into
+the right `KeyModifiers` bits (both set and unset); existing modifier tests stay
+green (they pass `LockState::default()`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT synthesize any key event from a lock-state change (binding
+decision); do NOT add a new `App` trait method or touch `event_loop.rs` (superseded);
+do NOT attempt the observed-key-down cache update (deferred to 114.7); do NOT start
+half B (114.5); do NOT proceed.
+
+Stop: report + await review.
+
+#### 114.5 — Key-delivery seam: `App::on_raw_key_event` + narrow winit intercept
+
+Scope: `freminal-windowing/src/lib.rs` (add `on_raw_key_event` to `trait App` with a
+default empty body; add a `RawKeyMods` type carrying shift/ctrl/alt/super),
+`freminal-windowing/src/event_loop.rs` (`Handler::window_event` `KeyboardInput` arm:
+match the blocked `PhysicalKey::Code(KeyCode::…)` set — keypad operators/directional,
+media, ISO-level, lock/print/pause/menu — and call `app.on_raw_key_event(...)`
+BEFORE handing to egui, `return`-ing early like the paste precedent; everything else
+falls through to egui unchanged).
+
+What: land the delivery seam only. The blocked-key set is an explicit `matches!` on
+the exact `KeyCode` variants. The GUI impl of `on_raw_key_event` is an inert
+placeholder in this subtask (log at `trace!`) — encoding is 114.6/114.7. This keeps
+the architecture change (new trait method + narrow intercept) isolated and
+reviewable.
+
+Deliverable: the trait method + `RawKeyMods` + the narrow intercept + an inert GUI
+impl; a windowing-level unit/doc test that the intercept classifies a blocked
+`KeyCode` (and does NOT intercept a normal letter key). Existing input tests green.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT encode kitty bytes yet (114.6/114.7); do NOT let the intercept
+swallow keys egui still needs (only the blocked set); do NOT proceed.
+
+Stop: report + await review (this is the `freminal-architecture` sign-off gate for
+the input-path change).
+
+#### 114.6 — Functional-key codepoint tables (keypad/media/ISO/lock/print/pause/menu)
+
+Scope: `freminal-terminal-emulator/src/input.rs` (add the missing `const … _CODEPOINT`
+values and a generic `TerminalInput::KittyFunctional(u32, KeyModifiers)` variant OR
+per-group variants — Opus decides: a single generic
+`TerminalInput::KittyFunctional { codepoint: u32, mods: KeyModifiers }` variant,
+encoded via the existing `build_csi_u` in `to_payload_kkp`, mirroring the F13–F35
+arm at `input.rs:1018`).
+
+What: type the codepoint tables the recon found MISSING — keypad operators/directional
+(57399–57427), media (57428–57440), ISO_Level3/5_Shift (57453/57454),
+CapsLock/ScrollLock/NumLock/PrintScreen/Pause/Menu-as-keys (57358–57363) — as
+`const` codepoints, and route them through `build_csi_u` (which already exists; no
+encoding-mechanism change). Pure encoding-layer addition; no delivery wiring yet.
+
+Deliverable: the variant + codepoints + exhaustive `to_payload_kkp` unit tests
+(one representative key per group, asserting the exact `CSI <cp>;<mods> u` bytes,
+under flags 1/2/8 as appropriate).
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT wire the GUI delivery (114.7); do NOT change `build_csi_u`; do
+NOT proceed.
+
+Stop: report + await review.
+
+#### 114.7 — GUI: encode delivered raw keys → `TerminalInput` (half-B integration)
+
+Scope: `freminal/src/gui/**` — the real impl of `App::on_raw_key_event` (replace the
+114.5 placeholder): map the intercepted `winit` `KeyCode` + `RawKeyMods` + the
+ambient lock cache (114.4) + KKP flag state to the `TerminalInput::KittyFunctional`
+codepoints (114.6), build the `KeyEventMeta` (press/repeat/release from the winit
+`KeyEvent`), and route through the existing `send_terminal_inputs` funnel in
+`freminal/src/gui/terminal/input.rs`. Honour the ambient/transition decision:
+these keys emit events only while focused (the intercept only fires for the focused
+window by winit contract); lock-as-keys ALSO update the ambient cache on key-down.
+
+What: turn delivered raw keys into encoded kitty bytes on the existing input path.
+Respect the KKP flags (only emit functional-key escapes when the relevant flag is
+set; fall back to legacy behaviour otherwise, matching how egui-delivered keys
+behave today).
+
+**114.7 execution decisions (recorded 2026-07-05 from the 114.5 review + 114.7 recon):**
+
+- **BINDING ARCHITECTURE DECISION — queue at event time, encode at render time.**
+  The 114.7 recon found two problems with encoding directly inside
+  `on_raw_key_event`: (1) the callback fires at winit-event time, OUTSIDE the
+  render/`update()` path, but the entire input funnel (`write_input_to_terminal`,
+  `super_pressed` tracking, `InputModes::from_snapshot`, the active pane's
+  `input_tx`) lives INSIDE render; (2) `super_pressed` is per-pane and updated only
+  during render, so a Super+blocked-key chord in one event batch would read stale
+  super state (a real ordering hazard). **Resolution:** `on_raw_key_event` does NOT
+  encode. It pushes the `RawKeyEvent` (+ the `RawKeyMods`) onto a new
+  `pending_raw_keys: Vec<(RawKeyEvent, RawKeyMods)>` field on `PerWindowState`
+  (mirroring the existing `pending_menu_actions`/`pending_close_pane` deferred-queue
+  precedent on `PerWindowState`, all drained during `update()`). The queue is
+  DRAINED during the render path at a point where the active pane, its snapshot
+  (`InputModes`), the true per-pane `super_pressed`, and the per-window ambient
+  `LockState` are all in scope and correctly ordered — encode there via the existing
+  `send_terminal_inputs` funnel. This keeps ALL keyboard encoding on the render path
+  (one source of truth for modifier state), eliminates the stale-super hazard, and
+  respects the lock-free architecture (no new channel; the queue is GUI-thread-only
+  interior state). Decide the exact drain site during implementation (candidates:
+  inside `FreminalTerminalWidget::show` for the active pane, or in `update()` just
+  before/after the active pane's `show` call — wherever `super_pressed` for the
+  active pane is freshly available).
+- **`RawKeyMods.super_key` from 114.5 is `egui::Modifiers.command` (== `ctrl` on
+  Linux/Windows)** — so it over-reports super. Because encoding now happens at
+  render time, use the active pane's real `super_pressed` (Task 101.2 tracking) for
+  the `KeyModifiers.super_key` bit, NOT `RawKeyMods.super_key`. The queued
+  `RawKeyMods` may still supply shift/ctrl/alt (those ARE reliable from egui), but
+  super must come from `super_pressed`. Do NOT ship the `command`-as-super
+  approximation into the encoding.
+- **Visibility:** `InputModes`, `send_terminal_inputs`/`encode_terminal_inputs`, and
+  `PaneRenderCache::super_pressed` are `pub(super)` to `gui::terminal`; the drain
+  logic must live where it can reach them. If the drain lives in `gui::terminal`
+  (e.g. in `widget.rs`/`input.rs`), no visibility widening is needed. If it must be
+  reached from `app_impl.rs`, add narrow `pub(crate)` accessors — widen ONLY what is
+  needed, never blanket-`pub(crate)`.
+- **Codepoint mapping:** map each blocked `winit::keyboard::KeyCode` to the matching
+  `freminal_terminal_emulator::input::KKP_*_CODEPOINT` (now `pub`) and build a
+  `TerminalInput::KittyFunctional { codepoint, mods }`. `Numpad0..9` map to
+  `KKP_KP_0..9`; numpad operators to the KP operator codepoints; media to the media
+  codepoints; lock/system keys to 57358–57363.
+- **ISO_Level3/5_Shift have no winit `KeyCode`** (114.5 finding) and are therefore
+  not deliverable — they stay a documented permanent gap (114.9), same tier as
+  hyper/meta.
+- **Observed lock-key cache update (deferred here from 114.4):** when a
+  `CapsLock`/`NumLock` press is delivered via `on_raw_key_event` while focused,
+  toggle the per-window ambient `LockState` cache (114.4) so decoration stays
+  correct between requeries. This is the "transition updates ambient" half of the
+  binding decision; still emit the key's own event too (it is a real observed
+  transition under flag 8).
+
+Deliverable: end-to-end encoding for the blocked keys + tests (feed a synthetic
+`on_raw_key_event` for a keypad/media/lock key under flag 8 and assert the bytes on
+the input channel); existing keyboard tests green.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT synthesize releases from focus/lock deltas; do NOT add a new
+channel; do NOT proceed.
+
+Stop: report + await review.
+
+#### 114.8 — Focus-loss held-key reset (transition-model correctness)
+
+Scope: `freminal/src/gui/terminal/input.rs` (+ `widget.rs` if the held-set lives
+there), `freminal-windowing/src/event_loop.rs` `WindowEvent::Focused(false)` if a
+hook is needed.
+
+What: on focus-loss, clear the held-keys tracking set (so no stale "held" state
+leaks into later reports) and **emit nothing** — no synthetic releases. This
+finalizes the transition-only decision. (If 114.4/114.7 already added the clear, this
+subtask verifies + tests it and is a no-op-or-test-only pass.)
+
+Deliverable: held-set reset on focus-loss + a test asserting no bytes are emitted on
+focus-loss and that post-focus-gain the first real key rebuilds tracking cleanly.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT emit synthetic releases; do NOT proceed.
+
+Stop: report + await review.
+
+#### 114.9 — Escape-sequence dual-doc + reference update
+
+Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`,
+`Documents/KITTY_PROTOCOL_REFERENCE.md`.
+
+What: flip the Task-114-tracked gaps (keypad/media/ISO/lock/print/pause/menu keys,
+`caps_lock`/`num_lock` bits) from tracked-gap to implemented; update the kitty
+keyboard rows in COVERAGE; refresh both "Last updated" headers; update the reference
+doc's keyboard current-state deltas. Note the remaining honest caveats
+(`hyper`/`meta` bits stay `0` — no platform source; macOS num/scroll `false`; macOS
+TCC caveat) rather than over-claiming.
+
+Deliverable: dual-doc + reference update.
+
+Verification: `markdownlint-cli2` clean; prettier clean.
+
+Prohibitions: do NOT over-advertise (hyper/meta, macOS num/scroll); none beyond
+scope.
+
+Stop: report + await review.
+
+#### 114.10 — MASTER_PLAN + plan status update
+
+Scope: `Documents/MASTER_PLAN.md` (Task 114 status row + completion tracking table),
+`Documents/PLAN_VERSION_110.md` (Task Summary table status; this decomposition's
+completion notes).
+
+What: mark Task 114 complete with the branch name and subtask commit range; note the
+carried caveats (hyper/meta, macOS).
+
+Deliverable: status updates.
+
+Verification: `markdownlint-cli2` clean.
+
+Prohibitions: none beyond scope.
+
+Stop: report + await review; then the Task 114 PR (`task-114/keyboard-egui-blocked`
+→ `main`, separate from the v0.11.0 PR).
 
 ---
 

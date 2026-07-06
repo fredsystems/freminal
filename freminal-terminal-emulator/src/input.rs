@@ -153,6 +153,88 @@ const KKP_RIGHT_CONTROL_CODEPOINT: u32 = 57448;
 const KKP_RIGHT_ALT_CODEPOINT: u32 = 57449;
 const KKP_RIGHT_SUPER_CODEPOINT: u32 = 57450;
 
+/// KKP lock / system-key codepoints (`CSI <codepoint> u`, flag 8 only —
+/// these are keys egui never delivers today; see Task 114). No legacy
+/// encoding exists for any of these.
+///
+/// These are `pub` so the GUI crate's raw-key delivery wiring (Task 114.7,
+/// `TerminalInput::KittyFunctional`) can name them as
+/// `freminal_terminal_emulator::input::KKP_*_CODEPOINT` rather than using
+/// magic numbers.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_CAPS_LOCK_CODEPOINT: u32 = 57358;
+pub const KKP_SCROLL_LOCK_CODEPOINT: u32 = 57359;
+pub const KKP_NUM_LOCK_CODEPOINT: u32 = 57360;
+pub const KKP_PRINT_SCREEN_CODEPOINT: u32 = 57361;
+pub const KKP_PAUSE_CODEPOINT: u32 = 57362;
+pub const KKP_MENU_CODEPOINT: u32 = 57363;
+
+/// KKP keypad codepoints (`CSI <codepoint> u`).
+///
+/// Covers the keypad keys that have no legacy encoding: digits, operators,
+/// Enter/Equal/Separator, and the keypad navigation cluster
+/// (`KP_Left`..`KP_Begin`). `KP_Begin` here is the KKP-only numeric form
+/// (`57427 u`); the alternate legacy `1 E` form is out of scope for this
+/// variant.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_KP_0_CODEPOINT: u32 = 57399;
+pub const KKP_KP_1_CODEPOINT: u32 = 57400;
+pub const KKP_KP_2_CODEPOINT: u32 = 57401;
+pub const KKP_KP_3_CODEPOINT: u32 = 57402;
+pub const KKP_KP_4_CODEPOINT: u32 = 57403;
+pub const KKP_KP_5_CODEPOINT: u32 = 57404;
+pub const KKP_KP_6_CODEPOINT: u32 = 57405;
+pub const KKP_KP_7_CODEPOINT: u32 = 57406;
+pub const KKP_KP_8_CODEPOINT: u32 = 57407;
+pub const KKP_KP_9_CODEPOINT: u32 = 57408;
+pub const KKP_KP_DECIMAL_CODEPOINT: u32 = 57409;
+pub const KKP_KP_DIVIDE_CODEPOINT: u32 = 57410;
+pub const KKP_KP_MULTIPLY_CODEPOINT: u32 = 57411;
+pub const KKP_KP_SUBTRACT_CODEPOINT: u32 = 57412;
+pub const KKP_KP_ADD_CODEPOINT: u32 = 57413;
+pub const KKP_KP_ENTER_CODEPOINT: u32 = 57414;
+pub const KKP_KP_EQUAL_CODEPOINT: u32 = 57415;
+pub const KKP_KP_SEPARATOR_CODEPOINT: u32 = 57416;
+pub const KKP_KP_LEFT_CODEPOINT: u32 = 57417;
+pub const KKP_KP_RIGHT_CODEPOINT: u32 = 57418;
+pub const KKP_KP_UP_CODEPOINT: u32 = 57419;
+pub const KKP_KP_DOWN_CODEPOINT: u32 = 57420;
+pub const KKP_KP_PAGE_UP_CODEPOINT: u32 = 57421;
+pub const KKP_KP_PAGE_DOWN_CODEPOINT: u32 = 57422;
+pub const KKP_KP_HOME_CODEPOINT: u32 = 57423;
+pub const KKP_KP_END_CODEPOINT: u32 = 57424;
+pub const KKP_KP_INSERT_CODEPOINT: u32 = 57425;
+pub const KKP_KP_DELETE_CODEPOINT: u32 = 57426;
+pub const KKP_KP_BEGIN_CODEPOINT: u32 = 57427;
+
+/// KKP media-key codepoints (`CSI <codepoint> u`). Names and values match the
+/// upstream kitty functional-key table (`MEDIA_PLAY`..`MUTE_VOLUME`,
+/// `57428`-`57440`) verbatim.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_MEDIA_PLAY_CODEPOINT: u32 = 57428;
+pub const KKP_MEDIA_PAUSE_CODEPOINT: u32 = 57429;
+pub const KKP_MEDIA_PLAY_PAUSE_CODEPOINT: u32 = 57430;
+pub const KKP_MEDIA_REVERSE_CODEPOINT: u32 = 57431;
+pub const KKP_MEDIA_STOP_CODEPOINT: u32 = 57432;
+pub const KKP_MEDIA_FAST_FORWARD_CODEPOINT: u32 = 57433;
+pub const KKP_MEDIA_REWIND_CODEPOINT: u32 = 57434;
+pub const KKP_MEDIA_TRACK_NEXT_CODEPOINT: u32 = 57435;
+pub const KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT: u32 = 57436;
+pub const KKP_MEDIA_RECORD_CODEPOINT: u32 = 57437;
+pub const KKP_LOWER_VOLUME_CODEPOINT: u32 = 57438;
+pub const KKP_RAISE_VOLUME_CODEPOINT: u32 = 57439;
+pub const KKP_MUTE_VOLUME_CODEPOINT: u32 = 57440;
+
+/// KKP ISO-level-shift codepoints (`CSI <codepoint> u`) for keyboards with
+/// AltGr-style ISO level-3/level-5 shift keys.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_ISO_LEVEL3_SHIFT_CODEPOINT: u32 = 57453;
+pub const KKP_ISO_LEVEL5_SHIFT_CODEPOINT: u32 = 57454;
+
 /// US QWERTY shifted-key mapping for KKP flag 4.
 ///
 /// Given a lowercase ASCII byte, returns the Unicode codepoint of the shifted
@@ -372,6 +454,16 @@ pub enum TerminalInput {
     AltRight(KeyModifiers),
     SuperLeft(KeyModifiers),
     SuperRight(KeyModifiers),
+    /// A kitty-keyboard functional key identified directly by its KKP
+    /// codepoint (flag-gated `CSI <codepoint> u` form). Used for keys egui
+    /// does not deliver (keypad operators/directional, media, ISO-level
+    /// shifts, lock/print/pause/menu keys) — see Task 114. The GUI computes
+    /// the codepoint from the raw winit key (114.7); this variant just carries
+    /// it to the encoder. No legacy (non-KKP) encoding exists for these.
+    KittyFunctional {
+        codepoint: u32,
+        mods: KeyModifiers,
+    },
 }
 
 impl TerminalInput {
@@ -599,6 +691,10 @@ impl TerminalInput {
             }
             // KKP "modifier keys as keys" (flag 8) have no legacy encoding —
             // a bare press of a modifier key produces no bytes outside KKP.
+            // KKP-only functional keys (keypad operators/directional, media,
+            // ISO-level shifts, lock/print/pause/menu — `KittyFunctional`)
+            // likewise have no legacy encoding — no bytes are produced
+            // outside the KKP path.
             Self::ShiftLeft(_)
             | Self::ShiftRight(_)
             | Self::ControlLeft(_)
@@ -606,7 +702,8 @@ impl TerminalInput {
             | Self::AltLeft(_)
             | Self::AltRight(_)
             | Self::SuperLeft(_)
-            | Self::SuperRight(_) => TerminalInputPayload::Many(b""),
+            | Self::SuperRight(_)
+            | Self::KittyFunctional { .. } => TerminalInputPayload::Many(b""),
         }
     }
 
@@ -1106,6 +1203,16 @@ impl TerminalInput {
                 } else {
                     TerminalInputPayload::Many(b"")
                 }
+            }
+            // ── KKP-only functional keys (Task 114) ──────────────────────
+            //
+            // Keypad operators/directional, media, ISO-level shifts, and
+            // lock/print/pause/menu keys have no legacy or functional-event
+            // encoding — always plain `CSI <codepoint> u` (event type, if
+            // any, is embedded by `build_csi_u` itself via `flags`/`meta`),
+            // mirroring the F13–F35 arm above.
+            Self::KittyFunctional { codepoint, mods } => {
+                Self::build_csi_u(*codepoint, mods.modifier_param(), flags, meta)
             }
         }
     }
@@ -3042,6 +3149,257 @@ mod tests {
             to_payload_defaults(&TerminalInput::SuperRight(KeyModifiers::NONE)),
             TerminalInputPayload::Many(b"")
         );
+    }
+
+    // ── 114.6: KittyFunctional (keypad/media/ISO/lock/print/pause/menu) ─────
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_release_event() {
+        // Flags 2|8 (REPORT_EVENT_TYPES + REPORT_ALL), release event, no
+        // modifiers: modifier field defaults to the literal 1 so the
+        // `:3` event-type sub-field is unambiguous.
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_non_kkp_path_produces_empty_payload() {
+        // Outside the KKP path (flags 0), these keys have no legacy
+        // encoding: no bytes are produced.
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+    }
+
+    /// Documents (and exercises) the full Task 114.6 codepoint table against
+    /// the upstream kitty functional-key spec values
+    /// (`docs/keyboard-protocol.rst`, `.. functional key table`).
+    #[test]
+    fn kkp_functional_codepoint_table_matches_spec() {
+        // Lock / system keys: 57358-57363
+        assert_eq!(KKP_CAPS_LOCK_CODEPOINT, 57358);
+        assert_eq!(KKP_SCROLL_LOCK_CODEPOINT, 57359);
+        assert_eq!(KKP_NUM_LOCK_CODEPOINT, 57360);
+        assert_eq!(KKP_PRINT_SCREEN_CODEPOINT, 57361);
+        assert_eq!(KKP_PAUSE_CODEPOINT, 57362);
+        assert_eq!(KKP_MENU_CODEPOINT, 57363);
+
+        // Keypad: 57399-57427
+        assert_eq!(KKP_KP_0_CODEPOINT, 57399);
+        assert_eq!(KKP_KP_1_CODEPOINT, 57400);
+        assert_eq!(KKP_KP_2_CODEPOINT, 57401);
+        assert_eq!(KKP_KP_3_CODEPOINT, 57402);
+        assert_eq!(KKP_KP_4_CODEPOINT, 57403);
+        assert_eq!(KKP_KP_5_CODEPOINT, 57404);
+        assert_eq!(KKP_KP_6_CODEPOINT, 57405);
+        assert_eq!(KKP_KP_7_CODEPOINT, 57406);
+        assert_eq!(KKP_KP_8_CODEPOINT, 57407);
+        assert_eq!(KKP_KP_9_CODEPOINT, 57408);
+        assert_eq!(KKP_KP_DECIMAL_CODEPOINT, 57409);
+        assert_eq!(KKP_KP_DIVIDE_CODEPOINT, 57410);
+        assert_eq!(KKP_KP_MULTIPLY_CODEPOINT, 57411);
+        assert_eq!(KKP_KP_SUBTRACT_CODEPOINT, 57412);
+        assert_eq!(KKP_KP_ADD_CODEPOINT, 57413);
+        assert_eq!(KKP_KP_ENTER_CODEPOINT, 57414);
+        assert_eq!(KKP_KP_EQUAL_CODEPOINT, 57415);
+        assert_eq!(KKP_KP_SEPARATOR_CODEPOINT, 57416);
+        assert_eq!(KKP_KP_LEFT_CODEPOINT, 57417);
+        assert_eq!(KKP_KP_RIGHT_CODEPOINT, 57418);
+        assert_eq!(KKP_KP_UP_CODEPOINT, 57419);
+        assert_eq!(KKP_KP_DOWN_CODEPOINT, 57420);
+        assert_eq!(KKP_KP_PAGE_UP_CODEPOINT, 57421);
+        assert_eq!(KKP_KP_PAGE_DOWN_CODEPOINT, 57422);
+        assert_eq!(KKP_KP_HOME_CODEPOINT, 57423);
+        assert_eq!(KKP_KP_END_CODEPOINT, 57424);
+        assert_eq!(KKP_KP_INSERT_CODEPOINT, 57425);
+        assert_eq!(KKP_KP_DELETE_CODEPOINT, 57426);
+        assert_eq!(KKP_KP_BEGIN_CODEPOINT, 57427);
+
+        // Media keys: 57428-57440
+        assert_eq!(KKP_MEDIA_PLAY_CODEPOINT, 57428);
+        assert_eq!(KKP_MEDIA_PAUSE_CODEPOINT, 57429);
+        assert_eq!(KKP_MEDIA_PLAY_PAUSE_CODEPOINT, 57430);
+        assert_eq!(KKP_MEDIA_REVERSE_CODEPOINT, 57431);
+        assert_eq!(KKP_MEDIA_STOP_CODEPOINT, 57432);
+        assert_eq!(KKP_MEDIA_FAST_FORWARD_CODEPOINT, 57433);
+        assert_eq!(KKP_MEDIA_REWIND_CODEPOINT, 57434);
+        assert_eq!(KKP_MEDIA_TRACK_NEXT_CODEPOINT, 57435);
+        assert_eq!(KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT, 57436);
+        assert_eq!(KKP_MEDIA_RECORD_CODEPOINT, 57437);
+        assert_eq!(KKP_LOWER_VOLUME_CODEPOINT, 57438);
+        assert_eq!(KKP_RAISE_VOLUME_CODEPOINT, 57439);
+        assert_eq!(KKP_MUTE_VOLUME_CODEPOINT, 57440);
+
+        // ISO level shifts: 57453-57454
+        assert_eq!(KKP_ISO_LEVEL3_SHIFT_CODEPOINT, 57453);
+        assert_eq!(KKP_ISO_LEVEL5_SHIFT_CODEPOINT, 57454);
     }
 
     // ── 70.A.1 regression: non-ASCII character encoding ─────────────────────

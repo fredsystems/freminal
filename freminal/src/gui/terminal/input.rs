@@ -25,7 +25,17 @@ use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, Key
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
     input::{
-        KeyEventMeta, KeyEventType, KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
+        KKP_CAPS_LOCK_CODEPOINT, KKP_KP_0_CODEPOINT, KKP_KP_1_CODEPOINT, KKP_KP_2_CODEPOINT,
+        KKP_KP_3_CODEPOINT, KKP_KP_4_CODEPOINT, KKP_KP_5_CODEPOINT, KKP_KP_6_CODEPOINT,
+        KKP_KP_7_CODEPOINT, KKP_KP_8_CODEPOINT, KKP_KP_9_CODEPOINT, KKP_KP_ADD_CODEPOINT,
+        KKP_KP_DECIMAL_CODEPOINT, KKP_KP_DIVIDE_CODEPOINT, KKP_KP_ENTER_CODEPOINT,
+        KKP_KP_EQUAL_CODEPOINT, KKP_KP_MULTIPLY_CODEPOINT, KKP_KP_SEPARATOR_CODEPOINT,
+        KKP_KP_SUBTRACT_CODEPOINT, KKP_LOWER_VOLUME_CODEPOINT, KKP_MEDIA_PLAY_PAUSE_CODEPOINT,
+        KKP_MEDIA_STOP_CODEPOINT, KKP_MEDIA_TRACK_NEXT_CODEPOINT,
+        KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT, KKP_MENU_CODEPOINT, KKP_MUTE_VOLUME_CODEPOINT,
+        KKP_NUM_LOCK_CODEPOINT, KKP_PAUSE_CODEPOINT, KKP_PRINT_SCREEN_CODEPOINT,
+        KKP_RAISE_VOLUME_CODEPOINT, KKP_SCROLL_LOCK_CODEPOINT, KeyEventMeta, KeyEventType,
+        KeyModifiers, TerminalInput, TerminalInputPayload, collect_text,
     },
     io::InputEvent,
     recording::{EventPayload, RecordingContext},
@@ -165,18 +175,234 @@ pub(super) fn resend_scroll_window(
 /// here: on Linux/Windows `m.command == m.ctrl` (so dropping the OR is a
 /// no-op), and on macOS `m.command == m.mac_cmd`, which must map to
 /// `super_key`, not `ctrl`.
-pub(super) const fn egui_mods_to_key_modifiers(m: Modifiers, super_held: bool) -> KeyModifiers {
+///
+/// `lock` is the per-window ambient OS lock-key snapshot (Task 114.4),
+/// seeded at window creation and re-queried on focus-gain — see
+/// [`PerWindowState::lock_state`](crate::gui::window::PerWindowState). It
+/// supplies the `caps_lock`/`num_lock` bits. `hyper` and `meta` remain
+/// `false`: egui has no producer for them at all, so they stay an
+/// unsourced permanent gap (tracked under Task 114).
+pub(super) const fn egui_mods_to_key_modifiers(
+    m: Modifiers,
+    super_held: bool,
+    lock: freminal_windowing::LockState,
+) -> KeyModifiers {
     KeyModifiers {
         shift: m.shift,
         ctrl: m.ctrl,
         alt: m.alt,
         super_key: super_held || m.mac_cmd,
-        // hyper, meta, caps_lock, num_lock: egui has no producer for these —
-        // deferred to Task 114 (egui-blocked keyboard remainder).
+        // hyper, meta: egui has no producer for these at all — remain a
+        // permanent gap (Task 114).
         hyper: false,
         meta: false,
-        caps_lock: false,
-        num_lock: false,
+        caps_lock: lock.caps,
+        num_lock: lock.num,
+    }
+}
+
+/// Map a blocked physical `winit` [`KeyCode`](winit::keyboard::KeyCode) (Task
+/// 114.5/114.7's intercepted set) to its Kitty Keyboard Protocol codepoint.
+///
+/// Returns `None` for any key outside the blocked set (defensive — the
+/// `on_raw_key_event` intercept in `freminal-windowing` already filters to
+/// exactly this set, but this function stays total rather than assuming
+/// that invariant holds forever).
+///
+/// `NumpadStar` maps to the same `KKP_KP_MULTIPLY_CODEPOINT` as
+/// `NumpadMultiply` — the kitty spec has one "keypad multiply" codepoint and
+/// winit's `NumpadStar`/`NumpadMultiply` distinction (layout-dependent
+/// physical labeling) collapses to it.
+///
+/// `ISO_Level3_Shift`/`ISO_Level5_Shift` have no `winit::keyboard::KeyCode`
+/// variant at all (114.5 finding) and are therefore not representable here —
+/// they remain a documented permanent gap (Task 114.9), same tier as
+/// hyper/meta.
+#[must_use]
+pub const fn kitty_keycode_to_codepoint(key: winit::keyboard::KeyCode) -> Option<u32> {
+    use winit::keyboard::KeyCode;
+    match key {
+        // Lock / system keys.
+        KeyCode::CapsLock => Some(KKP_CAPS_LOCK_CODEPOINT),
+        KeyCode::ScrollLock => Some(KKP_SCROLL_LOCK_CODEPOINT),
+        KeyCode::NumLock => Some(KKP_NUM_LOCK_CODEPOINT),
+        KeyCode::PrintScreen => Some(KKP_PRINT_SCREEN_CODEPOINT),
+        KeyCode::Pause => Some(KKP_PAUSE_CODEPOINT),
+        KeyCode::ContextMenu => Some(KKP_MENU_CODEPOINT),
+        // Keypad operators.
+        KeyCode::NumpadDivide => Some(KKP_KP_DIVIDE_CODEPOINT),
+        KeyCode::NumpadMultiply | KeyCode::NumpadStar => Some(KKP_KP_MULTIPLY_CODEPOINT),
+        KeyCode::NumpadSubtract => Some(KKP_KP_SUBTRACT_CODEPOINT),
+        KeyCode::NumpadAdd => Some(KKP_KP_ADD_CODEPOINT),
+        KeyCode::NumpadEnter => Some(KKP_KP_ENTER_CODEPOINT),
+        KeyCode::NumpadEqual => Some(KKP_KP_EQUAL_CODEPOINT),
+        KeyCode::NumpadComma => Some(KKP_KP_SEPARATOR_CODEPOINT),
+        KeyCode::NumpadDecimal => Some(KKP_KP_DECIMAL_CODEPOINT),
+        // Keypad digits.
+        KeyCode::Numpad0 => Some(KKP_KP_0_CODEPOINT),
+        KeyCode::Numpad1 => Some(KKP_KP_1_CODEPOINT),
+        KeyCode::Numpad2 => Some(KKP_KP_2_CODEPOINT),
+        KeyCode::Numpad3 => Some(KKP_KP_3_CODEPOINT),
+        KeyCode::Numpad4 => Some(KKP_KP_4_CODEPOINT),
+        KeyCode::Numpad5 => Some(KKP_KP_5_CODEPOINT),
+        KeyCode::Numpad6 => Some(KKP_KP_6_CODEPOINT),
+        KeyCode::Numpad7 => Some(KKP_KP_7_CODEPOINT),
+        KeyCode::Numpad8 => Some(KKP_KP_8_CODEPOINT),
+        KeyCode::Numpad9 => Some(KKP_KP_9_CODEPOINT),
+        // Media keys.
+        KeyCode::MediaPlayPause => Some(KKP_MEDIA_PLAY_PAUSE_CODEPOINT),
+        KeyCode::MediaStop => Some(KKP_MEDIA_STOP_CODEPOINT),
+        KeyCode::MediaTrackNext => Some(KKP_MEDIA_TRACK_NEXT_CODEPOINT),
+        KeyCode::MediaTrackPrevious => Some(KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT),
+        KeyCode::AudioVolumeUp => Some(KKP_RAISE_VOLUME_CODEPOINT),
+        KeyCode::AudioVolumeDown => Some(KKP_LOWER_VOLUME_CODEPOINT),
+        KeyCode::AudioVolumeMute => Some(KKP_MUTE_VOLUME_CODEPOINT),
+        _ => None,
+    }
+}
+
+/// Convert a queued [`RawKeyMods`](freminal_windowing::RawKeyMods) into
+/// [`KeyModifiers`] for encoding a raw (egui-blocked) key event (Task 114.7).
+///
+/// Mirrors [`egui_mods_to_key_modifiers`], but for the raw-key path: `shift`,
+/// `ctrl`, and `alt` come from the queued `RawKeyMods` (reliable — sourced
+/// from `state.egui.modifiers()` at intercept time). `super_key` deliberately
+/// does NOT come from `RawKeyMods.super_key` — that field is
+/// `egui::Modifiers::command`, which equals `ctrl` on Linux/Windows and so
+/// over-reports super (114.7 binding decision). Instead it comes from the
+/// caller-supplied `super_pressed`, the active pane's real physical
+/// Super/Command hold-state (Task 101.2 tracking), read fresh on the render
+/// path where this is called. `hyper`/`meta` remain `false` (permanent gap,
+/// same as `egui_mods_to_key_modifiers`); `caps_lock`/`num_lock` come from
+/// the per-window ambient `lock` snapshot.
+#[must_use]
+pub const fn raw_mods_to_key_modifiers(
+    mods: freminal_windowing::RawKeyMods,
+    super_pressed: bool,
+    lock: freminal_windowing::LockState,
+) -> KeyModifiers {
+    KeyModifiers {
+        shift: mods.shift,
+        ctrl: mods.ctrl,
+        alt: mods.alt,
+        super_key: super_pressed,
+        hyper: false,
+        meta: false,
+        caps_lock: lock.caps,
+        num_lock: lock.num,
+    }
+}
+
+/// Drain queued raw key events (Task 114.7) for the active pane, encoding
+/// each into a [`TerminalInput::KittyFunctional`] and sending it through the
+/// existing [`send_terminal_inputs`] funnel.
+///
+/// ## Why this runs on the render path, not inside `on_raw_key_event`
+///
+/// `App::on_raw_key_event` fires at winit-event time, before the active
+/// pane's `super_pressed` state has been refreshed for the current frame
+/// (that only happens inside [`super::widget::FreminalTerminalWidget::show`]).
+/// Encoding immediately would risk reading a stale `super_pressed` for a
+/// Super+blocked-key chord. Instead, the raw events are queued on
+/// `PerWindowState::pending_raw_keys` and this function is called once per
+/// frame, after the active pane's `show()` has returned — so `super_pressed`
+/// and `snap` both reflect the current frame.
+///
+/// ## Ambient lock-state update
+///
+/// A fresh (non-repeat) `CapsLock`/`NumLock` press toggles the matching bit
+/// on `*lock_state` — the "transition updates ambient" half of the Task 114
+/// binding decision that was impossible in 114.4 (egui has no `Key` variant
+/// for these keys). This happens unconditionally (whether or not KKP is
+/// active) and independently of whether the key's own event is encoded.
+///
+/// ## KKP gating
+///
+/// No explicit KKP-flag check is needed here: when no relevant
+/// `kitty_keyboard_flags` bit is set, `TerminalInput::KittyFunctional`'s
+/// `to_payload` returns an empty payload (these keys have no legacy
+/// encoding), so [`send_terminal_inputs`] sends nothing.
+///
+/// ## Broadcast (Task 74)
+///
+/// Mirrors the encoded bytes to `key_broadcast_targets` when broadcast input
+/// is active, matching how other genuine keyboard input is fanned out
+/// elsewhere in this module.
+pub fn drain_pending_raw_keys(
+    pending: &mut Vec<(
+        freminal_windowing::RawKeyEvent,
+        freminal_windowing::RawKeyMods,
+    )>,
+    input_tx: &Sender<InputEvent>,
+    snap: &TerminalSnapshot,
+    super_pressed: bool,
+    lock_state: &mut freminal_windowing::LockState,
+    key_broadcast_targets: &[Sender<InputEvent>],
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let modes = InputModes::from_snapshot(snap);
+    for (event, mods) in pending.drain(..) {
+        // Observed lock-key transition updates the ambient cache (114.7,
+        // deferred from 114.4): a fresh press (not a repeat, not a release)
+        // toggles the corresponding bit. Emit no synthetic event for this —
+        // the key's own real event (below) is what gets reported.
+        if event.pressed && !event.repeat {
+            match event.key_code {
+                winit::keyboard::KeyCode::CapsLock => lock_state.caps = !lock_state.caps,
+                winit::keyboard::KeyCode::NumLock => lock_state.num = !lock_state.num,
+                _ => {}
+            }
+        }
+
+        let Some(codepoint) = kitty_keycode_to_codepoint(event.key_code) else {
+            continue;
+        };
+
+        let key_mods = raw_mods_to_key_modifiers(mods, super_pressed, *lock_state);
+        let meta = if !event.pressed {
+            KeyEventMeta {
+                event_type: KeyEventType::Release,
+                associated_text: None,
+            }
+        } else if event.repeat {
+            KeyEventMeta {
+                event_type: KeyEventType::Repeat,
+                associated_text: None,
+            }
+        } else {
+            KeyEventMeta::PRESS
+        };
+
+        let input = TerminalInput::KittyFunctional {
+            codepoint,
+            mods: key_mods,
+        };
+        send_terminal_inputs(std::slice::from_ref(&input), input_tx, &modes, &meta);
+
+        if !key_broadcast_targets.is_empty() {
+            let bytes = encode_terminal_inputs(std::slice::from_ref(&input), &modes, &meta);
+            broadcast_key_bytes(key_broadcast_targets, &bytes);
+        }
+    }
+}
+
+/// The physical held-key tracking state (currently just physical Super) that
+/// should carry across a focus change (Task 114.8).
+///
+/// On focus-loss we clear held-key tracking: the terminal may miss the
+/// release of a key held at the moment focus left (the user releases it in
+/// another window), so retaining `true` would report a phantom-held key
+/// afterward. Per the transition-only binding decision no synthetic release is
+/// emitted — the next real key press rebuilds tracking honestly. On focus-gain
+/// the current value is preserved (real modifier state arrives via the
+/// compositor's `ModifiersChanged`).
+const fn held_keys_after_focus_change(focused: bool, current_super_pressed: bool) -> bool {
+    if focused {
+        current_super_pressed
+    } else {
+        false
     }
 }
 
@@ -677,13 +903,15 @@ pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
 ///
 /// `super_held` is threaded through to [`egui_mods_to_key_modifiers`] — see
 /// its doc comment for why it cannot be derived from `mods` alone on
-/// Linux/Windows.
+/// Linux/Windows. `lock` is the ambient OS lock-key snapshot, also
+/// forwarded to [`egui_mods_to_key_modifiers`] (Task 114.4).
 fn egui_key_to_terminal_input(
     key: Key,
     mods: Modifiers,
     super_held: bool,
+    lock: freminal_windowing::LockState,
 ) -> Option<TerminalInput> {
-    let km = egui_mods_to_key_modifiers(mods, super_held);
+    let km = egui_mods_to_key_modifiers(mods, super_held, lock);
     match key {
         Key::Enter => Some(TerminalInput::Enter),
         Key::Backspace => Some(TerminalInput::Backspace),
@@ -980,6 +1208,20 @@ fn release_end_col(
     }
 }
 
+/// Return type of [`write_input_to_terminal`] — see its "Return value" doc
+/// section for the meaning of each element. Factored into a named alias
+/// (rather than an inline tuple) to satisfy `clippy::type_complexity`.
+type WriteInputResult = (
+    bool,
+    Option<PreviousMouseState>,
+    Option<Key>,
+    f32,
+    bool,
+    Vec<KeyAction>,
+    bool,
+    freminal_windowing::LockState,
+);
+
 #[allow(
     clippy::cognitive_complexity,
     clippy::too_many_lines,
@@ -1004,7 +1246,7 @@ fn release_end_col(
 /// | `PointerButton`      | Translated to X10/X11/SGR mouse report bytes when mouse tracking is active. |
 /// | `PointerMoved`       | Mouse-move report when button-motion or any-event tracking is active; updates text selection when tracking is off. |
 /// | `Scroll`             | Alternate screen: unconditionally converted to arrow-key bytes (matching kitty/Alacritty/WezTerm). Primary screen: updates `ViewState::scroll_offset` and sends `InputEvent::ScrollOffset`. |
-/// | `WindowFocused`      | Sends `InputEvent::FocusChange`; clears mouse position on unfocus. |
+/// | `WindowFocused`      | Sends `InputEvent::FocusChange`; clears mouse position on unfocus; on focus-gain re-queries the ambient OS lock state (Task 114.4, no event emitted). |
 /// | `Paste`              | Bracketed-paste wrapped if `RlBracket::Bracketed` is set. |
 /// | `Copy`               | Selection text placed on system clipboard. |
 ///
@@ -1018,13 +1260,14 @@ fn release_end_col(
 ///
 /// ## Return value
 ///
-/// Returns `(left_mouse_pressed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending, deferred_actions, super_pressed)`:
+/// Returns `(left_mouse_pressed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending, deferred_actions, super_pressed, lock_state)`:
 /// - `left_mouse_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `last_reported_mouse_pos` — updated mouse tracking state for the next call.
 /// - `previous_key` — last pressed key (used for key-repeat deduplication).
 /// - `scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
 /// - `super_pressed` — updated physical Super/Command hold-state (see `super_pressed` parameter) for the next call.
+/// - `lock_state` — the ambient OS lock-key snapshot (see `lock_state` parameter), possibly refreshed this call if `Event::WindowFocused(true)` was observed (Task 114.4); the caller writes this back to `PerWindowState::lock_state`.
 ///
 /// ## Active-pane gating
 ///
@@ -1058,15 +1301,8 @@ pub(super) fn write_input_to_terminal(
     placeholder_rects: &[(Rect, CommandBlockId)],
     key_broadcast_targets: &[Sender<InputEvent>],
     super_pressed: bool,
-) -> (
-    bool,
-    Option<PreviousMouseState>,
-    Option<Key>,
-    f32,
-    bool,
-    Vec<KeyAction>,
-    bool,
-) {
+    lock_state: freminal_windowing::LockState,
+) -> WriteInputResult {
     if input.raw.events.is_empty() {
         return (
             false,
@@ -1076,6 +1312,7 @@ pub(super) fn write_input_to_terminal(
             false,
             Vec::new(),
             super_pressed,
+            lock_state,
         );
     }
 
@@ -1092,6 +1329,10 @@ pub(super) fn write_input_to_terminal(
     // Super/Windows key, so it must be tracked across frames via the
     // `Key::SuperLeft`/`Key::SuperRight` press/release events observed below.
     let mut super_pressed = super_pressed;
+    // Ambient per-window OS lock-key snapshot (Task 114.4). Re-queried
+    // (not tracked from key events — impossible on egui) on focus-gain
+    // below; never used to synthesize an event.
+    let mut lock_state = lock_state;
 
     // Derive the terminal origin from the rect.  Pointer events whose
     // position falls outside `terminal_rect` are ignored — they belong to
@@ -1165,7 +1406,8 @@ pub(super) fn write_input_to_terminal(
             let kkp = snap.kitty_keyboard_flags;
             if kkp & 2 != 0
                 && kkp & (1 | 8) != 0
-                && let Some(ti) = egui_key_to_terminal_input(*key, *modifiers, super_pressed)
+                && let Some(ti) =
+                    egui_key_to_terminal_input(*key, *modifiers, super_pressed, lock_state)
             {
                 let release_meta = KeyEventMeta {
                     event_type: KeyEventType::Release,
@@ -1331,6 +1573,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ArrowUp(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1341,6 +1584,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ArrowDown(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1351,6 +1595,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ArrowLeft(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1361,6 +1606,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ArrowRight(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1371,6 +1617,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::Home(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1381,6 +1628,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::End(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1391,6 +1639,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::Delete(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1401,6 +1650,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::Insert(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1411,6 +1661,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::PageUp(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1421,6 +1672,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::PageDown(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1436,7 +1688,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 1,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1446,7 +1698,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 2,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1456,7 +1708,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 3,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1466,7 +1718,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 4,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1476,7 +1728,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 5,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1486,7 +1738,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 6,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1496,7 +1748,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 7,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1506,7 +1758,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 8,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1516,7 +1768,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 9,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1526,7 +1778,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 10,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1536,7 +1788,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 11,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
             Event::Key {
@@ -1546,7 +1798,7 @@ pub(super) fn write_input_to_terminal(
                 ..
             } => vec![TerminalInput::FunctionKey(
                 12,
-                egui_mods_to_key_modifiers(*modifiers, super_pressed),
+                egui_mods_to_key_modifiers(*modifiers, super_pressed, lock_state),
             )]
             .into(),
 
@@ -1571,6 +1823,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ShiftLeft(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1581,6 +1834,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ShiftRight(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1591,6 +1845,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ControlLeft(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1601,6 +1856,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::ControlRight(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1611,6 +1867,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::AltLeft(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1621,6 +1878,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::AltRight(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1631,6 +1889,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::SuperLeft(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
             Event::Key {
@@ -1641,6 +1900,7 @@ pub(super) fn write_input_to_terminal(
             } => vec![TerminalInput::SuperRight(egui_mods_to_key_modifiers(
                 *modifiers,
                 super_pressed,
+                lock_state,
             ))]
             .into(),
 
@@ -1712,10 +1972,27 @@ pub(super) fn write_input_to_terminal(
                     "Failed to send focus change event"
                 );
 
-                if !*focused {
+                if *focused {
+                    // Ambient requery only (Task 114.4, binding decision):
+                    // silently correct the caps/num lock snapshot in case it
+                    // was toggled while unfocused. No synthetic event is
+                    // emitted — the kitty keyboard protocol has no
+                    // "state changed" resync event.
+                    lock_state = freminal_windowing::query_lock_state();
+                } else {
                     view_state.mouse_position = None;
                     last_reported_mouse_pos = None;
                 }
+                // Task 114.8: clear the held-key tracking (physical Super) on
+                // focus-loss so stale "held" state cannot leak into a later
+                // key report. Per the transition-only binding decision we emit
+                // NO synthetic release for it — the next real key rebuilds
+                // tracking honestly on focus-gain. If the user released Super
+                // in another window while we were unfocused, we simply never
+                // saw it; resetting here avoids reporting a phantom-held Super
+                // afterward. Factored into `held_keys_after_focus_change` so
+                // the invariant is unit-testable without an egui harness.
+                super_pressed = held_keys_after_focus_change(*focused, super_pressed);
 
                 continue;
             }
@@ -2235,6 +2512,7 @@ pub(super) fn write_input_to_terminal(
         clipboard_pending,
         deferred_actions,
         super_pressed,
+        lock_state,
     )
 }
 
@@ -2658,9 +2936,30 @@ mod key_modifiers_tests {
     fn super_held_true_sets_super_key() {
         // Linux/Windows path: no egui `Modifiers` bit for the physical Super
         // key, so the caller-tracked `super_held` flag alone must set it.
-        let km = egui_mods_to_key_modifiers(Modifiers::default(), true);
+        let km = egui_mods_to_key_modifiers(
+            Modifiers::default(),
+            true,
+            freminal_windowing::LockState::default(),
+        );
         assert!(km.super_key);
         assert!(!km.ctrl);
+    }
+
+    #[test]
+    fn focus_loss_clears_held_super() {
+        // Task 114.8: on focus-loss, held-key tracking (physical Super) is
+        // cleared so a phantom-held Super cannot leak into a later report.
+        assert!(!held_keys_after_focus_change(false, true));
+        assert!(!held_keys_after_focus_change(false, false));
+    }
+
+    #[test]
+    fn focus_gain_preserves_held_super() {
+        // Task 114.8: focus-gain does not fabricate or drop held state — the
+        // current value carries through (real modifiers arrive via the
+        // compositor's ModifiersChanged).
+        assert!(held_keys_after_focus_change(true, true));
+        assert!(!held_keys_after_focus_change(true, false));
     }
 
     #[test]
@@ -2672,7 +2971,7 @@ mod key_modifiers_tests {
             command: true,
             ..Modifiers::default()
         };
-        let km = egui_mods_to_key_modifiers(mods, false);
+        let km = egui_mods_to_key_modifiers(mods, false, freminal_windowing::LockState::default());
         assert!(km.super_key);
         assert!(!km.ctrl);
     }
@@ -2683,15 +2982,45 @@ mod key_modifiers_tests {
             ctrl: true,
             ..Modifiers::default()
         };
-        let km = egui_mods_to_key_modifiers(mods, false);
+        let km = egui_mods_to_key_modifiers(mods, false, freminal_windowing::LockState::default());
         assert!(km.ctrl);
         assert!(!km.super_key);
     }
 
     #[test]
     fn no_modifiers_no_super_held_is_empty() {
-        let km = egui_mods_to_key_modifiers(Modifiers::default(), false);
+        let km = egui_mods_to_key_modifiers(
+            Modifiers::default(),
+            false,
+            freminal_windowing::LockState::default(),
+        );
         assert!(km.is_empty());
+    }
+
+    #[test]
+    fn lock_state_caps_sets_caps_lock_bit_only() {
+        // Task 114.4: `caps_lock`/`num_lock` come from the ambient
+        // `LockState`, not egui `Modifiers`.
+        let lock = freminal_windowing::LockState {
+            caps: true,
+            num: false,
+            scroll: false,
+        };
+        let km = egui_mods_to_key_modifiers(Modifiers::default(), false, lock);
+        assert!(km.caps_lock);
+        assert!(!km.num_lock);
+    }
+
+    #[test]
+    fn lock_state_num_sets_num_lock_bit_only() {
+        let lock = freminal_windowing::LockState {
+            caps: false,
+            num: true,
+            scroll: false,
+        };
+        let km = egui_mods_to_key_modifiers(Modifiers::default(), false, lock);
+        assert!(!km.caps_lock);
+        assert!(km.num_lock);
     }
 }
 
@@ -2707,13 +3036,23 @@ mod modifier_keys_as_keys_tests {
 
     #[test]
     fn shift_left_maps_to_terminal_input_variant() {
-        let ti = egui_key_to_terminal_input(Key::ShiftLeft, Modifiers::default(), false);
+        let ti = egui_key_to_terminal_input(
+            Key::ShiftLeft,
+            Modifiers::default(),
+            false,
+            freminal_windowing::LockState::default(),
+        );
         assert!(matches!(ti, Some(TerminalInput::ShiftLeft(_))));
     }
 
     #[test]
     fn control_right_maps_to_terminal_input_variant() {
-        let ti = egui_key_to_terminal_input(Key::ControlRight, Modifiers::default(), false);
+        let ti = egui_key_to_terminal_input(
+            Key::ControlRight,
+            Modifiers::default(),
+            false,
+            freminal_windowing::LockState::default(),
+        );
         assert!(matches!(ti, Some(TerminalInput::ControlRight(_))));
     }
 
@@ -2721,7 +3060,12 @@ mod modifier_keys_as_keys_tests {
     fn super_left_maps_to_terminal_input_variant_with_super_key_set() {
         // super_held = true (as observed via the SuperLeft press itself)
         // must set `super_key` in the resulting modifier report.
-        let ti = egui_key_to_terminal_input(Key::SuperLeft, Modifiers::default(), true);
+        let ti = egui_key_to_terminal_input(
+            Key::SuperLeft,
+            Modifiers::default(),
+            true,
+            freminal_windowing::LockState::default(),
+        );
         match ti {
             Some(TerminalInput::SuperLeft(km)) => assert!(km.super_key),
             other => panic!("expected Some(TerminalInput::SuperLeft(_)), got {other:?}"),
@@ -2730,7 +3074,259 @@ mod modifier_keys_as_keys_tests {
 
     #[test]
     fn alt_right_maps_to_terminal_input_variant() {
-        let ti = egui_key_to_terminal_input(Key::AltRight, Modifiers::default(), false);
+        let ti = egui_key_to_terminal_input(
+            Key::AltRight,
+            Modifiers::default(),
+            false,
+            freminal_windowing::LockState::default(),
+        );
         assert!(matches!(ti, Some(TerminalInput::AltRight(_))));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod raw_key_tests {
+    //! Tests for the Task 114.7 egui-blocked raw-key delivery path:
+    //! [`kitty_keycode_to_codepoint`]'s codepoint table, [`drain_pending_raw_keys`]'s
+    //! end-to-end encoding through `send_terminal_inputs`, and the ambient
+    //! lock-state toggle on an observed `CapsLock`/`NumLock` press (the
+    //! "transition updates ambient" half deferred from 114.4).
+
+    use super::*;
+    use freminal_windowing::{LockState, RawKeyEvent, RawKeyMods};
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn maps_caps_lock_to_its_codepoint() {
+        assert_eq!(
+            kitty_keycode_to_codepoint(KeyCode::CapsLock),
+            Some(KKP_CAPS_LOCK_CODEPOINT)
+        );
+    }
+
+    #[test]
+    fn maps_numpad_enter_to_its_codepoint() {
+        assert_eq!(
+            kitty_keycode_to_codepoint(KeyCode::NumpadEnter),
+            Some(KKP_KP_ENTER_CODEPOINT)
+        );
+    }
+
+    #[test]
+    fn maps_numpad_5_to_its_codepoint() {
+        assert_eq!(
+            kitty_keycode_to_codepoint(KeyCode::Numpad5),
+            Some(KKP_KP_5_CODEPOINT)
+        );
+    }
+
+    #[test]
+    fn maps_audio_volume_mute_to_its_codepoint() {
+        assert_eq!(
+            kitty_keycode_to_codepoint(KeyCode::AudioVolumeMute),
+            Some(KKP_MUTE_VOLUME_CODEPOINT)
+        );
+    }
+
+    #[test]
+    fn unblocked_key_maps_to_none() {
+        assert_eq!(kitty_keycode_to_codepoint(KeyCode::KeyA), None);
+    }
+
+    fn snap_with_kkp_flags(flags: u32) -> TerminalSnapshot {
+        let mut s = TerminalSnapshot::empty();
+        s.kitty_keyboard_flags = flags;
+        s
+    }
+
+    #[test]
+    fn drain_encodes_caps_lock_under_report_all_flag() {
+        // Flag 8 (REPORT_ALL) activates the KKP path for keys with no
+        // legacy encoding, so a queued CapsLock press must produce a
+        // `CSI 57358 ... u` sequence on the pane's input channel.
+        //
+        // The ambient toggle (this same press) runs *before* the modifier
+        // byte is computed -- physically, pressing CapsLock engages the OS
+        // lock as part of the key-down itself, so the report for this very
+        // event correctly carries `caps_lock=1` (modifier 1 + 64 = 65), not
+        // the pre-press state. See `drain_pending_raw_keys`'s "Ambient
+        // lock-state update" doc section.
+        let snap = snap_with_kkp_flags(8);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::CapsLock,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(pending.is_empty(), "queue must be drained");
+        match rx.try_recv() {
+            Ok(InputEvent::Key(bytes)) => assert_eq!(bytes, b"\x1b[57358;65u"),
+            other => panic!("expected InputEvent::Key(b\"\\x1b[57358;65u\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drain_honors_caps_lock_ambient_bit_in_encoded_modifiers() {
+        // With the ambient caps_lock bit already set, the modifier param
+        // (1 + 64 = 65) must appear in the encoded sequence.
+        let snap = snap_with_kkp_flags(8);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::NumpadEnter,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState {
+            caps: true,
+            num: false,
+            scroll: false,
+        };
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        match rx.try_recv() {
+            Ok(InputEvent::Key(bytes)) => assert_eq!(bytes, b"\x1b[57414;65u"),
+            other => panic!("expected InputEvent::Key(_), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drain_produces_no_bytes_when_kkp_is_off() {
+        // Flags 0: `KittyFunctional` has no legacy encoding, so nothing is
+        // sent to the PTY -- matches how all other KKP-only keys behave.
+        let snap = snap_with_kkp_flags(0);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::MediaPlayPause,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "no bytes should be sent when KKP is off"
+        );
+    }
+
+    #[test]
+    fn drain_ignores_unmapped_key() {
+        // A blocked-set-adjacent key with no codepoint mapping (defensive
+        // path) must be skipped without panicking or sending bytes.
+        let snap = snap_with_kkp_flags(8);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::KeyA,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(pending.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fresh_caps_lock_press_toggles_ambient_caps_bit() {
+        // The "transition updates ambient" half deferred from 114.4: a
+        // fresh (non-repeat) CapsLock press flips the ambient bit so
+        // decoration stays correct between OS requeries.
+        let snap = snap_with_kkp_flags(0);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::CapsLock,
+                pressed: true,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+        assert!(!lock_state.caps);
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(
+            lock_state.caps,
+            "a fresh CapsLock press must toggle the ambient bit"
+        );
+    }
+
+    #[test]
+    fn caps_lock_repeat_does_not_toggle_ambient_bit() {
+        // Auto-repeat is not a fresh transition; must not double-toggle.
+        let snap = snap_with_kkp_flags(0);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::CapsLock,
+                pressed: true,
+                repeat: true,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(
+            !lock_state.caps,
+            "an auto-repeat must not toggle the ambient bit"
+        );
+    }
+
+    #[test]
+    fn caps_lock_release_does_not_toggle_ambient_bit() {
+        // A release is a real transition, but only a *press* toggles the
+        // ambient bit (mirrors physical lock-key behaviour: the OS toggles
+        // caps lock on key-down, not key-up).
+        let snap = snap_with_kkp_flags(0);
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![(
+            RawKeyEvent {
+                key_code: KeyCode::CapsLock,
+                pressed: false,
+                repeat: false,
+            },
+            RawKeyMods::default(),
+        )];
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(!lock_state.caps);
+    }
+
+    #[test]
+    fn empty_queue_is_a_noop() {
+        let snap = snap_with_kkp_flags(8);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending: Vec<(RawKeyEvent, RawKeyMods)> = Vec::new();
+        let mut lock_state = LockState::default();
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &mut lock_state, &[]);
+
+        assert!(rx.try_recv().is_err());
     }
 }

@@ -238,6 +238,8 @@ impl freminal_windowing::App for FreminalGui {
                         broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
                         close_dialog: super::close_guard::CloseGuardDialog::default(),
                         pending_force_close: false,
+                        lock_state: freminal_windowing::query_lock_state(),
+                        pending_raw_keys: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1767,10 +1769,32 @@ impl freminal_windowing::App for FreminalGui {
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
                             &key_broadcast_targets,
+                            win.lock_state,
                         )
                     });
-                let (left_clicked, deferred_actions) = show_result.inner;
+                let (left_clicked, deferred_actions, new_lock_state) = show_result.inner;
+                win.lock_state = new_lock_state;
                 all_deferred_actions.extend(deferred_actions);
+
+                // Task 114.7: drain any egui-blocked raw key events queued
+                // this frame (keypad operators/directional, media,
+                // ISO-level shifts, lock/print/pause/menu keys) for the
+                // active pane. Must run here, after `show()` returned above,
+                // so `pane.render_cache.super_pressed()` and `win.lock_state`
+                // both reflect the current frame — draining earlier (or
+                // inside `on_raw_key_event` itself) risks encoding against
+                // stale Super/lock state.
+                if is_active && !win.pending_raw_keys.is_empty() {
+                    let super_pressed = pane.render_cache.super_pressed();
+                    crate::gui::terminal::input::drain_pending_raw_keys(
+                        &mut win.pending_raw_keys,
+                        &pane.input_tx,
+                        &pane_snap,
+                        super_pressed,
+                        &mut win.lock_state,
+                        &key_broadcast_targets,
+                    );
+                }
 
                 // ── Command history palette overlay (Ctrl+Shift+M) ───
                 // Rendered here (not in `widget.show`) because the palette
@@ -2241,6 +2265,29 @@ impl freminal_windowing::App for FreminalGui {
         //   - no request (true idle, steady cursor)  → 0 FPS
         raw_input.predicted_dt = 0.0;
     }
+
+    fn on_raw_key_event(
+        &mut self,
+        window_id: WindowId,
+        event: freminal_windowing::RawKeyEvent,
+        mods: freminal_windowing::RawKeyMods,
+    ) {
+        // Task 114.7: queue only -- do NOT encode here. This callback fires
+        // at winit-event time, outside the render/`update()` path where the
+        // active pane, its snapshot, and the true per-pane `super_pressed`
+        // are in scope. The queue is drained and encoded on the render path
+        // in `update()` (see `terminal::input::drain_pending_raw_keys`).
+        //
+        // No explicit repaint request is needed here: `event_loop.rs`'s
+        // `KeyboardInput` intercept already sets `state.repaint_at =
+        // Some(Instant::now())` immediately after calling this method, so a
+        // repaint (and therefore a drain) is already guaranteed this cycle.
+        let Some(win) = self.windows.get_mut(&window_id) else {
+            trace!(?window_id, "raw key event for unknown window; dropping");
+            return;
+        };
+        win.pending_raw_keys.push((event, mods));
+    }
 }
 
 impl FreminalGui {
@@ -2431,6 +2478,8 @@ impl FreminalGui {
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
+            lock_state: freminal_windowing::query_lock_state(),
+            pending_raw_keys: Vec::new(),
         }
     }
 

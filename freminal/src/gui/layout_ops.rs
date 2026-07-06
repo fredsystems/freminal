@@ -719,6 +719,8 @@ impl FreminalGui {
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
+            lock_state: freminal_windowing::query_lock_state(),
+            pending_raw_keys: Vec::new(),
         };
         self.windows.insert(window_id, win);
 

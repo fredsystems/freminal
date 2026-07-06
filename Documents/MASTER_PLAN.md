@@ -182,7 +182,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 110 | Focus Follows Mouse (Toggleable)          | `PLAN_VERSION_090.md` (Task 110)              | Complete      | Task 58                |
 | 111 | Bundled Font / Icon (CaskaydiaCove)       | `PLAN_VERSION_100.md` (Task 111)              | Complete      | v0.8.0, v0.9.0         |
 | 112 | UI Beautification (ChromeStyle)           | `PLAN_VERSION_100.md` (Task 112)              | Complete      | Task 111               |
-| 114 | Kitty Keyboard: egui-blocked keys         | `PLAN_VERSION_110.md` (Task 114)              | Stub          | Task 101               |
+| 114 | Kitty Keyboard: egui-blocked keys         | `PLAN_VERSION_110.md` (Task 114)              | Complete      | Task 101               |
 
 ---
 
@@ -645,6 +645,7 @@ Update this section as tasks complete:
 | 111  | 2026-06-17 | 2026-06-17 | All 7 subtasks (111.1-111.7) on task-111/bundled-font; PR pending                |
 | 112  | 2026-06-17 | 2026-06-19 | All subtasks (112.1-112.13) on task-112/ui-beautification; PR pending            |
 | 101  | 2026-07-05 | 2026-07-05 | 101.1 audit + 101.2-101.4 on task-101/keyboard-compliance; egui-blocked -> 114   |
+| 114  | 2026-07-05 | 2026-07-05 | 114.1-114.10 on task-114/keyboard-egui-blocked; lock query + raw-winit keys      |
 
 ---
 
