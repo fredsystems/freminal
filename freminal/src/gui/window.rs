@@ -183,4 +183,10 @@ pub(super) struct PerWindowState {
     /// close dialog is resolved.  Resolves an open close-guard dialog as
     /// "Force Close" without the user reaching for the mouse or Ctrl+Enter.
     pub(super) pending_force_close: bool,
+
+    /// Ambient OS lock-key state (Caps/Num Lock) for this window, used to set
+    /// the kitty-keyboard `caps_lock`/`num_lock` modifier bits. Seeded at
+    /// window creation and re-queried on focus-gain (Task 114.4). This is an
+    /// ambient snapshot, never a source of key events.
+    pub(super) lock_state: freminal_windowing::LockState,
 }

@@ -238,6 +238,7 @@ impl freminal_windowing::App for FreminalGui {
                         broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
                         close_dialog: super::close_guard::CloseGuardDialog::default(),
                         pending_force_close: false,
+                        lock_state: freminal_windowing::query_lock_state(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1767,9 +1768,11 @@ impl freminal_windowing::App for FreminalGui {
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
                             &key_broadcast_targets,
+                            win.lock_state,
                         )
                     });
-                let (left_clicked, deferred_actions) = show_result.inner;
+                let (left_clicked, deferred_actions, new_lock_state) = show_result.inner;
+                win.lock_state = new_lock_state;
                 all_deferred_actions.extend(deferred_actions);
 
                 // ── Command history palette overlay (Ctrl+Shift+M) ───
@@ -2431,6 +2434,7 @@ impl FreminalGui {
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
+            lock_state: freminal_windowing::query_lock_state(),
         }
     }
 
