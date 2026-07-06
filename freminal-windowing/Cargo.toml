@@ -23,6 +23,9 @@ thiserror.workspace = true
 tracing.workspace = true
 winit.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { workspace = true }
+
 [[example]]
 name = "hello"
 path = "examples/hello.rs"
