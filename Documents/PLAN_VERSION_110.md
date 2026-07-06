@@ -2281,34 +2281,69 @@ Stop: report + await review, explicitly surfacing the TCC-permission caveat.
 
 #### 114.4 — Wire lock state into the GUI ambient cache + `KeyModifiers` (half-A integration)
 
-Scope: `freminal-windowing/src/event_loop.rs` (add a `WindowEvent::Focused(true)`
-handler that calls `query_lock_state()`; query once at window creation too — see
-`on_window_created` / `resumed`); the `App` trait / a delivery of `LockState` to the
-GUI (a new `App` method `fn on_lock_state(&mut self, window_id, LockState)` OR store
-on `WindowState` and expose — Opus decides: use an `App` callback
-`on_lock_state(window_id, LockState)` for symmetry with 114.5's `on_raw_key_event`);
-`freminal/src/gui/**` GUI-side ambient cache (mirror the existing `super_held`
-pattern in `freminal/src/gui/terminal/input.rs`/`widget.rs`), and
-`egui_mods_to_key_modifiers` in `freminal/src/gui/terminal/input.rs:168-181`
-(populate `caps_lock`/`num_lock` from the cache instead of hardcoded `false`).
+##### 114.4 execution decisions (recorded 2026-07-05, from the wiring recon)
 
-What: freminal queries lock state at cold start + on focus-gain, caches it GUI-side
-(ambient), and `egui_mods_to_key_modifiers` reads the cache to set the
-`caps_lock`/`num_lock` bits on every emitted `KeyModifiers`. Also update the ambient
-cache from observed CapsLock/NumLock key-down transitions while focused (per the
-ambient/transition decision). **Emit no events on requery** (ambient only). Clear
-the held-keys set on focus-loss (the held-set clearing pairs with 114.6; if the
-held-set does not yet exist here, add the focus-loss clear hook as a no-op stub and
-note it for 114.6).
+The 114.4 seam recon resolved the two open shape questions and found one scope gap.
+Opus decisions (binding for the implementer):
 
-Deliverable: caps/num bits now reflect true OS state at cold start and after
-focus-gain; a test that `egui_mods_to_key_modifiers` maps a cached caps/num into the
-right `KeyModifiers` bits; existing modifier tests stay green.
+- **Requery via the GUI-layer `Event::WindowFocused`, NOT a windowing-layer
+  `WindowEvent::Focused` + new `App::on_lock_state` callback.** The recon found
+  `write_input_to_terminal` already handles `Event::WindowFocused(focused)`
+  (`input.rs:1705`), and `freminal` already depends on `freminal-windowing` (so
+  calling the exported `freminal_windowing::query_lock_state()` directly from the
+  GUI is a downward, legal dependency). This is strictly simpler than the plan's
+  original `WindowEvent::Focused` route: **no new `App` trait method, no new
+  windowing-layer focus arm.** The original "add `on_lock_state` / `WindowEvent::Focused`"
+  scope line is **superseded**. (`freminal-windowing/src/event_loop.rs` is therefore
+  NOT touched by 114.4.)
+- **Storage granularity: per-window ambient cache on `PerWindowState`
+  (`freminal/src/gui/window.rs`), NOT per-pane `PaneRenderCache`.** Lock state is a
+  per-window/OS-global fact; storing it once per window (not once per pane) avoids N
+  redundant caches. `write_input_to_terminal` receives it as a parameter (mirroring
+  how `super_pressed` is threaded, but sourced from `PerWindowState`, not the pane
+  cache) — thread the current `LockState` in, and thread any focus-gain-updated
+  value back out so the caller writes it to `PerWindowState`.
+- **Scope gap (moved to 114.7): the "update ambient cache on observed
+  CapsLock/NumLock key-down while focused" half is IMPOSSIBLE in 114.4.** egui's
+  `Key` enum has NO CapsLock/NumLock variant (recon-confirmed against egui 0.35
+  `key.rs`), so no `Event::Key` arm can observe a lock-key transition. That half
+  requires 114.5's raw-winit intercept and is therefore **deferred to 114.7** (which
+  already consumes delivered raw keys). 114.4 delivers ONLY the cold-start +
+  focus-gain requery half.
+- **Cold-start query:** call `query_lock_state()` when `PerWindowState` is first
+  built (in the `FreminalGui` window-creation path, `app_impl.rs` `on_window_created`
+  / wherever `PerWindowState` is constructed) and seed the ambient field.
+- **No held-key set here.** The focus-loss held-key clearing is 114.8; 114.4 adds no
+  stub for it (the held set does not exist until 114.7).
 
-Verification: `cargo test --all`; clippy.
+Scope: `freminal/src/gui/window.rs` (`PerWindowState`: add a
+`lock_state: LockState` field, seed from `query_lock_state()` at construction);
+`freminal/src/gui/terminal/input.rs` (`egui_mods_to_key_modifiers` gains a
+`lock_state: LockState` param and populates `caps_lock`/`num_lock`;
+`egui_key_to_terminal_input` threads it; `write_input_to_terminal` gains a
+`lock_state` parameter + returns the possibly-refreshed value; the
+`Event::WindowFocused(true)` arm at `input.rs:1705` calls
+`freminal_windowing::query_lock_state()` and updates the local `lock_state`);
+`freminal/src/gui/terminal/widget.rs` (thread `PerWindowState.lock_state` into the
+`write_input_to_terminal` call + write back the returned value);
+`freminal/src/gui/app_impl.rs` if the window-creation seed needs it.
+
+What: freminal seeds the per-window ambient `LockState` at cold start and re-queries
+it on `Event::WindowFocused(true)`; `egui_mods_to_key_modifiers` reads it to set the
+`caps_lock`/`num_lock` bits on every emitted `KeyModifiers`. **Emit no events on
+requery** (ambient only — binding decision).
+
+Deliverable: caps/num bits reflect true OS state at cold start and after focus-gain;
+a unit test that `egui_mods_to_key_modifiers` maps a `LockState { caps, num }` into
+the right `KeyModifiers` bits (both set and unset); existing modifier tests stay
+green (they pass `LockState::default()`).
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
 
 Prohibitions: do NOT synthesize any key event from a lock-state change (binding
-decision); do NOT start half B's key delivery (114.5); do NOT proceed.
+decision); do NOT add a new `App` trait method or touch `event_loop.rs` (superseded);
+do NOT attempt the observed-key-down cache update (deferred to 114.7); do NOT start
+half B (114.5); do NOT proceed.
 
 Stop: report + await review.
 
