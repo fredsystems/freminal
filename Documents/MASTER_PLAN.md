@@ -645,7 +645,7 @@ Update this section as tasks complete:
 | 111  | 2026-06-17 | 2026-06-17 | All 7 subtasks (111.1-111.7) on task-111/bundled-font; PR pending                |
 | 112  | 2026-06-17 | 2026-06-19 | All subtasks (112.1-112.13) on task-112/ui-beautification; PR pending            |
 | 101  | 2026-07-05 | 2026-07-05 | 101.1 audit + 101.2-101.4 on task-101/keyboard-compliance; egui-blocked -> 114   |
-| 114  | 2026-07-05 | 2026-07-05 | 114.1-114.10 on task-114/keyboard-egui-blocked; lock query + raw-winit keys      |
+| 114  | 2026-07-05 | 2026-07-06 | keypad/media/print/pause/menu via raw-winit; lock-state reverted (see 114.11)    |
 
 ---
 

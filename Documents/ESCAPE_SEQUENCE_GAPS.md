@@ -1,22 +1,20 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-05 — Task 114 (v0.11.0) implemented the egui-blocked
-keyboard remainder: keypad operators/directional keys, media keys, and
-lock/print/pause/menu-as-keys are now delivered via a raw-winit intercept
-(`App::on_raw_key_event` in `freminal-windowing`) and encoded through the
-existing KKP `CSI u` path (114.5–114.7); true `caps_lock`/`num_lock` modifier
-bits (64/128) are now sourced from an OS lock-state query — `evdev`/EVIOCGLED
-on Linux (one code path for X11 and Wayland), `GetKeyState` on Windows,
-`CGEventSourceFlagsState` on macOS (caps only; num/scroll hardcoded `false` —
-the concept doesn't exist on Mac keyboards; the macOS Input-Monitoring/TCC
-permission question is unverified on-device) — queried at cold-start and
-focus-gain, plus toggled on observed CapsLock/NumLock presses while focused
-(114.4/114.7). The **Keyboard Gaps** section below is now much shorter: only
-ISO_Level3/5_Shift (no winit `KeyCode` variant — a winit limitation, not
-egui) and the `hyper`/`meta` modifier bits (no platform source on any target)
-remain tracked, both unscheduled. Same day — Task 101 (v0.11.0), kitty
-keyboard encoding-only compliance: super modifier, F13–F35,
-modifier-keys-as-keys (flag 8), and F3 → `CSI 13 ~` are implemented. Earlier:
+Last updated: 2026-07-06 — Task 114's lock-state half was **reverted**. The
+keypad operators/directional keys, media keys, and print/pause/menu-as-keys
+are delivered via a raw-winit intercept (`App::on_raw_key_event` in
+`freminal-windowing`) and encoded through the existing KKP `CSI u` path — this
+is kept and correct on every platform. But `caps_lock`/`num_lock` decoration
+bits (64/128) and the CapsLock/NumLock/ScrollLock **transition events** cannot
+be produced correctly or uniformly across platforms (Wayland compositors
+consume the lock keys so winit delivers no `KeyboardInput`; Windows/macOS offer
+only level queries at focus-gain, never the transition), so the `evdev` /
+`GetKeyState` / `CGEventSourceFlagsState` machinery was removed rather than
+half-shipped. Those are now tracked as gaps against upstream (egui#3653,
+egui#2041, winit#1426; alacritty#7937 documents the same limitation). Earlier:
+2026-07-05 — Task 101 (v0.11.0), kitty keyboard encoding-only compliance: super
+modifier, F13–F35, modifier-keys-as-keys (flag 8), and F3 → `CSI 13 ~` are
+implemented. Earlier:
 2026-07-02 — Kitty graphics render-path fixes (Tasks
 100.11–100.20, v0.11.0) closed the sub-cell `X`/`Y` offset and the
 native-vs-explicit display-sizing / per-placement-identity render gaps, plus
@@ -51,17 +49,17 @@ are parsed and wired. DECDWL/DECDHL are rendered. Bell is visual + audible.
 Blinking text renders. IRM is implemented. DCS sub-commands (DECRQSS, XTGETTCAP) and the
 APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel and iTerm2 inline
 images (OSC 1337) are fully implemented (Task 13). Kitty graphics is fully implemented
-(Tasks 13, 100). Kitty keyboard protocol is now effectively complete: Task 35, the
+(Tasks 13, 100). Kitty keyboard protocol is substantially compliant: Task 35, the
 Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys under flag 8,
-F3 → `CSI 13 ~`), and Task 114 (raw-winit delivery of keypad/media/lock/print/pause/menu
-keys, plus true caps_lock/num_lock modifier bits via OS lock-state query). Only two
-permanent, unscheduled keyboard gaps remain (ISO_Level3/5_Shift, hyper/meta bits). The
-remaining gaps are:
+F3 → `CSI 13 ~`), and Task 114's raw-winit delivery of keypad/media/print/pause/menu keys.
+The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
 
 - **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
 - **OSC gaps:** OSC 66 (recognized but no effect)
-- **Keyboard gaps:** ISO_Level3/5_Shift (no winit `KeyCode` variant) and
-  hyper/meta modifier bits (no platform source) — both permanent, unscheduled
+- **Keyboard gaps:** `caps_lock`/`num_lock` decoration bits + CapsLock/NumLock/ScrollLock
+  transition events (reverted — not producible uniformly across platforms),
+  ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
+  (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
@@ -96,27 +94,34 @@ These features are tracked at the state-machine level but the renderer does not 
 
 ## Keyboard Gaps
 
-The kitty keyboard protocol is now effectively complete (Task 35, the Task 101
-encoding-only wins, and Task 114's raw-winit key-delivery intercept + OS
-lock-state query). Task 114 delivered the previously egui-blocked keys —
-keypad operators/directional/KP_Begin, media keys, and lock/print/pause/menu
-keys (via `App::on_raw_key_event`) — and the true `caps_lock`/`num_lock`
-modifier bits (via an OS lock-state query: `evdev`/EVIOCGLED on Linux,
-`GetKeyState` on Windows, `CGEventSourceFlagsState` on macOS caps-only). Two
-gaps remain, neither one egui-blocked any longer:
+The kitty keyboard protocol is substantially compliant (Task 35, the Task 101
+encoding-only wins, and Task 114's raw-winit delivery of keypad operators/
+directional/KP_Begin, media keys, and PrintScreen/Pause/Menu — all correct on
+every platform). The **lock-state half of Task 114 was reverted** because it
+cannot be produced correctly or uniformly:
 
-- **ISO_Level3/5_Shift** is blocked on **winit**, not egui: winit 0.30.13's
-  `KeyCode` enum has no variant for these keys at all (the closest concept is
-  the logical `NamedKey::AltGraph`, which carries no physical-key identity to
-  intercept).
-- **hyper/meta modifier bits** have no source on any platform freminal
-  targets — this is a permanent, unscheduled gap, not an egui or winit
-  limitation.
+- **`caps_lock`/`num_lock` decoration + CapsLock/NumLock/ScrollLock transition
+  events** — the spec asks the terminal to (a) decorate key reports with lock
+  state and (b) emit lock-key press/release events. Neither is achievable
+  uniformly: on **Wayland** the compositor consumes the lock keys and sends only
+  `wl_keyboard.modifiers` (winit delivers no `KeyboardInput`), so neither the
+  state nor the transition is observable; on **Windows/macOS** the OS query is a
+  level (current on/off) sampled only at focus-gain, so decoration is stale
+  mid-focus and the transition is never observable. Only X11 could do both, which
+  would make one platform behave fundamentally differently. Reverted rather than
+  half-shipped; tracked upstream (egui#3653, egui#2041, winit#1426; alacritty#7937
+  is the same limitation in another kitty-protocol terminal).
+- **ISO_Level3/5_Shift** is blocked on **winit**: winit 0.30.13's `KeyCode` enum
+  has no variant for these keys (the closest concept is the logical
+  `NamedKey::AltGraph`, which carries no physical-key identity to intercept).
+- **hyper/meta modifier bits** have no source on any platform freminal targets.
 
-| Feature                    | Importance | Type | Planned | Notes                                                                                                                                                       |
-| -------------------------- | ---------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ISO_Level3/5_Shift         | ⬜         | ⬜   | —       | `CSI 57453 u` / `57454 u` — no winit `KeyCode` variant (winit 0.30.13; closest is the logical `NamedKey::AltGraph`); blocked on upstream winit, unscheduled |
-| hyper / meta modifier bits | ⬜         | ⬜   | —       | Modifier bits 16 / 32 — no platform source on any target; `KeyModifiers` fields exist but stay `0`                                                          |
+| Feature                                 | Importance | Type | Planned | Notes                                                                                                                                                          |
+| --------------------------------------- | ---------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| caps_lock / num_lock modifier state     | 🟨         | ⬜   | —       | Bits 64 / 128 — no uniform cross-platform source (Wayland compositor-consumed; Win/macOS level-only query). Reverted; tracked upstream (egui#3653, winit#1426) |
+| CapsLock / NumLock / ScrollLock as keys | ⬜         | ⬜   | —       | `CSI 57358 u` / `57359 u` / `57360 u` — transition not observable off X11 (Wayland consumes; Win/macOS give a level, not an edge). Declined; tracked upstream  |
+| ISO_Level3/5_Shift                      | ⬜         | ⬜   | —       | `CSI 57453 u` / `57454 u` — no winit `KeyCode` variant (winit 0.30.13; closest is the logical `NamedKey::AltGraph`); blocked on upstream winit, unscheduled    |
+| hyper / meta modifier bits              | ⬜         | ⬜   | —       | Modifier bits 16 / 32 — no platform source on any target; `KeyModifiers` fields exist but stay `0`                                                             |
 
 ---
 

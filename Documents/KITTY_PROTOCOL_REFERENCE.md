@@ -716,32 +716,34 @@ under flag 8.
 → 9. `ctrl+0` → 48, `ctrl+1` → 49 (no transform). Any other ASCII key is left
 untouched by ctrl.
 
-### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101 and Task 114)
+### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101; lock-state reverted 2026-07-06)
 
 The 101.1 audit found the real blocker was **egui 0.35 (via egui-winit)**, not
 freminal's encoding layer. Work split into "encoding-only" (Task 101, **done**)
-and "egui-blocked" (Task 114, **done** — a raw-winit intercept in
-`freminal-windowing`, since egui itself was never upgraded). Two items remain,
-and neither is egui-blocked any more: ISO_Level3/5_Shift is blocked on
-**winit** (no `KeyCode` variant), and `hyper`/`meta` remain unsourced on any
-platform.
+and "egui-blocked" (Task 114 — a raw-winit intercept in `freminal-windowing`,
+since egui itself was never upgraded). Task 114 delivered the keypad/media/
+Print/Pause/Menu keys (kept, correct on every platform), but its **lock-state
+half was reverted** (see below): `caps_lock`/`num_lock` decoration and the
+CapsLock/NumLock/ScrollLock transition events cannot be produced uniformly
+across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
+(no winit `KeyCode`), and `hyper`/`meta` (no platform source).
 
 - Modifiers: `KeyModifiers` models all 8 bits (110.0); `modifier_param()` returns
   `Option<u16>` (max 256).
   - **✅ Done (101.2):** `super` (bit 8) is sourced by tracking
     `Key::SuperLeft`/`SuperRight` press/release in the GUI loop (macOS routes
     `Modifiers::mac_cmd` to `super_key`, split out of `ctrl`).
-  - **✅ Done (Task 114):** true `caps_lock`/`num_lock` (bits 64/128) are sourced
-    from an OS lock-state query — `evdev`/`EVIOCGLED` kernel LED read on Linux
-    (one code path for X11 and Wayland; Wayland has no client-side lock-state
-    query by protocol design, so the kernel LED read sidesteps the display
-    server entirely), `GetKeyState(VK_CAPITAL/VK_NUMLOCK)` on Windows, and
-    `CGEventSourceFlagsState`/`kCGEventFlagMaskAlphaShift` on macOS (caps only;
-    num/scroll hardcoded `false` — the concept doesn't exist on Mac keyboards;
-    the Input-Monitoring/TCC permission question is unverified on-device). The
-    query is ambient (ran at cold-start + `WindowFocused(true)`, never emits a
-    synthetic event) and additionally toggled on an observed CapsLock/NumLock
-    key transition while focused.
+  - **⏳ Gap (REVERTED 2026-07-06 — not producible uniformly):** true
+    `caps_lock`/`num_lock` (bits 64/128) are **not** sourced. A Task 114 attempt
+    (`evdev` on Linux, `GetKeyState` on Windows, `CGEventSourceFlagsState` on
+    macOS) was reverted: on **Wayland** the compositor consumes the lock keys and
+    sends only `wl_keyboard.modifiers` (winit delivers no `KeyboardInput`), so the
+    state is not observable via events; on **Windows/macOS** the OS query is a
+    level (current on/off) sampled only at cold-start/focus-gain, so decoration is
+    stale mid-focus. A Linux-only `evdev` kernel LED watcher was rejected as
+    fragile and platform-divergent. Half-shipping would over-advertise capability.
+    The `KeyModifiers` fields stay `0`. Tracked upstream: egui#3653, egui#2041,
+    winit#1426 (alacritty#7937 is the same limitation elsewhere).
   - **⏳ Gap (no platform source):** `hyper`/`meta` (16/32) remain unavailable on
     any current platform path. The `KeyModifiers` fields exist but stay `0`.
 - Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F35,
@@ -752,14 +754,21 @@ platform.
     SuperLeft/Right (57441–57444 / 57447–57450, under flag 8; Hyper/Meta omitted —
     egui has no such `Key` variants).
   - **✅ Done (Task 114):** keypad operators/directional/KP_Enter/KP_Begin, media
-    keys, and CapsLock/ScrollLock/NumLock/PrintScreen/Pause/Menu-as-keys are now
-    delivered via a raw-winit `KeyboardInput` intercept
-    (`App::on_raw_key_event` in `freminal-windowing/src/lib.rs`, wired through
-    `event_loop.rs` before egui-winit translation) and encoded to
+    keys, and PrintScreen/Pause/Menu-as-keys are delivered via a raw-winit
+    `KeyboardInput` intercept (`App::on_raw_key_event` in
+    `freminal-windowing/src/lib.rs`, wired through `event_loop.rs` before
+    egui-winit translation) and encoded to
     `TerminalInput::KittyFunctional { codepoint, mods }` on the existing
     `build_csi_u` path — the same encoding Task 101 uses, just fed from a
     different delivery seam. Numpad digits/decimal remain unified with
     main-row digits per egui#3653.
+  - **⏳ Gap (REVERTED 2026-07-06):** CapsLock/ScrollLock/NumLock **as keys**
+    (their `CSI 57358/57359/57360 u` transition events) are **not** delivered.
+    The transition is not observable off X11 (Wayland compositor consumes the
+    key; Windows/macOS expose a level, not an edge), so shipping it only on X11
+    would make one platform behave differently. Declined; tracked upstream
+    (egui#3653, winit#1426). The `KKP_*_CODEPOINT` constants stay defined in
+    `freminal-terminal-emulator` (spec table) — only the GUI delivery is absent.
   - **⏳ Gap (no winit `KeyCode`, not egui):** ISO_Level3_Shift / ISO_Level5_Shift
     (57453/57454) are still not delivered. The 114.5 recon confirmed the
     blocker moved from egui to **winit itself**: winit 0.30.13's `KeyCode` enum
