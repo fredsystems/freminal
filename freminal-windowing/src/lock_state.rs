@@ -15,9 +15,11 @@
 //! On Linux (both X11 and Wayland), the query reads kernel LED state via
 //! `evdev`, sidestepping the display server entirely -- see the durable
 //! decision in `Documents/PLAN_VERSION_110.md` ("114 Durable decision:
-//! per-platform lock-state query resolved") for the full rationale. Windows
-//! and macOS real queries land in subtasks 114.2/114.3; until then those
-//! platforms use a stub that always reports all locks as inactive.
+//! per-platform lock-state query resolved") for the full rationale. On
+//! Windows, the query uses `GetKeyState` (subtask 114.2). macOS's real query
+//! lands in subtask 114.3; until then that platform (and any other
+//! non-Linux, non-Windows target) uses a stub that always reports all locks
+//! as inactive.
 
 /// The current state of the three standard lock keys.
 ///
@@ -94,15 +96,42 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::LockState;
+    use winapi::um::winuser::{GetKeyState, VK_CAPITAL, VK_NUMLOCK, VK_SCROLL};
+
+    /// Windows implementation: query each toggle key's state via the
+    /// `user32` `GetKeyState` API.
+    pub(super) fn query_lock_state() -> LockState {
+        LockState {
+            caps: is_toggled(VK_CAPITAL),
+            num: is_toggled(VK_NUMLOCK),
+            scroll: is_toggled(VK_SCROLL),
+        }
+    }
+
+    /// Returns whether the given virtual-key's toggle state is active.
+    ///
+    /// `GetKeyState`'s return value has the low-order bit set when the key is
+    /// "toggled" (on) for toggle keys like Caps/Num/Scroll Lock.
+    fn is_toggled(vk: i32) -> bool {
+        // SAFETY: `GetKeyState` is a pure Win32 query with no preconditions;
+        // it takes an integer virtual-key code and returns a SHORT. There are
+        // no pointers, no lifetimes, and no invariants to uphold. (114.2)
+        let state = unsafe { GetKeyState(vk) };
+        (state & 0x0001) != 0
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod imp {
     use super::LockState;
 
-    /// Non-Linux stub. Windows (`GetKeyState`) and macOS
-    /// (`CGEventSourceFlagsState`) real queries are implemented in
-    /// subtasks 114.2 and 114.3 respectively; until then, every lock is
-    /// reported as inactive so the crate compiles and runs on every
-    /// platform.
+    /// Non-Linux, non-Windows stub. macOS's real query
+    /// (`CGEventSourceFlagsState`) is implemented in subtask 114.3; until
+    /// then, and on any other platform, every lock is reported as inactive
+    /// so the crate compiles and runs everywhere.
     pub(super) fn query_lock_state() -> LockState {
         LockState::default()
     }
@@ -126,6 +155,15 @@ mod tests {
         // The actual bool values are environment-dependent (they reflect
         // whatever the real hardware/kernel state is on the CI/dev box), so
         // this only asserts the call completes and returns a `LockState`.
+        let _state: LockState = query_lock_state();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn query_lock_state_completes() {
+        // Mirrors the Linux smoke test: the actual bool values are
+        // environment-dependent, so this only asserts the call completes
+        // and returns a `LockState`.
         let _state: LockState = query_lock_state();
     }
 }

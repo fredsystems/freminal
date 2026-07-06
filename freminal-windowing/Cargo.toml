@@ -26,6 +26,9 @@ winit.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { workspace = true, features = ["winuser"] }
+
 [[example]]
 name = "hello"
 path = "examples/hello.rs"
