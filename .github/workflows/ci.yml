@@ -117,6 +117,33 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo xtask check
 
+  # Run the test suite natively on every target platform. The `check`
+  # matrix above only compiles (`cargo xtask check`); it never runs the
+  # tests, and `build-and-check` runs them on Linux only. Platform-specific
+  # test failures — e.g. macOS's 31-char POSIX shm-name limit surfacing as
+  # `ENAMETOOLONG` where Linux allows 255 — are invisible without this job.
+  #
+  # Windows cannot be tested under Nix, so this native matrix is the sole
+  # cross-platform test gate for Windows and macOS. A single toolchain is
+  # used deliberately: test behavior differs by *platform*, not by compiler
+  # version, and the multi-toolchain sweep is already covered by `check`.
+  test:
+    name: Test ${{ matrix.os }}
+    needs: skip-if-clean
+    if: ${{ needs.skip-if-clean.outputs.skip != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo xtask test
+
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
@@ -125,6 +152,7 @@ jobs:
       - build-and-check
       - coverage
       - check
+      - test
     if: always()
     steps:
       - name: Verify all jobs succeeded
@@ -133,6 +161,7 @@ jobs:
           echo "build-and-check: ${{ needs.build-and-check.result }}"
           echo "coverage:        ${{ needs.coverage.result }}"
           echo "check:           ${{ needs.check.result }}"
+          echo "test:            ${{ needs.test.result }}"
 
           # Fast-path: if the merge queue skipper determined no re-check
           # is needed, all downstream jobs were skipped — that is success.
@@ -153,6 +182,11 @@ jobs:
 
           if [[ "${{ needs.check.result }}" != "success" ]]; then
             echo "❌ check matrix failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "❌ test matrix failed"
             exit 1
           fi
 
