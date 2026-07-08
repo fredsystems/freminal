@@ -5757,7 +5757,7 @@ mod tests {
                 image_id: Some(993),
                 ..KittyControlData::default()
             },
-            payload: name.clone().into_bytes(),
+            payload: name.into_bytes(),
         };
 
         handler.handle_kitty_graphics(cmd);
