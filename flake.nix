@@ -11,7 +11,7 @@
     # cargo-bundle is only used inside the dev shell to produce the Linux
     # deb/appimage artifacts locally.  nixpkgs is pinned at 0.9.0, which predates
     # SVG-icon and `appimage` support; we build from upstream master so the dev
-    # shell matches the 0.11.0+ the release CI installs via `cargo install`.
+    # shell matches the 0.11.1+ the release CI installs via `cargo install`.
     # `nix flake update cargo-bundle-src` picks up new upstream commits.
     cargo-bundle-src = {
       url = "github:burtonageo/cargo-bundle";
@@ -107,7 +107,7 @@
             };
           };
 
-          version = "0.11.0";
+          version = "0.11.1";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -171,9 +171,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.11.0</string>
+                    <string>0.11.1</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.11.0</string>
+                    <string>0.11.1</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -301,7 +301,7 @@
 
               # cargo-bundle built from upstream master (see the cargo-bundle-src
               # input).  nixpkgs ships 0.9.0, which cannot bundle SVG icons or
-              # produce appimages; this matches the 0.11.0+ the release CI uses.
+              # produce appimages; this matches the 0.11.1+ the release CI uses.
               # Mirrors the nixpkgs recipe (squashfsTools wrap for appimage).
               cargoBundleLatest = pkgs.rustPlatform.buildRustPackage {
                 pname = "cargo-bundle";
