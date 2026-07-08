@@ -170,22 +170,17 @@ fn widget(palette: &ThemePalette, gui_theme: &GuiTheme, role: WidgetRole) -> Wid
 /// - `gui_theme` — geometry (corner radii, stroke widths, spacing, hover
 ///   expansion).  All geometry comes from here; no values are hard-coded.
 /// - `palette` — color data.  Every color in the returned `Visuals` is
-///   derived from this palette, **except** for the reverse-video white
-///   documented in the `normal_display == false` case below.
+///   derived from this palette.
 /// - `bg_opacity` — background opacity in `[0.0, 1.0]`.  Applied to
 ///   `panel_fill` only; `window_fill` is always fully opaque (so menus,
 ///   settings modal, and chrome remain readable over transparent terminals).
-/// - `normal_display` — when `true` (normal display mode) both fills are
-///   derived from `palette.background`.  When `false` (reverse-video mode)
-///   both fills are forced to solid white, matching the existing behaviour
-///   in `app_impl.rs`.
 ///
 /// # Color derivation table
 ///
 /// | `Visuals` field          | Source                                                |
 /// |--------------------------|-------------------------------------------------------|
-/// | `window_fill`            | `palette.background` (opaque) / white (reverse video) |
-/// | `panel_fill`             | `palette.background` at `bg_opacity` / white          |
+/// | `window_fill`            | `palette.background` (opaque)                         |
+/// | `panel_fill`             | `palette.background` at `bg_opacity`                  |
 /// | `window_stroke`          | `stroke_width` + `ChromeRole::Border`                 |
 /// | `window_corner_radius`   | `gui_theme.corner_radius`                             |
 /// | `menu_corner_radius`     | `gui_theme.menu_corner_radius`                        |
@@ -205,39 +200,23 @@ pub fn build_visuals(
     gui_theme: &GuiTheme,
     palette: &ThemePalette,
     bg_opacity: f32,
-    normal_display: bool,
 ) -> egui::Visuals {
     // ── Fill colors ─────────────────────────────────────────────────────────
+    //
+    // Chrome fills are always derived from the palette background,
+    // regardless of any pane's DECSCNM (reverse-video) state. Reverse video
+    // is a per-cell terminal-content concern, not a chrome concern; the
+    // window_fill is fully opaque (chrome must be readable) and panel_fill
+    // respects bg_opacity so the terminal area can be semi-transparent.
 
-    let (window_fill, panel_fill) = if normal_display {
-        // Normal display: derive both fills from the palette background.
-        // window_fill is fully opaque (chrome must be readable).
-        // panel_fill respects bg_opacity so the terminal area can be
-        // semi-transparent.
-        let wf = internal_color_to_egui_with_alpha(
-            TerminalColor::DefaultBackground,
-            false,
-            palette,
-            1.0,
-        );
-        let pf = internal_color_to_egui_with_alpha(
-            TerminalColor::DefaultBackground,
-            false,
-            palette,
-            bg_opacity,
-        );
-        (wf, pf)
-    } else {
-        // Reverse-video / alternate-screen invert: force white fills.
-        // This is the only hard-coded color in the module (intentional —
-        // white is the semantic "inverted background" for reverse video).
-        let alpha = (bg_opacity.clamp(0.0, 1.0) * 255.0)
-            .approx_as::<u8>()
-            .unwrap_or(255_u8);
-        let wf = Color32::from_rgba_unmultiplied(255, 255, 255, 255);
-        let pf = Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
-        (wf, pf)
-    };
+    let window_fill =
+        internal_color_to_egui_with_alpha(TerminalColor::DefaultBackground, false, palette, 1.0);
+    let panel_fill = internal_color_to_egui_with_alpha(
+        TerminalColor::DefaultBackground,
+        false,
+        palette,
+        bg_opacity,
+    );
 
     // ── Derived scalar types ─────────────────────────────────────────────────
 
@@ -412,7 +391,7 @@ mod tests {
     #[test]
     fn retro_produces_zero_corner_radius() {
         let gt = StyleProfile::Retro.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.window_corner_radius,
@@ -449,7 +428,7 @@ mod tests {
     #[test]
     fn modern_produces_nonzero_corner_radius() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_ne!(
             v.window_corner_radius,
@@ -478,7 +457,7 @@ mod tests {
         // Must be None: a global override bakes one color into every glyph and
         // nullifies selection/per-state text colors (the active-tab bug).
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         assert_eq!(
             v.override_text_color, None,
             "override_text_color must be None so per-state text colors apply"
@@ -491,7 +470,7 @@ mod tests {
         // selection.stroke; these must be the Accent / OnAccent pair so the
         // selected element is saturated and its text legible.
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         assert_eq!(
             v.selection.bg_fill,
             rgb_to_color32(PALETTE.chrome_role(ChromeRole::Accent)),
@@ -504,26 +483,12 @@ mod tests {
         );
     }
 
-    // ── Reverse-video fill ───────────────────────────────────────────────────
+    // ── Window fill ──────────────────────────────────────────────────────────
 
     #[test]
-    fn reverse_video_forces_white_window_fill() {
+    fn window_fill_is_opaque_and_palette_derived() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, false);
-
-        assert_eq!(
-            v.window_fill,
-            Color32::from_rgba_unmultiplied(255, 255, 255, 255),
-            "Reverse-video window_fill must be solid white"
-        );
-    }
-
-    // ── Normal-display fill ─────────────────────────────────────────────────
-
-    #[test]
-    fn normal_display_window_fill_is_opaque_and_palette_derived() {
-        let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         // Alpha must be 255 (fully opaque).
         assert_eq!(
@@ -558,7 +523,7 @@ mod tests {
     #[test]
     fn bg_opacity_half_reflected_in_panel_fill() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 0.5, true);
+        let v = build_visuals(&gt, PALETTE, 0.5);
 
         // 0.5 * 255.0 = 127.5 → approx_as::<u8> truncates to 127.
         // Allow ±1 for rounding differences.
@@ -572,7 +537,7 @@ mod tests {
     #[test]
     fn bg_opacity_full_makes_panel_fill_opaque() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.panel_fill.a(),
@@ -590,7 +555,7 @@ mod tests {
             gt.widget_hover_expansion > 0.0,
             "Modern widget_hover_expansion must be nonzero (pre-condition)"
         );
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.widgets.hovered.expansion, gt.widget_hover_expansion,
@@ -609,7 +574,7 @@ mod tests {
     #[test]
     fn noninteractive_and_inactive_have_zero_expansion() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.widgets.noninteractive.expansion, 0.0,
@@ -625,7 +590,7 @@ mod tests {
     fn retro_all_states_have_zero_expansion() {
         let gt = StyleProfile::Retro.defaults();
         // Retro widget_hover_expansion is 0.0, so all states must be 0.0.
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(v.widgets.noninteractive.expansion, 0.0);
         assert_eq!(v.widgets.inactive.expansion, 0.0);
@@ -639,35 +604,12 @@ mod tests {
     #[test]
     fn menu_corner_radius_matches_gui_theme() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         assert_eq!(
             v.menu_corner_radius,
             CornerRadius::same(gt.menu_corner_radius),
             "menu_corner_radius must match gui_theme.menu_corner_radius"
         );
-    }
-
-    // ── Reverse-video panel_fill alpha ───────────────────────────────────────
-
-    #[test]
-    fn reverse_video_panel_fill_alpha_reflects_opacity() {
-        let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 0.5, false);
-
-        // In reverse-video mode panel_fill is white with opacity applied.
-        // 0.5 * 255 ≈ 127; allow ±1 for rounding.
-        let a = v.panel_fill.a();
-        assert!(
-            (127_i32 - i32::from(a)).abs() <= 1,
-            "Reverse-video panel_fill alpha at bg_opacity=0.5 must be ~127, got {a}"
-        );
-        // RGB must be pure white — check via to_srgba_unmultiplied() because
-        // Color32 stores premultiplied alpha internally, so .r()/.g()/.b()
-        // return the premultiplied values (≈127 at 50% opacity, not 255).
-        let [red, green, blue, _] = v.panel_fill.to_srgba_unmultiplied();
-        assert_eq!(red, 255, "panel_fill R (unmultiplied) must be 255");
-        assert_eq!(green, 255, "panel_fill G (unmultiplied) must be 255");
-        assert_eq!(blue, 255, "panel_fill B (unmultiplied) must be 255");
     }
 
     // ── Surface backgrounds derive from the palette ──────────────────────────
@@ -677,7 +619,7 @@ mod tests {
         // On a non-black palette, extreme/faint/code backgrounds must be
         // palette-derived, not egui's hard-coded near-black dark defaults.
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         let dark_default = egui::Visuals::dark();
         assert_ne!(
@@ -697,7 +639,7 @@ mod tests {
     #[test]
     fn semantic_fg_colors_map_to_palette_ansi() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.warn_fg_color,
@@ -721,7 +663,7 @@ mod tests {
         // Menus / combo dropdowns / context menus all use popup_shadow; its
         // color must be palette-tinted (semi-transparent), not the egui default.
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
 
         assert_eq!(
             v.popup_shadow.color, v.window_shadow.color,
@@ -739,13 +681,13 @@ mod tests {
         // A light palette must set dark_mode = false so egui's implicit
         // shading is correct.
         let gt = StyleProfile::Modern.defaults();
-        let light = build_visuals(&gt, &themes::CATPPUCCIN_LATTE, 1.0, true);
+        let light = build_visuals(&gt, &themes::CATPPUCCIN_LATTE, 1.0);
         assert!(
             !light.dark_mode,
             "Catppuccin Latte is a light theme; dark_mode must be false"
         );
 
-        let dark = build_visuals(&gt, &themes::CATPPUCCIN_MOCHA, 1.0, true);
+        let dark = build_visuals(&gt, &themes::CATPPUCCIN_MOCHA, 1.0);
         assert!(
             dark.dark_mode,
             "Catppuccin Mocha is a dark theme; dark_mode must be true"
@@ -757,7 +699,7 @@ mod tests {
     #[test]
     fn window_stroke_uses_resolved_border_role() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         let expected = rgb_to_color32(PALETTE.chrome_role(ChromeRole::Border));
         assert_eq!(
             v.window_stroke.color, expected,
@@ -768,7 +710,7 @@ mod tests {
     #[test]
     fn widget_fills_use_resolved_surface_roles() {
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         assert_eq!(
             v.widgets.inactive.bg_fill,
             rgb_to_color32(PALETTE.chrome_role(ChromeRole::SurfaceVariant)),
@@ -794,7 +736,7 @@ mod tests {
         // (a designed, legible-by-construction combo) rather than a derived
         // text on a muted surface.
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         assert_eq!(
             v.widgets.active.bg_fill,
             rgb_to_color32(PALETTE.chrome_role(ChromeRole::Accent)),
@@ -813,7 +755,7 @@ mod tests {
         // must not equal ansi[0] (the old "dim border"/fill source) unless the
         // theme genuinely resolves there.
         let gt = StyleProfile::Modern.defaults();
-        let v = build_visuals(&gt, PALETTE, 1.0, true);
+        let v = build_visuals(&gt, PALETTE, 1.0);
         // Mocha authors a distinct Surface0 variant != ansi[0] (Surface1).
         assert_ne!(
             v.widgets.inactive.bg_fill,

@@ -1,6 +1,16 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-08 — Task 117 (v0.11.1) closed two of the three
+Last updated: 2026-07-08 — Task 115 (v0.11.1) closed the DECSCNM
+cell-level fg/bg swap renderer gap: DECSCNM (?5) now performs a per-pane,
+per-cell foreground/background swap at render time in the vertex builders
+(`freminal/src/gui/renderer/vertex.rs`), XOR-composed with per-cell SGR-7
+reverse video. The previous behavior — forcing the egui window
+chrome/`panel_fill` to solid white instead of touching individual cells —
+was removed, and the "DECSCNM — Reverse Video (?5)" row and the
+"DECSCNM cell-level fg/bg swap" roadmap row are both removed from this
+document (see "Renderer Gaps" and "Roadmap by Priority" below — the
+Renderer Gaps table is now empty of DECSCNM). Also 2026-07-08 — Task 117
+(v0.11.1) closed two of the three
 buffer-semantics gaps added earlier today by the drift-reconciliation pass
 (see "Earlier" below) and both entries are removed from this document: (1)
 double-width/double-height rows now halve the auto-wrap column
@@ -25,9 +35,10 @@ characterization was wrong — both top and bottom halves render correctly
 (verified against `RowGlyphParams::new`,
 `freminal/src/gui/renderer/vertex.rs:963-982`, and test
 `row_glyph_params_double_height_bottom_shifts_origin`, `vertex.rs:2489-2496`)
-— this is **not** a gap and is not listed below. DECSCNM, SGR reverse video,
+— this is **not** a gap and is not listed below. SGR reverse video,
 kitty keyboard, bracketed paste, and mouse tracking gap entries were
-spot-checked against code and found already accurate — no change. Earlier:
+spot-checked against code and found already accurate — no change.
+(DECSCNM was subsequently closed as a gap by Task 115 — see above.) Earlier:
 2026-07-06 — Task 114's lock-state half was **reverted**. The
 keypad operators/directional keys, media keys, and print/pause/menu-as-keys
 are delivered via a raw-winit intercept (`App::on_raw_key_event` in
@@ -57,7 +68,7 @@ itemized rows in this GAPS file, so no GAPS entry is removed — the
 "DCS / Graphics Gaps: None" claim below is now accurate. OSC 99 (kitty
 desktop notifications) implemented directly (Task 99, v0.11.0); it was never
 a tracked gap, so no GAPS entry is removed for that either.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114, 117)
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114, 115, 117)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -85,7 +96,6 @@ Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys un
 F3 → `CSI 13 ~`), and Task 114's raw-winit delivery of keypad/media/print/pause/menu keys.
 The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
 
-- **Renderer gaps:** DECSCNM cell-level fg/bg swap (panel-fill swap exists)
 - **OSC gaps:** OSC 66 (recognized but no effect); OSC 9 ConEmu progress-report
   sub-protocol (`9;1`–`9;4`, misparsed as literal notification text)
 - **Keyboard gaps:** `caps_lock`/`num_lock` decoration bits + CapsLock/NumLock/ScrollLock
@@ -107,11 +117,10 @@ Legend:
 
 ## Renderer Gaps
 
-These features are tracked at the state-machine level but the renderer does not yet fully act on them.
-
-| Feature                      | Importance | Type | Planned | Notes                                                                                                         |
-| ---------------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------- |
-| DECSCNM — Reverse Video (?5) | 🟨         | 🚧   | —       | `TerminalModes.invert_screen` set; renderer swaps panel-fill background but per-cell fg/bg inversion not done |
+None currently tracked. DECSCNM (?5) cell-level fg/bg swap was the last entry
+in this section; it was closed by Task 115 (v0.11.1), which performs the
+swap per-pane, per-cell at render time in the vertex builders and removed
+the prior panel-fill-only white inversion.
 
 ---
 
@@ -252,10 +261,9 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 1 — Renderer integration
 
-| Item                          | Rationale                                                                  | Planned        |
-| ----------------------------- | -------------------------------------------------------------------------- | -------------- |
-| DECSCNM cell-level fg/bg swap | Panel-fill inversion lands today; true per-cell inversion still missing    | —              |
-| OSC 133 command-block UI      | Storage + navigation done under Task 72; only the gutter rendering remains | v0.9.0 Task 73 |
+| Item                     | Rationale                                                                  | Planned        |
+| ------------------------ | -------------------------------------------------------------------------- | -------------- |
+| OSC 133 command-block UI | Storage + navigation done under Task 72; only the gutter rendering remains | v0.9.0 Task 73 |
 
 ### Priority 2 — Polish
 

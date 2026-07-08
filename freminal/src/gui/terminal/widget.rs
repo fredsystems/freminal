@@ -2382,6 +2382,12 @@ impl FreminalTerminalWidget {
                         term_width_cols: snap.term_width,
                         theme: snap.theme,
                         cursor_color_override: snap.cursor_color_override,
+                        // Task 115.2: DECSCNM (whole-screen reverse video)
+                        // composes with per-cell SGR-7 by XOR inside the
+                        // vertex builders via `effective_fg`/`effective_bg`.
+                        // `is_normal_display` is `true` for normal display,
+                        // so DECSCNM-active is its negation.
+                        reverse_screen: !snap.is_normal_display,
                     },
                     &mut rs_ref.bg_instances,
                     &mut rs_ref.deco_verts,
@@ -2401,6 +2407,9 @@ impl FreminalTerminalWidget {
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
+                    // Task 115.2: see the matching `BackgroundFrame`
+                    // construction above for the XOR-compose rationale.
+                    reverse_screen: !snap.is_normal_display,
                 };
                 build_foreground_instances(
                     &rendered_shaped_lines,

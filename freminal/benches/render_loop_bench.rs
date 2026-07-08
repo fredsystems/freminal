@@ -475,6 +475,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                             term_width_cols: 0,
                             theme: &CATPPUCCIN_MOCHA,
                             cursor_color_override: None,
+                            reverse_screen: false,
                         },
                         &mut instances,
                         &mut deco,
@@ -601,11 +602,11 @@ fn bench_shape_placeholder_line(c: &mut Criterion) {
 // `build_visuals` maps a `(GuiTheme, ThemePalette)` pair to a fully-specified
 // egui `Visuals`.  It is invoked by the per-frame style hook in
 // `app_impl::update`, but **only when the style cache key changes** (theme /
-// profile / opacity / display-mode).  On the steady-state path the cache
-// short-circuits the call entirely, so this measures the worst case: the cost
-// paid on a theme/profile switch, and the cost that *would* be paid every
-// frame if the cache regressed.  It must be far below a frame budget so that
-// even a per-frame call (a cache regression) would be invisible.
+// profile / opacity).  On the steady-state path the cache short-circuits the
+// call entirely, so this measures the worst case: the cost paid on a
+// theme/profile switch, and the cost that *would* be paid every frame if the
+// cache regressed.  It must be far below a frame budget so that even a
+// per-frame call (a cache regression) would be invisible.
 fn bench_build_visuals(c: &mut Criterion) {
     use freminal::gui::chrome_style::build_visuals;
     use freminal_common::gui_theme::StyleProfile;
@@ -624,7 +625,6 @@ fn bench_build_visuals(c: &mut Criterion) {
                     std::hint::black_box(&gui_theme),
                     std::hint::black_box(&CATPPUCCIN_MOCHA),
                     std::hint::black_box(1.0),
-                    std::hint::black_box(true),
                 ));
             });
         });

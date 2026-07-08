@@ -2,7 +2,14 @@
 
 ## Last updated
 
-Last updated: 2026-07-08 — Task 117 (v0.11.1) closed two buffer-semantics
+Last updated: 2026-07-08 — Task 115 (v0.11.1) implemented DECSCNM (?5) as a
+per-pane, per-cell foreground/background swap performed at render time in
+the vertex builders (`freminal/src/gui/renderer/vertex.rs`), composing with
+per-cell SGR-7 reverse video by XOR — a cell that is both SGR-7 and DECSCNM
+renders un-swapped. The previous behavior, which forced the egui window
+chrome/`panel_fill` to solid white instead of touching individual cells, was
+removed; DECSCNM now moves from partial to fully implemented. Also
+2026-07-08 — Task 117 (v0.11.1) closed two buffer-semantics
 gaps. (1) Auto-wrap column is now halved on double-width/double-height rows:
 `Buffer::insert_text` (`freminal-buffer/src/buffer/mod.rs:355-365`) checks
 `row.line_width.is_double_width()` and halves the DECLRMM-margin-derived
@@ -26,9 +33,10 @@ Clarified that OSC 9 implements only the iTerm2/WezTerm simple-body variant;
 the ConEmu progress-report sub-protocol (`OSC 9;1`–`9;4`) is not recognized
 and is misparsed as literal notification body text (`handle_osc_notify_9`,
 `freminal-terminal-emulator/src/ansi_components/osc_notify.rs:45-77`).
-DECSCNM, SGR reverse video, kitty keyboard, bracketed paste, and mouse
+SGR reverse video, kitty keyboard, bracketed paste, and mouse
 tracking entries were spot-checked against code and found already accurate —
-no change. Earlier: 2026-07-06 — Task 114's lock-state half was **reverted**. The
+no change. (DECSCNM was subsequently changed by Task 115 — see above.)
+Earlier: 2026-07-06 — Task 114's lock-state half was **reverted**. The
 previously egui-blocked keypad operators/directional, media keys, and
 PrintScreen/Pause/Menu keys are delivered via a raw-winit intercept
 (`App::on_raw_key_event` in `freminal-windowing`) and encoded through the
@@ -58,7 +66,7 @@ z-index render ordering; plus OSC 99 (kitty desktop notifications)
 implemented (Task 99, v0.11.0): stateful notifications with chunked
 title/body/icon/buttons, urgency/sound/occasion/expiry, activation/close/
 alive reverse reports, and the p=? capability handshake.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114, 117)
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114, 115, 117)
 
 ## Overview
 
@@ -68,9 +76,9 @@ been fixed, and further coverage landed during v0.3.0–v0.7.0 (notably: DECDWL/
 blinking text, bell with visual + audible feedback, DECANM/VT52, DECNKM, DECBKM, DECLRMM,
 AlternateScroll, IRM, and SGR underline styles with per-underline color).
 
-The remaining gaps are primarily optional features: full cell-level fg/bg swap for DECSCNM,
-legacy G1–G3 charset switching and a handful of niche standard modes
-(SRM) and DEC modes (?1034, ?1001 functional effect).
+The remaining gaps are primarily optional features: legacy G1–G3 charset
+switching and a handful of niche standard modes (SRM) and DEC modes
+(?1034, ?1001 functional effect).
 
 ### Status Legend
 
@@ -264,36 +272,36 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 ## DEC Private Modes (CSI ? Pm h / l)
 
-| ?Ps   | Name                             | Status | Notes                                                                                                                                |
-| ----- | -------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------ |
-| ?1    | DECCKM — Cursor Keys Mode        | ✅     | Wired to `TerminalModes.cursor_key`; GUI reads for application/normal arrow key translation                                          |
-| ?2    | DECANM — VT52 Mode               | ✅     | Full VT52/ANSI state machine toggle; VT52 ESC sequences, `ESC <` return to ANSI (Task 20)                                            |
-| ?3    | DECCOLM — 80/132 Column Mode     | ✅     | Mode stored and acted on when `AllowColumnModeSwitch (?40)` is enabled                                                               |
-| ?5    | DECSCNM — Reverse Video          | 🚧     | Mode stored in `TerminalModes.invert_screen`; renderer swaps background fill but full cell-level fg/bg inversion not yet implemented |
-| ?6    | DECOM — Origin Mode              | ✅     | Mode stored and applied; CUP row 1 → top of scroll region when set                                                                   |
-| ?7    | DECAWM — Auto Wrap Mode          | ✅     | Implemented (`Decawm` enum)                                                                                                          |
-| ?8    | DECARM — Auto Repeat Keys        | ✅     | Mode stored in `TerminalModes.repeat_keys`                                                                                           |
-| ?12   | XtCBlink — Cursor Blink          | ✅     | Implemented                                                                                                                          |
-| ?25   | DECTCEM — Show/Hide Cursor       | ✅     | Implemented                                                                                                                          |
-| ?40   | AllowColumnModeSwitch            | ✅     | Gates DECCOLM behavior                                                                                                               |
-| ?45   | ReverseWrapAround                | ✅     | Mode stored in `TerminalModes.reverse_wrap_around`                                                                                   |
-| ?47   | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                          |
-| ?66   | DECNKM — Numeric Keypad          | ✅     | Keypad application/numeric mode; alias for `ESC=` / `ESC>`; DECRQM supported (Task 20)                                               |
-| ?67   | DECBKM — Backarrow Key           | ✅     | Backspace sends BS (set) or DEL (reset); wired in keyboard input path; snapshot field `backarrow_key_mode` (Task 20)                 |
-| ?69   | DECLRMM — Left/Right Margin Mode | ✅     | Gates `DECSLRM` (`CSI Pl;Pr s`) (Task 20)                                                                                            |
-| ?1000 | X11 Mouse — Normal Tracking      | ✅     | Mode stored in `TerminalModes.mouse_tracking`; GUI reads and forwards events                                                         |
-| ?1001 | XtMseHilite — Highlight Tracking | 🚧     | Mode parsed and stored; obsolete hilite tracking not functionally active                                                             |
-| ?1002 | X11 Mouse — Button Event         | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
-| ?1003 | X11 Mouse — Any Event            | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
-| ?1004 | Focus Reporting                  | ✅     | Mode stored in `TerminalModes.focus_reporting`; GUI sends focus events                                                               |
-| ?1006 | SGR Mouse — Extended Coordinates | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                        |
-| ?1007 | AlternateScroll                  | ✅     | Mouse wheel translated to scroll keys in alternate screen                                                                            |
-| ?1047 | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                          |
-| ?1048 | Save/Restore Cursor (legacy)     | ✅     | Wired to existing save/restore cursor machinery                                                                                      |
-| ?1049 | Alt Screen Buffer + Save Cursor  | ✅     | Implemented — swaps screen buffers                                                                                                   |
-| ?2004 | Bracketed Paste                  | ✅     | Mode stored in `TerminalModes.bracketed_paste`; GUI wraps paste with bracket sequences                                               |
-| ?2026 | Synchronized Output              | ✅     | Mode stored in `TerminalModes.synchronized_updates`                                                                                  |
-| ?2031 | Adaptive Theme Notification      | ✅     | DECRPM query path implemented (Task 52)                                                                                              |
+| ?Ps   | Name                             | Status | Notes                                                                                                                               |
+| ----- | -------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| ?1    | DECCKM — Cursor Keys Mode        | ✅     | Wired to `TerminalModes.cursor_key`; GUI reads for application/normal arrow key translation                                         |
+| ?2    | DECANM — VT52 Mode               | ✅     | Full VT52/ANSI state machine toggle; VT52 ESC sequences, `ESC <` return to ANSI (Task 20)                                           |
+| ?3    | DECCOLM — 80/132 Column Mode     | ✅     | Mode stored and acted on when `AllowColumnModeSwitch (?40)` is enabled                                                              |
+| ?5    | DECSCNM — Reverse Video          | ✅     | Per-pane, per-cell fg/bg swap performed at render time in the vertex builders, XOR-composed with per-cell SGR-7 (Task 115, v0.11.1) |
+| ?6    | DECOM — Origin Mode              | ✅     | Mode stored and applied; CUP row 1 → top of scroll region when set                                                                  |
+| ?7    | DECAWM — Auto Wrap Mode          | ✅     | Implemented (`Decawm` enum)                                                                                                         |
+| ?8    | DECARM — Auto Repeat Keys        | ✅     | Mode stored in `TerminalModes.repeat_keys`                                                                                          |
+| ?12   | XtCBlink — Cursor Blink          | ✅     | Implemented                                                                                                                         |
+| ?25   | DECTCEM — Show/Hide Cursor       | ✅     | Implemented                                                                                                                         |
+| ?40   | AllowColumnModeSwitch            | ✅     | Gates DECCOLM behavior                                                                                                              |
+| ?45   | ReverseWrapAround                | ✅     | Mode stored in `TerminalModes.reverse_wrap_around`                                                                                  |
+| ?47   | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                         |
+| ?66   | DECNKM — Numeric Keypad          | ✅     | Keypad application/numeric mode; alias for `ESC=` / `ESC>`; DECRQM supported (Task 20)                                              |
+| ?67   | DECBKM — Backarrow Key           | ✅     | Backspace sends BS (set) or DEL (reset); wired in keyboard input path; snapshot field `backarrow_key_mode` (Task 20)                |
+| ?69   | DECLRMM — Left/Right Margin Mode | ✅     | Gates `DECSLRM` (`CSI Pl;Pr s`) (Task 20)                                                                                           |
+| ?1000 | X11 Mouse — Normal Tracking      | ✅     | Mode stored in `TerminalModes.mouse_tracking`; GUI reads and forwards events                                                        |
+| ?1001 | XtMseHilite — Highlight Tracking | 🚧     | Mode parsed and stored; obsolete hilite tracking not functionally active                                                            |
+| ?1002 | X11 Mouse — Button Event         | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                       |
+| ?1003 | X11 Mouse — Any Event            | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                       |
+| ?1004 | Focus Reporting                  | ✅     | Mode stored in `TerminalModes.focus_reporting`; GUI sends focus events                                                              |
+| ?1006 | SGR Mouse — Extended Coordinates | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                       |
+| ?1007 | AlternateScroll                  | ✅     | Mouse wheel translated to scroll keys in alternate screen                                                                           |
+| ?1047 | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                         |
+| ?1048 | Save/Restore Cursor (legacy)     | ✅     | Wired to existing save/restore cursor machinery                                                                                     |
+| ?1049 | Alt Screen Buffer + Save Cursor  | ✅     | Implemented — swaps screen buffers                                                                                                  |
+| ?2004 | Bracketed Paste                  | ✅     | Mode stored in `TerminalModes.bracketed_paste`; GUI wraps paste with bracket sequences                                              |
+| ?2026 | Synchronized Output              | ✅     | Mode stored in `TerminalModes.synchronized_updates`                                                                                 |
+| ?2031 | Adaptive Theme Notification      | ✅     | DECRPM query path implemented (Task 52)                                                                                             |
 
 ### Not Yet Parsed
 
@@ -366,7 +374,7 @@ UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 | DECDWL / DECDHL                 | ✅              | 🚧                 | `LineWidth` enum; renderer applies 2× x-scale (DECDWL) and 2× y-scale (DECDHL); both DECDHL top and bottom halves render correctly, a genuine VT100 split (Task 49; `vertex.rs:963-982`). Auto-wrap column is now halved on double-width/height rows (Task 117, v0.11.1; `insert_text`, `buffer/mod.rs:355-365`)                                                                                                                                         |
 | VT52 Mode (DECANM)              | ✅              | ⬜                 | Full VT52 state machine (Task 20)                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | SGR 7 / SGR 27 (Reverse Video)  | ✅              | ✅                 | Per-cell fg/bg swap via `StateColors::get_color` / `get_background_color`                                                                                                                                                                                                                                                                                                                                                                                |
-| DECSCNM (?5) Screen Reverse     | 🚧              | ✅                 | Mode tracked; renderer inverts panel_fill (white) but per-cell colors are not swapped                                                                                                                                                                                                                                                                                                                                                                    |
+| DECSCNM (?5) Screen Reverse     | ✅              | ✅                 | Per-pane, per-cell fg/bg swap at render time; XOR-composes with SGR-7; no longer couples to window chrome (Task 115, v0.11.1)                                                                                                                                                                                                                                                                                                                            |
 | Kitty Keyboard Protocol         | ✅              | 🚧                 | Task 35 + Task 101: super modifier, F13–F35, modifier-keys-as-keys (flag 8), F3 → `CSI 13 ~`. Task 114 delivered keypad/media/print/pause/menu keys (raw-winit intercept). NOT implemented: caps_lock/num_lock decoration + lock-key transition events (Task 114 lock half reverted — not producible uniformly across platforms), ISO_Level3/5_Shift (no winit `KeyCode`), hyper/meta bits (no platform source). Tracked upstream: egui#3653, winit#1426 |
 | Bell (BEL, 0x07)                | ✅              | ✅                 | `WindowCommand::Bell`; 200 ms tab-bar flash; optional audible beep; configurable `BellMode` (Task 41)                                                                                                                                                                                                                                                                                                                                                    |
 | SO/SI (G1 charset switching)    | ⬜              | 🚧                 | Parsed but G1 rendering not implemented                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -390,13 +398,12 @@ UI for command-block navigation (gutters, jump-to-prompt, fold) is planned for
 
 The gaps that remain are either low-priority polish or require significant new infrastructure:
 
-1. **Cell-level DECSCNM inversion** — Panel fill is inverted, but individual cell fg/bg are not swapped.
-2. **SO/SI G1 charset switching** — Consumed as control characters; G1 rendering not implemented (simplified single-slot charset model).
-3. **OSC 66** — Recognized; silently consumed (DECRPM ?2031 is the functional adaptive-theme path). OSC 777 is now implemented (Task 76).
-4. **Standard mode SRM (12)** — Rare in practice.
-5. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
-6. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).
-7. **OSC 9 ConEmu progress-report sub-protocol** — Only the iTerm2/WezTerm simple-body variant is recognized; `OSC 9;1`–`9;4` progress-state sequences are misparsed as literal notification text rather than being recognized and ignored/handled.
+1. **SO/SI G1 charset switching** — Consumed as control characters; G1 rendering not implemented (simplified single-slot charset model).
+2. **OSC 66** — Recognized; silently consumed (DECRPM ?2031 is the functional adaptive-theme path). OSC 777 is now implemented (Task 76).
+3. **Standard mode SRM (12)** — Rare in practice.
+4. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
+5. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).
+6. **OSC 9 ConEmu progress-report sub-protocol** — Only the iTerm2/WezTerm simple-body variant is recognized; `OSC 9;1`–`9;4` progress-state sequences are misparsed as literal notification text rather than being recognized and ignored/handled.
 
 ---
 
