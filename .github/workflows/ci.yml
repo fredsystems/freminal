@@ -98,7 +98,12 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  # Run cargo check. This is a fast way to catch any obvious errors in the code.
+  # Run clippy with `-D warnings` on every target OS and toolchain.
+  # `cargo xtask check` runs clippy (a superset of `cargo check`) with
+  # warnings denied, so this matrix is a genuine cross-platform
+  # fail-on-warning gate — it catches OS-specific warnings (e.g. `dead_code`
+  # for a function whose only non-test caller is behind `#[cfg(...)]` on
+  # another platform) that would otherwise only surface downstream.
   check:
     name: Check ${{ matrix.os }} ${{ matrix.toolchain }}
     needs: skip-if-clean

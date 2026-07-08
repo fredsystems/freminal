@@ -283,9 +283,23 @@ fn build() -> Result<()> {
     run_cargo(vec!["build", "--all-targets", "--all-features"])
 }
 
-/// Run cargo check
+/// Run clippy with warnings denied.
+///
+/// Runs clippy (a superset of `cargo check`) rather than a bare `cargo
+/// check` so the CI `check` matrix — which runs this on every target OS —
+/// is a genuine fail-on-warning gate. This is what catches platform-specific
+/// warnings (e.g. `dead_code` for a function whose only non-test caller is
+/// behind `#[cfg(...)]` on another OS) that a warning-permissive `cargo
+/// check` would emit but not fail on. Mirrors [`lint_clippy`]'s flags.
 fn check() -> Result<()> {
-    run_cargo(vec!["check", "--all-targets", "--all-features"])
+    run_cargo(vec![
+        "clippy",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    ])
 }
 
 /// Run cargo-rdme to check if README.md is up-to-date with the library documentation
