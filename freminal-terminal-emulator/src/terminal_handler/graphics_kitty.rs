@@ -3059,6 +3059,34 @@ mod tests {
         (handler, rx)
     }
 
+    /// Generate a unique, POSIX-style shared-memory object name that is safe
+    /// to pass to `shm_open` / `CreateFileMappingW` on every platform.
+    ///
+    /// macOS caps POSIX shm names at `PSHMNAMLEN` (31 characters, *including*
+    /// the leading `/`) and returns `ENAMETOOLONG` for anything longer —
+    /// unlike Linux, which allows up to `NAME_MAX` (255). The descriptive
+    /// `/freminal_test_shm_{pid}_{label}` names previously used here
+    /// overflowed that limit on macOS, so names are kept deliberately short.
+    ///
+    /// Uniqueness across concurrently-running test binaries and across the
+    /// tests within one binary comes from the low bits of the process id
+    /// combined with a per-binary atomic counter, hex-encoded. The result
+    /// (e.g. `/frm_2a3f_1`) stays well under 31 characters while satisfying
+    /// [`shm_name_is_safe`] (single leading slash, no embedded slash, no
+    /// `..`, no NUL).
+    #[cfg(any(unix, windows))]
+    fn unique_shm_name() -> String {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        // Mask the pid to 16 bits so the hex stays at most 4 characters; the
+        // atomic counter guarantees intra-binary uniqueness regardless.
+        let pid = std::process::id() & 0xffff;
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("/frm_{pid:x}_{seq:x}")
+    }
+
     /// Helper: build a `KittyGraphicsCommand` with the given control data and
     /// raw RGBA payload for a 2x2 image.
     fn kitty_rgba_2x2_cmd(action: KittyAction) -> KittyGraphicsCommand {
@@ -5507,11 +5535,10 @@ mod tests {
 
         let (mut handler, rx) = kitty_handler();
 
-        let name = format!(
-            "/freminal_test_shm_nonexistent_{}_{}",
-            std::process::id(),
-            line!()
-        );
+        // A safe, well-formed name that does not correspond to any existing
+        // mapping — the point is that opening it fails. Kept short so it is
+        // consistent with the POSIX path and the shared naming helper.
+        let name = unique_shm_name();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -5653,17 +5680,14 @@ mod tests {
     /// is closed, and this test is the only thing creating (and thus
     /// keeping alive) the object.
     #[cfg(windows)]
-    fn create_test_shm_object_windows(
-        unique: &str,
-        data: &[u8],
-    ) -> (String, winapi::um::winnt::HANDLE) {
+    fn create_test_shm_object_windows(data: &[u8]) -> (String, winapi::um::winnt::HANDLE) {
         use winapi::um::handleapi::INVALID_HANDLE_VALUE;
         use winapi::um::memoryapi::{
             CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, UnmapViewOfFile,
         };
         use winapi::um::winnt::PAGE_READWRITE;
 
-        let name = format!("/freminal_test_shm_{}_{unique}", std::process::id());
+        let name = unique_shm_name();
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let size = u32::try_from(data.len().max(1)).expect("test data length fits in u32");
 
@@ -5718,7 +5742,7 @@ mod tests {
 
         // 2x1 RGBA image: red pixel, green pixel.
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
-        let (name, creator_handle) = create_test_shm_object_windows("round_trip", &pixels);
+        let (name, creator_handle) = create_test_shm_object_windows(&pixels);
 
         let (mut handler, rx) = kitty_handler();
 
@@ -5781,11 +5805,11 @@ mod tests {
 
         let (mut handler, rx) = kitty_handler();
 
-        let name = format!(
-            "/freminal_test_shm_nonexistent_{}_{}",
-            std::process::id(),
-            line!()
-        );
+        // A safe, well-formed name that does not correspond to any existing
+        // object — the point is that `shm_open` fails with `ENOENT`. The name
+        // must fit macOS's 31-char shm limit, or the error would be
+        // `ENAMETOOLONG` instead. `unique_shm_name` never creates the object.
+        let name = unique_shm_name();
 
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
@@ -5874,13 +5898,13 @@ mod tests {
     /// returning its unique name. Test-only helper for the `t=s` round-trip
     /// tests below.
     #[cfg(unix)]
-    fn create_test_shm_object(unique: &str, data: &[u8]) -> String {
+    fn create_test_shm_object(data: &[u8]) -> String {
         use nix::fcntl::OFlag;
         use nix::sys::mman::{MapFlags, ProtFlags, mmap, munmap, shm_open};
         use nix::sys::stat::Mode;
         use nix::unistd::ftruncate;
 
-        let name = format!("/freminal_test_shm_{}_{unique}", std::process::id());
+        let name = unique_shm_name();
         let fd = shm_open(
             name.as_str(),
             OFlag::O_CREAT | OFlag::O_RDWR,
@@ -5933,7 +5957,7 @@ mod tests {
 
         // 2x1 RGBA image: red pixel, green pixel.
         let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255];
-        let name = create_test_shm_object("round_trip", &pixels);
+        let name = create_test_shm_object(&pixels);
 
         let (mut handler, rx) = kitty_handler();
 
@@ -5999,7 +6023,7 @@ mod tests {
         object.extend_from_slice(&header);
         object.extend_from_slice(&pixel);
 
-        let name = create_test_shm_object("with_offset", &object);
+        let name = create_test_shm_object(&object);
 
         let (mut handler, _rx) = kitty_handler();
 
