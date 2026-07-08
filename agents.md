@@ -88,6 +88,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                   |
 | `freminal-numeric-conversions`     | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                               |
 | `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
+| `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
 | `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |

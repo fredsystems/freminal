@@ -75,6 +75,12 @@ When a version is activated (moved from stub to active work):
 Activation planning is itself Opus work. It is orchestration, not
 implementation.
 
+At activation you set the version's status to `In progress` and its
+tasks to `Planned` (step 4 above). Every subsequent status transition —
+including the one that gets forgotten, advancing a task to `Complete`
+when its PR merges — is governed by the **`freminal-plan-status-lifecycle`**
+skill. Load it whenever you edit `MASTER_PLAN.md` status columns.
+
 ## The Sonnet-sized subtask shape
 
 The division of labour:
@@ -173,6 +179,9 @@ Stop: report files changed + verification results; await review.
   decomposition is incomplete -- that choice is Opus's.
 - Do NOT write subtasks against remembered code. Re-read the seams at
   activation; the codebase moved since the stub was written.
+- Do NOT leave a task at `Pending merge` / `Planned` after its PR has
+  merged. Advancing status in MASTER_PLAN is governed by the
+  `freminal-plan-status-lifecycle` skill — load it for the full rule.
 
 ## When to stop and ask
 

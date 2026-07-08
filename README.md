@@ -21,7 +21,7 @@
 
 - **It records everything.** Start a session with one flag and every keystroke, every byte of output, every pane, every window is captured to a single file for replay, debugging, or post-mortems. Great for bug reports, teaching, and figuring out what on earth that script did last Tuesday.
 
-- **It respects its own foundation.** The next release is entirely devoted to closing every correctness and polish gap before a single new feature ships. When Freminal says a feature works, it works.
+- **It respects its own foundation.** Every release starts with a correctness-and-polish gate before new features ship, and that discipline never lets up — it's why the workflow features below (command blocks, notifications, paste guard) landed on top of a foundation that had already been audited end to end. When Freminal says a feature works, it works.
 
 ---
 
@@ -31,7 +31,7 @@
 Ligature-aware programming fonts, color emoji, 27 built-in themes with a live-preview picker, adjustable background opacity, cursor styles with blink, and smooth GPU rendering on every platform.
 
 **Terminal compatibility**
-Full modern escape sequence support — true-color, mouse tracking, bracketed paste, focus reporting, Kitty keyboard protocol, alternate screens, scroll regions, left/right margins, blinking text, OSC 8 hyperlinks, and even VT52 for the retro crowd.
+Full modern escape sequence support — true-color, mouse tracking, bracketed paste, focus reporting, Kitty keyboard protocol, alternate screens, scroll regions, left/right margins, blinking text, OSC 8 hyperlinks, shell-integration command blocks with exit-status tracking, desktop notifications (OSC 9 / 777 / 99), and even VT52 for the retro crowd.
 
 **Inline images**
 iTerm2 and Kitty graphics protocols plus Sixel. Tools like `yazi`, `timg`, and image-aware shells display images directly in the terminal.
@@ -165,19 +165,27 @@ freminal --recording-path ~/rec.frec  # record this session to disk
 
 ## Roadmap
 
-Freminal is under active development with a public, versioned roadmap. Every version below has a written plan; stubs fill in as we get closer.
+Freminal is under active development with a public, versioned roadmap. Every version below has a written plan; far-out versions are captured as design-intent stubs and only get a full subtask breakdown once their turn comes.
 
-| Version | Theme                      | Status           | Highlights                                                                                                                                    |
-| ------- | -------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| v0.8.0  | Correctness & Polish       | Next (hard gate) | No new features. The whole version is devoted to finishing every rough edge before v0.9.0 adds anything new.                                  |
-| v0.9.0  | Modern Workflow Terminal   | Planned          | Shell-aware command blocks with exit-status gutters, broadcast-to-panes, project-scoped environments, system notifications, smart paste guard |
-| v0.10.0 | Power-User Toolkit         | Planned          | Named profiles, live theme editor, fast scrollback regex search, hint mode, command palette                                                   |
-| v0.11.0 | Platform Play              | Planned          | User scripting, a powerline-capable status bar, first-class SSH with session roaming, optional AI command assist                              |
-| v0.12.0 | Completeness & Credibility | Planned          | CJK / IME input, accessibility hooks, Windows quality pass, opt-in crash reporting, terminfo auto-install, config import from other terminals |
+| Version | Theme                           | Status   | Highlights                                                                                                         |
+| ------- | ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------ |
+| v0.8.0  | Correctness & Polish            | Complete | Full code-correctness and hygiene sweep plus a UX completeness pass — every rough edge closed before new features. |
+| v0.9.0  | Modern Workflow Terminal        | Complete | OSC 133 command blocks, broadcast input to panes, workspace-scoped environments, notifications, smart paste guard. |
+| v0.10.0 | Beautification & Fonts          | Complete | Bundled CaskaydiaCove Nerd Font (ligatures + powerline glyphs) and a theme-consistent UI chrome pass.              |
+| v0.11.0 | Kitty: Notifications & Graphics | Complete | Kitty desktop notifications (OSC 99), kitty graphics protocol completion, kitty keyboard protocol compliance.      |
+| v0.12.0 | Kitty: Transfer & Cursors       | Planned  | File transfer over the TTY (OSC 5113) with a user-consent prompt, multiple simultaneous cursors.                   |
+| v0.13.0 | Kitty: Text Sizing              | Planned  | Kitty text sizing (OSC 66) — multicell glyph blocks and fractional scaling.                                        |
+| v0.14.0 | Power-User Toolkit              | Stub     | Named profiles, live theme editor, scrollback regex search, hint/quick-select mode, command palette.               |
+| v0.15.0 | Remote                          | Stub     | SSH integration with remote multiplexing.                                                                          |
+| v0.16.0 | Reach & Credibility             | Stub     | CJK / IME input, accessibility hooks, opt-in crash reporting, config import from other terminals.                  |
+| v0.17.0 | Status Bar                      | Stub     | Powerline-capable status bar with built-in and shell-out segments.                                                 |
+| v0.18.0 | AI Assist — Advisory            | Stub     | Opt-in, read-only AI command assistance.                                                                           |
+| v0.19.0 | AI Assist — Generative          | Stub     | Opt-in AI-assisted command generation and execution.                                                               |
+| v0.20.0 | Event Hook API                  | Stub     | Lua-based event hook API for scripting and third-party integrations.                                               |
 
-For the full task list and dependencies, see [`Documents/MASTER_PLAN.md`](./Documents/MASTER_PLAN.md).
+For the full task list, dependencies, and design rationale, see [`Documents/MASTER_PLAN.md`](./Documents/MASTER_PLAN.md).
 
-**Why pause for v0.8.0?** Because a terminal is the program you trust to not surprise you. Before adding command blocks, notifications, and scripting, the existing foundation gets the full treatment: every rough corner smoothed, every advertised feature verified, every error path made visible. When v0.9.0 starts adding the flashy stuff, it's built on something solid.
+**Where things stand today.** The correctness-first foundation (v0.8.0) is done, and it bought real leverage: the modern-workflow feature set — command blocks, notifications, broadcast panes, paste guard (v0.9.0), the bundled-font and UI beautification pass (v0.10.0), and the first tranche of full kitty protocol coverage — desktop notifications, graphics-protocol completion, and keyboard-protocol compliance (v0.11.0) — are all built and merged. Active development is now on the rest of the kitty protocol suite: file transfer and multiple cursors (v0.12.0), then text sizing (v0.13.0). Everything past that is durable design intent, not yet decomposed into implementation work.
 
 ---
 

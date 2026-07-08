@@ -26,6 +26,80 @@
       "matchManagers": ["github-actions", "nix"],
       "matchUpdateTypes": ["major", "minor", "patch", "pin"],
       "automerge": true
+    },
+    {
+      "groupName": "egui + windowing stack",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": [
+        "egui",
+        "egui_glow",
+        "egui-winit",
+        "glow",
+        "glutin",
+        "glutin-winit",
+        "winit",
+        "raw-window-handle"
+      ]
+    },
+    {
+      "groupName": "tracing",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": [
+        "tracing",
+        "tracing-appender",
+        "tracing-log",
+        "tracing-subscriber",
+        "tracing-core",
+        "tracing-tree"
+      ]
+    },
+    {
+      "groupName": "serde",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": [
+        "serde",
+        "serde_repr",
+        "serde_derive",
+        "serde_json",
+        "serde_with",
+        "rmp-serde"
+      ]
+    },
+    {
+      "groupName": "font shaping stack",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["rustybuzz", "swash", "fontdb", "ttf-parser"]
+    },
+    {
+      "groupName": "clap",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["clap", "clap-cargo", "clap-verbosity-flag"]
+    },
+    {
+      "groupName": "error handling",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["anyhow", "thiserror", "color-eyre"]
+    },
+    {
+      "groupName": "unicode",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["unicode-segmentation", "unicode-width"]
+    },
+    {
+      "groupName": "windows platform apis",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["winapi", "winreg", "shared_library"]
+    },
+    {
+      "groupName": "rust test tooling",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": [
+        "assert_cmd",
+        "predicates",
+        "proptest",
+        "test-log",
+        "tempfile"
+      ]
     }
   ]
 }
