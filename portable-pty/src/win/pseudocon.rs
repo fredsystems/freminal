@@ -23,6 +23,9 @@ use winapi::um::winbase::{
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
 
+// `HPCON` is the canonical Win32 ConPTY SDK type name (a pseudo-console
+// handle); keep the platform spelling rather than renaming to `Hpcon`.
+#[allow(clippy::upper_case_acronyms)]
 pub type HPCON = HANDLE;
 
 /// Flag to inherit the cursor position from the parent console.

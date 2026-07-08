@@ -96,7 +96,7 @@ impl MasterPty for ConPtyMasterPty {
 
     fn get_size(&self) -> Result<PtySize, Error> {
         let inner = lock_inner(&self.inner)?;
-        Ok(inner.size.clone())
+        Ok(inner.size)
     }
 
     fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {

@@ -28,23 +28,16 @@ pub struct WinChild {
 /// Helper to lock the process handle mutex, converting a poisoned-mutex error
 /// to `std::io::Error`.
 fn lock_proc(proc: &Mutex<OwnedHandle>) -> IoResult<std::sync::MutexGuard<'_, OwnedHandle>> {
-    proc.lock().map_err(|e| {
-        IoError::new(
-            std::io::ErrorKind::Other,
-            format!("process handle mutex poisoned: {e}"),
-        )
-    })
+    proc.lock()
+        .map_err(|e| IoError::other(format!("process handle mutex poisoned: {e}")))
 }
 
 impl WinChild {
     fn is_complete(&mut self) -> IoResult<Option<ExitStatus>> {
         let mut status: DWORD = 0;
-        let proc = lock_proc(&self.proc)?.try_clone().map_err(|e| {
-            IoError::new(
-                std::io::ErrorKind::Other,
-                format!("failed to clone process handle: {e}"),
-            )
-        })?;
+        let proc = lock_proc(&self.proc)?
+            .try_clone()
+            .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
         let res = unsafe { GetExitCodeProcess(proc.as_raw_handle() as _, &mut status) };
         if res != 0 {
             if status == STILL_ACTIVE {
@@ -58,12 +51,9 @@ impl WinChild {
     }
 
     fn do_kill(&mut self) -> IoResult<()> {
-        let proc = lock_proc(&self.proc)?.try_clone().map_err(|e| {
-            IoError::new(
-                std::io::ErrorKind::Other,
-                format!("failed to clone process handle: {e}"),
-            )
-        })?;
+        let proc = lock_proc(&self.proc)?
+            .try_clone()
+            .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
         let err = IoError::last_os_error();
         if res == 0 {
@@ -100,10 +90,7 @@ pub struct WinChildKiller {
 impl ChildKiller for WinChildKiller {
     fn kill(&mut self) -> IoResult<()> {
         let Some(proc) = &self.proc else {
-            return Err(IoError::new(
-                std::io::ErrorKind::Other,
-                "no process handle available to kill",
-            ));
+            return Err(IoError::other("no process handle available to kill"));
         };
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
         let err = IoError::last_os_error();
@@ -129,12 +116,9 @@ impl Child for WinChild {
         if let Ok(Some(status)) = self.try_wait() {
             return Ok(status);
         }
-        let proc = lock_proc(&self.proc)?.try_clone().map_err(|e| {
-            IoError::new(
-                std::io::ErrorKind::Other,
-                format!("failed to clone process handle: {e}"),
-            )
-        })?;
+        let proc = lock_proc(&self.proc)?
+            .try_clone()
+            .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
         unsafe {
             WaitForSingleObject(proc.as_raw_handle() as _, INFINITE);
         }

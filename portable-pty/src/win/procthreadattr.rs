@@ -22,11 +22,12 @@ impl ProcThreadAttributeList {
                 &mut bytes_required,
             )
         };
-        let mut data = Vec::with_capacity(bytes_required);
-        // We have the right capacity, so force the vec to consider itself
-        // that length.  The contents of those bytes will be maintained
-        // by the win32 apis used in this impl.
-        unsafe { data.set_len(bytes_required) };
+        // Allocate the buffer zero-initialized rather than
+        // `with_capacity` + `set_len` (which would expose uninitialized
+        // bytes as an initialized `&mut [u8]` — UB, flagged by
+        // `clippy::uninit_vec`). The win32 APIs below populate the bytes;
+        // the extra memset of this small buffer is negligible.
+        let mut data = vec![0u8; bytes_required];
 
         let attr_ptr = data.as_mut_slice().as_mut_ptr() as *mut _;
         let res = unsafe {
