@@ -5448,6 +5448,19 @@ mod tests {
 
         let (mut handler, rx) = kitty_handler();
 
+        // Build a platform-appropriate *absolute* path that does not exist.
+        // A hardcoded `/tmp/...` string is not absolute on Windows (no drive
+        // letter), so `read_kitty_file`'s absolute-path guard would reject it
+        // with EPERM before ever attempting the read — deriving from
+        // `temp_dir()` yields a real absolute path on every platform, so the
+        // read is attempted and fails with EIO as intended.
+        let missing = std::env::temp_dir().join("freminal_this_file_does_not_exist_12345.png");
+        let payload = missing
+            .to_str()
+            .expect("temp path is not UTF-8")
+            .as_bytes()
+            .to_vec();
+
         let cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::TransmitAndDisplay),
@@ -5456,7 +5469,7 @@ mod tests {
                 image_id: Some(997),
                 ..KittyControlData::default()
             },
-            payload: b"/tmp/freminal_this_file_does_not_exist_12345.png".to_vec(),
+            payload,
         };
 
         handler.handle_kitty_graphics(cmd);
