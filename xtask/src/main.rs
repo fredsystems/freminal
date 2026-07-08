@@ -88,6 +88,10 @@ enum Command {
     #[command(visible_alias = "c")]
     Check,
 
+    /// Run clippy for the x86_64-pc-windows-gnu target (Windows cross-check)
+    #[command(visible_alias = "cw")]
+    CheckWindows,
+
     /// Check if README.md is up-to-date
     #[command(visible_alias = "cr")]
     CheckReadme,
@@ -213,6 +217,7 @@ impl Command {
             Self::CI => ci(),
             Self::Build => build(),
             Self::Check => check(),
+            Self::CheckWindows => check_windows(),
             Self::Deny => deny(),
             Self::Machete => machete(),
             Self::CheckReadme => check_readme(),
@@ -300,6 +305,71 @@ fn check() -> Result<()> {
         "-D",
         "warnings",
     ])
+}
+
+/// Run clippy for the `x86_64-pc-windows-gnu` target with warnings denied.
+///
+/// Cross-checks the Windows-only `#[cfg(windows)]` code paths (portable-pty's
+/// `ConPTY` backend, the kitty shared-memory tests, etc.) from a Linux dev host,
+/// so Windows-specific lints and `#[cfg]`-gated compile errors are caught
+/// locally instead of only in GitHub CI. Clippy type-checks but does not link,
+/// so this needs only the windows-gnu target std plus a mingw `cc` for cargo's
+/// link-probe — both provided by the `default` dev shell (never the `ci`
+/// shell). See `flake.nix` `windowsCheck` for the toolchain wiring.
+///
+/// Requires the Windows target + linker from the dev shell; if the target std
+/// is missing, cargo emits a clear "target may not be installed" error.
+///
+/// The dev shell puts two toolchains on `PATH` — the CI toolchain (no
+/// windows-gnu std) and the windows-capable one — so this cannot rely on
+/// `which cargo`. When `FREMINAL_WINDOWS_CARGO` is set (by the `default` dev
+/// shell), invoke that cargo explicitly and drop the inherited `CARGO`
+/// (which points at the *outer* `cargo xtask` binary) so the chosen cargo
+/// dispatches its own matching `rustc`.
+fn check_windows() -> Result<()> {
+    let args = vec![
+        "clippy",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--all-targets",
+        "--all-features",
+        "--",
+        "-D",
+        "warnings",
+    ];
+
+    match std::env::var("FREMINAL_WINDOWS_CARGO") {
+        Ok(cargo) if !cargo.is_empty() => {
+            // cargo resolves `rustc` via `RUSTC`/PATH, not its own sibling, and
+            // the CI toolchain (without the windows-gnu std) is also on PATH.
+            // Pin `RUSTC` to the sibling rustc and prepend the toolchain's bin
+            // dir to PATH so cargo uses the windows-capable rustc, not the CI
+            // one. Drop the inherited `CARGO` (the outer `cargo xtask` binary).
+            let bin_dir = std::path::Path::new(&cargo)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!("FREMINAL_WINDOWS_CARGO has no parent dir: {cargo}")
+                })?;
+            let rustc = bin_dir.join("rustc");
+            let path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{path}", bin_dir.display());
+
+            cmd(&cargo, args)
+                .env_remove("CARGO")
+                .env("RUSTC", rustc)
+                .env("PATH", new_path)
+                .run_with_trace()?;
+            Ok(())
+        }
+        _ => {
+            tracing::warn!(
+                "FREMINAL_WINDOWS_CARGO is not set; falling back to the cargo on PATH. \
+                 Are you in the `default` dev shell? (the `ci` shell has no windows toolchain)"
+            );
+            run_cargo(args)
+        }
+    }
 }
 
 /// Run cargo-rdme to check if README.md is up-to-date with the library documentation
