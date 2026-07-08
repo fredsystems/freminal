@@ -23,6 +23,7 @@ name = "buffer_benches"
 arc-swap.workspace = true
 conv2.workspace = true
 crossbeam-channel.workspace = true
+flate2.workspace = true
 freminal-buffer = { path = "../freminal-buffer" }
 rmp-serde.workspace = true
 serde.workspace = true
@@ -37,7 +38,10 @@ tracing.workspace = true
 vergen.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["term"] }
+nix = { workspace = true, features = ["mman", "term"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { workspace = true, features = ["handleapi", "memoryapi", "winnt"] }
 
 # dev dependencies
 [dev-dependencies]

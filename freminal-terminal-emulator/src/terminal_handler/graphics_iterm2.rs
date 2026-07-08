@@ -17,7 +17,9 @@
 use conv2::ValueFrom;
 use freminal_common::buffer_states::osc::{ITerm2InlineImageData, ImageDimension};
 
-use freminal_buffer::image_store::{ImageProtocol, InlineImage, next_image_id};
+use freminal_buffer::image_store::{
+    ImageProtocol, ImageSizeMode, InlineImage, next_image_id, next_placement_instance_id,
+};
 
 use super::{MultipartImageState, TerminalHandler};
 
@@ -90,6 +92,20 @@ impl TerminalHandler {
             return;
         }
 
+        // An explicit (non-auto) width or height request means the image is
+        // scaled to fill the declared cell grid; `None`/`Auto` on both axes
+        // means the grid was derived from the native pixel size (Task
+        // 100.17). `Auto` is represented as `Some(ImageDimension::Auto)`, not
+        // `None`, so it must be checked explicitly rather than inferred from
+        // `Option::is_some()`.
+        let width_explicit = !matches!(data.width, None | Some(ImageDimension::Auto));
+        let height_explicit = !matches!(data.height, None | Some(ImageDimension::Auto));
+        let size_mode = if width_explicit || height_explicit {
+            ImageSizeMode::ExplicitCells
+        } else {
+            ImageSizeMode::NativePixels
+        };
+
         let pixels = img.into_raw();
         let inline_image = InlineImage {
             id: next_image_id(),
@@ -98,6 +114,10 @@ impl TerminalHandler {
             height_px: img_height_px,
             display_cols,
             display_rows,
+            size_mode,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
         // Save cursor position if doNotMoveCursor is set — iTerm2 protocol
@@ -110,9 +130,26 @@ impl TerminalHandler {
 
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
-        let _new_offset =
-            self.buffer
-                .place_image(inline_image, 0, ImageProtocol::ITerm2, None, None, 0);
+        //
+        // iTerm2 has no placement-id concept and no `X=`/`Y=` sub-cell
+        // control key — mint a fresh placement-instance id (Task 100.18)
+        // so this placement never merges with an unrelated one, and pass
+        // `None` sub-cell offset (Task 100.19, kitty-only).
+        let placement_instance = next_placement_instance_id();
+        let _new_offset = self
+            .buffer
+            .place_image(
+                inline_image,
+                0,
+                ImageProtocol::ITerm2,
+                None,
+                None,
+                0,
+                None,
+                placement_instance,
+                None,
+            )
+            .scroll_offset;
 
         // Restore cursor position if doNotMoveCursor was requested.
         if let Some(pos) = saved_cursor {
@@ -511,6 +548,96 @@ mod tests {
         );
         assert_eq!(rows2, 10);
         assert_eq!(cols2, 15);
+    }
+
+    // ------------------------------------------------------------------
+    // ImageSizeMode provenance (Task 100.17a)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn iterm2_explicit_width_and_height_sets_explicit_cells_mode() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let mut png_buf = Vec::new();
+        {
+            use image::ImageEncoder;
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: false,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::ExplicitCells,
+            "explicit width/height should set ExplicitCells"
+        );
+    }
+
+    #[test]
+    fn iterm2_auto_width_and_height_sets_native_pixels_mode() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let mut png_buf = Vec::new();
+        {
+            use image::ImageEncoder;
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        let image_data = ITerm2InlineImageData {
+            name: None,
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Auto),
+            height: None,
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: false,
+            data: png_buf,
+        };
+
+        handler.handle_iterm2_inline_image(&image_data);
+
+        let store = handler.buffer().image_store();
+        let (_, img) = store
+            .iter()
+            .next()
+            .expect("image store should contain an image");
+        assert_eq!(
+            img.size_mode,
+            ImageSizeMode::NativePixels,
+            "auto/none width and height should default to NativePixels"
+        );
     }
 
     // ------------------------------------------------------------------

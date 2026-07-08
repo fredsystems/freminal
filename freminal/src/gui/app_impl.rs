@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
+use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::ThemeMode;
+use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::WindowId;
@@ -236,6 +238,7 @@ impl freminal_windowing::App for FreminalGui {
                         broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
                         close_dialog: super::close_guard::CloseGuardDialog::default(),
                         pending_force_close: false,
+                        pending_raw_keys: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -1092,6 +1095,22 @@ impl freminal_windowing::App for FreminalGui {
             // frame, routed after the loop (Task 76.4).
             let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
                 Vec::new();
+            // OSC 99 stateful notifications collected from every pane this
+            // frame, routed after the loop (Task 99.5a) alongside
+            // `osc_notifications`. Each item is paired with a clone of the
+            // originating pane's `pty_write_tx` (Task 99.5c Gap 2) so future
+            // reverse-path writes (Task 99.6) can target the right pane.
+            let mut osc99_notifications: Vec<(
+                freminal_common::buffer_states::window_manipulation::Notification99Data,
+                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+            )> = Vec::new();
+            // OSC 99 app→terminal control sequences (p=close/p=alive/p=?)
+            // collected from every pane this frame (Task 99.5c). Inert for
+            // now — logged after the loop, not yet answered (Tasks 99.6/99.7).
+            let mut osc99_controls: Vec<(
+                crate::gui::notifications::Osc99Control,
+                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+            )> = Vec::new();
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -1124,6 +1143,8 @@ impl freminal_windowing::App for FreminalGui {
                                 is_only_pane,
                             },
                             &mut osc_notifications,
+                            &mut osc99_notifications,
+                            &mut osc99_controls,
                         );
                         if shell_set {
                             tab_shell_set_title = true;
@@ -1149,6 +1170,92 @@ impl freminal_windowing::App for FreminalGui {
                         window_focused,
                         &mut toasts,
                     );
+                }
+            }
+
+            // Route OSC 99 stateful notifications collected above (Task
+            // 99.5a). Done after the pane loop so `self.config`, the toast
+            // stack, and the OSC 99 session maps are borrowable without
+            // conflicting with the `win.tabs` borrow.
+            if !osc99_notifications.is_empty() {
+                let window_minimized =
+                    ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+                if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
+                    self.toasts.try_borrow_mut(),
+                    self.osc99_icon_cache.try_borrow_mut(),
+                    self.osc99_live.try_borrow_mut(),
+                ) {
+                    let ctx = crate::gui::notifications::Osc99DisplayContext {
+                        window_focused,
+                        window_minimized,
+                    };
+                    // `tx` (the originating pane's `pty_write_tx` clone) is
+                    // threaded into the reverse-write path (Task 99.6): the
+                    // notification thread uses it to write activation/close
+                    // reports back to the pane that produced this OSC 99
+                    // sequence.
+                    for (data, tx) in &osc99_notifications {
+                        crate::gui::notifications::NotificationRouter::route_osc99(
+                            data,
+                            &self.config.notifications,
+                            ctx,
+                            &mut toasts,
+                            &mut icon_cache,
+                            &mut live,
+                            tx,
+                        );
+                    }
+                }
+            }
+
+            // Answer OSC 99 control sequences collected above (Task 99.6 for
+            // Close/Alive; the Query capability handshake is Task 99.7). Run
+            // after the display-routing block above so its `osc99_live`
+            // borrow has already been released.
+            for (control, tx) in &osc99_controls {
+                match control.kind {
+                    Osc99ControlKind::Alive => {
+                        // Answer the poll with the current live notification ids.
+                        if let Ok(live) = self.osc99_live.try_borrow() {
+                            let ids = crate::gui::notifications::live_ids_sorted(&live);
+                            let bytes = crate::gui::notifications::osc99_alive_report(
+                                control.id.as_deref(),
+                                &ids,
+                            );
+                            send_or_log!(
+                                tx,
+                                PtyWrite::Write(bytes),
+                                "Failed to send OSC 99 alive report"
+                            );
+                        }
+                    }
+                    Osc99ControlKind::Close => {
+                        // App-driven close request: prune the live entry.
+                        // freminal cannot programmatically close an OS
+                        // notification it already delegated to the desktop
+                        // environment, so this only reconciles our liveness
+                        // map — no report is sent here (the close report is
+                        // emitted only when WE observe a close on the
+                        // notification thread with `c=1`).
+                        if let (Some(id), Ok(mut live)) =
+                            (control.id.as_deref(), self.osc99_live.try_borrow_mut())
+                        {
+                            crate::gui::notifications::forget_osc99(&mut live, id);
+                        }
+                    }
+                    Osc99ControlKind::Query => {
+                        // OSC 99 p=? capability handshake (Task 99.7): answer
+                        // with freminal's truthfully-advertised OSC 99
+                        // capabilities.
+                        let bytes = crate::gui::notifications::osc99_query_response(
+                            control.id.as_deref(),
+                        );
+                        send_or_log!(
+                            tx,
+                            PtyWrite::Write(bytes),
+                            "Failed to send OSC 99 capability response"
+                        );
+                    }
                 }
             }
 
@@ -1666,6 +1773,42 @@ impl freminal_windowing::App for FreminalGui {
                 let (left_clicked, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
 
+                // Task 114.7: drain any egui-blocked raw key events queued
+                // this frame (keypad operators/directional, media,
+                // print/pause/menu keys) for the active pane. Must run
+                // here, after `show()` returned above, so
+                // `pane.render_cache.super_pressed()` reflects the current
+                // frame — draining earlier (or inside `on_raw_key_event`
+                // itself) risks encoding against a stale Super state.
+                if is_active && !win.pending_raw_keys.is_empty() {
+                    // Per-pane overlays (search, command-history palette,
+                    // right-click context menu) also own keyboard input and
+                    // suppress normal terminal input; queued raw keys must be
+                    // gated the same way so they cannot bypass those overlays.
+                    let pane_input_suppressed = pane.view_state.search_state.is_open
+                        || pane.view_state.command_history.is_open
+                        || pane.view_state.context_menu_pos.is_some();
+                    if ui_overlay_open || pane_input_suppressed {
+                        // An overlay (rename/paste/close/broadcast dialog,
+                        // menu, welcome/about window, save-layout, or a
+                        // per-pane search/history/context menu) owns keyboard
+                        // input this frame — the same gate that suppresses
+                        // normal terminal input. Drop the queued raw keys
+                        // instead of forwarding them to the PTY, so
+                        // intercepted keys cannot bypass the overlay.
+                        win.pending_raw_keys.clear();
+                    } else {
+                        let super_pressed = pane.render_cache.super_pressed();
+                        crate::gui::terminal::input::drain_pending_raw_keys(
+                            &mut win.pending_raw_keys,
+                            &pane.input_tx,
+                            &pane_snap,
+                            super_pressed,
+                            &key_broadcast_targets,
+                        );
+                    }
+                }
+
                 // ── Command history palette overlay (Ctrl+Shift+M) ───
                 // Rendered here (not in `widget.show`) because the palette
                 // needs `Pane`-owned data — `recent_commands`,
@@ -2135,6 +2278,29 @@ impl freminal_windowing::App for FreminalGui {
         //   - no request (true idle, steady cursor)  → 0 FPS
         raw_input.predicted_dt = 0.0;
     }
+
+    fn on_raw_key_event(
+        &mut self,
+        window_id: WindowId,
+        event: freminal_windowing::RawKeyEvent,
+        mods: freminal_windowing::RawKeyMods,
+    ) {
+        // Task 114.7: queue only -- do NOT encode here. This callback fires
+        // at winit-event time, outside the render/`update()` path where the
+        // active pane, its snapshot, and the true per-pane `super_pressed`
+        // are in scope. The queue is drained and encoded on the render path
+        // in `update()` (see `terminal::input::drain_pending_raw_keys`).
+        //
+        // No explicit repaint request is needed here: `event_loop.rs`'s
+        // `KeyboardInput` intercept already sets `state.repaint_at =
+        // Some(Instant::now())` immediately after calling this method, so a
+        // repaint (and therefore a drain) is already guaranteed this cycle.
+        let Some(win) = self.windows.get_mut(&window_id) else {
+            trace!(?window_id, "raw key event for unknown window; dropping");
+            return;
+        };
+        win.pending_raw_keys.push((event, mods));
+    }
 }
 
 impl FreminalGui {
@@ -2325,6 +2491,7 @@ impl FreminalGui {
             broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
+            pending_raw_keys: Vec::new(),
         }
     }
 

@@ -1057,6 +1057,9 @@ mod tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         }
     }
 
@@ -1485,6 +1488,10 @@ mod tests {
             height_px: 16,
             display_cols: 1,
             display_rows: 1,
+            size_mode: crate::image_store::ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         });
 
         let mut row = Row::new(80);

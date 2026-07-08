@@ -35,6 +35,8 @@ pub mod mode;
 pub mod modes;
 /// OSC parameter types and inline-image data.
 pub mod osc;
+/// OSC 99 (kitty desktop notifications) parser and typed command types.
+pub mod osc_notify_99;
 /// `PointerShape` — typed cursor shape set by OSC 22.
 pub mod pointer_shape;
 /// Sixel graphics types.

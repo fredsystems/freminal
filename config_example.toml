@@ -376,6 +376,9 @@ limit = 4000
 # Default: true.
 # osc_777 = true
 
+# Honour OSC 99 (kitty stateful) notifications. Default: true.
+# osc_99 = true
+
 # When true, an OSC 133 D (command finished) event fires a notification.
 # Default: true.
 # on_command_finished = true

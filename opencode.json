@@ -40,11 +40,11 @@
   "agent": {
     "general": {
       "description": "General-purpose sub-agent for focused implementation tasks. Uses Sonnet for cost-efficient parallel execution.",
-      "model": "opencode/claude-sonnet-4-6"
+      "model": "opencode/claude-sonnet-5"
     },
     "explore": {
       "description": "Fast read-only agent for codebase exploration and analysis.",
-      "model": "opencode/claude-sonnet-4-6"
+      "model": "opencode/claude-sonnet-5"
     }
   }
 }

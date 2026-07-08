@@ -19,7 +19,10 @@ use winit::window::{Window, WindowAttributes};
 use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
-use crate::{App, UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId, WindowOp};
+use crate::{
+    App, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId,
+    WindowOp,
+};
 
 use conv2::{ApproxFrom, RoundToZero};
 
@@ -52,6 +55,53 @@ fn logical_coord_to_i32(v: f64) -> i32 {
             i32::MAX
         }
     })
+}
+
+/// Returns `true` for the narrow set of physical keys that egui 0.35 cannot
+/// deliver: print/pause/menu keys, keypad operators and digits, and the
+/// media keys winit's `KeyCode` exposes (Task 114). These are intercepted
+/// BEFORE egui-winit sees them and routed to [`App::on_raw_key_event`]
+/// instead; every other key falls through to egui unchanged.
+const fn is_blocked_key(key_code: winit::keyboard::KeyCode) -> bool {
+    use winit::keyboard::KeyCode;
+
+    matches!(
+        key_code,
+        // System keys.
+        KeyCode::PrintScreen
+            | KeyCode::Pause
+            | KeyCode::ContextMenu
+            // Keypad operators.
+            | KeyCode::NumpadDivide
+            | KeyCode::NumpadMultiply
+            | KeyCode::NumpadSubtract
+            | KeyCode::NumpadAdd
+            | KeyCode::NumpadEnter
+            | KeyCode::NumpadEqual
+            | KeyCode::NumpadComma
+            | KeyCode::NumpadDecimal
+            | KeyCode::NumpadStar
+            // Keypad digits (egui unifies these with the main-row digits, so
+            // the physical distinction is otherwise lost).
+            | KeyCode::Numpad0
+            | KeyCode::Numpad1
+            | KeyCode::Numpad2
+            | KeyCode::Numpad3
+            | KeyCode::Numpad4
+            | KeyCode::Numpad5
+            | KeyCode::Numpad6
+            | KeyCode::Numpad7
+            | KeyCode::Numpad8
+            | KeyCode::Numpad9
+            // Media keys.
+            | KeyCode::MediaPlayPause
+            | KeyCode::MediaStop
+            | KeyCode::MediaTrackNext
+            | KeyCode::MediaTrackPrevious
+            | KeyCode::AudioVolumeUp
+            | KeyCode::AudioVolumeDown
+            | KeyCode::AudioVolumeMute
+    )
 }
 
 /// Per-window state.
@@ -397,6 +447,46 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     }
                 }
             }
+        }
+
+        // Intercept the narrow set of physical keys egui 0.35 cannot deliver
+        // (Task 114: keypad operators/digits, media, print/pause/menu)
+        // BEFORE egui-winit sees them, and route them to
+        // `App::on_raw_key_event` instead. Every other key falls through to
+        // egui unchanged — this must stay narrow (see `is_blocked_key`).
+        if let winit::event::WindowEvent::KeyboardInput {
+            event:
+                winit::event::KeyEvent {
+                    physical_key: winit::keyboard::PhysicalKey::Code(key_code),
+                    state: key_state,
+                    repeat,
+                    ..
+                },
+            ..
+        } = event
+            && is_blocked_key(key_code)
+        {
+            if let Some(state) = self.windows.get_mut(&winit_id) {
+                let mods = state.egui.modifiers();
+                let raw_event = RawKeyEvent {
+                    key_code,
+                    pressed: key_state == winit::event::ElementState::Pressed,
+                    repeat,
+                };
+                let raw_mods = RawKeyMods {
+                    shift: mods.shift,
+                    ctrl: mods.ctrl,
+                    alt: mods.alt,
+                    super_key: mods.command,
+                };
+                self.app
+                    .on_raw_key_event(WindowId(winit_id), raw_event, raw_mods);
+                state.repaint_at = Some(Instant::now());
+            }
+            // Don't pass to egui-winit — this key has no egui `Key` variant
+            // and would otherwise be silently dropped.
+            self.update_control_flow(event_loop);
+            return;
         }
 
         // Pass to egui first
@@ -800,8 +890,10 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        ViewportCommandFlags, logical_coord_to_i32, logical_dim_to_u32, viewport_command_flags,
+        ViewportCommandFlags, is_blocked_key, logical_coord_to_i32, logical_dim_to_u32,
+        viewport_command_flags,
     };
+    use winit::keyboard::KeyCode;
 
     #[test]
     fn request_paste_command_sets_only_paste_flag() {
@@ -883,5 +975,52 @@ mod tests {
         assert_eq!(logical_coord_to_i32(-100.4), -100);
         assert_eq!(logical_coord_to_i32(1.0e20), i32::MAX);
         assert_eq!(logical_coord_to_i32(-1.0e20), i32::MIN);
+    }
+
+    #[test]
+    fn is_blocked_key_covers_the_egui_blocked_set() {
+        // Task 114.5: a representative key from each blocked group.
+        assert!(is_blocked_key(KeyCode::PrintScreen));
+        assert!(is_blocked_key(KeyCode::Pause));
+        assert!(is_blocked_key(KeyCode::ContextMenu));
+        assert!(is_blocked_key(KeyCode::NumpadEnter));
+        assert!(is_blocked_key(KeyCode::NumpadDivide));
+        assert!(is_blocked_key(KeyCode::NumpadMultiply));
+        assert!(is_blocked_key(KeyCode::NumpadSubtract));
+        assert!(is_blocked_key(KeyCode::NumpadAdd));
+        assert!(is_blocked_key(KeyCode::NumpadEqual));
+        assert!(is_blocked_key(KeyCode::NumpadComma));
+        assert!(is_blocked_key(KeyCode::NumpadDecimal));
+        assert!(is_blocked_key(KeyCode::NumpadStar));
+        assert!(is_blocked_key(KeyCode::Numpad0));
+        assert!(is_blocked_key(KeyCode::Numpad9));
+        assert!(is_blocked_key(KeyCode::MediaPlayPause));
+        assert!(is_blocked_key(KeyCode::MediaStop));
+        assert!(is_blocked_key(KeyCode::MediaTrackNext));
+        assert!(is_blocked_key(KeyCode::MediaTrackPrevious));
+        assert!(is_blocked_key(KeyCode::AudioVolumeUp));
+        assert!(is_blocked_key(KeyCode::AudioVolumeDown));
+        assert!(is_blocked_key(KeyCode::AudioVolumeMute));
+    }
+
+    #[test]
+    fn is_blocked_key_does_not_intercept_normal_keys() {
+        // egui delivers these keys today; the intercept must stay narrow
+        // and never swallow them. CapsLock/NumLock/ScrollLock are no longer
+        // intercepted (Task 114 lock-state revert) — they fall through to
+        // egui like any other normal-ish key (accepted gap: egui drops them).
+        assert!(!is_blocked_key(KeyCode::CapsLock));
+        assert!(!is_blocked_key(KeyCode::ScrollLock));
+        assert!(!is_blocked_key(KeyCode::NumLock));
+        assert!(!is_blocked_key(KeyCode::KeyA));
+        assert!(!is_blocked_key(KeyCode::Digit1));
+        assert!(!is_blocked_key(KeyCode::Enter));
+        assert!(!is_blocked_key(KeyCode::ArrowUp));
+        assert!(!is_blocked_key(KeyCode::ArrowDown));
+        assert!(!is_blocked_key(KeyCode::ArrowLeft));
+        assert!(!is_blocked_key(KeyCode::ArrowRight));
+        assert!(!is_blocked_key(KeyCode::Space));
+        assert!(!is_blocked_key(KeyCode::Escape));
+        assert!(!is_blocked_key(KeyCode::AltRight));
     }
 }

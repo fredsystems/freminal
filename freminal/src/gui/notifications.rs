@@ -19,9 +19,18 @@
 //! helpers. The system leg additionally requires that `notify-rust` is the
 //! intended sink; the toast leg never spawns a thread.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use conv2::ValueInto;
+use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
-use freminal_common::buffer_states::window_manipulation::NotificationKind;
+use freminal_common::buffer_states::window_manipulation::{
+    Notification99Data, NotificationKind, Osc99ControlKind,
+};
 use freminal_common::config::{NotificationRouting, NotificationsConfig};
+use freminal_common::pty_write::PtyWrite;
+use freminal_common::send_or_log;
 
 use super::command_blocks::format_command_duration;
 use super::toast::ToastStack;
@@ -325,6 +334,583 @@ impl NotificationRouter {
             }
         }) {
             tracing::warn!("failed to spawn notification thread: {e}");
+        }
+    }
+}
+
+/// Record of a live OSC 99 notification (for update/close reconciliation).
+///
+/// Populated by [`NotificationRouter::route_osc99`] whenever the source
+/// notification carried an `i=` id. 99.5a only records identity plus the
+/// report flags 99.6 needs; it does not retain a `notify-rust` handle (that
+/// is 99.5b).
+#[derive(Debug, Clone)]
+pub(super) struct Osc99LiveEntry {
+    /// Whether `a=report` was requested (activation reports wanted — 99.6).
+    pub report_activation: bool,
+    /// Whether `c=1` was requested (close report wanted — 99.6).
+    pub close_report: bool,
+}
+
+/// Remove a notification id from the live map.
+///
+/// Called from `app_impl`'s OSC 99 control loop (Task 99.6) when an
+/// app-driven `p=close` control sequence arrives, to keep the `p=alive`
+/// response accurate. An OS-observed close (the activation-thread
+/// `__closed` event) does NOT call this — see the pruning-tradeoff note on
+/// [`NotificationRouter::route_osc99`].
+///
+/// Returns whether an entry was actually removed.
+pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str) -> bool {
+    live.remove(id).is_some()
+}
+
+/// Build an OSC 99 activation report: `ESC ] 99 ; i=<id> ; <button> ST`.
+///
+/// `id` defaults to `0` when absent; `button` is the (0-based) action-id
+/// string freminal registered for the button, or `None` for
+/// whole-notification activation (empty button field).
+pub(super) fn osc99_activation_report(id: Option<&str>, button: Option<&str>) -> Vec<u8> {
+    let id = id.unwrap_or("0");
+    let button = button.unwrap_or("");
+    format!("\x1b]99;i={id};{button}\x1b\\").into_bytes()
+}
+
+/// Build an OSC 99 close report: `ESC ] 99 ; i=<id> : p=close ; [untracked] ST`.
+///
+/// `untracked` marks a close freminal could not directly observe (macOS /
+/// Windows, where the background thread cannot watch for a close event).
+pub(super) fn osc99_close_report(id: Option<&str>, untracked: bool) -> Vec<u8> {
+    let id = id.unwrap_or("0");
+    let payload = if untracked { "untracked" } else { "" };
+    format!("\x1b]99;i={id}:p=close;{payload}\x1b\\").into_bytes()
+}
+
+/// Build an OSC 99 alive report: `ESC ] 99 ; i=<req-id> : p=alive ; id1,id2 ST`.
+///
+/// `req_id` defaults to `0` when the poll carried no id; `live_ids` is
+/// comma-joined verbatim (empty list -> empty payload).
+pub(super) fn osc99_alive_report(req_id: Option<&str>, live_ids: &[String]) -> Vec<u8> {
+    let req_id = req_id.unwrap_or("0");
+    let list = live_ids.join(",");
+    format!("\x1b]99;i={req_id}:p=alive;{list}\x1b\\").into_bytes()
+}
+
+/// The OSC 99 capabilities freminal truthfully advertises in a `p=?`
+/// response.
+///
+/// Colon-separated `key=value` pairs, in a stable order. Advertises only
+/// what is genuinely implemented (the truthful-advertisement rule from
+/// Task 76): `a=report` (NOT `focus` — `focus_on_activation` is parsed but
+/// freminal does not act on it), `c=1` (close reports), `o=` all three
+/// occasions (99.5a), `p=` the payload types freminal handles (display
+/// types plus the control types it answers), `s=system,silent` (forwarded
+/// freedesktop sound-name hints — freminal forwards the name, playback is
+/// the daemon's concern), `u=0,1,2` (urgency levels — advertised even
+/// though the setter is unavailable on macOS, matching Task 76's handling
+/// of the same gap), and `w=1` (auto-expiry, wired via `.timeout()`).
+const OSC99_CAPABILITIES: &str = "a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1";
+
+/// Build the OSC 99 `p=?` capability handshake response:
+/// `ESC ] 99 ; i=<id> : p=? ; <capabilities> ST`.
+///
+/// `id` defaults to `0` when the query control carried no id.
+pub(super) fn osc99_query_response(id: Option<&str>) -> Vec<u8> {
+    let id = id.unwrap_or("0");
+    format!("\x1b]99;i={id}:p=?;{OSC99_CAPABILITIES}\x1b\\").into_bytes()
+}
+
+/// Collect the live notification ids in sorted order (deterministic for the
+/// `p=alive` response and for testing).
+pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<String> {
+    let mut ids: Vec<String> = live.keys().cloned().collect();
+    ids.sort();
+    ids
+}
+
+/// Map a `notify-rust` xdg action id observed by `wait_for_action` to the
+/// OSC 99 reverse-path report bytes to send, if any.
+///
+/// `action` is `"__closed"` (dismissed without action), `"default"`
+/// (whole-notification activation), or the button's registered id string
+/// (the 0-based `enumerate` index used when registering `.action(...)`).
+/// Returns `None` when the source notification didn't request a report for
+/// this event (`report_activation` / `close_report` both gate their
+/// respective branches).
+pub(super) fn osc99_action_report(
+    action: &str,
+    id: Option<&str>,
+    report_activation: bool,
+    close_report: bool,
+) -> Option<Vec<u8>> {
+    match action {
+        "__closed" => close_report.then(|| osc99_close_report(id, false)),
+        "default" => report_activation.then(|| osc99_activation_report(id, None)),
+        other => report_activation.then(|| osc99_activation_report(id, Some(other))),
+    }
+}
+
+/// An OSC 99 app→terminal control sequence collected from
+/// `WindowManipulation::Osc99Control` during `handle_window_manipulation`
+/// (Task 99.5c). Paired with a cloned `pty_write_tx` in
+/// `app_impl::update()`'s post-loop routing, where it is answered:
+/// Task 99.6 (close/alive) and Task 99.7 (query).
+#[derive(Debug, Clone)]
+pub(super) struct Osc99Control {
+    /// Notification id (`i=`) the control refers to, if any.
+    pub id: Option<String>,
+    /// Which control payload type this is.
+    pub kind: Osc99ControlKind,
+}
+
+/// Display-gate context for an OSC 99 notification.
+///
+/// Carries the window state inputs needed to evaluate the `o=` occasion
+/// gate ([`NotificationRouter::occasion_allows_display`]).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Osc99DisplayContext {
+    /// Whether the source window currently has OS focus.
+    pub window_focused: bool,
+    /// Whether the source window is currently minimized.
+    pub window_minimized: bool,
+}
+
+/// Monotonic counter disambiguating concurrent OSC 99 icon temp files within
+/// a single process run (paired with the process id in the filename).
+static OSC99_ICON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+impl NotificationRouter {
+    /// Route an OSC 99 stateful notification to the toast leg and/or the OS
+    /// notification daemon, honouring the occasion gate, urgency, sound,
+    /// expiry, buttons, and icon. 99.5a is fire-and-forget (no handle
+    /// retention — that is 99.5b); it records the notification id in `live`
+    /// for later update/close reconciliation.
+    ///
+    /// Does nothing when the notification system is disabled
+    /// ([`NotificationsConfig::enabled`] is `false`), when the OSC 99
+    /// kill-switch is off ([`NotificationsConfig::osc_99`] is `false`,
+    /// Task 99.8), or when the occasion gate says the notification should
+    /// not be displayed right now (in which case it is also not recorded in
+    /// `live` — an occasion-suppressed notification never happened as far
+    /// as later update/close tracking is concerned).
+    pub(super) fn route_osc99(
+        data: &Notification99Data,
+        config: &NotificationsConfig,
+        ctx: Osc99DisplayContext,
+        toasts: &mut ToastStack,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        live: &mut HashMap<String, Osc99LiveEntry>,
+        pty_write_tx: &Sender<PtyWrite>,
+    ) {
+        if !config.enabled {
+            return;
+        }
+
+        // OSC 99 kill-switch (Task 99.8): even with the master switch on, users can
+        // disable the kitty stateful protocol specifically.
+        if !config.osc_99 {
+            return;
+        }
+
+        // Resolve/cache icon bytes *before* the occasion gate: caching must
+        // not depend on whether this particular instance is displayed. An
+        // occasion-suppressed notification that transmits icon bytes with a
+        // `g=` cache key must still populate the cache, so a later
+        // (displayed) notification referencing the same `g=` key with bytes
+        // omitted can resolve the icon.
+        let resolved_icon = Self::resolve_icon_bytes(data, icon_cache);
+
+        if !Self::occasion_allows_display(data.occasion.as_deref(), ctx) {
+            return;
+        }
+
+        // Toast leg: OSC 99 has no per-category routing config row, so
+        // 99.5a always attempts both legs (toast + OS notification) —
+        // simple, honest, and works without a notification daemon.
+        let summary = data
+            .title
+            .clone()
+            .or_else(|| data.body.clone())
+            .unwrap_or_default();
+        let detail = data
+            .body
+            .as_deref()
+            .filter(|body| !body.is_empty())
+            .map(str::to_owned);
+        if data.urgency == Some(2) {
+            toasts.error(summary, detail);
+        } else {
+            toasts.info(summary, detail);
+        }
+
+        Self::show_system_osc99(data, resolved_icon, pty_write_tx.clone());
+
+        if let Some(id) = &data.id {
+            let entry = Osc99LiveEntry {
+                report_activation: data.report_activation,
+                close_report: data.close_report,
+            };
+            tracing::trace!(
+                id,
+                report_activation = entry.report_activation,
+                close_report = entry.close_report,
+                "tracking live OSC 99 notification"
+            );
+            // NOTE: OS-observed closes on Linux write the close report directly
+            // from the notification thread but do NOT prune this map (it is a
+            // !Send RefCell on the GUI thread, and adding a channel back is
+            // disallowed). The map is pruned only on an app-driven p=close
+            // (`Osc99Control::Close`, handled in `app_impl`'s control loop). A
+            // `p=alive` response may thus transiently over-report a
+            // user-dismissed notification — spec-tolerable for a best-effort
+            // poll, and it avoids a new GUI<->thread channel.
+            live.insert(id.clone(), entry);
+        }
+    }
+
+    /// Evaluate the OSC 99 `o=` occasion gate.
+    ///
+    /// - `None` (Always) — always display.
+    /// - `Some("unfocused")` — display only when the source window lacks
+    ///   focus.
+    /// - `Some("invisible")` — display only when the source window is
+    ///   minimized. Background-tab occlusion is out of scope for 99.5a
+    ///   (documented, not silently dropped — see the 99.5 execution
+    ///   decisions in `PLAN_VERSION_110.md`).
+    /// - Any other value — treated as Always (forward-compat with occasion
+    ///   values not yet recognised by the parser).
+    fn occasion_allows_display(occasion: Option<&str>, ctx: Osc99DisplayContext) -> bool {
+        match occasion {
+            Some("unfocused") => !ctx.window_focused,
+            Some("invisible") => ctx.window_minimized,
+            // `None` (Always) and any other/unrecognised value both display
+            // unconditionally.
+            None | Some(_) => true,
+        }
+    }
+
+    /// Resolve the icon bytes to display, applying the `g=` cache.
+    ///
+    /// - Transmitted bytes (`icon_data`) always win and are cached under
+    ///   `icon_cache_key` (`g=`) when present, so a later `g=`-only
+    ///   notification can reuse them.
+    /// - Otherwise, a `g=`-only notification looks up the cache.
+    /// - `None` when neither is available (the OS leg then falls back to
+    ///   icon-by-name).
+    fn resolve_icon_bytes(
+        data: &Notification99Data,
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+    ) -> Option<Vec<u8>> {
+        if let Some(bytes) = &data.icon_data {
+            if let Some(key) = &data.icon_cache_key {
+                Self::insert_icon_cache_bounded(icon_cache, key.clone(), bytes.clone());
+            }
+            Some(bytes.clone())
+        } else {
+            data.icon_cache_key
+                .as_ref()
+                .and_then(|key| icon_cache.get(key).cloned())
+        }
+    }
+
+    /// Insert into the session icon cache, enforcing a bound so a program
+    /// that repeatedly transmits distinct `g=` cache keys with icon bytes
+    /// cannot grow this map without limit for the lifetime of the GUI
+    /// process (terminal escape-sequence input is untrusted). Mirrors the
+    /// quota-style bounding used by the kitty graphics image store: when
+    /// either the entry-count or total-byte cap would be exceeded, existing
+    /// entries are evicted until the new one fits (or the cache is emptied,
+    /// in which case a later `g=`-only reference simply misses and the
+    /// program must re-transmit).
+    fn insert_icon_cache_bounded(
+        icon_cache: &mut HashMap<String, Vec<u8>>,
+        key: String,
+        bytes: Vec<u8>,
+    ) {
+        /// Max number of distinct `g=` icon entries retained per session.
+        const MAX_ICON_CACHE_ENTRIES: usize = 64;
+        /// Max total icon bytes retained per session (4 MiB).
+        const MAX_ICON_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+        // A single icon larger than the whole budget is not cacheable.
+        if bytes.len() > MAX_ICON_CACHE_BYTES {
+            icon_cache.remove(&key);
+            return;
+        }
+
+        // Account for a replace of an existing key.
+        let existing = icon_cache.get(&key).map_or(0, Vec::len);
+        let mut total: usize = icon_cache
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_sub(existing);
+
+        // Evict until both the incoming bytes and one more entry fit.
+        while (total.saturating_add(bytes.len()) > MAX_ICON_CACHE_BYTES
+            || icon_cache.len() >= MAX_ICON_CACHE_ENTRIES)
+            && !icon_cache.is_empty()
+        {
+            let Some(victim) = icon_cache
+                .iter()
+                .find(|(k, _)| *k != &key)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = icon_cache.remove(&victim) {
+                total = total.saturating_sub(removed.len());
+            }
+        }
+
+        icon_cache.insert(key, bytes);
+    }
+
+    /// Write transmitted icon bytes to a uniquely-named temp file.
+    ///
+    /// `tempfile` is only a dev-dependency of the `freminal` crate (not a
+    /// production dependency), so this writes directly into
+    /// [`std::env::temp_dir`] with a name disambiguated by the notification
+    /// id, a monotonic per-process counter, and the process id. The caller
+    /// is responsible for best-effort removal after use.
+    fn write_icon_temp_file(id: Option<&str>, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+        use std::io::Write as _;
+
+        let pid = std::process::id();
+        let sanitized_id: String = id
+            .unwrap_or("noid")
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect();
+
+        // The temp dir (e.g. `/tmp`) is typically world-writable, and the
+        // filename is predictable (pid + a per-process counter), so a plain
+        // `fs::write` (which follows symlinks and truncates) would be
+        // vulnerable to a symlink pre-creation attack: a local attacker could
+        // point a guessable future filename at a file the freminal user owns
+        // and have us overwrite it. Use `create_new(true)` (O_CREAT|O_EXCL,
+        // which refuses to follow an existing path/symlink) and retry on a
+        // name collision so the write always lands in a fresh, exclusively
+        // created file.
+        loop {
+            let counter = OSC99_ICON_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let filename = format!("freminal-osc99-icon-{sanitized_id}-{pid}-{counter}.png");
+            let path = std::env::temp_dir().join(filename);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    file.write_all(bytes)?;
+                    return Ok(path);
+                }
+                // A collision on the guessable name (or a pre-created
+                // symlink) is retried with the next counter value.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Best-effort removal of an OSC 99 icon temp file; a leftover file is
+    /// not fatal, so failures are logged at `debug` and otherwise ignored.
+    fn remove_icon_temp_file(path: &std::path::Path) {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::debug!(
+                "failed to remove OSC 99 icon temp file {}: {e}",
+                path.display()
+            );
+        }
+    }
+
+    /// Build a `notify-rust` `Notification` from the extracted OSC 99
+    /// fields, applying urgency, buttons, sound, timeout, and icon (as a
+    /// temp file when transmitted bytes are given, else by name).
+    ///
+    /// Returns the built notification plus the icon temp file path (if one
+    /// was written), so the caller can clean it up after `.show()`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_osc99_notification(
+        id: Option<&str>,
+        title: Option<&str>,
+        body: &str,
+        app_name: Option<&str>,
+        button_labels: &[String],
+        urgency: Option<u8>,
+        sound: Option<&str>,
+        expire_ms: Option<i64>,
+        icon_names: &[String],
+        resolved_icon_bytes: Option<Vec<u8>>,
+    ) -> (notify_rust::Notification, Option<std::path::PathBuf>) {
+        let mut notification = notify_rust::Notification::new();
+        notification
+            .appname(app_name.unwrap_or("freminal"))
+            .summary(title.unwrap_or(body))
+            .body(body);
+
+        // See `Self::show_system` for the platform rationale: `urgency()` is
+        // unavailable on macOS.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let urgency_level = match urgency {
+                Some(0) => notify_rust::Urgency::Low,
+                Some(2) => notify_rust::Urgency::Critical,
+                _ => notify_rust::Urgency::Normal,
+            };
+            notification.urgency(urgency_level);
+        }
+        #[cfg(target_os = "macos")]
+        let _ = urgency;
+
+        for (idx, label) in button_labels.iter().enumerate() {
+            notification.action(&idx.to_string(), label);
+        }
+
+        if let Some(sound_name) = sound {
+            notification.sound_name(sound_name);
+        }
+
+        let timeout = match expire_ms {
+            Some(0) => notify_rust::Timeout::Never,
+            Some(ms) if ms > 0 => {
+                let ms: u32 = ms.value_into().unwrap_or(u32::MAX);
+                notify_rust::Timeout::Milliseconds(ms)
+            }
+            // `None` (OS default) and negative-and-nonzero (not a value the
+            // 99.4 mapping produces -- `-1` is normalised to `None` -- but
+            // matched exhaustively rather than relying on that invariant)
+            // both fall back to the server default.
+            None | Some(_) => notify_rust::Timeout::Default,
+        };
+        notification.timeout(timeout);
+
+        let mut icon_temp_path: Option<std::path::PathBuf> = None;
+        if let Some(bytes) = resolved_icon_bytes {
+            match Self::write_icon_temp_file(id, &bytes) {
+                Ok(path) => {
+                    if let Some(path_str) = path.to_str() {
+                        notification.image_path(path_str);
+                    }
+                    icon_temp_path = Some(path);
+                }
+                Err(e) => {
+                    tracing::warn!("failed to write OSC 99 icon temp file: {e}");
+                }
+            }
+        } else if let Some(first) = icon_names.first() {
+            notification.icon(first);
+        }
+
+        (notification, icon_temp_path)
+    }
+
+    /// Show an OS notification for an OSC 99 notification, retaining the
+    /// handle where the platform allows it so activation/close can be
+    /// reported back to the originating pane's PTY (Task 99.5b + 99.6).
+    ///
+    /// On Linux/BSD (`notify-rust`'s D-Bus backend), the handle's
+    /// `wait_for_action` blocks the spawned thread for the notification's
+    /// lifetime, observing whole-notification activation, button
+    /// activation, and dismissal ("closed") — each writes the matching
+    /// report to `pty_write_tx` when the source notification requested it
+    /// (`a=report` / `c=1`). On macOS/Windows, `notify-rust` does not expose
+    /// an observable handle from a background thread (the macOS callback
+    /// needs the main run loop), so a `c=1` close report is emitted
+    /// immediately in the `untracked` form and no activation reports are
+    /// sent. The icon temp file (if any) is removed on a best-effort basis
+    /// once the daemon has read it; cleanup failure never fails the
+    /// notification.
+    fn show_system_osc99(
+        data: &Notification99Data,
+        resolved_icon_bytes: Option<Vec<u8>>,
+        pty_write_tx: Sender<PtyWrite>,
+    ) {
+        let id = data.id.clone();
+        let title = data.title.clone();
+        let body = data.body.clone().unwrap_or_default();
+        let app_name = data.app_name.clone();
+        let button_labels = data.button_labels.clone();
+        let urgency = data.urgency;
+        let sound = data.sound.clone();
+        let expire_ms = data.expire_ms;
+        let icon_names = data.icon_names.clone();
+        let report_activation = data.report_activation;
+        let close_report = data.close_report;
+
+        let builder = std::thread::Builder::new().name("freminal-notify-99".to_owned());
+        if let Err(e) = builder.spawn(move || {
+            let (notification, mut icon_temp_path) = Self::build_osc99_notification(
+                id.as_deref(),
+                title.as_deref(),
+                &body,
+                app_name.as_deref(),
+                &button_labels,
+                urgency,
+                sound.as_deref(),
+                expire_ms,
+                &icon_names,
+                resolved_icon_bytes,
+            );
+
+            // Linux/BSD: `notify-rust`'s D-Bus backend returns a handle that
+            // can observe activation/close, but `wait_for_action` blocks for
+            // the notification's lifetime — so the icon temp file is cleaned
+            // up as soon as the daemon has shown it, not after the blocking
+            // call returns.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            match notification.show() {
+                Ok(handle) => {
+                    if let Some(path) = icon_temp_path.take() {
+                        Self::remove_icon_temp_file(&path);
+                    }
+                    handle.wait_for_action(move |action| {
+                        if let Some(bytes) = osc99_action_report(
+                            action,
+                            id.as_deref(),
+                            report_activation,
+                            close_report,
+                        ) {
+                            send_or_log!(
+                                pty_write_tx,
+                                PtyWrite::Write(bytes),
+                                "Failed to send OSC 99 activation/close report"
+                            );
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("failed to show OSC 99 desktop notification: {e}");
+                    if let Some(path) = icon_temp_path.take() {
+                        Self::remove_icon_temp_file(&path);
+                    }
+                }
+            }
+
+            // macOS/Windows: no observable handle from a background thread
+            // (the macOS activation callback requires the main run loop), so
+            // emit the `untracked` close form immediately when requested and
+            // send no activation reports this cycle.
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            {
+                if let Err(e) = notification.show() {
+                    tracing::warn!("failed to show OSC 99 desktop notification: {e}");
+                }
+                let _ = report_activation;
+                if close_report {
+                    let bytes = osc99_close_report(id.as_deref(), true);
+                    send_or_log!(
+                        pty_write_tx,
+                        PtyWrite::Write(bytes),
+                        "Failed to send OSC 99 untracked close report"
+                    );
+                }
+                if let Some(path) = icon_temp_path.take() {
+                    Self::remove_icon_temp_file(&path);
+                }
+            }
+        }) {
+            tracing::warn!("failed to spawn OSC 99 notification thread: {e}");
         }
     }
 }
@@ -679,5 +1265,617 @@ mod tests {
         assert_eq!(req.body, "test finished in 30s (exit 2)");
         // Non-zero exit -> Error kind.
         assert_eq!(req.kind, NotificationKind::Error);
+    }
+
+    // ── OSC 99 (Task 99.5a) ──────────────────────────────────────────
+
+    fn default_n99() -> Notification99Data {
+        Notification99Data {
+            id: None,
+            title: Some("Title".to_owned()),
+            body: Some("Body".to_owned()),
+            icon_data: None,
+            icon_names: Vec::new(),
+            icon_cache_key: None,
+            button_labels: Vec::new(),
+            report_activation: false,
+            focus_on_activation: true,
+            close_report: false,
+            urgency: None,
+            occasion: None,
+            sound: None,
+            app_name: None,
+            notification_type: Vec::new(),
+            expire_ms: None,
+        }
+    }
+
+    fn osc99_ctx(window_focused: bool, window_minimized: bool) -> Osc99DisplayContext {
+        Osc99DisplayContext {
+            window_focused,
+            window_minimized,
+        }
+    }
+
+    #[test]
+    fn route_osc99_master_gate_disabled_does_nothing() {
+        let config = NotificationsConfig::default(); // enabled = false
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_osc99_kill_switch_disabled_does_nothing() {
+        // Task 99.8: `enabled = true` but `osc_99 = false` must still
+        // suppress OSC 99 notifications specifically.
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_99: false,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_occasion_always_displays_regardless_of_focus() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99(); // occasion: None => Always
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(
+            toasts.len(),
+            1,
+            "Always occasion must display even when focused"
+        );
+    }
+
+    #[test]
+    fn route_osc99_occasion_unfocused_gates_on_focus() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("unfocused".to_owned()),
+            ..default_n99()
+        };
+
+        // Focused: must NOT display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+        assert_eq!(
+            toasts.len(),
+            0,
+            "unfocused occasion must not fire while focused"
+        );
+        assert!(live.is_empty());
+
+        // Unfocused: must display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(false, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+        assert_eq!(
+            toasts.len(),
+            1,
+            "unfocused occasion must fire while unfocused"
+        );
+    }
+
+    #[test]
+    fn route_osc99_occasion_invisible_gates_on_minimized() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("invisible".to_owned()),
+            ..default_n99()
+        };
+
+        // Not minimized: must NOT display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+        assert_eq!(
+            toasts.len(),
+            0,
+            "invisible occasion must not fire while visible"
+        );
+
+        // Minimized: must display.
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, true),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+        assert_eq!(
+            toasts.len(),
+            1,
+            "invisible occasion must fire while minimized"
+        );
+    }
+
+    #[test]
+    fn route_osc99_unrecognised_occasion_treated_as_always() {
+        let config = enabled_config(0.0);
+        let data = Notification99Data {
+            occasion: Some("something_new".to_owned()),
+            ..default_n99()
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_populated_from_transmitted_bytes() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = Notification99Data {
+            icon_data: Some(vec![1, 2, 3, 4]),
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+
+        let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+
+        assert_eq!(resolved, Some(vec![1, 2, 3, 4]));
+        assert_eq!(icon_cache.get("k"), Some(&vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_reused_on_subsequent_g_only_notification() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        icon_cache.insert("k".to_owned(), vec![9, 9, 9]);
+
+        let data = Notification99Data {
+            icon_data: None,
+            icon_cache_key: Some("k".to_owned()),
+            ..default_n99()
+        };
+
+        let resolved = NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+
+        assert_eq!(resolved, Some(vec![9, 9, 9]));
+    }
+
+    #[test]
+    fn route_osc99_icon_cache_miss_returns_none() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = Notification99Data {
+            icon_data: None,
+            icon_cache_key: Some("missing".to_owned()),
+            ..default_n99()
+        };
+
+        assert_eq!(
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
+            None
+        );
+    }
+
+    #[test]
+    fn route_osc99_no_icon_data_or_key_returns_none() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        let data = default_n99();
+
+        assert_eq!(
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache),
+            None
+        );
+    }
+
+    #[test]
+    fn route_osc99_records_live_entry_when_id_present() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = Notification99Data {
+            id: Some("n1".to_owned()),
+            report_activation: true,
+            close_report: true,
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        let entry = live.get("n1").expect("live entry recorded");
+        assert!(entry.report_activation);
+        assert!(entry.close_report);
+    }
+
+    #[test]
+    fn route_osc99_no_live_entry_when_id_absent() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99(); // id: None
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_title_and_body_push_a_toast() {
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn route_osc99_occasion_suppressed_records_no_live_entry() {
+        // An occasion-suppressed notification is not displayed, so it must
+        // not be tracked for update/close either -- as far as later
+        // reconciliation is concerned, it never happened.
+        let config = enabled_config(0.0);
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = Notification99Data {
+            id: Some("n2".to_owned()),
+            occasion: Some("unfocused".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    // ── 99.5c: forget_osc99 prune helper ──────────────────────────────────────
+
+    #[test]
+    fn forget_osc99_removes_existing_entry() {
+        let mut live = HashMap::new();
+        live.insert(
+            "n1".to_owned(),
+            Osc99LiveEntry {
+                report_activation: true,
+                close_report: true,
+            },
+        );
+
+        let removed = forget_osc99(&mut live, "n1");
+
+        assert!(removed);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn forget_osc99_missing_id_returns_false() {
+        let mut live: HashMap<String, Osc99LiveEntry> = HashMap::new();
+
+        let removed = forget_osc99(&mut live, "does-not-exist");
+
+        assert!(!removed);
+    }
+
+    // ── 99.5b + 99.6: reverse-path report builders ────────────────────────
+
+    #[test]
+    fn osc99_activation_report_with_id_no_button() {
+        assert_eq!(
+            osc99_activation_report(Some("abc"), None),
+            b"\x1b]99;i=abc;\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_activation_report_with_id_and_button() {
+        assert_eq!(
+            osc99_activation_report(Some("abc"), Some("2")),
+            b"\x1b]99;i=abc;2\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_activation_report_no_id_defaults_to_zero() {
+        assert_eq!(
+            osc99_activation_report(None, None),
+            b"\x1b]99;i=0;\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_close_report_tracked() {
+        assert_eq!(
+            osc99_close_report(Some("abc"), false),
+            b"\x1b]99;i=abc:p=close;\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_close_report_untracked() {
+        assert_eq!(
+            osc99_close_report(Some("abc"), true),
+            b"\x1b]99;i=abc:p=close;untracked\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_close_report_no_id_defaults_to_zero() {
+        assert_eq!(
+            osc99_close_report(None, false),
+            b"\x1b]99;i=0:p=close;\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_alive_report_with_req_id_and_ids() {
+        assert_eq!(
+            osc99_alive_report(Some("q1"), &["a".to_owned(), "b".to_owned()]),
+            b"\x1b]99;i=q1:p=alive;a,b\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_alive_report_empty_live_list() {
+        assert_eq!(
+            osc99_alive_report(Some("q1"), &[]),
+            b"\x1b]99;i=q1:p=alive;\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_alive_report_no_req_id_defaults_to_zero() {
+        assert_eq!(
+            osc99_alive_report(None, &["x".to_owned()]),
+            b"\x1b]99;i=0:p=alive;x\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_query_response_with_id_matches_exact_bytes() {
+        assert_eq!(
+            osc99_query_response(Some("q1")),
+            b"\x1b]99;i=q1:p=?;a=report:c=1:o=always,unfocused,invisible:p=title,body,icon,buttons,alive,close,?:s=system,silent:u=0,1,2:w=1\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc99_query_response_no_id_defaults_to_zero() {
+        let bytes = osc99_query_response(None);
+        assert!(bytes.starts_with(b"\x1b]99;i=0:p=?;"));
+    }
+
+    #[test]
+    fn osc99_capabilities_are_truthful() {
+        // Guards the truthful-advertisement decision: activation reporting
+        // is advertised, but NOT the `focus` sub-capability (freminal parses
+        // `focus_on_activation` but does not act on it). Scoped to the `a=`
+        // field specifically — the `o=` field's `unfocused` value legitimately
+        // contains the substring "focus".
+        let a_field = OSC99_CAPABILITIES
+            .split(':')
+            .find(|kv| kv.starts_with("a="))
+            .expect("a= field present");
+        assert_eq!(a_field, "a=report");
+        assert!(!a_field.contains("focus"));
+
+        // `p=` payload types must include at least `title` (spec minimum).
+        let p_field = OSC99_CAPABILITIES
+            .split(':')
+            .find(|kv| kv.starts_with("p="))
+            .expect("p= field present");
+        assert!(p_field.contains("title"));
+    }
+
+    #[test]
+    fn live_ids_sorted_returns_deterministic_order() {
+        let mut live = HashMap::new();
+        for id in ["b", "a", "c"] {
+            live.insert(
+                id.to_owned(),
+                Osc99LiveEntry {
+                    report_activation: false,
+                    close_report: false,
+                },
+            );
+        }
+
+        assert_eq!(live_ids_sorted(&live), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn icon_cache_bounded_by_entry_count() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        // Insert well beyond the entry cap; the map must never exceed it.
+        for i in 0..500u32 {
+            let data = Notification99Data {
+                icon_data: Some(vec![0u8; 16]),
+                icon_cache_key: Some(format!("k{i}")),
+                ..default_n99()
+            };
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+            assert!(
+                icon_cache.len() <= 64,
+                "icon cache exceeded entry cap: {}",
+                icon_cache.len()
+            );
+        }
+    }
+
+    #[test]
+    fn icon_cache_bounded_by_total_bytes() {
+        let mut icon_cache: HashMap<String, Vec<u8>> = HashMap::new();
+        // Each icon is 256 KiB; the 4 MiB budget holds ~16, so repeated
+        // inserts of distinct keys must keep total bytes bounded.
+        let chunk = 256 * 1024;
+        for i in 0..64u32 {
+            let data = Notification99Data {
+                icon_data: Some(vec![0u8; chunk]),
+                icon_cache_key: Some(format!("b{i}")),
+                ..default_n99()
+            };
+            NotificationRouter::resolve_icon_bytes(&data, &mut icon_cache);
+            let total: usize = icon_cache.values().map(Vec::len).sum();
+            assert!(
+                total <= 4 * 1024 * 1024,
+                "icon cache exceeded byte budget: {total}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_icon_temp_file_uses_exclusive_create() {
+        // Two writes with the same id must not collide or overwrite; the
+        // monotonic counter + O_EXCL retry guarantees distinct fresh files.
+        let a = NotificationRouter::write_icon_temp_file(Some("id"), b"aaaa")
+            .expect("first temp write");
+        let b = NotificationRouter::write_icon_temp_file(Some("id"), b"bbbb")
+            .expect("second temp write");
+        assert_ne!(a, b, "temp files must be distinct");
+        assert_eq!(std::fs::read(&a).unwrap(), b"aaaa");
+        assert_eq!(std::fs::read(&b).unwrap(), b"bbbb");
+
+        // Writing to an existing path must not follow/truncate it: calling
+        // the raw create_new on an existing file fails.
+        let err = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&a)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
+        // Clean up.
+        NotificationRouter::remove_icon_temp_file(&a);
+        NotificationRouter::remove_icon_temp_file(&b);
     }
 }

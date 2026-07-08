@@ -20,8 +20,10 @@ prose, rationale, or examples.
   - <https://sw.kovidgoyal.net/kitty/desktop-notifications/>
   - <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
   - <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
-- Distilled from upstream as of **2026-07-01**, corresponding to kitty
-  **~0.47.x**.
+- Distilled from upstream as of **2026-07-05** (keyboard key tables reconfirmed
+  during Task 101 and Task 114 — the functional-key codepoint table was
+  re-checked against upstream when wiring the raw-winit delivery path),
+  corresponding to kitty **~0.47.x**.
 - Attribution: the kitty documentation is authored by Kovid Goyal and is
   licensed GPL-3.0. This file is a distilled derivative for implementation
   reference within freminal.
@@ -216,29 +218,69 @@ back, OSC 99 is unsupported.
   encoding (≤2048 raw bytes/chunk, include padding) or after encoding (≤4096
   bytes/chunk, padding only on the last chunk; terminals handle either).
 
-### freminal current-state deltas: notifications (from activation recon, 2026-07-01)
+### freminal current-state deltas: notifications — implemented in v0.11.0 (Task 99)
 
-- No OSC 99 routing yet: `OscTarget` has `Notify9`/`Notify777` but no `Notify99`;
-  OSC 99 currently falls through to `Unknown` and is dropped.
-- `AnsiOscType::Notify { title, body }` is the shared OSC 9/777 output; OSC 99
-  needs a richer variant (id, buttons, urgency, sound, icon, occasion, expiry,
-  report flags).
-- `WindowManipulation::Notification { kind, title, body }` carries no OSC 99
-  fields — Task 99.4 extends it.
-- `notify-rust` handle is dropped immediately (fire-and-forget); reports need the
-  handle retained — Task 99.5/99.6.
-- `NotificationsConfig` `osc_9`/`osc_777` fields exist but are **not enforced** in
-  dispatch today; an `osc_99` field must be wired end-to-end (do not repeat the
-  silent-drop) — Task 99.8, per `freminal-config-options`.
+OSC 99 routing landed across Tasks 99.1–99.8:
+
+- Parser: `osc_notify_99.rs` scans `raw_params` (not the pre-split token
+  vector) and splits on the **second** `;` only, so an escape-safe-UTF-8
+  title/body containing a literal `;` parses correctly. Dispatch runs through
+  the dedicated `OscTarget::Notify99` / `AnsiOscType::Notify99` variants
+  (kept separate from the shared OSC 9/777 `Notify` variant).
+- Chunk reassembly: `reassemble_osc99` accumulates multi-escape payloads
+  (`pending_notifications` on `TerminalHandler`, cleared in `full_reset()`)
+  before a fully-formed `Notification99Data` reaches the GUI.
+- App→terminal control payloads (close/alive/`p=?` query) are split into
+  `Osc99Control` / `Osc99ControlKind` rather than folded into the display
+  path.
+- Display: `NotificationRouter::route_osc99` (`freminal/src/gui/notifications.rs`)
+  pushes the toast leg and/or a `notify-rust` desktop notification, honouring
+  the `o=` occasion gate, urgency, sound, auto-expiry, buttons, and the `g=`
+  icon-by-data cache (`icon_cache: HashMap<String, Vec<u8>>`).
+- Reverse reports: activation, close, and alive reports are written back via
+  the originating pane's `pty_write_tx` (Linux/BSD observes real
+  activation/close through `wait_for_action`; macOS/Windows emit the
+  `untracked` close form immediately, since no observable handle is available
+  from a background thread there).
+- Capability handshake: `p=?` is answered with `osc99_query_response`,
+  truthfully advertising only what's implemented (see `OSC99_CAPABILITIES` in
+  `notifications.rs`).
+- Config: `[notifications] osc_99` (added in 110.0, wired through
+  `ConfigPartial`/`apply_partial`) is enforced at the `route_osc99` drain site
+  (Task 99.8) as a kill-switch alongside the master `enabled` gate.
+
+**Known deferrals (not silently dropped — tracked):**
+
+- **`osc_9`/`osc_777` are still not gated independently** (Task 99.10,
+  scheduled as an independent Task 76 hygiene cleanup, not a v0.11.0
+  blocker). Both currently collapse to the shared `NotificationKind::OscText`
+  and are gated only by `enabled`/`routing_info`; the `osc_9`/`osc_777`
+  config fields have no effect yet.
+- **Alive-map pruning tradeoff:** an OS-observed close on Linux writes the
+  close report directly from the notification thread but does not prune
+  `live` (a `!Send` map on the GUI thread); the map is pruned only on an
+  app-driven `p=close` control. A `p=alive` response may thus transiently
+  over-report a user-dismissed notification — spec-tolerable for a
+  best-effort poll.
 
 ---
 
 ## Graphics protocol completion
 
-Reference for Task 100. Task 13 shipped transmit/put/delete/query and unicode
-placeholders; the parser already types every control key. Remaining: animation,
-storage quotas, compression (`o=z`), shared memory (`t=s`), source-rect crop,
-relative placements, and `p=` in responses.
+Reference for Task 100, now implemented (v0.11.0). Task 13 shipped
+transmit/put/delete/query and unicode placeholders; Task 100 added animation
+(frame transfer/control/compose), image-number (`I=`) references, relative
+placements (`P`/`Q`/`H`/`V`, incl. their parser keys), storage quotas +
+eviction, compression (`o=z`), shared memory (`t=s`, POSIX + Windows),
+source-rect crop (`a=p` `x/y/w/h`), delete-target correctness, `p=` in
+responses, and z-index render ordering. A follow-up live-testing pass
+(Tasks 100.11–100.20) fixed the end-to-end render path: animation/compose
+repaint, relative-placement origin under scrollback, image persistence across
+subsequent output, `C=1` on `a=T`, native-vs-explicit display sizing,
+per-placement identity (coexisting placements of one image), the sub-cell
+`X`/`Y` offset, and placement-scoped delete. See the "freminal current-state"
+section below for the full done list; the graphics surface is complete (only
+the `t=f`/`t=t` security-hardening note remains, not a Task 100 item).
 
 ### Envelope (graphics)
 
@@ -370,12 +412,17 @@ freminal already implements this (dedicated `unicode_placeholder.rs`, 297-entry
 diacritic table, inheritance rules, tests). Task 100.3 mainly verifies conformance
 and closes the `image_number` reference-by-number gap.
 
-### Relative placements (in scope — Task 100.4)
+### Relative placements (implemented — Task 100.4)
 
 Relative placements are part of the **graphics protocol proper**, transmitted in
 the same `ESC _ G ... ESC \` APC envelope with `a=p` — they are _not_ a separate
-CSI extension. The parser already types `P`, `Q`, `H`, `V`; Task 100.4 is
-handler/store work.
+CSI extension. `P`/`Q`/`H`/`V` are typed fields on `KittyControlData` (added in
+foundation subtask 110.0) and are handled by a dedicated relative-placement path:
+real-parent placements get cell-stamp positioning (recorded at place time);
+virtual-placeholder parents get render-time position derivation. Error handling
+(`ENOPARENT`, `ECYCLE`, `ETOODEEP` at depth ≥ 8, and `EINVAL` for a
+virtual-relative parent) and cascade delete are implemented; the cursor never
+moves for a relative placement (Task 100.4a/100.4b).
 
 ```text
 ESC _ G a=p,i=<id>,p=<placement>,P=<parent_img>,Q=<parent_placement> ESC \
@@ -418,14 +465,16 @@ first. A delete received mid-chunked-upload aborts the partial upload.
 
 ### Transmission media (`t=`)
 
-| `t=` | Medium                                                                                                                                |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `d`  | Direct — data in the escape payload (already implemented).                                                                            |
-| `f`  | Regular file (implemented; follows symlinks, refuses special files).                                                                  |
-| `t`  | Temp file — deleted after read; only in known temp dirs and path contains `tty-graphics-protocol` (implemented).                      |
-| `s`  | POSIX/Windows shared-memory object; read `S` bytes at offset `O`, then unlink+close (POSIX) / close (Windows). Payload = object name. |
+| `t=` | Medium                                                                                                                                                                                                                                    |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `d`  | Direct — data in the escape payload (implemented).                                                                                                                                                                                        |
+| `f`  | Regular file — implemented via `read_kitty_file`; requires an absolute path, read via `std::fs::read`. Does **not** refuse symlinks, device/socket files, or restrict to specific directories (see freminal current-state note below).    |
+| `t`  | Temp file — implemented via `read_kitty_file` with `delete_after: true`; same absolute-path-only check as `f`, deleted after read. Does **not** restrict to known temp dirs or require `tty-graphics-protocol` in the path.               |
+| `s`  | Shared-memory object; read `S` bytes at offset `O`. POSIX: `shm_open`/`mmap`, then `shm_unlink`+close. Windows: `OpenFileMappingW`/`MapViewOfFile`, then unmap+close (no unlink; `S=` required). Payload = object name. Both implemented. |
 
-Security: refuse device/socket/special files; may refuse `/proc`, `/sys`, `/dev`.
+Security (upstream spec): refuse device/socket/special files; may refuse
+`/proc`, `/sys`, `/dev`. **freminal current state:** only the absolute-path
+check is enforced for `f`/`t` — see the graphics current-state section below.
 
 ### Responses and error codes
 
@@ -434,8 +483,8 @@ ESC _ G i=<id>[,p=<placement>] ; <OK-or-ERROR[:detail]> ESC \
 ```
 
 - `p=` is included in the response **only if** the request specified a non-zero
-  `p=`. (freminal's `format_kitty_response` currently emits `i=` only — a gap to
-  close in Task 100.)
+  `p=`. (freminal's `format_kitty_response` emits `p=<pid>` for non-zero
+  placements as of Task 100.)
 - `q=1` suppresses OK; `q=2` suppresses all. Message is printable ASCII.
 
 Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
@@ -445,8 +494,8 @@ Named error codes: `ENOENT`, `EINVAL`, `ENOTSUP`, `ETOODEEP`, `ECYCLE`,
 
 `o=z` marks the payload as RFC 1950 zlib-deflated (before base64). Decompress
 before interpreting pixels/PNG. Valid for any `f=`. With PNG + compression,
-provide `S=` (source data size). freminal parses `o=z` but does not yet
-decompress — a gap in Task 100.
+provide `S=` (source data size). Implemented in Task 100 (RFC 1950 inflate
+via `flate2`/`miniz_oxide`).
 
 ### Storage quotas
 
@@ -462,21 +511,99 @@ Eviction: LRU on overflow, preferring images without placements. The protocol
 floor is "at least a few full-screen images"; the exact number is an
 implementation choice.
 
-### freminal current-state deltas: graphics (from activation recon, 2026-07-01)
+### freminal current-state: graphics — implemented in v0.11.0 (Task 100)
 
-- Parser types **all** control keys (including `P Q H V`, `t=s`, `U`, `o=z`, the
-  animation keys). Remaining work is handler/store, not parsing.
-- `a=f`/`a=a`/`a=c` are warn-and-skip stubs; `InlineImage` has no frame concept.
-- `o=z` parsed but never decompressed; `t=s` returns `ENOTSUP`.
-- Source-rect crop (`x/y/w/h`) and cell offsets (`X/Y`) parsed but not applied at
-  decode/render.
-- `format_kitty_response` omits `p=`.
-- Renderer sorts image quads by id, not z-index.
-- No storage quota; only scrollback-driven GC.
-- Delete "and-after"/uppercase-free distinctions are partially collapsed.
-- **Correction to a recon note:** an early sub-agent summary claimed relative
-  placements were "a separate CSI extension, out of scope". That is wrong —
-  relative placements are APC graphics commands and are in scope as Task 100.4.
+- Relative placements: `P`/`Q`/`H`/`V` are typed fields on `KittyControlData`
+  (110.0) and fully handled: real-parent cell-stamp positioning at place time,
+  virtual-placeholder-parent render-time position derivation, `ENOPARENT`/
+  `ECYCLE`/`ETOODEEP` (depth ≥ 8)/virtual-relative `EINVAL`, cascade delete, and
+  the cursor never moves for a relative placement (Task 100.4a/100.4b).
+- Animation `a=f` (frame transfer), `a=a` (control: run/stop/loop, current
+  frame, per-frame gap), and `a=c` (compose) are implemented with the
+  action-dependent key re-aliasing documented in the control-key table above.
+  `InlineImage` carries a frame model (`frames`, `root_gap_ms`,
+  `AnimationControl`); the GUI selects the current frame by wall-clock and the
+  renderer re-uploads the texture on frame change (Tasks 100.2a/100.2b/100.2c).
+- Image number (`I=`) reference-by-number is implemented: transmit records
+  number→id in the image store; `a=p`/`a=f` resolve a bare `I=` to the
+  newest-transmitted image with that number; the response echoes
+  `i=<id>,I=<n>` (Task 100.3).
+- `o=z` (RFC 1950 zlib, via `flate2`) is decompressed before interpreting
+  pixels/PNG; `t=s` shared memory is implemented on both POSIX
+  (`shm_open`/`mmap`/`shm_unlink` via the `nix` crate's `"mman"` feature) and
+  Windows (`OpenFileMappingW`/`MapViewOfFile`/`UnmapViewOfFile`/`CloseHandle`
+  via `winapi`; Task 100.10); `O=` byte offset is applied when reading a
+  file/shm object (Tasks 100.6, 100.10).
+- `format_kitty_response(image_id, ok, message)` and `send_kitty_error` now
+  take a placement id and emit `,p=<pid>` in the response when the request had
+  a non-zero placement id (Tasks 100.2a, 100.3).
+- Image storage quota + LRU eviction is implemented in `ImageStore` (base
+  320 MB, animation budget 5× base; eviction prefers placement-less images,
+  then oldest) (Task 100.5).
+- Delete-target correctness (Task 100.7a): lowercase `d=` targets remove
+  placements only and keep image data; uppercase targets additionally free the
+  image data if no placement (including scrollback) still references it. Added
+  the previously-missing `d=q`/`d=Q` (cell + z-index), `d=r`/`d=R` (id range,
+  kitty 0.33.0+), and `d=f`/`d=F` (delete frames) variants; `d=a` (visible-only)
+  vs `d=A` (all) is distinguished; the earlier `d=n`/`d=N` store-free bug is
+  fixed.
+- Image quads render in `(z-index, placement-instance)` order, with higher
+  z-index drawn on top of lower (Task 100.7b; the tie-break basis changed from
+  image id to placement-instance in Task 100.18) — the earlier id-only sort
+  order was a real stacking bug and is fixed.
+- Source-rect crop for `a=p`/`a=T` (Task 100.9): the `x`/`y`/`w`/`h` display
+  keys select a pixel sub-rectangle of the transmitted image; the crop rides
+  the per-placement `ImagePlacement.source_crop` and `compute_image_quad`
+  composes it into the UV window (`w=0`/`h=0`/absent = full from the offset).
+- Images survive a terminal reflow as coherent rectangles across all three
+  supported protocols (Task 100.4.0 atomicity fix).
+- A displayed image survives subsequent output: `place_image` leaves a fresh
+  blank row below the image and moves the cursor there, so following text no
+  longer overwrites (destroys) the image's cells (Task 100.15). `C=1` (no
+  cursor movement) is honoured on `a=T`/Put, not only `a=p` (Task 100.16).
+- Display sizing honours the spec's native-vs-explicit distinction (Task
+  100.17): with no `c`/`r` (kitty), `auto` (iTerm2), or always (sixel) the image
+  is drawn at its native pixel size anchored at the cell top-left
+  (`ImageSizeMode::NativePixels`); with explicit `c`/`r` (kitty) or
+  `width`/`height` (iTerm2) it is scaled to fill the declared cell grid
+  (`ImageSizeMode::ExplicitCells`). Previously every image was stretched to fill
+  its cell grid.
+- Multiple placements of the same image coexist correctly (Task 100.18): per
+  the spec, `a=p` puts with placement id `0`/unspecified create distinct
+  coexisting placements, and a second put with the same non-zero placement id
+  replaces the first. Each placement carries a monotonic `placement_instance`
+  id; `build_image_verts` buckets by it (previously by `image_id` alone, which
+  merged two on-screen placements of one image into a single oversized quad).
+  This also resolved the earlier `z_index`/`source_crop` first-seen-collapse
+  limitations for free.
+- Sub-cell `X`/`Y` pixel offsets ARE applied (Task 100.19): the `X`/`Y` display
+  keys shift the drawing origin within the first cell by that many pixels
+  (clamped `< cell size`), via `ImagePlacement.subcell_offset` and an additive
+  quad-origin translation in `compute_image_quad`. Orthogonal to size mode
+  (position only) and source-crop (UV only). Kitty-only (iTerm2/sixel have no
+  such key).
+- Unicode-placeholder virtual placements with placement id `0` coexist
+  distinctly, and `d=i,p=<n>` deletes only the named placement (Task 100.20).
+- Kitty image DATA persists across scroll-out: when a placement scrolls off
+  the end of scrollback (or is removed by a lowercase `d=` delete), the
+  transmitted image data is retained and stays addressable by `id`/number for
+  a later `a=p` put, per the spec's separate-lifetime rule. The scrollback GC
+  (`ImageStore::retain_referenced`) is protocol-aware — it only garbage-
+  collects cell-owned Sixel/iTerm2 images on scroll-out; Kitty image data is
+  released only by an explicit uppercase free/delete or the quota-LRU path.
+  (Previously scroll-out freed Kitty data unconditionally, breaking
+  transmit-only `a=t` images and lowercase-deleted images referenced again by
+  id — PR #382 review fix.)
+
+**Confirmed still remaining (not resolved by Task 100):**
+
+- **`t=f`/`t=t` file-path security is narrower than the upstream spec
+  suggests.** `read_kitty_file` only rejects non-absolute paths
+  (`path.is_absolute()`); it does not follow-vs-refuse symlinks, does not
+  refuse device/socket/special files, and does not restrict temp-file reads to
+  known temp directories or require `tty-graphics-protocol` in the path. The
+  transmission-media table above has been corrected to describe this actual
+  behavior rather than the previously-documented (and inaccurate) protections.
 
 ---
 
@@ -599,13 +726,70 @@ under flag 8.
 → 9. `ctrl+0` → 48, `ctrl+1` → 49 (no transform). Any other ASCII key is left
 untouched by ctrl.
 
-### freminal current-state deltas: keyboard (from activation recon, 2026-07-01)
+### freminal current-state deltas: keyboard (from 101.1 audit, 2026-07-01; updated 2026-07-05 after Task 101; lock-state reverted 2026-07-06)
 
-- Modifiers: only shift/alt/ctrl (bits 1/2/4). Missing bits 8–128.
-- Keypad keys, media keys, modifier-keys-as-keys, F13–F35, and the lock/
-  print/pause/menu keys are suspected absent (need audit in 101.1).
-- Stack, set/push/pop, query handshake, XTGETTCAP `u`, and alt-screen separate
-  stacks are implemented and tested.
+The 101.1 audit found the real blocker was **egui 0.35 (via egui-winit)**, not
+freminal's encoding layer. Work split into "encoding-only" (Task 101, **done**)
+and "egui-blocked" (Task 114 — a raw-winit intercept in `freminal-windowing`,
+since egui itself was never upgraded). Task 114 delivered the keypad/media/
+Print/Pause/Menu keys (kept, correct on every platform), but its **lock-state
+half was reverted** (see below): `caps_lock`/`num_lock` decoration and the
+CapsLock/NumLock/ScrollLock transition events cannot be produced uniformly
+across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
+(no winit `KeyCode`), and `hyper`/`meta` (no platform source).
+
+- Modifiers: `KeyModifiers` models all 8 bits (110.0); `modifier_param()` returns
+  `Option<u16>` (max 256).
+  - **✅ Done (101.2):** `super` (bit 8) is sourced by tracking
+    `Key::SuperLeft`/`SuperRight` press/release in the GUI loop (macOS routes
+    `Modifiers::mac_cmd` to `super_key`, split out of `ctrl`).
+  - **⏳ Gap (REVERTED 2026-07-06 — not producible uniformly):** true
+    `caps_lock`/`num_lock` (bits 64/128) are **not** sourced. A Task 114 attempt
+    (`evdev` on Linux, `GetKeyState` on Windows, `CGEventSourceFlagsState` on
+    macOS) was reverted: on **Wayland** the compositor consumes the lock keys and
+    sends only `wl_keyboard.modifiers` (winit delivers no `KeyboardInput`), so the
+    state is not observable via events; on **Windows/macOS** the OS query is a
+    level (current on/off) sampled only at cold-start/focus-gain, so decoration is
+    stale mid-focus. A Linux-only `evdev` kernel LED watcher was rejected as
+    fragile and platform-divergent. Half-shipping would over-advertise capability.
+    The `KeyModifiers` fields stay `0`. Tracked upstream: egui#3653, egui#2041,
+    winit#1426 (alacritty#7937 is the same limitation elsewhere).
+  - **⏳ Gap (no platform source):** `hyper`/`meta` (16/32) remain unavailable on
+    any current platform path. The `KeyModifiers` fields exist but stay `0`.
+- Functional keys present: arrows, Home/End, Insert/Delete, PageUp/Down, F1–F35,
+  Enter/Tab/Backspace/Escape, modifier-keys-as-keys. `KeyPad(u8)` carries only
+  legacy bytes, not KKP codepoints.
+  - **✅ Done (101.3):** F13–F35 (`CSI 57376 u`…`57398 u`, KKP path only) and
+    modifier-keys-as-keys ShiftLeft/Right, ControlLeft/Right, AltLeft/Right,
+    SuperLeft/Right (57441–57444 / 57447–57450, under flag 8; Hyper/Meta omitted —
+    egui has no such `Key` variants).
+  - **✅ Done (Task 114):** keypad operators/directional/KP_Enter/KP_Begin, media
+    keys, and PrintScreen/Pause/Menu-as-keys are delivered via a raw-winit
+    `KeyboardInput` intercept (`App::on_raw_key_event` in
+    `freminal-windowing/src/lib.rs`, wired through `event_loop.rs` before
+    egui-winit translation) and encoded to
+    `TerminalInput::KittyFunctional { codepoint, mods }` on the existing
+    `build_csi_u` path — the same encoding Task 101 uses, just fed from a
+    different delivery seam. Numpad digits/decimal remain unified with
+    main-row digits per egui#3653.
+  - **⏳ Gap (REVERTED 2026-07-06):** CapsLock/ScrollLock/NumLock **as keys**
+    (their `CSI 57358/57359/57360 u` transition events) are **not** delivered.
+    The transition is not observable off X11 (Wayland compositor consumes the
+    key; Windows/macOS expose a level, not an edge), so shipping it only on X11
+    would make one platform behave differently. Declined; tracked upstream
+    (egui#3653, winit#1426). The `KKP_*_CODEPOINT` constants stay defined in
+    `freminal-terminal-emulator` (spec table) — only the GUI delivery is absent.
+  - **⏳ Gap (no winit `KeyCode`, not egui):** ISO_Level3_Shift / ISO_Level5_Shift
+    (57453/57454) are still not delivered. The 114.5 recon confirmed the
+    blocker moved from egui to **winit itself**: winit 0.30.13's `KeyCode` enum
+    has no variant for these keys at all; the closest concept is the logical
+    `NamedKey::AltGraph`, which carries no physical-key identity to intercept.
+    Permanent, unscheduled gap pending upstream winit support.
+- **✅ Done (101.3):** F3 is normalized to `13 ~` under KKP (was `ESC O R` SS3,
+  which collides with CPR). The legacy (non-KKP) path keeps `ESC O R` for xterm
+  terminfo compatibility.
+- Conformant, do not touch: stack set/push/pop, `CSI ? u` query, XTGETTCAP `u`,
+  separate main/alt-screen stacks (all tested). All 5 flag bits defined.
 - Base-layout sub-field always equals the key codepoint (no physical-layout map).
 - DA1 does not advertise kitty keyboard (correct — detection is via `CSI ? u`).
 

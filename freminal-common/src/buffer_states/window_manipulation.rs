@@ -37,6 +37,61 @@ pub enum WindowManipulationError {
     },
 }
 
+/// Data payload for a stateful OSC 99 desktop notification (Task 99).
+///
+/// Boxed in [`WindowManipulation::Notification99`] to keep the enum size
+/// reasonable. All fields are primitive shells; domain enums for urgency,
+/// occasion, and action live in the Task 99.1 typed parser, not here.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Notification99Data {
+    /// Notification id (`i=`), if any. `None` = no id (report as `i=0`).
+    pub id: Option<String>,
+    /// Notification title (`p=title` payload), if any.
+    pub title: Option<String>,
+    /// Notification body (`p=body` payload), if any.
+    pub body: Option<String>,
+    /// Transmitted icon image bytes (`p=icon`, base64-decoded), if any.
+    pub icon_data: Option<Vec<u8>>,
+    /// Icon names to resolve (`n=`), first available wins.
+    pub icon_names: Vec<String>,
+    /// Icon-data cache key (`g=`), if any.
+    pub icon_cache_key: Option<String>,
+    /// Button labels (`p=buttons`), in order.
+    pub button_labels: Vec<String>,
+    /// Whether `a=report` was set (activation reports wanted).
+    pub report_activation: bool,
+    /// Whether `a=focus` was set (focus the source window on activation).
+    /// Default `true` (the OSC 99 default is `focus`).
+    pub focus_on_activation: bool,
+    /// Whether `c=1` was set (close report wanted).
+    pub close_report: bool,
+    /// Urgency (`u=`): 0 low, 1 normal, 2 critical. `None` = unset/normal.
+    pub urgency: Option<u8>,
+    /// Occasion (`o=`): `always` / `unfocused` / `invisible`. `None` = default.
+    pub occasion: Option<String>,
+    /// Sound name (`s=`), if any.
+    pub sound: Option<String>,
+    /// Application name (`f=`), if any.
+    pub app_name: Option<String>,
+    /// Notification type/category (`t=`), may repeat.
+    pub notification_type: Vec<String>,
+    /// Auto-expire after N ms (`w=`). `None` = OS default.
+    pub expire_ms: Option<i64>,
+}
+
+/// The three OSC 99 app→terminal control payload types that are NOT display
+/// requests: they require a terminal response or state change rather than a
+/// notification banner (Task 99).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Osc99ControlKind {
+    /// `p=close`: the application asks to close the notification with this id.
+    Close,
+    /// `p=alive`: liveness poll; the terminal answers with the live-id list.
+    Alive,
+    /// `p=?`: capability query; the terminal answers with its supported keys.
+    Query,
+}
+
 /// Window manipulation commands (XTWINOPS / xterm CSI Ps ; Ps ; Ps t).
 ///
 /// This enum covers two categories:
@@ -128,6 +183,28 @@ pub enum WindowManipulation {
         /// The notification body text.
         body: String,
     },
+    /// Stateful desktop notification request (OSC 99, Task 99).
+    ///
+    /// The stateful sibling of `Notification` (OSC 9/777). Carries the full
+    /// OSC 99 metadata superset in a [`Box<Notification99Data>`] to avoid
+    /// inflating the enum's in-memory size.  The boxed struct's fields are
+    /// primitive "shells" populated by Task 99.4 from the typed `Osc99Command`
+    /// parser (Task 99.1); domain enums for urgency/occasion/action live in
+    /// that parser, not here.  Transported via the `WindowCommand` channel
+    /// (not the snapshot) and rendered by Task 99.5.
+    Notification99(Box<Notification99Data>),
+    /// OSC 99 app→terminal control sequence (`p=close`/`p=alive`/`p=?`, Task 99).
+    ///
+    /// Routed distinctly from display notifications: it drives a terminal
+    /// response (close reconciliation, alive-id list, or capability
+    /// handshake) rather than a banner. The reverse writes land in Tasks
+    /// 99.6/99.7.
+    Osc99Control {
+        /// Notification id (`i=`) the control refers to, if any.
+        id: Option<String>,
+        /// Which control payload type this is.
+        kind: Osc99ControlKind,
+    },
 }
 
 impl TryFrom<(usize, usize, usize)> for WindowManipulation {
@@ -170,5 +247,63 @@ impl TryFrom<(usize, usize, usize)> for WindowManipulation {
                 param_ps3,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification99_variant_round_trips() {
+        let data = Notification99Data {
+            id: Some("test-id-42".to_owned()),
+            title: Some("Test Title".to_owned()),
+            body: Some("Test body text.".to_owned()),
+            icon_data: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            icon_names: vec!["dialog-information".to_owned(), "info".to_owned()],
+            icon_cache_key: Some("cache-key-1".to_owned()),
+            button_labels: vec!["OK".to_owned(), "Cancel".to_owned()],
+            report_activation: true,
+            focus_on_activation: true,
+            close_report: false,
+            urgency: Some(1),
+            occasion: Some("unfocused".to_owned()),
+            sound: Some("bell".to_owned()),
+            app_name: Some("MyApp".to_owned()),
+            notification_type: vec!["email".to_owned()],
+            expire_ms: Some(5000),
+        };
+        let original = WindowManipulation::Notification99(Box::new(data));
+        let cloned = original.clone();
+
+        // Pattern-match the clone and assert all fields survived.
+        let WindowManipulation::Notification99(ref d) = cloned else {
+            panic!("expected Notification99 variant");
+        };
+
+        assert_eq!(d.id.as_deref(), Some("test-id-42"));
+        assert_eq!(d.title.as_deref(), Some("Test Title"));
+        assert_eq!(d.body.as_deref(), Some("Test body text."));
+        assert_eq!(
+            d.icon_data.as_deref(),
+            Some(&[0x89u8, 0x50, 0x4e, 0x47][..])
+        );
+        assert_eq!(d.icon_names, vec!["dialog-information", "info"]);
+        assert_eq!(d.icon_cache_key.as_deref(), Some("cache-key-1"));
+        assert_eq!(d.button_labels, vec!["OK", "Cancel"]);
+        assert!(d.report_activation);
+        assert!(d.focus_on_activation);
+        assert!(!d.close_report);
+        assert_eq!(d.urgency, Some(1));
+        assert_eq!(d.occasion.as_deref(), Some("unfocused"));
+        assert_eq!(d.sound.as_deref(), Some("bell"));
+        assert_eq!(d.app_name.as_deref(), Some("MyApp"));
+        assert_eq!(d.notification_type, vec!["email"]);
+        assert_eq!(d.expire_ms, Some(5000));
+
+        // Confirm the variant equals the original.
+        assert_eq!(original, cloned);
     }
 }

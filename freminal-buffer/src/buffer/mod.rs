@@ -20,6 +20,7 @@ use crate::{
 };
 
 pub use flatten::{AutoUrlRange, RowCacheEntry};
+pub use images::PlaceImageResult;
 
 #[cfg(test)]
 use crate::cell::Cell;
@@ -3140,6 +3141,10 @@ mod image_tests {
             height_px: u32::try_from(rows * 16).unwrap(),
             display_cols: cols,
             display_rows: rows,
+            size_mode: crate::image_store::ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         }
     }
 
@@ -3152,7 +3157,7 @@ mod image_tests {
         let img_id = img.id;
 
         // Cursor starts at (0,0).
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Rows 0 and 1 should have image cells at columns 0, 1, 2.
         for img_row in 0..2_usize {
@@ -3174,6 +3179,55 @@ mod image_tests {
         assert!(buf.image_store().contains(img_id));
     }
 
+    /// Regression: `clear_image_placements_at_cell_with_z` (Kitty `d=q`/`d=Q`)
+    /// must clear only the placement instance the matched cell belongs to,
+    /// not every placement sharing the same `image_id`. Two coexisting
+    /// placements of one image at different z-indexes must be deletable
+    /// independently.
+    #[test]
+    fn clear_placement_with_z_only_removes_matched_instance() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Two placements of the SAME image id at different z-indexes and
+        // different rows, distinguished by `placement_instance`.
+        let img_a = make_image(3, 1);
+        let img_id = img_a.id;
+        let img_b = img_a.clone(); // same id, second placement
+
+        // Placement instance 1 at row 0, z=0.
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 0;
+        buf.place_image(img_a, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+
+        // Placement instance 2 at row 2, z=5.
+        buf.cursor.pos.x = 0;
+        buf.cursor.pos.y = 2;
+        buf.place_image(img_b, 0, ImageProtocol::Kitty, None, None, 5, None, 2, None);
+
+        // Both placements exist: 3 cells each.
+        assert_eq!(count_image_cells(&buf, img_id), 6);
+
+        // Clear the z=0 placement at its cell (row 0, col 0).
+        let cleared = buf.clear_image_placements_at_cell_with_z(0, 0, 0);
+        assert_eq!(cleared, Some(img_id));
+
+        // Only the z=0 instance (3 cells) was removed; the z=5 instance
+        // (3 cells at row 2) must survive.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            3,
+            "only the matched placement instance should be cleared"
+        );
+        for col in 0..3usize {
+            let cell = &buf.rows[2].cells()[col];
+            let p = cell
+                .image_placement()
+                .expect("z=5 placement must survive at row 2");
+            assert_eq!(p.z_index, 5);
+            assert_eq!(p.placement_instance, 2);
+        }
+    }
+
     #[test]
     fn place_image_moves_cursor_below_image() {
         let mut buf = Buffer::new(20, 10);
@@ -3187,11 +3241,108 @@ mod image_tests {
         buf.cursor.pos.x = 0;
 
         let img = make_image(3, 2);
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Cursor should be at row 2 (below the 2-row image), column 0.
         assert_eq!(buf.cursor.pos.y, 2);
         assert_eq!(buf.cursor.pos.x, 0);
+    }
+
+    /// Regression test for Task 100.15: a real (Kitty) image placed at the
+    /// buffer's tail — the common real-world case, since `Buffer::new`
+    /// starts with a single row and grows one at a time as output arrives,
+    /// so there is usually NO pre-existing blank row below a freshly
+    /// placed image — must leave the cursor on a genuinely fresh blank
+    /// row below the image, not parked on the image's own last row.
+    ///
+    /// Before the fix, `place_image` parked the cursor on the image's own
+    /// last row in exactly this scenario, so the very next character
+    /// write destroyed the entire image via
+    /// `clear_images_overwritten_by_text`. This test drives the real
+    /// sequence (place image, then write ordinary text at wherever the
+    /// cursor naturally landed — no manual cursor repositioning) and
+    /// asserts the image survives.
+    #[test]
+    fn place_image_at_buffer_tail_leaves_blank_row_so_next_text_write_does_not_destroy_it() {
+        let mut buf = Buffer::new(20, 10);
+
+        // 3 cols x 2 rows image, placed at the fresh buffer's only
+        // (tail) row.
+        let img = make_image(3, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+
+        let image_last_row = 1; // image occupies rows 0 and 1.
+        assert!(
+            buf.cursor.pos.y > image_last_row,
+            "cursor (row {}) must be strictly below the image's last row \
+             ({image_last_row}) — a fresh blank row, not the image's own \
+             last row",
+            buf.cursor.pos.y,
+        );
+        assert_eq!(buf.cursor.pos.x, 0);
+
+        // Sanity check: the image is intact before the text write.
+        assert_eq!(count_image_cells(&buf, img_id), 6);
+
+        // Write ordinary text at wherever `place_image` naturally parked
+        // the cursor — do NOT manually reposition it; that is the real
+        // bug path (a shell echoing the next character after an inline
+        // image, with no explicit cursor movement in between).
+        buf.insert_text(&[TChar::Ascii(b'X')]);
+
+        // The image must have survived: the text landed on the fresh
+        // blank row below the image, not on any of the image's own rows,
+        // so all 6 of its cells must still carry the placement stamp.
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            6,
+            "image must survive a text write immediately after placement"
+        );
+    }
+
+    /// Same regression as
+    /// `place_image_at_buffer_tail_leaves_blank_row_so_next_text_write_does_not_destroy_it`,
+    /// but for a taller (4-row) Sixel image placed a few rows down from
+    /// the buffer's origin (still at the buffer's tail). Confirms the fix
+    /// generalizes across image height and protocol, and covers the
+    /// "append one row" path when more than one row must be pushed to
+    /// clear the image before a blank row appears.
+    #[test]
+    fn place_sixel_multirow_image_at_buffer_tail_survives_subsequent_text_write() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Advance a couple of lines first so the image lands away from
+        // row 0 but is still at the buffer's tail (no pre-existing rows
+        // below it) — matches an ordinary terminal session shape.
+        buf.insert_text(&[TChar::Ascii(b'$')]);
+        buf.handle_lf();
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        assert_eq!(buf.rows.len(), 3);
+        assert_eq!(buf.cursor.pos.y, 2);
+
+        let img = make_image(4, 4);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+
+        let image_last_row = 2 + 4 - 1; // rows 2..=5.
+        assert!(
+            buf.cursor.pos.y > image_last_row,
+            "cursor (row {}) must be strictly below the image's last row \
+             ({image_last_row})",
+            buf.cursor.pos.y,
+        );
+
+        assert_eq!(count_image_cells(&buf, img_id), 16);
+
+        buf.insert_text(&[TChar::Ascii(b'Y')]);
+
+        assert_eq!(
+            count_image_cells(&buf, img_id),
+            16,
+            "multi-row image must survive a text write immediately after placement"
+        );
     }
 
     #[test]
@@ -3201,7 +3352,7 @@ mod image_tests {
         let img = make_image(10, 1);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Only columns 0..5 should have image cells.
         let row = &buf.rows[0];
@@ -3224,7 +3375,7 @@ mod image_tests {
         let img = make_image(3, 1);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Image cells should be at columns 5, 6, 7.
         let row = &buf.rows[0];
@@ -3253,7 +3404,7 @@ mod image_tests {
         let img = make_image(3, 2);
         let img_id = img.id;
 
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // The image should exist in the store.
         assert!(buf.image_store().contains(img_id));
@@ -3285,7 +3436,7 @@ mod image_tests {
         // Place an image at cursor (0,0).
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // The image should be in the store.
         assert!(buf.image_store().contains(img_id));
@@ -3306,6 +3457,31 @@ mod image_tests {
     }
 
     #[test]
+    fn kitty_image_data_survives_scroll_out() {
+        // Unlike Sixel/iTerm2, a Kitty image's DATA must persist after its
+        // placement scrolls off the end of scrollback — it stays addressable
+        // by id/number until an explicit free or quota eviction (kitty
+        // graphics protocol). Same scenario as
+        // `image_gc_removes_unreferenced_images`, but with the Kitty protocol.
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(2);
+
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        assert!(buf.image_store().contains(img_id));
+
+        // Push enough lines to drain the image's row off the top.
+        for _ in 0..10 {
+            buf.handle_lf();
+        }
+
+        assert!(
+            buf.image_store().contains(img_id),
+            "Kitty image data must survive its placement scrolling off"
+        );
+    }
+
+    #[test]
     fn image_gc_retains_referenced_images() {
         let mut buf = Buffer::new(10, 5).with_scrollback_limit(10);
 
@@ -3313,7 +3489,7 @@ mod image_tests {
         buf.handle_lf();
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Push a few lines, but not enough to evict the image row.
         for _ in 0..3 {
@@ -3336,7 +3512,7 @@ mod image_tests {
         // Place an image in the primary buffer.
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert!(buf.image_store().contains(img_id));
 
         // Enter alternate screen — primary images should be saved.
@@ -3361,7 +3537,7 @@ mod image_tests {
         // Place image and remember the cell content.
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Verify cell has image before alternate screen.
         assert!(buf.rows[0].cells()[0].has_image());
@@ -3387,7 +3563,7 @@ mod image_tests {
 
         let img = make_image(2, 1);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert!(buf.image_store().contains(img_id));
 
         buf.full_reset();
@@ -3405,11 +3581,11 @@ mod image_tests {
 
         let img1 = make_image(2, 1);
         let id1 = img1.id;
-        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         let img2 = make_image(3, 1);
         let id2 = img2.id;
-        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         assert!(buf.image_store().contains(id1));
         assert!(buf.image_store().contains(id2));
@@ -3424,7 +3600,7 @@ mod image_tests {
         // Image 1 on row 0.
         let img1 = make_image(2, 1);
         let id1 = img1.id;
-        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img1, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Move cursor down and place image 2.
         for _ in 0..4 {
@@ -3432,7 +3608,7 @@ mod image_tests {
         }
         let img2 = make_image(2, 1);
         let id2 = img2.id;
-        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img2, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Push many more lines to evict the first image's row.
         for _ in 0..10 {
@@ -3491,6 +3667,9 @@ mod image_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         row.set_image_cell(5, placement.clone(), FormatTag::default());
 
@@ -3512,6 +3691,9 @@ mod image_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         // Column 10 is beyond width 5 — should be a no-op.
         row.set_image_cell(10, placement, FormatTag::default());
@@ -3536,6 +3718,9 @@ mod image_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let img_cell = Cell::image_cell(placement.clone(), FormatTag::default());
         assert!(img_cell.has_image());
@@ -3552,6 +3737,9 @@ mod image_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         let mut cell = Cell::image_cell(placement, FormatTag::default());
         assert!(cell.has_image());
@@ -3570,7 +3758,17 @@ mod image_tests {
         // Place a tall image (3 cols × 5 rows) at cursor (0,0).
         let big_img = make_image(3, 5);
         let big_id = big_img.id;
-        buf.place_image(big_img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(
+            big_img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+        );
 
         // Cursor is now below the image (row 5). Move back to (0,0).
         buf.cursor.pos.y = 0;
@@ -3579,7 +3777,17 @@ mod image_tests {
         // Place a smaller image (3 cols × 2 rows) at the same position.
         let small_img = make_image(3, 2);
         let small_id = small_img.id;
-        buf.place_image(small_img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(
+            small_img,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            1,
+            None,
+        );
 
         // Rows 0-1 should have the new image's cells.
         for r in 0..2_usize {
@@ -3627,7 +3835,7 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
 
         // Verify image cells are present (5 cols × 3 rows = 15).
         assert_eq!(count_image_cells(&buf, img_id), 15);
@@ -3652,7 +3860,7 @@ mod image_tests {
         // Place image A at columns 0-2, rows 0-1.
         let img_a = make_image(3, 2);
         let id_a = img_a.id;
-        buf.place_image(img_a, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img_a, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, id_a), 6);
 
         // place_image moved cursor below. Move cursor to row 0, col 10
@@ -3661,7 +3869,7 @@ mod image_tests {
         buf.cursor.pos.x = 10;
         let img_b = make_image(3, 2);
         let id_b = img_b.id;
-        buf.place_image(img_b, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img_b, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, id_b), 6);
 
         // Write text over image A's first cell.
@@ -3693,7 +3901,7 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Cursor at (0,0); erase from cursor to end of line.
@@ -3717,7 +3925,7 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Move cursor to the end of the image's first row.
@@ -3739,7 +3947,7 @@ mod image_tests {
 
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         buf.cursor.pos.y = 0;
@@ -3760,7 +3968,7 @@ mod image_tests {
         // Place image spanning rows 0-2, cols 0-4.
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Erase from row 1 onward — image has cells on row 1, so the
@@ -3783,7 +3991,7 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Move cursor to col 2 of row 0 and erase 1 char — should trigger
@@ -3806,7 +4014,7 @@ mod image_tests {
         // Place a 5×3 image at (0,0).
         let img = make_image(5, 3);
         let img_id = img.id;
-        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
         assert_eq!(count_image_cells(&buf, img_id), 15);
 
         // Erase the entire first line — should clear all image cells.
@@ -3817,6 +4025,234 @@ mod image_tests {
             count_image_cells(&buf, img_id),
             0,
             "all image cells should be cleared after erase_line"
+        );
+    }
+
+    // ── reflow_to_width: image rectangle preservation (Task 100.4.0) ──
+    //
+    // Regression tests for a pre-existing, protocol-agnostic bug: image cells
+    // are `TChar::Space` with `is_head() == false`, so `reflow_to_width`'s
+    // glyph-rewrap path treated them as stray width-1 continuations and
+    // could spread a single image row's cells across multiple new physical
+    // rows, fragmenting the `(row_in_image, col_in_image)` rectangle the
+    // renderer relies on.
+
+    /// Return the sorted list of physical row indices in `buf` that contain
+    /// at least one cell whose placement has the given `image_id` and
+    /// `row_in_image`.
+    fn physical_rows_for_image_row(buf: &Buffer, image_id: u64, row_in_image: usize) -> Vec<usize> {
+        buf.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.cells().iter().any(|c| {
+                    c.image_placement()
+                        .is_some_and(|p| p.image_id == image_id && p.row_in_image == row_in_image)
+                })
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Return the `col_in_image` values (in cell order) for cells on
+    /// `phys_row` that belong to `image_id`'s `row_in_image`.
+    fn cols_in_image_on_row(
+        buf: &Buffer,
+        phys_row: usize,
+        image_id: u64,
+        row_in_image: usize,
+    ) -> Vec<usize> {
+        buf.rows[phys_row]
+            .cells()
+            .iter()
+            .filter_map(|c| {
+                c.image_placement()
+                    .filter(|p| p.image_id == image_id && p.row_in_image == row_in_image)
+                    .map(|p| p.col_in_image)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reflow_narrower_keeps_image_rectangle_contiguous() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 10-col × 3-row image at (0,0).
+        let img = make_image(10, 3);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+
+        // Sanity: before reflow, the image occupies a contiguous rectangle —
+        // each image row lives on exactly one physical row with col_in_image
+        // running 0..10.
+        for row_in_image in 0..3_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row before reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..10).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should be contiguous 0..10 before reflow"
+            );
+        }
+
+        // Reflow to a width (8) narrower than the image's 10 columns. Without
+        // the fix, the glyph-rewrap path would split each 10-cell image row
+        // across two new physical rows (8 cells + 2 cells), fragmenting the
+        // image's rectangle.
+        buf.reflow_to_width(8);
+
+        for row_in_image in 0..3_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should still be on exactly one physical row after \
+                 narrowing reflow (found on rows {phys_rows:?}) — the image must not fragment"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..8).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should be contiguous 0..8 (clipped to the \
+                 new width) after narrowing reflow"
+            );
+        }
+    }
+
+    #[test]
+    fn reflow_wider_keeps_image_rectangle() {
+        let mut buf = Buffer::new(10, 10);
+
+        // Place an 8-col × 2-row image at (0,0) — fits within the original width.
+        let img = make_image(8, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+
+        buf.reflow_to_width(20);
+
+        for row_in_image in 0..2_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row after \
+                 widening reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..8).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should remain contiguous 0..8 after \
+                 widening reflow (image is narrower than new width, so no clipping)"
+            );
+        }
+    }
+
+    #[test]
+    fn reflow_image_line_preserved_text_line_rewraps() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Row 0: a 20-char text logical line that fills the original width
+        // exactly and will need to wrap into multiple rows once narrowed.
+        let text: Vec<TChar> = (0..20)
+            .map(|i| TChar::Ascii(b'A' + u8::try_from(i % 26).unwrap_or(b'A')))
+            .collect();
+        buf.insert_text(&text);
+
+        // Start a new logical line below the text, then place an image there.
+        buf.handle_lf();
+        buf.cursor.pos.x = 0;
+        let img = make_image(5, 2);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+
+        let rows_before = buf.rows.len();
+
+        // Narrow enough that the 20-char text line must wrap but the 5-col
+        // image does not need clipping.
+        buf.reflow_to_width(8);
+
+        // The text line should have rewrapped into more physical rows
+        // (ceil(20/8) = 3 rows instead of 1).
+        assert!(
+            buf.rows.len() > rows_before,
+            "expected more physical rows after narrowing reflow (text line should wrap): \
+             before={rows_before}, after={}",
+            buf.rows.len()
+        );
+
+        let row0 = cell_str_ignoring_images(&buf, 0);
+        assert_eq!(
+            row0, "ABCDEFGH",
+            "row0 should hold the first 8 chars of the text line"
+        );
+        let row1 = cell_str_ignoring_images(&buf, 1);
+        assert_eq!(
+            row1, "IJKLMNOP",
+            "row1 should hold the next 8 chars of the text line"
+        );
+
+        // The image (which is on its own logical line, unaffected by the
+        // text line's rewrap) must still be intact — one physical row per
+        // image row, contiguous columns.
+        for row_in_image in 0..2_usize {
+            let phys_rows = physical_rows_for_image_row(&buf, img_id, row_in_image);
+            assert_eq!(
+                phys_rows.len(),
+                1,
+                "row_in_image={row_in_image} should be on exactly one physical row after reflow"
+            );
+            let cols = cols_in_image_on_row(&buf, phys_rows[0], img_id, row_in_image);
+            assert_eq!(
+                cols,
+                (0..5).collect::<Vec<usize>>(),
+                "row_in_image={row_in_image} cols should remain contiguous 0..5 after reflow"
+            );
+        }
+    }
+
+    /// Render a row's non-image, non-continuation cells as a plain string
+    /// (mirrors `reflow_to_width_tests::cell_str` but lives in this module
+    /// since it's only needed here).
+    fn cell_str_ignoring_images(buf: &Buffer, row_idx: usize) -> String {
+        buf.rows[row_idx]
+            .characters()
+            .iter()
+            .filter(|c| !c.is_continuation() && !c.has_image())
+            .map(|c| match c.tchar() {
+                TChar::Ascii(b) => (*b as char).to_string(),
+                TChar::Space | TChar::NewLine => String::new(),
+                TChar::Utf8(buf, len) => String::from_utf8_lossy(&buf[..*len as usize]).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reflow_image_cell_count_consistent_after_reflow() {
+        let mut buf = Buffer::new(20, 10);
+
+        // Place a 10-col × 3-row image (30 cells total).
+        let img = make_image(10, 3);
+        buf.place_image(img, 0, ImageProtocol::Sixel, None, None, 0, None, 1, None);
+        assert_eq!(buf.image_cell_count, 30);
+
+        // Narrow to width 8 — each of the 3 image rows is clipped from 10 to
+        // 8 columns, so 3 * 8 = 24 cells should remain.
+        buf.reflow_to_width(8);
+
+        let actual_image_cells: usize = buf.rows.iter().map(Row::count_image_cells).sum();
+        assert_eq!(
+            buf.image_cell_count, actual_image_cells,
+            "image_cell_count field must match the actual number of image cells after reflow"
+        );
+        assert_eq!(
+            buf.image_cell_count, 24,
+            "each of the 3 image rows should be clipped from 10 to 8 columns"
         );
     }
 }
@@ -6271,6 +6707,9 @@ mod resize_and_insert_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         }
     }
 
@@ -6581,6 +7020,9 @@ mod image_clearing_tests {
             image_number,
             placement_id: None,
             z_index,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         }
     }
 
@@ -6625,6 +7067,74 @@ mod image_clearing_tests {
         assert!(!buf.rows[0].cells()[0].has_image());
         assert!(!buf.rows[0].cells()[1].has_image());
         assert!(buf.rows[1].cells()[0].has_image());
+    }
+
+    // ── `clear_image_placements_by_placement` (Task 100.18/100.20) ──
+
+    fn make_placement_with_pid(image_id: u64, placement_id: Option<u32>) -> ImagePlacement {
+        ImagePlacement {
+            placement_id,
+            ..make_placement(image_id, None, 0)
+        }
+    }
+
+    /// Two coexisting placements of the SAME image id but DIFFERENT
+    /// `placement_id`s: clearing one by `(image_id, placement_id)` must
+    /// leave the other placement's cells completely untouched.
+    #[test]
+    fn clear_by_placement_narrows_to_named_placement_only() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(
+            0,
+            0,
+            make_placement_with_pid(1, Some(5)),
+            FormatTag::default(),
+        );
+        buf.set_image_cell_at(
+            0,
+            1,
+            make_placement_with_pid(1, Some(5)),
+            FormatTag::default(),
+        );
+        buf.set_image_cell_at(
+            1,
+            0,
+            make_placement_with_pid(1, Some(9)),
+            FormatTag::default(),
+        );
+        assert_eq!(buf.image_cell_count, 3);
+
+        buf.clear_image_placements_by_placement(1, 5);
+
+        assert_eq!(
+            buf.image_cell_count, 1,
+            "only the named placement's 2 cells should be cleared"
+        );
+        assert!(!buf.rows[0].cells()[0].has_image());
+        assert!(!buf.rows[0].cells()[1].has_image());
+        assert!(
+            buf.rows[1].cells()[0].has_image(),
+            "the OTHER placement (same image id, different placement id) must survive"
+        );
+    }
+
+    /// A non-matching `image_id`/`placement_id` pair is a no-op.
+    #[test]
+    fn clear_by_placement_no_match_is_noop() {
+        let mut buf = alt_buf(10, 5);
+        buf.set_image_cell_at(
+            0,
+            0,
+            make_placement_with_pid(1, Some(5)),
+            FormatTag::default(),
+        );
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.clear_image_placements_by_placement(1, 99);
+        assert_eq!(buf.image_cell_count, 1);
+
+        buf.clear_image_placements_by_placement(2, 5);
+        assert_eq!(buf.image_cell_count, 1);
     }
 
     // ── `clear_image_placements_by_number` ──
@@ -6855,6 +7365,9 @@ mod coverage_gap_tests {
             image_number: None,
             placement_id: None,
             z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
         };
         buf.rows[row].set_image_cell(col, placement, FormatTag::default());
         buf.image_cell_count += 1;
@@ -7432,9 +7945,13 @@ mod coverage_gap_tests {
             height_px: 1,
             display_cols: 3,
             display_rows: 1,
+            size_mode: crate::image_store::ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: crate::image_store::AnimationControl::default(),
         };
         // Place an image that spans 3 cols starting at col 4 → only col 4 fits
-        buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0);
+        buf.place_image(image, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
         // Should have placed at most 1 cell (col 4; cols 5+ out of bounds)
         assert!(buf.image_cell_count <= 1);
     }

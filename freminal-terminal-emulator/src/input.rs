@@ -77,14 +77,14 @@ const fn char_to_ctrl_code(c: u8) -> u8 {
 /// Build an xterm-style modified key sequence: `ESC [ 1 ; <mod> <final>`.
 ///
 /// Used for arrow keys and Home/End when a modifier is held.
-fn modified_csi_final(modifier: u8, final_byte: u8) -> TerminalInputPayload {
+fn modified_csi_final(modifier: u16, final_byte: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[1;{modifier}{}", final_byte as char).into_bytes())
 }
 
 /// Build an xterm-style modified tilde key sequence: `ESC [ <code> ; <mod> ~`.
 ///
 /// Used for Insert/Delete/PageUp/PageDown and F5–F12 when a modifier is held.
-fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
+fn modified_csi_tilde(code: u8, modifier: u16) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}~").into_bytes())
 }
 
@@ -99,7 +99,7 @@ fn modified_csi_tilde(code: u8, modifier: u8) -> TerminalInputPayload {
 /// sequence (e.g. `ESC O B`) carries no event-type information and would be
 /// wrongly read by applications as a fresh key *press*, duplicating the
 /// key — this builder exists to avoid exactly that bug.
-fn kkp_csi_final_event(modifier: u8, event: u8, final_byte: u8) -> TerminalInputPayload {
+fn kkp_csi_final_event(modifier: u16, event: u8, final_byte: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(
         format!("\x1b[1;{modifier}:{event}{}", final_byte as char).into_bytes(),
     )
@@ -112,7 +112,7 @@ fn kkp_csi_final_event(modifier: u8, event: u8, final_byte: u8) -> TerminalInput
 /// Protocol `REPORT_EVENT_TYPES` (flag 2) flag is active and the event is a
 /// repeat or release.  See [`kkp_csi_final_event`] for why a bare legacy
 /// tilde sequence is unsafe for non-press events.
-fn kkp_csi_tilde_event(code: u8, modifier: u8, event: u8) -> TerminalInputPayload {
+fn kkp_csi_tilde_event(code: u8, modifier: u16, event: u8) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[{code};{modifier}:{event}~").into_bytes())
 }
 
@@ -127,6 +127,113 @@ fn kkp_csi_tilde_event(code: u8, modifier: u8, event: u8) -> TerminalInputPayloa
 fn modify_other_keys_encoding(modifier: u8, code: u32) -> TerminalInputPayload {
     TerminalInputPayload::Owned(format!("\x1b[27;{modifier};{code}~").into_bytes())
 }
+
+/// KKP codepoint for F13 (kitty function-key extended range).
+///
+/// F14–F35 have no legacy (SS3 / CSI-tilde) encoding; they only exist under
+/// the Kitty Keyboard Protocol as `CSI <codepoint> u`.  Their codepoints are
+/// `KKP_F13_CODEPOINT + (n - 13)`.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+const KKP_F13_CODEPOINT: u32 = 57376;
+
+/// KKP "modifier keys as keys" codepoints (flag 8,
+/// `REPORT_ALL_KEYS_AS_ESCAPE_CODES` only).  These report a bare press of a
+/// modifier key (e.g. tapping Left Shift by itself) as its own `CSI <code> u`
+/// event.  Hyper/Meta codepoints (57445/57446/57451/57452) are intentionally
+/// omitted — egui has no Hyper/Meta key variants to source them from.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+const KKP_LEFT_SHIFT_CODEPOINT: u32 = 57441;
+const KKP_LEFT_CONTROL_CODEPOINT: u32 = 57442;
+const KKP_LEFT_ALT_CODEPOINT: u32 = 57443;
+const KKP_LEFT_SUPER_CODEPOINT: u32 = 57444;
+const KKP_RIGHT_SHIFT_CODEPOINT: u32 = 57447;
+const KKP_RIGHT_CONTROL_CODEPOINT: u32 = 57448;
+const KKP_RIGHT_ALT_CODEPOINT: u32 = 57449;
+const KKP_RIGHT_SUPER_CODEPOINT: u32 = 57450;
+
+/// KKP lock / system-key codepoints (`CSI <codepoint> u`, flag 8 only —
+/// these are keys egui never delivers today; see Task 114). No legacy
+/// encoding exists for any of these.
+///
+/// These are `pub` so the GUI crate's raw-key delivery wiring (Task 114.7,
+/// `TerminalInput::KittyFunctional`) can name them as
+/// `freminal_terminal_emulator::input::KKP_*_CODEPOINT` rather than using
+/// magic numbers.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_CAPS_LOCK_CODEPOINT: u32 = 57358;
+pub const KKP_SCROLL_LOCK_CODEPOINT: u32 = 57359;
+pub const KKP_NUM_LOCK_CODEPOINT: u32 = 57360;
+pub const KKP_PRINT_SCREEN_CODEPOINT: u32 = 57361;
+pub const KKP_PAUSE_CODEPOINT: u32 = 57362;
+pub const KKP_MENU_CODEPOINT: u32 = 57363;
+
+/// KKP keypad codepoints (`CSI <codepoint> u`).
+///
+/// Covers the keypad keys that have no legacy encoding: digits, operators,
+/// Enter/Equal/Separator, and the keypad navigation cluster
+/// (`KP_Left`..`KP_Begin`). `KP_Begin` here is the KKP-only numeric form
+/// (`57427 u`); the alternate legacy `1 E` form is out of scope for this
+/// variant.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_KP_0_CODEPOINT: u32 = 57399;
+pub const KKP_KP_1_CODEPOINT: u32 = 57400;
+pub const KKP_KP_2_CODEPOINT: u32 = 57401;
+pub const KKP_KP_3_CODEPOINT: u32 = 57402;
+pub const KKP_KP_4_CODEPOINT: u32 = 57403;
+pub const KKP_KP_5_CODEPOINT: u32 = 57404;
+pub const KKP_KP_6_CODEPOINT: u32 = 57405;
+pub const KKP_KP_7_CODEPOINT: u32 = 57406;
+pub const KKP_KP_8_CODEPOINT: u32 = 57407;
+pub const KKP_KP_9_CODEPOINT: u32 = 57408;
+pub const KKP_KP_DECIMAL_CODEPOINT: u32 = 57409;
+pub const KKP_KP_DIVIDE_CODEPOINT: u32 = 57410;
+pub const KKP_KP_MULTIPLY_CODEPOINT: u32 = 57411;
+pub const KKP_KP_SUBTRACT_CODEPOINT: u32 = 57412;
+pub const KKP_KP_ADD_CODEPOINT: u32 = 57413;
+pub const KKP_KP_ENTER_CODEPOINT: u32 = 57414;
+pub const KKP_KP_EQUAL_CODEPOINT: u32 = 57415;
+pub const KKP_KP_SEPARATOR_CODEPOINT: u32 = 57416;
+pub const KKP_KP_LEFT_CODEPOINT: u32 = 57417;
+pub const KKP_KP_RIGHT_CODEPOINT: u32 = 57418;
+pub const KKP_KP_UP_CODEPOINT: u32 = 57419;
+pub const KKP_KP_DOWN_CODEPOINT: u32 = 57420;
+pub const KKP_KP_PAGE_UP_CODEPOINT: u32 = 57421;
+pub const KKP_KP_PAGE_DOWN_CODEPOINT: u32 = 57422;
+pub const KKP_KP_HOME_CODEPOINT: u32 = 57423;
+pub const KKP_KP_END_CODEPOINT: u32 = 57424;
+pub const KKP_KP_INSERT_CODEPOINT: u32 = 57425;
+pub const KKP_KP_DELETE_CODEPOINT: u32 = 57426;
+pub const KKP_KP_BEGIN_CODEPOINT: u32 = 57427;
+
+/// KKP media-key codepoints (`CSI <codepoint> u`). Names and values match the
+/// upstream kitty functional-key table (`MEDIA_PLAY`..`MUTE_VOLUME`,
+/// `57428`-`57440`) verbatim.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_MEDIA_PLAY_CODEPOINT: u32 = 57428;
+pub const KKP_MEDIA_PAUSE_CODEPOINT: u32 = 57429;
+pub const KKP_MEDIA_PLAY_PAUSE_CODEPOINT: u32 = 57430;
+pub const KKP_MEDIA_REVERSE_CODEPOINT: u32 = 57431;
+pub const KKP_MEDIA_STOP_CODEPOINT: u32 = 57432;
+pub const KKP_MEDIA_FAST_FORWARD_CODEPOINT: u32 = 57433;
+pub const KKP_MEDIA_REWIND_CODEPOINT: u32 = 57434;
+pub const KKP_MEDIA_TRACK_NEXT_CODEPOINT: u32 = 57435;
+pub const KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT: u32 = 57436;
+pub const KKP_MEDIA_RECORD_CODEPOINT: u32 = 57437;
+pub const KKP_LOWER_VOLUME_CODEPOINT: u32 = 57438;
+pub const KKP_RAISE_VOLUME_CODEPOINT: u32 = 57439;
+pub const KKP_MUTE_VOLUME_CODEPOINT: u32 = 57440;
+
+/// KKP ISO-level-shift codepoints (`CSI <codepoint> u`) for keyboards with
+/// AltGr-style ISO level-3/level-5 shift keys.
+///
+/// Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#functional-key-definitions>
+pub const KKP_ISO_LEVEL3_SHIFT_CODEPOINT: u32 = 57453;
+pub const KKP_ISO_LEVEL5_SHIFT_CODEPOINT: u32 = 57454;
 
 /// US QWERTY shifted-key mapping for KKP flag 4.
 ///
@@ -200,11 +307,27 @@ pub fn raw_ascii_bytes_to_terminal_input(buf: &[u8]) -> Cow<'static, [TerminalIn
 /// | 6 | Ctrl+Shift      |
 /// | 7 | Ctrl+Alt        |
 /// | 8 | Ctrl+Alt+Shift  |
+///
+/// The kitty keyboard protocol extends this to 8 bits (`super`, `hyper`,
+/// `meta`, `caps_lock`, `num_lock`), for a maximum parameter value of 256.
+// Requires 8 bool fields to model the 8-bit kitty modifier mask exactly;
+// collapsing into flags/enum would add conversion boilerplate without benefit.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    /// Super modifier (bit 8).
+    pub super_key: bool,
+    /// Hyper modifier (bit 16).
+    pub hyper: bool,
+    /// Meta modifier (bit 32).
+    pub meta: bool,
+    /// Caps Lock active (bit 64).
+    pub caps_lock: bool,
+    /// Num Lock active (bit 128).
+    pub num_lock: bool,
 }
 
 impl KeyModifiers {
@@ -213,24 +336,44 @@ impl KeyModifiers {
         shift: false,
         ctrl: false,
         alt: false,
+        super_key: false,
+        hyper: false,
+        meta: false,
+        caps_lock: false,
+        num_lock: false,
     };
 
     /// Returns `true` when no modifier is held.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        !self.shift && !self.ctrl && !self.alt
+        !self.shift
+            && !self.ctrl
+            && !self.alt
+            && !self.super_key
+            && !self.hyper
+            && !self.meta
+            && !self.caps_lock
+            && !self.num_lock
     }
 
-    /// Compute the xterm modifier parameter (2–8), or `None` if no modifier
-    /// is held.
+    /// Compute the xterm / kitty modifier parameter (2–256), or `None` if no
+    /// modifier is held.
     ///
-    /// Encoding: `1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)`
+    /// Encoding across 8 bits (each bit adds a power of two):
+    ///
+    /// ```text
+    /// 1 + shift*1 + alt*2 + ctrl*4 + super_key*8
+    ///   + hyper*16 + meta*32 + caps_lock*64 + num_lock*128
+    /// ```
+    ///
+    /// The result is `u16` because the maximum value (all 8 bits set) is 256,
+    /// which overflows `u8`. All arithmetic stays within `u16`.
     #[must_use]
-    pub const fn modifier_param(self) -> Option<u8> {
+    pub const fn modifier_param(self) -> Option<u16> {
         if self.is_empty() {
             return None;
         }
-        let mut n: u8 = 1;
+        let mut n: u16 = 1;
         if self.shift {
             n += 1;
         }
@@ -239,6 +382,21 @@ impl KeyModifiers {
         }
         if self.ctrl {
             n += 4;
+        }
+        if self.super_key {
+            n += 8;
+        }
+        if self.hyper {
+            n += 16;
+        }
+        if self.meta {
+            n += 32;
+        }
+        if self.caps_lock {
+            n += 64;
+        }
+        if self.num_lock {
+            n += 128;
         }
         Some(n)
     }
@@ -283,8 +441,29 @@ pub enum TerminalInput {
     InFocus,
     LostFocus,
     KeyPad(u8),
-    // Function keys F1–F12
+    // Function keys F1–F35 (F1–F12 have legacy encodings; F13–F35 are
+    // KKP-only, see `to_payload_kkp`'s `FunctionKey` arm).
     FunctionKey(u8, KeyModifiers),
+    // KKP "modifier keys as keys" (flag 8 only) — bare presses of a
+    // modifier key reported as their own event. No legacy encoding exists.
+    ShiftLeft(KeyModifiers),
+    ShiftRight(KeyModifiers),
+    ControlLeft(KeyModifiers),
+    ControlRight(KeyModifiers),
+    AltLeft(KeyModifiers),
+    AltRight(KeyModifiers),
+    SuperLeft(KeyModifiers),
+    SuperRight(KeyModifiers),
+    /// A kitty-keyboard functional key identified directly by its KKP
+    /// codepoint (flag-gated `CSI <codepoint> u` form). Used for keys egui
+    /// does not deliver (keypad operators/directional, media, ISO-level
+    /// shifts, lock/print/pause/menu keys) — see Task 114. The GUI computes
+    /// the codepoint from the raw winit key (114.7); this variant just carries
+    /// it to the encoder. No legacy (non-KKP) encoding exists for these.
+    KittyFunctional {
+        codepoint: u32,
+        mods: KeyModifiers,
+    },
 }
 
 impl TerminalInput {
@@ -501,12 +680,30 @@ impl TerminalInput {
                     (10, None) => TerminalInputPayload::Many(b"\x1b[21~"),
                     (11, None) => TerminalInputPayload::Many(b"\x1b[23~"),
                     (12, None) => TerminalInputPayload::Many(b"\x1b[24~"),
+                    // F13–F35 and any out-of-range value: no legacy encoding
+                    // exists for F13–F35 (KKP-only, see `to_payload_kkp`),
+                    // so both fall through to the same empty fallback.
                     _ => {
                         warn!("Unhandled function key: F{n}");
                         TerminalInputPayload::Many(b"")
                     }
                 }
             }
+            // KKP "modifier keys as keys" (flag 8) have no legacy encoding —
+            // a bare press of a modifier key produces no bytes outside KKP.
+            // KKP-only functional keys (keypad operators/directional, media,
+            // ISO-level shifts, lock/print/pause/menu — `KittyFunctional`)
+            // likewise have no legacy encoding — no bytes are produced
+            // outside the KKP path.
+            Self::ShiftLeft(_)
+            | Self::ShiftRight(_)
+            | Self::ControlLeft(_)
+            | Self::ControlRight(_)
+            | Self::AltLeft(_)
+            | Self::AltRight(_)
+            | Self::SuperLeft(_)
+            | Self::SuperRight(_)
+            | Self::KittyFunctional { .. } => TerminalInputPayload::Many(b""),
         }
     }
 
@@ -520,7 +717,7 @@ impl TerminalInput {
     /// Trailing default fields and sub-fields are omitted.
     fn build_csi_u(
         codepoint: u32,
-        modifier_param: Option<u8>,
+        modifier_param: Option<u16>,
         flags: u32,
         meta: &KeyEventMeta,
     ) -> TerminalInputPayload {
@@ -874,17 +1071,21 @@ impl TerminalInput {
             Self::InFocus => TerminalInputPayload::Many(b"\x1b[I"),
             Self::FunctionKey(n, mods) => {
                 let mod_param = mods.modifier_param();
-                // F1–F4 use the CSI-final form (P/Q/R/S); F5–F12 use the
+                // F1, F2, F4 use the CSI-final form (P/Q/S); F5–F12 use the
                 // CSI-tilde form.  Under `REPORT_EVENT_TYPES`, repeats and
                 // releases must carry the `:<event-type>` sub-field instead of
                 // the bare legacy sequence (see the arrow-key arms above).
+                //
+                // F3 is a deliberate exception: under KKP it uses the tilde
+                // form (`CSI 13 ~`), NOT the legacy SS3/CSI-R form, because
+                // `CSI R` collides with the Cursor Position Report (CPR)
+                // response — see `f_tilde(13, ...)` below.
                 let f_final = |b: u8| match (functional_event_code, mod_param) {
                     (Some(ev), m) => kkp_csi_final_event(m.unwrap_or(1), ev, b),
                     (None, Some(m)) => modified_csi_final(m, b),
                     (None, None) => match b {
                         b'P' => TerminalInputPayload::Many(b"\x1bOP"),
                         b'Q' => TerminalInputPayload::Many(b"\x1bOQ"),
-                        b'R' => TerminalInputPayload::Many(b"\x1bOR"),
                         _ => TerminalInputPayload::Many(b"\x1bOS"),
                     },
                 };
@@ -897,7 +1098,7 @@ impl TerminalInput {
                 match n {
                     1 => f_final(b'P'),
                     2 => f_final(b'Q'),
-                    3 => f_final(b'R'),
+                    3 => f_tilde(13, b"\x1b[13~"),
                     4 => f_final(b'S'),
                     5 => f_tilde(15, b"\x1b[15~"),
                     6 => f_tilde(17, b"\x1b[17~"),
@@ -907,11 +1108,111 @@ impl TerminalInput {
                     10 => f_tilde(21, b"\x1b[21~"),
                     11 => f_tilde(23, b"\x1b[23~"),
                     12 => f_tilde(24, b"\x1b[24~"),
+                    // F13–F35: KKP-only, no legacy/functional-event form —
+                    // always plain `CSI <codepoint> u` (event type, if any,
+                    // is embedded by `build_csi_u` itself via `flags`/`meta`).
+                    13..=35 => {
+                        let codepoint = KKP_F13_CODEPOINT + u32::from(*n - 13);
+                        Self::build_csi_u(codepoint, mod_param, flags, meta)
+                    }
                     _ => {
                         warn!("Unhandled function key: F{n}");
                         TerminalInputPayload::Many(b"")
                     }
                 }
+            }
+            // ── KKP "modifier keys as keys" (flag 8 only) ────────────────
+            //
+            // Kitty reports a bare press of a modifier key (e.g. tapping
+            // Left Shift by itself, with no other key) as its own CSI u
+            // event, but ONLY when REPORT_ALL (flag 8) is active — flag 1
+            // (disambiguate) alone does not enable this. There is no legacy
+            // encoding: outside flag 8 these produce no bytes.
+            Self::ShiftLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_SHIFT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ShiftRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_SHIFT_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ControlLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_LEFT_CONTROL_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::ControlRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_CONTROL_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::AltLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::AltRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_RIGHT_ALT_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::SuperLeft(mods) => {
+                if report_all {
+                    Self::build_csi_u(KKP_LEFT_SUPER_CODEPOINT, mods.modifier_param(), flags, meta)
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            Self::SuperRight(mods) => {
+                if report_all {
+                    Self::build_csi_u(
+                        KKP_RIGHT_SUPER_CODEPOINT,
+                        mods.modifier_param(),
+                        flags,
+                        meta,
+                    )
+                } else {
+                    TerminalInputPayload::Many(b"")
+                }
+            }
+            // ── KKP-only functional keys (Task 114) ──────────────────────
+            //
+            // Keypad operators/directional, media, ISO-level shifts, and
+            // lock/print/pause/menu keys have no legacy or functional-event
+            // encoding — always plain `CSI <codepoint> u` (event type, if
+            // any, is embedded by `build_csi_u` itself via `flags`/`meta`),
+            // mirroring the F13–F35 arm above.
+            Self::KittyFunctional { codepoint, mods } => {
+                Self::build_csi_u(*codepoint, mods.modifier_param(), flags, meta)
             }
         }
     }
@@ -1050,11 +1351,33 @@ mod tests {
     fn arrow_right_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_right_with_super_modifier() {
+        // super_key alone → modifier param 1 + 8 = 9.
+        let mods = KeyModifiers {
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;9C".to_vec()));
+    }
+
+    #[test]
+    fn arrow_right_with_ctrl_super_modifier() {
+        // ctrl + super → modifier param 1 + 4 + 8 = 13.
+        let mods = KeyModifiers {
+            ctrl: true,
+            super_key: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_defaults(&TerminalInput::ArrowRight(mods));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;13C".to_vec()));
     }
 
     #[test]
@@ -1146,9 +1469,8 @@ mod tests {
     #[test]
     fn home_with_ctrl_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Home(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5H".to_vec()));
@@ -1187,8 +1509,7 @@ mod tests {
     fn delete_with_shift() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Delete(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[3;2~".to_vec()));
@@ -1203,9 +1524,8 @@ mod tests {
     #[test]
     fn insert_with_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::Insert(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[2;5~".to_vec()));
@@ -1221,8 +1541,7 @@ mod tests {
     fn pageup_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::PageUp(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[5;2~".to_vec()));
@@ -1239,7 +1558,7 @@ mod tests {
         let mods = KeyModifiers {
             shift: true,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::PageDown(mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[6;6~".to_vec()));
@@ -1321,8 +1640,7 @@ mod tests {
     fn function_key_f1_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(1, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2P".to_vec()));
@@ -1331,9 +1649,8 @@ mod tests {
     #[test]
     fn function_key_f5_with_modifier() {
         let mods = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(5, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;5~".to_vec()));
@@ -1343,8 +1660,7 @@ mod tests {
     fn function_key_f12_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_defaults(&TerminalInput::FunctionKey(12, mods));
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[24;2~".to_vec()));
@@ -1819,9 +2135,8 @@ mod tests {
     fn kkp_arrow_release_with_modifier_keeps_modifier_param() {
         // Ctrl held: modifier param is 5 (1 + ctrl*4), event 3 appended.
         let ctrl = KeyModifiers {
-            shift: false,
             ctrl: true,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_kkp_event(&TerminalInput::ArrowRight(ctrl), 3, KeyEventType::Release);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;5:3C".to_vec()));
@@ -1931,9 +2246,11 @@ mod tests {
             to_payload_kkp(&TerminalInput::FunctionKey(2, KeyModifiers::NONE), 1),
             TerminalInputPayload::Many(b"\x1bOQ")
         );
+        // F3 is the deliberate exception: under KKP it uses the tilde form
+        // (`CSI 13 ~`), not SS3/CSI-R, because `CSI R` collides with CPR.
         assert_eq!(
             to_payload_kkp(&TerminalInput::FunctionKey(3, KeyModifiers::NONE), 1),
-            TerminalInputPayload::Many(b"\x1bOR")
+            TerminalInputPayload::Many(b"\x1b[13~")
         );
         assert_eq!(
             to_payload_kkp(&TerminalInput::FunctionKey(4, KeyModifiers::NONE), 1),
@@ -1957,8 +2274,7 @@ mod tests {
     fn kkp_function_key_with_modifier() {
         let mods = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         let p = to_payload_kkp(&TerminalInput::FunctionKey(5, mods), 1);
         assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[15;2~".to_vec()));
@@ -1966,7 +2282,39 @@ mod tests {
 
     #[test]
     fn kkp_function_key_unknown_returns_empty() {
-        let p = to_payload_kkp(&TerminalInput::FunctionKey(13, KeyModifiers::NONE), 1);
+        // F13 is now a valid KKP-only function key (see
+        // `kkp_function_key_f13_f20_f35`); use an actually out-of-range
+        // value to exercise the fallback arm.
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(36, KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_function_key_f13_f20_f35() {
+        // F13 = 57376, a mid-range key F20 = 57376 + 7 = 57383, F35 = 57398.
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(13, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57376u".to_vec())
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(20, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57383u".to_vec())
+        );
+        assert_eq!(
+            to_payload_kkp(&TerminalInput::FunctionKey(35, KeyModifiers::NONE), 1),
+            TerminalInputPayload::Owned(b"\x1b[57398u".to_vec())
+        );
+    }
+
+    #[test]
+    fn kkp_function_key_f13_with_modifier() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(13, SHIFT), 1);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57376;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_function_key_f36_out_of_range_returns_empty() {
+        let p = to_payload_kkp(&TerminalInput::FunctionKey(36, KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b""));
     }
 
@@ -2140,8 +2488,7 @@ mod tests {
         assert_eq!(
             KeyModifiers {
                 shift: true,
-                ctrl: false,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(2)
@@ -2149,9 +2496,8 @@ mod tests {
         // Alt only
         assert_eq!(
             KeyModifiers {
-                shift: false,
-                ctrl: false,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(3)
@@ -2160,8 +2506,8 @@ mod tests {
         assert_eq!(
             KeyModifiers {
                 shift: true,
-                ctrl: false,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(4)
@@ -2169,9 +2515,8 @@ mod tests {
         // Ctrl only
         assert_eq!(
             KeyModifiers {
-                shift: false,
                 ctrl: true,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(5)
@@ -2181,7 +2526,7 @@ mod tests {
             KeyModifiers {
                 shift: true,
                 ctrl: true,
-                alt: false
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(6)
@@ -2189,9 +2534,9 @@ mod tests {
         // Ctrl+Alt
         assert_eq!(
             KeyModifiers {
-                shift: false,
                 ctrl: true,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(7)
@@ -2201,10 +2546,53 @@ mod tests {
             KeyModifiers {
                 shift: true,
                 ctrl: true,
-                alt: true
+                alt: true,
+                ..KeyModifiers::NONE
             }
             .modifier_param(),
             Some(8)
+        );
+    }
+
+    #[test]
+    fn modifier_param_new_bits() {
+        // New bits are inert when false: KeyModifiers::default() → None.
+        assert_eq!(KeyModifiers::default().modifier_param(), None);
+
+        // super_key (bit 8): 1 + 8 = 9.
+        assert_eq!(
+            KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::NONE
+            }
+            .modifier_param(),
+            Some(9)
+        );
+
+        // caps_lock (bit 64): 1 + 64 = 65.
+        assert_eq!(
+            KeyModifiers {
+                caps_lock: true,
+                ..KeyModifiers::NONE
+            }
+            .modifier_param(),
+            Some(65)
+        );
+
+        // All eight bits set: 1 + 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128 = 256.
+        assert_eq!(
+            KeyModifiers {
+                shift: true,
+                ctrl: true,
+                alt: true,
+                super_key: true,
+                hyper: true,
+                meta: true,
+                caps_lock: true,
+                num_lock: true,
+            }
+            .modifier_param(),
+            Some(256)
         );
     }
 
@@ -2214,6 +2602,11 @@ mod tests {
         shift: true,
         ctrl: false,
         alt: false,
+        super_key: false,
+        hyper: false,
+        meta: false,
+        caps_lock: false,
+        num_lock: false,
     };
 
     #[test]
@@ -2519,8 +2912,9 @@ mod tests {
 
     #[test]
     fn kkp_f3_with_modifier() {
+        // F3 under KKP uses the tilde form (code 13), not CSI-R.
         let p = to_payload_kkp(&TerminalInput::FunctionKey(3, SHIFT), 1);
-        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[1;2R".to_vec()));
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[13;2~".to_vec()));
     }
 
     #[test]
@@ -2629,6 +3023,383 @@ mod tests {
     fn kkp_f_unknown() {
         let p = to_payload_kkp(&TerminalInput::FunctionKey(99, KeyModifiers::NONE), 1);
         assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    // ── 101.3: KKP "modifier keys as keys" (flag 8 only) ─────────────────────
+
+    #[test]
+    fn kkp_modifier_key_left_shift_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57441u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_shift_without_report_all_is_empty() {
+        // Flag 1 (disambiguate) only, no flag 8: no encoding for a bare
+        // modifier-key press.
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_shift_with_extra_modifier() {
+        // Left Shift pressed while Ctrl is already held: modifier param
+        // reflects ctrl (1 + 4 = 5).
+        let mods = KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::NONE
+        };
+        let p = to_payload_kkp(&TerminalInput::ShiftLeft(mods), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57441;5u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_shift_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ShiftRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57447u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_control_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ControlLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57442u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_control_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::ControlLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_control_report_all() {
+        let p = to_payload_kkp(&TerminalInput::ControlRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57448u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_alt_report_all() {
+        let p = to_payload_kkp(&TerminalInput::AltLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57443u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_alt_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::AltLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_alt_report_all() {
+        let p = to_payload_kkp(&TerminalInput::AltRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57449u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_super_report_all() {
+        let p = to_payload_kkp(&TerminalInput::SuperLeft(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57444u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_modifier_key_left_super_without_report_all_is_empty() {
+        let p = to_payload_kkp(&TerminalInput::SuperLeft(KeyModifiers::NONE), 1);
+        assert_eq!(p, TerminalInputPayload::Many(b""));
+    }
+
+    #[test]
+    fn kkp_modifier_key_right_super_report_all() {
+        let p = to_payload_kkp(&TerminalInput::SuperRight(KeyModifiers::NONE), 8);
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57450u".to_vec()));
+    }
+
+    #[test]
+    fn legacy_modifier_keys_as_keys_are_always_empty() {
+        // No legacy encoding exists for any of these, regardless of flags
+        // (flags 0 forces the legacy path since neither bit 0 nor bit 3 is set).
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ShiftLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ShiftRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ControlLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::ControlRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::AltLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::AltRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::SuperLeft(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::SuperRight(KeyModifiers::NONE)),
+            TerminalInputPayload::Many(b"")
+        );
+    }
+
+    // ── 114.6: KittyFunctional (keypad/media/ISO/lock/print/pause/menu) ─────
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_lock_key_caps_lock_release_event() {
+        // Flags 2|8 (REPORT_EVENT_TYPES + REPORT_ALL), release event, no
+        // modifiers: modifier field defaults to the literal 1 so the
+        // `:3` event-type sub-field is unambiguous.
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57358;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_keypad_kp_enter_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57414;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_media_play_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57428;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_no_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_with_shift_modifier() {
+        let p = to_payload_kkp(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: SHIFT,
+            },
+            8,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453;2u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_iso_level3_shift_release_event() {
+        let p = to_payload_kkp_event(
+            &TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            },
+            2 | 8,
+            KeyEventType::Release,
+        );
+        assert_eq!(p, TerminalInputPayload::Owned(b"\x1b[57453;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kkp_functional_non_kkp_path_produces_empty_payload() {
+        // Outside the KKP path (flags 0), these keys have no legacy
+        // encoding: no bytes are produced.
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_CAPS_LOCK_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_KP_ENTER_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_MEDIA_PLAY_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+        assert_eq!(
+            to_payload_defaults(&TerminalInput::KittyFunctional {
+                codepoint: KKP_ISO_LEVEL3_SHIFT_CODEPOINT,
+                mods: KeyModifiers::NONE,
+            }),
+            TerminalInputPayload::Many(b"")
+        );
+    }
+
+    /// Documents (and exercises) the full Task 114.6 codepoint table against
+    /// the upstream kitty functional-key spec values
+    /// (`docs/keyboard-protocol.rst`, `.. functional key table`).
+    #[test]
+    fn kkp_functional_codepoint_table_matches_spec() {
+        // Lock / system keys: 57358-57363
+        assert_eq!(KKP_CAPS_LOCK_CODEPOINT, 57358);
+        assert_eq!(KKP_SCROLL_LOCK_CODEPOINT, 57359);
+        assert_eq!(KKP_NUM_LOCK_CODEPOINT, 57360);
+        assert_eq!(KKP_PRINT_SCREEN_CODEPOINT, 57361);
+        assert_eq!(KKP_PAUSE_CODEPOINT, 57362);
+        assert_eq!(KKP_MENU_CODEPOINT, 57363);
+
+        // Keypad: 57399-57427
+        assert_eq!(KKP_KP_0_CODEPOINT, 57399);
+        assert_eq!(KKP_KP_1_CODEPOINT, 57400);
+        assert_eq!(KKP_KP_2_CODEPOINT, 57401);
+        assert_eq!(KKP_KP_3_CODEPOINT, 57402);
+        assert_eq!(KKP_KP_4_CODEPOINT, 57403);
+        assert_eq!(KKP_KP_5_CODEPOINT, 57404);
+        assert_eq!(KKP_KP_6_CODEPOINT, 57405);
+        assert_eq!(KKP_KP_7_CODEPOINT, 57406);
+        assert_eq!(KKP_KP_8_CODEPOINT, 57407);
+        assert_eq!(KKP_KP_9_CODEPOINT, 57408);
+        assert_eq!(KKP_KP_DECIMAL_CODEPOINT, 57409);
+        assert_eq!(KKP_KP_DIVIDE_CODEPOINT, 57410);
+        assert_eq!(KKP_KP_MULTIPLY_CODEPOINT, 57411);
+        assert_eq!(KKP_KP_SUBTRACT_CODEPOINT, 57412);
+        assert_eq!(KKP_KP_ADD_CODEPOINT, 57413);
+        assert_eq!(KKP_KP_ENTER_CODEPOINT, 57414);
+        assert_eq!(KKP_KP_EQUAL_CODEPOINT, 57415);
+        assert_eq!(KKP_KP_SEPARATOR_CODEPOINT, 57416);
+        assert_eq!(KKP_KP_LEFT_CODEPOINT, 57417);
+        assert_eq!(KKP_KP_RIGHT_CODEPOINT, 57418);
+        assert_eq!(KKP_KP_UP_CODEPOINT, 57419);
+        assert_eq!(KKP_KP_DOWN_CODEPOINT, 57420);
+        assert_eq!(KKP_KP_PAGE_UP_CODEPOINT, 57421);
+        assert_eq!(KKP_KP_PAGE_DOWN_CODEPOINT, 57422);
+        assert_eq!(KKP_KP_HOME_CODEPOINT, 57423);
+        assert_eq!(KKP_KP_END_CODEPOINT, 57424);
+        assert_eq!(KKP_KP_INSERT_CODEPOINT, 57425);
+        assert_eq!(KKP_KP_DELETE_CODEPOINT, 57426);
+        assert_eq!(KKP_KP_BEGIN_CODEPOINT, 57427);
+
+        // Media keys: 57428-57440
+        assert_eq!(KKP_MEDIA_PLAY_CODEPOINT, 57428);
+        assert_eq!(KKP_MEDIA_PAUSE_CODEPOINT, 57429);
+        assert_eq!(KKP_MEDIA_PLAY_PAUSE_CODEPOINT, 57430);
+        assert_eq!(KKP_MEDIA_REVERSE_CODEPOINT, 57431);
+        assert_eq!(KKP_MEDIA_STOP_CODEPOINT, 57432);
+        assert_eq!(KKP_MEDIA_FAST_FORWARD_CODEPOINT, 57433);
+        assert_eq!(KKP_MEDIA_REWIND_CODEPOINT, 57434);
+        assert_eq!(KKP_MEDIA_TRACK_NEXT_CODEPOINT, 57435);
+        assert_eq!(KKP_MEDIA_TRACK_PREVIOUS_CODEPOINT, 57436);
+        assert_eq!(KKP_MEDIA_RECORD_CODEPOINT, 57437);
+        assert_eq!(KKP_LOWER_VOLUME_CODEPOINT, 57438);
+        assert_eq!(KKP_RAISE_VOLUME_CODEPOINT, 57439);
+        assert_eq!(KKP_MUTE_VOLUME_CODEPOINT, 57440);
+
+        // ISO level shifts: 57453-57454
+        assert_eq!(KKP_ISO_LEVEL3_SHIFT_CODEPOINT, 57453);
+        assert_eq!(KKP_ISO_LEVEL5_SHIFT_CODEPOINT, 57454);
     }
 
     // ── 70.A.1 regression: non-ASCII character encoding ─────────────────────

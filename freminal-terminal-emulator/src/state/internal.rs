@@ -998,8 +998,7 @@ mod tests {
         // Arrow right with Shift produces an Owned payload (modified_csi_final)
         let shift = KeyModifiers {
             shift: true,
-            ctrl: false,
-            alt: false,
+            ..KeyModifiers::NONE
         };
         state
             .write(&TerminalInput::ArrowRight(shift))

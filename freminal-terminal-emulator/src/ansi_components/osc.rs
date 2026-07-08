@@ -15,7 +15,7 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 use super::osc_clipboard::handle_osc_clipboard;
 use super::osc_iterm2::handle_osc_iterm2;
-use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_777};
+use super::osc_notify::{handle_osc_notify_9, handle_osc_notify_99, handle_osc_notify_777};
 use super::osc_palette::{handle_osc_palette_color, handle_osc_reset_palette};
 use super::osc_shell_info::handle_osc_shell_info;
 
@@ -323,6 +323,9 @@ fn dispatch_osc_target(
         }
         OscTarget::Notify777 => {
             handle_osc_notify_777(raw_params, seq_trace, output);
+        }
+        OscTarget::Notify99 => {
+            handle_osc_notify_99(raw_params, seq_trace, output);
         }
         // OSC 22 — set the pointer (mouse cursor) shape.
         OscTarget::PointerShape => {

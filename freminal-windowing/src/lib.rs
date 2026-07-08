@@ -101,6 +101,45 @@ pub trait App {
     ///
     /// Default implementation does nothing.
     fn raw_input_hook(&mut self, _window_id: WindowId, _raw_input: &mut egui::RawInput) {}
+
+    /// Called for keyboard keys that egui cannot deliver (keypad
+    /// operators/directional, media, print/pause/menu keys — see Task 114).
+    /// Delivered BEFORE egui-winit and only for that narrow blocked set; all
+    /// other keys reach the app through egui as usual.
+    ///
+    /// `event` carries the physical key code, press/release state, and
+    /// auto-repeat flag. `mods` is the current chorded modifier state. The
+    /// default implementation does nothing.
+    fn on_raw_key_event(&mut self, _window_id: WindowId, _event: RawKeyEvent, _mods: RawKeyMods) {}
+}
+
+/// Chorded modifier state accompanying a raw key event delivered via
+/// [`App::on_raw_key_event`].
+///
+/// These are the "held-for-decoration" modifiers: Shift/Ctrl/Alt/Super,
+/// chorded at the time of the raw key event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // Four independent chorded-modifier flags mirroring egui::Modifiers; a state machine would add noise, not clarity.
+pub struct RawKeyMods {
+    /// `Shift` held.
+    pub shift: bool,
+    /// `Ctrl` held.
+    pub ctrl: bool,
+    /// `Alt` held.
+    pub alt: bool,
+    /// `Super`/`Cmd`/`Windows` held.
+    pub super_key: bool,
+}
+
+/// A raw keyboard event for a key egui cannot deliver (Task 114).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawKeyEvent {
+    /// The physical key code (winit's `KeyCode`).
+    pub key_code: winit::keyboard::KeyCode,
+    /// True on press/repeat, false on release.
+    pub pressed: bool,
+    /// True if this is an auto-repeat.
+    pub repeat: bool,
 }
 
 /// Last-known geometry for a window, tracked by the windowing layer.

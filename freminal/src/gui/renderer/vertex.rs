@@ -14,7 +14,9 @@ use freminal_common::buffer_states::fonts::{BlinkState, FontDecorations, Underli
 use freminal_common::cursor::CursorVisualStyle;
 use freminal_common::themes::ThemePalette;
 use freminal_terminal_emulator::LineWidth;
-use freminal_terminal_emulator::{ImagePlacement, InlineImage};
+use freminal_terminal_emulator::{
+    ImagePlacement, ImageSizeMode, InlineImage, SourceCrop, SubCellOffset,
+};
 use std::sync::Arc;
 
 use super::super::{
@@ -128,11 +130,16 @@ impl FgRenderOptions {
     }
 }
 
-/// Per-image tracking: pixel bounding box and cell-grid extent within the
-/// image.  The cell-grid extent (min/max `col_in_image`, `row_in_image`) tells
-/// us which portion of the texture is visible, so we can compute UV
-/// coordinates that preserve aspect ratio even when the image is partially
-/// clipped by the terminal edge.
+/// Per-image-PLACEMENT tracking: pixel bounding box and cell-grid extent
+/// within the image.  The cell-grid extent (min/max `col_in_image`,
+/// `row_in_image`) tells us which portion of the texture is visible, so we
+/// can compute UV coordinates that preserve aspect ratio even when the
+/// image is partially clipped by the terminal edge.
+///
+/// Bucketed by `placement_instance` (Task 100.18), NOT by `image_id` — two
+/// independent on-screen placements of the SAME image (e.g. two `a=p` puts
+/// with `p=0`/unspecified) are two separate `ImageBounds` entries, each
+/// producing its own quad, rather than merging into one oversized bucket.
 struct ImageBounds {
     x0: f32,
     y0: f32,
@@ -142,6 +149,41 @@ struct ImageBounds {
     min_row_in_image: usize,
     max_col_in_image: usize,
     max_row_in_image: usize,
+    /// The underlying image id (texture lookup key) this placement
+    /// displays. Captured from the first cell of the bucket — correct
+    /// because every cell of one placement instance shares one image id.
+    image_id: u64,
+    /// Kitty `z=` layering value (Task 100.7b). Read from the first-seen
+    /// placement for this placement instance; all cells of one placement
+    /// share the same z-index, so later cells must not overwrite it.
+    z_index: i32,
+    /// Source-crop (kitty `a=p` x/y/w/h); read from the first-seen
+    /// placement, like `z_index`. `None` = full image. Bucketing by
+    /// `placement_instance` (Task 100.18) means two DIFFERENT placements of
+    /// the same image with different crops no longer collapse — each gets
+    /// its own bucket and therefore its own crop.
+    crop: Option<SourceCrop>,
+    /// Sub-cell pixel offset (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19);
+    /// read from the first-seen placement, like `z_index`/`crop`.
+    subcell_offset: Option<SubCellOffset>,
+}
+
+/// One entry in the authoritative image draw order (Task 100.18).
+///
+/// Carries BOTH the placement instance id (the key into the vertex-slab
+/// bucketing done by [`build_image_verts`]) and the underlying image id
+/// (the key into the GPU texture cache in `gpu.rs`'s `image_textures`
+/// map) — the two are no longer the same key, since bucketing moved from
+/// `image_id` to `placement_instance`, but texture upload/lookup is still
+/// keyed by `image_id` (the pixel data, which may be shared by several
+/// placements).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDrawEntry {
+    /// The placement-instance id (Task 100.18) — identifies which vertex
+    /// slab in the image VBO this entry corresponds to.
+    pub instance_id: u64,
+    /// The underlying image id — identifies which GPU texture to bind.
+    pub image_id: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -644,14 +686,20 @@ pub fn build_image_verts(
     cell_width: u32,
     cell_height: u32,
     verts: &mut Vec<f32>,
+    draw_order: &mut Vec<ImageDrawEntry>,
 ) {
     // Reuse existing heap allocation — clear but keep capacity.
     verts.clear();
+    draw_order.clear();
 
     if placements.is_empty() || snap_images.is_empty() {
         return;
     }
 
+    // Bucketed by `placement_instance` (Task 100.18), NOT `image_id` — two
+    // independent placements of the same image id (e.g. two `a=p` puts with
+    // `p=0`/unspecified) must land in two separate buckets so they render
+    // as two separate quads instead of merging into one oversized quad.
     let mut bounds: std::collections::HashMap<u64, ImageBounds> = std::collections::HashMap::new();
 
     for (cell_idx, placement) in placements.iter().enumerate() {
@@ -664,8 +712,8 @@ pub fn build_image_verts(
         let x1 = x0 + gl_f32_u32(cell_width);
         let y1 = y0 + gl_f32_u32(cell_height);
 
-        let id = p.image_id;
-        let entry = bounds.entry(id).or_insert(ImageBounds {
+        let instance_id = p.placement_instance;
+        let entry = bounds.entry(instance_id).or_insert(ImageBounds {
             x0,
             y0,
             x1,
@@ -674,6 +722,10 @@ pub fn build_image_verts(
             min_row_in_image: p.row_in_image,
             max_col_in_image: p.col_in_image,
             max_row_in_image: p.row_in_image,
+            image_id: p.image_id,
+            z_index: p.z_index,
+            crop: p.source_crop,
+            subcell_offset: p.subcell_offset,
         });
         entry.x0 = entry.x0.min(x0);
         entry.y0 = entry.y0.min(y0);
@@ -685,18 +737,29 @@ pub fn build_image_verts(
         entry.max_row_in_image = entry.max_row_in_image.max(p.row_in_image);
     }
 
-    // Emit quads sorted by image ID (must match draw_images iteration order).
-    let mut sorted_ids: Vec<u64> = bounds.keys().copied().collect();
-    sorted_ids.sort_unstable();
+    // Emit quads in (z_index, instance_id) order so higher z-index
+    // placements render above lower ones (ties broken by instance id for
+    // determinism). `draw_images` iterates the SAME order (via
+    // `draw_order`), so vertex slab N corresponds to `draw_order[N]` — the
+    // vertex-emission order and the draw order are guaranteed identical
+    // because they share this one authoritative list.
+    draw_order.extend(bounds.iter().map(|(&instance_id, b)| ImageDrawEntry {
+        instance_id,
+        image_id: b.image_id,
+    }));
+    draw_order.sort_unstable_by_key(|entry| {
+        let z = bounds.get(&entry.instance_id).map_or(0, |b| b.z_index);
+        (z, entry.instance_id)
+    });
 
-    verts.reserve(sorted_ids.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+    verts.reserve(draw_order.len() * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
 
-    for id in &sorted_ids {
-        let Some(b) = bounds.get(id) else {
+    for entry in draw_order.iter() {
+        let Some(b) = bounds.get(&entry.instance_id) else {
             continue;
         };
 
-        let quad = compute_image_quad(b, snap_images.get(id));
+        let quad = compute_image_quad(b, snap_images.get(&entry.image_id), cell_width, cell_height);
         verts.extend_from_slice(&quad);
     }
 }
@@ -715,10 +778,42 @@ pub fn build_image_verts(
 /// `display_rows` grid; partial visibility (e.g. image clipped at the terminal
 /// edge) produces a UV sub-range.
 ///
-/// The quad pixel size is determined by the bounding box `b`, which is already
-/// computed in renderer cell pixels.  This means the image is scaled to fill
-/// exactly the declared cell grid — matching the Kitty protocol intent.
-fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * VERTS_PER_QUAD] {
+/// The quad's PIXEL EXTENT depends on the image's [`ImageSizeMode`]
+/// (Task 100.17b):
+///
+/// - `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
+///   or when image metadata is unavailable: the quad fills the bounding box
+///   `b` exactly — the image is scaled to fill the declared cell grid. This
+///   is the pre-100.17 behaviour, unchanged.
+/// - `NativePixels` (kitty without `c=`/`r=`, iTerm2 `auto`, and ALWAYS for
+///   sixel — the spec-mandated default): the quad is anchored at the cell
+///   top-left `(b.x0, b.y0)` and sized to the image's *native* pixel
+///   dimensions instead of stretching to fill the cell box. See
+///   [`compute_image_quad_position`] for how this interacts with
+///   source-crop and partial cell-grid visibility.
+///
+/// If `b.crop` is set (kitty `a=p` source-crop, Task 100.9), the cell-grid
+/// UV fractions above are re-mapped into the crop's pixel-space UV window
+/// instead of the full texture, so the placement displays only that
+/// sub-rectangle of the transmitted image. For `NativePixels` images the
+/// crop's pixel dimensions also become the quad's native extent (rather
+/// than the full image's), so a cropped native-size image is drawn at the
+/// crop's actual pixel size.
+///
+/// If `b.subcell_offset` is set (kitty `a=p`/`a=T` `X=`/`Y=`, Task 100.19),
+/// the quad's position (all four corners) is translated by that many
+/// pixels after [`compute_image_quad_position`] resolves the base
+/// position — orthogonal to both size mode (a position-only shift) and
+/// crop (which only affects UVs, not position). Defensively re-clamped to
+/// `< cell_width`/`< cell_height` here as well, in case a future caller
+/// constructs an `ImageBounds` directly without going through the
+/// resolving handler's own clamp.
+fn compute_image_quad(
+    b: &ImageBounds,
+    img: Option<&InlineImage>,
+    cell_width: u32,
+    cell_height: u32,
+) -> [f32; 4 * VERTS_PER_QUAD] {
     let (u0, v0, u1, v1) = if let Some(img) = img
         && img.display_cols > 0
         && img.display_rows > 0
@@ -738,11 +833,111 @@ fn compute_image_quad(b: &ImageBounds, img: Option<&InlineImage>) -> [f32; 4 * V
         (0.0, 0.0, 1.0, 1.0)
     };
 
+    // Compose a kitty `a=p` source-crop (Task 100.9) on top of the
+    // cell-visibility UV fractions computed above: the crop defines the
+    // outer texture-space UV window `[cu0,cu1]x[cv0,cv1]`, and the
+    // cell-visibility fractions `u0..u1`/`v0..v1` are re-mapped INTO that
+    // window via lerp. When there's no crop, the UVs are unchanged.
+    let (u0, v0, u1, v1) = match (b.crop, img) {
+        (Some(crop), Some(img)) if img.width_px > 0 && img.height_px > 0 => {
+            let w = gl_f32_u32(img.width_px);
+            let h = gl_f32_u32(img.height_px);
+            let cu0 = gl_f32_u32(crop.x) / w;
+            let cu1 = gl_f32_u32(crop.x.saturating_add(crop.width)) / w;
+            let cv0 = gl_f32_u32(crop.y) / h;
+            let cv1 = gl_f32_u32(crop.y.saturating_add(crop.height)) / h;
+            (
+                (cu1 - cu0).mul_add(u0, cu0),
+                (cv1 - cv0).mul_add(v0, cv0),
+                (cu1 - cu0).mul_add(u1, cu0),
+                (cv1 - cv0).mul_add(v1, cv0),
+            )
+        }
+        _ => (u0, v0, u1, v1),
+    };
+
+    let (qx0, qy0, qx1, qy1) = compute_image_quad_position(b, img);
+
+    // Apply the kitty `X=`/`Y=` sub-cell pixel offset (Task 100.19) as a
+    // pure translation of all four corners — position only, independent of
+    // size mode and crop (both already resolved above).
+    let (qx0, qy0, qx1, qy1) = b.subcell_offset.map_or((qx0, qy0, qx1, qy1), |offset| {
+        let dx = gl_f32_u32(offset.x.min(cell_width.saturating_sub(1)));
+        let dy = gl_f32_u32(offset.y.min(cell_height.saturating_sub(1)));
+        (qx0 + dx, qy0 + dy, qx1 + dx, qy1 + dy)
+    });
+
     [
         // Triangle 1
-        b.x0, b.y0, u0, v0, b.x1, b.y0, u1, v0, b.x0, b.y1, u0, v1, // Triangle 2
-        b.x1, b.y0, u1, v0, b.x1, b.y1, u1, v1, b.x0, b.y1, u0, v1,
+        qx0, qy0, u0, v0, qx1, qy0, u1, v0, qx0, qy1, u0, v1, // Triangle 2
+        qx1, qy0, u1, v0, qx1, qy1, u1, v1, qx0, qy1, u0, v1,
     ]
+}
+
+/// Compute the pixel-space quad rectangle `(x0, y0, x1, y1)` for an image,
+/// honoring its [`ImageSizeMode`] (Task 100.17b).
+///
+/// - `ImageSizeMode::ExplicitCells`, or when `img` is `None` (metadata
+///   unavailable): returns the cell bounding box `b` unchanged — the
+///   pre-100.17 behaviour.
+/// - `ImageSizeMode::NativePixels`: returns a quad anchored at the cell
+///   top-left `(b.x0, b.y0)` and sized to the image's native pixel
+///   dimensions. If a source-crop (`b.crop`, Task 100.9) is active, the
+///   crop's pixel dimensions are used instead of the full image's — the
+///   displayed native size is the size of the cropped region, not the
+///   original image.
+///
+///   When only part of the image's cell grid is visible (`b`'s
+///   `min`/`max_col_in_image` / `row_in_image` span narrower than the
+///   full `display_cols` × `display_rows` grid — e.g. the placement is
+///   clipped at the terminal's right/bottom edge or by scroll), the
+///   native extent is scaled by that same visible-cell fraction, mirroring
+///   the UV sub-range computed in [`compute_image_quad`]. This keeps quad
+///   geometry and texture sampling proportionally aligned in both the
+///   fully-visible case (fraction == 1, full native size) and the
+///   partially-visible case, without needing a separate fallback path.
+///
+/// Sub-cell X/Y pixel offset (kitty `X=`/`Y=`, Task 100.19) is NOT applied
+/// here — this function returns the quad anchored exactly at the cell
+/// origin; the offset translation is applied by the caller,
+/// [`compute_image_quad`], after this function returns.
+fn compute_image_quad_position(b: &ImageBounds, img: Option<&InlineImage>) -> (f32, f32, f32, f32) {
+    let Some(img) = img else {
+        return (b.x0, b.y0, b.x1, b.y1);
+    };
+
+    if img.size_mode == ImageSizeMode::ExplicitCells {
+        return (b.x0, b.y0, b.x1, b.y1);
+    }
+
+    // NativePixels: the crop's pixel size (if any) takes precedence over
+    // the full image's — a cropped native-size image displays at the
+    // crop's actual dimensions. `resolve_source_crop` (terminal-emulator
+    // side) never stores a zero-sized crop, but we guard defensively
+    // rather than trust that invariant across the snapshot boundary.
+    let (native_w, native_h) = match b.crop {
+        Some(crop) if crop.width > 0 && crop.height > 0 => (crop.width, crop.height),
+        _ => (img.width_px, img.height_px),
+    };
+
+    if native_w == 0 || native_h == 0 || img.display_cols == 0 || img.display_rows == 0 {
+        // Degenerate metadata — fall back to the cell bounding box rather
+        // than emit a zero-size (invisible) quad.
+        return (b.x0, b.y0, b.x1, b.y1);
+    }
+
+    // Fraction of the image's declared cell grid that is actually visible
+    // in `b`, in each axis. `max >= min` always holds by construction
+    // (bounds are seeded with `min == max` and only ever widened).
+    let visible_cols = gl_f32(b.max_col_in_image - b.min_col_in_image + 1);
+    let visible_rows = gl_f32(b.max_row_in_image - b.min_row_in_image + 1);
+    let display_cols = gl_f32(img.display_cols);
+    let display_rows = gl_f32(img.display_rows);
+
+    let w = gl_f32_u32(native_w) * (visible_cols / display_cols);
+    let h = gl_f32_u32(native_h) * (visible_rows / display_rows);
+
+    (b.x0, b.y0, b.x0 + w, b.y0 + h)
 }
 
 /// Per-row rendering parameters for glyph emission: scaling factors,
@@ -1300,6 +1495,7 @@ mod tests {
     use freminal_common::buffer_states::cursor::StateColors;
     use freminal_common::buffer_states::fonts::FontWeight;
     use freminal_common::colors::TerminalColor;
+    use freminal_terminal_emulator::{AnimationControl, ImageProtocol, ImageSizeMode};
 
     /// Default `StateColors` for test runs.
     fn default_colors() -> StateColors {
@@ -2505,5 +2701,676 @@ mod tests {
             deco.is_empty(),
             "expected no deco quads when term_width_cols == 0"
         );
+    }
+
+    // ── build_image_verts z-order (Task 100.7b) ──────────────────────
+
+    /// Build a minimal 1x1-pixel `InlineImage` for `build_image_verts` tests.
+    fn make_inline_image(id: u64) -> InlineImage {
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        }
+    }
+
+    /// Build a single-cell `ImagePlacement` with the given image id,
+    /// z-index, and placement instance id.
+    ///
+    /// `instance_id` (Task 100.18) must be explicit rather than derived from
+    /// `image_id` so tests can build two DISTINCT placements of the SAME
+    /// image id and confirm they are bucketed separately.
+    fn make_placement(image_id: u64, z_index: i32, instance_id: u64) -> ImagePlacement {
+        ImagePlacement {
+            image_id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index,
+            source_crop: None,
+            placement_instance: instance_id,
+            subcell_offset: None,
+        }
+    }
+
+    /// Higher z-index images must be emitted (and therefore drawn) after
+    /// lower z-index ones, so they render on top (Task 100.7b).
+    #[test]
+    fn build_image_verts_orders_by_z_index() {
+        let term_width = 4;
+        // Cell 0 -> image A (id=1, z=5); cell 1 -> image B (id=2, z=1).
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(1, 5, 1)),
+            Some(make_placement(2, 1, 2)),
+            None,
+            None,
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(1, make_inline_image(1));
+        snap_images.insert(2, make_inline_image(2));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        // B (lower z) drawn first = bottom; A (higher z) drawn last = on top.
+        assert_eq!(
+            draw_order,
+            vec![
+                ImageDrawEntry {
+                    instance_id: 2,
+                    image_id: 2
+                },
+                ImageDrawEntry {
+                    instance_id: 1,
+                    image_id: 1
+                },
+            ]
+        );
+    }
+
+    /// Images with equal z-index are ordered by ascending instance id for
+    /// determinism.
+    #[test]
+    fn build_image_verts_ties_broken_by_id() {
+        let term_width = 4;
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(3, 0, 3)),
+            Some(make_placement(1, 0, 1)),
+            None,
+            None,
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(3, make_inline_image(3));
+        snap_images.insert(1, make_inline_image(1));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order,
+            vec![
+                ImageDrawEntry {
+                    instance_id: 1,
+                    image_id: 1
+                },
+                ImageDrawEntry {
+                    instance_id: 3,
+                    image_id: 3
+                },
+            ]
+        );
+    }
+
+    /// Empty placements must clear `draw_order`, even if it held stale
+    /// entries from a previous frame.
+    #[test]
+    fn build_image_verts_empty_placements_clears_draw_order() {
+        let placements: Vec<Option<ImagePlacement>> = vec![None, None];
+        let snap_images = std::collections::HashMap::new();
+
+        let mut verts = Vec::new();
+        // Pre-fill with stale junk to confirm the early-return path clears it.
+        let mut draw_order = vec![
+            ImageDrawEntry {
+                instance_id: 99,
+                image_id: 99,
+            },
+            ImageDrawEntry {
+                instance_id: 98,
+                image_id: 98,
+            },
+        ];
+        build_image_verts(
+            &placements,
+            &snap_images,
+            4,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert!(
+            draw_order.is_empty(),
+            "draw_order should be cleared on the empty-input path"
+        );
+        assert!(verts.is_empty());
+    }
+
+    /// A single placed image yields exactly one entry in `draw_order`.
+    #[test]
+    fn build_image_verts_single_image_single_draw_order_entry() {
+        let term_width = 4;
+        let placements: Vec<Option<ImagePlacement>> = vec![Some(make_placement(7, 3, 7)), None];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(7, make_inline_image(7));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order,
+            vec![ImageDrawEntry {
+                instance_id: 7,
+                image_id: 7
+            }]
+        );
+    }
+
+    /// Two independent placements of the SAME image id (e.g. two `a=p`
+    /// puts with `p=0`/unspecified) must produce TWO separate `ImageBounds`
+    /// buckets/draw-order entries with distinct instance ids and
+    /// correctly-sized separate quads — not one merged, oversized quad
+    /// (Task 100.18).
+    ///
+    /// This is the fail-before/pass-after assertion for 100.18: before the
+    /// fix, bucketing by `image_id` would have collapsed both placements'
+    /// cells into a single `ImageBounds` entry spanning cells from BOTH
+    /// placements (an oversized bounding box), yielding exactly one
+    /// `draw_order` entry instead of two.
+    #[test]
+    fn build_image_verts_two_placements_of_same_image_id_stay_separate() {
+        let term_width = 4;
+        // Placement A: image id 5, instance 100, occupies cell 0 only.
+        // Placement B: image id 5 (SAME image), instance 200, occupies
+        // cells 2 and 3 (a 1x2 placement, distinct region on screen).
+        let mut placement_b_col0 = make_placement(5, 0, 200);
+        placement_b_col0.col_in_image = 0;
+        let mut placement_b_col1 = make_placement(5, 0, 200);
+        placement_b_col1.col_in_image = 1;
+
+        let placements: Vec<Option<ImagePlacement>> = vec![
+            Some(make_placement(5, 0, 100)),
+            None,
+            Some(placement_b_col0),
+            Some(placement_b_col1),
+        ];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(5, make_inline_image(5));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order.len(),
+            2,
+            "two independent placements of the same image id must yield \
+             two separate draw_order entries, not one merged bucket"
+        );
+        let instance_ids: Vec<u64> = draw_order.iter().map(|e| e.instance_id).collect();
+        assert!(instance_ids.contains(&100));
+        assert!(instance_ids.contains(&200));
+        // Both entries reference the same underlying image id for texture
+        // lookup purposes.
+        assert!(draw_order.iter().all(|e| e.image_id == 5));
+        // Two separate quads => 2 * VERTS_PER_QUAD * IMG_VERTEX_FLOATS floats.
+        assert_eq!(verts.len(), 2 * VERTS_PER_QUAD * IMG_VERTEX_FLOATS);
+    }
+
+    /// A same NON-ZERO `placement_id` re-put (kitty spec REPLACE
+    /// semantics, Task 100.18/100.20) is exercised at the
+    /// `Buffer::clear_image_placements_by_placement` level in
+    /// `freminal-buffer`; here we only confirm that once the OLD
+    /// placement's cells are cleared (as that lower-level call does), only
+    /// the NEW placement's instance remains in `draw_order`.
+    #[test]
+    fn build_image_verts_after_replace_only_new_instance_remains() {
+        let term_width = 4;
+        // Simulates the buffer state AFTER a same-`p=` re-put replaced the
+        // old placement's cells: only the new instance's cell is present.
+        let placements: Vec<Option<ImagePlacement>> =
+            vec![Some(make_placement(9, 0, 300)), None, None, None];
+        let mut snap_images = std::collections::HashMap::new();
+        snap_images.insert(9, make_inline_image(9));
+
+        let mut verts = Vec::new();
+        let mut draw_order = Vec::new();
+        build_image_verts(
+            &placements,
+            &snap_images,
+            term_width,
+            8,
+            16,
+            &mut verts,
+            &mut draw_order,
+        );
+
+        assert_eq!(
+            draw_order.len(),
+            1,
+            "only the replacement placement remains"
+        );
+        assert_eq!(draw_order[0].instance_id, 300);
+    }
+
+    // ── compute_image_quad UV composition (Task 100.9 source-crop) ────
+
+    /// Build an `InlineImage` with caller-specified pixel dimensions and a
+    /// single-cell display grid, for `compute_image_quad` UV tests where the
+    /// pixel-space crop math must be exercised against a non-trivial image
+    /// size (unlike the 1x1-pixel `make_inline_image` helper above).
+    fn make_inline_image_sized(id: u64, width_px: u32, height_px: u32) -> InlineImage {
+        InlineImage {
+            id,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px,
+            height_px,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        }
+    }
+
+    /// Like [`make_inline_image_sized`], but with `size_mode` set to
+    /// `ExplicitCells` (kitty `c=`/`r=`, iTerm2 explicit `width=`/`height=`),
+    /// for Task 100.17b quad-sizing tests that need to lock in the
+    /// unchanged "scale to the declared cell grid" behaviour for that mode.
+    fn make_inline_image_sized_explicit_cells(
+        id: u64,
+        width_px: u32,
+        height_px: u32,
+    ) -> InlineImage {
+        InlineImage {
+            size_mode: ImageSizeMode::ExplicitCells,
+            ..make_inline_image_sized(id, width_px, height_px)
+        }
+    }
+
+    /// Build a fully-visible single-cell `ImageBounds` (min == max == 0),
+    /// with the given optional source-crop, for `compute_image_quad` tests.
+    fn make_bounds(crop: Option<SourceCrop>) -> ImageBounds {
+        ImageBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 8.0,
+            y1: 16.0,
+            min_col_in_image: 0,
+            min_row_in_image: 0,
+            max_col_in_image: 0,
+            max_row_in_image: 0,
+            image_id: 1,
+            z_index: 0,
+            crop,
+            subcell_offset: None,
+        }
+    }
+
+    /// Extract the (u, v) pair from vertex `idx` (0-based) of a
+    /// `compute_image_quad` result. Each vertex is `[x, y, u, v]` (stride 4).
+    fn quad_uv(quad: &[f32; 4 * VERTS_PER_QUAD], idx: usize) -> (f32, f32) {
+        (quad[idx * 4 + 2], quad[idx * 4 + 3])
+    }
+
+    /// Extract the (x, y) pair from vertex `idx` (0-based) of a
+    /// `compute_image_quad` result. Each vertex is `[x, y, u, v]` (stride 4).
+    fn quad_pos(quad: &[f32; 4 * VERTS_PER_QUAD], idx: usize) -> (f32, f32) {
+        (quad[idx * 4], quad[idx * 4 + 1])
+    }
+
+    const UV_EPSILON: f32 = 1e-6;
+
+    /// With no crop, a fully-visible single-cell image (1x1 display grid)
+    /// must map to the full 0..1 UV range — this also covers the
+    /// previously-untested plain (no-crop) UV path.
+    #[test]
+    fn compute_image_quad_no_crop_maps_full_uv_range() {
+        let bounds = make_bounds(None);
+        let img = make_inline_image_sized(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+
+        // Triangle 1: (x0,y0,u0,v0) (x1,y0,u1,v0) (x0,y1,u0,v1)
+        let corner_a = quad_uv(&quad, 0);
+        let corner_b = quad_uv(&quad, 1);
+        let corner_c = quad_uv(&quad, 2);
+
+        assert!(
+            (corner_a.0 - 0.0).abs() < UV_EPSILON,
+            "u0 should be 0.0, got {}",
+            corner_a.0
+        );
+        assert!(
+            (corner_a.1 - 0.0).abs() < UV_EPSILON,
+            "v0 should be 0.0, got {}",
+            corner_a.1
+        );
+        assert!(
+            (corner_b.0 - 1.0).abs() < UV_EPSILON,
+            "u1 should be 1.0, got {}",
+            corner_b.0
+        );
+        assert!(
+            (corner_b.1 - 0.0).abs() < UV_EPSILON,
+            "v0 should be 0.0, got {}",
+            corner_b.1
+        );
+        assert!(
+            (corner_c.0 - 0.0).abs() < UV_EPSILON,
+            "u0 should be 0.0, got {}",
+            corner_c.0
+        );
+        assert!(
+            (corner_c.1 - 1.0).abs() < UV_EPSILON,
+            "v1 should be 1.0, got {}",
+            corner_c.1
+        );
+    }
+
+    /// A source-crop (kitty `a=p` x/y/w/h) on a fully-visible single-cell
+    /// image must re-map the UV range into the crop's pixel-space window
+    /// instead of the full texture (Task 100.9).
+    #[test]
+    fn compute_image_quad_with_crop_maps_to_crop_sub_range() {
+        let bounds = make_bounds(Some(SourceCrop {
+            x: 25,
+            y: 25,
+            width: 50,
+            height: 50,
+        }));
+        let img = make_inline_image_sized(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+
+        let corner_a = quad_uv(&quad, 0);
+        let corner_b = quad_uv(&quad, 1);
+        let corner_c = quad_uv(&quad, 2);
+
+        assert!(
+            (corner_a.0 - 0.25).abs() < UV_EPSILON,
+            "u0 should be 0.25, got {}",
+            corner_a.0
+        );
+        assert!(
+            (corner_a.1 - 0.25).abs() < UV_EPSILON,
+            "v0 should be 0.25, got {}",
+            corner_a.1
+        );
+        assert!(
+            (corner_b.0 - 0.75).abs() < UV_EPSILON,
+            "u1 should be 0.75, got {}",
+            corner_b.0
+        );
+        assert!(
+            (corner_b.1 - 0.25).abs() < UV_EPSILON,
+            "v0 should be 0.25, got {}",
+            corner_b.1
+        );
+        assert!(
+            (corner_c.0 - 0.25).abs() < UV_EPSILON,
+            "u0 should be 0.25, got {}",
+            corner_c.0
+        );
+        assert!(
+            (corner_c.1 - 0.75).abs() < UV_EPSILON,
+            "v1 should be 0.75, got {}",
+            corner_c.1
+        );
+    }
+
+    // ── compute_image_quad position sizing (Task 100.17b) ────
+
+    const POS_EPSILON: f32 = 1e-4;
+
+    /// `ImageSizeMode::NativePixels` with a native size SMALLER than the
+    /// cell bounding box must produce a quad sized to the native pixels
+    /// (anchored at `b.x0`/`b.y0`), NOT stretched to fill the full cell
+    /// box. This is the core Task 100.17 fail-before/pass-after
+    /// assertion: before this fix, `x1-x0`/`y1-y0` equalled the 8x16 cell
+    /// box regardless of the 4x4 native size.
+    #[test]
+    fn compute_image_quad_native_pixels_sizes_to_native_dimensions_not_cell_box() {
+        let bounds = make_bounds(None); // 8x16 cell box (b.x1=8, b.y1=16)
+        let img = make_inline_image_sized(1, 4, 4); // native 4x4px, size_mode NativePixels
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON, "x0 should be 0.0, got {x0}");
+        assert!((y0 - 0.0).abs() < POS_EPSILON, "y0 should be 0.0, got {y0}");
+        assert!(
+            (x1 - 4.0).abs() < POS_EPSILON,
+            "x1-x0 should equal native width_px (4), got x1={x1}"
+        );
+        assert!(
+            (y1 - 4.0).abs() < POS_EPSILON,
+            "y1-y0 should equal native height_px (4), got y1={y1}"
+        );
+    }
+
+    /// `ImageSizeMode::ExplicitCells` must still scale the quad to fill the
+    /// full cell bounding box — unchanged pre-100.17 behaviour, locked in
+    /// so a future regression can't silently apply native sizing to
+    /// explicitly-sized (kitty `c=`/`r=`, iTerm2 explicit width/height)
+    /// images.
+    #[test]
+    fn compute_image_quad_explicit_cells_sizes_to_cell_box() {
+        let bounds = make_bounds(None); // 8x16 cell box
+        let img = make_inline_image_sized_explicit_cells(1, 4, 4); // native 4x4px, but ExplicitCells
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        assert!(
+            (x1 - 8.0).abs() < POS_EPSILON,
+            "x1 should equal the full cell box x1 (8), got {x1}"
+        );
+        assert!(
+            (y1 - 16.0).abs() < POS_EPSILON,
+            "y1 should equal the full cell box y1 (16), got {y1}"
+        );
+    }
+
+    /// `NativePixels` composed with a source-crop (kitty `a=p`, Task 100.9)
+    /// must size the quad to the CROP's pixel dimensions, not the full
+    /// image's — a cropped native-size image displays at the crop's actual
+    /// size while the UV window (covered by the existing crop UV test)
+    /// still samples only that sub-rectangle of the texture.
+    #[test]
+    fn compute_image_quad_native_pixels_with_crop_sizes_to_crop_dimensions() {
+        let bounds = make_bounds(Some(SourceCrop {
+            x: 10,
+            y: 10,
+            width: 50,
+            height: 30,
+        }));
+        let img = make_inline_image_sized(1, 100, 100); // full image is 100x100, crop is 50x30
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        assert!(
+            (x1 - 50.0).abs() < POS_EPSILON,
+            "x1-x0 should equal the crop width (50), got x1={x1}"
+        );
+        assert!(
+            (y1 - 30.0).abs() < POS_EPSILON,
+            "y1-y0 should equal the crop height (30), got y1={y1}"
+        );
+    }
+
+    /// `NativePixels` on a partially-visible image (only some of the
+    /// image's declared cell grid is within `b`, e.g. clipped at the
+    /// terminal's right edge) must scale the native pixel extent by the
+    /// same visible-cell fraction used for the UV sub-range, so quad
+    /// geometry and texture sampling stay proportionally aligned.
+    #[test]
+    fn compute_image_quad_native_pixels_partial_visibility_scales_proportionally() {
+        // A 20x10px native image declared across a 2x1 cell grid; only the
+        // first column (col_in_image == 0) is visible (e.g. the second
+        // column was clipped at the terminal edge) => 1 of 2 cols visible.
+        let bounds = ImageBounds {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 8.0,
+            y1: 16.0,
+            min_col_in_image: 0,
+            min_row_in_image: 0,
+            max_col_in_image: 0,
+            max_row_in_image: 0,
+            image_id: 1,
+            z_index: 0,
+            crop: None,
+            subcell_offset: None,
+        };
+        let img = InlineImage {
+            id: 1,
+            pixels: Arc::new(vec![0u8; 4]),
+            width_px: 20,
+            height_px: 10,
+            display_cols: 2,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        };
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
+        // 1 of 2 cols visible => half the native 20px width.
+        assert!(
+            (x1 - 10.0).abs() < POS_EPSILON,
+            "x1-x0 should be half the native width (10), got x1={x1}"
+        );
+        // Full row visible (1 of 1) => full native 10px height.
+        assert!(
+            (y1 - 10.0).abs() < POS_EPSILON,
+            "y1-y0 should equal the full native height (10), got y1={y1}"
+        );
+    }
+
+    // ── compute_image_quad sub-cell X/Y offset (Task 100.19) ────
+
+    /// A kitty `X=`/`Y=` sub-cell offset must translate the quad's origin
+    /// (all four corners) by that many pixels — position only, UVs
+    /// unaffected.
+    #[test]
+    fn compute_image_quad_subcell_offset_translates_quad_position() {
+        let mut bounds = make_bounds(None); // 8x16 cell box (x0=0,y0=0,x1=8,y1=16)
+        bounds.subcell_offset = Some(SubCellOffset { x: 3, y: 5 });
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+        let (x1, _) = quad_pos(&quad, 1);
+        let (_, y1) = quad_pos(&quad, 2);
+
+        assert!(
+            (x0 - 3.0).abs() < POS_EPSILON,
+            "x0 should be translated by the offset (3), got {x0}"
+        );
+        assert!(
+            (y0 - 5.0).abs() < POS_EPSILON,
+            "y0 should be translated by the offset (5), got {y0}"
+        );
+        // ExplicitCells sizes to the full 8x16 cell box; translated by the
+        // offset, x1 = 8 + 3 = 11, y1 = 16 + 5 = 21.
+        assert!(
+            (x1 - 11.0).abs() < POS_EPSILON,
+            "x1 should also be translated by the offset, got {x1}"
+        );
+        assert!(
+            (y1 - 21.0).abs() < POS_EPSILON,
+            "y1 should also be translated by the offset, got {y1}"
+        );
+    }
+
+    /// A sub-cell offset at or beyond the cell's pixel dimensions must be
+    /// defensively re-clamped to strictly less than `cell_width`/
+    /// `cell_height`, even though the resolving handler already clamps.
+    #[test]
+    fn compute_image_quad_subcell_offset_defensively_clamped_to_cell_size() {
+        let mut bounds = make_bounds(None);
+        bounds.subcell_offset = Some(SubCellOffset { x: 100, y: 100 });
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+
+        assert!(
+            (x0 - 7.0).abs() < POS_EPSILON,
+            "x offset should clamp to cell_width - 1 (7), got {x0}"
+        );
+        assert!(
+            (y0 - 15.0).abs() < POS_EPSILON,
+            "y offset should clamp to cell_height - 1 (15), got {y0}"
+        );
+    }
+
+    /// No sub-cell offset (`None`) must leave the quad position exactly as
+    /// `compute_image_quad_position` computed it — no translation applied.
+    #[test]
+    fn compute_image_quad_no_subcell_offset_is_untranslated() {
+        let bounds = make_bounds(None);
+        let img = make_inline_image_sized_explicit_cells(1, 100, 100);
+
+        let quad = compute_image_quad(&bounds, Some(&img), 8, 16);
+        let (x0, y0) = quad_pos(&quad, 0);
+
+        assert!((x0 - 0.0).abs() < POS_EPSILON);
+        assert!((y0 - 0.0).abs() < POS_EPSILON);
     }
 }

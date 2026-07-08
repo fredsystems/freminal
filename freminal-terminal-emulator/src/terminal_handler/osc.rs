@@ -19,7 +19,7 @@ use freminal_common::buffer_states::{
     window_manipulation::{NotificationKind, WindowManipulation},
 };
 
-use super::{TerminalHandler, shell_integration};
+use super::{TerminalHandler, notify_99, shell_integration};
 
 impl TerminalHandler {
     /// Handle an APC (Application Program Command) sequence.
@@ -44,6 +44,10 @@ impl TerminalHandler {
     /// Handle an OSC (Operating System Command) sequence.
     ///
     /// Ports the logic from `TerminalState::osc_response` in the old buffer.
+    // Inherently large: exhaustive match over all `AnsiOscType` variants. Each arm is a
+    // tightly-coupled, single-line-or-few-lines dispatch. Splitting would require passing the
+    // full handler context to sub-functions without any reduction in complexity.
+    #[allow(clippy::too_many_lines)]
     pub fn handle_osc(&mut self, osc: &AnsiOscType) {
         match osc {
             // Hyperlink: OSC 8 ; params ; url ST  (start) / OSC 8 ; ; ST  (end)
@@ -156,6 +160,26 @@ impl TerminalHandler {
                 });
             }
 
+            // OSC 99 stateful notification (Task 99). Feed each parsed chunk into the
+            // reassembly machine; on finalize, branch on the payload type (Task 99.5c):
+            // control payloads (p=close/p=alive/p=?) push Osc99Control, display payloads
+            // (title/body/icon/buttons) push Notification99 as before (Task 99.4).
+            AnsiOscType::Notify99(cmd) => {
+                if let Some(finalized) = self.reassemble_osc99(cmd.clone()) {
+                    if let Some(kind) = notify_99::control_kind(finalized.meta.payload_type) {
+                        self.window_commands.push(WindowManipulation::Osc99Control {
+                            id: finalized.meta.id,
+                            kind,
+                        });
+                    } else {
+                        self.window_commands
+                            .push(WindowManipulation::Notification99(Box::new(
+                                finalized.into_notification99_data(),
+                            )));
+                    }
+                }
+            }
+
             AnsiOscType::NoOp => {}
         }
     }
@@ -207,10 +231,15 @@ impl TerminalHandler {
 mod tests {
     use super::TerminalHandler;
     use freminal_common::buffer_states::osc::AnsiOscType;
+    use freminal_common::buffer_states::osc_notify_99::{
+        NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command, Osc99PayloadType,
+    };
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
     use freminal_common::buffer_states::window_manipulation::{
-        NotificationKind, WindowManipulation,
+        NotificationKind, Osc99ControlKind, WindowManipulation,
     };
+
+    // ── Existing OSC 9/777 tests ──────────────────────────────────────────────
 
     #[test]
     fn osc_notify_pushes_window_command() {
@@ -253,6 +282,387 @@ mod tests {
                 assert_eq!(body, "hello");
             }
             other => panic!("expected Notification, got: {other:?}"),
+        }
+    }
+
+    // ── OSC 99 reassembly tests ───────────────────────────────────────────────
+
+    /// Build a default `Osc99Command` for use in tests.  All fields are set to
+    /// protocol defaults so individual tests only need to override the fields
+    /// they care about.
+    fn default_osc99() -> Osc99Command {
+        Osc99Command {
+            id: None,
+            payload_type: Osc99PayloadType::Title,
+            done: true,
+            payload: Vec::new(),
+            actions: Osc99Actions::default(),
+            close_report: false,
+            app_name: None,
+            icon_cache_key: None,
+            icon_names: Vec::new(),
+            occasion: NotificationOccasion::Always,
+            sound: None,
+            notification_type: Vec::new(),
+            urgency: None,
+            expire_ms: -1,
+        }
+    }
+
+    /// Single-chunk `done` title with no id → finalizes immediately.
+    #[test]
+    fn single_chunk_done_title_no_id() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            payload: b"Hi".to_vec(),
+            ..default_osc99()
+        };
+        let result = handler.reassemble_osc99(cmd);
+        let finalized = result.expect("single done chunk must finalize");
+        assert_eq!(finalized.title, Some("Hi".to_owned()));
+        assert_eq!(finalized.body, None);
+        assert_eq!(finalized.icon, None);
+        assert!(finalized.meta.id.is_none());
+    }
+
+    /// Three chunks with the same id: two title chunks (`d=0`) then a body
+    /// chunk (`d=1`). Expect the two title chunks concatenated in `title` and
+    /// the body in `body`.
+    #[test]
+    fn chunked_title_plus_body_by_id() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Chunk 1: id=n1, Title, d=false, payload "He"
+        let chunk1 = Osc99Command {
+            id: Some("n1".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: false,
+            payload: b"He".to_vec(),
+            ..default_osc99()
+        };
+        let r1 = handler.reassemble_osc99(chunk1);
+        assert!(r1.is_none(), "first chunk must not finalize");
+
+        // Chunk 2: id=n1, Title, d=false, payload "llo"
+        let chunk2 = Osc99Command {
+            id: Some("n1".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: false,
+            payload: b"llo".to_vec(),
+            ..default_osc99()
+        };
+        let r2 = handler.reassemble_osc99(chunk2);
+        assert!(r2.is_none(), "second chunk must not finalize");
+
+        // Chunk 3: id=n1, Body, d=true, payload "World"
+        let chunk3 = Osc99Command {
+            id: Some("n1".to_owned()),
+            payload_type: Osc99PayloadType::Body,
+            done: true,
+            payload: b"World".to_vec(),
+            ..default_osc99()
+        };
+        let r3 = handler.reassemble_osc99(chunk3);
+        let finalized = r3.expect("terminating chunk must finalize");
+        assert_eq!(finalized.title, Some("Hello".to_owned()));
+        assert_eq!(finalized.body, Some("World".to_owned()));
+        assert_eq!(finalized.icon, None);
+        assert_eq!(finalized.meta.id, Some("n1".to_owned()));
+    }
+
+    /// After finalizing id=n1, a new chunk with the same id starts fresh.
+    #[test]
+    fn update_by_id_after_finalize_starts_fresh() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // First notification: id=n1, done immediately.
+        let first = Osc99Command {
+            id: Some("n1".to_owned()),
+            payload: b"First".to_vec(),
+            ..default_osc99()
+        };
+        let r1 = handler.reassemble_osc99(first);
+        assert!(r1.is_some(), "first n1 must finalize");
+
+        // Second notification: same id, new content.
+        let second = Osc99Command {
+            id: Some("n1".to_owned()),
+            payload: b"Second".to_vec(),
+            ..default_osc99()
+        };
+        let r2 = handler.reassemble_osc99(second);
+        let finalized = r2.expect("second n1 must finalize (fresh start)");
+        // Must not carry stale bytes from the first notification.
+        assert_eq!(finalized.title, Some("Second".to_owned()));
+    }
+
+    /// Unidentified non-final chunk → dropped, map stays empty.
+    #[test]
+    fn unidentified_non_final_never_merged() {
+        let mut handler = TerminalHandler::new(80, 24);
+        let cmd = Osc99Command {
+            id: None,
+            done: false,
+            payload: b"ignored".to_vec(),
+            ..default_osc99()
+        };
+        let result = handler.reassemble_osc99(cmd);
+        assert!(result.is_none(), "non-final, no-id chunk must return None");
+        assert!(
+            handler.pending_notifications.is_empty(),
+            "no map entry must be created for a no-id non-final chunk"
+        );
+    }
+
+    /// Two interleaved ids must not cross-contaminate each other's payloads.
+    #[test]
+    fn two_interleaved_ids_no_cross_contamination() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // id=a: non-final title chunk.
+        let a1 = Osc99Command {
+            id: Some("a".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: false,
+            payload: b"AAA".to_vec(),
+            ..default_osc99()
+        };
+        assert!(handler.reassemble_osc99(a1).is_none());
+
+        // id=b: non-final title chunk.
+        let b1 = Osc99Command {
+            id: Some("b".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: false,
+            payload: b"BBB".to_vec(),
+            ..default_osc99()
+        };
+        assert!(handler.reassemble_osc99(b1).is_none());
+
+        // Finalize id=a.
+        let a2 = Osc99Command {
+            id: Some("a".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: true,
+            payload: b"aaa".to_vec(),
+            ..default_osc99()
+        };
+        let fa = handler.reassemble_osc99(a2).expect("a must finalize");
+        assert_eq!(fa.title, Some("AAAaaa".to_owned()), "a title contaminated");
+        assert_eq!(fa.body, None);
+
+        // Finalize id=b.
+        let b2 = Osc99Command {
+            id: Some("b".to_owned()),
+            payload_type: Osc99PayloadType::Title,
+            done: true,
+            payload: b"bbb".to_vec(),
+            ..default_osc99()
+        };
+        let fb = handler.reassemble_osc99(b2).expect("b must finalize");
+        assert_eq!(fb.title, Some("BBBbbb".to_owned()), "b title contaminated");
+        assert_eq!(fb.body, None);
+    }
+
+    /// `full_reset()` clears all in-flight pending notifications.
+    #[test]
+    fn full_reset_clears_pending_notifications() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        // Accumulate a non-final chunk.
+        let chunk = Osc99Command {
+            id: Some("pending".to_owned()),
+            done: false,
+            payload: b"partial".to_vec(),
+            ..default_osc99()
+        };
+        handler.reassemble_osc99(chunk);
+        assert!(
+            !handler.pending_notifications.is_empty(),
+            "pending map must be non-empty before reset"
+        );
+
+        handler.full_reset();
+        assert!(
+            handler.pending_notifications.is_empty(),
+            "full_reset must clear pending_notifications"
+        );
+    }
+
+    // ── OSC 99 emit tests (Task 99.4) ─────────────────────────────────────────
+
+    /// A single done title-only notification finalizes and pushes exactly one
+    /// `Notification99` window command with defaults mapped correctly.
+    #[test]
+    fn osc_notify99_single_done_title_pushes_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(handler.window_commands.is_empty());
+
+        let cmd = Osc99Command {
+            payload: b"Hello".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("Hello"));
+                assert_eq!(data.occasion, None, "default Always maps to None");
+                assert_eq!(data.expire_ms, None, "default -1 maps to None");
+                assert!(data.button_labels.is_empty());
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
+    }
+
+    /// A fully-specified notification maps urgency/occasion/expiry/actions
+    /// correctly into the `Notification99Data` shell.
+    #[test]
+    fn osc_notify99_full_fields_map_correctly() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("notif-1".to_owned()),
+            urgency: Some(NotificationUrgency::Critical),
+            occasion: NotificationOccasion::Unfocused,
+            expire_ms: 3000,
+            close_report: true,
+            actions: Osc99Actions {
+                report_activation: true,
+                focus_on_activation: false,
+            },
+            payload: b"Body text".to_vec(),
+            payload_type: Osc99PayloadType::Body,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.id.as_deref(), Some("notif-1"));
+                assert_eq!(data.body.as_deref(), Some("Body text"));
+                assert_eq!(data.urgency, Some(2));
+                assert_eq!(data.occasion.as_deref(), Some("unfocused"));
+                assert_eq!(data.expire_ms, Some(3000));
+                assert!(data.close_report);
+                assert!(data.report_activation);
+                assert!(!data.focus_on_activation);
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
+        }
+    }
+
+    /// A non-final chunk (`done: false`, with an id) must not push a window
+    /// command — it is still awaiting more chunks.
+    #[test]
+    fn osc_notify99_non_final_chunk_does_not_push_window_command() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("pending-1".to_owned()),
+            done: false,
+            payload: b"partial".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert!(
+            handler.window_commands.is_empty(),
+            "non-final chunk must not emit a window command"
+        );
+    }
+
+    // ── OSC 99 control routing (Task 99.5c) ───────────────────────────────────
+
+    /// A `p=close` payload finalizing must push `Osc99Control { kind: Close }`,
+    /// NOT a `Notification99` (Gap 1 fix — control payloads were previously
+    /// misrouted as empty display notifications).
+    #[test]
+    fn osc_notify99_close_pushes_osc99_control_close() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("close-1".to_owned()),
+            payload_type: Osc99PayloadType::Close,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(id.as_deref(), Some("close-1"));
+                assert_eq!(*kind, Osc99ControlKind::Close);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A `p=alive` payload finalizing must push `Osc99Control { kind: Alive }`.
+    #[test]
+    fn osc_notify99_alive_pushes_osc99_control_alive() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: None,
+            payload_type: Osc99PayloadType::Alive,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(*id, None);
+                assert_eq!(*kind, Osc99ControlKind::Alive);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A `p=?` payload finalizing must push `Osc99Control { kind: Query }`.
+    #[test]
+    fn osc_notify99_query_pushes_osc99_control_query() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            id: Some("query-1".to_owned()),
+            payload_type: Osc99PayloadType::Query,
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Osc99Control { id, kind } => {
+                assert_eq!(id.as_deref(), Some("query-1"));
+                assert_eq!(*kind, Osc99ControlKind::Query);
+            }
+            other => panic!("expected Osc99Control, got: {other:?}"),
+        }
+    }
+
+    /// A display payload type (`Title`) still produces `Notification99`, not
+    /// `Osc99Control` — the display path is unchanged by the 99.5c branch.
+    #[test]
+    fn osc_notify99_title_still_pushes_notification99_not_control() {
+        let mut handler = TerminalHandler::new(80, 24);
+
+        let cmd = Osc99Command {
+            payload_type: Osc99PayloadType::Title,
+            payload: b"Hello".to_vec(),
+            ..default_osc99()
+        };
+        handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify99(cmd))]);
+
+        assert_eq!(handler.window_commands.len(), 1);
+        match &handler.window_commands[0] {
+            WindowManipulation::Notification99(data) => {
+                assert_eq!(data.title.as_deref(), Some("Hello"));
+            }
+            other => panic!("expected Notification99, got: {other:?}"),
         }
     }
 }
