@@ -267,6 +267,16 @@ impl Buffer {
                         if self.cursor.pos.y + 1 < self.height {
                             self.cursor.pos.y += 1;
                         }
+                    } else if self.declrmm_enabled == Declrmm::Enabled {
+                        // Mirrors IL/DL: confine the scroll to the DECSLRM
+                        // left/right margins when DECLRMM is active.
+                        let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                        self.scroll_slice_up_columns(
+                            self.scroll_region_top,
+                            self.scroll_region_bottom,
+                            left,
+                            right,
+                        );
                     } else {
                         self.scroll_slice_up(self.scroll_region_top, self.scroll_region_bottom);
                     }
@@ -338,6 +348,16 @@ impl Buffer {
                 if y >= self.scroll_region_top && y <= self.scroll_region_bottom {
                     if y > self.scroll_region_top {
                         self.cursor.pos.y -= 1;
+                    } else if self.declrmm_enabled == Declrmm::Enabled {
+                        // Mirrors IL/DL: confine the scroll to the DECSLRM
+                        // left/right margins when DECLRMM is active.
+                        let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                        self.scroll_slice_down_columns(
+                            self.scroll_region_top,
+                            self.scroll_region_bottom,
+                            left,
+                            right,
+                        );
                     } else {
                         self.scroll_slice_down(self.scroll_region_top, self.scroll_region_bottom);
                     }
