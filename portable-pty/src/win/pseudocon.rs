@@ -1,7 +1,7 @@
 use super::WinChild;
 use crate::cmdbuilder::CommandBuilder;
 use crate::win::procthreadattr::ProcThreadAttributeList;
-use anyhow::{bail, ensure, Error};
+use anyhow::{Error, bail, ensure};
 use filedescriptor::{FileDescriptor, OwnedHandle};
 use lazy_static::lazy_static;
 use shared_library::shared_library;
@@ -10,8 +10,8 @@ use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::winerror::{HRESULT, S_OK};

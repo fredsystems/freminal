@@ -1,5 +1,5 @@
 use crate::win::pseudocon::HPCON;
-use anyhow::{ensure, Error};
+use anyhow::{Error, ensure};
 use std::io::Error as IoError;
 use std::{mem, ptr};
 use winapi::shared::minwindef::DWORD;

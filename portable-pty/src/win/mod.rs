@@ -3,8 +3,8 @@ use anyhow::Context as _;
 use std::io::{Error as IoError, Result as IoResult};
 use std::os::windows::io::{AsRawHandle, RawHandle};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use winapi::shared::minwindef::DWORD;
 use winapi::um::minwinbase::STILL_ACTIVE;
@@ -56,11 +56,7 @@ impl WinChild {
             .map_err(|e| IoError::other(format!("failed to clone process handle: {e}")))?;
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
         let err = IoError::last_os_error();
-        if res == 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        if res == 0 { Err(err) } else { Ok(()) }
     }
 }
 
@@ -94,11 +90,7 @@ impl ChildKiller for WinChildKiller {
         };
         let res = unsafe { TerminateProcess(proc.as_raw_handle() as _, 1) };
         let err = IoError::last_os_error();
-        if res == 0 {
-            Err(err)
-        } else {
-            Ok(())
-        }
+        if res == 0 { Err(err) } else { Ok(()) }
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
@@ -134,11 +126,7 @@ impl Child for WinChild {
     fn process_id(&self) -> Option<u32> {
         let guard = lock_proc(&self.proc).ok()?;
         let res = unsafe { GetProcessId(guard.as_raw_handle() as _) };
-        if res == 0 {
-            None
-        } else {
-            Some(res)
-        }
+        if res == 0 { None } else { Some(res) }
     }
 
     fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
