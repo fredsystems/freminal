@@ -1314,6 +1314,13 @@ pub fn shell_integration_dir() -> Option<ShellIntegrationDir> {
     //    if the directory already exists — otherwise an unrelated XDG
     //    entry would shadow the per-user default.  These paths
     //    (typically `/usr/share/...`) are owned by the packager.
+    //
+    //    `XDG_DATA_DIRS` is an XDG Base Directory spec construct: it is a
+    //    Unix-only, `:`-separated path list. It has no meaning on Windows,
+    //    where paths embed a drive-letter `:` (`C:\Users\...`) that would be
+    //    mis-split here. Gate the whole scan to Unix so a stray env var on
+    //    Windows can never corrupt resolution.
+    #[cfg(unix)]
     if let Ok(xdg_data_dirs) = std::env::var("XDG_DATA_DIRS")
         && !xdg_data_dirs.is_empty()
     {
@@ -4061,7 +4068,12 @@ path = "/tmp/my.frag"
         );
     }
 
+    // `XDG_DATA_DIRS` is a Unix-only construct (see `shell_integration_dir`'s
+    // step 2); the resolver ignores it on Windows, where a drive-letter path
+    // would otherwise be mis-split on `:`. This regression test therefore
+    // only applies on Unix.
     #[test]
+    #[cfg(unix)]
     fn shell_integration_dir_with_xdg_data_dirs_hit_returns_packaging_provided() {
         // Regression for the Copilot PR-333 review finding that an
         // XDG_DATA_DIRS hit (typically a system path like
