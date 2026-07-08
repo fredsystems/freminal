@@ -90,6 +90,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
 | `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
+| `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally. |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
 | `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |
 | `flake-dev-shell-discipline`       | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                               |
@@ -151,12 +152,19 @@ Hardcoded shortcuts outside `BindingMap` are forbidden.
 | `cargo bench --no-run --all`                               | Compile benchmarks without running                            |
 | `cargo xtask coverage`                                     | Generate coverage report (lcov)                               |
 | `cargo fmt --all -- --check`                               | Check formatting                                              |
+| `cargo xtask check-windows`                                | Clippy for windows-gnu (Windows cross-check; `default` shell) |
 
 ### Verification suite (mandatory before "done")
 
 1. `cargo test --all`
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `cargo machete`
+
+Additionally, **before opening a PR** — especially for changes touching
+`#[cfg(windows)]` code, `portable-pty`, cross-platform paths, or
+threads/closures — run `cargo xtask check-windows` from the `default`
+dev shell to catch Windows-only compile errors and lints locally. See
+the `freminal-windows-crosscheck` skill.
 
 If any step fails, fix it. Don't ship around it. The `testing-mandate`
 skill expands the "what done means" definition.

@@ -41,7 +41,7 @@ impl EnvEntry {
 
 #[cfg(unix)]
 fn get_shell() -> String {
-    use nix::unistd::{access, AccessFlags};
+    use nix::unistd::{AccessFlags, access};
     use std::ffi::CStr;
     use std::str;
 
@@ -105,7 +105,7 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
     {
         use std::os::windows::ffi::OsStringExt;
         use winapi::um::processenv::ExpandEnvironmentStringsW;
-        use winreg::enums::{RegType, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegType};
         use winreg::types::FromRegValue;
         use winreg::{RegKey, RegValue};
 
@@ -138,9 +138,9 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
         if let Ok(sys_env) = RegKey::predef(HKEY_LOCAL_MACHINE)
             .open_subkey("System\\CurrentControlSet\\Control\\Session Manager\\Environment")
         {
-            for res in sys_env.enum_values() {
-                if let Ok((name, value)) = res {
-                    if name.to_ascii_lowercase() == "username" {
+            for (name, value) in sys_env.enum_values().flatten() {
+                {
+                    if name.eq_ignore_ascii_case("username") {
                         continue;
                     }
                     if let Ok(value) = reg_value_to_string(&value) {
@@ -159,11 +159,11 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
         }
 
         if let Ok(sys_env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Environment") {
-            for res in sys_env.enum_values() {
-                if let Ok((name, value)) = res {
+            for (name, value) in sys_env.enum_values().flatten() {
+                {
                     if let Ok(value) = reg_value_to_string(&value) {
                         // Merge the system and user paths together
-                        let value = if name.to_ascii_lowercase() == "path" {
+                        let value = if name.eq_ignore_ascii_case("path") {
                             match env.get(&EnvEntry::map_key(name.clone().into())) {
                                 Some(entry) => {
                                     let mut result = OsString::new();
@@ -439,7 +439,7 @@ impl CommandBuilder {
     }
 
     fn search_path(&self, exe: &OsStr, cwd: &OsStr) -> anyhow::Result<OsString> {
-        use nix::unistd::{access, AccessFlags};
+        use nix::unistd::{AccessFlags, access};
 
         let exe_path: &Path = exe.as_ref();
         if exe_path.is_relative() {
@@ -566,7 +566,7 @@ impl CommandBuilder {
     /// We take the contents of the $SHELL env var first, then
     /// fall back to looking it up from the password database.
     pub fn get_shell(&self) -> String {
-        use nix::unistd::{access, AccessFlags};
+        use nix::unistd::{AccessFlags, access};
 
         if let Some(shell) = self.get_env("SHELL").and_then(OsStr::to_str) {
             match access(shell, AccessFlags::X_OK) {
@@ -607,7 +607,7 @@ impl CommandBuilder {
             let extensions = self.get_env("PATHEXT").unwrap_or(OsStr::new(".EXE"));
             for path in std::env::split_paths(&path) {
                 // Check for exactly the user's string in this path dir
-                let candidate = path.join(&exe);
+                let candidate = path.join(exe);
                 if candidate.exists() {
                     return candidate.into_os_string();
                 }
@@ -621,7 +621,7 @@ impl CommandBuilder {
                     let Some(ext) = ext.to_str() else {
                         continue;
                     };
-                    let path = path.join(&exe).with_extension(&ext[1..]);
+                    let path = path.join(exe).with_extension(&ext[1..]);
                     if path.exists() {
                         return path.into_os_string();
                     }

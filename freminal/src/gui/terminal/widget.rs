@@ -1653,7 +1653,18 @@ impl FreminalTerminalWidget {
             cache.previous_key = None;
             cache.previous_mouse_state = None;
             cache.previous_scroll_amount = 0.0;
-            view_state.selection.is_selecting = false;
+            // Task 116.3 (defect 3): route through `finalize_interrupted_drag`
+            // instead of bluntly clearing `is_selecting`. An in-progress drag
+            // interrupted here (modal/menu/search/command-history opening,
+            // scrollbar-drag starting, or a split-pane-boundary release that
+            // never reaches this pane's `write_input_to_terminal` call) would
+            // otherwise strand `anchor`/`end` with `is_selecting = false`,
+            // making the next primary press see a stale `has_selection()`
+            // and clear instead of starting a new drag. Finalizing collapses
+            // a not-yet-dragged point selection (clears everything) or keeps
+            // a real range as a completed selection, matching what a normal
+            // mouse-release would have done.
+            view_state.selection.finalize_interrupted_drag();
         } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
@@ -1921,9 +1932,25 @@ impl FreminalTerminalWidget {
             // point to different text.  This is a pre-existing limitation
             // shared by all finite-scrollback terminals; the proper fix is to
             // adjust selection coordinates on eviction, not to clear here.
-            if snap.content_changed && !snap.scroll_changed && !view_state.selection.is_selecting {
+            //
+            // We also exclude frames where a selection was just finalized by
+            // a mouse release (`selection_committed_this_frame`). Input is
+            // processed before this auto-clear runs each frame, so by the
+            // time we get here `selection.is_selecting` is already `false`
+            // for a just-completed selection. Without this flag, PTY output
+            // that arrives on the same frame as the release would set
+            // `snap.content_changed` and immediately wipe the
+            // just-committed selection (defect 2, Task 116.2).
+            if snap.content_changed
+                && !snap.scroll_changed
+                && !view_state.selection.is_selecting
+                && !view_state.selection_committed_this_frame
+            {
                 view_state.selection.clear();
             }
+            // Reset the per-frame edge flag unconditionally so it does not
+            // persist into subsequent frames (Task 116.2).
+            view_state.selection_committed_this_frame = false;
 
             // Check whether the selection has changed since the last frame.
             let current_selection = view_state.selection.normalised();
@@ -2355,6 +2382,12 @@ impl FreminalTerminalWidget {
                         term_width_cols: snap.term_width,
                         theme: snap.theme,
                         cursor_color_override: snap.cursor_color_override,
+                        // Task 115.2: DECSCNM (whole-screen reverse video)
+                        // composes with per-cell SGR-7 by XOR inside the
+                        // vertex builders via `effective_fg`/`effective_bg`.
+                        // `is_normal_display` is `true` for normal display,
+                        // so DECSCNM-active is its negation.
+                        reverse_screen: !snap.is_normal_display,
                     },
                     &mut rs_ref.bg_instances,
                     &mut rs_ref.deco_verts,
@@ -2374,6 +2407,9 @@ impl FreminalTerminalWidget {
                     selection_is_block: view_state.selection.is_block,
                     text_blink_slow_visible: view_state.text_blink_slow_visible,
                     text_blink_fast_visible: view_state.text_blink_fast_visible,
+                    // Task 115.2: see the matching `BackgroundFrame`
+                    // construction above for the XOR-compose rationale.
+                    reverse_screen: !snap.is_normal_display,
                 };
                 build_foreground_instances(
                     &rendered_shaped_lines,

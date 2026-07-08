@@ -337,8 +337,10 @@ impl Buffer {
 
         // When DECLRMM is active the effective right wrap column is
         // scroll_region_right + 1; wrapping starts a new row at
-        // scroll_region_left rather than column 0.
-        let (wrap_col, wrap_start_col) = if self.declrmm_enabled == Declrmm::Enabled {
+        // scroll_region_left rather than column 0. This base span is fixed for
+        // the whole call; the per-row double-width halving below is applied on
+        // top of it each iteration.
+        let (base_wrap_col, base_wrap_start_col) = if self.declrmm_enabled == Declrmm::Enabled {
             (self.scroll_region_right + 1, self.scroll_region_left)
         } else {
             (self.width, 0)
@@ -352,6 +354,31 @@ impl Buffer {
         }
 
         loop {
+            // On a double-width or double-height row (DECDWL/DECDHL) each cell
+            // renders at 2x the normal cell width, so a real VT100 only fits
+            // half as many columns before wrapping. Halve the *span*
+            // (`base_wrap_col - base_wrap_start_col`) rather than `self.width`
+            // directly so this composes correctly with a DECLRMM-restricted
+            // scroll region: the halving applies to the margin-derived width,
+            // not the full screen width. Clamp to a minimum span of 1 so a
+            // 1-column-wide margin never collapses to a zero-width,
+            // unwrappable row. This is recomputed each iteration keyed off the
+            // *current* `row_idx`, because a single `insert_text` call can wrap
+            // across rows with differing `line_width` (e.g. a DoubleWidth row
+            // followed by Normal soft-wrap continuations) and each row must
+            // wrap at its own width.
+            let current_row_is_double_width = self
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.line_width.is_double_width());
+            let (wrap_col, wrap_start_col) = if current_row_is_double_width {
+                let span = base_wrap_col - base_wrap_start_col;
+                let half_span = (span / 2).max(1);
+                (base_wrap_start_col + half_span, base_wrap_start_col)
+            } else {
+                (base_wrap_col, base_wrap_start_col)
+            };
+
             // ┌─────────────────────────────────────────────┐
             // │ PRE-WRAP: if we're already at/past wrap_col,│
             // │ move to the next row as a soft-wrap row.    │
@@ -4756,6 +4783,385 @@ mod declrmm_tests {
         assert_eq!(buf.is_declrmm_enabled(), Declrmm::Disabled);
         assert_eq!(buf.left_right_margins(), (0, 9));
     }
+
+    // --- SU/SD and IND/RI confine to DECLRMM margins (117.2, 117.5) ---
+
+    /// Build a 10-wide, 5-tall buffer where every row is filled with a
+    /// distinct repeated digit ("0000000000", "1111111111", ... "4444444444"),
+    /// written *before* any DECLRMM/margin state is touched. Every cell is
+    /// then individually identifiable by (row digit, column), which lets the
+    /// scroll-confinement tests distinguish "shifted" from "untouched" cells
+    /// with a plain equality check instead of a blank/non-blank heuristic.
+    fn buf_full_grid_5x10() -> Buffer {
+        let mut buf = Buffer::new(10, 5);
+        for row in 0..5 {
+            let ch = match row {
+                0 => '0',
+                1 => '1',
+                2 => '2',
+                3 => '3',
+                4 => '4',
+                _ => unreachable!("loop only produces 0..5"),
+            };
+            buf.set_cursor_pos(Some(0), Some(row));
+            buf.insert_text(&text(&ch.to_string().repeat(10)));
+        }
+        buf
+    }
+
+    /// Like [`buf_full_grid_5x10`] but on the alternate screen: enters the
+    /// alternate buffer first, fills the grid, then enables DECLRMM with
+    /// margins [2, 7] (0-based).
+    fn alt_buf_full_grid_with_margins() -> Buffer {
+        let mut buf = Buffer::new(10, 5);
+        buf.enter_alternate(0);
+        for row in 0..5 {
+            let ch = match row {
+                0 => '0',
+                1 => '1',
+                2 => '2',
+                3 => '3',
+                4 => '4',
+                _ => unreachable!("loop only produces 0..5"),
+            };
+            buf.set_cursor_pos(Some(0), Some(row));
+            buf.insert_text(&text(&ch.to_string().repeat(10)));
+        }
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 1-based -> 0-based [2, 7]
+        buf
+    }
+
+    #[test]
+    fn scroll_region_up_n_confines_to_margins_when_declrmm_enabled() {
+        // 117.2: SU must shift only the [2, 7] margin range; columns 0, 1, 8,
+        // 9 (outside the margins) must be untouched on every row.
+        let mut buf = buf_full_grid_5x10();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 0-based [2, 7]
+
+        buf.scroll_region_up_n(1);
+
+        let row0 = buf.rows()[0].cells();
+        let row2 = buf.rows()[2].cells();
+        let row4 = buf.rows()[4].cells();
+
+        for col in 2..=7 {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row0 col {col} should hold what was row1's content"
+            );
+            assert_eq!(
+                row2.get(col).map(Cell::tchar),
+                Some(&ascii('3')),
+                "row2 col {col} should hold what was row3's content"
+            );
+            assert!(
+                row4.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row4 col {col} (bottom of region) should be blank after the shift"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row2.get(col).map(Cell::tchar),
+                Some(&ascii('2')),
+                "row2 col {col}"
+            );
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('4')),
+                "row4 col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_region_down_n_confines_to_margins_when_declrmm_enabled() {
+        // 117.2: SD must shift only the [2, 7] margin range; columns 0, 1, 8,
+        // 9 (outside the margins) must be untouched on every row.
+        let mut buf = buf_full_grid_5x10();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 0-based [2, 7]
+
+        buf.scroll_region_down_n(1);
+
+        let row0 = buf.rows()[0].cells();
+        let row2 = buf.rows()[2].cells();
+        let row4 = buf.rows()[4].cells();
+
+        for col in 2..=7 {
+            assert!(
+                row0.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row0 col {col} (top of region) should be blank after the shift"
+            );
+            assert_eq!(
+                row2.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row2 col {col} should hold what was row1's content"
+            );
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('3')),
+                "row4 col {col} should hold what was row3's content"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row2.get(col).map(Cell::tchar),
+                Some(&ascii('2')),
+                "row2 col {col}"
+            );
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('4')),
+                "row4 col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_ind_confines_to_margins_when_declrmm_enabled() {
+        // 117.2: IND at the bottom of a partial DECSTBM region must confine
+        // the scroll to the DECLRMM margins. A partial region (bottom !=
+        // height - 1) is required so `handle_lf` takes the DECSTBM path
+        // instead of the full-screen fast path (which never scrolls a
+        // region at all — it just advances/creates a row).
+        let mut buf = buf_full_grid_5x10();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 0-based [2, 7]
+        buf.set_scroll_region(1, 4); // 1-based -> 0-based [0, 3]
+        // Cursor at the bottom of the scroll region, inside the margins.
+        buf.set_cursor_pos(Some(4), Some(3));
+
+        buf.handle_ind();
+
+        let row0 = buf.rows()[0].cells();
+        let row3 = buf.rows()[3].cells();
+        let row4 = buf.rows()[4].cells();
+
+        for col in 2..=7 {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row0 col {col}"
+            );
+            assert!(
+                row3.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row3 col {col} (bottom of region) should be blank after IND"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row3.get(col).map(Cell::tchar),
+                Some(&ascii('3')),
+                "row3 col {col}"
+            );
+        }
+        // Row 4 is entirely outside the DECSTBM region and must be untouched.
+        for col in 0..10 {
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('4')),
+                "row4 col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_ri_confines_to_margins_when_declrmm_enabled() {
+        // 117.2: RI at the top of a partial DECSTBM region must confine the
+        // scroll to the DECLRMM margins.
+        let mut buf = buf_full_grid_5x10();
+        buf.set_declrmm(Declrmm::Enabled);
+        buf.set_left_right_margins(3, 8); // 0-based [2, 7]
+        buf.set_scroll_region(1, 4); // 1-based -> 0-based [0, 3]
+        // Cursor at the top of the scroll region, inside the margins.
+        buf.set_cursor_pos(Some(4), Some(0));
+
+        buf.handle_ri();
+
+        let row0 = buf.rows()[0].cells();
+        let row1 = buf.rows()[1].cells();
+        let row4 = buf.rows()[4].cells();
+
+        for col in 2..=7 {
+            assert!(
+                row0.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row0 col {col} (top of region) should be blank after RI"
+            );
+            assert_eq!(
+                row1.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row1 col {col}"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row1.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row1 col {col}"
+            );
+        }
+        // Row 4 is entirely outside the DECSTBM region and must be untouched.
+        for col in 0..10 {
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('4')),
+                "row4 col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_region_up_down_n_scroll_full_row_when_declrmm_disabled() {
+        // Regression guard: without DECLRMM, SU/SD must shift the ENTIRE
+        // row — columns 0, 1, 8, 9 must change too (no confinement).
+        let mut buf = buf_full_grid_5x10();
+        buf.scroll_region_up_n(1);
+        let row0 = buf.rows()[0].cells();
+        for col in 0..10 {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "col {col}"
+            );
+        }
+
+        let mut buf2 = buf_full_grid_5x10();
+        buf2.scroll_region_down_n(1);
+        let row0b = buf2.rows()[0].cells();
+        for col in 0..10 {
+            assert!(
+                row0b.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "col {col} should be blank (full-row scroll-down, no DECLRMM)"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_ind_ri_scroll_full_row_when_declrmm_disabled() {
+        // Regression guard: without DECLRMM, IND/RI at the scroll-region
+        // boundary must shift the ENTIRE row — columns 0, 1, 8, 9 must
+        // change too (no confinement).
+        let mut buf = buf_full_grid_5x10();
+        buf.set_scroll_region(1, 4); // 0-based [0, 3]
+        buf.set_cursor_pos(Some(4), Some(3));
+        buf.handle_ind();
+        let row0 = buf.rows()[0].cells();
+        for col in 0..10 {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "col {col}"
+            );
+        }
+
+        let mut buf2 = buf_full_grid_5x10();
+        buf2.set_scroll_region(1, 4);
+        buf2.set_cursor_pos(Some(4), Some(0));
+        buf2.handle_ri();
+        let row0b = buf2.rows()[0].cells();
+        for col in 0..10 {
+            assert!(
+                row0b.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "col {col} should be blank (full-row scroll via RI, no DECLRMM)"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_ind_confines_to_margins_on_alternate_buffer_when_declrmm_enabled() {
+        // 117.5: the alternate-buffer IND path must also confine to margins.
+        // Unlike the primary buffer, the alternate-buffer bottom-margin
+        // branch always checks DECLRMM (no full-screen fast-path bypass),
+        // so a full-height scroll region is sufficient here.
+        let mut buf = alt_buf_full_grid_with_margins();
+        buf.set_cursor_pos(Some(4), Some(4)); // bottom row, inside margins
+
+        buf.handle_ind();
+
+        let row0 = buf.rows()[0].cells();
+        let row4 = buf.rows()[4].cells();
+        for col in 2..=7 {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row0 col {col}"
+            );
+            assert!(
+                row4.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row4 col {col} should be blank after IND"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row4.get(col).map(Cell::tchar),
+                Some(&ascii('4')),
+                "row4 col {col}"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_ri_confines_to_margins_on_alternate_buffer_when_declrmm_enabled() {
+        // 117.5: the alternate-buffer RI path must also confine to margins.
+        let mut buf = alt_buf_full_grid_with_margins();
+        buf.set_cursor_pos(Some(4), Some(0)); // top row, inside margins
+
+        buf.handle_ri();
+
+        let row0 = buf.rows()[0].cells();
+        let row1 = buf.rows()[1].cells();
+        for col in 2..=7 {
+            assert!(
+                row0.get(col).is_none_or(|c| c.tchar() == &TChar::Space),
+                "row0 col {col} should be blank after RI"
+            );
+            assert_eq!(
+                row1.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row1 col {col}"
+            );
+        }
+        for col in [0, 1, 8, 9] {
+            assert_eq!(
+                row0.get(col).map(Cell::tchar),
+                Some(&ascii('0')),
+                "row0 col {col}"
+            );
+            assert_eq!(
+                row1.get(col).map(Cell::tchar),
+                Some(&ascii('1')),
+                "row1 col {col}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4844,6 +5250,148 @@ mod line_width_tests {
         assert_eq!(buf.rows[0].line_width, LineWidth::DoubleWidth);
         buf.set_cursor_line_width(LineWidth::Normal);
         assert_eq!(buf.rows[0].line_width, LineWidth::Normal);
+    }
+
+    // --- insert_text halves the auto-wrap span on double-width rows (117.1) ---
+
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn ascii(c: char) -> TChar {
+        TChar::Ascii(c as u8)
+    }
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(ascii).collect()
+    }
+
+    #[test]
+    fn insert_text_wraps_at_full_width_on_normal_row() {
+        // Regression guard: a Normal row must still wrap at the full
+        // buffer width (10), not at the halved span used for double-width
+        // rows.
+        let mut buf = Buffer::new(10, 3);
+        buf.insert_text(&text("ABCDEFGHIJK")); // 11 chars -> wraps after col 9
+
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDEFGHIJ".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
+        }
+        let row1 = buf.rows()[1].cells();
+        assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('K')));
+    }
+
+    #[test]
+    fn insert_text_halves_wrap_span_on_double_width_row() {
+        // 117.1: on a 10-wide DoubleWidth row the usable span halves to 5
+        // columns (0..=4), computed as (wrap_col - wrap_start_col) / 2 =
+        // (10 - 0) / 2 = 5. The 6th character must wrap to the next row
+        // instead of landing at column 5.
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEF")); // 6 chars
+
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDE".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
+        }
+        // Column 5 must be blank — if the wrap were still full-width, 'F'
+        // would have landed here instead of wrapping.
+        assert!(
+            row0.get(5).is_none_or(|c| c.tchar() == &TChar::Space),
+            "col 5 should be blank; the row is DoubleWidth so wrap should \
+             happen at half-width (col 5), not full-width (col 10)"
+        );
+
+        let row1 = buf.rows()[1].cells();
+        assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('F')));
+    }
+
+    #[test]
+    fn insert_text_halves_wrap_span_on_double_height_top_row() {
+        // 117.1: DoubleHeightTop is also `is_double_width() == true` and
+        // must halve the wrap span identically to DoubleWidth.
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleHeightTop);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEF")); // 6 chars
+
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDE".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
+        }
+        assert!(
+            row0.get(5).is_none_or(|c| c.tchar() == &TChar::Space),
+            "col 5 should be blank; DoubleHeightTop should halve the wrap span"
+        );
+        let row1 = buf.rows()[1].cells();
+        assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('F')));
+    }
+
+    #[test]
+    fn insert_text_halves_wrap_span_on_double_height_bottom_row() {
+        // 117.1: DoubleHeightBottom is also `is_double_width() == true` and
+        // must halve the wrap span identically to DoubleWidth.
+        let mut buf = Buffer::new(10, 3);
+        buf.set_cursor_line_width(LineWidth::DoubleHeightBottom);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEF")); // 6 chars
+
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDE".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "col {i}");
+        }
+        assert!(
+            row0.get(5).is_none_or(|c| c.tchar() == &TChar::Space),
+            "col 5 should be blank; DoubleHeightBottom should halve the wrap span"
+        );
+        let row1 = buf.rows()[1].cells();
+        assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('F')));
+    }
+
+    #[test]
+    fn insert_text_multi_wrap_recomputes_span_per_row() {
+        // Regression (CodeRabbit / PR #383): a single `insert_text` call that
+        // wraps across rows of differing `line_width` must recompute the wrap
+        // span for EACH destination row, not reuse the first row's status.
+        //
+        // Row 0 is DoubleWidth (half-width span = 5, cols 0..=4 usable). A
+        // soft-wrap continuation row created mid-insert defaults to Normal
+        // (full width 10). So on a 10-wide buffer:
+        //   - row 0 (DoubleWidth) holds 5 chars: "ABCDE"
+        //   - row 1 (Normal continuation) must hold the next 10 chars:
+        //     "FGHIJKLMNO" — NOT halved to 5.
+        //   - the 16th char "P" wraps to row 2.
+        // Before the fix the halved span leaked onto row 1, wrapping it after
+        // 5 chars ("FGHIJ") instead of 10.
+        let mut buf = Buffer::new(10, 4);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEFGHIJKLMNOP")); // 16 chars
+
+        // Row 0 (DoubleWidth): halved span, "ABCDE" in cols 0..=4, col 5 blank.
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDE".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "row0 col {i}");
+        }
+        assert!(
+            row0.get(5).is_none_or(|c| c.tchar() == &TChar::Space),
+            "row0 col 5 must be blank (DoubleWidth halves the span to 5)"
+        );
+
+        // Row 1 (Normal continuation): FULL width, "FGHIJKLMNO" in cols 0..=9.
+        let row1 = buf.rows()[1].cells();
+        for (i, ch) in "FGHIJKLMNO".chars().enumerate() {
+            assert_eq!(
+                row1[i].tchar(),
+                &ascii(ch),
+                "row1 col {i} must use the Normal row's full width, not row 0's halved span"
+            );
+        }
+
+        // Row 2: the 16th char "P" wrapped here.
+        let row2 = buf.rows()[2].cells();
+        assert_eq!(row2.first().map(Cell::tchar), Some(&ascii('P')));
     }
 }
 

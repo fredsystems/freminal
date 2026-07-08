@@ -161,6 +161,32 @@ impl SelectionState {
             _ => false,
         }
     }
+
+    /// Deterministically finalize an in-progress drag that is being
+    /// terminated WITHOUT a normal mouse-release event reaching the input
+    /// handler (defect 3, Task 116.3).
+    ///
+    /// This mirrors the collapse-or-keep decision a normal
+    /// `PointerButton` release makes: a drag that produced a real range
+    /// (`anchor != end`) is kept as a completed selection so the user can
+    /// still copy it, or clear it with the next click; a drag that never
+    /// moved past its starting cell (`anchor == end`, or either endpoint is
+    /// still unset) is fully cleared so nothing is left stranded.
+    ///
+    /// Without this, force-clearing only `is_selecting` (e.g. when a modal
+    /// opens mid-drag, the scrollbar starts being dragged, or a drag's
+    /// release lands outside the originating pane's rect) leaves `anchor`
+    /// and `end` populated while `is_selecting` is `false`. The next
+    /// primary press then sees a stale `has_selection() == true` and takes
+    /// the "clear existing selection, don't start a new drag" branch,
+    /// which feels like the selection state machine is stuck.
+    pub fn finalize_interrupted_drag(&mut self) {
+        if self.has_selection() {
+            self.is_selecting = false;
+        } else {
+            self.clear();
+        }
+    }
 }
 
 /// A single search match span within the terminal buffer.
@@ -381,6 +407,7 @@ pub struct PendingPaste {
 /// been migrated here as part of the lock-free architecture refactor
 /// (see `Documents/PERFORMANCE_PLAN.md`, Section 4.5).
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)] // GUI-local per-feature state flags (window focus, per-blink visibility, per-frame selection-commit edge flag) — each is independent and short-lived; a state machine would couple unrelated concerns and obscure intent.
 pub struct ViewState {
     /// How many lines the user has scrolled back from the live bottom.
     ///
@@ -576,6 +603,15 @@ pub struct ViewState {
     /// Per-image animation playback clocks (GUI-side, ephemeral), keyed by
     /// image id. Absent for still images / images not yet seen animating.
     image_anim_clocks: HashMap<u64, ImageAnimationClock>,
+
+    // ── Selection commit edge flag (Task 116.2) ───────────────────────
+    /// Per-frame edge flag: set when a mouse-release finalizes a
+    /// non-empty selection, consumed (and reset) by the content-changed
+    /// auto-clear in `show()` to prevent that auto-clear from wiping a
+    /// just-committed selection on a frame where PTY output also arrived
+    /// (defect 2, Task 116). This is distinct from `selection.is_selecting`,
+    /// which is already `false` by the time the release branch runs.
+    pub selection_committed_this_frame: bool,
 }
 
 impl Default for ViewState {
@@ -610,6 +646,7 @@ impl Default for ViewState {
             search_state: SearchState::default(),
             command_history: CommandHistoryState::default(),
             image_anim_clocks: HashMap::new(),
+            selection_committed_this_frame: false,
         }
     }
 }
@@ -2295,6 +2332,99 @@ mod tests {
         assert_eq!(s.row, 2, "normalised start row should be the smaller row");
         assert_eq!(e.row, 5, "normalised end row should be the larger row");
     }
+
+    // ── SelectionState::finalize_interrupted_drag tests (Task 116.3, defect 3a) ──
+
+    #[test]
+    fn finalize_interrupted_drag_keeps_real_selection() {
+        // Defect 3a: interrupting a drag that has already produced a real
+        // range (anchor != end) must KEEP anchor/end so the selection
+        // survives — only `is_selecting` is cleared.
+        let mut sel = SelectionState {
+            anchor: Some(CellCoord { col: 0, row: 0 }),
+            end: Some(CellCoord { col: 5, row: 0 }),
+            is_selecting: true,
+            is_block: false,
+        };
+        sel.finalize_interrupted_drag();
+        assert_eq!(
+            sel.anchor,
+            Some(CellCoord { col: 0, row: 0 }),
+            "anchor must be unchanged"
+        );
+        assert_eq!(
+            sel.end,
+            Some(CellCoord { col: 5, row: 0 }),
+            "end must be unchanged"
+        );
+        assert!(!sel.is_selecting, "is_selecting must be cleared");
+        assert!(sel.has_selection(), "the real selection must be kept");
+    }
+
+    #[test]
+    fn finalize_interrupted_drag_clears_point_selection() {
+        // Defect 3a: a drag interrupted before it ever moved past its
+        // starting cell (anchor == end) has no real range and must be
+        // fully cleared rather than left stranded.
+        let mut sel = SelectionState {
+            anchor: Some(CellCoord { col: 3, row: 1 }),
+            end: Some(CellCoord { col: 3, row: 1 }),
+            is_selecting: true,
+            is_block: false,
+        };
+        sel.finalize_interrupted_drag();
+        assert!(sel.anchor.is_none(), "point selection anchor must clear");
+        assert!(sel.end.is_none(), "point selection end must clear");
+        assert!(!sel.is_selecting);
+    }
+
+    #[test]
+    fn finalize_interrupted_drag_clears_when_end_none() {
+        // Defect 3a: an anchor with no tracked end (e.g. interrupted before
+        // the first `PointerMoved`) is not a real selection and must clear.
+        let mut sel = SelectionState {
+            anchor: Some(CellCoord { col: 2, row: 2 }),
+            end: None,
+            is_selecting: true,
+            is_block: false,
+        };
+        sel.finalize_interrupted_drag();
+        assert!(sel.anchor.is_none());
+        assert!(sel.end.is_none());
+        assert!(!sel.is_selecting);
+    }
+
+    #[test]
+    fn finalize_interrupted_drag_then_next_press_not_stuck() {
+        // Defect 3a: after keeping a real selection, the state machine
+        // must not be stranded — a subsequent `clear()` (simulating the
+        // "clear existing selection" branch a fresh primary press takes)
+        // must fully reset the state so a new anchor/end can be set.
+        let mut sel = SelectionState {
+            anchor: Some(CellCoord { col: 0, row: 0 }),
+            end: Some(CellCoord { col: 5, row: 0 }),
+            is_selecting: true,
+            is_block: false,
+        };
+        sel.finalize_interrupted_drag();
+        assert!(
+            sel.has_selection(),
+            "kept selection must be visible after finalize"
+        );
+
+        // Simulate the next press's "clear existing selection" step.
+        sel.clear();
+        assert!(!sel.has_selection(), "clear() must fully reset selection");
+        assert!(sel.anchor.is_none());
+        assert!(sel.end.is_none());
+
+        // A fresh drag can now start without interference from stale state.
+        sel.anchor = Some(CellCoord { col: 1, row: 1 });
+        sel.end = Some(CellCoord { col: 1, row: 1 });
+        sel.is_selecting = true;
+        assert_eq!(sel.anchor, sel.end, "fresh point selection can be set");
+    }
+
     #[test]
     fn cursor_animation_snap_threshold() {
         let mut vs = ViewState::new();

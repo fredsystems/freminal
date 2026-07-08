@@ -11,7 +11,7 @@
     # cargo-bundle is only used inside the dev shell to produce the Linux
     # deb/appimage artifacts locally.  nixpkgs is pinned at 0.9.0, which predates
     # SVG-icon and `appimage` support; we build from upstream master so the dev
-    # shell matches the 0.11.0+ the release CI installs via `cargo install`.
+    # shell matches the 0.11.1+ the release CI installs via `cargo install`.
     # `nix flake update cargo-bundle-src` picks up new upstream commits.
     cargo-bundle-src = {
       url = "github:burtonageo/cargo-bundle";
@@ -107,7 +107,7 @@
             };
           };
 
-          version = "0.11.0";
+          version = "0.11.1";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -171,9 +171,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.11.0</string>
+                    <string>0.11.1</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.11.0</string>
+                    <string>0.11.1</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -299,9 +299,44 @@
             let
               pkgs = import nixpkgs { inherit system; };
 
+              # ---------------------------------------------------------------
+              # Windows cross-CHECK toolchain (dev-shell only; NEVER in `ci`).
+              #
+              # `cargo xtask check-windows` runs clippy for the
+              # x86_64-pc-windows-gnu target so the Windows-only `#[cfg(windows)]`
+              # code paths (portable-pty's ConPTY backend, the kitty shared-memory
+              # tests, etc.) get linted locally instead of only in GitHub CI.
+              # Clippy/`cargo check` type-check but do not *link*, so a full MSVC
+              # toolchain is unnecessary; the mingw-w64 cross `cc` satisfies
+              # cargo's link-probe and any proc-macro/build-script host needs.
+              #
+              # This is deliberately Linux-only and lives exclusively in the
+              # `default` (interactive) shell's `devOnlyTools`. The `ci` shell
+              # (mkFreminalShell []) never receives it, so CI runners never pull
+              # the ~hundreds-of-MB mingw cross toolchain. The nixpkgs-provided
+              # CI toolchain is untouched.
+              windowsCheck =
+                let
+                  rustPkgs = import nixpkgs {
+                    inherit system;
+                    overlays = [ rust-overlay.overlays.default ];
+                  };
+                  # A stable toolchain that also carries the windows-gnu target's
+                  # std. Kept as its own toolchain (not shadowing the CI/default
+                  # cargo) and only invoked explicitly via `xtask check-windows`.
+                  toolchain = rustPkgs.rust-bin.stable.latest.default.override {
+                    targets = [ "x86_64-pc-windows-gnu" ];
+                  };
+                  cc = rustPkgs.pkgsCross.mingwW64.stdenv.cc;
+                in
+                {
+                  inherit toolchain cc;
+                  linker = "${cc}/bin/${cc.targetPrefix}cc";
+                };
+
               # cargo-bundle built from upstream master (see the cargo-bundle-src
               # input).  nixpkgs ships 0.9.0, which cannot bundle SVG icons or
-              # produce appimages; this matches the 0.11.0+ the release CI uses.
+              # produce appimages; this matches the 0.11.1+ the release CI uses.
               # Mirrors the nixpkgs recipe (squashfsTools wrap for appimage).
               cargoBundleLatest = pkgs.rustPlatform.buildRustPackage {
                 pname = "cargo-bundle";
@@ -389,6 +424,10 @@
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.perf
                 pkgs.fish
+                # Windows cross-check toolchain (see `windowsCheck`). Linux-only,
+                # `default`-shell-only — the `ci` shell never gets these.
+                windowsCheck.toolchain
+                windowsCheck.cc
               ];
 
               # Extra dev packages provided by mkCheck (includes rustToolchain)
@@ -405,34 +444,55 @@
                   pkgs.wayland
                 ];
 
-              # Shared shell builder.  `extraTools` is the only axis on which
-              # the `default` and `ci` shells differ.
+              # Windows cross-check env, set ONLY in the `default` shell (Linux).
+              # Tells cargo which linker to use for the windows-gnu target and
+              # which cargo binary to invoke, so `cargo xtask check-windows`
+              # works. Empty for `ci` and non-Linux so nothing leaks into the
+              # CI toolchain.
+              #
+              # `FREMINAL_WINDOWS_CARGO` is required because two toolchains are
+              # on PATH: the mkRustCheck/CI toolchain (no windows-gnu std) and
+              # `windowsCheck.toolchain` (with it). PATH order would otherwise
+              # pick the wrong one, so `check_windows` invokes this cargo
+              # explicitly rather than relying on `which cargo`.
+              windowsCheckEnv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+                CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = windowsCheck.linker;
+                FREMINAL_WINDOWS_CARGO = "${windowsCheck.toolchain}/bin/cargo";
+              };
+
+              # Shared shell builder.  `extraTools` and `extraEnv` are the only
+              # axes on which the `default` and `ci` shells differ.
               mkFreminalShell =
-                extraTools:
-                pkgs.mkShell {
-                  buildInputs = extraDev ++ corePkgs ++ ciRustTools ++ extraTools;
+                extraTools: extraEnv:
+                pkgs.mkShell (
+                  {
+                    buildInputs = extraDev ++ corePkgs ++ ciRustTools ++ extraTools;
 
-                  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
+                    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath libPkgs;
 
-                  # Enable the `playback` feature by default in the devshell so
-                  # developers get recording/playback support without extra flags.
-                  CARGO_BUILD_FEATURES = "playback";
+                    # Enable the `playback` feature by default in the devshell so
+                    # developers get recording/playback support without extra flags.
+                    CARGO_BUILD_FEATURES = "playback";
 
-                  shellHook = ''
-                    ${chk.shellHook}
+                    shellHook = ''
+                      ${chk.shellHook}
 
-                    alias pre-commit="pre-commit run --all-files"
-                  '';
-                };
+                      alias pre-commit="pre-commit run --all-files"
+                    '';
+                  }
+                  // extraEnv
+                );
             in
             {
               # Full interactive shell: lint/test tooling plus the dev-only
-              # extras (cargo-bundle, profilers, vttest, ...).
-              default = mkFreminalShell devOnlyTools;
+              # extras (cargo-bundle, profilers, vttest, ...) and the Windows
+              # cross-check env.
+              default = mkFreminalShell devOnlyTools windowsCheckEnv;
 
               # Lean shell for CI lint/test gates.  Omits devOnlyTools so CI
-              # never builds cargo-bundle from source.  Used by nightly.yml.
-              ci = mkFreminalShell [ ];
+              # never builds cargo-bundle from source, and gets no Windows
+              # cross-check env/toolchain.  Used by nightly.yml.
+              ci = mkFreminalShell [ ] { };
             };
         }) systems
       );

@@ -22,7 +22,7 @@ and plan document maintenance rules.
 | v0.9.0  | Modern Workflow Terminal        | `PLAN_VERSION_090.md`                                                 | 72–77, 94–95, 98 | Complete |
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete |
-| v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Planned  |
+| v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete |
 | v0.12.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_120.md`                                                 | 102–103          | Planned  |
 | v0.13.0 | Kitty: Text Sizing              | `PLAN_VERSION_130.md`                                                 | 104              | Planned  |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub     |
@@ -184,9 +184,9 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 111 | Bundled Font / Icon (CaskaydiaCove)       | `PLAN_VERSION_100.md` (Task 111)              | Complete  | v0.8.0, v0.9.0         |
 | 112 | UI Beautification (ChromeStyle)           | `PLAN_VERSION_100.md` (Task 112)              | Complete  | Task 111               |
 | 114 | Kitty Keyboard: egui-blocked keys         | `PLAN_VERSION_110.md` (Task 114)              | Complete  | Task 101               |
-| 115 | DECSCNM Per-Pane Per-Cell Reverse Video   | `PLAN_VERSION_111.md` (Task 115)              | Planned   | Task 58                |
-| 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Planned   | None                   |
-| 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Planned   | None                   |
+| 115 | DECSCNM Per-Pane Per-Cell Reverse Video   | `PLAN_VERSION_111.md` (Task 115)              | Complete  | Task 58                |
+| 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Complete  | None                   |
+| 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Complete  | None                   |
 
 ---
 
@@ -650,6 +650,9 @@ Update this section as tasks complete:
 | 112  | 2026-06-17 | 2026-06-19 | All subtasks (112.1-112.13) on task-112/ui-beautification; PR pending            |
 | 101  | 2026-07-05 | 2026-07-05 | 101.1 audit + 101.2-101.4 on task-101/keyboard-compliance; egui-blocked -> 114   |
 | 114  | 2026-07-05 | 2026-07-06 | keypad/media/print/pause/menu via raw-winit; lock-state reverted (see 114.11)    |
+| 117  | 2026-07-08 | 2026-07-08 | 117.1-117.5 (half-wrap + SU/SD/IND/RI DECSLRM confine, primary+alt) on v0.11.1   |
+| 116  | 2026-07-08 | 2026-07-08 | 116.1-116.4 selection release/stuck (tracked-end, commit-flag, interrupted drag) |
+| 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 
 ---
 

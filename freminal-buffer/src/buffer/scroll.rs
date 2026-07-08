@@ -16,7 +16,9 @@
 //! `any_visible_dirty`, `visible_image_placements`, `has_visible_images`,
 //! `max_scroll_offset`, `erase_scrollback`).
 
-use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
+use freminal_common::buffer_states::{
+    buffer_type::BufferType, format_tag::FormatTag, modes::declrmm::Declrmm,
+};
 
 use crate::{
     cell::Cell,
@@ -267,11 +269,39 @@ impl Buffer {
         (top, bottom)
     }
 
+    /// Scroll rows `[first, last]` UP by one line, honouring DECLRMM.
+    ///
+    /// When DECLRMM is active the scroll is confined to the DECSLRM
+    /// left/right margins (`scroll_slice_up_columns`); otherwise the whole row
+    /// is shifted (`scroll_slice_up`). Centralises the DECLRMM decision shared
+    /// by SU, the primary LF/IND/RI/NEL path, and IL/DL.
+    pub(in crate::buffer) fn scroll_slice_up_confined(&mut self, first: usize, last: usize) {
+        if self.declrmm_enabled == Declrmm::Enabled {
+            let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+            self.scroll_slice_up_columns(first, last, left, right);
+        } else {
+            self.scroll_slice_up(first, last);
+        }
+    }
+
+    /// Scroll rows `[first, last]` DOWN by one line, honouring DECLRMM.
+    ///
+    /// Mirror of [`scroll_slice_up_confined`] for downward scrolls (SD, the
+    /// primary RI path, IL/DL).
+    pub(in crate::buffer) fn scroll_slice_down_confined(&mut self, first: usize, last: usize) {
+        if self.declrmm_enabled == Declrmm::Enabled {
+            let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+            self.scroll_slice_down_columns(first, last, left, right);
+        } else {
+            self.scroll_slice_down(first, last);
+        }
+    }
+
     /// Scroll DECSTBM region UP by 1 (primary buffer)
     pub(in crate::buffer) fn scroll_region_up_primary(&mut self) {
         let (t, b) = self.scroll_region_rows();
         if t < b {
-            self.scroll_slice_up(t, b);
+            self.scroll_slice_up_confined(t, b);
         }
     }
 
@@ -279,7 +309,7 @@ impl Buffer {
     pub(in crate::buffer) fn scroll_region_down_primary(&mut self) {
         let (t, b) = self.scroll_region_rows();
         if t < b {
-            self.scroll_slice_down(t, b);
+            self.scroll_slice_down_confined(t, b);
         }
     }
 
@@ -324,7 +354,7 @@ impl Buffer {
         let region_size = b - t + 1;
         let clamped = n.min(region_size);
         for _ in 0..clamped {
-            self.scroll_slice_up(t, b);
+            self.scroll_slice_up_confined(t, b);
         }
     }
 
@@ -340,7 +370,7 @@ impl Buffer {
         let region_size = b - t + 1;
         let clamped = n.min(region_size);
         for _ in 0..clamped {
-            self.scroll_slice_down(t, b);
+            self.scroll_slice_down_confined(t, b);
         }
     }
 

@@ -1237,48 +1237,6 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
-/// Compute the end column for a mouse-release event, respecting the current
-/// multi-click mode.
-///
-/// For triple-click (`click_count >= 3`) the end snaps to line boundaries.
-/// For double-click (`click_count == 2`) it snaps to word boundaries.
-/// For single-click it returns the raw column `x`.
-fn release_end_col(
-    view_state: &ViewState,
-    snap: &TerminalSnapshot,
-    x: usize,
-    abs_row: usize,
-) -> usize {
-    // Snapshot-row index for `visible_chars` lookups, derived from the
-    // buffer-absolute `abs_row` so it accounts for the extra-row fold window.
-    // `y` (the raw screen row) is NOT a valid `visible_chars` index when folds
-    // shift the window.
-    let snap_y =
-        abs_row.saturating_sub(visible_window_start(snap).saturating_sub(snap.window_extra_rows));
-    if view_state.click_count >= 3 {
-        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
-        let (line_start, line_end) =
-            crate::gui::view_state::line_boundaries(&snap.visible_chars, snap_y);
-        if abs_row >= anchor_row {
-            line_end
-        } else {
-            line_start
-        }
-    } else if view_state.click_count == 2 {
-        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
-        let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
-        let (word_start, word_end) =
-            crate::gui::view_state::word_boundaries(&snap.visible_chars, snap_y, x);
-        if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col) {
-            word_end
-        } else {
-            word_start
-        }
-    } else {
-        x
-    }
-}
-
 /// Return type of [`write_input_to_terminal`] — see its "Return value" doc
 /// section for the meaning of each element. Factored into a named alias
 /// (rather than an inline tuple) to satisfy `clippy::type_complexity`.
@@ -1291,6 +1249,63 @@ type WriteInputResult = (
     Vec<KeyAction>,
     SuperKeyState,
 );
+
+/// Finalizes an in-progress text-selection drag on primary-button release.
+///
+/// Shared by both the in-rect release path and the out-of-rect
+/// split-pane-boundary release path (Task 116.3, defect 3) so the
+/// finalize logic — collapse-or-keep, the per-frame commit flag, and the
+/// selection-event recording — is not duplicated. Always uses the
+/// already-tracked `view_state.selection.end` (set by the last in-rect
+/// `PointerMoved`, or by the press handler for a no-drag click) rather
+/// than deriving a coordinate from the release position, which may be
+/// outside the terminal area entirely.
+fn finalize_selection_drag(
+    view_state: &mut ViewState,
+    recording_ctx: Option<&RecordingContext<'_>>,
+) {
+    view_state.selection.is_selecting = false;
+
+    let Some(end_coord) = view_state.selection.end else {
+        // No tracked end — nothing to finalize.
+        view_state.selection.clear();
+        return;
+    };
+
+    // Record selection event if a real selection exists.
+    if let Some(ctx) = recording_ctx
+        && let Some(anchor) = view_state.selection.anchor
+        && anchor != end_coord
+    {
+        // Saturating `usize -> u32` for recording
+        // row/col — any realistic terminal fits in u32.
+        ctx.handle.emit(EventPayload::SelectionEvent {
+            pane_id: ctx.pane_id,
+            start_row: u32::try_from(anchor.row).unwrap_or(u32::MAX),
+            start_col: u32::try_from(anchor.col).unwrap_or(u32::MAX),
+            end_row: u32::try_from(end_coord.row).unwrap_or(u32::MAX),
+            end_col: u32::try_from(end_coord.col).unwrap_or(u32::MAX),
+            is_block: view_state.selection.is_block,
+        });
+    }
+
+    // If anchor == end the user clicked without
+    // dragging — there is no real selection.
+    // Clear it so the next click starts fresh
+    // rather than hitting the "clear existing
+    // selection" path.
+    if view_state.selection.anchor == Some(end_coord) {
+        view_state.selection.clear();
+    } else {
+        // A non-empty selection was just finalized
+        // on this release. Mark the per-frame edge
+        // flag so the content-changed auto-clear in
+        // `show()` cannot wipe it if PTY output also
+        // arrived on this same frame (defect 2,
+        // Task 116.2).
+        view_state.selection_committed_this_frame = true;
+    }
+}
 
 #[allow(
     clippy::cognitive_complexity,
@@ -2172,7 +2187,35 @@ pub(super) fn write_input_to_terminal(
                 // Ignore clicks outside the terminal area (e.g. tab bar
                 // buttons) so they do not start text selections or generate
                 // spurious mouse reports at row 0.
+                //
+                // Task 116.3 (defect 3, split-pane boundary): the one
+                // exception is a primary-button RELEASE that is finalizing
+                // an in-progress selection drag. A drag that started in
+                // this pane can be released after the pointer has moved
+                // outside this pane's `terminal_rect` (e.g. across a split
+                // boundary into a sibling pane). If we `continue` here as
+                // usual, the release-finalize branch below never runs for
+                // the origin pane, leaving `is_selecting == true` and the
+                // selection frozen forever — no further in-rect event will
+                // ever arrive to finalize it. Detect that case and finalize
+                // directly using the already-tracked `selection.end`
+                // (updated by the last in-rect `PointerMoved`), without
+                // deriving a position from the out-of-rect `pos` and
+                // without running it through the mouse-report /
+                // `handle_pointer_button` machinery below (which would
+                // otherwise clamp the out-of-rect `pos` into this pane's
+                // grid and could emit a spurious mouse-tracking report to
+                // the PTY at a bogus position). Every other out-of-rect
+                // case — presses, secondary button, and releases while not
+                // selecting — is still ignored exactly as before.
                 if !terminal_rect.contains(*pos) {
+                    if *button == PointerButton::Primary
+                        && !*pressed
+                        && view_state.selection.is_selecting
+                    {
+                        finalize_selection_drag(view_state, recording_ctx);
+                        state_changed = true;
+                    }
                     continue;
                 }
 
@@ -2326,45 +2369,25 @@ pub(super) fn write_input_to_terminal(
                             }
                             view_state.selection.is_selecting = true;
                         } else if view_state.selection.is_selecting {
-                            // Mouse released — finalize the selection.
-                            // Respect click_count so double/triple-click
-                            // selections are not collapsed to the raw
-                            // mouse position on release.
-                            let abs_row =
-                                screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
-                            let end_col = release_end_col(view_state, snap, x, abs_row);
-                            let end_coord = CellCoord {
-                                col: end_col,
-                                row: abs_row,
-                            };
-                            view_state.selection.end = Some(end_coord);
-                            view_state.selection.is_selecting = false;
-
-                            // Record selection event if a real selection exists.
-                            if let Some(ctx) = recording_ctx
-                                && let Some(anchor) = view_state.selection.anchor
-                                && anchor != end_coord
-                            {
-                                // Saturating `usize -> u32` for recording
-                                // row/col — any realistic terminal fits in u32.
-                                ctx.handle.emit(EventPayload::SelectionEvent {
-                                    pane_id: ctx.pane_id,
-                                    start_row: u32::try_from(anchor.row).unwrap_or(u32::MAX),
-                                    start_col: u32::try_from(anchor.col).unwrap_or(u32::MAX),
-                                    end_row: u32::try_from(end_coord.row).unwrap_or(u32::MAX),
-                                    end_col: u32::try_from(end_coord.col).unwrap_or(u32::MAX),
-                                    is_block: view_state.selection.is_block,
-                                });
-                            }
-
-                            // If anchor == end the user clicked without
-                            // dragging — there is no real selection.
-                            // Clear it so the next click starts fresh
-                            // rather than hitting the "clear existing
-                            // selection" path.
-                            if view_state.selection.anchor == Some(end_coord) {
-                                view_state.selection.clear();
-                            }
+                            // Mouse released inside the terminal area —
+                            // finalize the selection using the end
+                            // coordinate already tracked by the
+                            // `PointerMoved` handler (and, for the no-drag
+                            // case, the press handler above). Re-deriving
+                            // the end coordinate from the raw release
+                            // position would recompute through
+                            // `screen_row_to_buffer_row` ->
+                            // `visible_window_start` -> `snap.total_rows`,
+                            // which can shift if PTY output arrived between
+                            // the last `PointerMoved` and this release,
+                            // causing the recomputed row to spuriously
+                            // collide with the anchor and wipe a real
+                            // selection. Sharing the coordinate space across
+                            // press/drag/release avoids that race. Shared
+                            // with the out-of-rect split-pane-boundary
+                            // release path above (Task 116.3, defect 3) via
+                            // `finalize_selection_drag`.
+                            finalize_selection_drag(view_state, recording_ctx);
                         }
                     }
                     continue;
@@ -3253,5 +3276,107 @@ mod raw_key_tests {
         assert!(s.any(), "right Super still held");
         s.right = false;
         assert!(!s.any());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod finalize_selection_drag_tests {
+    //! Regression tests for [`finalize_selection_drag`] (Task 116.1 /
+    //! 116.2) and [`SelectionState::finalize_interrupted_drag`] reachability
+    //! (Task 116.3). `finalize_selection_drag` takes no `TerminalSnapshot`
+    //! and no x/y — it always uses the already-tracked
+    //! `view_state.selection.end`, so these tests build synthetic
+    //! `ViewState`s directly rather than deriving a release position.
+
+    use super::*;
+
+    #[test]
+    fn finalize_selection_drag_keeps_tracked_end_and_sets_committed_flag() {
+        // Defect 1 (116.1) + defect 2 (116.2): the tracked `selection.end`
+        // must survive finalize verbatim (no re-derivation), and finalizing
+        // a real (non-empty) selection must set the per-frame commit flag
+        // so the content-changed auto-clear cannot wipe it this frame.
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        vs.selection.end = Some(CellCoord { col: 7, row: 2 });
+        vs.selection.is_selecting = true;
+        vs.selection_committed_this_frame = false;
+
+        finalize_selection_drag(&mut vs, None);
+
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 7, row: 2 }),
+            "tracked end must be unchanged — no re-derivation from a release position"
+        );
+        assert!(!vs.selection.is_selecting, "drag must be finished");
+        assert!(vs.selection.has_selection(), "real selection must survive");
+        assert!(
+            vs.selection_committed_this_frame,
+            "commit flag must be set when a real selection is kept"
+        );
+    }
+
+    #[test]
+    fn finalize_selection_drag_collapses_click_without_drag() {
+        // A click without any drag (anchor == end) has no real selection
+        // and must be fully cleared. The commit flag must NOT be set — it
+        // exists to protect a kept selection, not a cleared one.
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { col: 4, row: 1 });
+        vs.selection.end = Some(CellCoord { col: 4, row: 1 });
+        vs.selection.is_selecting = true;
+        vs.selection_committed_this_frame = false;
+
+        finalize_selection_drag(&mut vs, None);
+
+        assert!(vs.selection.anchor.is_none(), "point selection must clear");
+        assert!(vs.selection.end.is_none(), "point selection must clear");
+        assert!(!vs.selection.is_selecting);
+        assert!(
+            !vs.selection_committed_this_frame,
+            "commit flag must not be set when the selection was collapsed"
+        );
+    }
+
+    #[test]
+    fn finalize_selection_drag_clears_when_end_none() {
+        // No tracked end (e.g. release before any `PointerMoved`) means
+        // there is nothing to finalize — fully clear rather than leave a
+        // dangling anchor.
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { col: 1, row: 1 });
+        vs.selection.end = None;
+        vs.selection.is_selecting = true;
+        vs.selection_committed_this_frame = false;
+
+        finalize_selection_drag(&mut vs, None);
+
+        assert!(vs.selection.anchor.is_none());
+        assert!(vs.selection.end.is_none());
+        assert!(!vs.selection.is_selecting);
+        assert!(!vs.selection_committed_this_frame);
+    }
+
+    #[test]
+    fn finalize_selection_drag_is_snapshot_independent() {
+        // Core defect-1 regression: `finalize_selection_drag` takes no
+        // `TerminalSnapshot` and no x/y, so the finalized `end` can never
+        // be perturbed by PTY output (and the `total_rows` shift it may
+        // cause) arriving between the last drag-move and the release. The
+        // end value below is preserved verbatim from the tracked state.
+        let mut vs = ViewState::new();
+        vs.selection.anchor = Some(CellCoord { col: 2, row: 0 });
+        vs.selection.end = Some(CellCoord { col: 9, row: 0 });
+        vs.selection.is_selecting = true;
+
+        finalize_selection_drag(&mut vs, None);
+
+        assert_eq!(
+            vs.selection.end,
+            Some(CellCoord { col: 9, row: 0 }),
+            "end must be preserved verbatim regardless of any snapshot state"
+        );
     }
 }
