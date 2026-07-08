@@ -98,7 +98,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  # Run clippy with `-D warnings` on every target OS and toolchain.
+  # Run clippy with `-D warnings` on every target OS, on stable + MSRV.
   # `cargo xtask check` runs clippy (a superset of `cargo check`) with
   # warnings denied, so this matrix is a genuine cross-platform
   # fail-on-warning gate — it catches OS-specific warnings (e.g. `dead_code`
@@ -112,7 +112,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
-        toolchain: ["stable", "nightly", "1.95.0"]
+        # Stable + MSRV only. Nightly is deliberately excluded: `xtask check`
+        # runs clippy with `-D warnings`, and nightly clippy churns new lints
+        # that frequently suggest unstable APIs (e.g. `chunks_exact_to_as_chunks`
+        # -> `as_chunks_mut`, which does not exist on stable/MSRV). Gating CI on
+        # nightly clippy would make the build fail on lint drift we cannot act
+        # on without breaking the MSRV.
+        toolchain: ["stable", "1.95.0"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
