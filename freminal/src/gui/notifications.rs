@@ -370,6 +370,14 @@ pub(super) fn forget_osc99(live: &mut HashMap<String, Osc99LiveEntry>, id: &str)
 /// `id` defaults to `0` when absent; `button` is the (0-based) action-id
 /// string freminal registered for the button, or `None` for
 /// whole-notification activation (empty button field).
+///
+/// Only reachable from non-test code on Linux/BSD, where `notify-rust`'s
+/// D-Bus backend exposes an observable handle (see `show_system_osc99`).
+/// macOS/Windows have no background-thread activation callback, so this
+/// builder has no non-test caller there — but it is still exercised by
+/// unit tests on every platform, so it is compiled (not `cfg`'d out); the
+/// dead-code allow is scoped to exactly the platforms that lack a caller.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 pub(super) fn osc99_activation_report(id: Option<&str>, button: Option<&str>) -> Vec<u8> {
     let id = id.unwrap_or("0");
     let button = button.unwrap_or("");
@@ -437,6 +445,13 @@ pub(super) fn live_ids_sorted(live: &HashMap<String, Osc99LiveEntry>) -> Vec<Str
 /// Returns `None` when the source notification didn't request a report for
 /// this event (`report_activation` / `close_report` both gate their
 /// respective branches).
+///
+/// Only called from non-test code on Linux/BSD (the `wait_for_action`
+/// callback in `show_system_osc99`); macOS/Windows emit an untracked close
+/// report inline and never call this. Scoped dead-code allow for the
+/// platforms without a caller — the fn stays compiled for cross-platform
+/// unit coverage.
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 pub(super) fn osc99_action_report(
     action: &str,
     id: Option<&str>,
