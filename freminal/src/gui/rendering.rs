@@ -26,10 +26,10 @@ use crate::gui::notifications::{NotificationRequest, Osc99Control};
 ///
 /// Routes through [`chrome_style::build_visuals`](crate::gui::chrome_style::build_visuals)
 /// so the entire chrome (widgets, borders, selection, menus) is themed, not
-/// just `window_fill`/`panel_fill`.  Normal-display mode is assumed at setup;
-/// the per-frame style hook in `app_impl::update` keeps the visuals in sync
-/// with the active pane's display mode and the active `GuiTheme` profile
-/// thereafter.
+/// just `window_fill`/`panel_fill`.  Chrome styling never depends on any
+/// pane's display mode (DECSCNM reverse video is a per-cell terminal-content
+/// concern); the per-frame style hook in `app_impl::update` keeps the
+/// visuals in sync with the active `GuiTheme` profile thereafter.
 pub(super) fn set_egui_options(
     ctx: &egui::Context,
     theme: &ThemePalette,
@@ -58,15 +58,15 @@ pub(super) fn update_egui_theme(
 /// [`GuiTheme`] profile (the user's persisted `[chrome] profile`, Task 112.13),
 /// then apply them globally.
 ///
-/// Normal-display mode is assumed here; the per-frame hook in
-/// `app_impl::update` handles the reverse-video case.
+/// Chrome styling is independent of any pane's display mode; see
+/// [`set_egui_options`] doc comment.
 fn apply_chrome_visuals(
     ctx: &egui::Context,
     theme: &ThemePalette,
     bg_opacity: f32,
     gui_theme: &GuiTheme,
 ) {
-    let visuals = chrome_style::build_visuals(gui_theme, theme, bg_opacity, true);
+    let visuals = chrome_style::build_visuals(gui_theme, theme, bg_opacity);
     ctx.global_style_mut(|style| {
         style.visuals = visuals;
         chrome_style::apply_chrome_spacing(style, gui_theme);

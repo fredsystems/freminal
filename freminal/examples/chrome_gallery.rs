@@ -47,8 +47,6 @@ struct ChromeGallery {
     palette_idx: usize,
     /// Background opacity passed to `build_visuals` (`panel_fill` alpha).
     bg_opacity: f32,
-    /// `true` = normal display; `false` = reverse-video (forces white fills).
-    normal_display: bool,
     /// Sample state for the gallery's combo box.
     combo_choice: usize,
     /// Sample state for the gallery's slider.
@@ -61,7 +59,6 @@ impl Default for ChromeGallery {
             draft: StyleProfile::Modern.defaults(),
             palette_idx: 0,
             bg_opacity: 1.0,
-            normal_display: true,
             combo_choice: 0,
             slider_value: 0.5,
         }
@@ -140,12 +137,8 @@ impl ChromeGallery {
         });
 
         ui.separator();
-        ui.label("Display mode");
+        ui.label("Background opacity");
         ui.add(egui::Slider::new(&mut self.bg_opacity, 0.0..=1.0).text("bg_opacity"));
-        ui.checkbox(
-            &mut self.normal_display,
-            "normal display (uncheck = reverse video)",
-        );
 
         ui.separator();
         ui.label(format!(
@@ -265,12 +258,7 @@ impl App for ChromeGallery {
         // top-level popup surfaces (combo dropdowns, context menus) — which
         // do not inherit a local `ui.scope` style — also follow the theme.
         // This is what 112.4 will do for the real app via the per-frame hook.
-        let visuals = build_visuals(
-            &self.draft,
-            self.palette(),
-            self.bg_opacity,
-            self.normal_display,
-        );
+        let visuals = build_visuals(&self.draft, self.palette(), self.bg_opacity);
         ctx.set_visuals(visuals);
         ctx.global_style_mut(|style| {
             freminal::gui::chrome_style::apply_chrome_spacing(style, &self.draft);

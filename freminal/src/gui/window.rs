@@ -47,13 +47,12 @@ pub(super) struct PerWindowState {
 
     /// Cached egui style inputs — prevents redundant `global_style_mut` calls.
     ///
-    /// Key tuple: `(is_normal_display, &'static ThemePalette, background_opacity,
-    /// GuiTheme)`.  A change in any element invalidates the cache and forces a
-    /// full `build_visuals` rebuild.  `GuiTheme` is compared by value (it is
+    /// Key tuple: `(&'static ThemePalette, background_opacity, GuiTheme)`.  A
+    /// change in any element invalidates the cache and forces a full
+    /// `build_visuals` rebuild.  `GuiTheme` is compared by value (it is
     /// `PartialEq` but not `Eq` because of its `f32` fields), so the comparison
     /// is done manually in `app_impl::update`.
     pub(super) style_cache: Option<(
-        bool,
         &'static freminal_common::themes::ThemePalette,
         f32,
         freminal_common::gui_theme::GuiTheme,

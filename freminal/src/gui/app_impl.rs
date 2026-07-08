@@ -446,7 +446,6 @@ impl freminal_windowing::App for FreminalGui {
                 &self.gui_theme,
                 theme,
                 self.config.ui.background_opacity,
-                true,
             );
             let gui_theme = self.gui_theme;
             ctx.global_style_mut(|style| {
@@ -938,27 +937,21 @@ impl freminal_windowing::App for FreminalGui {
             let gui_theme = self.gui_theme;
             let chrome_theme = self.preview_theme.unwrap_or(snap.theme);
             let style_changed = match win.style_cache {
-                Some((prev_display, prev_theme, prev_opacity, prev_gui_theme)) => {
-                    prev_display != snap.is_normal_display
-                        || !std::ptr::eq(prev_theme, chrome_theme)
+                Some((prev_theme, prev_opacity, prev_gui_theme)) => {
+                    !std::ptr::eq(prev_theme, chrome_theme)
                         || prev_opacity.to_bits() != bg_opacity.to_bits()
                         || prev_gui_theme != gui_theme
                 }
                 None => true,
             };
             if style_changed {
-                let visuals = crate::gui::chrome_style::build_visuals(
-                    &gui_theme,
-                    chrome_theme,
-                    bg_opacity,
-                    snap.is_normal_display,
-                );
+                let visuals =
+                    crate::gui::chrome_style::build_visuals(&gui_theme, chrome_theme, bg_opacity);
                 ctx.global_style_mut(|style| {
                     style.visuals = visuals;
                     crate::gui::chrome_style::apply_chrome_spacing(style, &gui_theme);
                 });
-                win.style_cache =
-                    Some((snap.is_normal_display, chrome_theme, bg_opacity, gui_theme));
+                win.style_cache = Some((chrome_theme, bg_opacity, gui_theme));
             }
         }
 

@@ -70,6 +70,63 @@ const fn x_scale(lw: LineWidth) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+//  DECSCNM (screen reverse video) × SGR-7 compose (Task 115.2)
+// ---------------------------------------------------------------------------
+//
+// `StateColors::color()` / `StateColors::background_color()` already resolve
+// per-cell SGR-7 (reverse video) before vertex.rs ever sees a color:
+// `color()` returns the SGR-7-effective foreground, `background_color()`
+// returns the SGR-7-effective background.
+//
+// DECSCNM (whole-screen reverse video) must compose with SGR-7 by XOR: a
+// cell's fg/bg should appear swapped when *exactly one* of {SGR-7, DECSCNM}
+// is active (both active cancels out back to normal).
+//
+// Rather than re-implement the swap (and duplicate `default_to_regular()`'s
+// sentinel handling), we exploit an accessor-swap identity: when DECSCNM is
+// active, calling the OPPOSITE accessor reproduces the XOR exactly:
+//
+// - DECSCNM off -> use the accessor for the property we want (today's
+//   behavior: SGR-7 alone determines the swap).
+// - DECSCNM on  -> use the OTHER accessor. If SGR-7 is off, this yields the
+//   swapped color (DECSCNM alone flips it). If SGR-7 is also on, the two
+//   swaps cancel and we get the un-swapped color back (XOR cancels).
+//
+// All per-cell color reads in this module MUST route through these two
+// helpers rather than calling `StateColors::color()` /
+// `StateColors::background_color()` directly, so DECSCNM composes
+// consistently everywhere colors are resolved.
+
+/// Effective foreground color for a cell: composes per-cell SGR-7 (already
+/// resolved inside `colors.color()`/`colors.background_color()`) with
+/// whole-screen DECSCNM by XOR, via the opposite-accessor trick documented
+/// above (Task 115.2).
+#[inline]
+const fn effective_fg(
+    colors: &freminal_common::buffer_states::cursor::StateColors,
+    reverse_screen: bool,
+) -> freminal_common::colors::TerminalColor {
+    if reverse_screen {
+        colors.background_color()
+    } else {
+        colors.color()
+    }
+}
+
+/// Effective background color for a cell — the mirror of [`effective_fg`].
+#[inline]
+const fn effective_bg(
+    colors: &freminal_common::buffer_states::cursor::StateColors,
+    reverse_screen: bool,
+) -> freminal_common::colors::TerminalColor {
+    if reverse_screen {
+        colors.color()
+    } else {
+        colors.background_color()
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Vertex stride constants (in f32 components)
 // ---------------------------------------------------------------------------
 
@@ -101,6 +158,10 @@ pub(crate) const BG_INSTANCE_FLOATS: usize = 6;
 /// Options controlling per-glyph foreground rendering.
 ///
 /// Bundled to keep `build_foreground_instances` within the 7-argument lint limit.
+// Four independent, short-lived rendering-intent flags (selection shape,
+// two blink-visibility phases, DECSCNM state); a state machine would couple
+// unrelated concerns and obscure intent.
+#[allow(clippy::struct_excessive_bools)]
 pub struct FgRenderOptions {
     /// Normalised selection region `(start_col, start_row, end_col, end_row)`,
     /// or `None` when no selection is active.
@@ -114,6 +175,10 @@ pub struct FgRenderOptions {
     pub text_blink_slow_visible: bool,
     /// Whether fast-blink (SGR 6) text is currently in its visible phase.
     pub text_blink_fast_visible: bool,
+    /// `true` when DECSCNM (whole-screen reverse video) is active for this
+    /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
+    /// [`effective_bg`] (Task 115.2).
+    pub reverse_screen: bool,
 }
 
 impl FgRenderOptions {
@@ -126,6 +191,7 @@ impl FgRenderOptions {
             selection_is_block: false,
             text_blink_slow_visible: true,
             text_blink_fast_visible: true,
+            reverse_screen: false,
         }
     }
 }
@@ -222,6 +288,10 @@ pub struct MatchHighlight {
 ///
 /// Passing a struct instead of 18 positional parameters keeps call sites
 /// readable and eliminates the need for `#[allow(clippy::too_many_arguments)]`.
+// Independent, short-lived per-frame rendering-intent flags (cursor
+// visibility/blink, selection shape, DECSCNM state); a state machine would
+// couple unrelated concerns and obscure intent.
+#[allow(clippy::struct_excessive_bools)]
 pub struct BackgroundFrame<'a> {
     pub shaped_lines: &'a [Arc<ShapedLine>],
     pub cell_width: u32,
@@ -249,6 +319,10 @@ pub struct BackgroundFrame<'a> {
     pub term_width_cols: usize,
     pub theme: &'a ThemePalette,
     pub cursor_color_override: Option<(u8, u8, u8)>,
+    /// `true` when DECSCNM (whole-screen reverse video) is active for this
+    /// pane. Composed with per-cell SGR-7 by XOR via [`effective_fg`] /
+    /// [`effective_bg`] (Task 115.2).
+    pub reverse_screen: bool,
 }
 
 /// Build the two-pass background data: instanced cell BGs + decoration quads.
@@ -292,6 +366,7 @@ pub fn build_background_instances(
     let term_width_cols = frame.term_width_cols;
     let theme = frame.theme;
     let cursor_color_override = frame.cursor_color_override;
+    let reverse_screen = frame.reverse_screen;
     // Reuse existing heap allocations — clear but keep capacity.
     instances.clear();
     deco.clear();
@@ -304,7 +379,15 @@ pub fn build_background_instances(
         // --- Per-cell background instances ---
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let bg_color_raw = run.colors.background_color();
+            // Task 115.2: compute the DECSCNM/SGR-7-composed effective
+            // background BEFORE the DefaultBackground skip check below, so
+            // the skip decision operates on the post-swap color. This is
+            // required for correctness: under DECSCNM a cell whose raw
+            // background was DefaultBackground may now have a real
+            // (swapped-from-foreground) effective background and must be
+            // drawn, while a cell whose effective background becomes
+            // DefaultBackground must still be skipped.
+            let bg_color_raw = effective_bg(&run.colors, reverse_screen);
 
             // Skip default backgrounds (transparent — the terminal base color
             // is rendered as a panel clear, not explicit quads).
@@ -348,13 +431,18 @@ pub fn build_background_instances(
             let x1 = gl_f32(col_end) * gl_f32_u32(cell_width) * scale;
 
             if underline_style.is_active() {
-                // Use underline color if set, otherwise fall back to foreground.
+                // Use underline color if set, otherwise fall back to
+                // foreground. The underline color ITSELF is independent of
+                // fg/bg inversion and is deliberately NOT routed through
+                // `effective_fg` — only the fallback-to-foreground path is,
+                // so the underline stays visible against a DECSCNM-swapped
+                // background (Task 115.2).
                 let ul_color_raw = run.colors.underline_color();
                 let ul_color = if matches!(
                     ul_color_raw,
                     freminal_common::colors::TerminalColor::DefaultUnderlineColor
                 ) {
-                    internal_color_to_gl(run.colors.color(), is_faint, theme)
+                    internal_color_to_gl(effective_fg(&run.colors, reverse_screen), is_faint, theme)
                 } else {
                     internal_color_to_gl(ul_color_raw, is_faint, theme)
                 };
@@ -381,7 +469,14 @@ pub fn build_background_instances(
             }
 
             if has_strike {
-                let fg_color = internal_color_to_gl(run.colors.color(), is_faint, theme);
+                // Task 115.2: strikethrough uses the effective (DECSCNM ×
+                // SGR-7 composed) foreground so it stays visible under
+                // whole-screen reverse video.
+                let fg_color = internal_color_to_gl(
+                    effective_fg(&run.colors, reverse_screen),
+                    is_faint,
+                    theme,
+                );
                 // strikeout_offset from OS/2 is positive (above baseline in font
                 // coords).  In top-down pixel coords, subtracting it from the
                 // baseline places the line above the baseline (middle of cell).
@@ -623,7 +718,14 @@ pub fn build_foreground_instances(
 
         for run in &line.runs {
             let is_faint = run.font_decorations.contains(FontDecorations::Faint);
-            let normal_fg = internal_color_to_gl(run.colors.color(), is_faint, theme);
+            // Task 115.2: effective foreground composes per-cell SGR-7
+            // (already resolved in `colors.color()`) with whole-screen
+            // DECSCNM by XOR via `effective_fg`.
+            let normal_fg = internal_color_to_gl(
+                effective_fg(&run.colors, opts.reverse_screen),
+                is_faint,
+                theme,
+            );
 
             // Track the current column as we iterate glyphs within the run.
             let mut col = run.col_start;
@@ -1492,7 +1594,7 @@ mod tests {
 
     use crate::gui::font_manager::FontManager;
     use crate::gui::shaping::{ShapedGlyph, ShapedLine, ShapedRun};
-    use freminal_common::buffer_states::cursor::StateColors;
+    use freminal_common::buffer_states::cursor::{ReverseVideo, StateColors};
     use freminal_common::buffer_states::fonts::FontWeight;
     use freminal_common::colors::TerminalColor;
     use freminal_terminal_emulator::{AnimationControl, ImageProtocol, ImageSizeMode};
@@ -1598,11 +1700,182 @@ mod tests {
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
                 cursor_color_override: None,
+                reverse_screen: false,
             },
             &mut instances,
             &mut deco,
         );
         (instances, deco)
+    }
+
+    /// Sibling of [`bg_instances_test`] that additionally accepts a
+    /// `reverse_screen` flag (Task 115.3), so DECSCNM composition tests can
+    /// exercise `build_background_instances` without duplicating every other
+    /// `BackgroundFrame` field. All other fields are hardcoded to match
+    /// `bg_instances_test`'s defaults exactly (8x16 cells, no cursor, no
+    /// selection), so `reverse_screen: false` here must reproduce
+    /// `bg_instances_test`'s output byte-for-byte.
+    fn bg_instances_test_rev(
+        lines: &[Arc<ShapedLine>],
+        reverse_screen: bool,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
+        build_background_instances(
+            &BackgroundFrame {
+                shaped_lines: lines,
+                cell_width: 8,
+                cell_height: 16,
+                ascent: 14.0,
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                show_cursor: false,
+                cursor_blink_on: false,
+                cursor_pixel_pos: (0.0, 0.0),
+                cursor_width_scale: 1.0,
+                cursor_visual_style: &CursorVisualStyle::BlockCursorSteady,
+                selection: None,
+                selection_is_block: false,
+                match_highlights: &[],
+                command_block_hover_rows: None,
+                term_width_cols: 0,
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+                reverse_screen,
+            },
+            &mut instances,
+            &mut deco,
+        );
+        (instances, deco)
+    }
+
+    // -----------------------------------------------------------------------
+    //  DECSCNM (reverse_screen) / SGR-7 composition tests (Task 115.3)
+    //
+    //  Truth table exercised below (fg = cell foreground, bg = cell
+    //  background):
+    //    reverse_screen=false, SGR-7 Off -> bg instance color = bg (control)
+    //    reverse_screen=true,  SGR-7 Off -> bg instance color = fg (swapped)
+    //    reverse_screen=true,  SGR-7 On  -> bg instance color = bg (XOR cancels)
+    //    reverse_screen=false, SGR-7 On  -> bg instance color = fg (SGR-7 alone,
+    //                                       covered by pre-existing StateColors
+    //                                       tests, not repeated here)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bg_reverse_screen_off_uses_cell_background() {
+        // Control case: reverse_screen=false, SGR-7 Off. The emitted bg
+        // instance color must be the cell's own background (today's
+        // behavior, unchanged).
+        let colors = default_colors()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue);
+        let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
+        let (bg, _deco) = bg_instances_test_rev(&[line], false);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
+        let expected = internal_color_to_gl(TerminalColor::Blue, false, &themes::CATPPUCCIN_MOCHA);
+        assert_eq!(
+            &bg[2..6],
+            expected.as_slice(),
+            "bg color should be cell background"
+        );
+    }
+
+    #[test]
+    fn bg_reverse_screen_on_uses_cell_foreground() {
+        // Defect fix: reverse_screen=true, SGR-7 Off. DECSCNM alone swaps
+        // fg/bg, so the emitted bg instance color must be the cell's
+        // FOREGROUND color.
+        let colors = default_colors()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue);
+        let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
+        let (bg, _deco) = bg_instances_test_rev(&[line], true);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
+        let expected = internal_color_to_gl(TerminalColor::Red, false, &themes::CATPPUCCIN_MOCHA);
+        assert_eq!(
+            &bg[2..6],
+            expected.as_slice(),
+            "reverse_screen alone should swap in the cell foreground"
+        );
+    }
+
+    #[test]
+    fn bg_reverse_screen_on_with_sgr7_on_cancels() {
+        // XOR case: reverse_screen=true AND SGR-7 On. The two swaps cancel,
+        // so the emitted bg instance color must be the cell's original
+        // background again.
+        let colors = default_colors()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue)
+            .with_reverse_video(ReverseVideo::On);
+        let line = make_line(1, 8.0, colors, FontDecorationFlags::empty());
+        let (bg, _deco) = bg_instances_test_rev(&[line], true);
+        assert_eq!(bg.len(), BG_INSTANCE_FLOATS, "expected one cell instance");
+        let expected = internal_color_to_gl(TerminalColor::Blue, false, &themes::CATPPUCCIN_MOCHA);
+        assert_eq!(
+            &bg[2..6],
+            expected.as_slice(),
+            "SGR-7 On + reverse_screen=true should cancel back to the original background"
+        );
+    }
+
+    #[test]
+    fn bg_reverse_screen_false_matches_baseline() {
+        // Proves adding `reverse_screen` with value `false` changed nothing:
+        // the pre-115.2 helper (`bg_instances_test`, hardcoded
+        // `reverse_screen: false`) and the new helper called with
+        // `reverse_screen: false` must produce byte-identical output.
+        let colors = default_colors()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue);
+        let line_a = make_line(4, 8.0, colors, FontDecorationFlags::empty());
+        let line_b = make_line(4, 8.0, colors, FontDecorationFlags::empty());
+
+        let (bg_baseline, deco_baseline) = bg_instances_test(
+            &[line_a],
+            8,
+            16,
+            false,
+            false,
+            CursorPos::default(),
+            &CursorVisualStyle::BlockCursorSteady,
+        );
+        let (bg_rev_false, deco_rev_false) = bg_instances_test_rev(&[line_b], false);
+
+        assert_eq!(bg_baseline, bg_rev_false, "bg instances must be identical");
+        assert_eq!(
+            deco_baseline, deco_rev_false,
+            "deco verts must be identical"
+        );
+    }
+
+    #[test]
+    fn effective_fg_bg_xor_truth_table() {
+        // `build_foreground_instances` requires a real GlyphAtlas/FontManager
+        // (GPU-backed) to exercise end-to-end, which is impractical in a
+        // hermetic unit test. Instead, this test calls the private
+        // `effective_fg`/`effective_bg` helpers directly (reachable via
+        // `use super::*` in this module) to prove the full DECSCNM x SGR-7
+        // XOR composition truth table that both the background- and
+        // foreground-instance builders rely on.
+        let colors_off = default_colors()
+            .with_color(TerminalColor::Red)
+            .with_background_color(TerminalColor::Blue);
+        let colors_on = colors_off.with_reverse_video(ReverseVideo::On);
+
+        // SGR-7 Off:
+        assert_eq!(effective_fg(&colors_off, false), TerminalColor::Red);
+        assert_eq!(effective_bg(&colors_off, false), TerminalColor::Blue);
+        assert_eq!(effective_fg(&colors_off, true), TerminalColor::Blue);
+        assert_eq!(effective_bg(&colors_off, true), TerminalColor::Red);
+
+        // SGR-7 On:
+        assert_eq!(effective_fg(&colors_on, false), TerminalColor::Blue);
+        assert_eq!(effective_bg(&colors_on, false), TerminalColor::Red);
+        assert_eq!(effective_fg(&colors_on, true), TerminalColor::Red);
+        assert_eq!(effective_bg(&colors_on, true), TerminalColor::Blue);
     }
 
     #[test]
@@ -2631,6 +2904,7 @@ mod tests {
                 term_width_cols: 80,
                 theme: &themes::CATPPUCCIN_MOCHA,
                 cursor_color_override: None,
+                reverse_screen: false,
             },
             &mut instances,
             &mut deco,
@@ -2693,6 +2967,7 @@ mod tests {
                 term_width_cols: 0,
                 theme: &themes::CATPPUCCIN_MOCHA,
                 cursor_color_override: None,
+                reverse_screen: false,
             },
             &mut instances,
             &mut deco,
