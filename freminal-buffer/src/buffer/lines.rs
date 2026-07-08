@@ -267,18 +267,13 @@ impl Buffer {
                         if self.cursor.pos.y + 1 < self.height {
                             self.cursor.pos.y += 1;
                         }
-                    } else if self.declrmm_enabled == Declrmm::Enabled {
-                        // Mirrors IL/DL: confine the scroll to the DECSLRM
-                        // left/right margins when DECLRMM is active.
-                        let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                        self.scroll_slice_up_columns(
+                    } else {
+                        // Confine to DECSLRM margins when DECLRMM is active
+                        // (mirrors IL/DL); full-row scroll otherwise.
+                        self.scroll_slice_up_confined(
                             self.scroll_region_top,
                             self.scroll_region_bottom,
-                            left,
-                            right,
                         );
-                    } else {
-                        self.scroll_slice_up(self.scroll_region_top, self.scroll_region_bottom);
                     }
                 } else if self.cursor.pos.y + 1 < self.height {
                     self.cursor.pos.y += 1;
@@ -348,18 +343,13 @@ impl Buffer {
                 if y >= self.scroll_region_top && y <= self.scroll_region_bottom {
                     if y > self.scroll_region_top {
                         self.cursor.pos.y -= 1;
-                    } else if self.declrmm_enabled == Declrmm::Enabled {
-                        // Mirrors IL/DL: confine the scroll to the DECSLRM
-                        // left/right margins when DECLRMM is active.
-                        let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                        self.scroll_slice_down_columns(
+                    } else {
+                        // Confine to DECSLRM margins when DECLRMM is active
+                        // (mirrors IL/DL); full-row scroll otherwise.
+                        self.scroll_slice_down_confined(
                             self.scroll_region_top,
                             self.scroll_region_bottom,
-                            left,
-                            right,
                         );
-                    } else {
-                        self.scroll_slice_down(self.scroll_region_top, self.scroll_region_bottom);
                     }
                 } else if self.cursor.pos.y > 0 {
                     self.cursor.pos.y -= 1;
@@ -388,15 +378,8 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                if self.declrmm_enabled == Declrmm::Enabled {
-                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                    for _ in 0..count {
-                        self.scroll_slice_down_columns(y, self.scroll_region_bottom, left, right);
-                    }
-                } else {
-                    for _ in 0..count {
-                        self.scroll_slice_down(y, self.scroll_region_bottom);
-                    }
+                for _ in 0..count {
+                    self.scroll_slice_down_confined(y, self.scroll_region_bottom);
                 }
 
                 self.debug_assert_invariants();
@@ -413,15 +396,8 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                if self.declrmm_enabled == Declrmm::Enabled {
-                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                    for _ in 0..count {
-                        self.scroll_slice_down_columns(row, b, left, right);
-                    }
-                } else {
-                    for _ in 0..count {
-                        self.scroll_slice_down(row, b);
-                    }
+                for _ in 0..count {
+                    self.scroll_slice_down_confined(row, b);
                 }
 
                 self.debug_assert_invariants();
@@ -447,15 +423,8 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                if self.declrmm_enabled == Declrmm::Enabled {
-                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                    for _ in 0..count {
-                        self.scroll_slice_up_columns(y, self.scroll_region_bottom, left, right);
-                    }
-                } else {
-                    for _ in 0..count {
-                        self.scroll_slice_up(y, self.scroll_region_bottom);
-                    }
+                for _ in 0..count {
+                    self.scroll_slice_up_confined(y, self.scroll_region_bottom);
                 }
 
                 self.debug_assert_invariants();
@@ -472,15 +441,8 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                if self.declrmm_enabled == Declrmm::Enabled {
-                    let (left, right) = (self.scroll_region_left, self.scroll_region_right);
-                    for _ in 0..count {
-                        self.scroll_slice_up_columns(row, b, left, right);
-                    }
-                } else {
-                    for _ in 0..count {
-                        self.scroll_slice_up(row, b);
-                    }
+                for _ in 0..count {
+                    self.scroll_slice_up_confined(row, b);
                 }
 
                 self.debug_assert_invariants();

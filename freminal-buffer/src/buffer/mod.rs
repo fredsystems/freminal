@@ -337,31 +337,13 @@ impl Buffer {
 
         // When DECLRMM is active the effective right wrap column is
         // scroll_region_right + 1; wrapping starts a new row at
-        // scroll_region_left rather than column 0.
-        let (wrap_col, wrap_start_col) = if self.declrmm_enabled == Declrmm::Enabled {
+        // scroll_region_left rather than column 0. This base span is fixed for
+        // the whole call; the per-row double-width halving below is applied on
+        // top of it each iteration.
+        let (base_wrap_col, base_wrap_start_col) = if self.declrmm_enabled == Declrmm::Enabled {
             (self.scroll_region_right + 1, self.scroll_region_left)
         } else {
             (self.width, 0)
-        };
-
-        // On a double-width or double-height row (DECDWL/DECDHL) each cell
-        // renders at 2x the normal cell width, so a real VT100 only fits
-        // half as many columns before wrapping. Halve the *span*
-        // (`wrap_col - wrap_start_col`) rather than `self.width` directly so
-        // this composes correctly with a DECLRMM-restricted scroll region:
-        // the halving applies to the margin-derived width, not the full
-        // screen width. Clamp to a minimum span of 1 so a 1-column-wide
-        // margin never collapses to a zero-width, unwrappable row.
-        let current_row_is_double_width = self
-            .rows
-            .get(row_idx)
-            .is_some_and(|row| row.line_width.is_double_width());
-        let (wrap_col, wrap_start_col) = if current_row_is_double_width {
-            let span = wrap_col - wrap_start_col;
-            let half_span = (span / 2).max(1);
-            (wrap_start_col + half_span, wrap_start_col)
-        } else {
-            (wrap_col, wrap_start_col)
         };
 
         // First write into row 0 turns it into a real logical line
@@ -372,6 +354,31 @@ impl Buffer {
         }
 
         loop {
+            // On a double-width or double-height row (DECDWL/DECDHL) each cell
+            // renders at 2x the normal cell width, so a real VT100 only fits
+            // half as many columns before wrapping. Halve the *span*
+            // (`base_wrap_col - base_wrap_start_col`) rather than `self.width`
+            // directly so this composes correctly with a DECLRMM-restricted
+            // scroll region: the halving applies to the margin-derived width,
+            // not the full screen width. Clamp to a minimum span of 1 so a
+            // 1-column-wide margin never collapses to a zero-width,
+            // unwrappable row. This is recomputed each iteration keyed off the
+            // *current* `row_idx`, because a single `insert_text` call can wrap
+            // across rows with differing `line_width` (e.g. a DoubleWidth row
+            // followed by Normal soft-wrap continuations) and each row must
+            // wrap at its own width.
+            let current_row_is_double_width = self
+                .rows
+                .get(row_idx)
+                .is_some_and(|row| row.line_width.is_double_width());
+            let (wrap_col, wrap_start_col) = if current_row_is_double_width {
+                let span = base_wrap_col - base_wrap_start_col;
+                let half_span = (span / 2).max(1);
+                (base_wrap_start_col + half_span, base_wrap_start_col)
+            } else {
+                (base_wrap_col, base_wrap_start_col)
+            };
+
             // ┌─────────────────────────────────────────────┐
             // │ PRE-WRAP: if we're already at/past wrap_col,│
             // │ move to the next row as a soft-wrap row.    │
@@ -5340,6 +5347,51 @@ mod line_width_tests {
         );
         let row1 = buf.rows()[1].cells();
         assert_eq!(row1.first().map(Cell::tchar), Some(&ascii('F')));
+    }
+
+    #[test]
+    fn insert_text_multi_wrap_recomputes_span_per_row() {
+        // Regression (CodeRabbit / PR #383): a single `insert_text` call that
+        // wraps across rows of differing `line_width` must recompute the wrap
+        // span for EACH destination row, not reuse the first row's status.
+        //
+        // Row 0 is DoubleWidth (half-width span = 5, cols 0..=4 usable). A
+        // soft-wrap continuation row created mid-insert defaults to Normal
+        // (full width 10). So on a 10-wide buffer:
+        //   - row 0 (DoubleWidth) holds 5 chars: "ABCDE"
+        //   - row 1 (Normal continuation) must hold the next 10 chars:
+        //     "FGHIJKLMNO" — NOT halved to 5.
+        //   - the 16th char "P" wraps to row 2.
+        // Before the fix the halved span leaked onto row 1, wrapping it after
+        // 5 chars ("FGHIJ") instead of 10.
+        let mut buf = Buffer::new(10, 4);
+        buf.set_cursor_line_width(LineWidth::DoubleWidth);
+        buf.set_cursor_pos(Some(0), Some(0));
+        buf.insert_text(&text("ABCDEFGHIJKLMNOP")); // 16 chars
+
+        // Row 0 (DoubleWidth): halved span, "ABCDE" in cols 0..=4, col 5 blank.
+        let row0 = buf.rows()[0].cells();
+        for (i, ch) in "ABCDE".chars().enumerate() {
+            assert_eq!(row0[i].tchar(), &ascii(ch), "row0 col {i}");
+        }
+        assert!(
+            row0.get(5).is_none_or(|c| c.tchar() == &TChar::Space),
+            "row0 col 5 must be blank (DoubleWidth halves the span to 5)"
+        );
+
+        // Row 1 (Normal continuation): FULL width, "FGHIJKLMNO" in cols 0..=9.
+        let row1 = buf.rows()[1].cells();
+        for (i, ch) in "FGHIJKLMNO".chars().enumerate() {
+            assert_eq!(
+                row1[i].tchar(),
+                &ascii(ch),
+                "row1 col {i} must use the Normal row's full width, not row 0's halved span"
+            );
+        }
+
+        // Row 2: the 16th char "P" wrapped here.
+        let row2 = buf.rows()[2].cells();
+        assert_eq!(row2.first().map(Cell::tchar), Some(&ascii('P')));
     }
 }
 
