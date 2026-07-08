@@ -458,6 +458,37 @@ Prohibitions: do NOT change source code; do NOT proceed to another task.
 
 Stop: report files changed + markdownlint result; await review.
 
+#### 117.5 — Confine Alternate-buffer LF/IND/RI/NEL scroll to DECSLRM margins (cleanup)
+
+Surface point: subtask 117.2 (task-117 branch, `scroll.rs` confinement).
+
+Bug impact: 117.2's durable design decision assumed the shared
+`scroll_region_{up,down}_primary` helpers (scroll.rs:271-284) cover LF/IND/RI/NEL
+for all buffer types. They do not — they are `Primary`-only. The
+`BufferType::Alternate` arms of `handle_lf` (lines.rs:271) and `handle_ri`
+(lines.rs:342) call the unconfined full-row `scroll_slice_{up,down}` directly,
+bypassing those helpers. So with DECLRMM active on the alternate screen, LF /
+IND / RI / NEL still shift content outside the left/right margins. This is
+inconsistent with IL/DL, whose alternate-buffer arms (lines.rs:371, 430) already
+branch on DECLRMM correctly. SU/SD are unaffected — `scroll_region_{up,down}_n`
+are buffer-type-agnostic and were fully confined in 117.2.
+
+Scope of fix: `freminal-buffer/src/buffer/lines.rs` — the `BufferType::Alternate`
+scroll branches of `handle_lf` (line 271) and `handle_ri` (line 342) only.
+
+Suggested approach: mirror the exact IL/DL alternate-arm pattern (branch on
+`declrmm_enabled == Declrmm::Enabled`; call `scroll_slice_{up,down}_columns` with
+`(scroll_region_left, scroll_region_right)` when active, else the unconfined
+variant). Do NOT alter DECSTBM top/bottom logic.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D
+warnings`. Extend 117.3's tests to cover the alternate buffer under DECLRMM.
+
+Scheduling: fixed within Task 117 immediately after 117.2 (same branch), before
+117.3 so the tests cover both buffer types.
+
+Stop: report files changed + verification results; await review.
+
 ---
 
 ## Benchmarks

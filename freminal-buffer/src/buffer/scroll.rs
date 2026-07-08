@@ -16,7 +16,9 @@
 //! `any_visible_dirty`, `visible_image_placements`, `has_visible_images`,
 //! `max_scroll_offset`, `erase_scrollback`).
 
-use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
+use freminal_common::buffer_states::{
+    buffer_type::BufferType, format_tag::FormatTag, modes::declrmm::Declrmm,
+};
 
 use crate::{
     cell::Cell,
@@ -271,7 +273,14 @@ impl Buffer {
     pub(in crate::buffer) fn scroll_region_up_primary(&mut self) {
         let (t, b) = self.scroll_region_rows();
         if t < b {
-            self.scroll_slice_up(t, b);
+            // Mirrors IL/DL: when DECLRMM is active, confine the scroll to
+            // the left/right margins instead of shifting the whole row.
+            if self.declrmm_enabled == Declrmm::Enabled {
+                let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                self.scroll_slice_up_columns(t, b, left, right);
+            } else {
+                self.scroll_slice_up(t, b);
+            }
         }
     }
 
@@ -279,7 +288,14 @@ impl Buffer {
     pub(in crate::buffer) fn scroll_region_down_primary(&mut self) {
         let (t, b) = self.scroll_region_rows();
         if t < b {
-            self.scroll_slice_down(t, b);
+            // Mirrors IL/DL: when DECLRMM is active, confine the scroll to
+            // the left/right margins instead of shifting the whole row.
+            if self.declrmm_enabled == Declrmm::Enabled {
+                let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+                self.scroll_slice_down_columns(t, b, left, right);
+            } else {
+                self.scroll_slice_down(t, b);
+            }
         }
     }
 
@@ -323,8 +339,17 @@ impl Buffer {
         // Region indices are inclusive, so region has (b - t + 1) rows.
         let region_size = b - t + 1;
         let clamped = n.min(region_size);
-        for _ in 0..clamped {
-            self.scroll_slice_up(t, b);
+        // Mirrors IL/DL: when DECLRMM is active, confine the scroll to the
+        // left/right margins instead of shifting the whole row.
+        if self.declrmm_enabled == Declrmm::Enabled {
+            let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+            for _ in 0..clamped {
+                self.scroll_slice_up_columns(t, b, left, right);
+            }
+        } else {
+            for _ in 0..clamped {
+                self.scroll_slice_up(t, b);
+            }
         }
     }
 
@@ -339,8 +364,17 @@ impl Buffer {
         // Region indices are inclusive, so region has (b - t + 1) rows.
         let region_size = b - t + 1;
         let clamped = n.min(region_size);
-        for _ in 0..clamped {
-            self.scroll_slice_down(t, b);
+        // Mirrors IL/DL: when DECLRMM is active, confine the scroll to the
+        // left/right margins instead of shifting the whole row.
+        if self.declrmm_enabled == Declrmm::Enabled {
+            let (left, right) = (self.scroll_region_left, self.scroll_region_right);
+            for _ in 0..clamped {
+                self.scroll_slice_down_columns(t, b, left, right);
+            }
+        } else {
+            for _ in 0..clamped {
+                self.scroll_slice_down(t, b);
+            }
         }
     }
 
