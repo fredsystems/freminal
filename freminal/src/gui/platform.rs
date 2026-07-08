@@ -120,13 +120,13 @@ pub fn read_cwd(pid: u32) -> Option<String> {
             true,
             ProcessRefreshKind::nothing().with_cwd(sysinfo::UpdateKind::Always),
         );
-        match sys.process(sys_pid) {
-            Some(proc) => proc.cwd().map(|p| p.to_string_lossy().into_owned()),
-            None => {
+        sys.process(sys_pid).map_or_else(
+            || {
                 tracing::trace!("read_cwd: sysinfo has no process for pid {pid}");
                 None
-            }
-        }
+            },
+            |proc| proc.cwd().map(|p| p.to_string_lossy().into_owned()),
+        )
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
