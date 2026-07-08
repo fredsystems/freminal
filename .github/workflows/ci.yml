@@ -119,6 +119,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           toolchain: ${{ matrix.toolchain }}
+          # `cargo xtask check` runs clippy. dtolnay/rust-toolchain omits
+          # clippy for pinned-version toolchains (only the named @stable /
+          # @nightly entry points bundle it), so request it explicitly.
+          components: clippy
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo xtask check
 
