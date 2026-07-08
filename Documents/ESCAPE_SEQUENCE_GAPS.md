@@ -1,28 +1,34 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-08 — Documentation drift-reconciliation pass (no code
-changes). Added three genuine gaps discovered while auditing the coverage doc
-against the code: (1) double-width/double-height rows do not halve the
-auto-wrap column (`Buffer::insert_text`,
-`freminal-buffer/src/buffer/mod.rs:341-345`, computes `wrap_col` from DECLRMM
-margins or full buffer width only, never consulting `LineWidth`); (2) SU/SD
-(`CSI Ps S` / `CSI Ps T`) and margin-triggered IND/RI auto-scroll are not
-confined to DECSLRM left/right margins (`scroll_region_up_n` /
-`scroll_region_down_n`, `freminal-buffer/src/buffer/scroll.rs:318-345`, and
-`handle_ind` / `handle_ri`, `freminal-buffer/src/buffer/lines.rs:289-324`,
-lack the `declrmm_enabled` branch that `insert_lines` / `delete_lines`
-(`lines.rs:355-410`) have); (3) OSC 9 implements only the iTerm2/WezTerm
-simple-body variant — the ConEmu progress-report sub-protocol (`OSC 9;1`–
-`9;4`) is misparsed as literal notification text
-(`freminal-terminal-emulator/src/ansi_components/osc_notify.rs:45-77`). Also
-corrected the DECDHL entry: the previous "top-half-only" characterization was
-wrong — both top and bottom halves render correctly (verified against
-`RowGlyphParams::new`, `freminal/src/gui/renderer/vertex.rs:963-982`, and
-test `row_glyph_params_double_height_bottom_shifts_origin`,
-`vertex.rs:2489-2496`) — this is **not** a gap and is not listed below.
-DECSCNM, SGR reverse video, kitty keyboard, bracketed paste, and mouse
-tracking gap entries were spot-checked against code and found already
-accurate — no change. Earlier: 2026-07-06 — Task 114's lock-state half was **reverted**. The
+Last updated: 2026-07-08 — Task 117 (v0.11.1) closed two of the three
+buffer-semantics gaps added earlier today by the drift-reconciliation pass
+(see "Earlier" below) and both entries are removed from this document: (1)
+double-width/double-height rows now halve the auto-wrap column
+(`Buffer::insert_text`, `freminal-buffer/src/buffer/mod.rs:355-365`, checks
+`row.line_width.is_double_width()` and halves the DECLRMM-margin-derived
+span, clamped to a minimum of 1 column); (2) SU/SD (`CSI Ps S` / `CSI Ps T`)
+and margin-triggered IND/RI/LF/NEL auto-scroll are now confined to DECSLRM
+left/right margins when DECLRMM is active, for both the primary and
+alternate buffers (`scroll_region_up_n` / `scroll_region_down_n`,
+`scroll.rs:334-379`; `scroll_region_up_primary` / `scroll_region_down_primary`,
+`scroll.rs:272-300`; and the alternate-buffer arms of `handle_lf` /
+`handle_ri`, `lines.rs:270-282`, `351-361` — all now branch on
+`declrmm_enabled` and call `scroll_slice_up_columns` /
+`scroll_slice_down_columns`, mirroring IL/DL). The third gap from that pass —
+OSC 9 implementing only the iTerm2/WezTerm simple-body variant, with the
+ConEmu progress-report sub-protocol (`OSC 9;1`–`9;4`) misparsed as literal
+notification text (`freminal-terminal-emulator/src/ansi_components/osc_notify.rs:45-77`)
+— remains open and is still listed below. Earlier: 2026-07-08 —
+Documentation drift-reconciliation pass (no code changes) added the three
+gaps above and corrected the DECDHL entry: the previous "top-half-only"
+characterization was wrong — both top and bottom halves render correctly
+(verified against `RowGlyphParams::new`,
+`freminal/src/gui/renderer/vertex.rs:963-982`, and test
+`row_glyph_params_double_height_bottom_shifts_origin`, `vertex.rs:2489-2496`)
+— this is **not** a gap and is not listed below. DECSCNM, SGR reverse video,
+kitty keyboard, bracketed paste, and mouse tracking gap entries were
+spot-checked against code and found already accurate — no change. Earlier:
+2026-07-06 — Task 114's lock-state half was **reverted**. The
 keypad operators/directional keys, media keys, and print/pause/menu-as-keys
 are delivered via a raw-winit intercept (`App::on_raw_key_event` in
 `freminal-windowing`) and encoded through the existing KKP `CSI u` path — this
@@ -51,7 +57,7 @@ itemized rows in this GAPS file, so no GAPS entry is removed — the
 "DCS / Graphics Gaps: None" claim below is now accurate. OSC 99 (kitty
 desktop notifications) implemented directly (Task 99, v0.11.0); it was never
 a tracked gap, so no GAPS entry is removed for that either.
-(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114)
+(Tasks 20, 22, 23, 35, 41, 47, 48, 49, 52, 72, 76, 99, 100, 101, 114, 117)
 
 This document lists escape sequences and features that are **not yet fully implemented** in
 Freminal. Items resolved during v0.3.0–v0.7.0 have been removed; this document reflects only
@@ -68,9 +74,9 @@ All critical bugs have been fixed. All commonly-used DEC private modes (DECCKM, 
 DECNKM, DECBKM, DECLRMM, bracketed paste, mouse tracking, focus events, DECOM, DECSCNM,
 DECCOLM, DECARM, ReverseWrapAround, synchronized output, alternate-scroll, adaptive theme)
 are parsed and wired. DECDWL/DECDHL are rendered correctly (both DECDHL top
-and bottom halves render — a genuine VT100 split), though the auto-wrap
-column is not halved on double-width/height rows (see Buffer Semantics Gaps
-below). Bell is visual + audible.
+and bottom halves render — a genuine VT100 split), and the auto-wrap column
+is now halved on double-width/height rows (Task 117, v0.11.1). Bell is
+visual + audible.
 Blinking text renders. IRM is implemented. DCS sub-commands (DECRQSS, XTGETTCAP) and the
 APC parser (dispatching `_G…` to Kitty graphics) are implemented. Sixel and iTerm2 inline
 images (OSC 1337) are fully implemented (Task 13). Kitty graphics is fully implemented
@@ -87,9 +93,6 @@ The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **Buffer semantics gaps:** auto-wrap column not halved on double-width/height
-  rows; SU/SD and margin-triggered IND/RI not confined to DECSLRM left/right
-  margins (ECH/ICH/DCH/IL/DL, wrap, and cursor motion already are)
 - **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking
 - **UI work:** OSC 133 command-block gutter rendering (v0.9.0 Task 73; markers,
   storage, navigation, fold/copy/hover/duration all complete under Task 72)
@@ -124,36 +127,13 @@ These features are tracked at the state-machine level but the renderer does not 
 
 ## Buffer Semantics Gaps
 
-DECDWL/DECDHL rendering and DECSLRM margin tracking are both implemented and
-correct as far as they go (see `ESCAPE_SEQUENCE_COVERAGE.md`), but two
-narrower semantic gaps remain underneath the working parts:
-
-- **Double-width/height auto-wrap column.** `Buffer::insert_text`
-  (`freminal-buffer/src/buffer/mod.rs:341-345`) derives `wrap_col` from
-  DECLRMM margins (`scroll_region_right + 1`) or the full buffer width
-  (`self.width`) — it never consults the row's `LineWidth`. On a
-  `DoubleWidth`, `DoubleHeightTop`, or `DoubleHeightBottom` row (all
-  `LineWidth::is_double_width() == true`, `freminal-buffer/src/row.rs:57-59`)
-  a real VT100 would wrap at half the column count; freminal wraps at the
-  full column count instead, so more characters fit on a double-width line
-  before wrapping than the spec allows.
-- **SU/SD and margin-triggered IND/RI not confined to DECSLRM margins.**
-  `insert_lines`/`delete_lines` (`freminal-buffer/src/buffer/lines.rs:355-410`)
-  branch on `declrmm_enabled` and call the column-aware
-  `scroll_slice_down_columns`/`scroll_slice_up_columns` when DECLRMM is
-  active. `scroll_region_up_n`/`scroll_region_down_n`
-  (`freminal-buffer/src/buffer/scroll.rs:318-345`, used by `CSI Ps S` / `CSI
-Ps T`) and `handle_ind`/`handle_ri`
-  (`freminal-buffer/src/buffer/lines.rs:289-324`, used by IND/RI/NEL
-  auto-scroll at the DECSTBM margin) have no such branch — they always call
-  the full-row `scroll_slice_up`/`scroll_slice_down`, so content outside the
-  left/right margins is shifted along with content inside them.
-
-| Feature                                         | Importance | Type | Planned | Notes                                                                                                                     |
-| ----------------------------------------------- | ---------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Double-width/height auto-wrap column not halved | 🟨         | 🚧   | —       | `insert_text` ignores `LineWidth` when computing `wrap_col` (`buffer/mod.rs:341-345`); rendering geometry is unaffected   |
-| SU/SD not confined to DECSLRM margins           | 🟨         | 🚧   | —       | `scroll_region_up_n`/`scroll_region_down_n` lack the `declrmm_enabled` branch IL/DL have (`scroll.rs:318-345`)            |
-| Margin-triggered IND/RI not confined to DECSLRM | 🟨         | 🚧   | —       | `handle_ind`/`handle_ri` always scroll full rows (`lines.rs:289-324`); only DECSTBM top/bottom is honored, not left/right |
+No known buffer-semantics gaps. DECDWL/DECDHL rendering, the auto-wrap
+column on double-width/height rows, and DECSLRM margin confinement
+(ECH/ICH/DCH/IL/DL, SU/SD, and margin-triggered IND/RI/LF/NEL) are all
+implemented and correct (see `ESCAPE_SEQUENCE_COVERAGE.md`). The last two
+narrower gaps in this category — the double-width/height auto-wrap column
+and SU/SD/margin-triggered IND/RI DECSLRM confinement — were closed by
+Task 117 (v0.11.1).
 
 ---
 
@@ -279,12 +259,10 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                                                | Rationale                                                                                                                                                                    | Planned |
-| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| XTGETTCAP capability expansion                      | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —       |
-| SU/SD + margin-triggered IND/RI DECSLRM confinement | Only matters to programs combining DECLRMM split-margin layouts with explicit scrolling or DECSTBM-margin auto-scroll; DECLRMM itself is a niche feature                     | —       |
-| Double-width/height auto-wrap column halving        | Rendering is correct; only affects wrap-point placement on DECDWL/DECDHL lines, which are themselves rarely used in modern output                                            | —       |
-| OSC 9 ConEmu progress sub-protocol                  | Affects Windows Terminal/ConEmu-targeting scripts (e.g. progress bars); freminal shows a spurious notification instead of ignoring the sequence                              | —       |
+| Item                               | Rationale                                                                                                                                                                    | Planned |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| XTGETTCAP capability expansion     | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —       |
+| OSC 9 ConEmu progress sub-protocol | Affects Windows Terminal/ConEmu-targeting scripts (e.g. progress bars); freminal shows a spurious notification instead of ignoring the sequence                              | —       |
 
 ### Priority 3 — Low priority / optional
 
