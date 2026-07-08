@@ -3457,6 +3457,31 @@ mod image_tests {
     }
 
     #[test]
+    fn kitty_image_data_survives_scroll_out() {
+        // Unlike Sixel/iTerm2, a Kitty image's DATA must persist after its
+        // placement scrolls off the end of scrollback — it stays addressable
+        // by id/number until an explicit free or quota eviction (kitty
+        // graphics protocol). Same scenario as
+        // `image_gc_removes_unreferenced_images`, but with the Kitty protocol.
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(2);
+
+        let img = make_image(2, 1);
+        let img_id = img.id;
+        buf.place_image(img, 0, ImageProtocol::Kitty, None, None, 0, None, 1, None);
+        assert!(buf.image_store().contains(img_id));
+
+        // Push enough lines to drain the image's row off the top.
+        for _ in 0..10 {
+            buf.handle_lf();
+        }
+
+        assert!(
+            buf.image_store().contains(img_id),
+            "Kitty image data must survive its placement scrolling off"
+        );
+    }
+
+    #[test]
     fn image_gc_retains_referenced_images() {
         let mut buf = Buffer::new(10, 5).with_scrollback_limit(10);
 

@@ -715,7 +715,9 @@ impl TerminalHandler {
             self.apply_put_display_overrides(cmd, stored_image);
 
         // Update the store with the possibly-resized image.
-        self.buffer.image_store_mut().insert(image_to_place.clone());
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(image_to_place.clone());
 
         // Relative placement (`P=` present) — intercept before the
         // virtual/normal placement paths below; it sends its own response
@@ -1432,7 +1434,9 @@ impl TerminalHandler {
             animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
-        self.buffer.image_store_mut().insert(inline_image.clone());
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(inline_image.clone());
 
         // `I=` always creates a new image (already given a fresh id above,
         // since a bare `I=<n>` has no `i=`) — record it as the newest image
@@ -2129,7 +2133,9 @@ impl TerminalHandler {
             image_to_store.push_frame(std::sync::Arc::new(canvas), new_gap);
         }
 
-        self.buffer.image_store_mut().insert(image_to_store);
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(image_to_store);
 
         if quiet < 1 {
             let response_id = u32::value_from(id).unwrap_or(image_id_hint);
@@ -2196,7 +2202,9 @@ impl TerminalHandler {
             stored_image.set_frame_gap(r, gap);
         }
 
-        self.buffer.image_store_mut().insert(stored_image);
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(stored_image);
 
         // `a=a` is silent by kitty convention — no OK/ACK response is sent
         // even when quiet < 1.
@@ -2357,7 +2365,9 @@ impl TerminalHandler {
             return;
         }
 
-        self.buffer.image_store_mut().insert(stored_image);
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(stored_image);
 
         if quiet < 1 {
             let response =
@@ -2507,7 +2517,9 @@ impl TerminalHandler {
         );
         stored_image.frames.clear();
         stored_image.animation = AnimationControl::default();
-        self.buffer.image_store_mut().insert(stored_image);
+        self.buffer
+            .image_store_mut()
+            .insert_protocol_retained(stored_image);
         if free_data {
             self.free_image_if_unreferenced(id);
         }

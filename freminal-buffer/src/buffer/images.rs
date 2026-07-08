@@ -527,8 +527,14 @@ impl Buffer {
         let display_cols = image.display_cols;
         let display_rows = image.display_rows;
 
-        // Store the image centrally.
-        self.image_store.insert(image);
+        // Store the image centrally. Kitty image data must survive
+        // scroll-out (addressable by id/number until explicit free or quota
+        // eviction); Sixel/iTerm2 data is cell-owned and GC'd on scroll-out.
+        if protocol == ImageProtocol::Kitty {
+            self.image_store.insert_protocol_retained(image);
+        } else {
+            self.image_store.insert(image);
+        }
 
         let start_col = self.cursor.pos.x;
 

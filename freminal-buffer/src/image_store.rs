@@ -393,6 +393,19 @@ pub struct ImageStore {
     /// (placement-less first). May be slightly stale between refreshes —
     /// acceptable for a DoS-guard quota.
     placed: HashSet<u64>,
+
+    /// Ids whose image DATA must survive scrollback trimming even with zero
+    /// cell references. These are Kitty graphics protocol images: the spec
+    /// keeps transmitted image data addressable by `id`/number (for a later
+    /// `a=p` put, or after a lowercase placement-only delete) until an
+    /// explicit uppercase free/delete or quota eviction. Sixel/iTerm2 images
+    /// are NOT in this set — they have no id/number addressing or delete
+    /// protocol, so they are correctly garbage-collected on scroll-out.
+    ///
+    /// Data lifetime is therefore controlled by explicit free/delete and the
+    /// quota-LRU path (`enforce_quota_*`), NOT by scrollback trimming, for
+    /// ids in this set.
+    protocol_retained: HashSet<u64>,
 }
 
 impl ImageStore {
@@ -405,11 +418,19 @@ impl ImageStore {
             next_seq: 0,
             seq: HashMap::new(),
             placed: HashSet::new(),
+            protocol_retained: HashSet::new(),
         }
     }
 
     /// Insert an image.  If an image with the same ID already exists, it is
     /// replaced.
+    ///
+    /// This is the non-protocol-retained path: the image's data is eligible
+    /// for garbage collection on scroll-out once no cell references it (see
+    /// [`Self::retain_referenced`]). Use it for Sixel/iTerm2 images, which
+    /// have no id/number addressing or delete protocol. Kitty images must
+    /// use [`Self::insert_protocol_retained`] so their data survives
+    /// scroll-out per the graphics protocol.
     ///
     /// After inserting, enforces the kitty graphics storage quota
     /// (`KITTY_IMAGE_BASE_QUOTA_BYTES` / `KITTY_IMAGE_ANIM_QUOTA_BYTES`),
@@ -417,6 +438,34 @@ impl ImageStore {
     /// needed until the store is back under both caps (or only one image
     /// remains — a single over-quota image is never evicted to zero).
     pub fn insert(&mut self, image: InlineImage) {
+        let id = image.id;
+        self.insert_inner(image);
+        // A non-retained (re)insert of an id clears any prior retention: the
+        // latest transmit's provenance wins.
+        self.protocol_retained.remove(&id);
+    }
+
+    /// Insert a Kitty graphics protocol image whose DATA must survive
+    /// scrollback trimming even with zero cell references.
+    ///
+    /// The Kitty spec keeps transmitted image data addressable by `id`/number
+    /// (for a later `a=p` put, or after a lowercase placement-only delete)
+    /// until an explicit uppercase free/delete or quota eviction — it is NOT
+    /// released merely because the placement scrolled off the end of
+    /// scrollback. Data lifetime is instead controlled by explicit
+    /// free/delete and the quota-LRU path. See [`Self::retain_referenced`].
+    ///
+    /// Enforces the storage quota after inserting, exactly like
+    /// [`Self::insert`].
+    pub fn insert_protocol_retained(&mut self, image: InlineImage) {
+        let id = image.id;
+        self.insert_inner(image);
+        self.protocol_retained.insert(id);
+    }
+
+    /// Shared insert body: store the image, stamp its LRU sequence, and
+    /// enforce the quota (protecting the just-inserted id).
+    fn insert_inner(&mut self, image: InlineImage) {
         let id = image.id;
         self.images.insert(id, image);
         // Stamp/refresh the insertion sequence (a replace refreshes age — the
@@ -481,6 +530,7 @@ impl ImageStore {
             }
             self.seq.remove(&victim);
             self.placed.remove(&victim);
+            self.protocol_retained.remove(&victim);
             self.number_to_id.retain(|_, v| *v != victim);
         }
     }
@@ -509,12 +559,17 @@ impl ImageStore {
     }
 
     /// Remove an image by ID.  Returns the removed image, if any.
+    ///
+    /// This is the explicit-free path (e.g. Kitty uppercase `d=I`/`d=N`
+    /// delete): it releases the image data and clears its protocol-retention,
+    /// which is the sanctioned way a retained Kitty image's data is freed.
     pub fn remove(&mut self, id: u64) -> Option<InlineImage> {
         let removed = self.images.remove(&id);
         if removed.is_some() {
             self.number_to_id.retain(|_, v| *v != id);
             self.seq.remove(&id);
             self.placed.remove(&id);
+            self.protocol_retained.remove(&id);
         }
         removed
     }
@@ -556,11 +611,24 @@ impl ImageStore {
         self.images.is_empty()
     }
 
-    /// Remove all images whose IDs are not referenced by any cell in the
-    /// provided row iterator.
+    /// Update placement knowledge after scrollback trimming, garbage-
+    /// collecting only images whose lifetime is tied to their cells.
     ///
-    /// This is called after scrollback eviction to garbage-collect images
-    /// that are no longer visible or reachable.
+    /// Called after scrollback eviction. For each stored image:
+    /// - **Protocol-retained (Kitty)** images are KEPT even with zero cell
+    ///   references. The Kitty graphics protocol keeps transmitted image data
+    ///   addressable by `id`/number (for a later `a=p` put, or after a
+    ///   lowercase placement-only delete) until an explicit uppercase
+    ///   free/delete ([`Self::remove`]) or quota eviction. Scrollback
+    ///   trimming must not silently free it.
+    /// - **Non-retained (Sixel/iTerm2)** images are GC'd once no cell
+    ///   references them — they have no id/number addressing or delete
+    ///   protocol, so a scrolled-off image is genuinely unreachable.
+    ///
+    /// The `placed` set is updated to reflect only truly-referenced images
+    /// (independent of retention), so the quota-LRU picker still prefers
+    /// evicting placement-less images first — matching the spec's "images
+    /// without placements are evicted first" under quota pressure.
     pub fn retain_referenced<'a, I>(&mut self, rows: I)
     where
         I: Iterator<Item = &'a [crate::cell::Cell]>,
@@ -579,11 +647,20 @@ impl ImageStore {
             }
         }
 
+        // `placed` tracks genuine on-screen references only (drives quota
+        // eviction preference), regardless of protocol retention.
         self.placed.clone_from(&referenced);
-        self.images.retain(|id, _| referenced.contains(id));
+
+        // Keep an image if a cell references it OR its data is protocol-
+        // retained (Kitty). Only cell-owned (Sixel/iTerm2) images without a
+        // reference are dropped here.
+        self.images
+            .retain(|id, _| referenced.contains(id) || self.protocol_retained.contains(id));
         self.number_to_id.retain(|_, v| self.images.contains_key(v));
         self.seq.retain(|id, _| self.images.contains_key(id));
         self.placed.retain(|id| self.images.contains_key(id));
+        self.protocol_retained
+            .retain(|id| self.images.contains_key(id));
     }
 
     /// Iterate over all images.
@@ -597,6 +674,7 @@ impl ImageStore {
         self.number_to_id.clear();
         self.seq.clear();
         self.placed.clear();
+        self.protocol_retained.clear();
         self.next_seq = 0;
     }
 }
@@ -866,6 +944,92 @@ mod tests {
             "id2 should be removed (not referenced)"
         );
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn retain_referenced_keeps_protocol_retained_kitty_image_without_references() {
+        // Kitty image data must survive scroll-out (retain_referenced with
+        // no referencing cell) — it stays addressable by id/number for a
+        // later a=p put or after a lowercase placement-only delete.
+        let mut store = ImageStore::new();
+        let kitty_id = next_image_id();
+        store.insert_protocol_retained(make_test_image(kitty_id, 2, 2));
+
+        // No rows reference it, but it is protocol-retained.
+        store.retain_referenced(std::iter::empty());
+
+        assert!(
+            store.contains(kitty_id),
+            "protocol-retained Kitty image must survive scroll-out"
+        );
+    }
+
+    #[test]
+    fn retain_referenced_still_gcs_non_retained_sixel_image_without_references() {
+        // Sixel/iTerm2 images are cell-owned: with no referencing cell they
+        // are genuinely unreachable and must be GC'd on scroll-out.
+        let mut store = ImageStore::new();
+        let sixel_id = next_image_id();
+        store.insert(make_test_image(sixel_id, 2, 2));
+
+        store.retain_referenced(std::iter::empty());
+
+        assert!(
+            !store.contains(sixel_id),
+            "non-retained (Sixel/iTerm2) image must be GC'd on scroll-out"
+        );
+    }
+
+    #[test]
+    fn explicit_remove_frees_a_protocol_retained_image() {
+        // The uppercase Kitty delete path (d=I/d=N) uses `remove`, which must
+        // release the data and clear retention.
+        let mut store = ImageStore::new();
+        let kitty_id = next_image_id();
+        store.insert_protocol_retained(make_test_image(kitty_id, 2, 2));
+        assert!(store.contains(kitty_id));
+
+        store.remove(kitty_id);
+
+        assert!(!store.contains(kitty_id));
+        // After free, a subsequent scroll-out pass keeps it gone (no dangling
+        // retention entry resurrects it).
+        store.retain_referenced(std::iter::empty());
+        assert!(!store.contains(kitty_id));
+    }
+
+    #[test]
+    fn quota_eviction_still_reclaims_unplaced_protocol_retained_image() {
+        // Protocol retention protects against scroll-out GC, NOT against the
+        // memory-bounding quota-LRU path: an unplaced Kitty image is still
+        // evicted under quota pressure (spec: "images without placements are
+        // evicted first").
+        let mut store = ImageStore::new();
+        store.insert_protocol_retained(make_test_image_with_pixel_bytes(1, 100));
+        store.insert_protocol_retained(make_test_image_with_pixel_bytes(2, 100));
+
+        // 200 bytes over a 150-byte cap: one unplaced retained image is
+        // evicted, and its retention entry is cleared with it.
+        store.enforce_quota_with_caps(150, usize::MAX, None);
+
+        assert_eq!(store.len(), 1, "quota must still bound retained images");
+    }
+
+    #[test]
+    fn non_retained_reinsert_of_retained_id_clears_retention() {
+        // A later non-retained insert of the same id (provenance changed to a
+        // cell-owned protocol) must make the id GC-eligible again.
+        let mut store = ImageStore::new();
+        let id = next_image_id();
+        store.insert_protocol_retained(make_test_image(id, 2, 2));
+        store.insert(make_test_image(id, 2, 2)); // now non-retained
+
+        store.retain_referenced(std::iter::empty());
+
+        assert!(
+            !store.contains(id),
+            "a non-retained reinsert must clear prior retention"
+        );
     }
 
     #[test]

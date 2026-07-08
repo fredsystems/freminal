@@ -584,6 +584,16 @@ implementation choice.
   such key).
 - Unicode-placeholder virtual placements with placement id `0` coexist
   distinctly, and `d=i,p=<n>` deletes only the named placement (Task 100.20).
+- Kitty image DATA persists across scroll-out: when a placement scrolls off
+  the end of scrollback (or is removed by a lowercase `d=` delete), the
+  transmitted image data is retained and stays addressable by `id`/number for
+  a later `a=p` put, per the spec's separate-lifetime rule. The scrollback GC
+  (`ImageStore::retain_referenced`) is protocol-aware — it only garbage-
+  collects cell-owned Sixel/iTerm2 images on scroll-out; Kitty image data is
+  released only by an explicit uppercase free/delete or the quota-LRU path.
+  (Previously scroll-out freed Kitty data unconditionally, breaking
+  transmit-only `a=t` images and lowercase-deleted images referenced again by
+  id — PR #382 review fix.)
 
 **Confirmed still remaining (not resolved by Task 100):**
 
