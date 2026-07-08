@@ -172,6 +172,14 @@ impl std::future::Future for WinChild {
                     match std::thread::Builder::new()
                         .name("freminal-win-proc-waiter".to_string())
                         .spawn(move || {
+                            // Rebind the whole wrapper inside the closure so it
+                            // is captured by value as a `PassRawHandleToWaiterThread`
+                            // (which is `Send`). Under edition 2021+ disjoint
+                            // closure capture, referring to `handle.0` directly
+                            // would capture only the inner `*mut c_void` field —
+                            // which is not `Send` — defeating the wrapper's
+                            // `unsafe impl Send`.
+                            let handle = handle;
                             unsafe {
                                 WaitForSingleObject(handle.0 as _, INFINITE);
                             }
