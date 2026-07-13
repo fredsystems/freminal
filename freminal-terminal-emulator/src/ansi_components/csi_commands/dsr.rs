@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -27,7 +28,10 @@ pub fn ansi_parser_inner_csi_finished_dsr(
     let actual_params = if is_private { &params[1..] } else { params };
 
     let Ok(param) = parse_param_as::<usize>(actual_params) else {
-        warn!("Invalid DSR command");
+        warn!(
+            "Invalid DSR command (CSI n); raw params: \"{}\"",
+            escape_sequence_for_log(params)
+        );
         output.push(TerminalOutput::Invalid);
 
         return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDSRCommand(format!(
@@ -46,7 +50,10 @@ pub fn ansi_parser_inner_csi_finished_dsr(
             output.push(TerminalOutput::ColorThemeReport);
         }
         _ => {
-            warn!("Unhandled DSR Ps value: {param:?}");
+            warn!(
+                "Unhandled DSR Ps value: {param:?} (CSI n); raw params: \"{}\"",
+                escape_sequence_for_log(params)
+            );
             output.push(TerminalOutput::Invalid);
         }
     }

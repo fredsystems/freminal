@@ -241,6 +241,30 @@ pub fn parse_ftcs_params(params: &[&str]) -> Option<FtcsMarker> {
     }
 }
 
+/// Whether `marker_char` is an FTCS marker letter freminal knows about.
+///
+/// Distinguishes the two reasons [`parse_ftcs_params`] returns `None`:
+///
+/// - A **known** marker (`A`/`B`/`C`/`D`/`P`) returning `None` means a foreign
+///   emitter sent it without the `freminal=1` tag (or without a required
+///   field). Freminal understands the sequence and deliberately ignores it to
+///   avoid duplicate command blocks — this is expected and should NOT be logged
+///   as unhandled.
+/// - An **unknown** marker (any other letter, e.g. `Z`, or a future FTCS
+///   addition like `E`) or an empty parameter list means freminal does not
+///   recognise the sequence at all. That is a genuine gap — a new/malformed
+///   OSC 133 variant — and the caller should log it so the unhandled surface
+///   can be audited (see `MASTER_PLAN` v0.16.0 crash reporting).
+///
+/// This is intentionally a separate, allocation-free classifier rather than a
+/// richer return type on [`parse_ftcs_params`], so the "should I act on this?"
+/// decision (the `Option`) and the "should I log this as unhandled?" decision
+/// stay independent and the existing callers/tests are unaffected.
+#[must_use]
+pub fn is_known_ftcs_marker(params: &[&str]) -> bool {
+    matches!(params.first(), Some(&("A" | "B" | "C" | "D" | "P")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,5 +663,31 @@ mod tests {
                 fid: "x".to_owned()
             })
         );
+    }
+
+    // ── is_known_ftcs_marker ────────────────────────────────────────────
+
+    #[test]
+    fn known_ftcs_markers_are_recognised() {
+        // All five FTCS marker letters are "known", regardless of whether they
+        // carry freminal=1 (i.e. even foreign duplicates are known markers).
+        for m in ["A", "B", "C", "D", "P"] {
+            assert!(is_known_ftcs_marker(&[m]), "{m} should be known");
+            assert!(
+                is_known_ftcs_marker(&[m, "aid=12345"]),
+                "{m} with foreign params should still be known"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_or_empty_ftcs_markers_are_not_known() {
+        // Unknown letters, future additions, lowercase, and empty lists are all
+        // "not known" — these are the cases that must be logged as unhandled.
+        assert!(!is_known_ftcs_marker(&["Z"]));
+        assert!(!is_known_ftcs_marker(&["E"])); // plausible future FTCS marker
+        assert!(!is_known_ftcs_marker(&["a"])); // lowercase is not a marker
+        let empty: &[&str] = &[];
+        assert!(!is_known_ftcs_marker(empty));
     }
 }

@@ -67,8 +67,8 @@ pub(super) fn handle_osc_iterm2(
 
     // Not a recognised sub-command — silently consume, like xterm/VTE.
     tracing::warn!(
-        "OSC 1337: unrecognised sub-command: recent='{}'",
-        seq_trace.as_str()
+        "OSC 1337: unrecognised sub-command; raw sequence: \"{}\"",
+        seq_trace.as_escaped()
     );
     output.push(TerminalOutput::OscResponse(AnsiOscType::ITerm2Unknown));
 }
@@ -113,7 +113,7 @@ fn parse_iterm2_file_args(args_str: &str) -> ITerm2InlineImageData {
                     do_not_move_cursor = value == "1";
                 }
                 _ => {
-                    tracing::debug!("OSC 1337 File args: unknown arg: {key}={value}");
+                    tracing::warn!("OSC 1337 File args: unknown arg: {key}={value}");
                 }
             }
         }

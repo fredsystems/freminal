@@ -71,7 +71,7 @@ use super::csi_commands::{
     su::ansi_parser_inner_csi_finished_su, tbc::ansi_parser_inner_csi_finished_tbc,
     vpa::ansi_parser_inner_csi_finished_vpa, xtversion::ansi_parser_inner_csi_finished_xtversion,
 };
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::{SequenceTracer, escape_sequence_for_log};
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
 
 #[derive(Eq, PartialEq, Debug, Default)]
@@ -120,6 +120,21 @@ impl AnsiCsiParser {
     #[must_use]
     pub fn trace_str(&self) -> String {
         self.seq_trace.as_str()
+    }
+
+    /// Render the full raw CSI sequence — including the reconstructed `ESC [`
+    /// (CSI) introducer that the sub-parser never receives — as a
+    /// reconstruction-faithful escaped string for diagnostics.
+    ///
+    /// `body` is [`Self::sequence`], the accumulated CSI body bytes (parameters,
+    /// intermediates, and the final byte). The introducer is prepended so the
+    /// logged form is the complete sequence a terminal would send.
+    #[must_use]
+    fn format_raw_csi(body: &[u8]) -> String {
+        let mut full = Vec::with_capacity(body.len().saturating_add(2));
+        full.extend_from_slice(&[0x1b, b'[']);
+        full.extend_from_slice(body);
+        escape_sequence_for_log(&full)
     }
 
     /// Push a byte into the parser
@@ -363,7 +378,19 @@ impl AnsiCsiParser {
                 }
                 push_result
             }
-            AnsiCsiParserState::Finished(_esc) => push_result,
+            AnsiCsiParserState::Finished(_esc) => {
+                // Syntactically valid CSI whose final byte we do not implement.
+                // The grammar accepted it (params/intermediates/terminator all
+                // legal) but no dispatch arm matched, so nothing is emitted.
+                // Log the complete raw sequence — reconstructed with its `ESC [`
+                // introducer — so the offending sequence is identifiable rather
+                // than silently dropped.
+                tracing::warn!(
+                    "Unhandled CSI final byte (valid grammar, no dispatch): {}",
+                    Self::format_raw_csi(&self.sequence)
+                );
+                push_result
+            }
 
             // Below should cover the invalid state(AnsiCsiParserState::Invalid) as well as any other finished states
             _ => push_result,
@@ -663,5 +690,35 @@ mod tests {
         let result = parser.ansiparser_inner_csi(b'w', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn format_raw_csi_reconstructs_full_sequence() {
+        // The CSI body accumulated by the parser excludes the `ESC [`
+        // introducer; format_raw_csi must prepend it so the logged form is the
+        // complete sequence a terminal would send.
+        assert_eq!(AnsiCsiParser::format_raw_csi(b"38;5;9w"), "\\x1b[38;5;9w");
+        // Empty body still shows the introducer.
+        assert_eq!(AnsiCsiParser::format_raw_csi(b""), "\\x1b[");
+    }
+
+    #[test]
+    fn unhandled_final_byte_accumulates_full_body_for_logging() {
+        // Feed an unhandled-but-valid CSI (`ESC [ 1 ; 2 W`) one byte at a time
+        // and confirm the parser's `sequence` field holds the complete body so
+        // the diagnostic log can render it.
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for &b in b"1;2" {
+            let _ = parser.ansiparser_inner_csi(b, &mut output);
+        }
+        let result = parser.ansiparser_inner_csi(b'W', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(output.is_empty());
+        assert_eq!(parser.sequence, b"1;2W");
+        assert_eq!(
+            AnsiCsiParser::format_raw_csi(&parser.sequence),
+            "\\x1b[1;2W"
+        );
     }
 }

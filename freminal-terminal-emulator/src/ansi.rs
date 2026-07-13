@@ -325,7 +325,10 @@ impl FreminalAnsiParser {
                         // if the last value pushed to output is terminal Invalid, print out the sequence of characters that caused the error
 
                         if output.last() == Some(&TerminalOutput::Invalid) {
-                            debug!("Invalid ANSI sequence; recent={}", self.current_trace_str());
+                            debug!(
+                                "Invalid ANSI sequence; recent={}",
+                                self.current_trace_escaped()
+                            );
                         }
                     }
                     ParserOutcome::Continue => {
@@ -341,7 +344,7 @@ impl FreminalAnsiParser {
                         debug!(
                             "Invalid ANSI sequence: {}; recent={}",
                             message,
-                            self.current_trace_str()
+                            self.current_trace_escaped()
                         );
                         self.inner = ParserInner::Empty;
                     }
@@ -421,7 +424,7 @@ impl FreminalAnsiParser {
                             if output.last() == Some(&TerminalOutput::Invalid) {
                                 debug!(
                                     "Invalid ANSI sequence; recent={}",
-                                    self.current_trace_str()
+                                    self.current_trace_escaped()
                                 );
                             }
                         }
@@ -434,7 +437,7 @@ impl FreminalAnsiParser {
                             debug!(
                                 "Invalid ANSI sequence: {}; recent={}",
                                 message,
-                                self.current_trace_str()
+                                self.current_trace_escaped()
                             );
                             self.inner = ParserInner::Empty;
                         }
@@ -482,7 +485,7 @@ impl FreminalAnsiParser {
                             if output.last() == Some(&TerminalOutput::Invalid) {
                                 debug!(
                                     "Invalid ANSI sequence; recent={}",
-                                    self.current_trace_str()
+                                    self.current_trace_escaped()
                                 );
                             }
                         }
@@ -491,7 +494,7 @@ impl FreminalAnsiParser {
                             debug!(
                                 "Invalid ANSI sequence: {}; recent={}",
                                 message,
-                                self.current_trace_str()
+                                self.current_trace_escaped()
                             );
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
@@ -500,7 +503,7 @@ impl FreminalAnsiParser {
                             debug!(
                                 "Invalid ANSI sequence: {}; recent={}",
                                 message,
-                                self.current_trace_str()
+                                self.current_trace_escaped()
                             );
                             self.inner = ParserInner::Empty;
                             output.push(TerminalOutput::Invalid);
@@ -511,7 +514,10 @@ impl FreminalAnsiParser {
                     ParserOutcome::Finished => {
                         self.inner = ParserInner::Empty;
                         if output.last() == Some(&TerminalOutput::Invalid) {
-                            debug!("Invalid ANSI sequence; recent={}", self.current_trace_str());
+                            debug!(
+                                "Invalid ANSI sequence; recent={}",
+                                self.current_trace_escaped()
+                            );
                         }
                     }
                     ParserOutcome::Continue => (),
@@ -523,7 +529,7 @@ impl FreminalAnsiParser {
                         debug!(
                             "Invalid ANSI sequence: {}; recent={}",
                             message,
-                            self.current_trace_str()
+                            self.current_trace_escaped()
                         );
                         self.inner = ParserInner::Empty;
                     }
@@ -676,9 +682,9 @@ impl FreminalAnsiParser {
                 self.inner = ParserInner::Empty;
             }
             _ => {
-                debug!(
-                    "Unknown VT52 escape: 0x{b:02x}; recent={}",
-                    self.current_trace_str()
+                warn!(
+                    "Unknown VT52 escape: 0x{b:02x}; raw sequence: \"{}\"",
+                    self.current_trace_escaped()
                 );
                 output.push(TerminalOutput::Invalid);
                 self.inner = ParserInner::Empty;

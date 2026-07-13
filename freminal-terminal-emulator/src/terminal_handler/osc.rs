@@ -19,6 +19,8 @@ use freminal_common::buffer_states::{
     window_manipulation::{NotificationKind, WindowManipulation},
 };
 
+use crate::ansi_components::tracer::escape_sequence_for_log;
+
 use super::{TerminalHandler, notify_99, shell_integration};
 
 impl TerminalHandler {
@@ -31,8 +33,8 @@ impl TerminalHandler {
             Ok(cmd) => self.handle_kitty_graphics(cmd),
             Err(KittyParseError::NotKittyGraphics) => {
                 tracing::warn!(
-                    "APC received (not Kitty graphics, ignored): {}",
-                    String::from_utf8_lossy(apc)
+                    "APC received (not Kitty graphics, ignored); raw sequence: \"{}\"",
+                    escape_sequence_for_log(apc)
                 );
             }
             Err(e) => {

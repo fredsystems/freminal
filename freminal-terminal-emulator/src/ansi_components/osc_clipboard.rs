@@ -34,13 +34,16 @@ pub(super) fn handle_osc_clipboard(
                 )));
             }
             Err(e) => {
-                tracing::warn!("OSC 52: invalid base64 payload: {e}");
+                tracing::warn!(
+                    "OSC 52: invalid base64 payload: {e}; raw sequence: \"{}\"",
+                    seq_trace.as_escaped()
+                );
             }
         },
         _ => {
             tracing::warn!(
-                "OSC 52: missing or invalid payload: recent='{}'",
-                seq_trace.as_str()
+                "OSC 52: missing or invalid payload; raw sequence: \"{}\"",
+                seq_trace.as_escaped()
             );
         }
     }

@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -56,7 +57,10 @@ pub fn ansi_parser_inner_csi_finished_el(
         1 => output.push(TerminalOutput::ClearLineBackwards),
         2 => output.push(TerminalOutput::ClearLine),
         v => {
-            warn!("Unsupported erase in line command ({v})");
+            warn!(
+                "Unsupported erase in line command ({v}) (CSI K); raw params: \"{}\"",
+                escape_sequence_for_log(params)
+            );
             output.push(TerminalOutput::Invalid);
         }
     }

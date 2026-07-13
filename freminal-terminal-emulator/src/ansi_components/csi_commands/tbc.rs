@@ -6,6 +6,7 @@
 use freminal_common::buffer_states::terminal_output::{TabClearMode, TerminalOutput};
 
 use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use crate::error::ParserFailures;
 
 /// Tab Clear (TBC) — ECMA-48 Section 8.3.155
@@ -36,7 +37,10 @@ pub fn ansi_parser_inner_csi_finished_tbc(
     if let Ok(mode) = TabClearMode::try_from(ps) {
         output.push(TerminalOutput::TabClear(mode));
     } else {
-        tracing::warn!("TBC with unsupported Ps={ps} (ignored)");
+        tracing::warn!(
+            "TBC with unsupported Ps={ps} (ignored) (CSI g); raw params: \"{}\"",
+            escape_sequence_for_log(params)
+        );
     }
 
     ParserOutcome::Finished
