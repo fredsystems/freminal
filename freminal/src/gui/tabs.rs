@@ -280,9 +280,14 @@ impl TabManager {
     }
 
     /// Allocate the next unique `TabId`.
+    ///
+    /// Uses saturating arithmetic so the counter can never overflow and wrap
+    /// back to a low, already-issued id. Exhausting the full `u64` id space is
+    /// physically unreachable (it would require `u64::MAX` live tabs), so the
+    /// saturation point is a safety floor, not an expected condition.
     pub const fn next_tab_id(&mut self) -> TabId {
         let id = TabId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         id
     }
 
@@ -755,6 +760,23 @@ mod tests {
         mgr.add_tab(dummy_tab(TabId(1), "Low id"));
 
         assert_eq!(mgr.next_tab_id(), TabId(3));
+    }
+
+    /// Regression: an id counter at `u64::MAX` must saturate rather than
+    /// overflow. Overflowing `next_id` would panic in debug and wrap to a low,
+    /// already-issued id in release. This is physically unreachable in practice
+    /// (it needs `u64::MAX` live tabs) but `TabId::offset` is public, so a
+    /// hand-crafted layout could seed the counter near the ceiling.
+    #[test]
+    fn next_tab_id_saturates_at_u64_max() {
+        let tab = dummy_tab(TabId(u64::MAX), "Ceiling");
+        let mut mgr = TabManager::new(tab);
+
+        // `new` seeds `next_id` via saturating_add, so it stays at u64::MAX
+        // rather than wrapping to 0.
+        assert_eq!(mgr.next_tab_id(), TabId(u64::MAX));
+        // Further allocations must not wrap/panic; they stay pinned at the max.
+        assert_eq!(mgr.next_tab_id(), TabId(u64::MAX));
     }
 
     #[test]
