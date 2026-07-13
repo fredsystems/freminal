@@ -254,9 +254,9 @@ impl FreminalAnsiParser {
                 0x90 => {
                     self.inner = ParserInner::Dcs(DcsParser::new());
                 }
-                // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer
+                // CSI (0x9B) ≡ ESC [ — Control Sequence Introducer (8-bit C1)
                 0x9B => {
-                    self.inner = ParserInner::Csi(AnsiCsiParser::new());
+                    self.inner = ParserInner::Csi(AnsiCsiParser::new_c1());
                 }
                 // OSC (0x9D) ≡ ESC ] — Operating System Command
                 0x9D => {
