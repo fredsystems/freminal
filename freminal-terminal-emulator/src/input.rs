@@ -2831,7 +2831,7 @@ mod tests {
 
     #[test]
     fn kkp_keypad_application_mode_digits() {
-        let expected_suffixes = [b'p', b'q', b'r', b's', b't', b'u', b'v', b'w', b'x', b'y'];
+        let expected_suffixes = b"pqrstuvwxy";
         for (digit, suffix) in (0u8..=9).zip(expected_suffixes.iter()) {
             let p = to_payload_kkp_app(&TerminalInput::KeyPad(digit), 1);
             let expected = [0x1b, b'[', b'O', *suffix];

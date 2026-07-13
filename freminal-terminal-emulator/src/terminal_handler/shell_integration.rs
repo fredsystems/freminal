@@ -438,9 +438,7 @@ mod tests {
 
     #[test]
     fn hex_val_non_hex_chars_return_none() {
-        for byte in [
-            b'G', b'Z', b'g', b'z', b' ', b'!', b'/', b':', b'@', b'[', b'`', b'{',
-        ] {
+        for &byte in b"GZgz !/:@[`{" {
             assert_eq!(
                 hex_val(byte),
                 None,

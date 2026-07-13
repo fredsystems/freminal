@@ -1396,7 +1396,7 @@ mod tests {
     fn vt52_ansi_roundtrip() {
         // Start in ANSI mode, switch to VT52 via CSI, then back via ESC <
         let mut p = FreminalAnsiParser::new();
-        assert!(p.vt52_mode == Decanm::Ansi);
+        assert_eq!(p.vt52_mode, Decanm::Ansi);
 
         // Enter VT52 mode via the mode change (parser flag set externally,
         // as sync_mode would do after processing Mode::Decanm(Decanm::Vt52))

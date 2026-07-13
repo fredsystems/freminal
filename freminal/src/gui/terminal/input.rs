@@ -921,7 +921,7 @@ pub(super) fn dispatch_binding_action(
 pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
         let name = key.name();
-        assert!(name.len() == 1);
+        assert_eq!(name.len(), 1);
         let name_c = name.as_bytes()[0];
         return Some(vec![TerminalInput::Ctrl(name_c)].into());
     }

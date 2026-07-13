@@ -412,14 +412,14 @@ mod tests {
     fn partial_eq_vec_u8_utf8_matching() {
         let t = TChar::from('é');
         let bytes = "é".as_bytes().to_vec();
-        assert!(t == bytes);
+        assert_eq!(t, bytes);
     }
 
     #[test]
     fn partial_eq_vec_u8_utf8_non_matching() {
         let t = TChar::from('é');
         let bytes = "ü".as_bytes().to_vec();
-        assert!(t != bytes);
+        assert_ne!(t, bytes);
     }
 
     #[test]
@@ -587,12 +587,12 @@ mod tests {
 
     #[test]
     fn partial_eq_u8_space_matches_32() {
-        assert!(TChar::Space == 32u8);
+        assert_eq!(TChar::Space, 32u8);
     }
 
     #[test]
     fn partial_eq_u8_newline_matches_10() {
-        assert!(TChar::NewLine == 10u8);
+        assert_eq!(TChar::NewLine, 10u8);
     }
 
     #[test]

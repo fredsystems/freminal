@@ -1232,7 +1232,7 @@ mod pty_behavior_tests {
         buf.handle_lf();
 
         let y = buf.cursor.pos.y;
-        assert!(y == 1);
+        assert_eq!(y, 1);
         assert!(matches!(buf.rows[1].origin, RowOrigin::HardBreak));
     }
 
