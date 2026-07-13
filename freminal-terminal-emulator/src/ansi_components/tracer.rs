@@ -109,13 +109,16 @@ impl SequenceTracer {
 /// reconstructed from its output:
 ///
 /// - Printable ASCII (`0x20..=0x7E`) is emitted verbatim, **except** the
-///   backslash, which is doubled (`\\`) so the escaping is unambiguous.
+///   backslash, which is doubled (`\\`), and the double quote, which is
+///   escaped (`\"`) — both so the escaping is unambiguous. Nearly every call
+///   site embeds the result inside a quoted log string (e.g.
+///   `"raw sequence: \"{}\""`), so an unescaped `"` in the payload would break
+///   the surrounding quoting.
 /// - Every other byte — C0/C1 controls, `DEL`, and all bytes `>= 0x80` — is
 ///   emitted as a `\xNN` two-digit lowercase hex escape.
 ///
-/// The result is safe to embed in a log line and can be pasted back (e.g. via
-/// `printf`) to reproduce the exact sequence a terminal would need to trigger
-/// the same code path.
+/// The result is safe to embed in a quoted log line and unambiguously
+/// identifies the exact bytes received.
 #[must_use]
 pub fn escape_sequence_for_log(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -124,6 +127,7 @@ pub fn escape_sequence_for_log(bytes: &[u8]) -> String {
     for &b in bytes {
         match b {
             b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
             0x20..=0x7E => out.push(b as char),
             _ => {
                 out.push_str("\\x");
@@ -176,6 +180,15 @@ mod tests {
     #[test]
     fn escape_backslash_is_doubled() {
         assert_eq!(escape_sequence_for_log(b"a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn escape_double_quote_is_escaped() {
+        // Call sites embed the output inside a quoted log string, so a raw `"`
+        // in the payload must be escaped to keep the surrounding quoting intact.
+        assert_eq!(escape_sequence_for_log(b"a\"b"), "a\\\"b");
+        // Mixed backslash + quote (e.g. a JSON-ish OSC payload).
+        assert_eq!(escape_sequence_for_log(b"\\\""), "\\\\\\\"");
     }
 
     #[test]
