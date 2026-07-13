@@ -188,10 +188,14 @@ impl TerminalHandler {
 
     /// Handle an OSC 133 (FTCS) shell integration marker.
     ///
-    /// Only markers carrying `freminal=1` and a `fid` (parsed upstream by
-    /// [`parse_ftcs_params`]) reach this function.  Foreign markers (`WezTerm`,
-    /// Starship, `iTerm2`) are already filtered out at the parse layer and
-    /// never arrive here.
+    /// The `A`/`B`/`C`/`D` markers reach this function only when they carry
+    /// `freminal=1` and a `fid` (parsed upstream by [`parse_ftcs_params`]);
+    /// foreign `A`/`B`/`C`/`D` markers (`WezTerm`, Starship, `iTerm2`) are
+    /// filtered out at the parse layer and never arrive here.  The `P`
+    /// (`PromptProperty`) marker is the exception: it is freminal-independent
+    /// (accepted from any emitter, no `freminal=1`/`fid` required), so it
+    /// *does* reach this function — where it is handled as an informational
+    /// no-op (see the `PromptProperty` arm below).
     pub(super) fn handle_osc_ftcs(&mut self, marker: &FtcsMarker) {
         tracing::debug!("OSC 133 FTCS marker: {marker}");
         match marker {
