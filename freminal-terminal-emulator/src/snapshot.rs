@@ -417,7 +417,10 @@ mod tests {
 
     #[test]
     fn empty_application_escape_key_is_reset() {
-        assert!(TerminalSnapshot::empty().application_escape_key == ApplicationEscapeKey::Reset);
+        assert_eq!(
+            TerminalSnapshot::empty().application_escape_key,
+            ApplicationEscapeKey::Reset
+        );
     }
 
     #[test]

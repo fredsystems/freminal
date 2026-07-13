@@ -267,17 +267,27 @@ impl TabManager {
     /// Create a new `TabManager` with a single initial tab.
     #[must_use]
     pub fn new(initial: Tab) -> Self {
+        // `next_id` must never collide with an id already in use. The initial
+        // tab is normally `TabId::first()` (0), but a layout restore can seed
+        // it with an arbitrary offset id, so derive the counter from the
+        // initial tab's id rather than assuming 0.
+        let next_id = initial.id.0.saturating_add(1);
         Self {
             tabs: vec![initial],
             active: 0,
-            next_id: 1,
+            next_id,
         }
     }
 
     /// Allocate the next unique `TabId`.
+    ///
+    /// Uses saturating arithmetic so the counter can never overflow and wrap
+    /// back to a low, already-issued id. Exhausting the full `u64` id space is
+    /// physically unreachable (it would require `u64::MAX` live tabs), so the
+    /// saturation point is a safety floor, not an expected condition.
     pub const fn next_tab_id(&mut self) -> TabId {
         let id = TabId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
         id
     }
 
@@ -322,7 +332,15 @@ impl TabManager {
     }
 
     /// Add a new tab at the end and switch to it.
+    ///
+    /// The id-allocation counter is advanced past the added tab's id when
+    /// necessary. Tabs built outside `next_tab_id` (e.g. layout restore, which
+    /// assigns `TabId::offset(i)`) carry ids the counter has not yet seen;
+    /// without this, a subsequently spawned tab could be handed a duplicate id,
+    /// which then causes two tabs to match a single `renaming_tab` id and both
+    /// render the rename editor (keystrokes doubled across two tabs).
     pub fn add_tab(&mut self, tab: Tab) {
+        self.next_id = self.next_id.max(tab.id.0.saturating_add(1));
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
     }
@@ -691,6 +709,74 @@ mod tests {
         assert_eq!(id1, TabId(1));
         assert_eq!(id2, TabId(2));
         assert_eq!(id3, TabId(3));
+    }
+
+    /// Regression: a manager seeded with an initial tab whose id is not 0
+    /// (as a layout restore does via `TabId::offset`) must not hand out that
+    /// id again. Previously `next_id` was hard-coded to 1, so a first tab with
+    /// id 5 would collide with the next spawned tab.
+    #[test]
+    fn new_manager_seeds_next_id_past_initial_tab_id() {
+        let tab = dummy_tab(TabId(5), "Restored");
+        let mut mgr = TabManager::new(tab);
+
+        assert_eq!(mgr.next_tab_id(), TabId(6));
+    }
+
+    /// Regression: adding a tab whose id was assigned outside `next_tab_id`
+    /// (layout restore assigns `TabId::offset(i)`) must advance the counter
+    /// past it, so a subsequently spawned tab cannot receive a duplicate id.
+    /// A duplicate id caused two tabs to match a single `renaming_tab` value
+    /// and both render the rename editor (keystrokes doubled across two tabs).
+    #[test]
+    fn add_tab_advances_next_id_past_preassigned_ids() {
+        // Mimic a 3-tab layout restore: ids 0, 1, 2 assigned by offset,
+        // `next_id` still at 1 before this fix.
+        let tab0 = dummy_tab(TabId(0), "Tab 0");
+        let mut mgr = TabManager::new(tab0);
+        mgr.add_tab(dummy_tab(TabId(1), "Tab 1"));
+        mgr.add_tab(dummy_tab(TabId(2), "Tab 2"));
+
+        // The next spawned tab must get a fresh, non-colliding id.
+        let spawned = mgr.next_tab_id();
+        assert_eq!(spawned, TabId(3));
+
+        assert!(
+            !mgr.iter().any(|t| t.id == spawned),
+            "spawned id {spawned:?} collides with an existing tab id"
+        );
+    }
+
+    /// Adding a tab with a lower id than the current counter must not rewind
+    /// the counter.
+    #[test]
+    fn add_tab_does_not_rewind_next_id() {
+        let tab0 = dummy_tab(TabId(0), "Tab 0");
+        let mut mgr = TabManager::new(tab0);
+        // Advance the counter well past 0.
+        let _ = mgr.next_tab_id(); // 1
+        let _ = mgr.next_tab_id(); // 2
+        // Add a tab with a small, already-consumed-range id.
+        mgr.add_tab(dummy_tab(TabId(1), "Low id"));
+
+        assert_eq!(mgr.next_tab_id(), TabId(3));
+    }
+
+    /// Regression: an id counter at `u64::MAX` must saturate rather than
+    /// overflow. Overflowing `next_id` would panic in debug and wrap to a low,
+    /// already-issued id in release. This is physically unreachable in practice
+    /// (it needs `u64::MAX` live tabs) but `TabId::offset` is public, so a
+    /// hand-crafted layout could seed the counter near the ceiling.
+    #[test]
+    fn next_tab_id_saturates_at_u64_max() {
+        let tab = dummy_tab(TabId(u64::MAX), "Ceiling");
+        let mut mgr = TabManager::new(tab);
+
+        // `new` seeds `next_id` via saturating_add, so it stays at u64::MAX
+        // rather than wrapping to 0.
+        assert_eq!(mgr.next_tab_id(), TabId(u64::MAX));
+        // Further allocations must not wrap/panic; they stay pinned at the max.
+        assert_eq!(mgr.next_tab_id(), TabId(u64::MAX));
     }
 
     #[test]

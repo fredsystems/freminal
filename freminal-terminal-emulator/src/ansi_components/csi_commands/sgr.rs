@@ -8,6 +8,7 @@ use std::vec::IntoIter;
 
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::ansi_components::csi_commands::modify_other_keys::ansi_parser_inner_csi_finished_modify_other_keys;
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use freminal_common::buffer_states::fonts::UnderlineStyle;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::colors::TerminalColor;
@@ -189,7 +190,10 @@ fn process_colon_segment(segment: &[u8], output: &mut Vec<TerminalOutput>) {
         }
         _ => {
             // Unknown colon form — emit the primary as a plain SGR and warn.
-            debug!("Unknown colon-form SGR: primary={primary}");
+            warn!(
+                "Unknown colon-form SGR: primary={primary}; raw segment: \"{}\"",
+                escape_sequence_for_log(segment)
+            );
             output.push(TerminalOutput::Sgr(SelectGraphicRendition::from_usize(
                 primary,
             )));
@@ -262,7 +266,12 @@ pub fn handle_custom_color(
             match SelectGraphicRendition::from_usize_color(custom_color_control_code, r, g, b) {
                 Ok(sgr) => output.push(TerminalOutput::Sgr(sgr)),
                 Err(e) => {
-                    warn!("Invalid RGB SGR sequence: {}", e);
+                    // The raw SGR byte slice is not reachable at this depth
+                    // (only the already-parsed channel values survive), so log
+                    // the parsed reconstruction instead: SGR <cc>;2;r;g;b.
+                    warn!(
+                        "Invalid RGB SGR sequence: {e}; parsed SGR {custom_color_control_code};2;{r};{g};{b}"
+                    );
                     output.push(TerminalOutput::Invalid);
                 }
             }
@@ -292,7 +301,10 @@ pub fn handle_custom_color(
         }
 
         _ => {
-            warn!("Invalid SGR sequence: {}", param);
+            // Unhandled color-mode selector after 38/48/58 (only 2 and 5 are
+            // defined). Raw bytes are not reachable here; log the parsed
+            // reconstruction: SGR <cc>;<mode>.
+            warn!("Unhandled SGR color mode: parsed SGR {custom_color_control_code};{param}");
             output.push(TerminalOutput::Invalid);
         }
     }

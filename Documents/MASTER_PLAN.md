@@ -23,8 +23,9 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete |
-| v0.12.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_120.md`                                                 | 102–103          | Planned  |
+| v0.12.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_120.md`                                                 | 102–103, 118     | Planned  |
 | v0.13.0 | Kitty: Text Sizing              | `PLAN_VERSION_130.md`                                                 | 104              | Planned  |
+| v0.13.1 | Scrollback Compression          | `PLAN_VERSION_131.md`                                                 | 119              | Stub     |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub     |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub     |
 | v0.16.0 | Reach & Credibility             | `PLAN_VERSION_160.md`                                                 | 88, 89, 91, 93   | Stub     |
@@ -187,6 +188,8 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 115 | DECSCNM Per-Pane Per-Cell Reverse Video   | `PLAN_VERSION_111.md` (Task 115)              | Complete  | Task 58                |
 | 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Complete  | None                   |
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Complete  | None                   |
+| 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Planned   | None                   |
+| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_131.md` (Task 119)              | Stub      | Task 118               |
 
 ---
 
@@ -670,6 +673,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
 - `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty: Transfer & Cursors" (Tasks 102–103, decomposed)
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Text Sizing" (Task 104, decomposed)
+- `Documents/PLAN_VERSION_131.md` — v0.13.1 "Scrollback Compression" (stub, Task 119)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)

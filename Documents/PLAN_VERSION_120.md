@@ -7,8 +7,17 @@ bidirectional session machine with a mandatory user-consent prompt — and multi
 (CSI), a renderer-light addition. The heavy, consent-gated transfer work is balanced by
 the small, safe cursor win, so the version stays focused even if transfer expands.
 
+This version also carries **Task 118 — Compact Cell Representation**, a buffer-layer memory
+optimisation unrelated to the kitty work but deliberately slotted here because it is a
+cheap, low-risk, high-value change to the buffer's shape, and doing buffer-shape work
+*before* more features accrete on top of the buffer is prudent. It is the first phase of a
+two-phase scrollback-memory effort; phase two (LZ4 idle compression, Task 119) is a
+separate later version (v0.13.1, `PLAN_VERSION_131.md`) that builds on the compact
+representation this task introduces.
+
 Depends on v0.11.0 (Task 99 establishes the reverse-PTY-write notification path that file
-transfer reuses) and the existing lock-free architecture.
+transfer reuses) and the existing lock-free architecture. Task 118 has no dependency on the
+kitty tasks and can proceed in parallel with them.
 
 **Decomposed** per the `freminal-version-activation` skill (next-up, stable specs).
 Re-confirm the seams at activation before executing.
@@ -21,6 +30,7 @@ Re-confirm the seams at activation before executing.
 | --- | ------------------------------ | --------- | ------- | ---------- |
 | 102 | Kitty File Transfer (OSC 5113) | Very high | Planned | Task 99    |
 | 103 | Multiple Cursors (CSI)         | Medium    | Planned | None       |
+| 118 | Compact Cell Representation    | Medium    | Planned | None       |
 
 ---
 
@@ -345,3 +355,243 @@ Stop: report + await review.
   `PLAN_VERSION_DND.md`) because its spec is still under active development upstream
   (kitty 0.47, issue #9984). Building it against a moving target violates the
   build-against-a-frozen-spec rule.
+
+---
+
+## Task 118 — Compact Cell Representation
+
+### 118 Summary
+
+Reduce the resident-memory cost of scrollback so a much larger default scrollback becomes
+affordable, by shrinking the in-memory footprint of stored rows. This is **phase one** of a
+two-phase scrollback-memory effort. Phase one is pure representation/serialization — **no
+compression codec, no decompression-on-scroll, no reflow complexity, no new dependency** —
+and captures the large majority of the achievable win. Phase two (Task 119, v0.13.1) adds
+LZ4 idle compression as an incremental multiplier on top.
+
+The measured motivation (feasibility spike, 100k-line corpora with realistic
+"stable-structure + unique-content" data):
+
+| Corpus                    | In-memory today | Flat compact repr | Reduction |
+| ------------------------- | --------------- | ----------------- | --------- |
+| Shell session (typical)   | ~4160 B/line    | ~345 B/line       | **~12×**  |
+| Source / logs             | ~3739 B/line    | ~310 B/line       | **~12×**  |
+| High-entropy colored (WC) | ~5800 B/line    | ~732 B/line       | **~8×**   |
+
+The in-memory `Cell` is **72 bytes** (18-byte `TChar` + 40-byte `FormatTag` +
+2 bools + 8-byte `Option<Box<ImagePlacement>>`, padded to 72). The 40-byte `FormatTag`
+is duplicated in full on **every** cell even though runs of adjacent cells almost always
+share identical formatting, and the 8-byte image pointer is `None` for essentially every
+text cell. A compact representation that (a) shares formatting across runs instead of
+per-cell and (b) drops the always-null image slot from the common-case storage recovers
+~8–12× with zero runtime decompression cost.
+
+### 118 Design decisions (durable)
+
+- **Phase one is representation only; no codec.** The ~8–12× win comes entirely from
+  removing per-cell `FormatTag` duplication and the always-`None` image pointer from stored
+  scrollback rows. This is guaranteed regardless of content and adds **zero** read-path
+  latency (it is a compact layout, not a compressed blob). Compression (Task 119) is layered
+  on later and is explicitly out of scope here.
+- **Format-run sharing, not per-cell tags.** Store a row's formatting as a small run list
+  (`(FormatTag, run_length)` or a per-row interned tag table + per-cell index), reflecting
+  that adjacent cells overwhelmingly share a `FormatTag`. This mirrors the existing
+  `FormatTag { start, end, … }` range model already used at the flatten boundary
+  (`freminal-common/src/buffer_states/format_tag.rs`) and in `RowCacheEntry.tags`
+  (`freminal-buffer/src/buffer/flatten.rs`), so the run model is not a new concept in the
+  codebase.
+- **Scope the compaction to scrollback rows, not the active region.** The visible/active
+  region (`Buffer.rows` tail of length `height`) is mutated constantly and must stay in the
+  fast random-access `Vec<Cell>` form. Only rows that have scrolled into history
+  (`rows[0 .. rows.len()-height]`) are candidates for the compact form. The boundary is
+  crossed when a row scrolls out of the visible window.
+- **The `row_cache` duplicate is part of the prize.** `Buffer.row_cache:
+  Vec<Option<RowCacheEntry>>` (`buffer/mod.rs:84`) holds a *second*, fully-flattened copy of
+  every row (`chars`, `tags`, `bytes`, `byte_to_char`, `auto_urls`). For scrollback rows this
+  is pure duplication of data that is rarely read. Evicting / not-populating the cache entry
+  for compacted scrollback rows is a first-class part of this task's memory win, separate
+  from the cell compaction itself.
+- **Correctness is preserved exactly.** The compact form must round-trip losslessly to the
+  current `Row`/`Cell` (same `TChar`, same `FormatTag`, same wide-head/continuation flags,
+  same image placement when present). Inline-image scrollback rows (rare) may opt out of
+  compaction and stay in the `Vec<Cell>` form rather than complicate the compact encoding.
+- **No public snapshot/API change if avoidable.** `build_snapshot()` and the flatten path
+  consume rows via the existing accessors; the compact form should be internal to
+  `freminal-buffer` and decompacted on read at the flatten boundary, so the terminal-emulator
+  and GUI layers are unaffected. This respects the crate dependency boundaries in
+  `freminal-architecture`.
+- **Raising the default scrollback is a deliberate outcome, decided with data.** Once the
+  per-line cost drops ~8–12×, the default `ScrollbackConfig.limit` (currently 4000, range
+  1..=100_000, `freminal-common/src/config.rs`) can be raised substantially at net-lower
+  memory. The exact new default is chosen in 118.5 against the measured post-compaction
+  per-line cost, not guessed here.
+
+### 118 Current-state map (from recon)
+
+- **`Cell`** — `freminal-buffer/src/cell.rs:15` (`value: TChar`, `format: FormatTag`,
+  `is_wide_head`, `is_wide_continuation`, `image: Option<Box<ImagePlacement>>`). Fields are
+  private with accessors; construction via `Cell::new` / `blank_with_tag` /
+  `wide_continuation`.
+- **`Row`** — `freminal-buffer/src/row.rs:68` (`cells: Vec<Cell>`, `width`, `origin`, `join`,
+  `dirty`, `line_width`). Rows are already **sparse** (trailing default-blank cells trimmed,
+  e.g. `row.rs:570`).
+- **`Buffer.rows: Vec<Row>`** — `buffer/mod.rs:78`; scrollback = indices
+  `0..rows.len()-height`, visible = last `height`. **`Buffer.row_cache:
+  Vec<Option<RowCacheEntry>>`** — `buffer/mod.rs:84`, index-parallel to `rows`.
+- **`FormatTag`** — `freminal-common/src/buffer_states/format_tag.rs:22`; 40 bytes; the only
+  heap field is `url: Option<Arc<Url>>` (cloning bumps a refcount, never deep-copies).
+  `is_visually_default()` (`format_tag.rs:60`) is the cheap default check.
+- **Flatten boundary** — `Buffer::flatten_row` / `rows_as_tchars_and_tags_cached`
+  (`buffer/flatten.rs`) is where rows become `RowCacheEntry`; a compact scrollback row must
+  decompact correctly through this path.
+- **Benchmarks** — `freminal-buffer/benches/buffer_row_bench.rs`
+  (`bench_scrollback_flatten`, `bench_scrollback_render`, `buffer_resize`, `softwrap_heavy`)
+  and `freminal-terminal-emulator/benches/buffer_benches.rs`
+  (`bench_build_snapshot_with_scrollback`) cover the hot paths this task touches.
+
+### 118 Subtasks
+
+#### 118.1 — READ-ONLY audit + compact-representation design
+
+Scope: read-only across `freminal-buffer/src/cell.rs`, `row.rs`, `buffer/mod.rs`,
+`buffer/flatten.rs`, `freminal-common/src/buffer_states/format_tag.rs`, and the buffer
+benches.
+
+What: produce the concrete design for the compact scrollback-row representation. Decide:
+the exact compact type (e.g. `CompactRow { chars: Vec<TChar>, tag_runs: Vec<(FormatTag,
+u32)>, flags: …, line_width, origin, join }` or an interned-tag-table variant); the
+compaction trigger (row scrolls out of the visible window) and decompaction trigger (row
+re-enters visible window / is read for flatten); how inline-image rows are handled (opt out
+vs encode); how `row_cache` eviction for compacted rows is wired; and the exact accessor/
+flatten seam where decompaction happens so no higher layer sees the compact form. Confirm
+the sparse-row invariant interaction. Name every file each later subtask touches.
+
+Deliverable: design report with the chosen type definitions and the file-scoping for
+118.2–118.6. No code.
+
+Verification: none (read-only).
+
+Prohibitions: do NOT edit files; do NOT introduce a compression codec (that is Task 119);
+do NOT begin implementation; do NOT proceed without maintainer review of the design.
+
+Stop: report design; await explicit sign-off before 118.2.
+
+#### 118.2 — Compact row type + lossless round-trip (pure, in `freminal-buffer`)
+
+Scope: new module `freminal-buffer/src/compact_row.rs` (or as named in 118.1);
+`freminal-buffer/src/lib.rs` (module decl); unit tests in the new module.
+
+What: implement the compact row type chosen in 118.1 and the two conversions
+`Row -> CompactRow` and `CompactRow -> Row`, exactly lossless for `TChar`, `FormatTag`
+(including `Arc<Url>` sharing), wide-head/continuation flags, `line_width`, `origin`,
+`join`, and inline-image placement (or the documented opt-out). Pure data transform; no
+Buffer integration yet.
+
+Deliverable: the type + conversions + exhaustive round-trip tests (plain rows, colored
+runs, mixed tags, wide chars, URL tags, blank/sparse rows, and — per the 118.1 decision —
+image rows or the opt-out path). A `size_of`/heap-size assertion demonstrating the
+per-row reduction on a representative row.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`.
+
+Prohibitions: do NOT touch `Buffer`; do NOT change `Cell`/`Row` public API; do NOT add a
+codec; do NOT proceed.
+
+Stop: report + await review.
+
+#### 118.3 — Buffer integration: compact scrollback rows on scroll-out
+
+Scope: `freminal-buffer/src/buffer/mod.rs` (row storage + the scroll-out path), the
+scroll/enforce-scrollback sites (`enforce_scrollback_limit`, the scroll path around
+`buffer/mod.rs:333`), and `buffer/flatten.rs` (decompact-on-read seam).
+
+What: store scrollback rows in the compact form, decompacting at the flatten/read boundary
+so no higher layer observes the change. Compact a row when it scrolls out of the visible
+window; keep the visible `height` rows in the existing `Vec<Cell>` form. Preserve every
+existing `Buffer` behaviour (visible_rows, resize, alt-screen switch, prompt_rows/
+command_blocks index shifting on drain).
+
+Deliverable: integration + tests proving identical observable output (flatten, visible_rows,
+snapshot content) before/after compaction across scroll, and that scrollback eviction still
+shifts dependent indices correctly.
+
+Verification: `cargo test --all`; clippy. Existing buffer tests must pass unchanged.
+
+Prohibitions: do NOT alter visible-region storage; do NOT change snapshot/public API; do
+NOT add a codec; do NOT proceed.
+
+Stop: report + await review.
+
+#### 118.4 — `row_cache` eviction for compacted scrollback rows
+
+Scope: `freminal-buffer/src/buffer/mod.rs` (`row_cache` population/invalidation),
+`buffer/flatten.rs` (cache lookup).
+
+What: stop populating / actively evict `RowCacheEntry` for rows that are in the compact
+scrollback form, so the second flattened copy is not held for cold history. Re-populate on
+demand when such a row is read (decompacted) for flatten. Ensure the cache-index parallelism
+with `rows` is maintained through drains and resizes.
+
+Deliverable: cache-eviction logic + tests asserting compacted scrollback rows hold no cache
+entry, that reading one repopulates correctly, and that URL auto-detection still works on
+re-read.
+
+Verification: `cargo test --all`; clippy.
+
+Prohibitions: do NOT evict cache for visible rows; do NOT proceed.
+
+Stop: report + await review.
+
+#### 118.5 — Raise default scrollback + benchmark before/after
+
+Scope: `freminal-common/src/config.rs` (`ScrollbackConfig::default`), `config_example.toml`,
+the buffer benches (`freminal-buffer/benches/buffer_row_bench.rs`,
+`freminal-terminal-emulator/benches/buffer_benches.rs`).
+
+What: capture before/after memory + throughput per `performance-benchmarks` +
+`freminal-bench-table` for `bench_scrollback_flatten`, `bench_scrollback_render`,
+`bench_build_snapshot_with_scrollback`, `buffer_resize`, and `softwrap_heavy`. Confirm no
+>15% regression on the read/flatten hot paths (some slowdown on the cold decompact-on-read
+path is acceptable and expected; the visible-region path must not regress). Using the
+measured post-compaction per-line cost, raise `ScrollbackConfig`'s default `limit` to a value
+that is net-lower-or-equal memory versus today's 4000-line default (proposed target decided
+here with data, not guessed), and update `config_example.toml` and the field doc/comment.
+
+Deliverable: benchmark record (before/after) + the new default + config doc update.
+
+Verification: `cargo test --all`; clippy; `cargo bench --no-run --all`; markdownlint clean
+for any doc edits.
+
+Prohibitions: do NOT raise the default without the benchmark justifying it; do NOT regress
+the visible-region path >15%; do NOT proceed.
+
+Stop: report + await review.
+
+#### 118.6 — Windows cross-check + final verification
+
+Scope: no new logic; verification only (plus any trivial fix the cross-check surfaces).
+
+What: run `cargo xtask check-windows` (per `freminal-windows-crosscheck`) since this touches
+buffer storage/threading-adjacent code, and the full verification suite. Fix any
+Windows-only issue surfaced.
+
+Deliverable: green verification across the suite + Windows cross-check.
+
+Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- -D warnings`;
+`cargo machete`; `cargo fmt --all -- --check`; `cargo xtask check-windows`.
+
+Prohibitions: do NOT add features here; do NOT proceed past a failing check.
+
+Stop: report results.
+
+### 118 Open questions (resolve at activation)
+
+- Compact encoding shape: format-run list vs per-row interned tag table + indices. (Lean:
+  run list, since `FormatTag` runs are already the mental model and runs are typically very
+  few per row. Decide in 118.1 with a quick size comparison on representative rows.)
+- Inline-image scrollback rows: encode into the compact form, or opt out and keep as
+  `Vec<Cell>`? (Lean: opt out — image rows are rare and the `Box<ImagePlacement>` complicates
+  the flat encoding for negligible gain. Decide in 118.1.)
+- New default scrollback value: decided in 118.5 from the measured per-line cost. Candidate
+  framing: pick the largest round number whose post-compaction memory ≤ today's 4000-line
+  uncompacted memory (likely in the tens of thousands).

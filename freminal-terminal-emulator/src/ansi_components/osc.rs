@@ -6,7 +6,7 @@
 use crate::ansi::{ParserOutcome, parse_param_as};
 use crate::ansi_components::tracer::{SequenceTraceable, SequenceTracer};
 use crate::error::AnsiParseError;
-use freminal_common::buffer_states::ftcs::parse_ftcs_params;
+use freminal_common::buffer_states::ftcs::{is_known_ftcs_marker, parse_ftcs_params};
 use freminal_common::buffer_states::osc::{
     AnsiOscInternalType, AnsiOscToken, AnsiOscType, OscTarget, UrlResponse,
 };
@@ -267,15 +267,26 @@ fn dispatch_osc_target(
 
             if let Some(marker) = parse_ftcs_params(&ftcs_str_refs) {
                 output.push(TerminalOutput::OscResponse(AnsiOscType::Ftcs(marker)));
+            } else if is_known_ftcs_marker(&ftcs_str_refs) {
+                // Known FTCS marker (A/B/C/D/P) that we recognise but did not
+                // act on — a foreign emitter sent it without the `freminal=1`
+                // tag (e.g. Apple Terminal's `133;A;cl=m;aid=$$`, or
+                // Starship/oh-my-zsh/VTE). Freminal uses its own
+                // `freminal=1`-tagged FTCS variant (see shell-integration/) and
+                // deliberately ignores foreign duplicates to avoid double
+                // command blocks. This is expected and benign, so it is
+                // silently dropped WITHOUT a log by design.
             } else {
-                // Foreign FTCS markers (e.g. Apple Terminal's `/etc/bashrc`
-                // emitting `133;A;cl=m;aid=$$` before our PS1 wraps) are
-                // intentionally dropped to avoid duplicate command blocks.
-                // Logged at debug to aid diagnosis without flooding the
-                // log on systems where a foreign integration is active.
-                tracing::debug!(
-                    "OSC 133: ignored foreign or unrecognised FTCS params: recent='{}'",
-                    seq_trace.as_str()
+                // Unknown or malformed OSC 133: the marker letter is not one we
+                // recognise (e.g. `Z`, or a future FTCS addition like `E`), or
+                // the parameter list was empty. Unlike a known-foreign marker,
+                // this is a genuine gap — the OSC 133 surface may have grown a
+                // variant we do not handle, or a program sent something
+                // malformed. Log it at warn with the full raw sequence so the
+                // unhandled surface can be audited.
+                tracing::warn!(
+                    "OSC 133: unrecognised or malformed FTCS marker (not a known A/B/C/D/P); raw sequence: \"{}\"",
+                    seq_trace.as_escaped()
                 );
             }
         }
@@ -334,8 +345,8 @@ fn dispatch_osc_target(
         // Known-but-unimplemented OSC targets.  These are recognised
         // sequences sent by common programs (vim/neovim, zsh, tmux) that
         // Freminal cannot meaningfully act on (X11 mouse colors, Tektronix
-        // graphics, color-scheme notifications).  Silently
-        // consumed at trace level to avoid warn! spam during normal use.
+        // graphics, color-scheme notifications).  Logged at warn with the
+        // full raw sequence so the unhandled surface can be audited.
         OscTarget::MouseForeground
         | OscTarget::MouseBackground
         | OscTarget::TekForeground
@@ -343,18 +354,17 @@ fn dispatch_osc_target(
         | OscTarget::HighlightBackground
         | OscTarget::HighlightForeground
         | OscTarget::ColorSchemeNotification => {
-            tracing::trace!(
-                "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}, recent='{}'",
-                seq_trace.as_str()
+            tracing::warn!(
+                "Recognised but unimplemented OSC (silently consumed): target={osc_target:?}; raw sequence: \"{}\"",
+                seq_trace.as_escaped()
             );
         }
         OscTarget::Unknown => {
-            // Unknown OSC sequences are silently consumed (like
-            // xterm/VTE).  Downgraded from error!/Invalid to warn!
-            // so they don't spam logs during normal usage.
+            // Unknown OSC sequences are silently consumed (like xterm/VTE)
+            // but logged at warn with the full raw sequence for auditing.
             tracing::warn!(
-                "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}, recent='{}'",
-                seq_trace.as_str()
+                "Unknown OSC Target (silently consumed): type_number={osc_internal_type:?}; raw sequence: \"{}\"",
+                seq_trace.as_escaped()
             );
         }
     }
@@ -760,11 +770,33 @@ mod tests {
     }
 
     #[test]
-    fn osc133_ftcs_unknown_marker_silently_consumed() {
-        // OSC 133 ; Z BEL — unknown FTCS marker
+    fn osc133_ftcs_unknown_marker_consumed_and_logged() {
+        // OSC 133 ; Z BEL — `Z` is NOT a known FTCS marker (A/B/C/D/P), so this
+        // is treated as an unrecognised/malformed OSC 133: no buffer output,
+        // but it IS logged at warn (with the raw sequence) so a new/unknown
+        // OSC 133 variant surfaces for auditing rather than vanishing.
         let output = feed_osc(b"133;Z\x07");
-        // Unknown markers produce no output (the warn! is just logging)
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn osc133_known_foreign_marker_consumed_without_output() {
+        // Broaden coverage beyond `A` (see `osc133_ftcs_foreign_marker_...`):
+        // the `freminal=1`-gated markers B/C/D, when sent WITHOUT `freminal=1`,
+        // are foreign duplicates — recognised, deliberately ignored, no output
+        // (and, by design, no unhandled-log). `P` is excluded here: it is
+        // intentionally freminal-independent and DOES emit output.
+        for seq in [
+            b"133;B\x07".as_slice(),   // prompt end / command input start
+            b"133;C\x07".as_slice(),   // command output start
+            b"133;D;1\x07".as_slice(), // command finished, exit code 1
+        ] {
+            let output = feed_osc(seq);
+            assert!(
+                output.is_empty(),
+                "known foreign marker {seq:?} must produce no output"
+            );
+        }
     }
 
     // ── Lines 272-276: OSC 7 (RemoteHost) ───────────────────────────────────

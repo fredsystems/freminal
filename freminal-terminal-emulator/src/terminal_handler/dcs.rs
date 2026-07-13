@@ -20,6 +20,7 @@ use freminal_common::{buffer_states::modes::s8c1t::S8c1t, cursor::CursorVisualSt
 use super::TerminalHandler;
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
+use crate::ansi_components::tracer::escape_sequence_for_log;
 
 impl TerminalHandler {
     /// Handle a DCS (Device Control String) sequence.
@@ -380,7 +381,10 @@ impl TerminalHandler {
                 if let Ok(m) = EraseDisplayMode::try_from(mode) {
                     self.handle_erase_in_display(m);
                 } else {
-                    tracing::warn!("DCS tmux passthrough: unknown ED mode {mode}");
+                    tracing::warn!(
+                        "DCS tmux passthrough: unknown ED mode {mode}; raw CSI: \"\\x1b[{}\"",
+                        escape_sequence_for_log(csi_body)
+                    );
                 }
                 true
             }
@@ -394,7 +398,10 @@ impl TerminalHandler {
                 if let Ok(m) = EraseLineMode::try_from(mode) {
                     self.handle_erase_in_line(m);
                 } else {
-                    tracing::warn!("DCS tmux passthrough: unknown EL mode {mode}");
+                    tracing::warn!(
+                        "DCS tmux passthrough: unknown EL mode {mode}; raw CSI: \"\\x1b[{}\"",
+                        escape_sequence_for_log(csi_body)
+                    );
                 }
                 true
             }

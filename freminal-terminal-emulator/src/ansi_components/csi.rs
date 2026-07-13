@@ -71,7 +71,7 @@ use super::csi_commands::{
     su::ansi_parser_inner_csi_finished_su, tbc::ansi_parser_inner_csi_finished_tbc,
     vpa::ansi_parser_inner_csi_finished_vpa, xtversion::ansi_parser_inner_csi_finished_xtversion,
 };
-use crate::ansi_components::tracer::SequenceTracer;
+use crate::ansi_components::tracer::{SequenceTracer, escape_sequence_for_log};
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
 
 #[derive(Eq, PartialEq, Debug, Default)]
@@ -83,12 +83,39 @@ pub(crate) enum AnsiCsiParserState {
     Invalid,
     InvalidFinished,
 }
+/// Which Control Sequence Introducer began this CSI sequence.
+///
+/// The 7-bit `ESC [` form and the 8-bit `0x9B` (C1) form are equivalent
+/// grammatically, but for lossless diagnostic logging they must be
+/// reconstructed distinctly: the sub-parser never receives the introducer
+/// bytes, so it records which one was used at construction time.
+#[derive(Eq, PartialEq, Debug, Default, Clone, Copy)]
+pub enum CsiIntroducer {
+    /// 7-bit CSI: `ESC [` (`0x1B 0x5B`).
+    #[default]
+    SevenBit,
+    /// 8-bit CSI: `0x9B` (C1).
+    EightBit,
+}
+
+impl CsiIntroducer {
+    /// The raw introducer bytes as they appear on the wire.
+    const fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::SevenBit => b"\x1b[",
+            Self::EightBit => b"\x9b",
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Default)]
 pub struct AnsiCsiParser {
     pub(crate) state: AnsiCsiParserState,
     pub params: Vec<u8>,
     pub intermediates: Vec<u8>,
     pub sequence: Vec<u8>,
+    /// The introducer that began this sequence, for lossless diagnostics.
+    introducer: CsiIntroducer,
     /// Internal trace of recent bytes for diagnostics.
     seq_trace: SequenceTracer,
 }
@@ -105,13 +132,26 @@ impl SequenceTraceable for AnsiCsiParser {
 }
 
 impl AnsiCsiParser {
+    /// Construct a parser for a 7-bit (`ESC [`) CSI sequence.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_introducer(CsiIntroducer::SevenBit)
+    }
+
+    /// Construct a parser for an 8-bit (`0x9B`, C1) CSI sequence.
+    #[must_use]
+    pub fn new_c1() -> Self {
+        Self::with_introducer(CsiIntroducer::EightBit)
+    }
+
+    #[must_use]
+    fn with_introducer(introducer: CsiIntroducer) -> Self {
         Self {
             state: AnsiCsiParserState::Params,
             params: Vec::with_capacity(8),
             intermediates: Vec::with_capacity(4),
             sequence: Vec::with_capacity(16),
+            introducer,
             seq_trace: SequenceTracer::new(),
         }
     }
@@ -120,6 +160,23 @@ impl AnsiCsiParser {
     #[must_use]
     pub fn trace_str(&self) -> String {
         self.seq_trace.as_str()
+    }
+
+    /// Render the full raw CSI sequence — including the reconstructed CSI
+    /// introducer that the sub-parser never receives — as a
+    /// reconstruction-faithful escaped string for diagnostics.
+    ///
+    /// The body is [`Self::sequence`], the accumulated CSI body bytes
+    /// (parameters, intermediates, and the final byte). The actual introducer
+    /// (`ESC [` for 7-bit, `0x9B` for 8-bit C1) is prepended so the logged form
+    /// is the complete sequence a terminal would send.
+    #[must_use]
+    fn format_raw_csi(&self) -> String {
+        let introducer = self.introducer.bytes();
+        let mut full = Vec::with_capacity(self.sequence.len().saturating_add(introducer.len()));
+        full.extend_from_slice(introducer);
+        full.extend_from_slice(&self.sequence);
+        escape_sequence_for_log(&full)
     }
 
     /// Push a byte into the parser
@@ -363,7 +420,19 @@ impl AnsiCsiParser {
                 }
                 push_result
             }
-            AnsiCsiParserState::Finished(_esc) => push_result,
+            AnsiCsiParserState::Finished(_esc) => {
+                // Syntactically valid CSI whose final byte we do not implement.
+                // The grammar accepted it (params/intermediates/terminator all
+                // legal) but no dispatch arm matched, so nothing is emitted.
+                // Log the complete raw sequence — reconstructed with its actual
+                // introducer — so the offending sequence is identifiable rather
+                // than silently dropped.
+                tracing::warn!(
+                    "Unhandled CSI final byte (valid grammar, no dispatch): {}",
+                    self.format_raw_csi()
+                );
+                push_result
+            }
 
             // Below should cover the invalid state(AnsiCsiParserState::Invalid) as well as any other finished states
             _ => push_result,
@@ -663,5 +732,47 @@ mod tests {
         let result = parser.ansiparser_inner_csi(b'w', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn format_raw_csi_reconstructs_full_sequence() {
+        // The CSI body accumulated by the parser excludes the `ESC [`
+        // introducer; format_raw_csi must prepend it so the logged form is the
+        // complete sequence a terminal would send.
+        let mut parser = AnsiCsiParser::new();
+        parser.sequence = b"38;5;9w".to_vec();
+        assert_eq!(parser.format_raw_csi(), "\\x1b[38;5;9w");
+        // Empty body still shows the introducer.
+        let empty = AnsiCsiParser::new();
+        assert_eq!(empty.format_raw_csi(), "\\x1b[");
+    }
+
+    #[test]
+    fn format_raw_csi_preserves_c1_introducer() {
+        // A sequence begun by the 8-bit C1 introducer (`0x9B`) must be logged
+        // as `\x9b...`, not the 7-bit `\x1b[...` form, to stay lossless.
+        let mut parser = AnsiCsiParser::new_c1();
+        parser.sequence = b"38;5;9w".to_vec();
+        assert_eq!(parser.format_raw_csi(), "\\x9b38;5;9w");
+        // Empty body still shows the 8-bit introducer.
+        let empty = AnsiCsiParser::new_c1();
+        assert_eq!(empty.format_raw_csi(), "\\x9b");
+    }
+
+    #[test]
+    fn unhandled_final_byte_accumulates_full_body_for_logging() {
+        // Feed an unhandled-but-valid CSI (`ESC [ 1 ; 2 W`) one byte at a time
+        // and confirm the parser's `sequence` field holds the complete body so
+        // the diagnostic log can render it.
+        let mut parser = AnsiCsiParser::new();
+        let mut output = Vec::new();
+        for &b in b"1;2" {
+            let _ = parser.ansiparser_inner_csi(b, &mut output);
+        }
+        let result = parser.ansiparser_inner_csi(b'W', &mut output);
+        assert_eq!(result, ParserOutcome::Finished);
+        assert!(output.is_empty());
+        assert_eq!(parser.sequence, b"1;2W");
+        assert_eq!(parser.format_raw_csi(), "\\x1b[1;2W");
     }
 }

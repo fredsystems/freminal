@@ -64,9 +64,9 @@ pub(super) fn handle_osc_shell_info(
     // future sub-commands added to newer shell-integration scripts will
     // be ignored by older freminal binaries without producing a parse
     // error.
-    tracing::debug!(
-        "OSC 1338: unrecognised sub-command (ignored): recent='{}'",
-        seq_trace.as_str()
+    tracing::warn!(
+        "OSC 1338: unrecognised sub-command (ignored); raw sequence: \"{}\"",
+        seq_trace.as_escaped()
     );
 }
 

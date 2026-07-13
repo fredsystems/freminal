@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use crate::ansi::{ParserOutcome, parse_param_as};
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -16,7 +17,10 @@ pub fn ansi_parser_inner_csi_finished_dl(
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
     let Ok(param) = parse_param_as::<usize>(params) else {
-        warn!("Invalid dl command");
+        warn!(
+            "Invalid DL command (CSI M); raw params: \"{}\"",
+            escape_sequence_for_log(params)
+        );
         output.push(TerminalOutput::Invalid);
 
         return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDLCommand(format!(

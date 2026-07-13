@@ -5,6 +5,7 @@
 
 use crate::ansi::{ParserOutcome, split_params_into_semicolon_delimited_usize};
 use crate::ansi_components::csi_commands::util::param_or;
+use crate::ansi_components::tracer::escape_sequence_for_log;
 use crate::error::ParserFailures;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -80,6 +81,9 @@ pub fn ansi_parser_inner_csi_finished_decslpp(
     params: &[u8],
     output: &mut Vec<TerminalOutput>,
 ) -> ParserOutcome {
+    // Preserve the original raw parameter bytes for diagnostics before the
+    // binding is shadowed by the parsed form below.
+    let raw_params = params;
     let params = split_params_into_semicolon_delimited_usize(params);
 
     let Ok(params) = params else {
@@ -107,7 +111,10 @@ pub fn ansi_parser_inner_csi_finished_decslpp(
     let parsed = match WindowManipulation::try_from((ps1, ps2, ps3)) {
         Ok(parsed) => parsed,
         Err(e) => {
-            warn!("Invalid DECSLPP sequence: {e}");
+            warn!(
+                "Invalid DECSLPP sequence: {e} (CSI t); raw params: \"{}\"",
+                escape_sequence_for_log(raw_params)
+            );
             output.push(TerminalOutput::Invalid);
 
             return ParserOutcome::InvalidParserFailure(ParserFailures::UnhandledDECSLPPCommand(
