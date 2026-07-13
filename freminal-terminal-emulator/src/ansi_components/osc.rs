@@ -781,11 +781,22 @@ mod tests {
 
     #[test]
     fn osc133_known_foreign_marker_consumed_without_output() {
-        // `133;A;aid=12345` — `A` is a known marker but lacks `freminal=1`, so
-        // it is a foreign duplicate: recognised, deliberately ignored, no
-        // output (and, by design, no unhandled-log).
-        let output = feed_osc(b"133;A;aid=12345\x07");
-        assert!(output.is_empty());
+        // Broaden coverage beyond `A` (see `osc133_ftcs_foreign_marker_...`):
+        // the `freminal=1`-gated markers B/C/D, when sent WITHOUT `freminal=1`,
+        // are foreign duplicates — recognised, deliberately ignored, no output
+        // (and, by design, no unhandled-log). `P` is excluded here: it is
+        // intentionally freminal-independent and DOES emit output.
+        for seq in [
+            b"133;B\x07".as_slice(),   // prompt end / command input start
+            b"133;C\x07".as_slice(),   // command output start
+            b"133;D;1\x07".as_slice(), // command finished, exit code 1
+        ] {
+            let output = feed_osc(seq);
+            assert!(
+                output.is_empty(),
+                "known foreign marker {seq:?} must produce no output"
+            );
+        }
     }
 
     // ── Lines 272-276: OSC 7 (RemoteHost) ───────────────────────────────────
