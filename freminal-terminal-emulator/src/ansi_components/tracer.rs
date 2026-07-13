@@ -167,7 +167,22 @@ pub trait SequenceTraceable {
 
 #[cfg(test)]
 mod tests {
-    use super::{SequenceTracer, escape_sequence_for_log};
+    use super::{SequenceTraceable, SequenceTracer, escape_sequence_for_log};
+
+    /// Minimal `SequenceTraceable` host so the trait's default methods can be
+    /// exercised directly (rather than only via real parsers).
+    struct TraceHost {
+        tracer: SequenceTracer,
+    }
+
+    impl SequenceTraceable for TraceHost {
+        fn seq_tracer(&mut self) -> &mut SequenceTracer {
+            &mut self.tracer
+        }
+        fn seq_tracer_ref(&self) -> &SequenceTracer {
+            &self.tracer
+        }
+    }
 
     #[test]
     fn escape_printable_ascii_is_verbatim() {
@@ -229,6 +244,25 @@ mod tests {
             tracer.as_escaped(),
             escape_sequence_for_log(&tracer.to_bytes())
         );
+    }
+
+    #[test]
+    fn current_trace_escaped_renders_traced_bytes() {
+        // Directly exercise the public trait method: it must render the current
+        // trace using the same lossless escaping as `escape_sequence_for_log`,
+        // including non-printable and non-UTF-8 bytes.
+        let mut host = TraceHost {
+            tracer: SequenceTracer::new(),
+        };
+        for &b in &[0x1b, b'[', b'3', b'8', b';', 0xff, b'"'] {
+            host.append_trace(b);
+        }
+        assert_eq!(host.current_trace_escaped(), "\\x1b[38;\\xff\\\"");
+        // Empty trace renders as an empty string.
+        let empty = TraceHost {
+            tracer: SequenceTracer::new(),
+        };
+        assert_eq!(empty.current_trace_escaped(), "");
     }
 
     #[test]
