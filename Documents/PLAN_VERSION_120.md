@@ -425,6 +425,56 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   1..=100_000, `freminal-common/src/config.rs`) can be raised substantially at net-lower
   memory. The exact new default is chosen in 118.5 against the measured post-compaction
   per-line cost, not guessed here.
+- **Compaction lives inside `Row`, not `Buffer` (chosen at 118.3 activation, with recon).**
+  Two designs were weighed against measured blast radius: (A) change `Buffer.rows` to
+  `Vec<StoredRow>` where `StoredRow = enum { Live(Row), Compact(CompactRow) }`, and (B) keep
+  `Buffer.rows: Vec<Row>` and give `Row` an internal storage enum
+  (`{ Live(Vec<Cell>), Compact(CompactRow) }`) so compaction is transparent behind `Row`'s
+  existing accessors. Recon showed Design A touches ~228 `self.rows[...]` sites plus ~28 bare
+  `pub`-field accesses (`origin`/`join`/`dirty`/`line_width`) across all 10 `buffer/` files —
+  every one a match-arm or new accessor, a large correctness-risk surface. Design B confines
+  the storage change to `row.rs`; `Buffer`'s call sites are untouched. **Design B chosen.** The
+  performance rationale: the change adds **zero** cost to the hot paths (frame render / flatten,
+  PTY-ingest `insert_text`, scroll) under either design, so the deciding factor is
+  correctness-risk, and B's is far smaller.
+- **Compact rows are never mutated in place — decompact-all-on-resize (118.3 recon finding).**
+  The initial assumption that scrollback rows are read-only once they leave the visible window
+  is **false**. Recon confirmed three in-place scrollback-touch paths: (1) the `set_size`
+  width-change pass (`resize_and_alt.rs:132-146`) force-dirties and re-widths every row incl.
+  scrollback after reflow; (2) the `resize_height` grow pass (`resize_and_alt.rs:730-733`)
+  dirties `0..old_height` (scrollback indices — see cleanup note below); (3) the whole-buffer
+  image-placement-clear family (`images.rs`), reachable from everyday `insert_text`/erase when
+  a partially-visible image is overwritten, and from kitty `a=d`. Path (3) is neutralised for
+  free: **image rows opt out of compaction**, so an image-clear only ever touches `Live` rows.
+  Paths (1)/(2) are handled by **decompacting every compact scrollback row back to `Live` at
+  the start of any resize**, letting the existing (delicate) reflow/dirty passes run unchanged,
+  then re-compacting out-of-window rows afterward. This is chosen for performance where it
+  matters: resize is a rare, human-timescale event already doing O(all rows) work (reflow does
+  `mem::take` + full rebuild), so the extra decompact pass is negligible against reflow's own
+  cost, adds **zero** cost to every hot path, and keeps the fragile resize logic untouched.
+  Making the resize passes compact-aware was rejected: it saves nothing measurable (the saving
+  is invisible against reflow, and resize is not hot) at real correctness risk to the most
+  delicate code in the buffer.
+- **`row_cache` decompaction seam is via `Row`'s accessors, memoized (118.3).** The 3
+  borrow-returning accessors (`cells()`, `characters()`, `cells_mut()`) are the seam: a
+  `Compact` `Row` materialises back to `Live` on first cell access and stays `Live` for the
+  duration of the read burst, so repeated accesses within one flatten/extract are zero-cost.
+  Since scrollback is read-mostly, this one-time cost per read burst is acceptable per 118.5's
+  "cold decompact-on-read may slow down; visible-region path must not regress" rule.
+
+### 118 Cleanup entries (surfaced during recon)
+
+- **118.7 — `resize_height` grow-pass dirties scrollback rows, not the old visible window.**
+  Surface point: 118.3 recon (`resize_and_alt.rs:730-733`). The height-grow branch marks rows
+  `0..old_height` dirty, but when scrollback exists the old visible window was
+  `rows.len()-old_height..rows.len()`, so `0..old_height` are scrollback-index rows — the wrong
+  rows are being dirtied/cache-invalidated. Impact: likely benign today (over-invalidation, not
+  corruption) but wastes cache work and is a latent correctness smell; it also interacts with
+  compaction (dirtying a compact scrollback row). Scope: `resize_and_alt.rs` height-grow branch
+  only. Suggested approach: dirty the correct visible-window range; add a regression test
+  asserting scrollback rows retain their cache across a height grow. Verification: `cargo test
+  --all`; the new regression test. Scheduling: address within Task 118 (before or alongside
+  118.3's decompact-on-resize, since that path overlaps); do not defer past v0.12.0.
 
 ### 118 Current-state map (from recon)
 
