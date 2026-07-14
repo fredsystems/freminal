@@ -44,6 +44,7 @@
 
 pub mod buffer;
 pub mod cell;
+pub mod compact_row;
 pub mod image_store;
 pub mod response;
 pub mod row;

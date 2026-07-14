@@ -69,6 +69,32 @@ impl Cell {
         }
     }
 
+    /// Reconstruct a cell from its raw parts, exactly preserving the wide-glyph
+    /// flags as given rather than re-deriving them from `value`'s display width.
+    ///
+    /// This is an internal reconstruction primitive used by
+    /// [`crate::compact_row::CompactRow::to_row`] to losslessly rebuild cells
+    /// whose `is_wide_head` / `is_wide_continuation` flags may not agree with
+    /// what [`Cell::new`] would derive — e.g. orphan continuation cells (a
+    /// continuation with no preceding head), or a head cell whose flag was set
+    /// independently of `value.display_width()`. Compact rows never hold
+    /// images, so `image` is always `None`.
+    #[must_use]
+    pub(crate) const fn from_parts(
+        value: TChar,
+        format: FormatTag,
+        is_wide_head: bool,
+        is_wide_continuation: bool,
+    ) -> Self {
+        Self {
+            value,
+            format,
+            is_wide_head,
+            is_wide_continuation,
+            image: None,
+        }
+    }
+
     /// Returns `true` if this cell is the head (first column) of a wide glyph.
     #[must_use]
     pub const fn is_head(&self) -> bool {
@@ -161,6 +187,29 @@ mod cell_tests {
         let continuation_cell = Cell::wide_continuation();
         assert!(continuation_cell.is_continuation());
         assert!(!continuation_cell.is_head());
+    }
+
+    #[test]
+    fn test_cell_from_parts_preserves_arbitrary_flag_combinations() {
+        // Orphan continuation: is_continuation set, but with a non-default
+        // value/format that `Cell::wide_continuation()` could never produce.
+        let orphan = Cell::from_parts(TChar::Ascii(b'X'), FormatTag::default(), false, true);
+        assert_eq!(orphan.tchar(), &TChar::Ascii(b'X'));
+        assert!(!orphan.is_head());
+        assert!(orphan.is_continuation());
+        assert!(!orphan.has_image());
+
+        // Head flag disagreeing with display_width (narrow char marked as head).
+        let mismatched_head =
+            Cell::from_parts(TChar::Ascii(b'A'), FormatTag::default(), true, false);
+        assert!(mismatched_head.is_head());
+        assert!(!mismatched_head.is_continuation());
+
+        // Both flags set simultaneously — never produced by public constructors,
+        // but `from_parts` must still round-trip it exactly.
+        let both = Cell::from_parts(TChar::Space, FormatTag::default(), true, true);
+        assert!(both.is_head());
+        assert!(both.is_continuation());
     }
 
     #[test]
