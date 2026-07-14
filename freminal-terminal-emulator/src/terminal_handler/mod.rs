@@ -457,7 +457,7 @@ impl TerminalHandler {
     }
 
     /// Return a new handler with the given scrollback limit instead of the
-    /// default (4000).  Builder-style chaining method.
+    /// default (10000).  Builder-style chaining method.
     #[must_use]
     pub fn with_scrollback_limit(mut self, limit: usize) -> Self {
         self.buffer = self.buffer.with_scrollback_limit(limit);
@@ -2336,9 +2336,9 @@ mod tests {
     }
 
     #[test]
-    fn default_scrollback_limit_is_4000() {
+    fn default_scrollback_limit_is_10000() {
         let handler = TerminalHandler::new(80, 24);
-        assert_eq!(handler.buffer().scrollback_limit(), 4000);
+        assert_eq!(handler.buffer().scrollback_limit(), 10_000);
     }
 
     #[test]

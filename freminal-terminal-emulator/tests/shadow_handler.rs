@@ -155,7 +155,7 @@ fn terminal_state_default_scrollback_limit() {
     let state = TerminalState::default();
     assert_eq!(
         state.handler.buffer().scrollback_limit(),
-        4000,
+        10_000,
         "default TerminalState should use the compiled-in scrollback limit"
     );
 }
@@ -177,8 +177,8 @@ fn terminal_state_none_scrollback_limit_uses_default() {
     let state = TerminalState::new(tx, None);
     assert_eq!(
         state.handler.buffer().scrollback_limit(),
-        4000,
-        "TerminalState::new with None should keep the default 4000"
+        10_000,
+        "TerminalState::new with None should keep the default 10000"
     );
 }
 

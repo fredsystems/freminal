@@ -209,6 +209,13 @@ impl CompactRow {
     pub const fn tag_run_count(&self) -> usize {
         self.tag_runs.len()
     }
+
+    /// Number of stored cells (one `TChar` per stored cell), without
+    /// decompacting. Equals the source row's `cells().len()`.
+    #[must_use]
+    pub const fn stored_cell_count(&self) -> usize {
+        self.chars.len()
+    }
 }
 
 #[cfg(test)]

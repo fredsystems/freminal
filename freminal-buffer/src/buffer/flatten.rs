@@ -174,11 +174,41 @@ impl Buffer {
         }
 
         let auto_detect = self.auto_detect_urls;
-        Self::rows_as_tchars_and_tags_cached(
+        let result = Self::rows_as_tchars_and_tags_cached(
             &mut self.rows[..visible_start],
             &mut self.row_cache[..visible_start],
             auto_detect,
-        )
+        );
+
+        // Task 118.4: a full-scrollback flatten (the Ctrl-F search-buffer
+        // path) is the only caller that reads cold scrollback history in
+        // bulk. `rows_as_tchars_and_tags_cached` just built (or reused) a
+        // `RowCacheEntry` per row, and reading a compact row's cells along
+        // the way (in `flatten_row`) also warmed its `OnceCell` decompaction
+        // memo — so every compact row now momentarily holds three
+        // representations at once (its `CompactRow`, the memoized
+        // `Vec<Cell>`, and the `RowCacheEntry`). Cold scrollback rows are
+        // rarely re-read, so we drop the two larger, cheaply-rebuildable
+        // copies here and keep only the small `CompactRow`. The next
+        // scrollback flatten rebuilds an identical `RowCacheEntry` from the
+        // `CompactRow` (`entry.is_none()` forces a rebuild in Step 1 of
+        // `rows_as_tchars_and_tags_cached`), so output is unaffected — only
+        // resident memory changes.
+        //
+        // Visible rows are never in this slice (`..visible_start` excludes
+        // them), so their cache is untouched: they re-render every frame and
+        // must stay warm.
+        for (row, entry) in self.rows[..visible_start]
+            .iter_mut()
+            .zip(self.row_cache[..visible_start].iter_mut())
+        {
+            if row.is_compact() {
+                *entry = None;
+                row.release_decompacted_cache();
+            }
+        }
+
+        result
     }
 
     /// Shared helper: flatten a slice of [`Row`]s into `(Vec<TChar>,
@@ -826,5 +856,206 @@ mod extended_window_tests {
             !buf.any_visible_dirty_extended(0, 2),
             "freshly flattened extended window must be clean"
         );
+    }
+}
+
+/// Task 118.4: cold scrollback rows must not retain the second (row-cache)
+/// and third (decompaction-memo) copies of their cell data after a
+/// full-scrollback flatten, while output stays byte-identical across
+/// repeated flattens and visible-row caches stay warm.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scrollback_eviction_tests {
+    use crate::buffer::Buffer;
+    use crate::image_store::{ImagePlacement, ImageProtocol};
+    use crate::row::Row;
+    use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// Push `n` numbered lines (LF+CR terminated, matching real PTY output)
+    /// into `buf`. Mirrors the helper in
+    /// `crate::buffer::scrollback_compaction_tests`. This is a hot-path
+    /// fill only: compaction is deferred (Task 118 follow-up), so pushing
+    /// lines past the visible window does NOT compact anything on its own
+    /// — callers that need compacted scrollback must call
+    /// `Buffer::compact_idle_scrollback` explicitly afterward.
+    fn push_numbered_lines(buf: &mut Buffer, n: usize) {
+        for i in 0..n {
+            buf.insert_text(&text(&format!("line{i:04}content")));
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    fn buffer_with_compacted_scrollback() -> Buffer {
+        let mut buf = Buffer::new(20, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start > 0, "test needs scrollback rows to exist");
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+        buf
+    }
+
+    #[test]
+    fn two_consecutive_scrollback_flattens_are_byte_identical() {
+        let mut buf = buffer_with_compacted_scrollback();
+
+        // First flatten: populates row_cache + decompaction memos, then
+        // (per Task 118.4) evicts both for every compact row.
+        let (chars1, tags1, offsets1, urls1) = buf.scrollback_as_tchars_and_tags(0);
+
+        // Second flatten: must rebuild from the still-resident `CompactRow`
+        // data and produce byte-identical output.
+        let (chars2, tags2, offsets2, urls2) = buf.scrollback_as_tchars_and_tags(0);
+
+        assert_eq!(chars1, chars2, "flattened characters must be identical");
+        assert_eq!(tags1, tags2, "flattened format tags must be identical");
+        assert_eq!(offsets1, offsets2, "row offsets must be identical");
+        assert_eq!(urls1, urls2, "url tag indices must be identical");
+    }
+
+    #[test]
+    fn scrollback_flatten_evicts_compact_row_cache_and_memo() {
+        let mut buf = buffer_with_compacted_scrollback();
+        let visible_start = buf.visible_window_start(0);
+
+        let _ = buf.scrollback_as_tchars_and_tags(0);
+
+        for (row, entry) in buf.rows[..visible_start]
+            .iter()
+            .zip(buf.row_cache[..visible_start].iter())
+        {
+            if row.is_compact() {
+                assert!(
+                    entry.is_none(),
+                    "a compact scrollback row's RowCacheEntry must be evicted after a scrollback flatten"
+                );
+            }
+        }
+
+        // Rows must remain compact — eviction drops the cache/memo, not the
+        // compact representation itself.
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "rows must remain compact after cache eviction"
+        );
+
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn scrollback_flatten_does_not_evict_visible_row_cache() {
+        let mut buf = buffer_with_compacted_scrollback();
+        let visible_start = buf.visible_window_start(0);
+
+        // Warm the visible row cache first.
+        let _ = buf.visible_as_tchars_and_tags(0);
+        assert!(
+            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            "sanity: visible row cache should be populated before the scrollback flatten"
+        );
+
+        let _ = buf.scrollback_as_tchars_and_tags(0);
+
+        assert!(
+            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            "a scrollback flatten must not evict the visible window's row cache"
+        );
+    }
+
+    #[test]
+    fn url_in_compacted_scrollback_row_detected_after_eviction_rebuild() {
+        let mut buf = Buffer::new(40, 3).with_scrollback_limit(50);
+        assert!(buf.auto_detect_urls(), "test relies on default auto-detect");
+
+        buf.insert_text(&text("see http://example.com for info"));
+        buf.handle_lf();
+        buf.handle_cr();
+        push_numbered_lines(&mut buf, 20);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+
+        // First flatten: builds the RowCacheEntry (running URL detection),
+        // then evicts it (and the decompaction memo) per Task 118.4.
+        let (_chars1, tags1, _offsets1, url_indices1) = buf.scrollback_as_tchars_and_tags(0);
+        assert!(
+            !url_indices1.is_empty(),
+            "URL must be auto-detected on the first (populating) flatten"
+        );
+
+        // Second flatten: RowCacheEntry is `None` (evicted), so the row is
+        // rebuilt via `flatten_row`, re-running URL detection from scratch.
+        let (_chars2, tags2, _offsets2, url_indices2) = buf.scrollback_as_tchars_and_tags(0);
+        assert!(
+            !url_indices2.is_empty(),
+            "URL must still be auto-detected on the second flatten after eviction"
+        );
+        assert_eq!(
+            tags1, tags2,
+            "re-detected URL tags must match the original detection exactly"
+        );
+    }
+
+    #[test]
+    fn image_opt_out_row_is_not_evicted_by_scrollback_flatten() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+
+        // Stamp an image cell into row 0 before it scrolls into history —
+        // image rows opt out of compaction (`CompactRow::from_row`), so this
+        // row must stay `Live` all the way through.
+        let placement = ImagePlacement {
+            image_id: 1,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Sixel,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+        };
+        buf.set_image_cell_at(0, 0, placement, FormatTag::default());
+        buf.handle_lf();
+        buf.handle_cr();
+        push_numbered_lines(&mut buf, 20);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start > 0, "test needs the image row in scrollback");
+        assert!(
+            !buf.rows[0].is_compact(),
+            "an image row must never be compacted, even in scrollback"
+        );
+
+        let _ = buf.scrollback_as_tchars_and_tags(0);
+
+        // Eviction only targets `is_compact()` rows; a Live (opt-out) row's
+        // cache is left untouched.
+        assert!(
+            buf.row_cache[0].is_some(),
+            "a non-compact (image) scrollback row's cache must not be evicted"
+        );
+        assert!(!buf.rows[0].is_compact());
+        assert!(
+            buf.rows[0].cells().iter().any(crate::cell::Cell::has_image),
+            "image cell data must survive the scrollback flatten"
+        );
+
+        // A second flatten must still work without panicking and keep
+        // reporting the image row intact.
+        let _ = buf.scrollback_as_tchars_and_tags(0);
+        assert!(buf.rows[0].cells().iter().any(crate::cell::Cell::has_image));
     }
 }

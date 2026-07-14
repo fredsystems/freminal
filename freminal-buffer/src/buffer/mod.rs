@@ -18,7 +18,6 @@ use freminal_common::buffer_states::{
 };
 
 use crate::{
-    cell::Cell,
     image_store::ImageStore,
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
@@ -27,6 +26,8 @@ use crate::{
 pub use flatten::{AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
 
+#[cfg(test)]
+use crate::cell::Cell;
 #[cfg(test)]
 use freminal_common::buffer_states::{
     cursor::CursorPos,
@@ -245,9 +246,11 @@ pub struct BufferHeapBreakdown {
     /// Heap bytes held by `self.rows`.
     ///
     /// Computed as the outer `self.rows.capacity() * size_of::<Row>()`
-    /// allocation, plus, for every row, `row.characters().capacity() *
-    /// size_of::<Cell>()` (the row's own `Vec<Cell>` allocation, sized by
-    /// capacity — the real resident cost — not `len()`).
+    /// allocation, plus, for every row, [`Row::storage_heap_bytes`] — the
+    /// full `Vec<Cell>` capacity cost for a `Live` row, or the smaller
+    /// run-length-encoded [`crate::compact_row::CompactRow`] cost for a
+    /// compacted scrollback row (Task 118). This is the field that reflects
+    /// scrollback compaction's memory savings.
     ///
     /// Excludes the heap bytes of `Arc<Url>` string payloads reachable from
     /// any cell's `FormatTag.url`: the `Arc` pointer itself is already inside
@@ -270,6 +273,14 @@ pub struct BufferHeapBreakdown {
     /// common case for OSC 8 links spanning several columns) is counted
     /// exactly once. For each distinct URL this adds `url.url.len() +
     /// url.id` string length (0 when `id` is `None`).
+    ///
+    /// Only scans `Live` rows: a compacted scrollback row's cells are
+    /// deliberately not decompacted just to scan for URLs here, since doing
+    /// so would inflate memory (both representations resident at once) and
+    /// corrupt the very [`Self::rows_bytes`] measurement this API exists to
+    /// report. URLs that exist only in compacted scrollback rows are
+    /// therefore under-counted here — a diagnostic limitation, not a
+    /// correctness issue (the cell/tag data itself is unaffected).
     pub url_bytes: usize,
 
     /// Number of scrollback rows: `self.rows.len().saturating_sub(self.height)`.
@@ -297,7 +308,7 @@ fn text_col_span(text: &[TChar], col: usize, wrap_col: usize) -> usize {
 
 impl Buffer {
     /// Return a new buffer with the given scrollback limit instead of the
-    /// default (4000).  This is a builder-style method intended for
+    /// default (10000).  This is a builder-style method intended for
     /// production use where the value comes from user configuration.
     #[must_use]
     pub const fn with_scrollback_limit(mut self, limit: usize) -> Self {
@@ -352,6 +363,73 @@ impl Buffer {
         &self.rows
     }
 
+    /// Compact up to `budget` not-yet-compacted scrollback rows into the
+    /// space-saving `CompactRow` form, returning the number of rows actually
+    /// compacted. Intended to be called from the PTY thread's IDLE tick
+    /// (never on a hot path): compaction is a deferred background memory
+    /// optimization (Task 118), so the caller can spread the work across
+    /// multiple idle ticks by passing a bounded `budget` and re-calling
+    /// while the return value is `> 0`.
+    ///
+    /// Only rows below the visible window (`0..visible_window_start(0)`)
+    /// that are currently `Live` and losslessly compactable (non-image) are
+    /// compacted. Visible rows are never touched. A no-op (returns `0`) on
+    /// the alternate screen (no scrollback) and when there is nothing left
+    /// to compact.
+    ///
+    /// `budget` counts rows actually compacted, not rows scanned: a row
+    /// that cannot be compacted (e.g. an image row — see [`Row::compact`])
+    /// does not consume budget, so a screenful of images never starves
+    /// later, genuinely compactable rows of their turn. The scan is a
+    /// simple forward walk over `0..visible_start` that skips rows already
+    /// reported `is_compact()`; this is `O(visible_start)` worst case per
+    /// call, but that cost is paid on the idle path, not a hot one.
+    #[must_use]
+    pub fn compact_idle_scrollback(&mut self, budget: usize) -> usize {
+        if self.kind == BufferType::Alternate {
+            return 0;
+        }
+        let visible_start = self.visible_window_start(0);
+        let mut compacted = 0usize;
+        for (row, cache_entry) in self.rows[..visible_start]
+            .iter_mut()
+            .zip(self.row_cache[..visible_start].iter_mut())
+        {
+            if compacted >= budget {
+                break;
+            }
+            if row.is_compact() {
+                // Already compact. Its cache entry and decompaction memo are
+                // the second and third copies of cold scrollback cell data
+                // (see below); make sure they are released even if a prior
+                // pass only compacted the row without evicting them.
+                if cache_entry.is_some() {
+                    *cache_entry = None;
+                }
+                row.release_decompacted_cache();
+                continue;
+            }
+            if row.compact() {
+                compacted += 1;
+                // A compacted scrollback row keeps only its small `CompactRow`.
+                // The `RowCacheEntry` (a full second flattened copy: chars,
+                // tags, bytes, byte_to_char, auto_urls) and the row's
+                // decompaction memo (a third `Vec<Cell>` copy) are pure dead
+                // weight for cold history that is rarely re-read. Evicting
+                // both here is essential: without it, a row that scrolled
+                // through the visible window retains its `RowCacheEntry`
+                // forever (nothing else clears it on scroll-out), which for a
+                // 100k-line scrollback is ~180 MB of stale cache that dwarfs
+                // the compaction win. Re-reading the row (e.g. Ctrl-F search)
+                // transparently rebuilds both from the `CompactRow`.
+                *cache_entry = None;
+                row.release_decompacted_cache();
+            }
+        }
+        self.debug_assert_invariants();
+        compacted
+    }
+
     /// Returns a reference to the current cursor state (position and attributes).
     #[must_use]
     pub const fn cursor(&self) -> &CursorState {
@@ -367,15 +445,19 @@ impl Buffer {
     #[must_use]
     pub fn heap_bytes(&self) -> BufferHeapBreakdown {
         let row_struct_size = core::mem::size_of::<Row>();
-        let cell_size = core::mem::size_of::<Cell>();
 
         let mut rows_bytes = self.rows.capacity() * row_struct_size;
         let mut url_ptrs: HashSet<*const Url> = HashSet::new();
         let mut url_bytes = 0usize;
 
         for row in &self.rows {
-            rows_bytes += row.characters().capacity() * cell_size;
+            rows_bytes += row.storage_heap_bytes();
 
+            // Skip URL scanning for compacted rows without decompacting —
+            // see the doc comment on `BufferHeapBreakdown::url_bytes`.
+            if row.is_compact() {
+                continue;
+            }
             for cell in row.cells() {
                 if let Some(url) = &cell.tag().url {
                     let ptr = Arc::as_ptr(url);
@@ -3203,9 +3285,9 @@ mod scrollback_limit_tests {
     }
 
     #[test]
-    fn default_scrollback_limit_is_4000() {
+    fn default_scrollback_limit_is_10000() {
         let buf = Buffer::new(10, 5);
-        assert_eq!(buf.scrollback_limit(), 4000);
+        assert_eq!(buf.scrollback_limit(), 10_000);
     }
 
     #[test]
@@ -8982,5 +9064,355 @@ mod task_113_smoke {
             ),
             None => panic!("block 0 should be finished with an end_row"),
         }
+    }
+}
+
+// ============================================================================
+// Task 118.3: scrollback row compaction integration tests
+// ============================================================================
+
+#[cfg(test)]
+mod scrollback_compaction_tests {
+    use super::*;
+    use crate::row::Row;
+
+    fn ascii(c: char) -> TChar {
+        TChar::from(c)
+    }
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(ascii).collect()
+    }
+
+    /// Push `n` numbered lines (each terminated by LF+CR, matching real PTY
+    /// output) into `buf`. This is a hot-path fill: `handle_lf` calls
+    /// `enforce_scrollback_limit`, but (Task 118 follow-up) that no longer
+    /// compacts anything — rows that scroll out of the visible window are
+    /// left `Live`. Tests that need compacted scrollback rows must call
+    /// `Buffer::compact_idle_scrollback` explicitly after filling, mirroring
+    /// how the PTY thread's idle tick will drive compaction in production.
+    fn push_numbered_lines(buf: &mut Buffer, n: usize) {
+        for i in 0..n {
+            buf.insert_text(&text(&format!("line{i:04}content")));
+            buf.handle_lf();
+            buf.handle_cr();
+        }
+    }
+
+    #[test]
+    fn scrollback_rows_get_compacted_and_visible_rows_stay_live() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start > 0, "test needs some scrollback to exist");
+
+        // Task 118 follow-up: compaction is deferred, so an idle-tick call
+        // is required before any scrollback row becomes compact.
+        let compacted = buf.compact_idle_scrollback(usize::MAX);
+        assert!(compacted > 0, "expected idle compaction to compact rows");
+
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected at least one scrollback row to be compacted"
+        );
+        assert!(
+            buf.rows[visible_start..].iter().all(|r| !r.is_compact()),
+            "every visible row must remain Live"
+        );
+    }
+
+    /// Task 118 follow-up (deferred compaction): filling scrollback via the
+    /// hot per-line ingest path (`insert_text` + `handle_lf`) must NOT
+    /// compact any row on its own. Only an explicit
+    /// `Buffer::compact_idle_scrollback` call (standing in for the PTY
+    /// thread's idle tick) may compact rows.
+    #[test]
+    fn hot_path_fill_never_compacts_only_idle_compaction_does() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start > 0, "test needs some scrollback to exist");
+
+        assert!(
+            buf.rows.iter().all(|r| !r.is_compact()),
+            "no row may be compact immediately after a hot-path fill \
+             (compaction is deferred to the idle tick)"
+        );
+
+        let compacted = buf.compact_idle_scrollback(usize::MAX);
+        assert!(
+            compacted > 0,
+            "idle compaction should have compacted at least one row"
+        );
+
+        assert!(
+            buf.rows[..visible_start].iter().all(Row::is_compact),
+            "every scrollback row must be compact after an unbounded idle compaction pass"
+        );
+        assert!(
+            buf.rows[visible_start..].iter().all(|r| !r.is_compact()),
+            "visible rows must remain Live even after idle compaction"
+        );
+    }
+
+    #[test]
+    fn flatten_identical_whether_scrollback_compacted_or_forced_live() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+
+        let (compact_vis_chars, compact_vis_tags, ..) = buf.visible_as_tchars_and_tags(0);
+        let (compact_sb_chars, compact_sb_tags, ..) = buf.scrollback_as_tchars_and_tags(0);
+
+        // Force every row Live and invalidate the flatten cache so the next
+        // flatten pass rebuilds from scratch against plain `Live` storage.
+        for row in &mut buf.rows {
+            row.ensure_live();
+            row.mark_dirty();
+        }
+        for entry in &mut buf.row_cache {
+            *entry = None;
+        }
+
+        let (live_vis_chars, live_vis_tags, ..) = buf.visible_as_tchars_and_tags(0);
+        let (live_sb_chars, live_sb_tags, ..) = buf.scrollback_as_tchars_and_tags(0);
+
+        assert_eq!(compact_vis_chars, live_vis_chars);
+        assert_eq!(compact_vis_tags, live_vis_tags);
+        assert_eq!(compact_sb_chars, live_sb_chars);
+        assert_eq!(compact_sb_tags, live_sb_tags);
+    }
+
+    #[test]
+    fn width_resize_identical_with_or_without_compacted_scrollback() {
+        fn build() -> Buffer {
+            let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+            push_numbered_lines(&mut buf, 20);
+            let _ = buf.compact_idle_scrollback(usize::MAX);
+            buf
+        }
+
+        let mut compacted = build();
+        let visible_start = compacted.visible_window_start(0);
+        assert!(
+            compacted.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+
+        let mut forced_live = build();
+        for row in &mut forced_live.rows {
+            row.ensure_live();
+        }
+
+        compacted.set_size(6, 3, 0);
+        forced_live.set_size(6, 3, 0);
+
+        assert_eq!(compacted.rows.len(), forced_live.rows.len());
+        for (a, b) in compacted.rows.iter().zip(forced_live.rows.iter()) {
+            assert_eq!(a.cells(), b.cells());
+            assert_eq!(a.max_width(), b.max_width());
+            assert_eq!(a.origin, b.origin);
+            assert_eq!(a.join, b.join);
+        }
+    }
+
+    #[test]
+    fn extract_text_and_block_text_over_compacted_scrollback() {
+        // Wide enough that "lineNNNNcontent" (15 chars) never wraps, so row
+        // boundaries line up exactly with pushed lines.
+        let mut buf = Buffer::new(20, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 10);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 2, "test needs at least 2 scrollback rows");
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+
+        // Rows 0 and 1 are within scrollback (compacted); extract across them.
+        let extracted = buf.extract_text(0, 0, 1, 14);
+        assert!(
+            extracted.contains("line0000content"),
+            "extract_text over compacted scrollback missing row 0: {extracted:?}"
+        );
+        assert!(
+            extracted.contains("line0001content"),
+            "extract_text over compacted scrollback missing row 1: {extracted:?}"
+        );
+
+        let block = buf.extract_block_text(0, 0, 1, 6);
+        assert!(
+            block.contains("line000"),
+            "extract_block_text over compacted scrollback missing row 0: {block:?}"
+        );
+    }
+
+    #[test]
+    fn enforce_scrollback_limit_shifts_prompt_and_blocks_with_compact_rows_present() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(5);
+
+        // Some plain rows first so real scrollback (subject to compaction)
+        // exists before the command block is recorded.
+        push_numbered_lines(&mut buf, 3);
+
+        buf.mark_prompt_row();
+        let _id = buf.start_command_block(None, "fid1".to_owned());
+        buf.insert_text(&text("cmd"));
+        buf.handle_lf();
+        buf.handle_cr();
+        let _finished = buf.finish_command_block(Some(0), "fid1");
+
+        // Confirm compaction actually engaged before the drain below, so
+        // this test exercises the real interaction between compaction and
+        // scrollback-limit enforcement (not a no-op). Compaction is
+        // deferred (Task 118 follow-up), so drive it explicitly here,
+        // standing in for the PTY thread's idle tick.
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+        let visible_start = buf.visible_window_start(0);
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have already engaged"
+        );
+
+        // Push far more output than the scrollback limit allows, forcing
+        // enforce_scrollback_limit to actually drain rows from the front
+        // repeatedly while compact rows are present elsewhere in the buffer.
+        push_numbered_lines(&mut buf, 30);
+
+        let max_rows = buf.height + buf.scrollback_limit();
+        assert!(
+            buf.rows.len() <= max_rows,
+            "scrollback limit must still be enforced with compaction active"
+        );
+
+        // Every surviving prompt-row / command-block index must be in range
+        // and internally ordered — i.e. compaction did not corrupt the
+        // drain-and-shift bookkeeping in `adjust_prompt_rows`.
+        for &row in buf.prompt_rows() {
+            assert!(
+                row < buf.rows.len(),
+                "prompt row {row} out of bounds after drain (rows.len()={})",
+                buf.rows.len()
+            );
+        }
+        for block in buf.command_blocks() {
+            assert!(block.prompt_start_row < buf.rows.len());
+            if let Some(cmd_start) = block.command_start_row {
+                assert!(block.prompt_start_row <= cmd_start);
+                assert!(cmd_start < buf.rows.len());
+            }
+            if let Some(end) = block.end_row {
+                assert!(end < buf.rows.len());
+            }
+        }
+    }
+
+    #[test]
+    fn alt_screen_enter_leave_preserves_compacted_scrollback() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(
+            buf.rows[..visible_start].iter().any(Row::is_compact),
+            "expected scrollback compaction to have engaged"
+        );
+
+        let scrollback_before: Vec<Vec<Cell>> = buf.rows[..visible_start]
+            .iter()
+            .map(|r| r.cells().to_vec())
+            .collect();
+        let compact_flags_before: Vec<bool> = buf.rows[..visible_start]
+            .iter()
+            .map(Row::is_compact)
+            .collect();
+
+        buf.enter_alternate(0);
+        buf.insert_text(&text("alt screen content"));
+        let _ = buf.leave_alternate();
+
+        let visible_start_after = buf.visible_window_start(0);
+        assert_eq!(
+            visible_start_after, visible_start,
+            "scrollback size must be unchanged across an alt-screen round-trip"
+        );
+
+        let scrollback_after: Vec<Vec<Cell>> = buf.rows[..visible_start_after]
+            .iter()
+            .map(|r| r.cells().to_vec())
+            .collect();
+        assert_eq!(
+            scrollback_before, scrollback_after,
+            "scrollback content must be preserved exactly across the round-trip"
+        );
+
+        // The clone in `enter_alternate` and the plain move-back in
+        // `leave_alternate` should preserve each row's storage
+        // representation — confirming the round-trip didn't force an
+        // unnecessary full decompaction of scrollback.
+        let compact_flags_after: Vec<bool> = buf.rows[..visible_start_after]
+            .iter()
+            .map(Row::is_compact)
+            .collect();
+        assert_eq!(compact_flags_before, compact_flags_after);
+    }
+
+    /// Task 118.7 regression: growing the height must invalidate the cache for
+    /// the rows in the new (taller) bottom-anchored visible window, and must
+    /// NOT invalidate cold scrollback rows above it. The previous code dirtied
+    /// `0..old_height` (the oldest scrollback rows) instead of the visible
+    /// window, which both wasted cache rebuilds on cold history and left the
+    /// genuinely-newly-visible rows stale.
+    #[test]
+    fn height_grow_invalidates_new_visible_window_not_top_scrollback() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+
+        // Warm the whole flatten cache so every row has a `Some` entry, then we
+        // can observe exactly which entries a height grow invalidates.
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let _ = buf.scrollback_as_tchars_and_tags(0);
+        assert!(
+            buf.row_cache.iter().all(Option::is_some),
+            "precondition: every row cache entry warmed"
+        );
+
+        let old_height = buf.terminal_height();
+        let new_height = old_height + 4;
+        let total_before = buf.rows.len();
+        // The oldest scrollback rows at the TOP of the buffer — these must be
+        // left untouched by a height grow (they are far from the bottom-
+        // anchored visible window).
+        let top_scrollback = old_height.min(total_before);
+
+        buf.set_size(buf.terminal_width(), new_height, 0);
+
+        // The new bottom-anchored visible window must have been invalidated
+        // (rebuilt for the new height on next flatten).
+        let new_visible_start = buf.rows.len().saturating_sub(new_height);
+        assert!(
+            buf.row_cache[new_visible_start..]
+                .iter()
+                .all(Option::is_none),
+            "new visible window rows must have their cache invalidated on height grow"
+        );
+
+        // Cold scrollback rows at the top must NOT have been invalidated — this
+        // is the 118.7 fix (the old `0..old_height` range wrongly cleared them).
+        assert!(
+            buf.row_cache[..top_scrollback].iter().all(Option::is_some),
+            "top-of-scrollback cache entries must be retained across a height grow"
+        );
     }
 }
