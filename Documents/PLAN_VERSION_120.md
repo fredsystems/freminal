@@ -455,6 +455,36 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   Making the resize passes compact-aware was rejected: it saves nothing measurable (the saving
   is invisible against reflow, and resize is not hot) at real correctness risk to the most
   delicate code in the buffer.
+- **Compaction is a deferred, idle-driven, budgeted background task — NEVER synchronous on a hot
+  path (revised after CPU benchmarking).** The original 118.3 design compacted scrollback rows
+  synchronously inside `enforce_scrollback_limit` (reached from `insert_text`/`handle_lf`/resize).
+  Benchmarking showed this put `CompactRow::from_row` cost directly on hot paths: the worst case
+  was `softwrap_heavy` (+45% → +23% after the O(n²) reflow-offset fix), where reflowing one
+  5000-char line to width 10 creates ~420 scrollback rows that were all compacted *inside the
+  timed resize*. Resize is a hot loop and always will be; a giant line can hit the buffer and
+  immediately scroll into history. The durable principle: **having the most recent snapshot
+  available to the user, at the expense of slightly delaying the memory saving, is more valuable
+  than getting the memory win immediately.** Therefore compaction is moved entirely off the hot
+  paths:
+  - `enforce_scrollback_limit` (and every other hot path) no longer compacts. Rows that scroll
+    into history simply stay `Live` until idle compaction runs.
+  - The PTY consumer thread's `select!` loop (`freminal/src/gui/pty.rs`) gains a genuine idle
+    tick: a `recv(crossbeam_channel::after(~250ms))` arm that fires only when neither PTY data
+    nor GUI input has arrived (the loop previously blocked indefinitely with no timeout arm).
+    On that idle tick the thread compacts scrollback. This respects the lock-free architecture:
+    the PTY thread still owns `TerminalEmulator` exclusively; no separate timer thread touches
+    the buffer.
+  - Each idle tick compacts at most a **bounded budget** of rows (e.g. 512) so even a large
+    backlog never causes a single long stall; the remainder compacts on subsequent ticks. When
+    no compaction work remains, the tick need not re-arm (avoid waking a fully-idle terminal
+    forever — battery).
+  - Entry point: a new `pub` `Buffer::compact_idle_scrollback(budget) -> usize` (rows compacted),
+    passed through `TerminalHandler`/`TerminalEmulator`, callable from the PTY loop via
+    `emulator.internal.handler.buffer_mut()`.
+  This makes the memory win **eventually-consistent** rather than immediate, which is the correct
+  tradeoff for a memory optimisation: the user never pays compaction latency during typing,
+  scrolling, or resizing; they get the full snapshot immediately and the memory is reclaimed a
+  few hundred ms later once the terminal goes quiet.
 - **`row_cache` decompaction seam is via `Row`'s accessors, memoized (118.3).** The 3
   borrow-returning accessors (`cells()`, `characters()`, `cells_mut()`) are the seam: a
   `Compact` `Row` materialises back to `Live` on first cell access and stays `Live` for the
@@ -464,17 +494,26 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
 
 ### 118 Cleanup entries (surfaced during recon)
 
-- **118.7 — `resize_height` grow-pass dirties scrollback rows, not the old visible window.**
-  Surface point: 118.3 recon (`resize_and_alt.rs:730-733`). The height-grow branch marks rows
-  `0..old_height` dirty, but when scrollback exists the old visible window was
-  `rows.len()-old_height..rows.len()`, so `0..old_height` are scrollback-index rows — the wrong
-  rows are being dirtied/cache-invalidated. Impact: likely benign today (over-invalidation, not
-  corruption) but wastes cache work and is a latent correctness smell; it also interacts with
-  compaction (dirtying a compact scrollback row). Scope: `resize_and_alt.rs` height-grow branch
-  only. Suggested approach: dirty the correct visible-window range; add a regression test
-  asserting scrollback rows retain their cache across a height grow. Verification: `cargo test
-  --all`; the new regression test. Scheduling: address within Task 118 (before or alongside
-  118.3's decompact-on-resize, since that path overlaps); do not defer past v0.12.0.
+- **118.8 — `compact_newly_scrolled_rows` early-stop can miss a decompacted mid-scrollback
+  row. RESOLVED / OBSOLETE by 118.9.** This concerned the incremental backward-scan-with-early-
+  stop in `compact_newly_scrolled_rows` (the resize-regression fix): an image-clear could
+  decompact a mid-scrollback row in place, and the backward scan would break early and never
+  re-compact it. 118.9 (deferred idle compaction) **deleted `compact_newly_scrolled_rows`
+  entirely** — compaction no longer runs on any hot path, and `compact_idle_scrollback` uses a
+  simple forward scan over `0..visible_window_start(0)` that skips already-compact rows and
+  compacts any `Live` compactable row it finds, with no early-stop invariant to violate. A row
+  an image-clear left `Live` is therefore re-compacted on the next idle tick automatically. No
+  further action needed.
+- **118.7 — `resize_height` grow-pass dirties scrollback rows, not the new visible window.
+  RESOLVED (folded into the 118.5 pass).** The height-grow branch marked rows `0..old_height`
+  dirty, but the visible window is bottom-anchored, so when scrollback existed those were the
+  OLDEST scrollback rows at the top of the buffer — the wrong rows: it over-invalidated cold
+  scrollback (wasting cache rebuilds, and needlessly touching compact rows) while leaving the
+  genuinely-newly-visible rows stale. Fixed to invalidate the new bottom-anchored visible window
+  (`rows.len()-new_height..rows.len()`). Regression test added
+  (`height_grow_invalidates_new_visible_window_not_top_scrollback`) asserting the new visible
+  window is invalidated and top-of-scrollback cache entries are retained. Impact was benign
+  (over-invalidation, not corruption), consistent with the original assessment.
 
 ### 118 Current-state map (from recon)
 
@@ -617,6 +656,14 @@ the visible-region path >15%; do NOT proceed.
 
 Stop: report + await review.
 
+**DONE.** Default raised **4000 → 10000** (`ScrollbackConfig::default` and the buffer's
+compiled-in fallback in `lifecycle.rs`, kept in sync; `config_example.toml` updated). Chosen
+with data: measured settled per-line cost after compaction is ~1.0–1.7 KB/line for realistic
+colored scrollback (worst realistic ~1.7 KB/line), so 10000 lines ≈ 17 MB resident ≈ the old
+4000-line default's ~16.6 MB — 2.5× the history at net-neutral steady-state memory. Config
+default-assertion tests updated across `freminal-common`, `freminal-buffer`,
+`freminal-terminal-emulator`. Also folded in cleanup 118.7 (below).
+
 #### 118.6 — Windows cross-check + final verification
 
 Scope: no new logic; verification only (plus any trivial fix the cross-check surfaces).
@@ -633,6 +680,70 @@ Verification: `cargo test --all`; `cargo clippy --all-targets --all-features -- 
 Prohibitions: do NOT add features here; do NOT proceed past a failing check.
 
 Stop: report results.
+
+#### 118.9 — Deferred idle-driven compaction (move compaction off hot paths)
+
+Scope: `freminal-buffer/src/buffer/` (remove hot-path compaction, add
+`compact_idle_scrollback(budget)`), `freminal-terminal-emulator` (passthrough on
+`TerminalHandler`/`TerminalEmulator`), `freminal/src/gui/pty.rs` (PTY-loop idle tick).
+
+What: implement the "compaction is a deferred, budgeted, idle-driven background task, never
+synchronous on a hot path" decision recorded in the durable-decisions section. Two halves:
+(a) **buffer layer** — remove every synchronous compaction call from `enforce_scrollback_limit`
+and any other hot path; add `pub fn Buffer::compact_idle_scrollback(&mut self, budget: usize) ->
+usize`; adapt tests to call it explicitly before asserting compaction. (b) **PTY-loop wiring** —
+add a real idle-tick arm (`recv(crossbeam_channel::after(~250ms))`) to the `select!` in
+`spawn_pty_consumer_thread`; on idle, call the budgeted compaction through
+`emulator.internal.handler.buffer_mut().compact_idle_scrollback(BUDGET)`; re-arm the tick while
+the return value is `> 0`, and let it lapse (no re-arm) when there is nothing left to compact so a
+fully-idle terminal is not woken forever. Must respect the lock-free architecture: PTY thread owns
+`TerminalEmulator` exclusively; no separate timer thread touches the buffer.
+
+Deliverable: hot paths compaction-free (proven by a test that a scrollback fill leaves rows `Live`
+until the idle call runs); idle tick wired; before/after CPU benches showing hot paths
+(insert/lf/resize/softwrap) no longer pay compaction cost; before/after memory benches confirming
+compaction still happens (just deferred).
+
+Verification: `cargo test --all`; clippy; `cargo bench --bench buffer_row_bench -- --baseline
+before_118_3` (softwrap_heavy back to ~0%); memory benches; `cargo xtask check-windows` (touches
+the PTY thread / crossbeam select).
+
+Prohibitions: do NOT compact on any hot path; do NOT spawn a separate thread that touches the
+buffer; do NOT let the idle tick busy-wake a fully-idle terminal.
+
+Stop: report + benches + await review.
+
+#### 118.10 — Windowed / lazy reflow (STUB — decompose in a dedicated session)
+
+Status: **stub.** Design principle captured; not yet decomposed.
+
+Motivation: once deferred compaction (118.9) makes a very large scrollback affordable (tens of
+thousands to 100k+ lines), **synchronous full-scrollback reflow becomes the new latency wall.**
+Reflowing 100k logical lines on every window-width drag is unacceptable and unnecessary — the user
+only ever sees ~24–80 rows at once. Reflow cost must be proportional to what is *visible*, not to
+total scrollback depth. This is the same recency-first, eventually-consistent philosophy 118.9
+applies to compaction, applied to reflow.
+
+Design principle (durable): on a width resize, (1) reflow only the visible region plus a small
+scroll-headroom margin **synchronously**, producing a correct snapshot for the current viewport
+essentially instantly; (2) publish that snapshot immediately (the user sees the resized view with
+no perceptible delay); (3) reflow the remaining scrollback **lazily/incrementally in the
+background** (reusing the 118.9 idle-tick mechanism) and/or **on-demand as the user scrolls up**
+into not-yet-reflowed history. Recompaction of the reflowed rows then follows the normal deferred
+path.
+
+Why this is a stub, not decomposed now: lazy reflow is substantially larger and subtler than the
+118 memory work. It touches logical-line reconstruction, cursor remapping, and — the hard part —
+the **`command_blocks` / `prompt_rows` absolute-index remapping** (Task 113 "Bug R") across a
+buffer that is only *partially* reflowed to the current width. The buffer must track which
+scrollback regions are reflowed-to-current-width vs stale, handle a scroll into a stale region
+(reflow-on-read), and keep the absolute-index remaps correct while regions carry mixed widths.
+Open design questions to resolve at activation: how to represent "target width" per row/region;
+whether stale regions store their pre-resize width for on-read reflow; how scroll-offset maps onto
+a mixed-width buffer; how `visible_window_start` and snapshot bounds behave mid-reflow; and how the
+idle reflow driver interacts with the idle compaction driver (shared budget? ordering?). Depends on
+118.9 (idle-driver mechanism) and the compact representation (118.2–118.4). Decompose in a
+dedicated session against the code as it then exists, per `freminal-version-activation`.
 
 ### 118 Open questions (resolve at activation)
 
