@@ -23,9 +23,8 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete |
-| v0.12.0 | Kitty: Transfer & Cursors       | `PLAN_VERSION_120.md`                                                 | 102–103, 118     | Planned  |
+| v0.12.0 | Kitty T&C + Scrollback Memory   | `PLAN_VERSION_120.md`                                                 | 102–103, 118–120 | Planned  |
 | v0.13.0 | Kitty: Text Sizing              | `PLAN_VERSION_130.md`                                                 | 104              | Planned  |
-| v0.13.1 | Scrollback Compression          | `PLAN_VERSION_131.md`                                                 | 119              | Stub     |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub     |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub     |
 | v0.16.0 | Reach & Credibility             | `PLAN_VERSION_160.md`                                                 | 88, 89, 91, 93   | Stub     |
@@ -188,8 +187,9 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 115 | DECSCNM Per-Pane Per-Cell Reverse Video   | `PLAN_VERSION_111.md` (Task 115)              | Complete  | Task 58                |
 | 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Complete  | None                   |
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Complete  | None                   |
-| 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Planned   | None                   |
-| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_131.md` (Task 119)              | Stub      | Task 118               |
+| 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Complete  | None                   |
+| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Planned   | Task 118               |
+| 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 
 ---
 
@@ -449,6 +449,18 @@ path Task 99 establishes. Task 103 (multiple cursors) is a renderer-light additi
 (`TerminalSnapshot` gains a cursor list; `build_cursor_verts_only()` iterates). Both target
 stable specs. Cursors is the small safe win balancing the heavier transfer work.
 
+**Tasks 118–120 (v0.12.0, scrollback memory):** the whole three-phase scrollback-memory
+effort now lands in v0.12.0 (originally 118 here + 119 in a separate v0.13.1, since deleted).
+Task 118 (compact representation, **complete** on `task-118/compact-cell-repr`) built the
+infrastructure the other two reuse: the flat pointer-free `CompactRow`, the PTY-thread
+idle-tick driver, the decompact-on-read accessor seam, and the `malloc_trim` RSS-reclaim
+discipline. Task 119 (LZ4 block compression) is the incremental multiplier layered on that
+compact form, driven by the same idle tick — LZ4-only, no zstd tier. Task 120
+(compression-aware windowed reflow) **absorbs the former 118.10 lazy-reflow stub and the
+reflow half of the original Task 119**, because band-decompression and lazy reflow are one
+control flow; it stays an enriched stub (decomposed at its own activation) while 118–119 are
+decomposed. The memory tasks share no seams with the kitty tasks and are fully parallelizable.
+
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
 blocks, fractional scaling, custom width algorithm). It is isolated in its own version. **A
 collision audit is the mandatory first subtask:** freminal currently treats OSC 66 as the
@@ -656,6 +668,7 @@ Update this section as tasks complete:
 | 117  | 2026-07-08 | 2026-07-08 | 117.1-117.5 (half-wrap + SU/SD/IND/RI DECSLRM confine, primary+alt) on v0.11.1   |
 | 116  | 2026-07-08 | 2026-07-08 | 116.1-116.4 selection release/stuck (tracked-end, commit-flag, interrupted drag) |
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
+| 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 
 ---
 
@@ -671,9 +684,8 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty: Transfer & Cursors" (Tasks 102–103, decomposed)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty T&C + Scrollback Memory" (Tasks 102–103, 118–120; 118–119 decomposed, 120 stub)
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Text Sizing" (Task 104, decomposed)
-- `Documents/PLAN_VERSION_131.md` — v0.13.1 "Scrollback Compression" (stub, Task 119)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)
