@@ -33,7 +33,7 @@ fn default_config_has_expected_values() {
     assert_eq!(cfg.theme.effective_dark_name(), "catppuccin-mocha");
     assert!(cfg.shell.path.is_none());
     assert!(!cfg.logging.write_to_file);
-    assert_eq!(cfg.scrollback.limit, 4000);
+    assert_eq!(cfg.scrollback.limit, 10_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ fn v1_config_without_new_sections_loads_with_defaults() {
     // New sections should fall back to defaults
     assert!(cfg.shell.path.is_none());
     assert!(!cfg.logging.write_to_file);
-    assert_eq!(cfg.scrollback.limit, 4000);
+    assert_eq!(cfg.scrollback.limit, 10_000);
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn empty_config_file_loads_all_defaults() {
     let cfg = load_from_toml("").expect("empty config should parse");
     // version defaults to 1 (valid)
     assert_eq!(cfg.version, 1);
-    assert_eq!(cfg.scrollback.limit, 4000);
+    assert_eq!(cfg.scrollback.limit, 10_000);
     assert!(!cfg.logging.write_to_file);
 }
 
@@ -334,7 +334,7 @@ fn logging_config_default() {
 #[test]
 fn scrollback_config_default() {
     let s = ScrollbackConfig::default();
-    assert_eq!(s.limit, 4000);
+    assert_eq!(s.limit, 10_000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ fn config_with_only_shell_section_uses_defaults_for_rest() {
     let cfg = load_from_toml(toml).expect("should parse");
     assert_eq!(cfg.shell.path.as_deref(), Some("/bin/bash"));
     assert!(!cfg.logging.write_to_file);
-    assert_eq!(cfg.scrollback.limit, 4000);
+    assert_eq!(cfg.scrollback.limit, 10_000);
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn config_with_only_logging_section_uses_defaults_for_rest() {
     let cfg = load_from_toml(toml).expect("should parse");
     assert!(cfg.logging.write_to_file);
     assert!(cfg.shell.path.is_none());
-    assert_eq!(cfg.scrollback.limit, 4000);
+    assert_eq!(cfg.scrollback.limit, 10_000);
 }
 
 #[test]

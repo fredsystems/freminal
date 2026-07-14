@@ -253,7 +253,7 @@ impl TerminalEmulator {
     /// Create a new terminal emulator
     ///
     /// `scrollback_limit` overrides the default scrollback history size when
-    /// `Some(n)` is provided.  `None` keeps the compiled-in default (4000).
+    /// `Some(n)` is provided.  `None` keeps the compiled-in default (10000).
     ///
     /// # Errors
     ///

@@ -52,7 +52,10 @@ impl Buffer {
             height,
             cursor: CursorState::default(),
             current_tag: FormatTag::default(),
-            scrollback_limit: 4000,
+            // Compiled-in fallback used when no config value is supplied; kept
+            // in sync with `ScrollbackConfig::default` (Task 118 raised both
+            // from 4000 to 10000 — see that impl for the data-backed rationale).
+            scrollback_limit: 10_000,
             auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,

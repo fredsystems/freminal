@@ -108,7 +108,11 @@ light_name = "catppuccin-latte"
 [scrollback]
 # Maximum number of scrollback lines to keep in the buffer.
 # Must be between 1 and 100000.
-limit = 4000
+# Default is 10000: scrollback rows are stored in a compact form and compacted
+# in the background when the terminal is idle, so a large history is cheap
+# (~1-1.7 KB/line resident once settled). You can raise this substantially
+# toward 100000 at modest memory cost.
+limit = 10000
 
 ## ##############################################################################
 # UI SETTINGS

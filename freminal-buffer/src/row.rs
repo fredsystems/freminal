@@ -3,9 +3,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::cell::OnceCell;
+
 use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
 
-use crate::{cell::Cell, response::InsertResponse};
+use crate::{cell::Cell, compact_row::CompactRow, response::InsertResponse};
 
 /// Indicates whether a row was produced by a hard line break, a soft wrap, or as
 /// a blank scroll-fill placeholder.
@@ -59,6 +61,59 @@ impl LineWidth {
     }
 }
 
+/// Internal cell-storage representation for [`Row`].
+///
+/// `Live` is the plain per-cell representation every row starts life as and
+/// the only representation any *visible* row is ever in. `Compact` is the
+/// space-saving [`CompactRow`] representation used for scrollback rows that
+/// have left the visible window (see
+/// [`crate::buffer::Buffer`]'s scrollback-compaction pass). Compact rows are
+/// never mutated in place: every mutating method funnels through
+/// [`Row::ensure_live`] first, which decompacts back to `Live`.
+///
+/// The `decompacted` cache on the `Compact` variant memoizes the first
+/// read-only decompaction (via [`Row::cells`] / [`Row::characters`] / etc.)
+/// so repeated reads within one flatten/extract pass are O(1) after the
+/// first. Memoizing does *not* change [`Row::is_compact`]'s answer — it
+/// reports the storage representation, not whether the cache is warm.
+enum RowStorage {
+    /// Plain per-cell storage. Every visible row is always in this state.
+    Live(Vec<Cell>),
+    /// Space-saving run-length-encoded storage for compacted scrollback rows.
+    Compact {
+        compact: CompactRow,
+        /// Memoized decompaction, populated on first read-only cell access.
+        decompacted: OnceCell<Vec<Cell>>,
+    },
+}
+
+impl std::fmt::Debug for RowStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Live(cells) => f.debug_tuple("Live").field(cells).finish(),
+            Self::Compact { compact, .. } => {
+                f.debug_struct("Compact").field("compact", compact).finish()
+            }
+        }
+    }
+}
+
+impl Clone for RowStorage {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Live(cells) => Self::Live(cells.clone()),
+            Self::Compact { compact, .. } => Self::Compact {
+                compact: compact.clone(),
+                // A fresh, empty memoization cache: the clone is cheap (no
+                // decompaction happens just from cloning) and correctness is
+                // unaffected — the cache is a pure read-through performance
+                // optimization, not observable state.
+                decompacted: OnceCell::new(),
+            },
+        }
+    }
+}
+
 /// A single row of terminal cells with a fixed logical width.
 ///
 /// Cells are stored sparsely: trailing default-blank cells are not allocated.
@@ -67,7 +122,7 @@ impl LineWidth {
 /// The `dirty` flag tracks whether the row's cached flat representation is stale.
 #[derive(Debug, Clone)]
 pub struct Row {
-    cells: Vec<Cell>,
+    storage: RowStorage,
     width: usize,
     pub origin: RowOrigin,
     pub join: RowJoin,
@@ -85,7 +140,7 @@ impl Row {
     #[must_use]
     pub const fn new(width: usize) -> Self {
         Self {
-            cells: Vec::new(),
+            storage: RowStorage::Live(Vec::new()),
             width,
             origin: RowOrigin::ScrollFill,
             join: RowJoin::NewLogicalLine,
@@ -98,7 +153,7 @@ impl Row {
     #[must_use]
     pub const fn new_with_origin(width: usize, origin: RowOrigin, join: RowJoin) -> Self {
         Self {
-            cells: Vec::new(),
+            storage: RowStorage::Live(Vec::new()),
             width,
             origin,
             join,
@@ -119,7 +174,7 @@ impl Row {
         cells: Vec<Cell>,
     ) -> Self {
         Self {
-            cells,
+            storage: RowStorage::Live(cells),
             width,
             origin,
             join,
@@ -128,10 +183,165 @@ impl Row {
         }
     }
 
+    /// Ensure this row's cell storage is materialized as `Live`, decompacting
+    /// a `Compact` row in place if necessary. A no-op when already `Live`.
+    ///
+    /// This is the mutation seam every cell-mutating method calls first:
+    /// compact rows are never mutated in place (Task 118.3 design decision).
+    pub fn ensure_live(&mut self) {
+        let _ = self.cells_vec_mut();
+    }
+
+    /// Internal seam: ensure storage is `Live` and return a mutable reference
+    /// to the backing `Vec<Cell>`. Every cell-mutating method in this file
+    /// funnels through this (directly, or via [`Row::ensure_live`] /
+    /// [`Row::cells_mut`]).
+    fn cells_vec_mut(&mut self) -> &mut Vec<Cell> {
+        if let RowStorage::Compact {
+            compact,
+            decompacted,
+        } = &mut self.storage
+        {
+            // Reuse an already-memoized decompaction if a prior read warmed
+            // the cache; otherwise decompact fresh. Either way, ownership
+            // moves into the new `Live` storage — no wasted clone.
+            let cells = decompacted
+                .take()
+                .unwrap_or_else(|| Self::take_cells(compact.to_row()));
+            self.storage = RowStorage::Live(cells);
+        }
+        match &mut self.storage {
+            RowStorage::Live(cells) => cells,
+            RowStorage::Compact { .. } => {
+                // Structurally unreachable: the branch above just converted
+                // storage to `Live` whenever it was `Compact`.
+                unreachable!("storage must be Live after the decompaction branch above")
+            }
+        }
+    }
+
+    /// Internal seam: return a read-only reference to the backing
+    /// `Vec<Cell>`, materializing (and memoizing) a `Compact` row's cells on
+    /// first read. This does not change [`Row::is_compact`]'s answer, and
+    /// does not touch `dirty`/`origin`/`join`/`line_width`.
+    fn cells_ref(&self) -> &Vec<Cell> {
+        match &self.storage {
+            RowStorage::Live(cells) => cells,
+            RowStorage::Compact {
+                compact,
+                decompacted,
+            } => decompacted.get_or_init(|| Self::take_cells(compact.to_row())),
+        }
+    }
+
+    /// Extract the owned `Vec<Cell>` out of a freshly-built `Row` (always
+    /// [`RowStorage::Live`] — [`CompactRow::to_row`] only ever constructs via
+    /// [`Row::from_cells`]) without a clone.
+    fn take_cells(row: Self) -> Vec<Cell> {
+        match row.storage {
+            RowStorage::Live(cells) => cells,
+            RowStorage::Compact { .. } => {
+                // Structurally unreachable: `CompactRow::to_row` always
+                // builds via `Row::from_cells`, which is always `Live`.
+                // Fail loudly (matching `cells_vec_mut`) rather than silently
+                // blanking the row's cells if that invariant is ever broken.
+                unreachable!("CompactRow::to_row must always produce RowStorage::Live")
+            }
+        }
+    }
+
+    /// Returns `true` if this row's cell storage is currently the
+    /// space-saving compacted representation.
+    ///
+    /// A compacted row still answers every read accessor correctly — see
+    /// [`Row::cells_ref`] — so `is_compact()` reports the *storage
+    /// representation*, not whether cell data has been read yet.
+    #[must_use]
+    pub const fn is_compact(&self) -> bool {
+        matches!(self.storage, RowStorage::Compact { .. })
+    }
+
+    /// Attempt to compact this row's cell storage into the space-saving
+    /// [`CompactRow`] representation.
+    ///
+    /// Returns `false` (no-op) when the row is already compact, or when the
+    /// row cannot be losslessly compacted (currently: any row containing an
+    /// image cell — see [`crate::compact_row::is_compactable`]). Returns
+    /// `true` when the row was converted.
+    ///
+    /// Compact rows are never mutated in place: every mutating method
+    /// decompacts back to `Live` first via [`Row::ensure_live`].
+    pub fn compact(&mut self) -> bool {
+        if self.is_compact() {
+            return false;
+        }
+        let Some(compact) = CompactRow::from_row(self) else {
+            return false;
+        };
+        self.storage = RowStorage::Compact {
+            compact,
+            decompacted: OnceCell::new(),
+        };
+        true
+    }
+
+    /// Release the memoized decompaction cache of a `Compact` row, freeing
+    /// the materialized `Vec<Cell>` while keeping the row compact. A no-op
+    /// for a `Live` row or an as-yet-unwarmed `Compact` row.
+    ///
+    /// After this call, the next read accessor (e.g. [`Row::cells`] /
+    /// [`Row::characters`]) re-decompacts on demand. This is the Task 118.4
+    /// cold-scrollback-eviction hook: a one-off full-scrollback flatten (the
+    /// Ctrl-F search-buffer path) warms every compacted row's decompaction
+    /// cache just to read it once, and that cache is otherwise cold dead
+    /// weight until the next such flatten. Calling this after such a pass
+    /// drops the memoized `Vec<Cell>`, leaving only the small [`CompactRow`]
+    /// resident, at the cost of re-decompacting on the next full read.
+    pub fn release_decompacted_cache(&mut self) {
+        if let RowStorage::Compact { decompacted, .. } = &mut self.storage {
+            *decompacted = OnceCell::new();
+        }
+    }
+
+    /// Heap bytes retained by this row's backing cell storage: the full
+    /// per-cell cost when [`Row::is_compact`] is `false`, or the smaller
+    /// run-length-encoded [`CompactRow`] cost when compacted.
+    ///
+    /// When a compact row's read-only accessors (e.g. [`Row::cells`]) have
+    /// already memoized a decompaction, this *also* adds that cache's
+    /// `Vec<Cell>` capacity cost. This is deliberate: the memoized cache is
+    /// real resident memory (both representations exist simultaneously)
+    /// until it is either dropped by a future eviction pass (tracked
+    /// separately) or the row is mutated (which discards the compact form
+    /// entirely via [`Row::ensure_live`]). Reporting only the `CompactRow`
+    /// cost while a warm cache is resident would understate true memory use.
+    ///
+    /// Used by [`crate::buffer::Buffer::heap_bytes`] to account for
+    /// compaction savings.
+    #[must_use]
+    pub fn storage_heap_bytes(&self) -> usize {
+        match &self.storage {
+            RowStorage::Live(cells) => cells.capacity() * core::mem::size_of::<Cell>(),
+            RowStorage::Compact {
+                compact,
+                decompacted,
+            } => {
+                let cache_bytes = decompacted
+                    .get()
+                    .map_or(0, |cells| cells.capacity() * core::mem::size_of::<Cell>());
+                compact.heap_bytes() + cache_bytes
+            }
+        }
+    }
+
     /// Clear all cells in this row, leaving it empty (sparse).
     pub fn clear(&mut self) {
         self.dirty = true;
-        self.cells.clear();
+        // Clearing discards all content regardless of representation, so
+        // this can skip decompaction entirely rather than routing through
+        // `ensure_live()` — cheaper for a compact scrollback row that's
+        // about to be recycled.
+        self.storage = RowStorage::Live(Vec::new());
     }
 
     /// Fill this row with blank cells carrying the given format tag (BCE).
@@ -145,8 +355,9 @@ impl Row {
         if tag.is_visually_default() {
             return;
         }
-        self.cells
-            .resize(self.width, Cell::blank_with_tag(tag.clone()));
+        let width = self.width;
+        self.cells_vec_mut()
+            .resize(width, Cell::blank_with_tag(tag.clone()));
     }
 
     /// Mark this row as clean (its flat representation is up-to-date in the cache).
@@ -161,7 +372,13 @@ impl Row {
     /// are cleared or drained.
     #[must_use]
     pub fn count_image_cells(&self) -> usize {
-        self.cells.iter().filter(|c| c.has_image()).count()
+        // A compact row is guaranteed to contain zero image cells (image
+        // rows opt out of compaction — see `CompactRow::from_row`), so this
+        // returns 0 immediately without triggering a decompaction.
+        if self.is_compact() {
+            return 0;
+        }
+        self.cells_ref().iter().filter(|c| c.has_image()).count()
     }
 
     /// Count image cells in columns `[from..to)`.
@@ -169,21 +386,36 @@ impl Row {
     /// Columns beyond the stored cell count are treated as blank (no image).
     #[must_use]
     pub fn count_image_cells_in_range(&self, from: usize, to: usize) -> usize {
-        let start = from.min(self.cells.len());
-        let end = to.min(self.cells.len());
+        // See `count_image_cells`: a compact row can never contain an image
+        // cell, so this short-circuits without decompacting.
+        if self.is_compact() {
+            return 0;
+        }
+        let cells = self.cells_ref();
+        let start = from.min(cells.len());
+        let end = to.min(cells.len());
         if start >= end {
             return 0;
         }
-        self.cells[start..end]
-            .iter()
-            .filter(|c| c.has_image())
-            .count()
+        cells[start..end].iter().filter(|c| c.has_image()).count()
     }
 
     /// Logical row width (number of *columns*), not number of occupied cells.
     #[must_use]
     pub const fn max_width(&self) -> usize {
         self.width
+    }
+
+    /// Number of stored cells, WITHOUT decompacting a compact row.
+    /// For `Live`, the `Vec<Cell>` length; for `Compact`, the compact
+    /// stored-cell count. Used by width-preserving fast paths that must
+    /// not trigger decompaction.
+    #[must_use]
+    pub const fn stored_cell_count(&self) -> usize {
+        match &self.storage {
+            RowStorage::Live(cells) => cells.len(),
+            RowStorage::Compact { compact, .. } => compact.stored_cell_count(),
+        }
     }
 
     /// Update the logical width of this row (number of columns).
@@ -204,22 +436,28 @@ impl Row {
     /// cell at column `new_width` would be orphaned, so the head is converted
     /// to a blank using the head's own format tag (preserving background).
     pub fn truncate_cells_to_width(&mut self, new_width: usize) {
-        if self.cells.len() <= new_width {
+        // Fast path: if we already have no more cells than the target width,
+        // truncation is a no-op — do NOT decompact a compact row just to
+        // confirm nothing needs removing (this is the common case on a
+        // height-only resize, where width is unchanged).
+        if self.stored_cell_count() <= new_width {
             return;
         }
+        self.ensure_live();
+        let cells = self.cells_vec_mut();
 
         // Guard against splitting a wide glyph at the boundary.  If the cell
         // at new_width is a continuation, its head sits at new_width - 1 and
         // must become a blank (keep its format so BCE background survives).
         if new_width > 0
-            && let Some(boundary_cell) = self.cells.get(new_width)
+            && let Some(boundary_cell) = cells.get(new_width)
             && boundary_cell.is_continuation()
         {
-            let head_tag = self.cells[new_width - 1].tag().clone();
-            self.cells[new_width - 1] = Cell::blank_with_tag(head_tag);
+            let head_tag = cells[new_width - 1].tag().clone();
+            cells[new_width - 1] = Cell::blank_with_tag(head_tag);
         }
 
-        self.cells.truncate(new_width);
+        cells.truncate(new_width);
         // We mutated `cells` (and possibly cell content at `new_width - 1`),
         // so invalidate the Buffer's row cache. Matches every other mutator
         // in this file.
@@ -229,11 +467,12 @@ impl Row {
     /// How many cells are currently occupied.
     #[must_use]
     pub fn row_width(&self) -> usize {
+        let cells = self.cells_ref();
         let mut cols = 0;
         let mut idx = 0;
 
-        while idx < self.cells.len() {
-            let cell = &self.cells[idx];
+        while idx < cells.len() {
+            let cell = &cells[idx];
             if cell.is_head() {
                 cols += cell.display_width();
                 idx += cell.display_width();
@@ -250,14 +489,15 @@ impl Row {
     /// Returns the cell at the given column index, or `None` if out of bounds.
     #[must_use]
     pub fn char_at(&self, idx: usize) -> Option<&Cell> {
-        self.cells.get(idx)
+        self.cells_ref().get(idx)
     }
 
     /// Return the real cell if present, otherwise an implicit blank.
     #[must_use]
     pub fn resolve_cell(&self, col: usize) -> Cell {
-        if col < self.cells.len() {
-            self.cells[col].clone()
+        let cells = self.cells_ref();
+        if col < cells.len() {
+            cells[col].clone()
         } else {
             Cell::blank_with_tag(FormatTag::default())
         }
@@ -268,19 +508,37 @@ impl Row {
     /// Prefer [`Row::cells`] for slice access. This method is retained for
     /// callers that need a `&Vec<Cell>` specifically.
     #[must_use]
-    pub const fn characters(&self) -> &Vec<Cell> {
-        &self.cells
+    pub fn characters(&self) -> &Vec<Cell> {
+        self.cells_ref()
     }
 
     /// Returns the cells in this row as a slice.
     #[must_use]
     pub fn cells(&self) -> &[Cell] {
-        &self.cells
+        self.cells_ref()
+    }
+
+    /// Cells to scan for image references, for use by whole-buffer image
+    /// garbage-collection passes (e.g. `ImageStore::retain_referenced`).
+    ///
+    /// A compact row is guaranteed to contain zero image cells (image rows
+    /// opt out of compaction — see `CompactRow::from_row`), so this returns
+    /// an empty slice *without* triggering a decompaction. Scanning a
+    /// compacted scrollback row's real cells for images would otherwise
+    /// defeat its own memory savings the moment any image exists anywhere
+    /// in the buffer.
+    #[must_use]
+    pub fn cells_for_image_scan(&self) -> &[Cell] {
+        if self.is_compact() {
+            &[]
+        } else {
+            self.cells_ref()
+        }
     }
 
     /// Returns the cells in this row as a mutable slice.
     pub fn cells_mut(&mut self) -> &mut [Cell] {
-        &mut self.cells
+        self.cells_vec_mut().as_mut_slice()
     }
 
     /// Returns the logical width of this row.
@@ -292,7 +550,7 @@ impl Row {
     /// Push a single cell onto the backing store (used internally by column-
     /// selective scroll helpers which need to extend a row without a full clear).
     pub fn cells_mut_push(&mut self, cell: Cell) {
-        self.cells.push(cell);
+        self.cells_vec_mut().push(cell);
     }
 
     /// Mark this row as dirty (its cached flat representation is stale).
@@ -305,31 +563,33 @@ impl Row {
     /// - If overwriting a head, clear its continuations.
     fn cleanup_wide_overwrite(&mut self, col: usize) {
         self.dirty = true;
-        if col >= self.cells.len() {
+        self.ensure_live();
+        let cells = self.cells_vec_mut();
+        if col >= cells.len() {
             return;
         }
 
         // Overwriting a continuation: clean up head + all continuations.
-        if self.cells[col].is_continuation() {
+        if cells[col].is_continuation() {
             if col == 0 {
                 // Invariant violation; nothing to the left
                 return;
             }
             // find head to the left
             let mut head = col - 1;
-            while head > 0 && !self.cells[head].is_head() {
+            while head > 0 && !cells[head].is_head() {
                 head -= 1;
             }
-            if !self.cells[head].is_head() {
+            if !cells[head].is_head() {
                 return;
             }
 
             // clear head + all following continuations
             let mut idx = head;
-            while idx < self.cells.len() && self.cells[idx].is_continuation() || idx == head {
-                self.cells[idx] = Cell::new(TChar::Space, FormatTag::default());
+            while idx < cells.len() && cells[idx].is_continuation() || idx == head {
+                cells[idx] = Cell::new(TChar::Space, FormatTag::default());
                 idx += 1;
-                if idx >= self.cells.len() {
+                if idx >= cells.len() {
                     break;
                 }
             }
@@ -337,10 +597,10 @@ impl Row {
         }
 
         // Overwriting a head: clear trailing continuations
-        if self.cells[col].is_head() {
+        if cells[col].is_head() {
             let mut idx = col + 1;
-            while idx < self.cells.len() && self.cells[idx].is_continuation() {
-                self.cells[idx] = Cell::new(TChar::Space, FormatTag::default());
+            while idx < cells.len() && cells[idx].is_continuation() {
+                cells[idx] = Cell::new(TChar::Space, FormatTag::default());
                 idx += 1;
             }
         }
@@ -371,6 +631,7 @@ impl Row {
         tag: &FormatTag,
         right_limit: usize,
     ) -> InsertResponse {
+        self.ensure_live();
         let limit = right_limit.min(self.width);
         let mut col = start_col;
 
@@ -415,10 +676,10 @@ impl Row {
             // These cells were never explicitly written to, so they must
             // carry the default format rather than the incoming text's tag.
             // -----------------------------------------------------------
-            if col > self.cells.len() {
-                let pad = col - self.cells.len();
+            if col > self.cells_vec_mut().len() {
+                let pad = col - self.cells_vec_mut().len();
                 for _ in 0..pad {
-                    self.cells
+                    self.cells_vec_mut()
                         .push(Cell::new(TChar::Space, FormatTag::default()));
                 }
             }
@@ -426,7 +687,7 @@ impl Row {
             // -----------------------------------------------------------
             // If we're overwriting, clean up any wide-glyph debris.
             // -----------------------------------------------------------
-            if col < self.cells.len() {
+            if col < self.cells_vec_mut().len() {
                 self.cleanup_wide_overwrite(col);
             }
 
@@ -435,13 +696,13 @@ impl Row {
             // but never grow beyond self.width.
             // -----------------------------------------------------------
             let target_len = (col + w).min(self.width);
-            if self.cells.len() < target_len {
-                self.cells
+            if self.cells_vec_mut().len() < target_len {
+                self.cells_vec_mut()
                     .resize(target_len, Cell::new(TChar::Space, FormatTag::default()));
             }
 
             // After resize, col must be within bounds; double-check defensively.
-            if col >= self.cells.len() {
+            if col >= self.cells_vec_mut().len() {
                 return InsertResponse::Leftover {
                     leftover_start: i,
                     final_col: col,
@@ -451,17 +712,17 @@ impl Row {
             // -----------------------------------------------------------
             // Insert head cell
             // -----------------------------------------------------------
-            self.cells[col] = Cell::new(*tchar, tag.clone());
+            self.cells_vec_mut()[col] = Cell::new(*tchar, tag.clone());
 
             // -----------------------------------------------------------
             // Insert continuation cells within bounds
             // -----------------------------------------------------------
             for offset in 1..w {
                 let idx = col + offset;
-                if idx >= self.width || idx >= self.cells.len() {
+                if idx >= self.width || idx >= self.cells_vec_mut().len() {
                     break;
                 }
-                self.cells[idx] = Cell::wide_continuation();
+                self.cells_vec_mut()[idx] = Cell::wide_continuation();
             }
 
             // Move column forward by glyph width, but never beyond width
@@ -480,6 +741,7 @@ impl Row {
     /// Insert `n` spaces starting at `col`, shifting existing cells right.
     /// This implements VT ICH (Insert Character).
     pub fn insert_spaces_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
+        self.ensure_live();
         let width = self.width;
 
         if n == 0 || col >= width {
@@ -491,8 +753,10 @@ impl Row {
         // How many blanks can actually be inserted within the logical row width?
         let insert_len = n.min(width.saturating_sub(col));
 
+        let cells = self.cells_vec_mut();
+
         // Current number of stored cells (may be < width).
-        let old_len = self.cells.len();
+        let old_len = cells.len();
 
         // We need enough capacity to:
         //  - hold all existing cells, shifted by insert_len
@@ -508,35 +772,33 @@ impl Row {
         }
 
         // Resize with default blank cells; many of these will be overwritten.
-        self.cells
-            .resize(needed_len, Cell::blank_with_tag(FormatTag::default()));
+        cells.resize(needed_len, Cell::blank_with_tag(FormatTag::default()));
 
         // Shift existing cells [col..old_len) to the right by insert_len.
         // Anything whose destination is >= width "falls off" to the right.
         for i in (col..old_len).rev() {
             let dest = i + insert_len;
             if dest < width {
-                self.cells[dest] = self.cells[i].clone();
+                cells[dest] = cells[i].clone();
             }
             // if dest >= width, the cell is discarded (clamped off the row)
         }
 
         // Fill the gap [col..col+insert_len) with blanks using the current tag.
-        for i in col..(col + insert_len) {
-            if i < width {
-                self.cells[i] = Cell::blank_with_tag(tag.clone());
-            }
+        let fill_end = (col + insert_len).min(width);
+        for cell in cells.iter_mut().take(fill_end).skip(col) {
+            *cell = Cell::blank_with_tag(tag.clone());
         }
 
         // Finally, clamp physical storage so we don't have cells beyond logical width.
-        if self.cells.len() > width {
-            self.cells.truncate(width);
+        if cells.len() > width {
+            cells.truncate(width);
         }
 
         // Maintain sparse-row invariant by trimming trailing default blanks
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -545,6 +807,9 @@ impl Row {
 
     /// Clear cells from `col` to the end of the row
     pub fn clear_from(&mut self, col: usize, tag: &FormatTag) {
+        self.ensure_live();
+        let width = self.width;
+        let cells = self.cells_vec_mut();
         // BCE: when the tag has a non-default background, we must write explicit
         // blank cells all the way to the row width so the renderer picks up the
         // correct background color.  When the tag is visually default, we only
@@ -552,24 +817,23 @@ impl Row {
         if !tag.is_visually_default() {
             // Extend the cell vector to the full row width so every column from
             // `col` to the end has an explicit cell carrying the BCE tag.
-            if self.cells.len() < self.width {
-                self.cells
-                    .resize(self.width, Cell::blank_with_tag(FormatTag::default()));
+            if cells.len() < width {
+                cells.resize(width, Cell::blank_with_tag(FormatTag::default()));
             }
-        } else if col >= self.cells.len() {
+        } else if col >= cells.len() {
             return;
         }
 
         self.dirty = true;
-        let end = self.cells.len();
-        for i in col..end {
-            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        let cells = self.cells_vec_mut();
+        for cell in cells.iter_mut().skip(col) {
+            *cell = Cell::blank_with_tag(tag.clone());
         }
 
         // Trim trailing blanks to maintain sparse invariant
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -581,19 +845,21 @@ impl Row {
     /// Callers that want an inclusive clear (e.g. EL 1 — "erase through cursor")
     /// pass `cursor_x + 1`.
     pub fn clear_to(&mut self, col: usize, tag: &FormatTag) {
+        self.ensure_live();
         // BCE: when the tag is non-default, extend the cell vector so we can
         // write explicit blank cells for the full erased range.
         let limit = col.min(self.width);
-        if !tag.is_visually_default() && self.cells.len() < limit {
-            self.cells
+        if !tag.is_visually_default() && self.cells_vec_mut().len() < limit {
+            self.cells_vec_mut()
                 .resize(limit, Cell::blank_with_tag(FormatTag::default()));
         }
-        let end = limit.min(self.cells.len());
+        let end = limit.min(self.cells_vec_mut().len());
         if end > 0 {
             self.dirty = true;
         }
-        for i in 0..end {
-            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        let cells = self.cells_vec_mut();
+        for cell in cells.iter_mut().take(end) {
+            *cell = Cell::blank_with_tag(tag.clone());
         }
     }
 
@@ -605,10 +871,14 @@ impl Row {
     /// cells are written so the renderer can pick up the correct colors.
     pub fn clear_with_tag(&mut self, tag: &FormatTag) {
         self.dirty = true;
-        self.cells.clear();
+        let width = self.width;
+        // Same rationale as `clear()`: discard existing content outright
+        // rather than decompacting first — a full clear never needs the old
+        // cell data.
+        self.storage = RowStorage::Live(Vec::new());
         if !tag.is_visually_default() {
-            self.cells
-                .resize(self.width, Cell::blank_with_tag(tag.clone()));
+            self.cells_vec_mut()
+                .resize(width, Cell::blank_with_tag(tag.clone()));
         }
     }
 
@@ -623,6 +893,7 @@ impl Row {
     ///   continuation cell that falls within the range is replaced, and any wide glyph
     ///   that straddles the boundary is fully blanked so no dangling continuations remain.
     pub fn erase_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
+        self.ensure_live();
         if n == 0 || col >= self.width {
             return;
         }
@@ -632,21 +903,22 @@ impl Row {
         let end = (col + n).min(self.width);
 
         // Extend the backing storage up to `end` if needed, filling with default blanks.
-        if self.cells.len() < end {
-            self.cells
+        if self.cells_vec_mut().len() < end {
+            self.cells_vec_mut()
                 .resize(end, Cell::blank_with_tag(FormatTag::default()));
         }
 
         // If `end` cuts through a wide glyph (continuation at `end` whose head is
         // before `end`), extend `end` to cover the whole glyph so no dangling
         // continuation is left.
-        let erase_end = if end < self.cells.len() && self.cells[end].is_continuation() {
+        let cells = self.cells_vec_mut();
+        let erase_end = if end < cells.len() && cells[end].is_continuation() {
             let mut head = end;
-            while head > 0 && self.cells[head].is_continuation() {
+            while head > 0 && cells[head].is_continuation() {
                 head -= 1;
             }
-            if self.cells[head].is_head() {
-                (head + self.cells[head].display_width()).min(self.cells.len())
+            if cells[head].is_head() {
+                (head + cells[head].display_width()).min(cells.len())
             } else {
                 end
             }
@@ -655,14 +927,14 @@ impl Row {
         };
 
         // Replace every cell in [col .. erase_end] with a blank using `tag`.
-        for i in col..erase_end.min(self.cells.len()) {
-            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        for i in col..erase_end.min(cells.len()) {
+            cells[i] = Cell::blank_with_tag(tag.clone());
         }
 
         // Trim trailing default blanks to maintain the sparse-row invariant.
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -679,7 +951,9 @@ impl Row {
         tag: &FormatTag,
         right_limit: usize,
     ) {
+        self.ensure_live();
         let limit = right_limit.min(self.width);
+        let width = self.width;
 
         if n == 0 || col >= limit {
             return;
@@ -688,7 +962,7 @@ impl Row {
         self.dirty = true;
 
         let insert_len = n.min(limit.saturating_sub(col));
-        let old_len = self.cells.len().min(limit); // only cells inside the margin matter
+        let old_len = self.cells_vec_mut().len().min(limit); // only cells inside the margin matter
 
         let needed_len = (old_len + insert_len).max(col + insert_len).min(limit);
         if needed_len == 0 {
@@ -696,34 +970,37 @@ impl Row {
         }
 
         // Ensure storage up to `limit` (fill with default blanks).
-        if self.cells.len() < limit {
-            self.cells
+        if self.cells_vec_mut().len() < limit {
+            self.cells_vec_mut()
                 .resize(limit, Cell::blank_with_tag(FormatTag::default()));
         }
+
+        let cells = self.cells_vec_mut();
 
         // Shift cells [col..limit-insert_len) right by insert_len within [col, limit).
         let shift_end = limit.saturating_sub(insert_len);
         for i in (col..shift_end).rev() {
             let dest = i + insert_len;
             if dest < limit {
-                self.cells[dest] = self.cells[i].clone();
+                cells[dest] = cells[i].clone();
             }
         }
 
         // Fill [col..col+insert_len) with blanks.
-        for i in col..(col + insert_len).min(limit) {
-            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        let fill_end = (col + insert_len).min(limit);
+        for cell in cells.iter_mut().take(fill_end).skip(col) {
+            *cell = Cell::blank_with_tag(tag.clone());
         }
 
         // Clamp storage to logical width.
-        if self.cells.len() > self.width {
-            self.cells.truncate(self.width);
+        if cells.len() > width {
+            cells.truncate(width);
         }
 
         // Maintain sparse-row invariant.
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -742,9 +1019,11 @@ impl Row {
         right_limit: usize,
         tag: &FormatTag,
     ) {
+        self.ensure_live();
         let limit = right_limit.min(self.width);
+        let width = self.width;
 
-        if n == 0 || col >= limit || col >= self.cells.len() {
+        if n == 0 || col >= limit || col >= self.cells_vec_mut().len() {
             return;
         }
 
@@ -753,31 +1032,33 @@ impl Row {
         let delete_n = n.min(limit.saturating_sub(col));
 
         // Ensure storage up to `limit`.
-        if self.cells.len() < limit {
-            self.cells
+        if self.cells_vec_mut().len() < limit {
+            self.cells_vec_mut()
                 .resize(limit, Cell::blank_with_tag(FormatTag::default()));
         }
 
+        let cells = self.cells_vec_mut();
+
         // Shift cells [col+delete_n, limit) left by delete_n.
         for i in col..limit.saturating_sub(delete_n) {
-            self.cells[i] = self.cells[i + delete_n].clone();
+            cells[i] = cells[i + delete_n].clone();
         }
 
         // Fill [limit-delete_n, limit) with blanks.
         let fill_start = limit.saturating_sub(delete_n);
-        for i in fill_start..limit {
-            self.cells[i] = Cell::blank_with_tag(tag.clone());
+        for cell in cells.iter_mut().take(limit).skip(fill_start) {
+            *cell = Cell::blank_with_tag(tag.clone());
         }
 
         // Clamp storage.
-        if self.cells.len() > self.width {
-            self.cells.truncate(self.width);
+        if cells.len() > width {
+            cells.truncate(width);
         }
 
         // Maintain sparse-row invariant.
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag() == &FormatTag::default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -797,65 +1078,68 @@ impl Row {
     /// - BCE: the `tag` parameter is used for any blank cells created during
     ///   wide-glyph boundary cleanup (e.g. when a deletion splits a wide glyph).
     pub fn delete_cells_at(&mut self, col: usize, n: usize, tag: &FormatTag) {
-        if n == 0 || col >= self.cells.len() {
+        self.ensure_live();
+        if n == 0 || col >= self.cells_vec_mut().len() {
             return;
         }
 
         self.dirty = true;
 
+        let cells = self.cells_vec_mut();
+
         // --- Wide-glyph cleanup: find the real start of deletion --------
         let mut start = col;
 
         // If we land on a continuation, walk back to the head and include it.
-        if start < self.cells.len() && self.cells[start].is_continuation() {
+        if start < cells.len() && cells[start].is_continuation() {
             let mut head = start;
-            while head > 0 && self.cells[head].is_continuation() {
+            while head > 0 && cells[head].is_continuation() {
                 head -= 1;
             }
             // head is now either the wide head or position 0.
-            if self.cells[head].is_head() {
+            if cells[head].is_head() {
                 start = head;
             }
         }
 
         // Extend deletion to cover any trailing continuations of a head at `start`.
-        let mut end = (start + n).min(self.cells.len());
+        let mut end = (start + n).min(cells.len());
 
         // If the cell at `start` is a wide head, make sure we include all of its
         // continuation cells (they may already be covered, but let's be safe).
-        if start < self.cells.len() && self.cells[start].is_head() {
-            let head_width = self.cells[start].display_width();
-            end = end.max((start + head_width).min(self.cells.len()));
+        if start < cells.len() && cells[start].is_head() {
+            let head_width = cells[start].display_width();
+            end = end.max((start + head_width).min(cells.len()));
         }
 
         // Also extend `end` if it cuts through a wide glyph (continuation at `end`
         // whose head is before `end`): we blank the whole glyph.
-        if end < self.cells.len() && self.cells[end].is_continuation() {
+        if end < cells.len() && cells[end].is_continuation() {
             // Walk back to find head
             let mut head = end;
-            while head > 0 && self.cells[head].is_continuation() {
+            while head > 0 && cells[head].is_continuation() {
                 head -= 1;
             }
-            if self.cells[head].is_head() {
+            if cells[head].is_head() {
                 // Replace the head+continuations with blanks rather than splitting.
-                let head_width = self.cells[head].display_width();
-                let replace_end = (head + head_width).min(self.cells.len());
-                for i in head..replace_end {
-                    self.cells[i] = Cell::blank_with_tag(tag.clone());
+                let head_width = cells[head].display_width();
+                let replace_end = (head + head_width).min(cells.len());
+                for cell in cells.iter_mut().take(replace_end).skip(head) {
+                    *cell = Cell::blank_with_tag(tag.clone());
                 }
             }
         }
 
         // Clamp end to actual length
-        let end = end.min(self.cells.len());
+        let end = end.min(cells.len());
 
         // --- Remove the range [start..end] by draining it ---------------
-        self.cells.drain(start..end);
+        cells.drain(start..end);
 
         // Trim trailing visually-default blanks to maintain the sparse-row invariant.
-        while let Some(last) = self.cells.last() {
+        while let Some(last) = cells.last() {
             if last.tchar() == &TChar::Space && last.tag().is_visually_default() {
-                self.cells.pop();
+                cells.pop();
             } else {
                 break;
             }
@@ -872,22 +1156,23 @@ impl Row {
         placement: crate::image_store::ImagePlacement,
         tag: FormatTag,
     ) {
+        self.ensure_live();
         if col >= self.width {
             return;
         }
         self.dirty = true;
 
         // Extend cells to reach the target column if needed.
-        if col >= self.cells.len() {
-            let pad = col - self.cells.len() + 1;
-            self.cells
+        if col >= self.cells_vec_mut().len() {
+            let pad = col - self.cells_vec_mut().len() + 1;
+            self.cells_vec_mut()
                 .extend(std::iter::repeat_n(Cell::blank_with_tag(tag.clone()), pad));
         }
 
         // Clean up any wide character at this position.
         self.cleanup_wide_overwrite(col);
 
-        self.cells[col] = Cell::image_cell(placement, tag);
+        self.cells_vec_mut()[col] = Cell::image_cell(placement, tag);
     }
 }
 
@@ -904,7 +1189,7 @@ mod tests {
         response::InsertResponse,
     };
 
-    use super::{LineWidth, Row};
+    use super::{LineWidth, Row, RowStorage};
 
     // -----------------------------------------------------------------------
     // LineWidth::is_double_width
@@ -2046,18 +2331,18 @@ mod tests {
         // Pathological state: continuation cell at position 0 (no head to the left).
         let mut row = Row::new(5);
         // Fill cells so we can manipulate them
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::wide_continuation(), // col 0: orphan continuation
             Cell::new(TChar::Ascii(b'A'), FormatTag::default()),
             Cell::new(TChar::Ascii(b'B'), FormatTag::default()),
-        ];
+        ]);
         // Overwrite col 0 — cleanup_wide_overwrite is called, finds continuation
         // at col 0, returns early (invariant violation guard).
         let tag = FormatTag::default();
         let text = [TChar::Ascii(b'X')];
         let _resp = row.insert_text(0, &text, &tag);
         // Col 0 should now be 'X', not a continuation
-        assert_eq!(row.cells[0].tchar(), &TChar::Ascii(b'X'));
+        assert_eq!(row.cells()[0].tchar(), &TChar::Ascii(b'X'));
     }
 
     // ── cleanup_wide_overwrite: walk-back finds no head (lines 287-290) ─
@@ -2066,11 +2351,11 @@ mod tests {
     fn cleanup_wide_overwrite_walk_back_no_head_returns_early() {
         // Multiple continuation cells with no head — pathological state.
         let mut row = Row::new(5);
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::wide_continuation(), // col 0: orphan continuation
             Cell::wide_continuation(), // col 1: orphan continuation
             Cell::wide_continuation(), // col 2: orphan continuation
-        ];
+        ]);
         // Overwrite col 2 — walks back through continuations, finds col 0
         // which is also continuation (not head), returns early.
         let tag = FormatTag::default();
@@ -2080,7 +2365,7 @@ mod tests {
             InsertResponse::Consumed(col) => assert_eq!(col, 3),
             InsertResponse::Leftover { .. } => panic!("unexpected leftover"),
         }
-        assert_eq!(row.cells[2].tchar(), &TChar::Ascii(b'Z'));
+        assert_eq!(row.cells()[2].tchar(), &TChar::Ascii(b'Z'));
     }
 
     // ── insert_text: wide char at edge, continuation past width (428, 436) ─
@@ -2132,13 +2417,13 @@ mod tests {
     fn erase_cells_at_continuation_no_head_fallthrough() {
         // Walk-back from continuation finds no head cell — uses `end` as-is.
         let mut row = Row::new(10);
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::new(TChar::Ascii(b'A'), FormatTag::default()),
             Cell::new(TChar::Ascii(b'B'), FormatTag::default()),
             Cell::wide_continuation(), // orphan continuation at col 2
             Cell::wide_continuation(), // orphan continuation at col 3
             Cell::new(TChar::Ascii(b'C'), FormatTag::default()),
-        ];
+        ]);
         // Erase 1 cell at col 0 — end = min(0+1, 10) = 1.
         // Cell at end (col 1) is not continuation. Let's set up erase at col 0
         // with n = 2 so end = 2. Cell at col 2 IS a continuation.
@@ -2147,8 +2432,8 @@ mod tests {
         row.erase_cells_at(0, 2, &tag);
         // Cols 0 and 1 should be blanked. Col 2 (continuation) survives as-is
         // because the walk-back found no head.
-        assert_eq!(row.cells[0].tchar(), &TChar::Space);
-        assert_eq!(row.cells[1].tchar(), &TChar::Space);
+        assert_eq!(row.cells()[0].tchar(), &TChar::Space);
+        assert_eq!(row.cells()[1].tchar(), &TChar::Space);
     }
 
     // ── insert_spaces_bounded: resize path and sparse trim (lines 666-667, 686, 692-693) ─
@@ -2159,18 +2444,18 @@ mod tests {
         // After insert, if trailing cells are default blanks, they get popped (692-693).
         let mut row = Row::new(10);
         // Only 2 cells stored
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::new(TChar::Ascii(b'A'), FormatTag::default()),
             Cell::new(TChar::Ascii(b'B'), FormatTag::default()),
-        ];
+        ]);
         let tag = FormatTag::default();
         // Insert 2 spaces at col 1 within limit 8
         row.insert_spaces_at_with_right_limit(1, 2, &tag, 8);
         // 'A' at 0, then 2 blank spaces at 1-2, then 'B' shifted to 3
-        assert_eq!(row.cells[0].tchar(), &TChar::Ascii(b'A'));
-        assert_eq!(row.cells[1].tchar(), &TChar::Space);
-        assert_eq!(row.cells[2].tchar(), &TChar::Space);
-        assert_eq!(row.cells[3].tchar(), &TChar::Ascii(b'B'));
+        assert_eq!(row.cells()[0].tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(row.cells()[1].tchar(), &TChar::Space);
+        assert_eq!(row.cells()[2].tchar(), &TChar::Space);
+        assert_eq!(row.cells()[3].tchar(), &TChar::Ascii(b'B'));
     }
 
     // ── insert_spaces_bounded: cells.len > width truncation (line 686) ──
@@ -2184,11 +2469,12 @@ mod tests {
         // Line 686 is a defensive guard. Let's trigger it by manipulating cells directly.
         let mut row = Row::new(5);
         // Pre-fill with 7 cells (more than width)
-        row.cells = vec![Cell::new(TChar::Ascii(b'X'), FormatTag::default()); 7];
+        row.storage =
+            RowStorage::Live(vec![Cell::new(TChar::Ascii(b'X'), FormatTag::default()); 7]);
         let tag = FormatTag::default();
         row.insert_spaces_at_with_right_limit(0, 1, &tag, 5);
         // After operation, cells.len should be truncated to <= width
-        assert!(row.cells.len() <= 5);
+        assert!(row.cells().len() <= 5);
     }
 
     // ── delete_cells_bounded: cells.len > width truncation (line 740) ───
@@ -2197,11 +2483,12 @@ mod tests {
     fn delete_cells_bounded_truncates_when_exceeding_width() {
         let mut row = Row::new(5);
         // Pre-fill with 7 cells (more than width)
-        row.cells = vec![Cell::new(TChar::Ascii(b'X'), FormatTag::default()); 7];
+        row.storage =
+            RowStorage::Live(vec![Cell::new(TChar::Ascii(b'X'), FormatTag::default()); 7]);
         let tag = FormatTag::default();
         row.delete_cells_at_with_right_limit(0, 1, 5, &tag);
         // After operation, cells.len should be truncated to <= width
-        assert!(row.cells.len() <= 5);
+        assert!(row.cells().len() <= 5);
     }
 
     // ── delete_cells_at: deletion splits a wide glyph at end (line 812) ─
@@ -2238,12 +2525,12 @@ mod tests {
         // Cell at end (col 3) is continuation! → walk back, find head at col 2.
         // Replace head+continuations with blanks (line 809-811). Line 812 closing brace.
         let mut row = Row::new(10);
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::new(TChar::Ascii(b'A'), FormatTag::default()),
             Cell::new(TChar::Ascii(b'B'), FormatTag::default()),
             Cell::new(wide_tchar(), FormatTag::default()), // head at col 2
             Cell::wide_continuation(),                     // continuation at col 3
-        ];
+        ]);
         let tag = FormatTag::default();
         // Delete 3 cells starting at col 0 → end = 3.
         // Cell at col 3 is continuation → walk back to head at col 2.
@@ -2291,12 +2578,12 @@ mod tests {
             InsertResponse::Consumed(col) => assert_eq!(col, 6),
             InsertResponse::Leftover { .. } => panic!("unexpected leftover"),
         }
-        assert!(row.cells[0].is_head());
-        assert!(row.cells[1].is_continuation());
-        assert!(row.cells[2].is_head());
-        assert!(row.cells[3].is_continuation());
-        assert!(row.cells[4].is_head());
-        assert!(row.cells[5].is_continuation());
+        assert!(row.cells()[0].is_head());
+        assert!(row.cells()[1].is_continuation());
+        assert!(row.cells()[2].is_head());
+        assert!(row.cells()[3].is_continuation());
+        assert!(row.cells()[4].is_head());
+        assert!(row.cells()[5].is_continuation());
     }
 
     #[test]
@@ -2325,19 +2612,202 @@ mod tests {
     fn delete_cells_bounded_trims_trailing_default_blanks() {
         let mut row = Row::new(10);
         // Fill with [A, B, <blank>, <blank>, <blank>] — limit 5
-        row.cells = vec![
+        row.storage = RowStorage::Live(vec![
             Cell::new(TChar::Ascii(b'A'), FormatTag::default()),
             Cell::new(TChar::Ascii(b'B'), FormatTag::default()),
             Cell::blank_with_tag(FormatTag::default()),
             Cell::blank_with_tag(FormatTag::default()),
             Cell::blank_with_tag(FormatTag::default()),
-        ];
+        ]);
         let tag = FormatTag::default();
         // Delete 1 cell at col 0, limit 5: shift left, fill right with blank
         row.delete_cells_at_with_right_limit(0, 1, 5, &tag);
         // After delete: [B, blank, blank, blank, blank] → all trailing blanks trimmed
         // Final should be just [B]
-        assert_eq!(row.cells.len(), 1);
-        assert_eq!(row.cells[0].tchar(), &TChar::Ascii(b'B'));
+        assert_eq!(row.cells().len(), 1);
+        assert_eq!(row.cells()[0].tchar(), &TChar::Ascii(b'B'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Row-internal storage compaction (Task 118.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compact_then_read_decompacts_to_identical_cells() {
+        let mut row = Row::new(20);
+        let tag = FormatTag::default();
+        let text: Vec<TChar> = b"hello world".iter().map(|&b| TChar::Ascii(b)).collect();
+        row.insert_text(0, &text, &tag);
+        let cells_before: Vec<_> = row.cells().to_vec();
+
+        assert!(!row.is_compact());
+        assert!(row.compact(), "a plain text row should be compactable");
+        assert!(row.is_compact());
+
+        // Reading through every accessor after compaction must reproduce the
+        // exact pre-compaction cell data.
+        assert_eq!(row.cells(), cells_before.as_slice());
+        assert_eq!(row.characters(), &cells_before);
+        for (i, expected) in cells_before.iter().enumerate() {
+            assert_eq!(&row.resolve_cell(i), expected);
+            assert_eq!(row.char_at(i), Some(expected));
+        }
+        // A read-only decompaction must not flip the storage representation
+        // back to `Live` — it stays compact, just memoized.
+        assert!(row.is_compact());
+    }
+
+    #[test]
+    fn compact_on_image_row_is_noop() {
+        let mut row = Row::new(10);
+        row.set_image_cell(2, make_image_placement(1), FormatTag::default());
+
+        assert!(!row.compact(), "an image row must not be compactable");
+        assert!(!row.is_compact());
+    }
+
+    #[test]
+    fn compact_is_noop_when_already_compact() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A')], &tag);
+
+        assert!(row.compact());
+        assert!(row.is_compact());
+        // Compacting an already-compact row is a no-op that returns `false`.
+        assert!(!row.compact());
+        assert!(row.is_compact());
+    }
+
+    #[test]
+    fn compact_row_has_no_image_cells() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A'), TChar::Ascii(b'B')], &tag);
+        row.compact();
+
+        assert_eq!(row.count_image_cells(), 0);
+        assert_eq!(row.count_image_cells_in_range(0, 10), 0);
+    }
+
+    #[test]
+    fn mutating_a_compact_row_decompacts_it() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A'), TChar::Ascii(b'B')], &tag);
+        row.compact();
+        assert!(row.is_compact());
+
+        // Any mutating method must decompact the row back to `Live` first
+        // (Task 118.3: compact rows are never mutated in place).
+        row.insert_text(2, &[TChar::Ascii(b'C')], &tag);
+        assert!(!row.is_compact());
+        assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(row.resolve_cell(2).tchar(), &TChar::Ascii(b'C'));
+    }
+
+    #[test]
+    fn storage_heap_bytes_is_smaller_when_compacted() {
+        let width = 200;
+        let mut tag = FormatTag::default();
+        tag.colors
+            .set_color(freminal_common::colors::TerminalColor::Green);
+        let text: Vec<TChar> = "x".repeat(width).bytes().map(TChar::Ascii).collect();
+
+        let mut row = Row::new(width);
+        row.insert_text(0, &text, &tag);
+        let live_bytes = row.storage_heap_bytes();
+
+        row.compact();
+        let compact_bytes = row.storage_heap_bytes();
+
+        assert!(
+            compact_bytes < live_bytes,
+            "compact storage_heap_bytes ({compact_bytes}) should be smaller than live ({live_bytes})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // release_decompacted_cache (Task 118.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn release_decompacted_cache_is_noop_on_live_row() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A')], &tag);
+        assert!(!row.is_compact());
+
+        // Must not panic and must not flip storage representation.
+        row.release_decompacted_cache();
+        assert!(!row.is_compact());
+        assert_eq!(row.cells()[0].tchar(), &TChar::Ascii(b'A'));
+    }
+
+    #[test]
+    fn release_decompacted_cache_drops_memo_but_stays_compact() {
+        let width = 200;
+        let mut tag = FormatTag::default();
+        tag.colors
+            .set_color(freminal_common::colors::TerminalColor::Green);
+        let text: Vec<TChar> = "x".repeat(width).bytes().map(TChar::Ascii).collect();
+
+        let mut row = Row::new(width);
+        row.insert_text(0, &text, &tag);
+        row.compact();
+        assert!(row.is_compact());
+        let compact_only_bytes = row.storage_heap_bytes();
+
+        // Warm the decompaction memo via a read accessor.
+        let cells_before: Vec<_> = row.cells().to_vec();
+        let warm_bytes = row.storage_heap_bytes();
+        assert!(
+            warm_bytes > compact_only_bytes,
+            "a warmed memo must add to storage_heap_bytes ({warm_bytes} vs {compact_only_bytes})"
+        );
+
+        // Releasing the memo must drop back to the compact-only cost while
+        // remaining compact.
+        row.release_decompacted_cache();
+        assert!(row.is_compact());
+        assert_eq!(
+            row.storage_heap_bytes(),
+            compact_only_bytes,
+            "releasing the memo must free the memoized Vec<Cell> entirely"
+        );
+
+        // A subsequent read must reproduce identical cell data by
+        // re-decompacting from the still-resident `CompactRow`.
+        assert_eq!(row.cells(), cells_before.as_slice());
+        assert!(row.is_compact());
+    }
+
+    #[test]
+    fn release_decompacted_cache_is_noop_when_memo_never_warmed() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A'), TChar::Ascii(b'B')], &tag);
+        row.compact();
+        assert!(row.is_compact());
+
+        // No read accessor called yet — memo is cold. Releasing it anyway
+        // must be a harmless no-op.
+        row.release_decompacted_cache();
+        assert!(row.is_compact());
+        assert_eq!(row.resolve_cell(0).tchar(), &TChar::Ascii(b'A'));
+        assert_eq!(row.resolve_cell(1).tchar(), &TChar::Ascii(b'B'));
+    }
+
+    #[test]
+    fn clear_on_compact_row_does_not_panic_and_leaves_it_empty() {
+        let mut row = Row::new(10);
+        let tag = FormatTag::default();
+        row.insert_text(0, &[TChar::Ascii(b'A')], &tag);
+        row.compact();
+
+        row.clear();
+        assert!(row.cells().is_empty());
+        // `clear()` always produces `Live` storage (see its doc comment).
+        assert!(!row.is_compact());
     }
 }

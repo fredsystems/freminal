@@ -29,6 +29,38 @@ use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_windowing::{RepaintProxy, WindowId};
 
+/// Ask the system allocator to release free heap pages back to the OS.
+///
+/// After idle scrollback compaction (Task 118) frees a large number of small
+/// allocations (`Vec<Cell>` / `RowCacheEntry`), the glibc allocator keeps
+/// those pages in its per-arena free lists rather than `munmap`-ing them, so
+/// process RSS stays high even though the freed memory is no longer live. A
+/// one-shot `malloc_trim(0)` at the point the compaction backlog has fully
+/// drained returns the freed pages to the OS (empirically ~820 MB → ~380 MB
+/// after catting a 100k-line file into a pane). On non-glibc platforms this is
+/// a no-op: other allocators (macOS libmalloc, Windows) manage return-to-OS
+/// themselves and expose no equivalent portable call.
+// On non-glibc targets the body is empty, so clippy sees a trivially-const fn
+// and fires `missing_const_for_fn`; on glibc it makes a non-const FFI call and
+// cannot be const. The signature must be uniform across targets, so suppress
+// the conditional lint rather than split the definition.
+#[allow(clippy::missing_const_for_fn)]
+fn release_freed_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` is a glibc entry point with no preconditions;
+        // it only consolidates and releases already-free heap and returns
+        // non-zero if any memory was released. It cannot affect live
+        // allocations or Rust's memory safety.
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> core::ffi::c_int;
+        }
+        unsafe {
+            let _ = malloc_trim(0);
+        }
+    }
+}
+
 /// A finished-command event delivered from a PTY consumer thread to the GUI.
 ///
 /// Produced by Task 72.3 when the terminal handler sees an `OSC 133 D` marker,
@@ -349,6 +381,33 @@ fn spawn_pty_consumer_thread(
     if let Err(e) = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
+            // Idle-driven scrollback compaction (Task 118.9b): the only place
+            // `compact_idle_scrollback` is ever called from. Fires ~100ms
+            // after the last PTY read or GUI input event and compacts a
+            // bounded budget of not-yet-compacted scrollback rows, re-arming
+            // itself while work remains and disarming (via `never()`) once
+            // the terminal is fully caught up so a quiescent pane is not
+            // woken forever.
+            //
+            // The interval serves double duty: it is both the idle-detection
+            // delay (time since last activity before the first slice runs) and
+            // the inter-slice delay (gap between successive bounded compaction
+            // slices while a backlog drains). At 512 rows / 100ms that is
+            // ~5k rows/sec, so a freshly-dumped very large scrollback (e.g.
+            // 100k lines) takes on the order of ~20s to fully compact in the
+            // background — correct and never blocking, but a slow trickle for
+            // pathological dumps.
+            //
+            // TODO(Task 118 follow-up): revisit and make compaction pacing
+            // DYNAMIC based on the number of uncompacted rows outstanding —
+            // e.g. a larger budget and/or shorter inter-slice interval when the
+            // backlog is large, decaying back to this gentle cadence as it
+            // drains. The current fixed 512/100ms is deliberately simple; a
+            // huge dump should probably drain faster than ~20s.
+            const IDLE_COMPACTION_INTERVAL: std::time::Duration =
+                std::time::Duration::from_millis(100);
+            const IDLE_COMPACTION_BUDGET: usize = 512;
+
             let mut emulator = terminal;
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
@@ -491,7 +550,22 @@ fn spawn_pty_consumer_thread(
                     true
                 };
 
-            // Primary loop: service PTY reads, GUI input events, and child-exit signals.
+            let mut idle_deadline: crossbeam_channel::Receiver<std::time::Instant> =
+                crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+
+            // Tracks whether any scrollback rows were compacted since the last
+            // time we released freed heap back to the OS. Compaction frees a
+            // large amount of small allocations (`Vec<Cell>` / `RowCacheEntry`);
+            // the system allocator (glibc) retains those pages in its arenas
+            // rather than returning them, so RSS stays high until we explicitly
+            // trim. We trim only once, when the backlog has fully drained
+            // (`compacted == 0`) AND real work happened since the last trim —
+            // never mid-drain (the pages would just be re-faulted by the next
+            // slice) and never on a trivial re-arm that compacted nothing.
+            let mut compaction_since_trim = false;
+
+            // Primary loop: service PTY reads, GUI input events, child-exit
+            // signals, and the idle scrollback-compaction tick.
             loop {
                 crossbeam_channel::select! {
                     recv(pty_read_rx) -> msg => {
@@ -504,6 +578,7 @@ fn spawn_pty_consumer_thread(
                                 });
                             }
                             emulator.handle_incoming_data(data);
+                            idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                         } else {
                             info!("PTY read channel closed; signaling tab death");
                             post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
@@ -525,6 +600,7 @@ fn spawn_pty_consumer_thread(
                             reader_shutdown.store(true, Ordering::Release);
                             return;
                         }
+                        idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                     }
                     recv(child_exit) -> _ => {
                         info!("Child process exited; draining remaining PTY output");
@@ -542,6 +618,39 @@ fn spawn_pty_consumer_thread(
                             proxy.request_repaint(*wid);
                         }
                         return;
+                    }
+                    recv(idle_deadline) -> _ => {
+                        // Snapshot content is byte-identical after compaction
+                        // (it only changes the internal storage
+                        // representation), so this arm must never call
+                        // `post_event` — doing so would be a spurious GUI
+                        // wake and defeat the idle/battery goal. `continue`
+                        // skips the trailing `post_event` call below.
+                        let compacted = emulator
+                            .internal
+                            .handler
+                            .buffer_mut()
+                            .compact_idle_scrollback(IDLE_COMPACTION_BUDGET);
+                        if compacted > 0 {
+                            // More may remain — keep draining on the next tick.
+                            compaction_since_trim = true;
+                            idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                        } else {
+                            // Backlog fully drained. If we actually compacted
+                            // anything since the last trim, release the freed
+                            // pages back to the OS now: the transient
+                            // allocation churn is over, so the freed heap is
+                            // stable and worth returning. Doing this once per
+                            // settle (rather than per slice) avoids repeatedly
+                            // munmap-ing pages the allocator would re-fault
+                            // during an ongoing drain. See `release_freed_heap`.
+                            if compaction_since_trim {
+                                release_freed_heap();
+                                compaction_since_trim = false;
+                            }
+                            idle_deadline = crossbeam_channel::never();
+                        }
+                        continue;
                     }
                 }
 

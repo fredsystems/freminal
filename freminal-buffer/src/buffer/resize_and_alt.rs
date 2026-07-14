@@ -36,6 +36,30 @@ impl Buffer {
             return scroll_offset;
         }
 
+        // ---- NO BLANKET DECOMPACT NEEDED (Task 118.3 fix / 118.x follow-up) ----
+        // An earlier version of this function force-decompacted every row
+        // (including all of scrollback) up front on every resize, which was a
+        // severe CPU regression on height-only resizes (`shrink_height`,
+        // `grow_height`): those never read cell content at all, so the
+        // decompact-all-then-recompact-all round trip was pure waste. No
+        // explicit decompaction pass is needed here:
+        //   - A width change reflows via `reflow_to_width`, which reads every
+        //     row's cells through `.characters()` — an auto-decompacting
+        //     accessor — and then replaces `self.rows` wholesale with fresh
+        //     `Live` rows built by `Row::from_cells`. Scrollback ends up
+        //     all-`Live` as a side effect of reflow, not an explicit pass.
+        //   - A height-only resize never reads cell content: it only touches
+        //     `row.dirty` (a bool) and `row.set_max_width` (a `usize` field),
+        //     neither of which requires the row to be `Live`.
+        //   - `Row::truncate_cells_to_width` (called below when width
+        //     changes) now no-ops without decompacting whenever the stored
+        //     cell count already fits the new width — the common case for a
+        //     height-only resize, where width didn't change at all.
+        // Out-of-window rows are left `Live` after a resize; (re-)compacting
+        // them is deferred to the PTY thread's idle tick via
+        // `Buffer::compact_idle_scrollback` (Task 118 follow-up), not
+        // performed synchronously here.
+
         // ---- WIDTH CHANGE → REFLOW ----
         // Alternate buffers must never reflow (they represent a fixed-size screen,
         // not a scrollback history).  Reflow re-wraps logical lines which can
@@ -148,7 +172,11 @@ impl Buffer {
         // Always clamp cursor after size change
         self.clamp_cursor_after_resize();
 
-        // Enforce scrollback limit after resize (reflow may have created extra rows)
+        // Enforce scrollback limit after resize (reflow may have created extra rows).
+        // No compaction happens here — rows that end up out of the visible
+        // window are left `Live`; compaction is deferred to
+        // `Buffer::compact_idle_scrollback`, called from the PTY thread's
+        // idle tick.
         let final_offset = self.enforce_scrollback_limit(after_resize);
 
         // When on the alternate screen, also resize the saved primary buffer
@@ -191,7 +219,14 @@ impl Buffer {
             height: old_height,
             cursor: saved.cursor,
             current_tag: FormatTag::default(),
-            scrollback_limit: 4000,
+            // Placeholder limit for this throwaway reflow buffer, kept in sync
+            // with the compiled-in default. NOTE (pre-existing gap): the real
+            // configured limit is not carried on `SavedPrimaryState`, so an
+            // alt-screen resize reflows the saved primary against this default
+            // rather than the user's actual limit. Out of scope for Task 118;
+            // threading the true limit through `SavedPrimaryState` is a
+            // separate cleanup.
+            scrollback_limit: 10_000,
             auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,
@@ -273,6 +308,10 @@ impl Buffer {
         let old_rows = std::mem::take(&mut self.rows);
         let old_rows_len = old_rows.len();
 
+        // Note: reflow reads each row's cells exactly once via the flatten
+        // loop below (`row.characters()`), which decompacts lazily on that
+        // single read, so no up-front `ensure_live` pass is needed.
+
         // 1) Group rows into logical lines based on RowJoin.
         //    While grouping, identify which logical line contains the cursor
         //    and compute the cursor's flat cell offset within that line.
@@ -293,23 +332,25 @@ impl Buffer {
         // Per old row: (logical_line_idx, flat_offset_of_row_start, row_len).
         let mut old_row_meta: Vec<(usize, usize, usize)> = Vec::with_capacity(old_rows_len);
 
+        // Running flat-cell offset of the current logical line, maintained
+        // incrementally instead of re-summed from scratch on every row (that
+        // re-summing was O(n^2) `.characters()` calls for a long run of
+        // soft-wrap-only rows). Reset to 0 whenever a new logical line
+        // starts, before that line's first row records its (zero) offset.
+        let mut current_line_flat_len: usize = 0;
+
         for (old_row_idx, row) in old_rows.into_iter().enumerate() {
             if row.join == RowJoin::NewLogicalLine && !current_line.is_empty() {
                 logical_lines.push(current_line);
                 current_line = Vec::new();
+                current_line_flat_len = 0;
             }
 
             // Flat offset of this row's first cell within its logical line =
-            // the sum of cells already accumulated in `current_line`.
-            let row_start_flat_offset = current_line
-                .iter()
-                .map(|r| r.characters().len())
-                .sum::<usize>();
-            old_row_meta.push((
-                logical_lines.len(),
-                row_start_flat_offset,
-                row.characters().len(),
-            ));
+            // the running total of cells already accumulated in `current_line`.
+            let row_start_flat_offset = current_line_flat_len;
+            let row_cell_count = row.stored_cell_count();
+            old_row_meta.push((logical_lines.len(), row_start_flat_offset, row_cell_count));
 
             if old_row_idx == old_cursor_y {
                 cursor_logical_line = Some(logical_lines.len());
@@ -317,6 +358,7 @@ impl Buffer {
                 cursor_flat_offset = row_start_flat_offset + old_cursor_x;
             }
 
+            current_line_flat_len += row_cell_count;
             current_line.push(row);
         }
         if !current_line.is_empty() {
@@ -721,13 +763,24 @@ impl Buffer {
                 // accumulate a blank tail.
                 self.reclaim_trailing_blank_padding();
             }
-            // Mark all pre-existing rows dirty so the row-level cache is
-            // invalidated.  The visible window is now taller and the old
-            // snapshot was built for a different height — returning stale
-            // cached rows causes gaps and mispositioned content in
-            // full-screen TUIs (e.g. nvim) that rely on absolute cursor
-            // positioning after SIGWINCH.
-            for i in 0..old_height.min(self.rows.len()) {
+            // Invalidate the row-level cache for the rows now in the (taller)
+            // visible window.  The visible window is bottom-anchored
+            // (`visible_window_start(0) == rows.len() - height`), so growing
+            // the height re-exposes rows from the TOP of scrollback into the
+            // bottom-anchored window; those rows plus the previously-visible
+            // ones must be re-flattened for the new height, or full-screen TUIs
+            // (e.g. nvim) that rely on absolute cursor positioning after
+            // SIGWINCH see gaps and mispositioned content.
+            //
+            // Task 118.7 fix: the previous range `0..old_height` invalidated
+            // the WRONG rows whenever scrollback existed — those are the OLDEST
+            // scrollback rows at the top of the buffer, not the visible window
+            // at the bottom.  It over-invalidated cold scrollback (wasting cache
+            // rebuilds, and now needlessly touching compact rows) while leaving
+            // the genuinely-newly-visible rows stale.  Invalidate the new
+            // visible window instead.
+            let new_visible_start = self.rows.len().saturating_sub(new_height);
+            for i in new_visible_start..self.rows.len() {
                 self.rows[i].dirty = true;
                 self.row_cache[i] = None;
             }
@@ -846,6 +899,15 @@ impl Buffer {
         let max_rows = self.height + self.scrollback_limit;
 
         // Nothing to trim, but still make sure scroll_offset is not insane.
+        //
+        // Rows may have grown past the visible window without overflowing
+        // the scrollback limit (e.g. the very first row pushed into
+        // scrollback) — those rows are left `Live` here. Compaction is a
+        // deferred, budgeted background task (`Buffer::compact_idle_scrollback`)
+        // driven from the PTY thread's idle tick, never performed
+        // synchronously on this hot per-line ingest path (Task 118 follow-up:
+        // synchronous compaction here caused a +23% `softwrap_heavy` bench
+        // regression).
         if self.rows.len() <= max_rows {
             let max_offset = self.max_scroll_offset();
             return scroll_offset.min(max_offset);
@@ -877,7 +939,7 @@ impl Buffer {
         // --- Garbage-collect images no longer referenced by any row ---
         if !self.image_store.is_empty() {
             self.image_store
-                .retain_referenced(self.rows.iter().map(Row::cells));
+                .retain_referenced(self.rows.iter().map(Row::cells_for_image_scan));
         }
 
         // --- Adjust cursor row index ---
@@ -893,6 +955,12 @@ impl Buffer {
         // Finally, clamp scroll_offset to the new max_scroll_offset().
         let max_offset = self.max_scroll_offset();
         let final_offset = adjusted_offset.min(max_offset);
+
+        // No compaction here: rows that just scrolled out of the visible
+        // window are left `Live`. Compaction is deferred to the PTY
+        // thread's idle tick via `Buffer::compact_idle_scrollback`, never
+        // performed synchronously on this hot path (see the doc comment
+        // above and Task 118 follow-up).
 
         self.debug_assert_invariants();
 

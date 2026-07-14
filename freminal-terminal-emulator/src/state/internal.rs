@@ -104,7 +104,7 @@ impl TerminalState {
     /// Create a new `TerminalState`.
     ///
     /// `scrollback_limit` overrides the default scrollback history size when
-    /// `Some(n)` is provided.  `None` keeps the compiled-in default (4000).
+    /// `Some(n)` is provided.  `None` keeps the compiled-in default (10000).
     #[must_use]
     pub fn new(
         write_tx: crossbeam_channel::Sender<PtyWrite>,
