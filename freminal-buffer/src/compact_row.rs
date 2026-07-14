@@ -17,9 +17,9 @@
 //! [`CompactRow::to_row`] round-trip a compactable row exactly (see the
 //! module's test suite).
 //!
-//! This module is a pure data transform. It has no knowledge of `Buffer` and
-//! is not wired into the scrollback storage path — that integration is a
-//! separate task.
+//! This module is a pure data transform with no knowledge of `Buffer`. It is
+//! wired into the scrollback storage path via [`crate::row::Row`]'s
+//! `RowStorage::Compact` representation and `Buffer::compact_idle_scrollback`.
 
 use conv2::ValueFrom;
 use freminal_common::buffer_states::{format_tag::FormatTag, tchar::TChar};
@@ -33,19 +33,6 @@ use crate::{
 // for run-length encoding.
 const WIDE_FLAG_HEAD: u8 = 0b01;
 const WIDE_FLAG_CONTINUATION: u8 = 0b10;
-
-// Compile-time assertions capturing the measured sizes of the types this
-// module's space accounting depends on. If either of these change, the
-// heap-savings claims documented above (and measured in this module's tests)
-// need to be re-verified.
-const _: () = assert!(
-    core::mem::size_of::<Cell>() == 72,
-    "Cell size changed — re-measure CompactRow's space savings"
-);
-const _: () = assert!(
-    core::mem::size_of::<FormatTag>() == 40,
-    "FormatTag size changed — re-measure CompactRow's space savings"
-);
 
 /// Returns `true` if `row` can be losslessly represented as a [`CompactRow`].
 ///
@@ -231,6 +218,27 @@ mod tests {
     use crate::image_store::{ImagePlacement, ImageProtocol};
 
     use super::*;
+
+    /// Guard the measured sizes of the types this module's space accounting
+    /// depends on. If either changes, the heap-savings claims documented at
+    /// the top of this module (and measured in the round-trip tests) must be
+    /// re-verified. Kept as a targeted `#[test]` rather than a crate-level
+    /// `const` assertion so an unrelated field addition (or a different
+    /// pointer width) surfaces as a single failing test in CI rather than a
+    /// crate-wide `cargo build` failure.
+    #[test]
+    fn cell_and_format_tag_sizes_match_documented_space_savings() {
+        assert_eq!(
+            core::mem::size_of::<Cell>(),
+            72,
+            "Cell size changed — re-measure CompactRow's space savings"
+        );
+        assert_eq!(
+            core::mem::size_of::<FormatTag>(),
+            40,
+            "FormatTag size changed — re-measure CompactRow's space savings"
+        );
+    }
 
     fn ascii_row(width: usize, text: &str, tag: &FormatTag) -> Row {
         let mut row = Row::new(width);

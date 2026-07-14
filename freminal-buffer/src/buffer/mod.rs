@@ -9415,4 +9415,77 @@ mod scrollback_compaction_tests {
             "top-of-scrollback cache entries must be retained across a height grow"
         );
     }
+
+    /// `Buffer::heap_bytes` must report a smaller `rows_bytes` figure after
+    /// idle compaction than before it: compacting scrollback rows swaps each
+    /// full `Vec<Cell>` for the run-length-encoded `CompactRow`, which is the
+    /// entire point of the diagnostic. This mirrors the per-row
+    /// `storage_heap_bytes_is_smaller_when_compacted` test in `row.rs` at the
+    /// whole-buffer level, and also checks the derived counters
+    /// (`scrollback_lines` / `total_rows`) are internally consistent.
+    #[test]
+    fn heap_bytes_rows_shrink_after_idle_compaction() {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(50);
+        push_numbered_lines(&mut buf, 20);
+
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start > 0, "test needs some scrollback to exist");
+
+        let before = buf.heap_bytes();
+        assert_eq!(before.total_rows, buf.rows.len());
+        assert_eq!(
+            before.scrollback_lines,
+            buf.rows.len().saturating_sub(buf.terminal_height())
+        );
+
+        let compacted = buf.compact_idle_scrollback(usize::MAX);
+        assert!(compacted > 0, "expected idle compaction to compact rows");
+
+        let after = buf.heap_bytes();
+        assert!(
+            after.rows_bytes < before.rows_bytes,
+            "rows_bytes must drop after compaction: before={} after={}",
+            before.rows_bytes,
+            after.rows_bytes
+        );
+        // Row count is unchanged by compaction (it only changes storage), so
+        // the derived counters must be identical across the transition.
+        assert_eq!(after.total_rows, before.total_rows);
+        assert_eq!(after.scrollback_lines, before.scrollback_lines);
+    }
+
+    /// A single hyperlink shared across many cells (the common OSC 8 case)
+    /// must be counted exactly once in `heap_bytes().url_bytes`, because the
+    /// accounting deduplicates by `Arc::as_ptr` identity. A naive per-cell
+    /// sum would over-count the payload by the number of cells it spans.
+    #[test]
+    fn heap_bytes_counts_shared_url_once() {
+        use freminal_common::buffer_states::url::Url;
+        use std::sync::Arc;
+
+        let mut buf = Buffer::new(20, 3);
+
+        // No URLs yet: url_bytes must be zero.
+        assert_eq!(
+            buf.heap_bytes().url_bytes,
+            0,
+            "a buffer with no hyperlinks must report zero url_bytes"
+        );
+
+        // Attach one shared `Arc<Url>` to the current tag, then write several
+        // cells so the same `Arc` is cloned into each cell's `FormatTag`.
+        let url = Arc::new(Url {
+            id: None,
+            url: "https://example.com/shared".to_owned(),
+        });
+        let expected = url.url.len();
+        buf.current_tag.url = Some(Arc::clone(&url));
+        buf.insert_text(&text("ABCDEFGH"));
+
+        let breakdown = buf.heap_bytes();
+        assert_eq!(
+            breakdown.url_bytes, expected,
+            "a URL shared across cells must be counted once ({expected} bytes), not per-cell"
+        );
+    }
 }

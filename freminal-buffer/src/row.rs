@@ -243,7 +243,9 @@ impl Row {
             RowStorage::Compact { .. } => {
                 // Structurally unreachable: `CompactRow::to_row` always
                 // builds via `Row::from_cells`, which is always `Live`.
-                Vec::new()
+                // Fail loudly (matching `cells_vec_mut`) rather than silently
+                // blanking the row's cells if that invariant is ever broken.
+                unreachable!("CompactRow::to_row must always produce RowStorage::Live")
             }
         }
     }

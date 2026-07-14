@@ -290,7 +290,23 @@ impl NotificationRouter {
     /// `notify-rust`'s `show()` makes a synchronous D-Bus call on Linux, so
     /// it must not run on the egui frame thread. Failures are logged and
     /// otherwise ignored — a missing notification daemon is non-fatal.
+    ///
+    /// Under `cfg(test)` the real OS call is skipped entirely: on macOS,
+    /// `notify-rust`'s `show()` funnels into the Objective-C notification
+    /// runtime, which throws an *uncatchable foreign exception* when invoked
+    /// from a non-`.app`-bundled binary — exactly what a `cargo test` binary
+    /// is. Rust's unwinder cannot catch it, so the process `abort()`s
+    /// (`SIGABRT`). Because the notification runs on a detached, best-effort
+    /// thread, the abort lands nondeterministically during test teardown and
+    /// takes the whole harness down after every test has already passed. The
+    /// routing policy that these unit tests exercise is fully evaluated before
+    /// this point, so skipping the spawn under test loses no coverage.
     fn show_system(req: &NotificationRequest) {
+        // See the doc comment: the OS notification call aborts in test
+        // binaries on macOS (foreign ObjC exception). Never spawn it here.
+        if cfg!(test) {
+            return;
+        }
         let summary = req.summary().to_owned();
         let body = req.body.clone();
         // `notify-rust`'s `urgency()` setter exists on Linux/BSD and Windows
@@ -841,6 +857,15 @@ impl NotificationRouter {
         resolved_icon_bytes: Option<Vec<u8>>,
         pty_write_tx: Sender<PtyWrite>,
     ) {
+        // See `show_system`: the OS notification call aborts in test binaries
+        // on macOS (uncatchable foreign ObjC exception in a non-bundled
+        // process). The OSC 99 unit tests assert only on the `live` map and
+        // toast state — both settled before this point — and never read the
+        // `pty_write_tx` close/activation reports, so skipping the spawn under
+        // test loses no coverage.
+        if cfg!(test) {
+            return;
+        }
         let id = data.id.clone();
         let title = data.title.clone();
         let body = data.body.clone().unwrap_or_default();

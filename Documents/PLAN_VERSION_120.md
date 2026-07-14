@@ -538,10 +538,21 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   OLDEST scrollback rows at the top of the buffer — the wrong rows: it over-invalidated cold
   scrollback (wasting cache rebuilds, and needlessly touching compact rows) while leaving the
   genuinely-newly-visible rows stale. Fixed to invalidate the new bottom-anchored visible window
-  (`rows.len()-new_height..rows.len()`). Regression test added
+  (`rows.len()-new_height..rows.len()`).   Regression test added
   (`height_grow_invalidates_new_visible_window_not_top_scrollback`) asserting the new visible
   window is invalidated and top-of-scrollback cache entries are retained. Impact was benign
   (over-invalidation, not corruption), consistent with the original assessment.
+- **118.11 — `resize_saved_primary` reflows the saved primary against the compiled-in default
+  scrollback limit, not the user's configured limit. OPEN (pre-existing, out of scope for 118).**
+  `Buffer::resize_saved_primary` (`buffer/resize_and_alt.rs:229`) reconstructs a throwaway
+  primary `Buffer` to reuse the resize/reflow logic, but `SavedPrimaryState` does not carry the
+  real configured `scrollback_limit`, so the temp buffer hardcodes `10_000` (previously `4000`;
+  bumped with the 118.5 default raise). For any pane whose configured limit differs from the
+  default, an alt-screen resize therefore enforces the wrong scrollback limit on the saved
+  primary. This is a pre-existing gap (the value was already hardcoded before Task 118 — only the
+  constant changed) and is disclosed in an in-code `NOTE`. The fix is to thread the true limit
+  through `SavedPrimaryState` and use it here instead of the constant; deferred as a standalone
+  cleanup so this PR does not alter alt-screen resize behavior.
 
 ### 118 Current-state map (from recon)
 
