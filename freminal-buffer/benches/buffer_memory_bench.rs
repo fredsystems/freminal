@@ -31,8 +31,83 @@ const LINE_COUNT: usize = 5_000;
 const WIDTH: usize = 80;
 const HEIGHT: usize = 24;
 
+/// Current process resident set size (RSS) in bytes, or `None` if unavailable.
+///
+/// Reads `/proc/self/statm` (field 2 = resident pages) on Linux. This is the
+/// number a process monitor like `btop` reports, and — crucially — it can
+/// diverge sharply from the buffer's own `heap_bytes()` accounting: freeing a
+/// `Vec` in Rust returns the memory to the allocator, but glibc retains those
+/// pages in its arenas rather than returning them to the OS, so RSS stays high
+/// while the internal accounting drops. That divergence is exactly the class
+/// of bug the accounting-only harness missed, so this measures the real thing.
+///
+/// Returns `None` on non-Linux (no portable `/proc/self/statm`); callers skip
+/// the RSS line there.
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<usize> {
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: sysconf(_SC_PAGESIZE) is a pure query with no preconditions.
+    let page_size = unsafe { libc_sysconf_pagesize() };
+    Some(resident_pages * page_size)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_rss_bytes() -> Option<usize> {
+    None
+}
+
+/// Page size via `sysconf(_SC_PAGESIZE)`. Declared inline to avoid a `libc`
+/// dev-dependency just for one constant.
+#[cfg(target_os = "linux")]
+unsafe fn libc_sysconf_pagesize() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: core::ffi::c_int) -> core::ffi::c_long;
+    }
+    // _SC_PAGESIZE == 30 on Linux/glibc.
+    const SC_PAGESIZE: core::ffi::c_int = 30;
+    let v = unsafe { sysconf(SC_PAGESIZE) };
+    if v > 0 { v as usize } else { 4096 }
+}
+
+/// Ask the allocator to return free pages to the OS (glibc `malloc_trim`), so
+/// an RSS reading reflects live memory rather than allocator-retained free
+/// pages. Mirrors the live app's post-idle-compaction trim. No-op off glibc.
+fn trim_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` only releases already-free heap; it cannot
+        // affect live allocations.
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> core::ffi::c_int;
+        }
+        unsafe {
+            let _ = malloc_trim(0);
+        }
+    }
+}
+
+/// How often, in logical lines, to flatten the visible window during a fill.
+///
+/// This is the critical realism knob (see `build_buffer_from_lines`). A real
+/// terminal renders every frame while output streams, so `build_snapshot` —
+/// and thus `visible_as_tchars_and_tags` — runs repeatedly as rows scroll
+/// through the visible window, leaving each row with a populated
+/// `RowCacheEntry` that is NOT cleared when the row scrolls into scrollback.
+/// A bench that only fills and then flattens once at the end never reproduces
+/// that per-row scrollback-cache accumulation (the ~180 MB stale-cache leak a
+/// 100k-line scrollback exhibited in the live app), giving falsely optimistic
+/// memory numbers. Flattening every few lines during the fill reproduces it.
+///
+/// ~4 lines per flatten approximates a fast `cat` (many lines per frame)
+/// without flattening on literally every line (which no real frame cadence
+/// does and which would dominate the fill cost).
+const FLATTEN_EVERY_LINES: usize = 4;
+
 /// Insert `lines` into a fresh `WIDTH`x`HEIGHT` buffer, one logical row per
-/// string, using explicit `handle_lf` + `handle_cr` between lines.
+/// string, using explicit `handle_lf` + `handle_cr` between lines, and
+/// flattening the visible window every [`FLATTEN_EVERY_LINES`] lines to model
+/// real per-frame rendering (see that constant for why this matters).
 ///
 /// NOTE: embedding `TChar::NewLine` inside a single `insert_text` call does
 /// **not** create a new row — `Buffer::insert_text` only wraps at `width`,
@@ -43,11 +118,17 @@ const HEIGHT: usize = 24;
 /// actual newline byte.
 fn build_buffer_from_lines(lines: impl Iterator<Item = String>) -> Buffer {
     let mut buf = Buffer::new(WIDTH, HEIGHT);
-    for line in lines {
+    for (i, line) in lines.enumerate() {
         let chars: Vec<TChar> = line.bytes().map(TChar::Ascii).collect();
         buf.insert_text(&chars);
         buf.handle_lf();
         buf.handle_cr();
+        // Model per-frame rendering: flatten the visible window periodically so
+        // rows accrue (and then retain) a `RowCacheEntry` as they scroll past,
+        // exactly as the live render path does.
+        if i % FLATTEN_EVERY_LINES == 0 {
+            let _ = buf.visible_as_tchars_and_tags(0);
+        }
     }
     buf
 }
@@ -127,30 +208,82 @@ fn build_high_entropy_colored_buffer() -> Buffer {
         }
         buf.handle_lf();
         buf.handle_cr();
+        // Model per-frame rendering during the fill so scrollback rows retain
+        // a `RowCacheEntry` (see `FLATTEN_EVERY_LINES`).
+        if i % FLATTEN_EVERY_LINES == 0 {
+            let _ = buf.visible_as_tchars_and_tags(0);
+        }
     }
 
     buf
 }
 
-/// Warm the row-flatten cache the same way steady-state GUI rendering would:
-/// one full scrollback flatten and one full visible flatten.
-fn warm_cache(buf: &mut Buffer) {
+/// Warm the flatten cache the way *steady-state GUI rendering* actually does.
+///
+/// This is the important correction over the original harness. The per-frame
+/// render path (`TerminalEmulator::build_snapshot`) only ever flattens the
+/// **visible window** (`visible_as_tchars_and_tags_extended`); it never reads
+/// scrollback cell content. A full-scrollback flatten happens in exactly one
+/// place in the whole application: the `RequestSearchBuffer` handler
+/// (`data_and_format_data_for_gui`), i.e. only when the user presses Ctrl-F to
+/// search scrollback.
+///
+/// So the realistic resting state is: visible window flattened (cached), all
+/// scrollback rows *never touched* since they scrolled off. That is what this
+/// models — one visible flatten, no scrollback flatten.
+fn warm_steady_state(buf: &mut Buffer) {
+    let _ = buf.visible_as_tchars_and_tags(0);
+}
+
+/// Warm the caches the way a *Ctrl-F scrollback search* does: flatten the
+/// entire scrollback (populating `row_cache`, and — with the compact
+/// representation — memoizing every compacted row's decompacted cells too).
+///
+/// This is the transient worst case, reported separately so it is never
+/// conflated with the steady-state number. It is exactly the state Task 118.4
+/// (`row_cache` eviction for compacted rows) exists to reclaim.
+fn warm_post_search(buf: &mut Buffer) {
     let _ = buf.scrollback_as_tchars_and_tags(0);
     let _ = buf.visible_as_tchars_and_tags(0);
 }
 
-/// Print a readable memory report for one corpus.
-fn print_report(label: &str, buf: &mut Buffer) {
-    warm_cache(buf);
-    let breakdown = buf.heap_bytes();
+/// Run idle scrollback compaction to completion, modelling the state a real
+/// terminal settles into ~250ms after output stops.
+///
+/// Compaction is now a DEFERRED, idle-driven background task (Task 118.9): it
+/// no longer runs on any hot path. In the live application the PTY thread's
+/// idle tick calls `compact_idle_scrollback` in bounded budgets until the
+/// scrollback is fully compacted. A benchmark has no PTY thread, so we invoke
+/// it directly with an unbounded budget to reach the same settled state. This
+/// is the realistic resting memory of an idle terminal — the number that
+/// represents the actual memory win.
+fn settle_idle_compaction(buf: &mut Buffer) {
+    // One unbounded pass compacts everything the idle tick eventually would.
+    let _ = buf.compact_idle_scrollback(usize::MAX);
+}
 
+/// Print one labelled memory report block for a buffer in whatever cache state
+/// the caller has already established. Returns bytes/scrollback-line.
+///
+/// Also reports actual process RSS, trimmed first so the figure reflects live
+/// memory rather than allocator-retained free pages. NOTE: RSS is a
+/// whole-process number and is only meaningful in *relative* terms here (this
+/// bench builds many buffers in one process, so absolute RSS accumulates); the
+/// internal `total_bytes` accounting is the precise per-buffer figure. RSS is
+/// printed so a large divergence between it and the accounting — the
+/// allocator-retention class of bug — is visible rather than hidden.
+fn report_block(label: &str, state: &str, buf: &Buffer) -> usize {
+    let breakdown = buf.heap_bytes();
     let total_bytes = breakdown.rows_bytes + breakdown.row_cache_bytes + breakdown.url_bytes;
     let bytes_per_scrollback_line = total_bytes
         .checked_div(breakdown.scrollback_lines)
         .unwrap_or(0);
 
+    trim_allocator();
+    let rss = process_rss_bytes();
+
     println!("==================================================================");
-    println!(" Buffer memory report: {label}");
+    println!(" Buffer memory report: {label}  [{state}]");
     println!("------------------------------------------------------------------");
     println!(" total_rows          : {}", breakdown.total_rows);
     println!(" scrollback_lines    : {}", breakdown.scrollback_lines);
@@ -159,14 +292,85 @@ fn print_report(label: &str, buf: &mut Buffer) {
     println!(" url_bytes           : {}", breakdown.url_bytes);
     println!(" total_bytes         : {total_bytes}");
     println!(" bytes/scrollback_ln : {bytes_per_scrollback_line}");
+    match rss {
+        Some(bytes) => println!(" process_rss (trimmed): {bytes} ({} MB)", bytes / 1_000_000),
+        None => println!(" process_rss (trimmed): n/a (non-Linux)"),
+    }
     println!("==================================================================");
+
+    bytes_per_scrollback_line
+}
+
+/// Print the three-state memory report for one corpus.
+///
+/// Each phase builds its OWN buffer and drops it before the next, so buffers
+/// never coexist — otherwise their allocations would accumulate and confound
+/// the RSS reading (RSS is whole-process). The per-corpus RSS *delta* (idle
+/// baseline → settled, both trimmed) isolates what the settled buffer actually
+/// costs the OS, which is the figure that diverged from the internal
+/// accounting in the live app (allocator retention). Absolute RSS across
+/// corpora is still not comparable and is reported only as an advisory.
+fn print_report(label: &str, build: impl Fn() -> Buffer) {
+    // Trimmed idle RSS baseline before this corpus builds anything.
+    trim_allocator();
+    let rss_before = process_rss_bytes();
+
+    // (1) Freshly filled, BEFORE idle compaction — the transient uncompacted
+    //     state (~250ms right after a burst, PTY thread still busy). Now that
+    //     the fill flattens the visible window periodically (see
+    //     `FLATTEN_EVERY_LINES`), scrollback rows carry the stale
+    //     `RowCacheEntry` they retain in the live app.
+    let fresh_bpl = {
+        let mut fresh = build();
+        warm_steady_state(&mut fresh);
+        report_block(label, "fresh fill, pre-idle (transient)", &fresh)
+    };
+
+    // (2) SETTLED steady state — idle compaction has run to completion (as the
+    //     PTY idle tick would ~250ms after output stops), then the render path
+    //     warms the visible window. THIS is the real resident-memory win.
+    let (settled_bpl, rss_settled) = {
+        let mut settled = build();
+        settle_idle_compaction(&mut settled);
+        warm_steady_state(&mut settled);
+        let bpl = report_block(
+            label,
+            "settled steady-state (post-idle-compaction)",
+            &settled,
+        );
+        // Read RSS while the settled buffer is still alive, after trimming.
+        trim_allocator();
+        (bpl, process_rss_bytes())
+    };
+
+    // (3) SETTLED + post-search — Ctrl-F full-scrollback flatten on the settled
+    //     buffer; eviction (Task 118.4) reclaims the transient copies, so this
+    //     returns to the settled number.
+    let search_bpl = {
+        let mut searched = build();
+        settle_idle_compaction(&mut searched);
+        warm_post_search(&mut searched);
+        report_block(label, "settled + post-search (Ctrl-F)", &searched)
+    };
+
+    let rss_delta = match (rss_before, rss_settled) {
+        (Some(before), Some(settled)) => {
+            format!("{} MB", settled.saturating_sub(before) / 1_000_000)
+        }
+        _ => "n/a".to_string(),
+    };
+
+    println!(
+        " -> {label}: fresh(pre-idle) {fresh_bpl} B/line, settled {settled_bpl} B/line, \
+         settled+search {search_bpl} B/line, settled RSS delta {rss_delta}\n"
+    );
 }
 
 fn bench_memory_shell_session(c: &mut Criterion) {
+    print_report("shell_session", build_shell_session_buffer);
+
     let mut buf = build_shell_session_buffer();
-
-    print_report("shell_session", &mut buf);
-
+    warm_steady_state(&mut buf);
     c.bench_function("memory_report_shell_session", |b| {
         b.iter(|| {
             std::hint::black_box(buf.heap_bytes());
@@ -175,10 +379,10 @@ fn bench_memory_shell_session(c: &mut Criterion) {
 }
 
 fn bench_memory_source_logs(c: &mut Criterion) {
+    print_report("source_logs", build_source_logs_buffer);
+
     let mut buf = build_source_logs_buffer();
-
-    print_report("source_logs", &mut buf);
-
+    warm_steady_state(&mut buf);
     c.bench_function("memory_report_source_logs", |b| {
         b.iter(|| {
             std::hint::black_box(buf.heap_bytes());
@@ -187,10 +391,10 @@ fn bench_memory_source_logs(c: &mut Criterion) {
 }
 
 fn bench_memory_high_entropy_colored(c: &mut Criterion) {
+    print_report("high_entropy_colored", build_high_entropy_colored_buffer);
+
     let mut buf = build_high_entropy_colored_buffer();
-
-    print_report("high_entropy_colored", &mut buf);
-
+    warm_steady_state(&mut buf);
     c.bench_function("memory_report_high_entropy_colored", |b| {
         b.iter(|| {
             std::hint::black_box(buf.heap_bytes());

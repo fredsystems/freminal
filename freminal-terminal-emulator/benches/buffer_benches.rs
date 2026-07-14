@@ -98,6 +98,74 @@ fn bursty_payload() -> Vec<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------
+// Real-world colored scrollback corpora (Task 118 memory bench)
+//
+// These generate authentic ANSI byte streams that are fed through the REAL
+// parser (`handle_incoming_data`), so the resulting `FormatTag`s are produced
+// exactly as they would be from a live shell — not hand-constructed. They
+// model realistic developer output where formatting is *sparse-to-moderate*
+// (a few SGR runs per line), which is the common case scrollback compaction
+// targets, as opposed to the synthetic `high_entropy_colored` worst case in
+// the freminal-buffer harness.
+// ---------------------------------------------------------------
+
+/// SGR reset.
+const SGR_RESET: &str = "\x1b[0m";
+
+/// Colored build/compiler-style output (cargo/gcc flavour): mostly-default
+/// lines with sparse SGR bursts — bold paths, red `error`, yellow `warning`,
+/// green `ok`/`Compiling`, dim notes. A realistic dev scrollback: the majority
+/// of lines carry only one or two format runs.
+fn build_output_payload(lines: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(lines * 80);
+    for i in 0..lines {
+        let line = match i % 8 {
+            0 => format!("\x1b[1;32m   Compiling\x1b[0m freminal-buffer v0.11.2 (crate {i})"),
+            1 => format!("\x1b[1;32m   Compiling\x1b[0m freminal-common v0.11.2 (crate {i})"),
+            2 => format!("\x1b[1;33mwarning\x1b[0m: unused variable: \x1b[1m`tmp_{i}`\x1b[0m"),
+            3 => format!(
+                "  \x1b[1;34m-->\x1b[0m src/buffer/mod.rs:{}:{}",
+                i % 900,
+                i % 80
+            ),
+            4 => format!("\x1b[1;31merror[E0308]\x1b[0m: mismatched types in expr {i}"),
+            5 => "   |".to_string(),
+            6 => format!("   = \x1b[1mnote\x1b[0m: expected `usize`, found `u32` (site {i})"),
+            _ => format!("    Finished dev [unoptimized + debuginfo] target(s) in {i}.0s"),
+        };
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(SGR_RESET.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// `ls --color` / `eza`-style colored file listing: each filename colored by
+/// type (blue dirs, green executables, cyan symlinks, default regular files),
+/// a few runs per line. Common interactive output that lands in scrollback.
+fn ls_color_payload(lines: usize) -> Vec<u8> {
+    // (sgr, name-suffix) by "file type"
+    let kinds: &[(&str, &str)] = &[
+        ("\x1b[1;34m", "/"), // directory (bold blue)
+        ("\x1b[1;32m", "*"), // executable (bold green)
+        ("\x1b[1;36m", "@"), // symlink (bold cyan)
+        ("\x1b[0m", ""),     // regular file (default)
+        ("\x1b[0m", ""),     // regular file (default) — weight toward plain
+    ];
+    let mut out = Vec::with_capacity(lines * 80);
+    for i in 0..lines {
+        // 4 colored entries per line, like a wide `ls` listing.
+        for col in 0..4 {
+            let (sgr, suffix) = kinds[(i + col) % kinds.len()];
+            let entry = format!("{sgr}entry_{i}_{col}{suffix}\x1b[0m  ");
+            out.extend_from_slice(entry.as_bytes());
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+// ---------------------------------------------------------------
 // bench_parse_plain_text
 // ---------------------------------------------------------------
 fn bench_parse_plain_text(c: &mut Criterion) {
@@ -358,6 +426,125 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_scrollback_memory_realworld — resident memory of a large scrollback
+// filled with REAL colored output, fed through the real ANSI parser.
+//
+// Reports bytes-per-scrollback-line in two labelled states:
+//   * steady-state   : what build_snapshot does (visible flatten only) — the
+//                       state the terminal is in ~always.
+//   * post-search     : after a full-scrollback flatten (the Ctrl-F /
+//                       RequestSearchBuffer path) — the transient worst case.
+//
+// This is a *reporting* bench (prints B/line); it also registers a trivial
+// timing loop so it participates in `cargo bench` normally.
+// ---------------------------------------------------------------
+fn bench_scrollback_memory_realworld(c: &mut Criterion) {
+    const LINES: usize = 5_000;
+
+    type CorpusGen = fn(usize) -> Vec<u8>;
+    let corpora: &[(&str, CorpusGen)] = &[
+        ("build_output", build_output_payload),
+        ("ls_color", ls_color_payload),
+    ];
+
+    for (label, generate) in corpora {
+        let payload = generate(LINES);
+
+        // Build a fresh emulator, feed the corpus through the REAL parser in
+        // CHUNKS with a `build_snapshot` between chunks. This models real
+        // streaming output: the GUI renders every frame while data arrives, so
+        // `build_snapshot` (→ `visible_as_tchars_and_tags`) runs repeatedly as
+        // rows scroll through the visible window, leaving each row with a
+        // populated `RowCacheEntry` that is NOT cleared on scroll-out. Feeding
+        // the whole payload in one shot with a single final snapshot never
+        // reproduces that per-row scrollback-cache accumulation (the ~180 MB
+        // stale cache a 100k-line scrollback showed in the live app), giving
+        // falsely optimistic numbers. ~4 KB per chunk approximates a PTY read
+        // burst.
+        const CHUNK_BYTES: usize = 4096;
+        let build = || {
+            let mut emulator = TerminalEmulator::dummy_for_bench();
+            emulator.internal.set_win_size(80, 24, 8, 16);
+            for chunk in payload.chunks(CHUNK_BYTES) {
+                emulator.internal.handle_incoming_data(chunk);
+                // Model a rendered frame after each read burst.
+                let _ = emulator.build_snapshot();
+            }
+            emulator
+        };
+
+        // (1) Fresh fill, BEFORE idle compaction — compaction is deferred off
+        //     the hot path (Task 118.9), so nothing is compact yet. This is the
+        //     transient state for ~250ms right after a burst of output.
+        let mut fresh = build();
+        let _ = fresh.build_snapshot();
+        let fresh_bpl = report_emulator_memory(label, "fresh fill, pre-idle (transient)", &fresh);
+
+        // (2) SETTLED steady state — idle compaction has run to completion (as
+        //     the PTY idle tick would ~250ms after output stops), then the
+        //     render path warms the visible window. THIS is the real win.
+        let mut settled = build();
+        let _ = settled
+            .internal
+            .handler
+            .buffer_mut()
+            .compact_idle_scrollback(usize::MAX);
+        let _ = settled.build_snapshot();
+        let settled_bpl = report_emulator_memory(
+            label,
+            "settled steady-state (post-idle-compaction)",
+            &settled,
+        );
+
+        // (3) SETTLED + post-search: Ctrl-F full-scrollback flatten on the
+        //     settled buffer; Task 118.4 eviction reclaims the transient
+        //     copies, returning to ~the settled number.
+        let mut searched = build();
+        let _ = searched
+            .internal
+            .handler
+            .buffer_mut()
+            .compact_idle_scrollback(usize::MAX);
+        let _ = searched.build_snapshot();
+        let _ = searched.internal.handler.data_and_format_data_for_gui(0);
+        let search_bpl = report_emulator_memory(label, "settled + post-search (Ctrl-F)", &searched);
+
+        println!(
+            " -> {label}: fresh(pre-idle) {fresh_bpl} B/line, settled {settled_bpl} B/line, \
+             settled+search {search_bpl} B/line\n"
+        );
+
+        let measured = build();
+        c.bench_function(&format!("scrollback_memory_realworld_{label}"), |b| {
+            b.iter(|| {
+                std::hint::black_box(measured.internal.handler.buffer().heap_bytes());
+            });
+        });
+    }
+}
+
+/// Print one labelled memory report block for an emulator's buffer and return
+/// bytes-per-scrollback-line.
+fn report_emulator_memory(label: &str, state: &str, emulator: &TerminalEmulator) -> usize {
+    let breakdown = emulator.internal.handler.buffer().heap_bytes();
+    let total = breakdown.rows_bytes + breakdown.row_cache_bytes + breakdown.url_bytes;
+    let bpl = total.checked_div(breakdown.scrollback_lines).unwrap_or(0);
+
+    println!("==================================================================");
+    println!(" Realworld scrollback memory: {label}  [{state}]");
+    println!("------------------------------------------------------------------");
+    println!(" scrollback_lines    : {}", breakdown.scrollback_lines);
+    println!(" rows_bytes          : {}", breakdown.rows_bytes);
+    println!(" row_cache_bytes     : {}", breakdown.row_cache_bytes);
+    println!(" url_bytes           : {}", breakdown.url_bytes);
+    println!(" total_bytes         : {total}");
+    println!(" bytes/scrollback_ln : {bpl}");
+    println!("==================================================================");
+
+    bpl
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -372,6 +559,7 @@ criterion_group!(
         bench_data_and_format_for_gui,
         bench_build_snapshot,
         bench_build_snapshot_with_scrollback,
+        bench_scrollback_memory_realworld,
 );
 
 criterion_main!(benches);
