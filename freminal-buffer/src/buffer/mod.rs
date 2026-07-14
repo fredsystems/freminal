@@ -3,6 +3,9 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use conv2::ValueFrom;
 use freminal_common::buffer_states::{
     buffer_type::BufferType,
@@ -11,9 +14,11 @@ use freminal_common::buffer_states::{
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
     tchar::TChar,
+    url::Url,
 };
 
 use crate::{
+    cell::Cell,
     image_store::ImageStore,
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
@@ -22,8 +27,6 @@ use crate::{
 pub use flatten::{AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
 
-#[cfg(test)]
-use crate::cell::Cell;
 #[cfg(test)]
 use freminal_common::buffer_states::{
     cursor::CursorPos,
@@ -229,6 +232,54 @@ pub struct SavedPrimaryState {
     pub image_cell_count: usize,
 }
 
+/// Heap-inclusive memory breakdown for a [`Buffer`]'s row storage, row-flatten
+/// cache, and OSC-8/auto-detected URL payloads.
+///
+/// Produced by [`Buffer::heap_bytes`]. This is a diagnostic/measurement API —
+/// intended for benchmark harnesses and manual memory analysis (e.g. the
+/// Task 118 compact-cell-representation "before" baseline) — and is
+/// deliberately allocation-light rather than optimized for speed; it is not
+/// a hot path.
+#[derive(Debug, Clone, Copy)]
+pub struct BufferHeapBreakdown {
+    /// Heap bytes held by `self.rows`.
+    ///
+    /// Computed as the outer `self.rows.capacity() * size_of::<Row>()`
+    /// allocation, plus, for every row, `row.characters().capacity() *
+    /// size_of::<Cell>()` (the row's own `Vec<Cell>` allocation, sized by
+    /// capacity — the real resident cost — not `len()`).
+    ///
+    /// Excludes the heap bytes of `Arc<Url>` string payloads reachable from
+    /// any cell's `FormatTag.url`: the `Arc` pointer itself is already inside
+    /// the `Cell`/`FormatTag` and therefore already covered by the per-`Cell`
+    /// `size_of` accounting above, but the pointee's `String` payloads are
+    /// counted separately, once per distinct `Arc`, in [`Self::url_bytes`].
+    pub rows_bytes: usize,
+
+    /// Heap bytes held by `self.row_cache`.
+    ///
+    /// Computed as the outer `self.row_cache.capacity() *
+    /// size_of::<Option<RowCacheEntry>>()` allocation, plus, for each
+    /// populated (`Some`) entry, the capacities of its `chars`, `tags`,
+    /// `bytes`, `byte_to_char`, and `auto_urls` backing allocations.
+    pub row_cache_bytes: usize,
+
+    /// Heap bytes held by distinct `Arc<Url>` payloads reachable from any
+    /// cell's `FormatTag.url` (via [`Cell::tag`]), deduplicated by
+    /// `Arc::as_ptr` identity — a hyperlink shared across many cells (the
+    /// common case for OSC 8 links spanning several columns) is counted
+    /// exactly once. For each distinct URL this adds `url.url.len() +
+    /// url.id` string length (0 when `id` is `None`).
+    pub url_bytes: usize,
+
+    /// Number of scrollback rows: `self.rows.len().saturating_sub(self.height)`.
+    pub scrollback_lines: usize,
+
+    /// Total number of rows in the buffer (scrollback + visible region):
+    /// `self.rows.len()`.
+    pub total_rows: usize,
+}
+
 /// Compute the number of screen columns that `text` will occupy when
 /// inserted starting at column `col`, clamped so as not to exceed
 /// `wrap_col`.  Wide characters (`display_width` = 2) count for 2 columns.
@@ -305,6 +356,54 @@ impl Buffer {
     #[must_use]
     pub const fn cursor(&self) -> &CursorState {
         &self.cursor
+    }
+
+    /// Compute a heap-inclusive memory breakdown for this buffer's row
+    /// storage, row-flatten cache, and URL payloads.
+    ///
+    /// See [`BufferHeapBreakdown`] for the precise accounting rules for each
+    /// field. This is a measurement/diagnostic API for benchmark harnesses,
+    /// not a hot path — it walks every row, every cell, and every cache entry.
+    #[must_use]
+    pub fn heap_bytes(&self) -> BufferHeapBreakdown {
+        let row_struct_size = core::mem::size_of::<Row>();
+        let cell_size = core::mem::size_of::<Cell>();
+
+        let mut rows_bytes = self.rows.capacity() * row_struct_size;
+        let mut url_ptrs: HashSet<*const Url> = HashSet::new();
+        let mut url_bytes = 0usize;
+
+        for row in &self.rows {
+            rows_bytes += row.characters().capacity() * cell_size;
+
+            for cell in row.cells() {
+                if let Some(url) = &cell.tag().url {
+                    let ptr = Arc::as_ptr(url);
+                    if url_ptrs.insert(ptr) {
+                        url_bytes += url.url.len() + url.id.as_ref().map_or(0, String::len);
+                    }
+                }
+            }
+        }
+
+        let option_row_cache_entry_size = core::mem::size_of::<Option<RowCacheEntry>>();
+        let mut row_cache_bytes = self.row_cache.capacity() * option_row_cache_entry_size;
+
+        for entry in self.row_cache.iter().flatten() {
+            row_cache_bytes += entry.chars.capacity() * core::mem::size_of::<TChar>();
+            row_cache_bytes += entry.tags.capacity() * core::mem::size_of::<FormatTag>();
+            row_cache_bytes += entry.bytes.capacity();
+            row_cache_bytes += entry.byte_to_char.capacity() * core::mem::size_of::<u32>();
+            row_cache_bytes += entry.auto_urls.capacity() * core::mem::size_of::<AutoUrlRange>();
+        }
+
+        BufferHeapBreakdown {
+            rows_bytes,
+            row_cache_bytes,
+            url_bytes,
+            scrollback_lines: self.rows.len().saturating_sub(self.height),
+            total_rows: self.rows.len(),
+        }
     }
 
     /// Reset an existing row at `row_idx` to a soft-wrap continuation and update

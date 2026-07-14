@@ -35,5 +35,9 @@ test-log.workspace = true
 vergen.workspace = true
 
 [[bench]]
+name = "buffer_memory_bench"
+harness = false
+
+[[bench]]
 name = "buffer_row_bench"
 harness = false
