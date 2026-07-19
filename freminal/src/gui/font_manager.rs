@@ -637,6 +637,34 @@ impl FontManager {
         self.loaded_face(face_id).map(LoadedFace::cache_key)
     }
 
+    /// The own cell height and baseline of a **fallback** face, at the current
+    /// rasterisation ppem (Task #411).
+    ///
+    /// A glyph resolved from a fallback face (bundled or system) was designed
+    /// against *that* font's cell, not the primary font's. To place it into the
+    /// primary cell without clipping or mis-centring, the renderer needs the
+    /// fallback face's own `(cell_height, baseline)` so it can scale the glyph
+    /// by `primary_cell_height / fallback_cell_height`.
+    ///
+    /// Returns `None` for the primary faces (they drive the grid directly and
+    /// need no normalisation) and for any face that cannot be measured.
+    #[must_use]
+    pub fn fallback_cell_metrics(&self, face_id: FaceId) -> Option<(f32, f32)> {
+        match face_id {
+            FaceId::PrimaryRegular
+            | FaceId::PrimaryBold
+            | FaceId::PrimaryItalic
+            | FaceId::PrimaryBoldItalic => None,
+            _ => {
+                let face = self.loaded_face(face_id)?;
+                let ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
+                let cm = compute_cell_metrics(face, ppem).ok()?;
+                let cell_h: f32 = cm.cell_height.value_as::<f32>().ok()?;
+                Some((cell_h, cm.ascent))
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     //  Hot reload
     // -----------------------------------------------------------------------

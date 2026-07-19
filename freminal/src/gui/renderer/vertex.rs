@@ -20,7 +20,7 @@ use freminal_terminal_emulator::{
 use std::sync::Arc;
 
 use super::super::{
-    atlas::{GlyphAtlas, GlyphKey},
+    atlas::{AtlasEntry, GlyphAtlas, GlyphKey},
     colors::{
         command_block_hover_bg_f, cursor_f, internal_color_to_gl, search_current_bg_f,
         search_match_bg_f, selection_bg_f, selection_fg_f,
@@ -1226,6 +1226,125 @@ fn emit_procedural_glyph(
     ]);
 }
 
+/// Inputs for [`emit_normalized_fallback_glyph`], bundled to stay within the
+/// argument-count lint.
+struct NormalizedFallbackGlyph {
+    /// Cell-grid x origin of the glyph (pixels, pre-`x_scale`).
+    x_px: f32,
+    /// Horizontal bearing of the rasterised glyph.
+    bearing_x: i16,
+    /// Vertical bearing (baseline to glyph top, positive = up) of the glyph.
+    bearing_y: i16,
+    /// Rasterised glyph width in pixels.
+    glyph_w: u16,
+    /// Rasterised glyph height in pixels.
+    glyph_h: u16,
+    /// The fallback face's own cell height at the current ppem.
+    fb_cell_h: f32,
+    /// The fallback face's own baseline (cell-top to baseline) at the ppem.
+    fb_baseline: f32,
+    /// Atlas UV rect `[u0, v0, u1, v1]`.
+    uv: [f32; 4],
+}
+
+/// Normalise and emit a glyph if it was resolved from a **fallback** face
+/// (Task #411); returns `true` if it handled the glyph.
+///
+/// A glyph from a face other than the user-selected primary (bundled fallback
+/// or a system face) was designed against *that* font's cell, not the
+/// primary's. Placing it at the primary baseline with the primary metrics
+/// mis-sizes and mis-centres it — most visibly, full-cell Nerd Font powerline
+/// separators clip at the top. Returns `false` for primary-face glyphs (which
+/// drive the grid directly and take the normal placement path).
+fn try_emit_fallback_glyph(
+    instances: &mut Vec<f32>,
+    glyph: &ShapedGlyph,
+    entry: &AtlasEntry,
+    font_manager: &FontManager,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) -> bool {
+    let Some((fb_cell_h, fb_baseline)) = font_manager.fallback_cell_metrics(glyph.face_id) else {
+        return false;
+    };
+    if fb_cell_h <= 0.0 {
+        return false;
+    }
+    emit_normalized_fallback_glyph(
+        instances,
+        &NormalizedFallbackGlyph {
+            x_px: glyph.x_px,
+            bearing_x: entry.bearing_x,
+            bearing_y: entry.bearing_y,
+            glyph_w: entry.width,
+            glyph_h: entry.height,
+            fb_cell_h,
+            fb_baseline,
+            uv: entry.uv_rect,
+        },
+        fg_color,
+        row_params,
+    );
+    true
+}
+
+/// Emit a glyph resolved from a **fallback** face, normalised into the primary
+/// cell (Task #411).
+///
+/// The glyph was designed against the fallback font's own cell
+/// (`fb_cell_h` tall, baseline at `fb_baseline`). We map its natural box within
+/// that cell into the primary cell by the height ratio
+/// `s = primary_cell_h / fb_cell_h`, preserving aspect and centring
+/// horizontally within the advance. This makes full-cell glyphs (powerline
+/// separators) fill the primary cell and keeps partial-height icons
+/// proportional — with the actual pixel scaling done by the GPU (we only emit a
+/// resized quad). DECDWL/DECDHL row scaling is applied on top.
+fn emit_normalized_fallback_glyph(
+    instances: &mut Vec<f32>,
+    g: &NormalizedFallbackGlyph,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) {
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+    let primary_cell_h = cell_bottom - cell_top;
+    if primary_cell_h <= 0.0 || g.glyph_w == 0 || g.glyph_h == 0 {
+        return;
+    }
+
+    // Height ratio: map the fallback face's cell onto the primary cell.
+    let s = primary_cell_h / g.fb_cell_h;
+
+    // The glyph's natural box within the fallback face's own cell.
+    let natural_top = g.fb_baseline - f32::from(g.bearing_y);
+    let natural_left = f32::from(g.bearing_x);
+
+    // Scale that box by `s` into the primary cell, then apply the row's
+    // vertical scale and origin shift (DECDHL) and horizontal scale (DECDWL).
+    let scaled_h = f32::from(g.glyph_h) * s * row_params.y_scale;
+    let scaled_w = f32::from(g.glyph_w) * s * row_params.x_scale;
+
+    let y0 = (natural_top * s).mul_add(row_params.y_scale, cell_top + row_params.y_origin_shift);
+    let x0 = natural_left.mul_add(s, g.x_px) * row_params.x_scale;
+
+    let [u0, v0, u1, v1] = g.uv;
+    instances.extend_from_slice(&[
+        x0,
+        y0,
+        scaled_w,
+        scaled_h,
+        u0,
+        v0,
+        u1,
+        v1,
+        fg_color[0],
+        fg_color[1],
+        fg_color[2],
+        fg_color[3],
+        0.0,
+    ]);
+}
+
 /// Emit a single foreground glyph instance (13 floats).
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
@@ -1325,6 +1444,12 @@ fn emit_glyph_instance(
             fg_color[3],
             1.0,
         ]);
+        return;
+    }
+
+    // Fallback-face glyphs (Task #411) are normalised into the primary cell —
+    // see `try_emit_fallback_glyph`.
+    if try_emit_fallback_glyph(instances, glyph, &entry, font_manager, fg_color, row_params) {
         return;
     }
 
@@ -2356,6 +2481,73 @@ mod tests {
             r.width > cell_px,
             "width-2 emoji collapsed into a single cell: width={}",
             r.width
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_full_cell_glyph_fills_primary_cell() {
+        // Reproduces the Task #411 case: a full-cell powerline glyph from the
+        // bundled CaskaydiaCove fallback (its cell 19px, baseline 15, glyph
+        // bearing_y 15 h 19 => fills its own cell) placed into a Courier Prime
+        // primary cell (18px). It must fill the primary cell exactly, not clip.
+        let primary_cell_h = 18.0_f32;
+        // Row 0: cell_top = 0, cell_bottom = primary_cell_h.
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 15.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 15,
+                glyph_w: 10,
+                glyph_h: 19,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        assert_eq!(out.len(), 13, "one instance of 13 floats");
+        let y0 = out[1];
+        let height = out[3];
+        // natural_top = baseline - bearing_y = 0 -> y0 = cell_top = 0.
+        assert!(y0.abs() < 0.01, "expected y0 ~0 (cell top), got {y0}");
+        // scaled_h = 19 * (18/19) = 18 -> fills the primary cell, no clip.
+        assert!(
+            (height - primary_cell_h).abs() < 0.01,
+            "expected height ~{primary_cell_h} (fills cell), got {height}"
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_icon_stays_proportional() {
+        // A partial-height icon (h 13 in a 19px fallback cell) must NOT be
+        // ballooned to fill the primary cell — it stays proportionally sized.
+        let primary_cell_h = 18.0_f32;
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 15.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 12,
+                glyph_w: 13,
+                glyph_h: 13,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        let height = out[3];
+        // scaled_h = 13 * (18/19) ~= 12.3 — much less than the full cell.
+        assert!(
+            height < primary_cell_h * 0.8,
+            "icon should stay proportional, got height {height} (cell {primary_cell_h})"
         );
     }
 
