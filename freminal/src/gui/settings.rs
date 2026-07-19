@@ -388,13 +388,31 @@ impl SettingsModal {
         Self::serialize_for_baseline(&self.draft) != self.baseline_toml
     }
 
+    /// Returns `true` if the modal is open with edits that would be lost by
+    /// closing without saving.
+    ///
+    /// Read-only sessions never have "unsaved" edits from the user's
+    /// perspective (Apply is disabled), so they never report unsaved
+    /// changes here. Used by the owning-window close guard (issue #401) to
+    /// decide whether closing the terminal window that opened Settings
+    /// should surface a confirmation prompt.
+    #[must_use]
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.is_open && self.read_only_reason.is_none() && self.is_dirty()
+    }
+
     /// Request to close the modal, consulting the dirty state.
     ///
     /// Returns `true` if the modal may close immediately (no pending edits),
     /// `false` if the caller should keep the window open so the user can
     /// resolve the confirm prompt.  Callers include the embedded Cancel
-    /// button, the egui window X, and the app's `on_close_requested` hook
-    /// for the standalone settings OS window.
+    /// button and the egui window X — i.e. the modal closing *itself*.
+    ///
+    /// The owning terminal window's close path (issue #401) does not use
+    /// this method: it uses [`has_unsaved_changes`](Self::has_unsaved_changes)
+    /// plus the shared close-guard dialog (Task 98 pattern) instead, so the
+    /// prompt renders on the terminal window being closed rather than
+    /// relying on the settings window's own next frame.
     ///
     /// When read-only, close is always allowed (Apply is disabled, so there
     /// can be no unsaved edits from the user's perspective).
@@ -3269,6 +3287,49 @@ mod tests {
             (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
         assert!(modal.request_close());
         assert!(!modal.is_open);
+    }
+
+    #[test]
+    fn has_unsaved_changes_false_when_closed_clean_or_read_only() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+
+        // Never opened.
+        assert!(!modal.has_unsaved_changes());
+
+        modal.open(&live, Vec::new(), false);
+        modal.read_only_reason = None;
+
+        // Open but clean.
+        assert!(!modal.has_unsaved_changes());
+
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+
+        // Open and dirty.
+        assert!(modal.has_unsaved_changes());
+
+        // Read-only dirty modal has nothing "unsaved" from the user's
+        // perspective — Apply is disabled either way.
+        modal.read_only_reason = Some("test: read-only".to_string());
+        assert!(!modal.has_unsaved_changes());
+    }
+
+    #[test]
+    fn has_unsaved_changes_false_after_close() {
+        let mut modal = SettingsModal::new(None);
+        let live = Config::default();
+        modal.open(&live, Vec::new(), false);
+        modal.read_only_reason = None;
+        modal.draft.ui.background_opacity =
+            (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
+        assert!(modal.has_unsaved_changes());
+
+        modal.is_open = false;
+        assert!(
+            !modal.has_unsaved_changes(),
+            "a closed modal has nothing left to lose, dirty or not"
+        );
     }
 
     #[test]

@@ -147,6 +147,11 @@ pub(in crate::gui) enum CloseScope {
     Tab(usize),
     /// Close this window (and, if it is the last, quit).
     Window,
+    /// Close this window, which owns an open Settings modal with unsaved
+    /// edits (issue #401). Distinct from `Window` because it guards on
+    /// unsaved config edits rather than a running foreground command, and
+    /// resolving it also tears down the settings OS window.
+    WindowUnsavedSettings,
 }
 
 /// A close action suspended while the guard dialog is open.
@@ -217,14 +222,10 @@ impl CloseGuardDialog {
         let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let force = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
 
-        let count = pending.running.len();
-        let banner = format!(
-            "{count} pane{} {} a running command. Close anyway?",
-            if count == 1 { "" } else { "s" },
-            if count == 1 { "has" } else { "have" },
-        );
+        let banner = close_dialog_banner(pending.scope, pending.running.len());
+        let title = close_dialog_title(pending.scope);
 
-        egui::Window::new("Close — Running Commands")
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -271,6 +272,30 @@ impl CloseGuardDialog {
 
         outcome
     }
+}
+
+/// The window title for the close-guard dialog, specific to `scope`.
+const fn close_dialog_title(scope: CloseScope) -> &'static str {
+    match scope {
+        CloseScope::WindowUnsavedSettings => "Close — Unsaved Settings",
+        CloseScope::Pane | CloseScope::Tab(_) | CloseScope::Window => "Close — Running Commands",
+    }
+}
+
+/// The banner message for the close-guard dialog, specific to `scope`.
+///
+/// `running_count` is only meaningful for the running-command scopes
+/// (`Pane` / `Tab` / `Window`); `WindowUnsavedSettings` ignores it — that
+/// guard has nothing to list, just the unsaved-edits warning.
+fn close_dialog_banner(scope: CloseScope, running_count: usize) -> String {
+    if scope == CloseScope::WindowUnsavedSettings {
+        return "Settings has unsaved changes. Closing this window will discard them.".to_owned();
+    }
+    format!(
+        "{running_count} pane{} {} a running command. Close anyway?",
+        if running_count == 1 { "" } else { "s" },
+        if running_count == 1 { "has" } else { "have" },
+    )
 }
 
 /// Format one running-command entry for the dialog list:
@@ -563,6 +588,42 @@ mod tests {
     fn format_running_entry_missing_elapsed_reads_running() {
         let entry = format_running_entry(&info("T", "<unknown command>", None));
         assert_eq!(entry, "T · <unknown command> (running)");
+    }
+
+    #[test]
+    fn close_dialog_banner_running_commands_pluralizes() {
+        assert_eq!(
+            close_dialog_banner(CloseScope::Window, 1),
+            "1 pane has a running command. Close anyway?"
+        );
+        assert_eq!(
+            close_dialog_banner(CloseScope::Tab(0), 3),
+            "3 panes have a running command. Close anyway?"
+        );
+    }
+
+    #[test]
+    fn close_dialog_banner_unsaved_settings_ignores_running_count() {
+        assert_eq!(
+            close_dialog_banner(CloseScope::WindowUnsavedSettings, 0),
+            "Settings has unsaved changes. Closing this window will discard them."
+        );
+    }
+
+    #[test]
+    fn close_dialog_title_distinguishes_settings_from_running_commands() {
+        assert_eq!(
+            close_dialog_title(CloseScope::WindowUnsavedSettings),
+            "Close — Unsaved Settings"
+        );
+        assert_eq!(
+            close_dialog_title(CloseScope::Window),
+            "Close — Running Commands"
+        );
+        assert_eq!(
+            close_dialog_title(CloseScope::Pane),
+            "Close — Running Commands"
+        );
     }
 
     #[test]
