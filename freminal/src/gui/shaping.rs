@@ -77,6 +77,12 @@ pub struct ShapedGlyph {
     pub is_color: bool,
     /// Column width of the character (1 or 2).
     pub cell_width: usize,
+    /// The source Unicode scalar this glyph was shaped from.
+    ///
+    /// Used to route box-drawing / block-element codepoints to the procedural
+    /// renderer (Task #410). `'\0'` when the source char is unavailable (e.g.
+    /// ligature clusters spanning multiple chars, or placeholder glyphs).
+    pub source_char: char,
 }
 
 /// All shaped glyphs for a single [`TextRun`].
@@ -700,6 +706,10 @@ fn build_shaped_glyphs(
         .collect();
     let num_chars = char_widths.len();
 
+    // Char-index → source char, for routing box-drawing codepoints to the
+    // procedural renderer (Task #410).
+    let run_chars: Vec<char> = run_text.chars().collect();
+
     // Pre-compute cumulative column offsets so we can look up the column of
     // any char index in O(1).  `cum_cols[i]` is the sum of `char_widths[0..i]`.
     let mut cum_cols: Vec<usize> = Vec::with_capacity(num_chars + 1);
@@ -755,6 +765,15 @@ fn build_shaped_glyphs(
 
         let gid = u16::value_from(info.glyph_id).unwrap_or(0);
 
+        // Source char, but only for single-char clusters — a ligature spanning
+        // multiple chars has no single source char and must not be treated as
+        // procedural.
+        let source_char = if next_char_idx == char_idx + 1 {
+            run_chars.get(char_idx).copied().unwrap_or('\0')
+        } else {
+            '\0'
+        };
+
         glyphs.push(ShapedGlyph {
             glyph_id: gid,
             x_px,
@@ -762,6 +781,7 @@ fn build_shaped_glyphs(
             face_id,
             is_color,
             cell_width: cw,
+            source_char,
         });
     }
 
@@ -788,6 +808,7 @@ fn build_tofu_glyphs(
             face_id,
             is_color: false,
             cell_width: cw,
+            source_char: '\0',
         });
 
         col += cw;
@@ -964,14 +985,18 @@ mod tests {
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
 
-        // U+1F600 (😀) should route to emoji face if available.
+        // U+1F600 (😀) must route to the emoji face. With the bundled Noto
+        // Color Emoji floor (Task #402) there is always an emoji face, so this
+        // is now deterministic rather than environment-dependent.
         let chars = vec![TChar::from('😀')];
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert!(
+            runs.iter().any(|r| r.face_id == FaceId::Emoji),
+            "emoji must resolve to FaceId::Emoji (bundled Noto floor guarantees one)"
+        );
 
-        // The run should have face_id == FaceId::Emoji (if system has an emoji font)
-        // or some system fallback.  Either way, shaping should succeed.
         let shaped = shape_runs(&runs, &fm, cell_w, false);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());

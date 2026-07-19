@@ -99,17 +99,29 @@ pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinition
         try_load_user_primary_font(path_or_name, &mut defs);
     }
 
-    // 4. Emoji fallback (system, prioritized)
+    // 4. Emoji fallback for egui *chrome* (menu bar, settings modal — NOT the
+    //    terminal grid, which is drawn by the swash/atlas pipeline in
+    //    `font_manager`). This only helps chrome text render an emoji outline
+    //    (COLR/CPAL or a monochrome fallback such as Symbola); egui's grayscale
+    //    font atlas cannot display CBDT/CBLC bitmap color emoji.
     if cfg.enable_emoji_fallback {
         emoji_fonts::add_emoji_fallback(&mut defs);
     }
+
+    // NOTE: the bundled Noto Color Emoji (Task #402) is deliberately NOT
+    // registered into the egui chrome font stack. It is a CBDT/CBLC *bitmap*
+    // color font with no glyph outlines, and egui (0.35, egui_glow) renders
+    // from a grayscale outline atlas — it cannot display CBDT/CBLC glyphs, so
+    // registering the 10 MB face here would add a per-window no-op. The bundled
+    // floor lives in the terminal-side swash pipeline (`FontManager`), which
+    // *can* render color bitmap emoji. See `load_bundled_emoji_font`.
 
     // 5. Last resort system fallback (disabled by default)
     if cfg.enable_system_last_resort {
         system_fallback::add_last_resort_system_fonts(&mut defs);
     }
 
-    // 6. Register a placeholder "settings-preview" family pointing at the
+    // 7. Register a placeholder "settings-preview" family pointing at the
     //    bundled primary regular font.  This ensures that
     //    `FontFamily::Name("settings-preview")` is always valid — even before
     //    the settings modal loads a real preview font.  When the modal loads a
@@ -184,6 +196,11 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
 
     info!("Loaded bundled Freminal primary monospace font");
 }
+
+// The bundled Noto Color Emoji floor (Task #402) is applied on the terminal
+// (swash) side in `font_manager::discover_emoji_face`, not here — egui's
+// grayscale atlas cannot render its CBDT/CBLC bitmap glyphs. See the note in
+// `setup_font_files`.
 
 // -------------------------------------------------------------------------------------------------
 // 2. Bundled Nerd Symbols (fallback)
@@ -338,6 +355,16 @@ mod emoji_fonts {
         "Symbola",
     ];
 
+    /// Add a system emoji font as a chrome-text fallback.
+    ///
+    /// This is the **egui chrome** path (menu bar, settings), NOT the terminal
+    /// grid. It deliberately does NOT reuse the terminal-side capability
+    /// ranking (`font_manager::best_system_emoji_source`, which gates on
+    /// `has_color_glyphs`): egui's grayscale atlas cannot render color
+    /// (COLR/CBDT) glyphs, so for chrome a monochrome-renderable emoji/symbol
+    /// face (e.g. `Symbola`) is actually the *useful* choice, and a color-only
+    /// font would render as tofu. The name-priority list here is correct for
+    /// that goal; the two paths intentionally differ.
     pub fn add_emoji_fallback(defs: &mut FontDefinitions) {
         let mut db = Database::new();
         db.load_system_fonts();
@@ -356,8 +383,12 @@ mod emoji_fonts {
     }
 
     fn find_candidate(db: &Database, target: &str) -> Option<(String, Vec<u8>)> {
+        let target_lower = target.to_lowercase();
         for face in db.faces() {
-            let matches = face.families.iter().any(|fam| fam.0.contains(target));
+            let matches = face
+                .families
+                .iter()
+                .any(|fam| fam.0.to_lowercase().contains(&target_lower));
 
             if !matches {
                 continue;

@@ -36,6 +36,18 @@ full upstream license texts are bundled under [`res/fonts/`](res/fonts/).
   [`res/fonts/CaskaydiaCove-NerdFont-LICENSE.md`](res/fonts/CaskaydiaCove-NerdFont-LICENSE.md)
 - **Files:** `res/CaskaydiaCoveNerdFont-{Regular,Bold,Italic,BoldItalic}.ttf`
 
+### Noto Color Emoji
+
+- **Upstream:** Google Noto Fonts —
+  <https://github.com/googlefonts/noto-emoji>
+- **License:** SIL Open Font License 1.1.
+- **License text:**
+  [`res/fonts/NotoColorEmoji-LICENSE.txt`](res/fonts/NotoColorEmoji-LICENSE.txt)
+- **Files:** `res/NotoColorEmoji.ttf`
+- **Notes:** Bundled so color emoji render without depending on a system-installed
+  emoji font. When a suitable system color-emoji font is present it is preferred;
+  the bundled face is the guaranteed fallback.
+
 ## Bundled images
 
 All bundled image assets are first-party to the freminal project and are

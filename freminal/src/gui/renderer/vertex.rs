@@ -20,7 +20,7 @@ use freminal_terminal_emulator::{
 use std::sync::Arc;
 
 use super::super::{
-    atlas::{GlyphAtlas, GlyphKey},
+    atlas::{AtlasEntry, GlyphAtlas, GlyphKey},
     colors::{
         command_block_hover_bg_f, cursor_f, internal_color_to_gl, search_current_bg_f,
         search_match_bg_f, selection_bg_f, selection_fg_f,
@@ -1162,6 +1162,203 @@ fn fit_color_glyph_rect(
     }
 }
 
+/// Emit a procedural box-drawing / block-element glyph (Task #410).
+///
+/// The bitmap is generated at the exact cell pixel size and the quad spans the
+/// cell rectangle **exactly** — `[cell_left, cell_top]` to
+/// `[cell_right, cell_bottom]`, with the row's DECDWL/DECDHL scale applied — so
+/// consecutive cells tile with no seam. This deliberately bypasses the
+/// baseline/bearing/clip path used for font glyphs.
+fn emit_procedural_glyph(
+    instances: &mut Vec<f32>,
+    glyph: &ShapedGlyph,
+    atlas: &mut GlyphAtlas,
+    font_manager: &FontManager,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) {
+    use conv2::{ApproxFrom, RoundToNearest};
+
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+    let cell_w = font_manager.cell_width();
+    let cell_h = font_manager.cell_height();
+
+    // The generated bitmap fills the whole cell, so `bearing_y` (distance from
+    // the baseline up to the glyph top) equals the baseline-to-cell-top
+    // distance. It is unused by the exact-cell placement below, but the atlas
+    // entry records it for completeness.
+    let bearing_y: i16 =
+        <i16 as ApproxFrom<f32, RoundToNearest>>::approx_from(row_params.baseline_y - cell_top)
+            .unwrap_or(0);
+
+    let entry = match atlas.get_or_insert_procedural(glyph.source_char, cell_w, cell_h, bearing_y) {
+        Some(e) => e.clone(),
+        None => return,
+    };
+    if entry.width == 0 || entry.height == 0 {
+        return;
+    }
+    let [u0, v0, u1, v1] = entry.uv_rect;
+
+    // Exact cell rectangle, with DECDWL (x_scale) / DECDHL (y_scale,
+    // y_origin_shift) applied so double-width/height rows still fill correctly.
+    let x0 = glyph.x_px * row_params.x_scale;
+    let width = gl_f32_u32(cell_w) * row_params.x_scale;
+    let cell_pixel_h = cell_bottom - cell_top;
+    let y0 = cell_top.mul_add(1.0, row_params.y_origin_shift);
+    let height = cell_pixel_h * row_params.y_scale;
+
+    instances.extend_from_slice(&[
+        x0,
+        y0,
+        width,
+        height,
+        u0,
+        v0,
+        u1,
+        v1,
+        fg_color[0],
+        fg_color[1],
+        fg_color[2],
+        fg_color[3],
+        0.0,
+    ]);
+}
+
+/// Inputs for [`emit_normalized_fallback_glyph`], bundled to stay within the
+/// argument-count lint.
+struct NormalizedFallbackGlyph {
+    /// Cell-grid x origin of the glyph (pixels, pre-`x_scale`).
+    x_px: f32,
+    /// Horizontal bearing of the rasterised glyph.
+    bearing_x: i16,
+    /// Vertical bearing (baseline to glyph top, positive = up) of the glyph.
+    bearing_y: i16,
+    /// Rasterised glyph width in pixels.
+    glyph_w: u16,
+    /// Rasterised glyph height in pixels.
+    glyph_h: u16,
+    /// The fallback face's own cell height at the current ppem.
+    fb_cell_h: f32,
+    /// The fallback face's own baseline (cell-top to baseline) at the ppem.
+    fb_baseline: f32,
+    /// The fallback face's own cell width at the current ppem.
+    fb_cell_w: f32,
+    /// The primary face's cell width in pixels (pre-`x_scale`).
+    primary_cell_w: f32,
+    /// Atlas UV rect `[u0, v0, u1, v1]`.
+    uv: [f32; 4],
+}
+
+/// Normalise and emit a glyph if it was resolved from a **fallback** face
+/// (Task #411); returns `true` if it handled the glyph.
+///
+/// A glyph from a face other than the user-selected primary (bundled fallback
+/// or a system face) was designed against *that* font's cell, not the
+/// primary's. Placing it at the primary baseline with the primary metrics
+/// mis-sizes and mis-centres it — most visibly, full-cell Nerd Font powerline
+/// separators clip at the top. Returns `false` for primary-face glyphs (which
+/// drive the grid directly and take the normal placement path).
+fn try_emit_fallback_glyph(
+    instances: &mut Vec<f32>,
+    glyph: &ShapedGlyph,
+    entry: &AtlasEntry,
+    font_manager: &FontManager,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) -> bool {
+    let Some((fb_cell_h, fb_baseline, fb_cell_w)) =
+        font_manager.fallback_cell_metrics(glyph.face_id)
+    else {
+        return false;
+    };
+    if fb_cell_h <= 0.0 || fb_cell_w <= 0.0 {
+        return false;
+    }
+    emit_normalized_fallback_glyph(
+        instances,
+        &NormalizedFallbackGlyph {
+            x_px: glyph.x_px,
+            bearing_x: entry.bearing_x,
+            bearing_y: entry.bearing_y,
+            glyph_w: entry.width,
+            glyph_h: entry.height,
+            fb_cell_h,
+            fb_baseline,
+            fb_cell_w,
+            primary_cell_w: gl_f32_u32(font_manager.cell_width()),
+            uv: entry.uv_rect,
+        },
+        fg_color,
+        row_params,
+    );
+    true
+}
+
+/// Emit a glyph resolved from a **fallback** face, normalised into the primary
+/// cell (Task #411).
+///
+/// The glyph was designed against the fallback font's own cell
+/// (`fb_cell_w` × `fb_cell_h`, baseline at `fb_baseline`). We map its natural
+/// box within that cell into the primary cell using **independent** per-axis
+/// ratios — `sx = primary_cell_w / fb_cell_w` horizontally and
+/// `sy = primary_cell_h / fb_cell_h` vertically. Using the height ratio for
+/// both axes (as an earlier version did) mis-sizes the width whenever the
+/// fallback font's aspect ratio differs from the primary's, re-introducing the
+/// hairline-gap / over-fill class of bug for full-cell fallback glyphs
+/// (powerline separators). This makes full-cell glyphs fill the primary cell
+/// exactly and keeps partial icons proportional to the cell — with the actual
+/// pixel scaling done by the GPU (we only emit a resized quad). DECDWL/DECDHL
+/// row scaling is applied on top.
+fn emit_normalized_fallback_glyph(
+    instances: &mut Vec<f32>,
+    g: &NormalizedFallbackGlyph,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) {
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+    let primary_cell_h = cell_bottom - cell_top;
+    if primary_cell_h <= 0.0 || g.fb_cell_w <= 0.0 || g.glyph_w == 0 || g.glyph_h == 0 {
+        return;
+    }
+
+    // Independent per-axis ratios: map the fallback face's cell onto the
+    // primary cell without distorting the width by the height ratio.
+    let sy = primary_cell_h / g.fb_cell_h;
+    let sx = g.primary_cell_w / g.fb_cell_w;
+
+    // The glyph's natural box within the fallback face's own cell.
+    let natural_top = g.fb_baseline - f32::from(g.bearing_y);
+    let natural_left = f32::from(g.bearing_x);
+
+    // Scale that box into the primary cell, then apply the row's vertical scale
+    // and origin shift (DECDHL) and horizontal scale (DECDWL).
+    let scaled_h = f32::from(g.glyph_h) * sy * row_params.y_scale;
+    let scaled_w = f32::from(g.glyph_w) * sx * row_params.x_scale;
+
+    let y0 = (natural_top * sy).mul_add(row_params.y_scale, cell_top + row_params.y_origin_shift);
+    let x0 = natural_left.mul_add(sx, g.x_px) * row_params.x_scale;
+
+    let [u0, v0, u1, v1] = g.uv;
+    instances.extend_from_slice(&[
+        x0,
+        y0,
+        scaled_w,
+        scaled_h,
+        u0,
+        v0,
+        u1,
+        v1,
+        fg_color[0],
+        fg_color[1],
+        fg_color[2],
+        fg_color[3],
+        0.0,
+    ]);
+}
+
 /// Emit a single foreground glyph instance (13 floats).
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
@@ -1180,11 +1377,30 @@ fn emit_glyph_instance(
     fg_color: [f32; 4],
     row_params: &RowGlyphParams,
 ) {
-    use conv2::ValueFrom;
+    use conv2::{ApproxFrom, RoundToNearest};
 
-    // Determine pixel size from the atlas key.
-    // We use the font manager's cell height as the size_px for rasterisation.
-    let size_px = u16::value_from(font_manager.cell_height()).unwrap_or(u16::MAX);
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+
+    // Procedural box-drawing / block-element glyphs (Task #410) are drawn to
+    // fill the cell rectangle EXACTLY, so they tile with their neighbours with
+    // no seam. They bypass the font-glyph baseline/bearing/clip math entirely
+    // (that math accumulates sub-pixel error that shows up as hairline gaps
+    // between rows). Only single-cell-wide glyphs qualify.
+    if crate::gui::box_drawing::is_procedural(glyph.source_char) && glyph.cell_width == 1 {
+        emit_procedural_glyph(instances, glyph, atlas, font_manager, fg_color, row_params);
+        return;
+    }
+
+    // Rasterize glyphs at the font's actual pixels-per-em — the SAME size the
+    // cell metrics (ascent/descent/baseline/cell width) were computed at — not
+    // the cell *height*. The cell height can be larger than the font ppem
+    // (e.g. Nerd Fonts inflate it via the OS/2 win-metrics floor), and
+    // rasterizing at that inflated size scales every glyph by the wrong factor,
+    // making text visibly too large and top-heavy within the cell.
+    let size_px: u16 =
+        <u16 as ApproxFrom<f32, RoundToNearest>>::approx_from(font_manager.rasterization_ppem())
+            .unwrap_or(u16::MAX);
 
     let key = GlyphKey {
         glyph_id: glyph.glyph_id,
@@ -1203,9 +1419,6 @@ fn emit_glyph_instance(
     }
 
     let [u0, v0, u1, v1] = entry.uv_rect;
-
-    let cell_top = row_params.cell_y_range[0];
-    let cell_bottom = row_params.cell_y_range[1];
 
     // Color emoji take a separate geometry path: rather than crop an
     // oversized bitmap to the cell, scale it to fit (see
@@ -1245,6 +1458,12 @@ fn emit_glyph_instance(
             fg_color[3],
             1.0,
         ]);
+        return;
+    }
+
+    // Fallback-face glyphs (Task #411) are normalised into the primary cell —
+    // see `try_emit_fallback_glyph`.
+    if try_emit_fallback_glyph(instances, glyph, &entry, font_manager, fg_color, row_params) {
         return;
     }
 
@@ -1622,6 +1841,7 @@ mod tests {
                 face_id: FaceId::PrimaryRegular,
                 is_color: false,
                 cell_width: 1,
+                source_char: '\0',
             })
             .collect();
         Arc::new(ShapedLine {
@@ -1940,6 +2160,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -1957,6 +2178,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2007,6 +2229,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2024,6 +2247,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2271,6 +2495,119 @@ mod tests {
             r.width > cell_px,
             "width-2 emoji collapsed into a single cell: width={}",
             r.width
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_full_cell_glyph_fills_primary_cell() {
+        // Reproduces the Task #411 case: a full-cell powerline glyph from the
+        // bundled CaskaydiaCove fallback (its cell 19px, baseline 15, glyph
+        // bearing_y 15 h 19 => fills its own cell) placed into a Courier Prime
+        // primary cell (18px). It must fill the primary cell exactly, not clip.
+        let primary_cell_h = 18.0_f32;
+        // Row 0: cell_top = 0, cell_bottom = primary_cell_h.
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 15.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 15,
+                glyph_w: 10,
+                glyph_h: 19,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                fb_cell_w: 10.0,
+                primary_cell_w: 9.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        assert_eq!(out.len(), 13, "one instance of 13 floats");
+        let y0 = out[1];
+        let width = out[2];
+        let height = out[3];
+        // natural_top = baseline - bearing_y = 0 -> y0 = cell_top = 0.
+        assert!(y0.abs() < 0.01, "expected y0 ~0 (cell top), got {y0}");
+        // scaled_h = 19 * (18/19) = 18 -> fills the primary cell, no clip.
+        assert!(
+            (height - primary_cell_h).abs() < 0.01,
+            "expected height ~{primary_cell_h} (fills cell), got {height}"
+        );
+        // scaled_w = 10 * (primary_cell_w 9 / fb_cell_w 10) = 9 -> fills the
+        // primary cell width exactly (independent of the height ratio).
+        assert!(
+            (width - 9.0).abs() < 0.01,
+            "expected width ~9 (fills primary cell width), got {width}"
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_uses_independent_width_scale() {
+        // Aspect-ratio guard (Task #411 fix): a full-cell fallback glyph must be
+        // scaled to the primary cell's WIDTH via the width ratio, not the height
+        // ratio. Here the primary cell is much taller-and-narrower than the
+        // fallback cell, so a height-ratio width would wildly over-fill.
+        let primary_cell_h = 30.0_f32;
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 24.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 15,
+                glyph_w: 10, // fills the fallback cell width
+                glyph_h: 19,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                fb_cell_w: 10.0,
+                primary_cell_w: 8.0, // narrow primary cell
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        let width = out[2];
+        // Correct (width ratio): 10 * (8/10) = 8.0 — fills the narrow cell.
+        // Bug (height ratio): 10 * (30/19) ≈ 15.8 — nearly double, overflows.
+        assert!(
+            (width - 8.0).abs() < 0.01,
+            "expected width ~8 via width ratio, got {width} (height-ratio bug would give ~15.8)"
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_icon_stays_proportional() {
+        // A partial-height icon (h 13 in a 19px fallback cell) must NOT be
+        // ballooned to fill the primary cell — it stays proportionally sized.
+        let primary_cell_h = 18.0_f32;
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 15.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 12,
+                glyph_w: 13,
+                glyph_h: 13,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                fb_cell_w: 19.0,
+                primary_cell_w: 18.0,
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        let height = out[3];
+        // scaled_h = 13 * (18/19) ~= 12.3 — much less than the full cell.
+        assert!(
+            height < primary_cell_h * 0.8,
+            "icon should stay proportional, got height {height} (cell {primary_cell_h})"
         );
     }
 
@@ -2706,6 +3043,7 @@ mod tests {
                 face_id: FaceId::PrimaryRegular,
                 is_color: false,
                 cell_width: 1,
+                source_char: '\0',
             })
             .collect();
         Arc::new(ShapedLine {

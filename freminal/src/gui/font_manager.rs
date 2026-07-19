@@ -10,6 +10,7 @@
 //! references for the shaping pipeline, and resolves glyphs through a tiered
 //! fallback chain: primary face -> bundled fallback -> emoji -> system -> tofu.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -35,6 +36,30 @@ static CASKAYDIA_BOLD: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFon
 static CASKAYDIA_ITALIC: &[u8] = include_bytes!("../../../res/CaskaydiaCoveNerdFont-Italic.ttf");
 static CASKAYDIA_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../res/CaskaydiaCoveNerdFont-BoldItalic.ttf");
+
+/// Bundled color emoji font (Noto Color Emoji, OFL-1.1). Guarantees emoji
+/// rendering even on a system with no emoji font installed (Task #402).
+static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../res/NotoColorEmoji.ttf");
+
+/// The Unicode blocks that make up the emoji repertoire, as inclusive
+/// `(start, end)` codepoint ranges.
+///
+/// A candidate emoji face is scored by counting how many codepoints across
+/// these ranges its `cmap` actually maps ([`LoadedFace::emoji_coverage`]) —
+/// a real coverage measurement over the font's own character map, not a
+/// hand-picked sample. Ranges are the emoji-bearing blocks per the Unicode
+/// Standard (the pictographic/emoji blocks; not every codepoint in these
+/// blocks is an emoji, but the count is a faithful relative measure of how
+/// much of the repertoire a font carries).
+const EMOJI_BLOCKS: &[(u32, u32)] = &[
+    (0x2600, 0x26FF),   // Miscellaneous Symbols
+    (0x2700, 0x27BF),   // Dingbats
+    (0x1F300, 0x1F5FF), // Miscellaneous Symbols and Pictographs
+    (0x1F600, 0x1F64F), // Emoticons
+    (0x1F680, 0x1F6FF), // Transport and Map Symbols
+    (0x1F900, 0x1F9FF), // Supplemental Symbols and Pictographs
+    (0x1FA70, 0x1FAFF), // Symbols and Pictographs Extended-A
+];
 
 /// Raw bytes of the bundled default font (`CaskaydiaCove` Nerd Font, Regular).
 ///
@@ -221,6 +246,37 @@ impl LoadedFace {
     fn map_char(&self, c: char) -> u16 {
         self.as_font_ref().map_or(0, |f| f.charmap().map(c))
     }
+
+    /// Whether this face carries color glyph tables (`COLR`/`CPAL` vector
+    /// palettes or `CBDT`/`CBLC`/`sbix` bitmap strikes) — i.e. is a genuine
+    /// color emoji font rather than a text font that happens to map an emoji
+    /// codepoint to a monochrome outline.
+    fn has_color_glyphs(&self) -> bool {
+        self.as_font_ref().is_some_and(|f| {
+            f.color_palettes().next().is_some() || f.color_strikes().next().is_some()
+        })
+    }
+
+    /// Count how many codepoints across the [`EMOJI_BLOCKS`] this face's `cmap`
+    /// actually maps to a glyph — a real coverage measurement over the font's
+    /// character map. Used to rank candidate emoji faces by how much of the
+    /// emoji repertoire they carry.
+    fn emoji_coverage(&self) -> u32 {
+        self.as_font_ref().map_or(0, |f| {
+            let charmap = f.charmap();
+            let mut count = 0u32;
+            for &(start, end) in EMOJI_BLOCKS {
+                for cp in start..=end {
+                    if let Some(c) = char::from_u32(cp)
+                        && charmap.map(c) != 0
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        })
+    }
 }
 
 /// The four style variants of a single font family.
@@ -260,6 +316,23 @@ impl PrimaryFaces {
             }
         }
     }
+}
+
+/// A fallback face's own cell metrics, used to normalise its glyphs into the
+/// primary cell (Task #411).
+///
+/// All three are measured at the current rasterisation ppem. Cached per
+/// [`FaceId`] because recomputing them (`compute_cell_metrics`, which parses the
+/// OS/2 table and probes for Powerline glyphs) for every fallback glyph on every
+/// frame is expensive.
+#[derive(Debug, Clone, Copy)]
+struct FallbackCellMetrics {
+    /// The fallback face's own cell height in pixels.
+    cell_h: f32,
+    /// The fallback face's own baseline (cell-top to baseline) in pixels.
+    baseline: f32,
+    /// The fallback face's own cell width in pixels.
+    cell_w: f32,
 }
 
 /// Result of a [`FontManager::rebuild`] call, indicating what changed.
@@ -310,6 +383,13 @@ pub struct FontManager {
 
     /// Resolved glyph cache: (codepoint, style) -> (`face_id`, `glyph_id`).
     glyph_cache: HashMap<(char, GlyphStyle), (FaceId, u16)>,
+
+    /// Per-face cache of fallback cell metrics (Task #411). Populated lazily by
+    /// [`Self::fallback_cell_metrics`] and cleared on rebuild alongside
+    /// `glyph_cache`. `None` means the face has no measurable metrics (or is a
+    /// primary face). Interior mutability so the renderer can read metrics
+    /// through a shared `&FontManager` while still caching.
+    fallback_metrics_cache: RefCell<HashMap<FaceId, Option<FallbackCellMetrics>>>,
 
     /// Authoritative cell width in integer pixels.
     cell_width: u32,
@@ -399,12 +479,8 @@ impl FontManager {
                 (bundled, None, None)
             };
 
+        // Always resolves to at least the bundled Noto Color Emoji face.
         let emoji_face = discover_emoji_face(&font_db);
-        if emoji_face.is_some() {
-            info!("Discovered system emoji font");
-        } else {
-            warn!("No system emoji font found");
-        }
 
         let font_size_ppem = pt_to_ppem(font_size_pt, pixels_per_point);
         let CellMetrics {
@@ -424,6 +500,7 @@ impl FontManager {
             system_fallback_cache: HashMap::new(),
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
+            fallback_metrics_cache: RefCell::new(HashMap::new()),
             cell_width,
             cell_height,
             ascent,
@@ -500,6 +577,20 @@ impl FontManager {
         self.font_size_pt
     }
 
+    /// The pixels-per-em size glyphs must be **rasterized** at.
+    ///
+    /// This is the same ppem the cell metrics (ascent, descent, cell width)
+    /// are computed at — `font_size_pt × 96/72 × pixels_per_point`. Glyphs
+    /// MUST be rasterized at this size so their ink lines up with the baseline
+    /// and cell geometry. Rasterizing at any other size (e.g. the cell
+    /// *height*, which for Nerd Fonts is inflated by the OS/2 win-metrics
+    /// floor) scales every glyph by the wrong factor, making text too large
+    /// and pushing it toward the top of the cell.
+    #[must_use]
+    pub fn rasterization_ppem(&self) -> f32 {
+        pt_to_ppem(self.font_size_pt, self.pixels_per_point)
+    }
+
     // -----------------------------------------------------------------------
     //  Glyph resolution
     // -----------------------------------------------------------------------
@@ -570,6 +661,57 @@ impl FontManager {
     #[must_use]
     pub fn face_cache_key(&self, face_id: FaceId) -> Option<swash::CacheKey> {
         self.loaded_face(face_id).map(LoadedFace::cache_key)
+    }
+
+    /// The own cell height, baseline, and cell width of a **fallback** face, at
+    /// the current rasterisation ppem (Task #411).
+    ///
+    /// A glyph resolved from a fallback face (bundled or system) was designed
+    /// against *that* font's cell, not the primary font's. To place it into the
+    /// primary cell without clipping or mis-centring, the renderer needs the
+    /// fallback face's own `(cell_height, baseline, cell_width)` so it can scale
+    /// the glyph independently on each axis into the primary cell.
+    ///
+    /// Returns `(cell_height, baseline, cell_width)`, or `None` for the primary
+    /// faces (they drive the grid directly and need no normalisation) and for
+    /// any face that cannot be measured.
+    ///
+    /// The result is cached per [`FaceId`]: this is called for every
+    /// fallback glyph on every frame, and `compute_cell_metrics` (OS/2 parsing +
+    /// Powerline probe) is far too costly to repeat per glyph.
+    #[must_use]
+    pub fn fallback_cell_metrics(&self, face_id: FaceId) -> Option<(f32, f32, f32)> {
+        if let Some(cached) = self.fallback_metrics_cache.borrow().get(&face_id) {
+            return cached.map(|m| (m.cell_h, m.baseline, m.cell_w));
+        }
+
+        let computed = self.compute_fallback_cell_metrics(face_id);
+        self.fallback_metrics_cache
+            .borrow_mut()
+            .insert(face_id, computed);
+        computed.map(|m| (m.cell_h, m.baseline, m.cell_w))
+    }
+
+    /// Uncached computation backing [`Self::fallback_cell_metrics`].
+    fn compute_fallback_cell_metrics(&self, face_id: FaceId) -> Option<FallbackCellMetrics> {
+        match face_id {
+            FaceId::PrimaryRegular
+            | FaceId::PrimaryBold
+            | FaceId::PrimaryItalic
+            | FaceId::PrimaryBoldItalic => None,
+            _ => {
+                let face = self.loaded_face(face_id)?;
+                let ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
+                let cm = compute_cell_metrics(face, ppem).ok()?;
+                let cell_h: f32 = cm.cell_height.value_as::<f32>().ok()?;
+                let cell_w: f32 = cm.cell_width.value_as::<f32>().ok()?;
+                Some(FallbackCellMetrics {
+                    cell_h,
+                    baseline: cm.ascent,
+                    cell_w,
+                })
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -647,6 +789,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         if effective_family_changed {
             Ok(RebuildResult::FamilyChanged)
@@ -685,6 +828,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -725,6 +869,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -1124,26 +1269,178 @@ fn suggest_similar_families(query: &str, font_db: &Database) -> Vec<String> {
     suggestions
 }
 
-/// Discover the best available system emoji font.
+/// Choose the emoji face: the best capable color-emoji font installed on the
+/// system, falling back to the bundled Noto Color Emoji so emoji always render
+/// (Task #402).
+///
+/// System faces are ranked by capability, not merely by name:
+///
+/// 1. A candidate must actually be a **color** font ([`LoadedFace::has_color_glyphs`])
+///    — this is what stops a plain text font that maps an emoji codepoint to a
+///    monochrome outline from being chosen.
+/// 2. Among color faces, a **known-good family name** (in [`EMOJI_CANDIDATES`]
+///    order) is a strong prior, and **emoji codepoint coverage**
+///    ([`LoadedFace::emoji_coverage`]) breaks ties and rescues well-covered
+///    fonts with non-standard names (e.g. `JoyPixels`, a distro-renamed Noto).
+///
+/// This fixes the "user has an emoji font installed but we didn't find it
+/// because it isn't named exactly `Noto Color Emoji`" tofu bug, while keeping
+/// the previously-preferred fonts preferred. If no capable system face is
+/// found, the bundled Noto face is used.
 fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
+    load_emoji_face_from_source(&resolve_emoji_source(font_db))
+}
+
+/// Load the [`LoadedFace`] for a resolved [`EmojiSource`], falling back to the
+/// bundled floor if a system source can no longer be read.
+///
+/// Split out from [`discover_emoji_face`] so it can be exercised without the
+/// process-global [`EMOJI_SOURCE_CACHE`] (which would otherwise couple tests to
+/// execution order and the host's installed fonts).
+fn load_emoji_face_from_source(source: &EmojiSource) -> Option<LoadedFace> {
+    match source {
+        EmojiSource::SystemFile { path, index } => {
+            if let Ok(bytes) = std::fs::read(path)
+                && let Some(loaded) = LoadedFace::from_owned(bytes, *index)
+            {
+                info!("Using system emoji font: {}", path.display());
+                return Some(loaded);
+            }
+            // The cached source vanished (font uninstalled between windows) —
+            // fall through to the bundled floor.
+            warn!(
+                "Cached system emoji font no longer loadable ({}); using bundled",
+                path.display()
+            );
+            load_bundled_emoji_floor()
+        }
+        EmojiSource::Bundled => load_bundled_emoji_floor(),
+    }
+}
+
+/// Load the bundled Noto Color Emoji floor face.
+fn load_bundled_emoji_floor() -> Option<LoadedFace> {
+    let bundled = LoadedFace::from_static(NOTO_COLOR_EMOJI);
+    if bundled.is_some() {
+        info!("Using bundled Noto Color Emoji (no suitable system emoji font)");
+    } else {
+        warn!("Bundled Noto Color Emoji failed to load");
+    }
+    bundled
+}
+
+/// A resolved emoji-font source: either a concrete system font file, or the
+/// bundled floor. Cheap to clone and store in the process-global cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EmojiSource {
+    /// A system font file at `path`, face `index`.
+    SystemFile {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    /// The bundled Noto Color Emoji floor.
+    Bundled,
+}
+
+/// Process-global cache of the resolved emoji source.
+///
+/// Emoji discovery is host-configuration-invariant within a process run, but
+/// `FontManager::new` runs **once per window**. Without this cache, opening a
+/// window on a system with no known-named emoji font would re-run the full
+/// capability scan — reading and parsing *every* installed font file from disk
+/// — every single time. We resolve the source once and reuse it; only the
+/// (single) winning font file is re-read per window.
+static EMOJI_SOURCE_CACHE: std::sync::OnceLock<EmojiSource> = std::sync::OnceLock::new();
+
+/// Resolve (and memoize process-wide) which emoji source to use.
+fn resolve_emoji_source(font_db: &Database) -> EmojiSource {
+    EMOJI_SOURCE_CACHE
+        .get_or_init(|| best_system_emoji_source(font_db).unwrap_or(EmojiSource::Bundled))
+        .clone()
+}
+
+/// Find the best color emoji face installed on the system, or `None`.
+///
+/// Two passes, so the common case stays cheap:
+///
+/// 1. **Fast path** — try the known emoji family names ([`EMOJI_CANDIDATES`])
+///    in priority order, filtering by `fontdb`'s in-memory family metadata
+///    (no disk I/O) before loading a candidate. The first one that is a real
+///    color font wins. This is what runs on virtually every desktop.
+/// 2. **Capability scan** — only if no known-named emoji font is installed do
+///    we fall back to scanning *all* faces, loading each, gating on the color
+///    tables, and ranking by real emoji-block coverage. This rescues fonts
+///    with non-standard names (e.g. `JoyPixels`, a distro-renamed Noto) at the
+///    cost of a fuller scan, which only happens when the fast path found
+///    nothing.
+///
+/// Returns the resolved [`EmojiSource`] (path + index) rather than a loaded
+/// face, so the result can be cheaply cached process-wide (see
+/// [`resolve_emoji_source`]).
+fn best_system_emoji_source(font_db: &Database) -> Option<EmojiSource> {
+    // Fast path: known names, metadata-filtered, stop at the first color face.
+    // Name match is case-insensitive so e.g. "noto color emoji" also matches.
     for candidate in EMOJI_CANDIDATES {
+        let candidate_lower = candidate.to_lowercase();
         for face in font_db.faces() {
-            let matches = face.families.iter().any(|fam| fam.0.contains(candidate));
-            if !matches {
+            if !face
+                .families
+                .iter()
+                .any(|(fam, _)| fam.to_lowercase().contains(&candidate_lower))
+            {
                 continue;
             }
-
-            if let fontdb::Source::File(path) = &face.source
-                && let Ok(bytes) = std::fs::read(path)
-                && let Some(loaded) =
-                    LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
+            let fontdb::Source::File(path) = &face.source else {
+                continue;
+            };
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            let index = usize::value_from(face.index).unwrap_or(0);
+            if let Some(loaded) = LoadedFace::from_owned(bytes, index)
+                && loaded.has_color_glyphs()
             {
-                return Some(loaded);
+                return Some(EmojiSource::SystemFile {
+                    path: path.clone(),
+                    index,
+                });
             }
         }
     }
 
-    None
+    // Capability scan: no known emoji font installed — rank every color face by
+    // real coverage.
+    let mut best: Option<(u32, EmojiSource)> = None;
+    for face in font_db.faces() {
+        let fontdb::Source::File(path) = &face.source else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let index = usize::value_from(face.index).unwrap_or(0);
+        let Some(loaded) = LoadedFace::from_owned(bytes, index) else {
+            continue;
+        };
+        if !loaded.has_color_glyphs() {
+            continue;
+        }
+        let coverage = loaded.emoji_coverage();
+        if coverage > 0
+            && best
+                .as_ref()
+                .is_none_or(|(best_cov, _)| coverage > *best_cov)
+        {
+            best = Some((
+                coverage,
+                EmojiSource::SystemFile {
+                    path: path.clone(),
+                    index,
+                },
+            ));
+        }
+    }
+    best.map(|(_, source)| source)
 }
 
 /// Search `fontdb` for any font containing the given codepoint.
@@ -1188,36 +1485,11 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
     font_size_pt * (96.0 / 72.0) * pixels_per_point
 }
 
-/// Compute cell metrics from the regular face at the given ppem size.
+/// Compute the pixel dimensions of a single terminal cell from a loaded font face.
 ///
 /// `font_size_ppem` is in pixels-per-em — the value passed directly to
 /// swash's `Metrics::scale()`. Callers must convert from typographic points
 /// using [`pt_to_ppem`] before calling this function.
-///
-/// Returns `(cell_width, cell_height, baseline_offset, descent, underline_offset,
-/// strikeout_offset, stroke_size)`.
-///
-/// `baseline_offset` is the Y distance from the top of each cell row to the text
-/// baseline.  The renderer uses this value directly.
-///
-/// Cell height is the maximum of two metric sets:
-///
-/// 1. **Typographic height** — `ascent + |descent| + leading` from the font's
-///    primary metrics (either `sTypoAscender`/`sTypoDescender` when the
-///    `USE_TYPO_METRICS` flag is set, or `hhea.ascender`/`hhea.descender`
-///    otherwise).  This is what swash's `Metrics.ascent`/`.descent` reflect.
-///
-/// 2. **Win height** — `usWinAscent + usWinDescent` from the OS/2 table.  Nerd
-///    Font / Powerline glyphs are designed to fill this region, which is
-///    typically larger than the typographic height.
-///
-/// When the win height is larger, the extra vertical space is distributed evenly
-/// above and below the typographic region so that standard Latin glyphs remain
-/// vertically centred within the cell.
-/// Compute the pixel dimensions of a single terminal cell from a loaded font face.
-///
-/// Returns `(cell_width_u32, cell_height_u32, ascent_f32, descent_f32,
-/// line_gap_f32, underline_offset_f32, underline_thickness_f32)`.
 ///
 /// ## Cell width
 ///
@@ -1229,16 +1501,34 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
 /// 2. `metrics.average_width` (if `'0'` has no glyph or zero advance)
 /// 3. `metrics.max_width` (last resort)
 ///
-/// ## Cell height
+/// ## Cell height and baseline
 ///
-/// The tallest of three independent height signals is chosen to ensure nothing
-/// is clipped:
-/// - **Typographic height** (`ascent + |descent| + leading`) from swash.
-/// - **Win height** from the OS/2 `sTypoAscender` + `|sTypoDescender|` fields
-///   scaled from design units to pixels.
-/// - **Line gap height** (`ascent + |descent| + line_gap`) — handles fonts
-///   that encode inter-line spacing via the `hhea.lineGap` field rather than
-///   via explicit ascent/descent values.
+/// The base height for every font is `ascent + |descent|` — the near-universal
+/// terminal-grid convention.  The font's `leading` (a.k.a. line gap) is a prose
+/// line-spacing concept and is **never** summed into cell height; doing so
+/// (the previous behaviour) made ordinary, non-Nerd-Font faces render with
+/// excess row height because most desktop fonts carry a non-zero line gap
+/// intended for paragraph text, not fixed terminal grids.
+///
+/// The OS/2 `usWinAscent`/`usWinDescent` ("win height") floor is applied on
+/// top of the base height **only when the loaded face is detected as a
+/// Nerd Font / Powerline-patched font** via [`has_powerline_glyphs`]. Nerd
+/// Font glyphs (box-drawing extensions, powerline separators, devicon/Font
+/// Awesome icons, etc.) are drawn to fill the OS/2 win-metrics box, which is
+/// deliberately taller than the typographic ascent/descent box on most Nerd
+/// Font builds. Applying that floor unconditionally — the previous
+/// behaviour — inflated the row height of ordinary fonts that happen to
+/// carry generous (but irrelevant) win metrics.
+///
+/// Whatever extra vertical space ends up in the cell — either genuine
+/// win-metrics headroom (Nerd Font case) or just the sub-pixel slack from
+/// rounding the base height up to a whole pixel (ordinary-font case) — is
+/// split evenly above and below the ascent/descent box, so the glyph baseline
+/// stays vertically centred in the cell rather than being pinned to a
+/// fixed 1-pixel top pad (the previous behaviour, which visibly sat text too
+/// high for fonts with a taller-than-CaskaydiaCove ascent/descent box).
+/// See [`select_cell_height_and_top_pad`] for the exact (and independently
+/// unit-tested) formula.
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_ppem: f32,
@@ -1281,12 +1571,18 @@ fn compute_cell_metrics(
         }
     };
 
-    // --- Determine cell height from the tallest metric set ---
+    // --- Determine cell height and baseline padding ---
     //
-    // Typographic height (what swash gives us in `metrics`).
-    let typo_height = metrics.ascent + metrics.descent.abs() + metrics.leading;
+    // Base height is `ascent + |descent|` only — the font's `leading` (line
+    // gap) is deliberately excluded.  See the doc comment above this function
+    // for the rationale.
+    let ascent = metrics.ascent;
+    let descent = metrics.descent.abs();
 
-    // Win height from the OS/2 table (font design units → pixels).
+    // Win height from the OS/2 table (font design units → pixels).  This is
+    // only actually applied as a height floor when `is_nerd_font` is true
+    // (see `select_cell_height_and_top_pad`), but it is cheap to compute
+    // unconditionally.
     let unscaled = font_ref.metrics(&[]);
     let upem_f = if unscaled.units_per_em != 0 {
         f32::from(unscaled.units_per_em)
@@ -1303,25 +1599,10 @@ fn compute_cell_metrics(
             f32::from(wa).mul_add(scale_fdu, f32::from(wd) * scale_fdu)
         });
 
-    let effective_height = typo_height.max(win_height);
-
-    let cell_height = effective_height.ceil().approx_as::<u32>().unwrap_or(1);
-
-    // --- Baseline offset ---
-    //
-    // When the win height is larger than the typographic height the extra
-    // vertical space is split evenly above and below so Latin glyphs stay
-    // centred.  `extra_top` absorbs the top half of that extra space.
-    let extra_top = if win_height > typo_height {
-        (win_height - typo_height) * 0.5
-    } else {
-        0.0
-    };
-
-    // A minimum 1 px top pad ensures glyphs are never flush against the cell
-    // edge (important for fonts like CaskaydiaCove where leading == 0).
-    let top_pad = metrics.leading.mul_add(0.5, extra_top).max(1.0);
-    let baseline_offset = metrics.ascent + top_pad;
+    let is_nerd_font = has_powerline_glyphs(face);
+    let (cell_height, top_pad) =
+        select_cell_height_and_top_pad(ascent, descent, win_height, is_nerd_font);
+    let baseline_offset = ascent + top_pad;
 
     // Ensure non-zero dimensions.
     let cell_width = cell_width.max(1);
@@ -1331,11 +1612,111 @@ fn compute_cell_metrics(
         cell_width,
         cell_height,
         ascent: baseline_offset,
-        descent: metrics.descent.abs(),
+        descent,
         underline_offset: metrics.underline_offset,
         strikeout_offset: metrics.strikeout_offset,
         stroke_size: metrics.stroke_size,
     })
+}
+
+/// Powerline core separator glyphs (right/left solid and angled triangles),
+/// `U+E0B0`–`U+E0B3`.
+///
+/// This is the original Powerline patcher's Private-Use-Area range; Nerd
+/// Fonts preserve these exact codepoints for backward compatibility with
+/// Powerline-style shell prompts, so their presence is the single most
+/// reliable signal that a font is Nerd-Font/Powerline-patched. Ordinary
+/// (non-patched) fonts essentially never ship glyphs in this PUA range.
+///
+/// A wider probe set was considered — e.g. also requiring one of the
+/// Nerd-Font-only icon glyphs such as `U+F001` (Font Awesome) or `U+E5FA`
+/// (devicons) — but the core Powerline block alone is deliberately used as
+/// the *sole* gate: it is stable across every Nerd Font patch level and
+/// every partial "just the powerline glyphs" patch, whereas the icon PUA
+/// ranges vary between Nerd Font versions and are absent from some
+/// minimal powerline-only patches. Requiring icon coverage in addition to
+/// the core block would produce false negatives on those minimal patches;
+/// checking icons *instead of* the core block would be a weaker signal
+/// (broader unrelated PUA squatting is more common in icon-only ranges).
+const POWERLINE_CORE_GLYPHS: [char; 4] = ['\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\u{E0B3}'];
+
+/// Returns `true` if `face` appears to be a Nerd Font / Powerline-patched
+/// font, based on whether it contains **any** of the core Powerline separator
+/// glyphs ([`POWERLINE_CORE_GLYPHS`]).
+///
+/// This gates whether the OS/2 `usWinAscent`/`usWinDescent` height floor is
+/// applied in [`select_cell_height_and_top_pad`]: that floor exists to give
+/// Nerd Font box-drawing/icon glyphs enough vertical room, and applying it
+/// to an ordinary font (which has no such glyphs, but may still carry
+/// generous, unrelated win metrics) would inflate that font's row height
+/// for no reason.
+///
+/// The gate is `any`, not `all`: some minimal Powerline patches ship only a
+/// subset of the four core separators (e.g. just the two solid triangles,
+/// omitting the angled variants, or vice-versa). Requiring *all four* would
+/// misclassify such a font as non-Nerd and strip the win-metrics headroom
+/// from the icon glyphs it *does* carry — clipping them. Any single core PUA
+/// separator is already a decisive Nerd-Font signal (ordinary fonts do not
+/// ship glyphs in this PUA range), so presence of any one is sufficient.
+///
+/// Note: the separators themselves (`U+E0B0`–`U+E0BF`) are now rendered
+/// procedurally (see `crate::gui::box_drawing`), so this probe is used purely
+/// as a *font-type signal* for the headroom decision — not because we depend
+/// on the font's own separator glyphs.
+fn has_powerline_glyphs(face: &LoadedFace) -> bool {
+    POWERLINE_CORE_GLYPHS.iter().any(|&c| face.has_glyph(c))
+}
+
+/// Decide the final cell height (rounded up to a whole pixel) and the
+/// vertical padding to add above the ascent when computing the baseline
+/// offset.
+///
+/// `ascent` and `descent` (already absolute-valued) are pixel-scaled swash
+/// metrics; `win_height` is the OS/2 `usWinAscent + usWinDescent` sum, also
+/// pixel-scaled. `is_nerd_font` gates whether `win_height` is allowed to act
+/// as a height floor at all — see [`has_powerline_glyphs`].
+///
+/// The cell height is the tight `ascent + |descent|` box (never inflated by
+/// the font's `leading` line-gap), with the OS/2 `win_height` applied as a
+/// lower bound **only** for Nerd/Powerline fonts. A deliberate line-height
+/// *multiplier* is intentionally NOT applied: doing so adds a uniform gap
+/// between every row, which breaks Unicode block-drawing characters — they
+/// are rasterized to fill exactly one `ascent + |descent|` box and must tile
+/// seamlessly into a contiguous image (e.g. the block-art NixOS logo in a
+/// shell prompt). The row pitch is the cell height, so the cell height must
+/// equal the block-glyph height for seamless tiling.
+///
+/// The difference between the rounded-up cell height and the tight box (the
+/// sub-pixel rounding slack, or genuine win-metrics headroom for Nerd Fonts)
+/// is split evenly above and below the box so the baseline stays centred.
+fn select_cell_height_and_top_pad(
+    ascent: f32,
+    descent: f32,
+    win_height: f32,
+    is_nerd_font: bool,
+) -> (u32, f32) {
+    // Tight ink box — the row pitch. Block-drawing glyphs fill exactly this,
+    // so it must be the cell height for them to tile without gaps.
+    let tight_box = ascent + descent;
+
+    // Nerd-Font-only win-metrics floor.
+    let effective_height = if is_nerd_font {
+        tight_box.max(win_height)
+    } else {
+        tight_box
+    };
+
+    let cell_height_f = effective_height.ceil();
+    let cell_height = cell_height_f.approx_as::<u32>().unwrap_or(1).max(1);
+
+    // Distribute the difference between the final cell height and the tight
+    // box evenly above and below. `ceil` never returns a value smaller than
+    // its input, but guard against floating-point quirks landing a hair below
+    // zero.
+    let extra = (cell_height_f - tight_box).max(0.0);
+    let top_pad = extra * 0.5;
+
+    (cell_height, top_pad)
 }
 
 /// Cell-geometry output of [`compute_cell_metrics`].
@@ -1399,6 +1780,13 @@ mod tests {
     }
 
     // --- Test 2b: Cell height accounts for OS/2 win metrics (powerline) ---
+    //
+    // CaskaydiaCove IS a Nerd Font (it has the core Powerline separator
+    // glyphs — see `caskaydia_is_detected_as_nerd_font` below), so the
+    // win-metrics height floor legitimately applies to it and this test
+    // must still pass after the fix for issue 403: gating that floor on
+    // `has_powerline_glyphs` does not regress the one bundled font that
+    // actually needs the extra headroom.
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -1445,6 +1833,190 @@ mod tests {
             cell_h_f >= win_height_px.floor(),
             "cell_height ({cell_h_f}) must be >= win_height ({win_height_px})"
         );
+    }
+
+    // --- Test 2c: CaskaydiaCove is detected as a Nerd/Powerline font ---
+
+    #[test]
+    fn caskaydia_is_detected_as_nerd_font() {
+        let face = LoadedFace::from_static(CASKAYDIA_REGULAR)
+            .expect("bundled CaskaydiaCove must load as a LoadedFace");
+        assert!(
+            has_powerline_glyphs(&face),
+            "CaskaydiaCove Nerd Font must be detected via its core Powerline \
+             separator glyphs (U+E0B0-U+E0B3)"
+        );
+    }
+
+    // --- Task 402: bundled Noto Color Emoji + capability-based ranking ---
+
+    #[test]
+    fn bundled_noto_is_a_color_emoji_face() {
+        let noto = LoadedFace::from_static(NOTO_COLOR_EMOJI)
+            .expect("bundled Noto Color Emoji must load as a LoadedFace");
+        assert!(
+            noto.has_color_glyphs(),
+            "Noto Color Emoji must be detected as a color font (CBDT/CBLC)"
+        );
+        // A real color-emoji font covers a large chunk of the emoji blocks.
+        assert!(
+            noto.emoji_coverage() > 500,
+            "Noto emoji coverage unexpectedly low: {}",
+            noto.emoji_coverage()
+        );
+    }
+
+    #[test]
+    fn caskaydia_is_rejected_by_the_color_gate() {
+        // A text/Nerd font must be rejected as an emoji face by the color gate
+        // even though it may map a handful of dingbats/symbols as monochrome
+        // outlines (its emoji-block coverage is trivial).
+        let cask = LoadedFace::from_static(CASKAYDIA_REGULAR).expect("bundled CaskaydiaCove loads");
+        assert!(
+            !cask.has_color_glyphs(),
+            "a monochrome text font must not be treated as a color emoji font"
+        );
+        assert!(
+            cask.emoji_coverage() < noto_coverage_floor(),
+            "a text font's emoji-block coverage must be far below a real emoji font's"
+        );
+    }
+
+    /// A conservative lower bound on the bundled Noto face's emoji coverage,
+    /// used to contrast against non-emoji fonts.
+    fn noto_coverage_floor() -> u32 {
+        500
+    }
+
+    #[test]
+    fn emoji_face_falls_back_to_bundled_noto() {
+        // An empty font database has no system emoji font, so source resolution
+        // must yield the bundled floor. Exercised via the uncached path
+        // (`best_system_emoji_source` + `load_emoji_face_from_source`) so this
+        // test does not depend on / mutate the process-global source cache.
+        let empty_db = Database::new();
+        let source = best_system_emoji_source(&empty_db).unwrap_or(EmojiSource::Bundled);
+        assert_eq!(
+            source,
+            EmojiSource::Bundled,
+            "an empty db must resolve to the bundled floor"
+        );
+        let face = load_emoji_face_from_source(&source).expect("bundled floor must load");
+        assert!(
+            face.has_color_glyphs(),
+            "the bundled fallback must be a color emoji face"
+        );
+    }
+
+    #[test]
+    fn default_manager_always_has_an_emoji_face() {
+        // Regardless of the host, the manager must have a usable emoji face
+        // (bundled floor) so emoji never resolve to tofu.
+        let fm = default_manager();
+        assert!(
+            fm.emoji_face.is_some(),
+            "FontManager must always have an emoji face (bundled Noto floor)"
+        );
+    }
+
+    // --- Test 2d: `has_powerline_glyphs` accepts a *partial* core set ---
+    //
+    // Regression guard for the gating logic: a face carrying **any** of the
+    // four core Powerline separators must be classified as a Nerd Font, so a
+    // minimal/partial Powerline patch (e.g. only the two solid triangles) is
+    // not stripped of its win-metrics headroom. We can't easily construct a
+    // synthetic swash face with an arbitrary partial charmap in a unit test,
+    // so the downstream height decision is exercised through
+    // `select_cell_height_and_top_pad`'s `is_nerd_font` parameter in the
+    // synthetic tests below, which is exactly the boolean `has_powerline_glyphs`
+    // feeds into.
+
+    // --- Test 2e: height/baseline selection — synthetic, pure-function tests ---
+    //
+    // `select_cell_height_and_top_pad` is the pure decision function factored
+    // out of `compute_cell_metrics` specifically so the height-selection
+    // formula can be tested with synthetic ascent/descent/win-height/is_nerd
+    // combinations, independent of any real font file.
+
+    #[test]
+    fn height_selection_leading_is_never_a_factor() {
+        // `select_cell_height_and_top_pad` doesn't take `leading` as a
+        // parameter at all — this test documents that fact structurally:
+        // the same ascent/descent/win_height inputs must produce the same
+        // result regardless of how large a font's line-gap might have been
+        // (i.e. there is no code path left that could sum it in).
+        let (h1, p1) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
+        let (h2, p2) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
+        assert_eq!(h1, h2);
+        assert!((p1 - p2).abs() < f32::EPSILON);
+        // Tight box (ascent + descent) is 13.0, already a whole pixel, so
+        // there is zero rounding slack and zero top padding.
+        assert_eq!(h1, 13);
+        assert!(p1.abs() < f32::EPSILON, "top pad should be ~0, got {p1}");
+    }
+
+    #[test]
+    fn height_selection_win_floor_only_applies_when_nerd_font() {
+        // tight box = ascent + descent = 10.0; win_height = 20.0 — a large
+        // win-metrics floor honoured only when `is_nerd_font` is true.
+        let (non_nerd_height, non_nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, false);
+        assert_eq!(
+            non_nerd_height, 10,
+            "non-Nerd-Font faces must not be inflated by win_height"
+        );
+        assert!(
+            non_nerd_pad.abs() < f32::EPSILON,
+            "non-Nerd-Font top pad should be ~0 when the tight box is a whole \
+             pixel, got {non_nerd_pad}"
+        );
+
+        let (nerd_height, nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, true);
+        assert_eq!(
+            nerd_height, 20,
+            "Nerd Font faces must be floored to at least win_height"
+        );
+        // Extra over tight box is (20.0 - 10.0) = 10.0, split evenly -> 5.0.
+        assert!(
+            (nerd_pad - 5.0).abs() < f32::EPSILON,
+            "expected top pad of 5.0, got {nerd_pad}"
+        );
+    }
+
+    #[test]
+    fn height_selection_win_floor_below_tight_box_is_a_no_op() {
+        // win_height smaller than the tight ascent+descent box must never
+        // shrink the cell, even for Nerd Fonts.
+        let (height, pad) = select_cell_height_and_top_pad(8.0, 4.0, 1.0, true);
+        assert_eq!(height, 12);
+        assert!(pad.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn height_selection_rounding_slack_is_split_evenly() {
+        // Tight box 10.3 rounds up to 11, leaving 0.7px of slack split evenly
+        // above/below (0.35 top pad) regardless of `is_nerd_font` (no win
+        // floor in play here).
+        let (height, pad) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, false);
+        assert_eq!(height, 11);
+        assert!(
+            (pad - 0.35).abs() < 0.001,
+            "expected top pad ~0.35, got {pad}"
+        );
+
+        let (height_nerd, pad_nerd) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, true);
+        assert_eq!(height_nerd, 11);
+        assert!(
+            (pad_nerd - 0.35).abs() < 0.001,
+            "expected top pad ~0.35, got {pad_nerd}"
+        );
+    }
+
+    #[test]
+    fn height_selection_never_produces_zero_height() {
+        // Degenerate all-zero inputs must still floor to a 1px cell height,
+        // matching the `.max(1)` safety net applied by the caller.
+        let (height, _pad) = select_cell_height_and_top_pad(0.0, 0.0, 0.0, false);
+        assert_eq!(height, 1);
     }
 
     // --- Test 3: Fallback chain — ASCII resolves to primary ---
