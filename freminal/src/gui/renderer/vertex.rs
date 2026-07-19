@@ -1180,11 +1180,17 @@ fn emit_glyph_instance(
     fg_color: [f32; 4],
     row_params: &RowGlyphParams,
 ) {
-    use conv2::ValueFrom;
+    use conv2::{ApproxFrom, RoundToNearest};
 
-    // Determine pixel size from the atlas key.
-    // We use the font manager's cell height as the size_px for rasterisation.
-    let size_px = u16::value_from(font_manager.cell_height()).unwrap_or(u16::MAX);
+    // Rasterize glyphs at the font's actual pixels-per-em — the SAME size the
+    // cell metrics (ascent/descent/baseline/cell width) were computed at — not
+    // the cell *height*. The cell height can be larger than the font ppem
+    // (e.g. Nerd Fonts inflate it via the OS/2 win-metrics floor), and
+    // rasterizing at that inflated size scales every glyph by the wrong factor,
+    // making text visibly too large and top-heavy within the cell.
+    let size_px: u16 =
+        <u16 as ApproxFrom<f32, RoundToNearest>>::approx_from(font_manager.rasterization_ppem())
+            .unwrap_or(u16::MAX);
 
     let key = GlyphKey {
         glyph_id: glyph.glyph_id,
