@@ -26,6 +26,48 @@ use super::view_state;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
 
+/// What `on_close_requested` should do about a window that may own an open
+/// Settings window (issue #401).
+///
+/// Pure decision over an already-computed boolean (rather than `WindowId`s
+/// or `&FreminalGui` directly) so it is unit-testable without constructing
+/// the windowing layer or a full `FreminalGui`.
+///
+/// There is no "already resolved, proceed normally" variant: the
+/// `WindowUnsavedSettings` Force Close handler clears `settings_owner` to
+/// `None` *before* re-issuing the window's close, so `is_owner` is already
+/// `false` by the time `on_close_requested` runs again for the retry —
+/// tracking a separate "confirmed" flag would be dead weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsOwnerCloseDecision {
+    /// This window does not own the settings modal — no special handling.
+    NotOwner,
+    /// No unsaved settings edits (or none open) — close the settings window
+    /// now, alongside this window.
+    CloseNow,
+    /// Unsaved settings edits — veto this window's close and surface the
+    /// close-guard confirmation dialog.
+    VetoWithPrompt,
+}
+
+/// Decide what `on_close_requested` should do about the settings window when
+/// `window_id` (the window being closed) may own it.
+///
+/// `is_owner` is `self.settings_owner == Some(window_id)`. `has_unsaved` is
+/// `self.settings_modal.has_unsaved_changes()`.
+const fn settings_owner_close_decision(
+    is_owner: bool,
+    has_unsaved: bool,
+) -> SettingsOwnerCloseDecision {
+    if !is_owner {
+        return SettingsOwnerCloseDecision::NotOwner;
+    }
+    if has_unsaved {
+        return SettingsOwnerCloseDecision::VetoWithPrompt;
+    }
+    SettingsOwnerCloseDecision::CloseNow
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -46,7 +88,16 @@ impl freminal_windowing::App for FreminalGui {
         if self.pending_settings_window {
             self.pending_settings_window = false;
             self.settings_window_id = Some(window_id);
-            self.settings_owner = Some(window_id);
+            // `settings_owner` already holds the *terminal* window that
+            // requested this settings window (set by the menu/keybind
+            // action before `handle.create_window()` was called). Do NOT
+            // overwrite it with this settings window's own id here — doing
+            // so used to make `settings_owner == settings_window_id`
+            // always, which broke the owning-window-close guard (issue
+            // #401: the guard compares `settings_owner` against a real
+            // terminal window id, which could then never match) and the
+            // "Test Paste" routing / os_dark_mode lookup, both of which key
+            // off `settings_owner` to find the owning terminal window.
             // Don't create a PerWindowState — the settings window renders
             // only the settings UI via show_standalone().
             return;
@@ -270,7 +321,10 @@ impl freminal_windowing::App for FreminalGui {
     /// Called when a window close is requested.
     ///
     /// Removes the window's state — its PTY threads will be dropped when
-    /// the channels close.  Always returns `true` to allow the close.
+    /// the channels close. Returns `false` to veto the close: either the
+    /// settings modal has unsaved edits to confirm (this window's own
+    /// close, or the owning terminal window's — issue #401), or the window
+    /// has a running foreground command pending confirmation (Task 98).
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
         // Settings window closed (via OS close button).
         if self.settings_window_id == Some(window_id) {
@@ -286,16 +340,43 @@ impl freminal_windowing::App for FreminalGui {
             self.persist_window_state();
             return true;
         }
-        // If this window owns the settings modal (embedded floating), try
-        // the same guard.  If close is vetoed, still allow the owning
-        // terminal window to close — but keep the modal's dirty state so a
-        // confirm prompt appears on the next frame of a sibling window if
-        // any exists.  In practice this path closes the modal regardless
-        // because the modal has no window of its own to live in.
-        if self.settings_owner == Some(window_id) {
-            let _ = self.settings_modal.request_close();
-            self.settings_modal.is_open = false;
-            self.settings_owner = None;
+        // If this window owns an open Settings window, decide what to do
+        // about it before this window closes (issue #401: the settings
+        // window used to be orphaned — left open with its internal `is_open`
+        // flag force-cleared but the actual OS window never told to close,
+        // freezing it, and never counted against the "all windows closed"
+        // quit check).
+        match settings_owner_close_decision(
+            self.settings_owner == Some(window_id),
+            self.settings_modal.has_unsaved_changes(),
+        ) {
+            SettingsOwnerCloseDecision::NotOwner => {}
+            SettingsOwnerCloseDecision::CloseNow => {
+                self.settings_modal.is_open = false;
+                self.settings_owner = None;
+                // Nothing else will wake the settings window once its owner
+                // is gone — force a repaint so its own next `update()` call
+                // notices `is_open == false` and closes the OS window
+                // itself via the existing self-close path (see `update()`'s
+                // settings-window branch).
+                if let Some(sid) = self.settings_window_id
+                    && let Some((proxy, _)) = self
+                        .windows
+                        .get(&window_id)
+                        .and_then(|w| w.repaint_handle.get())
+                {
+                    proxy.request_repaint(sid);
+                }
+            }
+            SettingsOwnerCloseDecision::VetoWithPrompt => {
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    win.close_dialog.open(super::close_guard::PendingClose {
+                        scope: super::close_guard::CloseScope::WindowUnsavedSettings,
+                        running: Vec::new(),
+                    });
+                }
+                return false;
+            }
         }
 
         // Close-on-running-command guard (Task 98.7).  If the user already
@@ -1375,6 +1456,23 @@ impl freminal_windowing::App for FreminalGui {
                             // on_close_requested guard lets the resulting
                             // ViewportCommand::Close through without re-prompting.
                             self.force_close_windows.insert(window_id);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        super::close_guard::CloseScope::WindowUnsavedSettings => {
+                            // User chose to discard the unsaved settings
+                            // edits. Close the settings OS window directly —
+                            // `handle` is available right here, unlike in
+                            // `on_close_requested` — then re-issue this
+                            // window's close. Clearing `settings_owner` here
+                            // (rather than a separate "confirmed" flag) is
+                            // what makes the retry's `on_close_requested`
+                            // call see `is_owner == false` and skip the
+                            // guard without re-prompting (issue #401).
+                            self.settings_modal.is_open = false;
+                            self.settings_owner = None;
+                            if let Some(sid) = self.settings_window_id.take() {
+                                handle.close_window(sid);
+                            }
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     },
@@ -2690,5 +2788,40 @@ impl FreminalGui {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SettingsOwnerCloseDecision, settings_owner_close_decision};
+
+    #[test]
+    fn not_owner_ignores_other_state() {
+        assert_eq!(
+            settings_owner_close_decision(false, false),
+            SettingsOwnerCloseDecision::NotOwner
+        );
+        assert_eq!(
+            settings_owner_close_decision(false, true),
+            SettingsOwnerCloseDecision::NotOwner,
+            "a non-owner window closing must never touch the settings guard, \
+             even if `has_unsaved` happens to be set for some other window"
+        );
+    }
+
+    #[test]
+    fn clean_owner_closes_now() {
+        assert_eq!(
+            settings_owner_close_decision(true, false),
+            SettingsOwnerCloseDecision::CloseNow
+        );
+    }
+
+    #[test]
+    fn dirty_owner_is_vetoed_with_prompt() {
+        assert_eq!(
+            settings_owner_close_decision(true, true),
+            SettingsOwnerCloseDecision::VetoWithPrompt
+        );
     }
 }
