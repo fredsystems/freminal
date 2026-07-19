@@ -1162,6 +1162,70 @@ fn fit_color_glyph_rect(
     }
 }
 
+/// Emit a procedural box-drawing / block-element glyph (Task #410).
+///
+/// The bitmap is generated at the exact cell pixel size and the quad spans the
+/// cell rectangle **exactly** — `[cell_left, cell_top]` to
+/// `[cell_right, cell_bottom]`, with the row's DECDWL/DECDHL scale applied — so
+/// consecutive cells tile with no seam. This deliberately bypasses the
+/// baseline/bearing/clip path used for font glyphs.
+fn emit_procedural_glyph(
+    instances: &mut Vec<f32>,
+    glyph: &ShapedGlyph,
+    atlas: &mut GlyphAtlas,
+    font_manager: &FontManager,
+    fg_color: [f32; 4],
+    row_params: &RowGlyphParams,
+) {
+    use conv2::{ApproxFrom, RoundToNearest};
+
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+    let cell_w = font_manager.cell_width();
+    let cell_h = font_manager.cell_height();
+
+    // The generated bitmap fills the whole cell, so `bearing_y` (distance from
+    // the baseline up to the glyph top) equals the baseline-to-cell-top
+    // distance. It is unused by the exact-cell placement below, but the atlas
+    // entry records it for completeness.
+    let bearing_y: i16 =
+        <i16 as ApproxFrom<f32, RoundToNearest>>::approx_from(row_params.baseline_y - cell_top)
+            .unwrap_or(0);
+
+    let entry = match atlas.get_or_insert_procedural(glyph.source_char, cell_w, cell_h, bearing_y) {
+        Some(e) => e.clone(),
+        None => return,
+    };
+    if entry.width == 0 || entry.height == 0 {
+        return;
+    }
+    let [u0, v0, u1, v1] = entry.uv_rect;
+
+    // Exact cell rectangle, with DECDWL (x_scale) / DECDHL (y_scale,
+    // y_origin_shift) applied so double-width/height rows still fill correctly.
+    let x0 = glyph.x_px * row_params.x_scale;
+    let width = gl_f32_u32(cell_w) * row_params.x_scale;
+    let cell_pixel_h = cell_bottom - cell_top;
+    let y0 = cell_top.mul_add(1.0, row_params.y_origin_shift);
+    let height = cell_pixel_h * row_params.y_scale;
+
+    instances.extend_from_slice(&[
+        x0,
+        y0,
+        width,
+        height,
+        u0,
+        v0,
+        u1,
+        v1,
+        fg_color[0],
+        fg_color[1],
+        fg_color[2],
+        fg_color[3],
+        0.0,
+    ]);
+}
+
 /// Emit a single foreground glyph instance (13 floats).
 ///
 /// Looks up (or rasterises) the atlas entry for the glyph, then pushes one
@@ -1181,6 +1245,19 @@ fn emit_glyph_instance(
     row_params: &RowGlyphParams,
 ) {
     use conv2::{ApproxFrom, RoundToNearest};
+
+    let cell_top = row_params.cell_y_range[0];
+    let cell_bottom = row_params.cell_y_range[1];
+
+    // Procedural box-drawing / block-element glyphs (Task #410) are drawn to
+    // fill the cell rectangle EXACTLY, so they tile with their neighbours with
+    // no seam. They bypass the font-glyph baseline/bearing/clip math entirely
+    // (that math accumulates sub-pixel error that shows up as hairline gaps
+    // between rows). Only single-cell-wide glyphs qualify.
+    if crate::gui::box_drawing::is_procedural(glyph.source_char) && glyph.cell_width == 1 {
+        emit_procedural_glyph(instances, glyph, atlas, font_manager, fg_color, row_params);
+        return;
+    }
 
     // Rasterize glyphs at the font's actual pixels-per-em — the SAME size the
     // cell metrics (ascent/descent/baseline/cell width) were computed at — not
@@ -1209,9 +1286,6 @@ fn emit_glyph_instance(
     }
 
     let [u0, v0, u1, v1] = entry.uv_rect;
-
-    let cell_top = row_params.cell_y_range[0];
-    let cell_bottom = row_params.cell_y_range[1];
 
     // Color emoji take a separate geometry path: rather than crop an
     // oversized bitmap to the cell, scale it to fit (see
@@ -1628,6 +1702,7 @@ mod tests {
                 face_id: FaceId::PrimaryRegular,
                 is_color: false,
                 cell_width: 1,
+                source_char: '\0',
             })
             .collect();
         Arc::new(ShapedLine {
@@ -1946,6 +2021,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -1963,6 +2039,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2013,6 +2090,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 0,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2030,6 +2108,7 @@ mod tests {
                         face_id: FaceId::PrimaryRegular,
                         is_color: false,
                         cell_width: 1,
+                        source_char: '\0',
                     }],
                     col_start: 1,
                     style: crate::gui::font_manager::GlyphStyle::new(false, false),
@@ -2712,6 +2791,7 @@ mod tests {
                 face_id: FaceId::PrimaryRegular,
                 is_color: false,
                 cell_width: 1,
+                source_char: '\0',
             })
             .collect();
         Arc::new(ShapedLine {

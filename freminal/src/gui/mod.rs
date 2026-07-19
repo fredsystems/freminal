@@ -18,6 +18,7 @@ use settings::SettingsModal;
 use window::PerWindowState;
 
 pub mod atlas;
+pub mod box_drawing;
 pub mod colors;
 pub mod folding;
 pub mod font_manager;
