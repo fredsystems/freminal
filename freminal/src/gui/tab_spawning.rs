@@ -66,8 +66,14 @@ impl FreminalGui {
         match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
-            theme,
-            self.config.ui.auto_detect_urls,
+            pty::PtyTabInitialState {
+                theme,
+                auto_detect_urls: self.config.ui.auto_detect_urls,
+                cursor_style: freminal_common::cursor::CursorVisualStyle::from_config(
+                    &self.config.cursor.shape,
+                    self.config.cursor.blink,
+                ),
+            },
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
@@ -193,8 +199,14 @@ impl FreminalGui {
         let channels = match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
-            theme,
-            self.config.ui.auto_detect_urls,
+            pty::PtyTabInitialState {
+                theme,
+                auto_detect_urls: self.config.ui.auto_detect_urls,
+                cursor_style: freminal_common::cursor::CursorVisualStyle::from_config(
+                    &self.config.cursor.shape,
+                    self.config.cursor.blink,
+                ),
+            },
             &win.repaint_handle,
             initial_size,
             pty::PtyTabConfig {
@@ -323,8 +335,14 @@ impl FreminalGui {
         let channels = match pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
-            theme,
-            self.config.ui.auto_detect_urls,
+            pty::PtyTabInitialState {
+                theme,
+                auto_detect_urls: self.config.ui.auto_detect_urls,
+                cursor_style: freminal_common::cursor::CursorVisualStyle::from_config(
+                    &self.config.cursor.shape,
+                    self.config.cursor.blink,
+                ),
+            },
             repaint_handle,
             initial_size,
             pty::PtyTabConfig {

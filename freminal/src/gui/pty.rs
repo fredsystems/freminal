@@ -27,6 +27,7 @@ use freminal_terminal_emulator::interface::TerminalEmulator;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+use freminal_terminal_emulator::terminal_handler::TerminalHandler;
 use freminal_windowing::{RepaintProxy, WindowId};
 
 /// Ask the system allocator to release free heap pages back to the OS.
@@ -185,6 +186,52 @@ pub struct TabChannels {
     pub shell_program: Option<std::path::PathBuf>,
 }
 
+/// Already-resolved config values applied once, immediately after a new
+/// pane's `TerminalHandler` is constructed.
+///
+/// This seeds the pane's starting state from what the user has configured,
+/// rather than always the hardcoded type defaults. Grouped into one struct
+/// (rather than more `spawn_pty_tab` parameters) so
+/// adding a future per-pane seed value doesn't push the function over
+/// clippy's argument-count limit. All fields here mirror an existing live
+/// `InputEvent` used to re-apply the same value to an already-running pane
+/// when the user changes it in Settings.
+pub struct PtyTabInitialState {
+    /// Active color theme (`InputEvent::ThemeChange` is the live-apply
+    /// equivalent).
+    pub theme: &'static freminal_common::themes::ThemePalette,
+    /// Auto-detect plain URLs in terminal output
+    /// (`InputEvent::AutoDetectUrls` is the live-apply equivalent).
+    pub auto_detect_urls: bool,
+    /// Cursor shape/blink style, resolved from `config.cursor` via
+    /// [`CursorVisualStyle::from_config`](freminal_common::cursor::CursorVisualStyle::from_config)
+    /// (`InputEvent::CursorConfigChange` is the live-apply equivalent;
+    /// issue #406).
+    pub cursor_style: freminal_common::cursor::CursorVisualStyle,
+}
+
+/// Apply `initial_state` to a freshly constructed pane's handler.
+///
+/// Extracted out of `spawn_pty_tab` so this seeding logic — as opposed to
+/// the PTY spawn machinery around it, which needs a real child process — is
+/// unit-testable on its own with a bare `TerminalHandler`.
+fn apply_initial_state(handler: &mut TerminalHandler, initial_state: PtyTabInitialState) {
+    // Apply the configured theme so all snapshots carry the correct palette.
+    handler.set_theme(initial_state.theme);
+
+    // Apply the auto URL detection flag so the buffer's flatten cache
+    // surfaces auto-detected URLs in `FormatTag.url` entries.
+    handler
+        .buffer_mut()
+        .set_auto_detect_urls(initial_state.auto_detect_urls);
+
+    // Seed the cursor's initial shape/blink from `config.cursor` (issue
+    // #406). Like `theme`, this is only the *starting* state: a running
+    // program's own DECSCUSR / XTCBlink request still overrides it
+    // normally, exactly as on a real terminal.
+    handler.set_cursor_visual_style(initial_state.cursor_style);
+}
+
 /// Per-pane configuration forwarded to the PTY child process.
 ///
 /// Carries optional overrides from a layout file: shell binary, extra
@@ -210,9 +257,9 @@ pub struct PtyTabConfig<'a> {
 
 /// Spawn a new PTY-backed terminal and its consumer thread.
 ///
-/// Creates a `TerminalEmulator`, sets the given theme, wires all channels,
-/// and spawns the PTY consumer thread.  Returns the GUI-side channel
-/// endpoints as a [`TabChannels`].
+/// Creates a `TerminalEmulator`, sets the given theme and initial cursor
+/// style, wires all channels, and spawns the PTY consumer thread.  Returns
+/// the GUI-side channel endpoints as a [`TabChannels`].
 ///
 /// The `repaint_handle` is shared with the PTY thread so it can request
 /// repaints after publishing new snapshots.
@@ -224,8 +271,7 @@ pub struct PtyTabConfig<'a> {
 pub fn spawn_pty_tab(
     args: &Args,
     scrollback_limit: usize,
-    theme: &'static freminal_common::themes::ThemePalette,
-    auto_detect_urls: bool,
+    initial_state: PtyTabInitialState,
     repaint_handle: &Arc<OnceLock<(RepaintProxy, WindowId)>>,
     initial_size: FreminalTerminalSize,
     tab_cfg: PtyTabConfig<'_>,
@@ -241,16 +287,7 @@ pub fn spawn_pty_tab(
         tab_cfg.set_term_program,
     )?;
 
-    // Apply the configured theme so all snapshots carry the correct palette.
-    terminal.internal.handler.set_theme(theme);
-
-    // Apply the auto URL detection flag so the buffer's flatten cache
-    // surfaces auto-detected URLs in `FormatTag.url` entries.
-    terminal
-        .internal
-        .handler
-        .buffer_mut()
-        .set_auto_detect_urls(auto_detect_urls);
+    apply_initial_state(&mut terminal.internal.handler, initial_state);
 
     // Shared snapshot (ArcSwap).
     let arc_swap: Arc<ArcSwap<TerminalSnapshot>> =
@@ -496,6 +533,9 @@ fn spawn_pty_consumer_thread(
                         Ok(InputEvent::ThemeChange(theme)) => {
                             emulator.internal.handler.set_theme(theme);
                         }
+                        Ok(InputEvent::CursorConfigChange(style)) => {
+                            emulator.internal.handler.set_cursor_visual_style(style);
+                        }
                         Ok(InputEvent::AutoDetectUrls(enabled)) => {
                             emulator
                                 .internal
@@ -715,5 +755,47 @@ mod tests {
         drop(rx);
         forward_command_events(vec![block_with_fid("x")], 1, &tx);
         // No assertion needed: not panicking is the contract.
+    }
+
+    #[test]
+    fn apply_initial_state_seeds_theme_auto_detect_urls_and_cursor_style() {
+        // Regression test for issue #406 (and the pre-existing theme /
+        // auto_detect_urls seeding this PR's cursor_style change follows the
+        // shape of): `spawn_pty_tab` cannot be unit-tested directly (it
+        // spawns a real child process), but the seeding logic it delegates
+        // to can be, against a bare `TerminalHandler`.
+        use freminal_common::cursor::CursorVisualStyle;
+        use freminal_common::themes::{CATPPUCCIN_MOCHA, DRACULA};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert_eq!(
+            handler.theme(),
+            &CATPPUCCIN_MOCHA,
+            "sanity: TerminalHandler::new defaults to Catppuccin Mocha"
+        );
+        assert_eq!(handler.cursor_visual_style(), CursorVisualStyle::default());
+        // Seed the opposite of whatever the fresh handler's default is, so
+        // this test proves `apply_initial_state` actually changed the value
+        // rather than happening to match a pre-existing default.
+        let seeded_auto_detect_urls = !handler.buffer_mut().auto_detect_urls();
+
+        apply_initial_state(
+            &mut handler,
+            PtyTabInitialState {
+                theme: &DRACULA,
+                auto_detect_urls: seeded_auto_detect_urls,
+                cursor_style: CursorVisualStyle::VerticalLineCursorBlink,
+            },
+        );
+
+        assert_eq!(handler.theme(), &DRACULA);
+        assert_eq!(
+            handler.buffer_mut().auto_detect_urls(),
+            seeded_auto_detect_urls
+        );
+        assert_eq!(
+            handler.cursor_visual_style(),
+            CursorVisualStyle::VerticalLineCursorBlink
+        );
     }
 }

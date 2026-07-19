@@ -154,8 +154,14 @@ impl freminal_windowing::App for FreminalGui {
             match super::pty::spawn_pty_tab(
                 &self.args,
                 self.config.scrollback.limit,
-                theme,
-                self.config.ui.auto_detect_urls,
+                super::pty::PtyTabInitialState {
+                    theme,
+                    auto_detect_urls: self.config.ui.auto_detect_urls,
+                    cursor_style: freminal_common::cursor::CursorVisualStyle::from_config(
+                        &self.config.cursor.shape,
+                        self.config.cursor.blink,
+                    ),
+                },
                 &repaint_handle,
                 initial_size,
                 super::pty::PtyTabConfig {
@@ -2342,8 +2348,14 @@ impl FreminalGui {
         let channels = match super::pty::spawn_pty_tab(
             &self.args,
             self.config.scrollback.limit,
-            theme,
-            self.config.ui.auto_detect_urls,
+            super::pty::PtyTabInitialState {
+                theme,
+                auto_detect_urls: self.config.ui.auto_detect_urls,
+                cursor_style: freminal_common::cursor::CursorVisualStyle::from_config(
+                    &self.config.cursor.shape,
+                    self.config.cursor.blink,
+                ),
+            },
             &repaint_handle,
             initial_size,
             super::pty::PtyTabConfig {
