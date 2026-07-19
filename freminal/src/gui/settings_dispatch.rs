@@ -122,6 +122,40 @@ impl FreminalGui {
             }
         }
 
+        // Broadcast cursor shape/blink changes to all panes (issue #406).
+        // Like the initial pane-spawn seed, this only supplies the value in
+        // effect until a running program's own DECSCUSR / `XTCBlink`
+        // request overrides it, exactly as on a real terminal.
+        if new_cfg.cursor.shape != self.config.cursor.shape
+            || new_cfg.cursor.blink != self.config.cursor.blink
+        {
+            let style = freminal_common::cursor::CursorVisualStyle::from_config(
+                &new_cfg.cursor.shape,
+                new_cfg.cursor.blink,
+            );
+            for win in self.windows.values() {
+                for tab in win.tabs.iter() {
+                    match tab.pane_tree.iter_panes() {
+                        Ok(panes) => {
+                            for pane in panes {
+                                send_or_log!(
+                                    pane.input_tx,
+                                    InputEvent::CursorConfigChange(style.clone()),
+                                    "Failed to send CursorConfigChange to PTY thread"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                "iter_panes() failed on tab during cursor config \
+                                 apply: {e}; skipping this tab"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         self.config = new_cfg;
 
         // Adopt the persisted chrome style profile (Task 112.13). A previewed

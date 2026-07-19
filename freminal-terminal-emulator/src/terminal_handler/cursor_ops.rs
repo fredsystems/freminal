@@ -132,6 +132,17 @@ impl TerminalHandler {
         self.cursor_visual_style.clone()
     }
 
+    /// Set the cursor shape / blink style.
+    ///
+    /// Used to seed the initial style from `config.cursor` when a pane is
+    /// spawned, and to apply a live Settings change to an already-running
+    /// pane (issue #406). Like DECSCUSR, this is a plain overwrite — once
+    /// set, a subsequent DECSCUSR or `XTCBlink` request from the running
+    /// program takes over normally, exactly as on a real terminal.
+    pub const fn set_cursor_visual_style(&mut self, style: CursorVisualStyle) {
+        self.cursor_visual_style = style;
+    }
+
     /// Apply an `XtCBlink` blink-mode change to the current `cursor_visual_style`.
     ///
     /// Flips between the blinking and steady variants of whichever shape is active,

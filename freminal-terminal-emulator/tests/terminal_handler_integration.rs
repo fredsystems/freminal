@@ -1578,6 +1578,44 @@ fn cursor_visual_style_set() {
 }
 
 #[test]
+fn set_cursor_visual_style_seeds_and_can_be_overridden_by_decscusr() {
+    // Regression test for issue #406: `set_cursor_visual_style` is the seam
+    // used to apply `config.cursor` at pane-spawn time and on a live
+    // Settings change. It must take effect immediately (like `set_theme`),
+    // and a subsequent DECSCUSR output from the running program must still
+    // be able to override it — the config only supplies the value in
+    // effect *before* any program has requested something else, it does not
+    // pin the style permanently.
+    use freminal_common::{
+        buffer_states::terminal_output::TerminalOutput, cursor::CursorVisualStyle,
+    };
+
+    let mut handler = TerminalHandler::new(80, 24);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorSteady,
+        "sanity: bare TerminalHandler::new starts at the type default"
+    );
+
+    handler.set_cursor_visual_style(CursorVisualStyle::VerticalLineCursorBlink);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::VerticalLineCursorBlink,
+        "set_cursor_visual_style must take effect immediately"
+    );
+
+    // A running program's own DECSCUSR request still wins afterward.
+    handler.process_outputs(&[TerminalOutput::CursorVisualStyle(
+        CursorVisualStyle::BlockCursorSteady,
+    )]);
+    assert_eq!(
+        handler.cursor_visual_style(),
+        CursorVisualStyle::BlockCursorSteady,
+        "a program's own DECSCUSR request must still override the configured seed"
+    );
+}
+
+#[test]
 fn xtcblink_toggles_blink() {
     // XtCBlink::Blinking flips the current steady style to blinking;
     // XtCBlink::Steady flips it back.

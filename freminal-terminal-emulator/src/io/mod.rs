@@ -98,6 +98,16 @@ pub enum InputEvent {
     /// (the GUI must also reset its local `ViewState::scroll_offset` so the
     /// next frame renders from the live view).
     ClearScrollback,
+    /// The user changed the cursor shape/blink Settings while a pane was
+    /// already running (issue #406).
+    ///
+    /// Sent by the Settings Modal when `cursor.shape` / `cursor.blink`
+    /// change on Apply (or a config reload). The PTY thread calls
+    /// `handler.set_cursor_visual_style()`, exactly like the initial seed
+    /// applied at pane-spawn time. Like DECSCUSR, this is a plain
+    /// overwrite: a program's own subsequent DECSCUSR / `XTCBlink` request
+    /// still takes over normally afterward.
+    CursorConfigChange(freminal_common::cursor::CursorVisualStyle),
 }
 
 /// Commands sent from the PTY processing thread to the GUI thread.
