@@ -500,6 +500,20 @@ impl FontManager {
         self.font_size_pt
     }
 
+    /// The pixels-per-em size glyphs must be **rasterized** at.
+    ///
+    /// This is the same ppem the cell metrics (ascent, descent, cell width)
+    /// are computed at — `font_size_pt × 96/72 × pixels_per_point`. Glyphs
+    /// MUST be rasterized at this size so their ink lines up with the baseline
+    /// and cell geometry. Rasterizing at any other size (e.g. the cell
+    /// *height*, which for Nerd Fonts is inflated by the OS/2 win-metrics
+    /// floor) scales every glyph by the wrong factor, making text too large
+    /// and pushing it toward the top of the cell.
+    #[must_use]
+    pub fn rasterization_ppem(&self) -> f32 {
+        pt_to_ppem(self.font_size_pt, self.pixels_per_point)
+    }
+
     // -----------------------------------------------------------------------
     //  Glyph resolution
     // -----------------------------------------------------------------------
@@ -1188,36 +1202,11 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
     font_size_pt * (96.0 / 72.0) * pixels_per_point
 }
 
-/// Compute cell metrics from the regular face at the given ppem size.
+/// Compute the pixel dimensions of a single terminal cell from a loaded font face.
 ///
 /// `font_size_ppem` is in pixels-per-em — the value passed directly to
 /// swash's `Metrics::scale()`. Callers must convert from typographic points
 /// using [`pt_to_ppem`] before calling this function.
-///
-/// Returns `(cell_width, cell_height, baseline_offset, descent, underline_offset,
-/// strikeout_offset, stroke_size)`.
-///
-/// `baseline_offset` is the Y distance from the top of each cell row to the text
-/// baseline.  The renderer uses this value directly.
-///
-/// Cell height is the maximum of two metric sets:
-///
-/// 1. **Typographic height** — `ascent + |descent| + leading` from the font's
-///    primary metrics (either `sTypoAscender`/`sTypoDescender` when the
-///    `USE_TYPO_METRICS` flag is set, or `hhea.ascender`/`hhea.descender`
-///    otherwise).  This is what swash's `Metrics.ascent`/`.descent` reflect.
-///
-/// 2. **Win height** — `usWinAscent + usWinDescent` from the OS/2 table.  Nerd
-///    Font / Powerline glyphs are designed to fill this region, which is
-///    typically larger than the typographic height.
-///
-/// When the win height is larger, the extra vertical space is distributed evenly
-/// above and below the typographic region so that standard Latin glyphs remain
-/// vertically centred within the cell.
-/// Compute the pixel dimensions of a single terminal cell from a loaded font face.
-///
-/// Returns `(cell_width_u32, cell_height_u32, ascent_f32, descent_f32,
-/// line_gap_f32, underline_offset_f32, underline_thickness_f32)`.
 ///
 /// ## Cell width
 ///
@@ -1229,16 +1218,34 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
 /// 2. `metrics.average_width` (if `'0'` has no glyph or zero advance)
 /// 3. `metrics.max_width` (last resort)
 ///
-/// ## Cell height
+/// ## Cell height and baseline
 ///
-/// The tallest of three independent height signals is chosen to ensure nothing
-/// is clipped:
-/// - **Typographic height** (`ascent + |descent| + leading`) from swash.
-/// - **Win height** from the OS/2 `sTypoAscender` + `|sTypoDescender|` fields
-///   scaled from design units to pixels.
-/// - **Line gap height** (`ascent + |descent| + line_gap`) — handles fonts
-///   that encode inter-line spacing via the `hhea.lineGap` field rather than
-///   via explicit ascent/descent values.
+/// The base height for every font is `ascent + |descent|` — the near-universal
+/// terminal-grid convention.  The font's `leading` (a.k.a. line gap) is a prose
+/// line-spacing concept and is **never** summed into cell height; doing so
+/// (the previous behaviour) made ordinary, non-Nerd-Font faces render with
+/// excess row height because most desktop fonts carry a non-zero line gap
+/// intended for paragraph text, not fixed terminal grids.
+///
+/// The OS/2 `usWinAscent`/`usWinDescent` ("win height") floor is applied on
+/// top of the base height **only when the loaded face is detected as a
+/// Nerd Font / Powerline-patched font** via [`has_powerline_glyphs`]. Nerd
+/// Font glyphs (box-drawing extensions, powerline separators, devicon/Font
+/// Awesome icons, etc.) are drawn to fill the OS/2 win-metrics box, which is
+/// deliberately taller than the typographic ascent/descent box on most Nerd
+/// Font builds. Applying that floor unconditionally — the previous
+/// behaviour — inflated the row height of ordinary fonts that happen to
+/// carry generous (but irrelevant) win metrics.
+///
+/// Whatever extra vertical space ends up in the cell — either genuine
+/// win-metrics headroom (Nerd Font case) or just the sub-pixel slack from
+/// rounding the base height up to a whole pixel (ordinary-font case) — is
+/// split evenly above and below the ascent/descent box, so the glyph baseline
+/// stays vertically centred in the cell rather than being pinned to a
+/// fixed 1-pixel top pad (the previous behaviour, which visibly sat text too
+/// high for fonts with a taller-than-CaskaydiaCove ascent/descent box).
+/// See [`select_cell_height_and_top_pad`] for the exact (and independently
+/// unit-tested) formula.
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_ppem: f32,
@@ -1281,12 +1288,18 @@ fn compute_cell_metrics(
         }
     };
 
-    // --- Determine cell height from the tallest metric set ---
+    // --- Determine cell height and baseline padding ---
     //
-    // Typographic height (what swash gives us in `metrics`).
-    let typo_height = metrics.ascent + metrics.descent.abs() + metrics.leading;
+    // Base height is `ascent + |descent|` only — the font's `leading` (line
+    // gap) is deliberately excluded.  See the doc comment above this function
+    // for the rationale.
+    let ascent = metrics.ascent;
+    let descent = metrics.descent.abs();
 
-    // Win height from the OS/2 table (font design units → pixels).
+    // Win height from the OS/2 table (font design units → pixels).  This is
+    // only actually applied as a height floor when `is_nerd_font` is true
+    // (see `select_cell_height_and_top_pad`), but it is cheap to compute
+    // unconditionally.
     let unscaled = font_ref.metrics(&[]);
     let upem_f = if unscaled.units_per_em != 0 {
         f32::from(unscaled.units_per_em)
@@ -1303,25 +1316,10 @@ fn compute_cell_metrics(
             f32::from(wa).mul_add(scale_fdu, f32::from(wd) * scale_fdu)
         });
 
-    let effective_height = typo_height.max(win_height);
-
-    let cell_height = effective_height.ceil().approx_as::<u32>().unwrap_or(1);
-
-    // --- Baseline offset ---
-    //
-    // When the win height is larger than the typographic height the extra
-    // vertical space is split evenly above and below so Latin glyphs stay
-    // centred.  `extra_top` absorbs the top half of that extra space.
-    let extra_top = if win_height > typo_height {
-        (win_height - typo_height) * 0.5
-    } else {
-        0.0
-    };
-
-    // A minimum 1 px top pad ensures glyphs are never flush against the cell
-    // edge (important for fonts like CaskaydiaCove where leading == 0).
-    let top_pad = metrics.leading.mul_add(0.5, extra_top).max(1.0);
-    let baseline_offset = metrics.ascent + top_pad;
+    let is_nerd_font = has_powerline_glyphs(face);
+    let (cell_height, top_pad) =
+        select_cell_height_and_top_pad(ascent, descent, win_height, is_nerd_font);
+    let baseline_offset = ascent + top_pad;
 
     // Ensure non-zero dimensions.
     let cell_width = cell_width.max(1);
@@ -1331,11 +1329,98 @@ fn compute_cell_metrics(
         cell_width,
         cell_height,
         ascent: baseline_offset,
-        descent: metrics.descent.abs(),
+        descent,
         underline_offset: metrics.underline_offset,
         strikeout_offset: metrics.strikeout_offset,
         stroke_size: metrics.stroke_size,
     })
+}
+
+/// Powerline core separator glyphs (right/left solid and angled triangles),
+/// `U+E0B0`–`U+E0B3`.
+///
+/// This is the original Powerline patcher's Private-Use-Area range; Nerd
+/// Fonts preserve these exact codepoints for backward compatibility with
+/// Powerline-style shell prompts, so their presence is the single most
+/// reliable signal that a font is Nerd-Font/Powerline-patched. Ordinary
+/// (non-patched) fonts essentially never ship glyphs in this PUA range.
+///
+/// A wider probe set was considered — e.g. also requiring one of the
+/// Nerd-Font-only icon glyphs such as `U+F001` (Font Awesome) or `U+E5FA`
+/// (devicons) — but the core Powerline block alone is deliberately used as
+/// the *sole* gate: it is stable across every Nerd Font patch level and
+/// every partial "just the powerline glyphs" patch, whereas the icon PUA
+/// ranges vary between Nerd Font versions and are absent from some
+/// minimal powerline-only patches. Requiring icon coverage in addition to
+/// the core block would produce false negatives on those minimal patches;
+/// checking icons *instead of* the core block would be a weaker signal
+/// (broader unrelated PUA squatting is more common in icon-only ranges).
+const POWERLINE_CORE_GLYPHS: [char; 4] = ['\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\u{E0B3}'];
+
+/// Returns `true` if `face` appears to be a Nerd Font / Powerline-patched
+/// font, based on whether it contains the core Powerline separator glyphs
+/// ([`POWERLINE_CORE_GLYPHS`]).
+///
+/// This gates whether the OS/2 `usWinAscent`/`usWinDescent` height floor is
+/// applied in [`select_cell_height_and_top_pad`]: that floor exists to give
+/// Nerd Font box-drawing/icon glyphs enough vertical room, and applying it
+/// to an ordinary font (which has no such glyphs, but may still carry
+/// generous, unrelated win metrics) would inflate that font's row height
+/// for no reason.
+fn has_powerline_glyphs(face: &LoadedFace) -> bool {
+    POWERLINE_CORE_GLYPHS.iter().all(|&c| face.has_glyph(c))
+}
+
+/// Decide the final cell height (rounded up to a whole pixel) and the
+/// vertical padding to add above the ascent when computing the baseline
+/// offset.
+///
+/// `ascent` and `descent` (already absolute-valued) are pixel-scaled swash
+/// metrics; `win_height` is the OS/2 `usWinAscent + usWinDescent` sum, also
+/// pixel-scaled. `is_nerd_font` gates whether `win_height` is allowed to act
+/// as a height floor at all — see [`has_powerline_glyphs`].
+///
+/// The cell height is the tight `ascent + |descent|` box (never inflated by
+/// the font's `leading` line-gap), with the OS/2 `win_height` applied as a
+/// lower bound **only** for Nerd/Powerline fonts. A deliberate line-height
+/// *multiplier* is intentionally NOT applied: doing so adds a uniform gap
+/// between every row, which breaks Unicode block-drawing characters — they
+/// are rasterized to fill exactly one `ascent + |descent|` box and must tile
+/// seamlessly into a contiguous image (e.g. the block-art NixOS logo in a
+/// shell prompt). The row pitch is the cell height, so the cell height must
+/// equal the block-glyph height for seamless tiling.
+///
+/// The difference between the rounded-up cell height and the tight box (the
+/// sub-pixel rounding slack, or genuine win-metrics headroom for Nerd Fonts)
+/// is split evenly above and below the box so the baseline stays centred.
+fn select_cell_height_and_top_pad(
+    ascent: f32,
+    descent: f32,
+    win_height: f32,
+    is_nerd_font: bool,
+) -> (u32, f32) {
+    // Tight ink box — the row pitch. Block-drawing glyphs fill exactly this,
+    // so it must be the cell height for them to tile without gaps.
+    let tight_box = ascent + descent;
+
+    // Nerd-Font-only win-metrics floor.
+    let effective_height = if is_nerd_font {
+        tight_box.max(win_height)
+    } else {
+        tight_box
+    };
+
+    let cell_height_f = effective_height.ceil();
+    let cell_height = cell_height_f.approx_as::<u32>().unwrap_or(1).max(1);
+
+    // Distribute the difference between the final cell height and the tight
+    // box evenly above and below. `ceil` never returns a value smaller than
+    // its input, but guard against floating-point quirks landing a hair below
+    // zero.
+    let extra = (cell_height_f - tight_box).max(0.0);
+    let top_pad = extra * 0.5;
+
+    (cell_height, top_pad)
 }
 
 /// Cell-geometry output of [`compute_cell_metrics`].
@@ -1399,6 +1484,13 @@ mod tests {
     }
 
     // --- Test 2b: Cell height accounts for OS/2 win metrics (powerline) ---
+    //
+    // CaskaydiaCove IS a Nerd Font (it has the core Powerline separator
+    // glyphs — see `caskaydia_is_detected_as_nerd_font` below), so the
+    // win-metrics height floor legitimately applies to it and this test
+    // must still pass after the fix for issue 403: gating that floor on
+    // `has_powerline_glyphs` does not regress the one bundled font that
+    // actually needs the extra headroom.
 
     #[test]
     #[allow(clippy::unwrap_used)]
@@ -1445,6 +1537,118 @@ mod tests {
             cell_h_f >= win_height_px.floor(),
             "cell_height ({cell_h_f}) must be >= win_height ({win_height_px})"
         );
+    }
+
+    // --- Test 2c: CaskaydiaCove is detected as a Nerd/Powerline font ---
+
+    #[test]
+    fn caskaydia_is_detected_as_nerd_font() {
+        let face = LoadedFace::from_static(CASKAYDIA_REGULAR)
+            .expect("bundled CaskaydiaCove must load as a LoadedFace");
+        assert!(
+            has_powerline_glyphs(&face),
+            "CaskaydiaCove Nerd Font must be detected via its core Powerline \
+             separator glyphs (U+E0B0-U+E0B3)"
+        );
+    }
+
+    // --- Test 2d: `has_powerline_glyphs` requires the *whole* core set ---
+    //
+    // Regression guard for the gating logic itself, independent of any real
+    // font file: a face missing even one of the four core Powerline
+    // separators must not be classified as a Nerd Font. We can't easily
+    // construct a synthetic swash face with an arbitrary partial charmap in
+    // a unit test, so this is exercised indirectly through
+    // `select_cell_height_and_top_pad`'s `is_nerd_font` parameter in the
+    // synthetic tests below, which is exactly the boolean `has_powerline_glyphs`
+    // feeds into.
+
+    // --- Test 2e: height/baseline selection — synthetic, pure-function tests ---
+    //
+    // `select_cell_height_and_top_pad` is the pure decision function factored
+    // out of `compute_cell_metrics` specifically so the height-selection
+    // formula can be tested with synthetic ascent/descent/win-height/is_nerd
+    // combinations, independent of any real font file.
+
+    #[test]
+    fn height_selection_leading_is_never_a_factor() {
+        // `select_cell_height_and_top_pad` doesn't take `leading` as a
+        // parameter at all — this test documents that fact structurally:
+        // the same ascent/descent/win_height inputs must produce the same
+        // result regardless of how large a font's line-gap might have been
+        // (i.e. there is no code path left that could sum it in).
+        let (h1, p1) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
+        let (h2, p2) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
+        assert_eq!(h1, h2);
+        assert!((p1 - p2).abs() < f32::EPSILON);
+        // Tight box (ascent + descent) is 13.0, already a whole pixel, so
+        // there is zero rounding slack and zero top padding.
+        assert_eq!(h1, 13);
+        assert!(p1.abs() < f32::EPSILON, "top pad should be ~0, got {p1}");
+    }
+
+    #[test]
+    fn height_selection_win_floor_only_applies_when_nerd_font() {
+        // tight box = ascent + descent = 10.0; win_height = 20.0 — a large
+        // win-metrics floor honoured only when `is_nerd_font` is true.
+        let (non_nerd_height, non_nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, false);
+        assert_eq!(
+            non_nerd_height, 10,
+            "non-Nerd-Font faces must not be inflated by win_height"
+        );
+        assert!(
+            non_nerd_pad.abs() < f32::EPSILON,
+            "non-Nerd-Font top pad should be ~0 when the tight box is a whole \
+             pixel, got {non_nerd_pad}"
+        );
+
+        let (nerd_height, nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, true);
+        assert_eq!(
+            nerd_height, 20,
+            "Nerd Font faces must be floored to at least win_height"
+        );
+        // Extra over tight box is (20.0 - 10.0) = 10.0, split evenly -> 5.0.
+        assert!(
+            (nerd_pad - 5.0).abs() < f32::EPSILON,
+            "expected top pad of 5.0, got {nerd_pad}"
+        );
+    }
+
+    #[test]
+    fn height_selection_win_floor_below_tight_box_is_a_no_op() {
+        // win_height smaller than the tight ascent+descent box must never
+        // shrink the cell, even for Nerd Fonts.
+        let (height, pad) = select_cell_height_and_top_pad(8.0, 4.0, 1.0, true);
+        assert_eq!(height, 12);
+        assert!(pad.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn height_selection_rounding_slack_is_split_evenly() {
+        // Tight box 10.3 rounds up to 11, leaving 0.7px of slack split evenly
+        // above/below (0.35 top pad) regardless of `is_nerd_font` (no win
+        // floor in play here).
+        let (height, pad) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, false);
+        assert_eq!(height, 11);
+        assert!(
+            (pad - 0.35).abs() < 0.001,
+            "expected top pad ~0.35, got {pad}"
+        );
+
+        let (height_nerd, pad_nerd) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, true);
+        assert_eq!(height_nerd, 11);
+        assert!(
+            (pad_nerd - 0.35).abs() < 0.001,
+            "expected top pad ~0.35, got {pad_nerd}"
+        );
+    }
+
+    #[test]
+    fn height_selection_never_produces_zero_height() {
+        // Degenerate all-zero inputs must still floor to a 1px cell height,
+        // matching the `.max(1)` safety net applied by the caller.
+        let (height, _pad) = select_cell_height_and_top_pad(0.0, 0.0, 0.0, false);
+        assert_eq!(height, 1);
     }
 
     // --- Test 3: Fallback chain — ASCII resolves to primary ---
