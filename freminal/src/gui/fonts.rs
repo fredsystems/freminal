@@ -28,11 +28,6 @@ const PRIMARY_BOLD: &str = "freminal-primary-bold";
 const PRIMARY_ITALIC: &str = "freminal-primary-italic";
 const PRIMARY_BOLD_ITALIC: &str = "freminal-primary-bold-italic";
 
-// Bundled color emoji font name (Noto Color Emoji, OFL-1.1). Registered as the
-// lowest-priority emoji fallback so color emoji always render, even with no
-// system emoji font installed (Task #402).
-const BUNDLED_EMOJI: &str = "freminal-bundled-emoji";
-
 /// Configuration for the terminal font stack.
 ///
 /// Controls which font family is used as the primary face, the render size,
@@ -104,18 +99,24 @@ pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinition
         try_load_user_primary_font(path_or_name, &mut defs);
     }
 
-    // 4. Emoji fallback (system emoji fonts, prioritized above the bundled
-    //    floor below).
+    // 4. Emoji fallback for egui *chrome* (menu bar, settings modal — NOT the
+    //    terminal grid, which is drawn by the swash/atlas pipeline in
+    //    `font_manager`). This only helps chrome text render an emoji outline
+    //    (COLR/CPAL or a monochrome fallback such as Symbola); egui's grayscale
+    //    font atlas cannot display CBDT/CBLC bitmap color emoji.
     if cfg.enable_emoji_fallback {
         emoji_fonts::add_emoji_fallback(&mut defs);
     }
 
-    // 5. Bundled color emoji floor. Registered after the system emoji search so
-    //    a system emoji font (if any) is preferred, but color emoji still
-    //    render on systems with none installed (Task #402).
-    load_bundled_emoji_font(&mut defs);
+    // NOTE: the bundled Noto Color Emoji (Task #402) is deliberately NOT
+    // registered into the egui chrome font stack. It is a CBDT/CBLC *bitmap*
+    // color font with no glyph outlines, and egui (0.35, egui_glow) renders
+    // from a grayscale outline atlas — it cannot display CBDT/CBLC glyphs, so
+    // registering the 10 MB face here would add a per-window no-op. The bundled
+    // floor lives in the terminal-side swash pipeline (`FontManager`), which
+    // *can* render color bitmap emoji. See `load_bundled_emoji_font`.
 
-    // 6. Last resort system fallback (disabled by default)
+    // 5. Last resort system fallback (disabled by default)
     if cfg.enable_system_last_resort {
         system_fallback::add_last_resort_system_fonts(&mut defs);
     }
@@ -196,17 +197,10 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
     info!("Loaded bundled Freminal primary monospace font");
 }
 
-/// Register the bundled Noto Color Emoji font as the lowest-priority emoji
-/// fallback in every terminal font family, so color emoji render even when the
-/// system has no emoji font installed (Task #402).
-fn load_bundled_emoji_font(defs: &mut FontDefinitions) {
-    defs.font_data.insert(
-        BUNDLED_EMOJI.to_owned(),
-        FontData::from_static(include_bytes!("../../../res/NotoColorEmoji.ttf")).into(),
-    );
-    add_fallback_to_terminal_families(defs, BUNDLED_EMOJI);
-    info!("Loaded bundled Noto Color Emoji fallback");
-}
+// The bundled Noto Color Emoji floor (Task #402) is applied on the terminal
+// (swash) side in `font_manager::discover_emoji_face`, not here — egui's
+// grayscale atlas cannot render its CBDT/CBLC bitmap glyphs. See the note in
+// `setup_font_files`.
 
 // -------------------------------------------------------------------------------------------------
 // 2. Bundled Nerd Symbols (fallback)
@@ -361,6 +355,16 @@ mod emoji_fonts {
         "Symbola",
     ];
 
+    /// Add a system emoji font as a chrome-text fallback.
+    ///
+    /// This is the **egui chrome** path (menu bar, settings), NOT the terminal
+    /// grid. It deliberately does NOT reuse the terminal-side capability
+    /// ranking (`font_manager::best_system_emoji_source`, which gates on
+    /// `has_color_glyphs`): egui's grayscale atlas cannot render color
+    /// (COLR/CBDT) glyphs, so for chrome a monochrome-renderable emoji/symbol
+    /// face (e.g. `Symbola`) is actually the *useful* choice, and a color-only
+    /// font would render as tofu. The name-priority list here is correct for
+    /// that goal; the two paths intentionally differ.
     pub fn add_emoji_fallback(defs: &mut FontDefinitions) {
         let mut db = Database::new();
         db.load_system_fonts();
@@ -379,8 +383,12 @@ mod emoji_fonts {
     }
 
     fn find_candidate(db: &Database, target: &str) -> Option<(String, Vec<u8>)> {
+        let target_lower = target.to_lowercase();
         for face in db.faces() {
-            let matches = face.families.iter().any(|fam| fam.0.contains(target));
+            let matches = face
+                .families
+                .iter()
+                .any(|fam| fam.0.to_lowercase().contains(&target_lower));
 
             if !matches {
                 continue;
