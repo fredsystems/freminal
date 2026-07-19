@@ -30,13 +30,41 @@ const BPP: usize = 4;
 
 /// Returns `true` if `c` is a codepoint this module renders procedurally.
 ///
-/// Currently the box-drawing and block-elements blocks (`U+2500`–`U+259F`).
+/// Covers three cell-filling glyph groups, drawn procedurally so they tile /
+/// fill the cell exactly regardless of the loaded font (matching
+/// `kitty`/`WezTerm`/`foot`):
+///
+/// * box-drawing (`U+2500`–`U+257F`) and block elements (`U+2580`–`U+259F`),
+/// * powerline separators (`U+E0B0`–`U+E0BF`): arrows, semicircles, and half
+///   triangles — the canonical cell-filling powerline set.
+///
+/// **Except** the codepoints this module does not yet implement — currently the
+/// dashed box lines (`U+2504`–`U+250B`, `U+254C`–`U+254F`). Those must return
+/// `false` so the caller falls through to the normal font-glyph path (the font
+/// renders them, imperfectly tiled but visible) rather than the procedural path
+/// (which would return a fully-transparent bitmap, i.e. render nothing).
+///
 /// The braille (`U+2800`–`U+28FF`), sextant (`U+1FB00`–) and octant
 /// (`U+1CD00`–) blocks are natural extensions using the same [`fill_subcells`]
 /// primitive, but are out of the initial scope.
 #[must_use]
 pub fn is_procedural(c: char) -> bool {
-    matches!(u32::from(c), 0x2500..=0x259F)
+    let cp = u32::from(c);
+    if matches!(cp, 0xE0B0..=0xE0BF) {
+        return true;
+    }
+    if !matches!(cp, 0x2500..=0x259F) {
+        return false;
+    }
+    // Dashed lines are not yet implemented; let the font render them.
+    !is_unimplemented_dash(cp)
+}
+
+/// The dashed box-drawing codepoints this module does not yet draw:
+/// `U+2504`–`U+250B` (triple/quadruple dash, light and heavy) and
+/// `U+254C`–`U+254F` (double dash, light and heavy).
+const fn is_unimplemented_dash(cp: u32) -> bool {
+    matches!(cp, 0x2504..=0x250B | 0x254C..=0x254F)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,12 +194,78 @@ fn stroke_arc(buf: &mut [u8], w: usize, h: usize, arc: &Arc, thickness: f32) {
     }
 }
 
+/// Fill a solid polygon given its vertices (pixel coordinates, in order), by
+/// pixel-centre sampling with an even-odd point-in-polygon test.
+///
+/// Uses the same `px + 0.5` centre sampling as [`fill_rect`], so a polygon
+/// edge that lands exactly on the cell boundary tiles seamlessly with the
+/// neighbouring cell — the property that makes the powerline separators
+/// (`U+E0B0`–`U+E0BF`) join without a hairline gap regardless of cell size.
+fn fill_polygon(buf: &mut [u8], w: usize, h: usize, verts: &[(f32, f32)]) {
+    if verts.len() < 3 {
+        return;
+    }
+    for y in 0..h {
+        let yc = value_to_f32(y) + 0.5;
+        for x in 0..w {
+            let xc = value_to_f32(x) + 0.5;
+            if point_in_polygon(xc, yc, verts) {
+                set_px(buf, w, x, y, 255);
+            }
+        }
+    }
+}
+
+/// Even-odd (ray-cast) point-in-polygon test for the sample point `(px, py)`.
+fn point_in_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let n = verts.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = verts[i];
+        let (xj, yj) = verts[j];
+        // Does a horizontal ray from (px, py) cross edge (i, j)?
+        if (yi > py) != (yj > py) {
+            let slope = (xj - xi) / (yj - yi);
+            let x_cross = slope.mul_add(py - yi, xi);
+            if px < x_cross {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Tessellate a quadratic Bézier (`p0` → control `ctrl` → `p1`) into
+/// `segments` line points, appending the sampled points (excluding `p0`) to
+/// `out`.
+fn push_quad_bezier(
+    out: &mut Vec<(f32, f32)>,
+    p0: (f32, f32),
+    ctrl: (f32, f32),
+    p1: (f32, f32),
+    segments: u16,
+) {
+    for step in 1..=segments {
+        let t = f32::from(step) / f32::from(segments);
+        let mt = 1.0 - t;
+        // B(t) = mt² p0 + 2 mt t ctrl + t² p1
+        let w0 = mt * mt;
+        let w1 = 2.0 * mt * t;
+        let w2 = t * t;
+        let bx = w2.mul_add(p1.0, w1.mul_add(ctrl.0, w0 * p0.0));
+        let by = w2.mul_add(p1.1, w1.mul_add(ctrl.1, w0 * p0.1));
+        out.push((bx, by));
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Layer A — codepoint decoding
 // ---------------------------------------------------------------------------
 
 /// The stroke style of one arm of a box-drawing glyph.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LineStyle {
     None,
     Light,
@@ -203,6 +297,7 @@ pub fn generate_alpha(c: char, w: usize, h: usize) -> Vec<u8> {
     match cp {
         0x2580..=0x259F => draw_block(&mut buf, w, h, cp),
         0x2500..=0x257F => draw_box(&mut buf, w, h, cp),
+        0xE0B0..=0xE0BF => draw_powerline(&mut buf, w, h, cp),
         _ => {}
     }
     buf
@@ -431,6 +526,129 @@ fn draw_diagonal(buf: &mut [u8], w: usize, h: usize, forward: bool, back: bool) 
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Powerline separators (U+E0B0–U+E0BF)
+// ---------------------------------------------------------------------------
+
+/// Draw a powerline separator glyph (`U+E0B0`–`U+E0BF`) procedurally so it
+/// fills the cell exactly and tiles seamlessly with its neighbour, independent
+/// of the loaded font.
+///
+/// The set is the canonical cell-filling powerline block: right/left arrows
+/// (`E0B0`–`E0B3`), left/right semicircles (`E0B4`–`E0B7`), and the four pairs
+/// of half triangles (`E0B8`–`E0BF`). Even codepoints are solid fills; odd
+/// codepoints are the outline variants. Geometry follows the same shapes
+/// `WezTerm` draws (`customglyph.rs`). Coordinates are given as cell fractions
+/// (x right, y down; `(0,0)` top-left, `(1,1)` bottom-right) then scaled to the
+/// pixel cell.
+// Several outline half-triangles share the same dividing diagonal (e.g.
+// `E0B9`/`E0BF` both draw the main diagonal, `E0BB`/`E0BD` the anti-diagonal);
+// these are deliberately distinct codepoints listed separately for clarity.
+#[allow(clippy::match_same_arms)]
+fn draw_powerline(buf: &mut [u8], w: usize, h: usize, cp: u32) {
+    let w_f = value_to_f32(w);
+    let h_f = value_to_f32(h);
+    // Map a fractional cell coordinate to a pixel coordinate.
+    let p = |fx: f32, fy: f32| (fx * w_f, fy * h_f);
+    let stroke = light_thickness(h);
+
+    match cp {
+        // Right-pointing arrow: apex at the right edge mid-height.
+        0xE0B0 => fill_polygon(buf, w, h, &[p(0.0, 0.0), p(0.0, 1.0), p(1.0, 0.5)]),
+        0xE0B1 => stroke_polyline(buf, w, h, &[p(0.0, 0.0), p(1.0, 0.5), p(0.0, 1.0)], stroke),
+        // Left-pointing arrow: apex at the left edge mid-height.
+        0xE0B2 => fill_polygon(buf, w, h, &[p(1.0, 0.0), p(1.0, 1.0), p(0.0, 0.5)]),
+        0xE0B3 => stroke_polyline(buf, w, h, &[p(1.0, 0.0), p(0.0, 0.5), p(1.0, 1.0)], stroke),
+        // Left semicircle (bulges toward the right edge).
+        0xE0B4 => fill_semicircle(buf, w, h, Side::Left),
+        0xE0B5 => stroke_semicircle(buf, w, h, Side::Left, stroke),
+        // Right semicircle (bulges toward the left edge).
+        0xE0B6 => fill_semicircle(buf, w, h, Side::Right),
+        0xE0B7 => stroke_semicircle(buf, w, h, Side::Right, stroke),
+        // Half triangles. Even = filled, odd = the dividing diagonal only.
+        0xE0B8 => fill_polygon(buf, w, h, &[p(0.0, 0.0), p(0.0, 1.0), p(1.0, 1.0)]),
+        0xE0B9 => stroke_polyline(buf, w, h, &[p(0.0, 0.0), p(1.0, 1.0)], stroke),
+        0xE0BA => fill_polygon(buf, w, h, &[p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)]),
+        0xE0BB => stroke_polyline(buf, w, h, &[p(0.0, 1.0), p(1.0, 0.0)], stroke),
+        0xE0BC => fill_polygon(buf, w, h, &[p(0.0, 0.0), p(0.0, 1.0), p(1.0, 0.0)]),
+        0xE0BD => stroke_polyline(buf, w, h, &[p(0.0, 1.0), p(1.0, 0.0)], stroke),
+        0xE0BE => fill_polygon(buf, w, h, &[p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)]),
+        0xE0BF => stroke_polyline(buf, w, h, &[p(0.0, 0.0), p(1.0, 1.0)], stroke),
+        _ => {}
+    }
+}
+
+/// Which edge a powerline semicircle is anchored to (it bulges toward the
+/// opposite edge).
+#[derive(Clone, Copy)]
+enum Side {
+    /// Anchored to the left edge, bulging right (`U+E0B4`/`U+E0B5`).
+    Left,
+    /// Anchored to the right edge, bulging left (`U+E0B6`/`U+E0B7`).
+    Right,
+}
+
+/// The vertex path (fractional cell coords) of a filled powerline semicircle,
+/// as two quadratic Béziers plus the closing straight edge.
+fn semicircle_path(w: usize, h: usize, side: Side) -> Vec<(f32, f32)> {
+    let w_f = value_to_f32(w);
+    let h_f = value_to_f32(h);
+    let p = |fx: f32, fy: f32| (fx * w_f, fy * h_f);
+    let mut verts = Vec::new();
+    match side {
+        Side::Left => {
+            // (0,0) -Q ctrl(1,0)-> (1,0.5) -Q ctrl(1,1)-> (0,1) -> close.
+            verts.push(p(0.0, 0.0));
+            push_quad_bezier(&mut verts, p(0.0, 0.0), p(1.0, 0.0), p(1.0, 0.5), 24);
+            push_quad_bezier(&mut verts, p(1.0, 0.5), p(1.0, 1.0), p(0.0, 1.0), 24);
+        }
+        Side::Right => {
+            // (1,0) -Q ctrl(0,0)-> (0,0.5) -Q ctrl(0,1)-> (1,1) -> close.
+            verts.push(p(1.0, 0.0));
+            push_quad_bezier(&mut verts, p(1.0, 0.0), p(0.0, 0.0), p(0.0, 0.5), 24);
+            push_quad_bezier(&mut verts, p(0.0, 0.5), p(0.0, 1.0), p(1.0, 1.0), 24);
+        }
+    }
+    verts
+}
+
+/// Fill a powerline semicircle (`U+E0B4`/`U+E0B6`).
+fn fill_semicircle(buf: &mut [u8], w: usize, h: usize, side: Side) {
+    let verts = semicircle_path(w, h, side);
+    fill_polygon(buf, w, h, &verts);
+}
+
+/// Stroke the curved boundary of a powerline semicircle (`U+E0B5`/`U+E0B7`).
+fn stroke_semicircle(buf: &mut [u8], w: usize, h: usize, side: Side, thickness: f32) {
+    // The outline follows only the curved (Bézier) edge, not the straight
+    // closing edge, so drop the first vertex (the straight-edge start).
+    let verts = semicircle_path(w, h, side);
+    if verts.len() > 1 {
+        stroke_polyline(buf, w, h, &verts[1..], thickness);
+    }
+}
+
+/// Stroke a polyline (`points` in pixel coords) with the given `thickness` by
+/// stamping filled squares densely along each segment. Dense enough to leave
+/// no gaps at any cell size, mirroring [`stroke_arc`].
+fn stroke_polyline(buf: &mut [u8], w: usize, h: usize, points: &[(f32, f32)], thickness: f32) {
+    let half = thickness / 2.0;
+    for pair in points.windows(2) {
+        let (x0, y0) = pair[0];
+        let (x1, y1) = pair[1];
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = dx.hypot(dy);
+        let steps = u32_saturating(value_to_usize(len.ceil()).saturating_mul(2)).max(1);
+        for i in 0..=steps {
+            let t = u32_to_f32(i) / u32_to_f32(steps);
+            let px = dx.mul_add(t, x0);
+            let py = dy.mul_add(t, y0);
+            fill_rect(buf, w, h, px - half, py - half, px + half, py + half);
+        }
+    }
+}
+
 /// The light-line thickness in pixels for a cell of height `h`.
 ///
 /// Derived from the cell height so lines scale with font size; at least one
@@ -534,12 +752,12 @@ const fn single_heavy_arms(cp: u32) -> Option<Arms> {
         0x2542 => [H, L, H, L],
         0x2543 => [H, L, L, H],
         0x2544 => [H, H, L, L],
-        0x2545 => [L, L, N, L],
-        0x2546 => [L, H, L, L],
+        0x2545 => [L, L, H, H], // LEFT DOWN HEAVY AND RIGHT UP LIGHT
+        0x2546 => [L, H, H, L], // RIGHT DOWN HEAVY AND LEFT UP LIGHT
         0x2547 => [H, H, L, H],
         0x2548 => [L, H, H, H],
         0x2549 => [H, L, H, H],
-        0x254A => [H, H, L, L],
+        0x254A => [H, H, H, L], // LEFT LIGHT AND RIGHT VERTICAL HEAVY
         0x254B => [H, H, H, H],
 
         _ => return None, // dashes 2504-250B
@@ -618,8 +836,19 @@ fn u32_saturating(v: usize) -> u32 {
     v.value_into().unwrap_or(u32::MAX)
 }
 
+/// Approximate a non-negative `f32` length to `usize` (saturating, floored at
+/// 0). Used to size the stamp count for [`stroke_polyline`].
+fn value_to_usize(v: f32) -> usize {
+    use conv2::RoundToNearest;
+    if v <= 0.0 {
+        return 0;
+    }
+    <usize as ApproxFrom<f32, RoundToNearest>>::approx_from(v).unwrap_or(usize::MAX)
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn alpha_at(buf: &[u8], w: usize, x: usize, y: usize) -> u8 {
@@ -633,6 +862,22 @@ mod tests {
         assert!(is_procedural('\u{259F}'));
         assert!(!is_procedural('A'));
         assert!(!is_procedural('\u{2800}')); // braille, out of scope
+    }
+
+    #[test]
+    fn is_procedural_excludes_unimplemented_dashes() {
+        // Dashed lines must fall through to the font path (not render blank).
+        for cp in (0x2504..=0x250B_u32).chain(0x254C..=0x254F) {
+            let c = char::from_u32(cp).expect("valid codepoint");
+            assert!(
+                !is_procedural(c),
+                "{cp:#x} is an unimplemented dash and must not be procedural"
+            );
+        }
+        // A neighbouring implemented line stays procedural.
+        assert!(is_procedural('\u{2500}')); // light horizontal
+        assert!(is_procedural('\u{254B}')); // heavy cross (just before 254C)
+        assert!(is_procedural('\u{2550}')); // double horizontal (just after 254F)
     }
 
     #[test]
@@ -744,6 +989,155 @@ mod tests {
         assert_eq!(alpha_at(&buf, w, 0, h - 1), 255);
         // top row transparent
         assert_eq!(alpha_at(&buf, w, 0, 0), 0);
+    }
+
+    #[test]
+    fn powerline_range_is_procedural() {
+        for cp in 0xE0B0..=0xE0BF_u32 {
+            let c = char::from_u32(cp).expect("valid codepoint");
+            assert!(is_procedural(c), "{cp:#x} powerline must be procedural");
+        }
+        // Just outside the range is not procedural.
+        assert!(!is_procedural('\u{E0AF}'));
+        assert!(!is_procedural('\u{E0C0}'));
+    }
+
+    #[test]
+    fn powerline_right_arrow_fills_left_edge_and_points_right() {
+        // U+E0B0: solid right-pointing arrow. Left edge fully opaque (it is the
+        // triangle's base); the apex reaches the right edge at mid-height; the
+        // top-right and bottom-right corners are empty.
+        let (w, h) = (12, 20);
+        let buf = generate_alpha('\u{E0B0}', w, h);
+        // Left column fully opaque (base of the triangle) — this is what makes
+        // successive separators tile with no seam.
+        for y in 0..h {
+            assert_eq!(alpha_at(&buf, w, 0, y), 255, "left col gap at y={y}");
+        }
+        // The triangle narrows toward the right: ink at mid-height reaches
+        // well past the horizontal centre (the apex is near the right edge).
+        assert_eq!(
+            alpha_at(&buf, w, 3 * w / 4, h / 2),
+            255,
+            "no ink near right mid"
+        );
+        // Top-right and bottom-right corners empty (outside the triangle).
+        assert_eq!(alpha_at(&buf, w, w - 1, 0), 0, "top-right should be empty");
+        assert_eq!(
+            alpha_at(&buf, w, w - 1, h - 1),
+            0,
+            "bottom-right should be empty"
+        );
+    }
+
+    #[test]
+    fn powerline_left_arrow_fills_right_edge_and_points_left() {
+        // U+E0B2: solid left-pointing arrow — mirror of E0B0.
+        let (w, h) = (12, 20);
+        let buf = generate_alpha('\u{E0B2}', w, h);
+        for y in 0..h {
+            assert_eq!(alpha_at(&buf, w, w - 1, y), 255, "right col gap at y={y}");
+        }
+        assert_eq!(alpha_at(&buf, w, w / 4, h / 2), 255, "no ink near left mid");
+        assert_eq!(alpha_at(&buf, w, 0, 0), 0, "top-left should be empty");
+        assert_eq!(
+            alpha_at(&buf, w, 0, h - 1),
+            0,
+            "bottom-left should be empty"
+        );
+    }
+
+    #[test]
+    fn powerline_arrows_tile_without_seam() {
+        // The whole point: E0B0 immediately followed by another E0B0 must not
+        // leave a transparent column between them. E0B0's right apex is a
+        // single point, but its LEFT edge (the base of the next cell's
+        // triangle) is fully opaque, so abutting cells meet with no gap along
+        // the shared boundary. Verified by the left column being fully opaque.
+        let (w, h) = (10, 18);
+        let buf = generate_alpha('\u{E0B0}', w, h);
+        assert!(
+            (0..h).all(|y| alpha_at(&buf, w, 0, y) == 255),
+            "left edge must be a solid seam-free base"
+        );
+    }
+
+    #[test]
+    fn powerline_semicircle_fills_anchored_edge() {
+        // U+E0B4: left semicircle, anchored to the left edge, bulging right.
+        // The left edge is the straight side (fully opaque); the far right
+        // corners are outside the half-disc (empty).
+        let (w, h) = (16, 20);
+        let buf = generate_alpha('\u{E0B4}', w, h);
+        for y in 0..h {
+            assert_eq!(alpha_at(&buf, w, 0, y), 255, "left edge gap at y={y}");
+        }
+        // Mid-height near the right edge is inside the bulge.
+        assert_eq!(
+            alpha_at(&buf, w, w - 1, h / 2),
+            255,
+            "bulge missing at right mid"
+        );
+        // Corners are outside the half-disc.
+        assert_eq!(
+            alpha_at(&buf, w, w - 1, 0),
+            0,
+            "top-right corner should be empty"
+        );
+    }
+
+    #[test]
+    fn powerline_half_triangle_fills_expected_half() {
+        // U+E0B8: filled bottom-left half triangle (0,0)-(0,1)-(1,1). The
+        // bottom-left corner is opaque; the top-right corner is empty.
+        let (w, h) = (16, 16);
+        let buf = generate_alpha('\u{E0B8}', w, h);
+        assert_eq!(
+            alpha_at(&buf, w, 0, h - 1),
+            255,
+            "bottom-left should be filled"
+        );
+        assert_eq!(alpha_at(&buf, w, w - 1, 0), 0, "top-right should be empty");
+    }
+
+    #[test]
+    fn powerline_glyphs_produce_ink() {
+        // Every glyph in the range must render *some* ink (no silently-blank
+        // codepoint slipped into the range).
+        let (w, h) = (14, 20);
+        for cp in 0xE0B0..=0xE0BF_u32 {
+            let c = char::from_u32(cp).expect("valid codepoint");
+            let buf = generate_alpha(c, w, h);
+            assert!(
+                buf.chunks_exact(BPP).any(|px| px[3] > 0),
+                "{cp:#x} rendered fully transparent"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_weight_cross_arms_are_correct() {
+        // Regression guard for the three mixed-weight cross glyphs whose arm
+        // decomposition was wrong (dropped/mis-weighted arms). Arms are
+        // [up, right, down, left].
+        //
+        // U+2545 LEFT DOWN HEAVY AND RIGHT UP LIGHT   -> [L, L, H, H]
+        // U+2546 RIGHT DOWN HEAVY AND LEFT UP LIGHT   -> [L, H, H, L]
+        // U+254A LEFT LIGHT AND RIGHT VERTICAL HEAVY  -> [H, H, H, L]
+        assert_eq!(single_heavy_arms(0x2545), Some([L, L, H, H]));
+        assert_eq!(single_heavy_arms(0x2546), Some([L, H, H, L]));
+        assert_eq!(single_heavy_arms(0x254A), Some([H, H, H, L]));
+
+        // Every cross glyph 0x2543..=0x254B must have all four arms present
+        // (none is `None`) — a cross with a missing arm renders broken.
+        for cp in 0x2543..=0x254B {
+            let arms = single_heavy_arms(cp).expect("cross glyph must decode");
+            assert!(
+                arms.iter().all(|&a| a != N),
+                "cross glyph {cp:#x} has a missing arm: {:?}",
+                arms.map(|a| a == N)
+            );
+        }
     }
 
     #[test]

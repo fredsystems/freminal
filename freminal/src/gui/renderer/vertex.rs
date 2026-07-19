@@ -1243,6 +1243,10 @@ struct NormalizedFallbackGlyph {
     fb_cell_h: f32,
     /// The fallback face's own baseline (cell-top to baseline) at the ppem.
     fb_baseline: f32,
+    /// The fallback face's own cell width at the current ppem.
+    fb_cell_w: f32,
+    /// The primary face's cell width in pixels (pre-`x_scale`).
+    primary_cell_w: f32,
     /// Atlas UV rect `[u0, v0, u1, v1]`.
     uv: [f32; 4],
 }
@@ -1264,10 +1268,12 @@ fn try_emit_fallback_glyph(
     fg_color: [f32; 4],
     row_params: &RowGlyphParams,
 ) -> bool {
-    let Some((fb_cell_h, fb_baseline)) = font_manager.fallback_cell_metrics(glyph.face_id) else {
+    let Some((fb_cell_h, fb_baseline, fb_cell_w)) =
+        font_manager.fallback_cell_metrics(glyph.face_id)
+    else {
         return false;
     };
-    if fb_cell_h <= 0.0 {
+    if fb_cell_h <= 0.0 || fb_cell_w <= 0.0 {
         return false;
     }
     emit_normalized_fallback_glyph(
@@ -1280,6 +1286,8 @@ fn try_emit_fallback_glyph(
             glyph_h: entry.height,
             fb_cell_h,
             fb_baseline,
+            fb_cell_w,
+            primary_cell_w: gl_f32_u32(font_manager.cell_width()),
             uv: entry.uv_rect,
         },
         fg_color,
@@ -1292,13 +1300,17 @@ fn try_emit_fallback_glyph(
 /// cell (Task #411).
 ///
 /// The glyph was designed against the fallback font's own cell
-/// (`fb_cell_h` tall, baseline at `fb_baseline`). We map its natural box within
-/// that cell into the primary cell by the height ratio
-/// `s = primary_cell_h / fb_cell_h`, preserving aspect and centring
-/// horizontally within the advance. This makes full-cell glyphs (powerline
-/// separators) fill the primary cell and keeps partial-height icons
-/// proportional — with the actual pixel scaling done by the GPU (we only emit a
-/// resized quad). DECDWL/DECDHL row scaling is applied on top.
+/// (`fb_cell_w` × `fb_cell_h`, baseline at `fb_baseline`). We map its natural
+/// box within that cell into the primary cell using **independent** per-axis
+/// ratios — `sx = primary_cell_w / fb_cell_w` horizontally and
+/// `sy = primary_cell_h / fb_cell_h` vertically. Using the height ratio for
+/// both axes (as an earlier version did) mis-sizes the width whenever the
+/// fallback font's aspect ratio differs from the primary's, re-introducing the
+/// hairline-gap / over-fill class of bug for full-cell fallback glyphs
+/// (powerline separators). This makes full-cell glyphs fill the primary cell
+/// exactly and keeps partial icons proportional to the cell — with the actual
+/// pixel scaling done by the GPU (we only emit a resized quad). DECDWL/DECDHL
+/// row scaling is applied on top.
 fn emit_normalized_fallback_glyph(
     instances: &mut Vec<f32>,
     g: &NormalizedFallbackGlyph,
@@ -1308,24 +1320,26 @@ fn emit_normalized_fallback_glyph(
     let cell_top = row_params.cell_y_range[0];
     let cell_bottom = row_params.cell_y_range[1];
     let primary_cell_h = cell_bottom - cell_top;
-    if primary_cell_h <= 0.0 || g.glyph_w == 0 || g.glyph_h == 0 {
+    if primary_cell_h <= 0.0 || g.fb_cell_w <= 0.0 || g.glyph_w == 0 || g.glyph_h == 0 {
         return;
     }
 
-    // Height ratio: map the fallback face's cell onto the primary cell.
-    let s = primary_cell_h / g.fb_cell_h;
+    // Independent per-axis ratios: map the fallback face's cell onto the
+    // primary cell without distorting the width by the height ratio.
+    let sy = primary_cell_h / g.fb_cell_h;
+    let sx = g.primary_cell_w / g.fb_cell_w;
 
     // The glyph's natural box within the fallback face's own cell.
     let natural_top = g.fb_baseline - f32::from(g.bearing_y);
     let natural_left = f32::from(g.bearing_x);
 
-    // Scale that box by `s` into the primary cell, then apply the row's
-    // vertical scale and origin shift (DECDHL) and horizontal scale (DECDWL).
-    let scaled_h = f32::from(g.glyph_h) * s * row_params.y_scale;
-    let scaled_w = f32::from(g.glyph_w) * s * row_params.x_scale;
+    // Scale that box into the primary cell, then apply the row's vertical scale
+    // and origin shift (DECDHL) and horizontal scale (DECDWL).
+    let scaled_h = f32::from(g.glyph_h) * sy * row_params.y_scale;
+    let scaled_w = f32::from(g.glyph_w) * sx * row_params.x_scale;
 
-    let y0 = (natural_top * s).mul_add(row_params.y_scale, cell_top + row_params.y_origin_shift);
-    let x0 = natural_left.mul_add(s, g.x_px) * row_params.x_scale;
+    let y0 = (natural_top * sy).mul_add(row_params.y_scale, cell_top + row_params.y_origin_shift);
+    let x0 = natural_left.mul_add(sx, g.x_px) * row_params.x_scale;
 
     let [u0, v0, u1, v1] = g.uv;
     instances.extend_from_slice(&[
@@ -2504,6 +2518,8 @@ mod tests {
                 glyph_h: 19,
                 fb_cell_h: 19.0,
                 fb_baseline: 15.0,
+                fb_cell_w: 10.0,
+                primary_cell_w: 9.0,
                 uv: [0.0, 0.0, 1.0, 1.0],
             },
             [1.0, 1.0, 1.0, 1.0],
@@ -2511,6 +2527,7 @@ mod tests {
         );
         assert_eq!(out.len(), 13, "one instance of 13 floats");
         let y0 = out[1];
+        let width = out[2];
         let height = out[3];
         // natural_top = baseline - bearing_y = 0 -> y0 = cell_top = 0.
         assert!(y0.abs() < 0.01, "expected y0 ~0 (cell top), got {y0}");
@@ -2518,6 +2535,47 @@ mod tests {
         assert!(
             (height - primary_cell_h).abs() < 0.01,
             "expected height ~{primary_cell_h} (fills cell), got {height}"
+        );
+        // scaled_w = 10 * (primary_cell_w 9 / fb_cell_w 10) = 9 -> fills the
+        // primary cell width exactly (independent of the height ratio).
+        assert!(
+            (width - 9.0).abs() < 0.01,
+            "expected width ~9 (fills primary cell width), got {width}"
+        );
+    }
+
+    #[test]
+    fn normalized_fallback_uses_independent_width_scale() {
+        // Aspect-ratio guard (Task #411 fix): a full-cell fallback glyph must be
+        // scaled to the primary cell's WIDTH via the width ratio, not the height
+        // ratio. Here the primary cell is much taller-and-narrower than the
+        // fallback cell, so a height-ratio width would wildly over-fill.
+        let primary_cell_h = 30.0_f32;
+        let params = RowGlyphParams::new(LineWidth::Normal, primary_cell_h, 0, 24.0);
+        let mut out = Vec::new();
+        emit_normalized_fallback_glyph(
+            &mut out,
+            &NormalizedFallbackGlyph {
+                x_px: 0.0,
+                bearing_x: 0,
+                bearing_y: 15,
+                glyph_w: 10, // fills the fallback cell width
+                glyph_h: 19,
+                fb_cell_h: 19.0,
+                fb_baseline: 15.0,
+                fb_cell_w: 10.0,
+                primary_cell_w: 8.0, // narrow primary cell
+                uv: [0.0, 0.0, 1.0, 1.0],
+            },
+            [1.0, 1.0, 1.0, 1.0],
+            &params,
+        );
+        let width = out[2];
+        // Correct (width ratio): 10 * (8/10) = 8.0 — fills the narrow cell.
+        // Bug (height ratio): 10 * (30/19) ≈ 15.8 — nearly double, overflows.
+        assert!(
+            (width - 8.0).abs() < 0.01,
+            "expected width ~8 via width ratio, got {width} (height-ratio bug would give ~15.8)"
         );
     }
 
@@ -2538,6 +2596,8 @@ mod tests {
                 glyph_h: 13,
                 fb_cell_h: 19.0,
                 fb_baseline: 15.0,
+                fb_cell_w: 19.0,
+                primary_cell_w: 18.0,
                 uv: [0.0, 0.0, 1.0, 1.0],
             },
             [1.0, 1.0, 1.0, 1.0],

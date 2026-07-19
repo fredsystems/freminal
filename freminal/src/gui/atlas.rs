@@ -329,6 +329,18 @@ impl GlyphAtlas {
         bearing_y: i16,
     ) -> Option<&AtlasEntry> {
         if self.procedural_entries.contains_key(&ch) {
+            // Cache hit — bump the LRU generation of the owning shelf, exactly
+            // as [`Self::get`] does for font glyphs. Procedural box-drawing
+            // glyphs are typically redrawn every frame a TUI border/table is on
+            // screen, so their shelves must not look stale to the LRU evictor.
+            let shelf_idx = self.procedural_entries.get(&ch).map(|e| e.shelf_idx);
+            if let Some(shelf_idx) = shelf_idx {
+                self.generation += 1;
+                let current_gen = self.generation;
+                if let Some(shelf) = self.shelves.get_mut(shelf_idx) {
+                    shelf.last_used = current_gen;
+                }
+            }
             return self.procedural_entries.get(&ch);
         }
 
@@ -680,8 +692,13 @@ impl GlyphAtlas {
 
     /// Evict all glyphs from a shelf, freeing its horizontal space.
     fn evict_shelf(&mut self, shelf_idx: usize) {
-        // Remove all entries that belong to this shelf.
+        // Remove all entries that belong to this shelf. Both the font-glyph map
+        // and the procedural-glyph map (Task #410) pack into the shared shelf
+        // pool, so both must be purged or a stale procedural entry would later
+        // sample whatever glyph overwrote that region.
         self.entries.retain(|_, entry| entry.shelf_idx != shelf_idx);
+        self.procedural_entries
+            .retain(|_, entry| entry.shelf_idx != shelf_idx);
 
         // Reset the shelf's horizontal cursor so it can be reused.
         if let Some(shelf) = self.shelves.get_mut(shelf_idx) {
@@ -749,6 +766,16 @@ impl GlyphAtlas {
             entry.uv_rect[2] *= scale;
             entry.uv_rect[3] *= scale;
         }
+        // Procedural box-drawing / block-element entries (Task #410) live in a
+        // separate map but reference the same texture, so their UVs must be
+        // rescaled identically or cached box/block glyphs would sample the
+        // wrong region after a grow.
+        for entry in self.procedural_entries.values_mut() {
+            entry.uv_rect[0] *= scale;
+            entry.uv_rect[1] *= scale;
+            entry.uv_rect[2] *= scale;
+            entry.uv_rect[3] *= scale;
+        }
 
         self.size = new_size;
         self.full_reupload = true;
@@ -761,7 +788,7 @@ impl GlyphAtlas {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use freminal_common::config::Config;
@@ -1199,5 +1226,76 @@ mod tests {
         // After growth, should be true again.
         atlas.try_grow();
         assert!(atlas.needs_full_reupload());
+    }
+
+    #[test]
+    fn procedural_uv_rescaled_on_growth() {
+        // A cached procedural (box-drawing) glyph must have its UV rescaled when
+        // the atlas grows, exactly like font-glyph entries — otherwise it would
+        // sample the wrong texture region after the grow.
+        let mut atlas = GlyphAtlas::new(64, 256);
+
+        let before = atlas
+            .get_or_insert_procedural('\u{2588}', 10, 19, 15)
+            .expect("full block should pack")
+            .clone();
+
+        let grew = atlas.try_grow();
+        assert!(grew, "64 -> 128 should grow");
+
+        let after = atlas
+            .get_or_insert_procedural('\u{2588}', 10, 19, 15)
+            .expect("cached procedural entry should still resolve")
+            .clone();
+
+        // UVs halved (64/128) and still address the same absolute pixel region.
+        assert!((after.uv_rect[0] - before.uv_rect[0] / 2.0).abs() < f32::EPSILON);
+        assert!((after.uv_rect[1] - before.uv_rect[1] / 2.0).abs() < f32::EPSILON);
+        assert!((after.uv_rect[2] - before.uv_rect[2] / 2.0).abs() < f32::EPSILON);
+        assert!((after.uv_rect[3] - before.uv_rect[3] / 2.0).abs() < f32::EPSILON);
+        // All within the unit square.
+        assert!(after.uv_rect.iter().all(|&c| (0.0..=1.0).contains(&c)));
+    }
+
+    #[test]
+    fn procedural_entry_purged_when_its_shelf_is_evicted() {
+        // A procedural glyph packed into a shelf must be dropped from
+        // `procedural_entries` when that shelf is evicted, so a later cache
+        // lookup doesn't return a stale entry pointing at an overwritten region.
+        let mut atlas = GlyphAtlas::new(32, 32); // cannot grow
+
+        let entry = atlas
+            .get_or_insert_procedural('\u{2588}', 8, 8, 6)
+            .expect("full block should pack")
+            .clone();
+
+        atlas.evict_shelf(entry.shelf_idx);
+
+        assert!(
+            !atlas.procedural_entries.contains_key(&'\u{2588}'),
+            "evicted shelf must purge its procedural entries"
+        );
+    }
+
+    #[test]
+    fn procedural_cache_hit_bumps_lru() {
+        // Repeatedly drawing a procedural glyph must keep its shelf fresh, so it
+        // is not the eviction target under atlas pressure.
+        let mut atlas = GlyphAtlas::new(64, 64); // cannot grow
+
+        let shelf_idx = atlas
+            .get_or_insert_procedural('\u{2588}', 8, 8, 6)
+            .expect("full block should pack")
+            .shelf_idx;
+
+        let gen_before = atlas.shelves[shelf_idx].last_used;
+        // A cache hit should advance the shelf's last_used generation.
+        let _ = atlas.get_or_insert_procedural('\u{2588}', 8, 8, 6);
+        let gen_after = atlas.shelves[shelf_idx].last_used;
+
+        assert!(
+            gen_after > gen_before,
+            "procedural cache hit must bump the shelf LRU generation"
+        );
     }
 }

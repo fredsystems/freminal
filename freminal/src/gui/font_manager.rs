@@ -10,6 +10,7 @@
 //! references for the shaping pipeline, and resolves glyphs through a tiered
 //! fallback chain: primary face -> bundled fallback -> emoji -> system -> tofu.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -317,6 +318,23 @@ impl PrimaryFaces {
     }
 }
 
+/// A fallback face's own cell metrics, used to normalise its glyphs into the
+/// primary cell (Task #411).
+///
+/// All three are measured at the current rasterisation ppem. Cached per
+/// [`FaceId`] because recomputing them (`compute_cell_metrics`, which parses the
+/// OS/2 table and probes for Powerline glyphs) for every fallback glyph on every
+/// frame is expensive.
+#[derive(Debug, Clone, Copy)]
+struct FallbackCellMetrics {
+    /// The fallback face's own cell height in pixels.
+    cell_h: f32,
+    /// The fallback face's own baseline (cell-top to baseline) in pixels.
+    baseline: f32,
+    /// The fallback face's own cell width in pixels.
+    cell_w: f32,
+}
+
 /// Result of a [`FontManager::rebuild`] call, indicating what changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildResult {
@@ -365,6 +383,13 @@ pub struct FontManager {
 
     /// Resolved glyph cache: (codepoint, style) -> (`face_id`, `glyph_id`).
     glyph_cache: HashMap<(char, GlyphStyle), (FaceId, u16)>,
+
+    /// Per-face cache of fallback cell metrics (Task #411). Populated lazily by
+    /// [`Self::fallback_cell_metrics`] and cleared on rebuild alongside
+    /// `glyph_cache`. `None` means the face has no measurable metrics (or is a
+    /// primary face). Interior mutability so the renderer can read metrics
+    /// through a shared `&FontManager` while still caching.
+    fallback_metrics_cache: RefCell<HashMap<FaceId, Option<FallbackCellMetrics>>>,
 
     /// Authoritative cell width in integer pixels.
     cell_width: u32,
@@ -475,6 +500,7 @@ impl FontManager {
             system_fallback_cache: HashMap::new(),
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
+            fallback_metrics_cache: RefCell::new(HashMap::new()),
             cell_width,
             cell_height,
             ascent,
@@ -637,19 +663,37 @@ impl FontManager {
         self.loaded_face(face_id).map(LoadedFace::cache_key)
     }
 
-    /// The own cell height and baseline of a **fallback** face, at the current
-    /// rasterisation ppem (Task #411).
+    /// The own cell height, baseline, and cell width of a **fallback** face, at
+    /// the current rasterisation ppem (Task #411).
     ///
     /// A glyph resolved from a fallback face (bundled or system) was designed
     /// against *that* font's cell, not the primary font's. To place it into the
     /// primary cell without clipping or mis-centring, the renderer needs the
-    /// fallback face's own `(cell_height, baseline)` so it can scale the glyph
-    /// by `primary_cell_height / fallback_cell_height`.
+    /// fallback face's own `(cell_height, baseline, cell_width)` so it can scale
+    /// the glyph independently on each axis into the primary cell.
     ///
-    /// Returns `None` for the primary faces (they drive the grid directly and
-    /// need no normalisation) and for any face that cannot be measured.
+    /// Returns `(cell_height, baseline, cell_width)`, or `None` for the primary
+    /// faces (they drive the grid directly and need no normalisation) and for
+    /// any face that cannot be measured.
+    ///
+    /// The result is cached per [`FaceId`]: this is called for every
+    /// fallback glyph on every frame, and `compute_cell_metrics` (OS/2 parsing +
+    /// Powerline probe) is far too costly to repeat per glyph.
     #[must_use]
-    pub fn fallback_cell_metrics(&self, face_id: FaceId) -> Option<(f32, f32)> {
+    pub fn fallback_cell_metrics(&self, face_id: FaceId) -> Option<(f32, f32, f32)> {
+        if let Some(cached) = self.fallback_metrics_cache.borrow().get(&face_id) {
+            return cached.map(|m| (m.cell_h, m.baseline, m.cell_w));
+        }
+
+        let computed = self.compute_fallback_cell_metrics(face_id);
+        self.fallback_metrics_cache
+            .borrow_mut()
+            .insert(face_id, computed);
+        computed.map(|m| (m.cell_h, m.baseline, m.cell_w))
+    }
+
+    /// Uncached computation backing [`Self::fallback_cell_metrics`].
+    fn compute_fallback_cell_metrics(&self, face_id: FaceId) -> Option<FallbackCellMetrics> {
         match face_id {
             FaceId::PrimaryRegular
             | FaceId::PrimaryBold
@@ -660,7 +704,12 @@ impl FontManager {
                 let ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
                 let cm = compute_cell_metrics(face, ppem).ok()?;
                 let cell_h: f32 = cm.cell_height.value_as::<f32>().ok()?;
-                Some((cell_h, cm.ascent))
+                let cell_w: f32 = cm.cell_width.value_as::<f32>().ok()?;
+                Some(FallbackCellMetrics {
+                    cell_h,
+                    baseline: cm.ascent,
+                    cell_w,
+                })
             }
         }
     }
@@ -740,6 +789,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         if effective_family_changed {
             Ok(RebuildResult::FamilyChanged)
@@ -778,6 +828,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -818,6 +869,7 @@ impl FontManager {
         self.glyph_cache.clear();
         self.system_fallback_cache.clear();
         self.system_faces.clear();
+        self.fallback_metrics_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -1236,12 +1288,38 @@ fn suggest_similar_families(query: &str, font_db: &Database) -> Vec<String> {
 /// the previously-preferred fonts preferred. If no capable system face is
 /// found, the bundled Noto face is used.
 fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
-    let system = best_system_emoji_face(font_db);
-    if let Some(loaded) = system {
-        info!("Using system emoji font");
-        return Some(loaded);
+    load_emoji_face_from_source(&resolve_emoji_source(font_db))
+}
+
+/// Load the [`LoadedFace`] for a resolved [`EmojiSource`], falling back to the
+/// bundled floor if a system source can no longer be read.
+///
+/// Split out from [`discover_emoji_face`] so it can be exercised without the
+/// process-global [`EMOJI_SOURCE_CACHE`] (which would otherwise couple tests to
+/// execution order and the host's installed fonts).
+fn load_emoji_face_from_source(source: &EmojiSource) -> Option<LoadedFace> {
+    match source {
+        EmojiSource::SystemFile { path, index } => {
+            if let Ok(bytes) = std::fs::read(path)
+                && let Some(loaded) = LoadedFace::from_owned(bytes, *index)
+            {
+                info!("Using system emoji font: {}", path.display());
+                return Some(loaded);
+            }
+            // The cached source vanished (font uninstalled between windows) —
+            // fall through to the bundled floor.
+            warn!(
+                "Cached system emoji font no longer loadable ({}); using bundled",
+                path.display()
+            );
+            load_bundled_emoji_floor()
+        }
+        EmojiSource::Bundled => load_bundled_emoji_floor(),
     }
-    // Bundled floor: always available, so emoji never fall through to tofu.
+}
+
+/// Load the bundled Noto Color Emoji floor face.
+fn load_bundled_emoji_floor() -> Option<LoadedFace> {
     let bundled = LoadedFace::from_static(NOTO_COLOR_EMOJI);
     if bundled.is_some() {
         info!("Using bundled Noto Color Emoji (no suitable system emoji font)");
@@ -1249,6 +1327,36 @@ fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
         warn!("Bundled Noto Color Emoji failed to load");
     }
     bundled
+}
+
+/// A resolved emoji-font source: either a concrete system font file, or the
+/// bundled floor. Cheap to clone and store in the process-global cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EmojiSource {
+    /// A system font file at `path`, face `index`.
+    SystemFile {
+        path: std::path::PathBuf,
+        index: usize,
+    },
+    /// The bundled Noto Color Emoji floor.
+    Bundled,
+}
+
+/// Process-global cache of the resolved emoji source.
+///
+/// Emoji discovery is host-configuration-invariant within a process run, but
+/// `FontManager::new` runs **once per window**. Without this cache, opening a
+/// window on a system with no known-named emoji font would re-run the full
+/// capability scan — reading and parsing *every* installed font file from disk
+/// — every single time. We resolve the source once and reuse it; only the
+/// (single) winning font file is re-read per window.
+static EMOJI_SOURCE_CACHE: std::sync::OnceLock<EmojiSource> = std::sync::OnceLock::new();
+
+/// Resolve (and memoize process-wide) which emoji source to use.
+fn resolve_emoji_source(font_db: &Database) -> EmojiSource {
+    EMOJI_SOURCE_CACHE
+        .get_or_init(|| best_system_emoji_source(font_db).unwrap_or(EmojiSource::Bundled))
+        .clone()
 }
 
 /// Find the best color emoji face installed on the system, or `None`.
@@ -1265,11 +1373,21 @@ fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
 ///    with non-standard names (e.g. `JoyPixels`, a distro-renamed Noto) at the
 ///    cost of a fuller scan, which only happens when the fast path found
 ///    nothing.
-fn best_system_emoji_face(font_db: &Database) -> Option<LoadedFace> {
+///
+/// Returns the resolved [`EmojiSource`] (path + index) rather than a loaded
+/// face, so the result can be cheaply cached process-wide (see
+/// [`resolve_emoji_source`]).
+fn best_system_emoji_source(font_db: &Database) -> Option<EmojiSource> {
     // Fast path: known names, metadata-filtered, stop at the first color face.
+    // Name match is case-insensitive so e.g. "noto color emoji" also matches.
     for candidate in EMOJI_CANDIDATES {
+        let candidate_lower = candidate.to_lowercase();
         for face in font_db.faces() {
-            if !face.families.iter().any(|(fam, _)| fam.contains(candidate)) {
+            if !face
+                .families
+                .iter()
+                .any(|(fam, _)| fam.to_lowercase().contains(&candidate_lower))
+            {
                 continue;
             }
             let fontdb::Source::File(path) = &face.source else {
@@ -1278,18 +1396,21 @@ fn best_system_emoji_face(font_db: &Database) -> Option<LoadedFace> {
             let Ok(bytes) = std::fs::read(path) else {
                 continue;
             };
-            if let Some(loaded) =
-                LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
+            let index = usize::value_from(face.index).unwrap_or(0);
+            if let Some(loaded) = LoadedFace::from_owned(bytes, index)
                 && loaded.has_color_glyphs()
             {
-                return Some(loaded);
+                return Some(EmojiSource::SystemFile {
+                    path: path.clone(),
+                    index,
+                });
             }
         }
     }
 
     // Capability scan: no known emoji font installed — rank every color face by
     // real coverage.
-    let mut best: Option<(u32, LoadedFace)> = None;
+    let mut best: Option<(u32, EmojiSource)> = None;
     for face in font_db.faces() {
         let fontdb::Source::File(path) = &face.source else {
             continue;
@@ -1297,9 +1418,8 @@ fn best_system_emoji_face(font_db: &Database) -> Option<LoadedFace> {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Some(loaded) =
-            LoadedFace::from_owned(bytes, usize::value_from(face.index).unwrap_or(0))
-        else {
+        let index = usize::value_from(face.index).unwrap_or(0);
+        let Some(loaded) = LoadedFace::from_owned(bytes, index) else {
             continue;
         };
         if !loaded.has_color_glyphs() {
@@ -1311,10 +1431,16 @@ fn best_system_emoji_face(font_db: &Database) -> Option<LoadedFace> {
                 .as_ref()
                 .is_none_or(|(best_cov, _)| coverage > *best_cov)
         {
-            best = Some((coverage, loaded));
+            best = Some((
+                coverage,
+                EmojiSource::SystemFile {
+                    path: path.clone(),
+                    index,
+                },
+            ));
         }
     }
-    best.map(|(_, loaded)| loaded)
+    best.map(|(_, source)| source)
 }
 
 /// Search `fontdb` for any font containing the given codepoint.
@@ -1515,8 +1641,8 @@ fn compute_cell_metrics(
 const POWERLINE_CORE_GLYPHS: [char; 4] = ['\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\u{E0B3}'];
 
 /// Returns `true` if `face` appears to be a Nerd Font / Powerline-patched
-/// font, based on whether it contains the core Powerline separator glyphs
-/// ([`POWERLINE_CORE_GLYPHS`]).
+/// font, based on whether it contains **any** of the core Powerline separator
+/// glyphs ([`POWERLINE_CORE_GLYPHS`]).
 ///
 /// This gates whether the OS/2 `usWinAscent`/`usWinDescent` height floor is
 /// applied in [`select_cell_height_and_top_pad`]: that floor exists to give
@@ -1524,8 +1650,21 @@ const POWERLINE_CORE_GLYPHS: [char; 4] = ['\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\
 /// to an ordinary font (which has no such glyphs, but may still carry
 /// generous, unrelated win metrics) would inflate that font's row height
 /// for no reason.
+///
+/// The gate is `any`, not `all`: some minimal Powerline patches ship only a
+/// subset of the four core separators (e.g. just the two solid triangles,
+/// omitting the angled variants, or vice-versa). Requiring *all four* would
+/// misclassify such a font as non-Nerd and strip the win-metrics headroom
+/// from the icon glyphs it *does* carry — clipping them. Any single core PUA
+/// separator is already a decisive Nerd-Font signal (ordinary fonts do not
+/// ship glyphs in this PUA range), so presence of any one is sufficient.
+///
+/// Note: the separators themselves (`U+E0B0`–`U+E0BF`) are now rendered
+/// procedurally (see `crate::gui::box_drawing`), so this probe is used purely
+/// as a *font-type signal* for the headroom decision — not because we depend
+/// on the font's own separator glyphs.
 fn has_powerline_glyphs(face: &LoadedFace) -> bool {
-    POWERLINE_CORE_GLYPHS.iter().all(|&c| face.has_glyph(c))
+    POWERLINE_CORE_GLYPHS.iter().any(|&c| face.has_glyph(c))
 }
 
 /// Decide the final cell height (rounded up to a whole pixel) and the
@@ -1751,10 +1890,18 @@ mod tests {
 
     #[test]
     fn emoji_face_falls_back_to_bundled_noto() {
-        // An empty font database has no system emoji font, so discovery must
-        // fall back to the bundled Noto face rather than returning None.
+        // An empty font database has no system emoji font, so source resolution
+        // must yield the bundled floor. Exercised via the uncached path
+        // (`best_system_emoji_source` + `load_emoji_face_from_source`) so this
+        // test does not depend on / mutate the process-global source cache.
         let empty_db = Database::new();
-        let face = discover_emoji_face(&empty_db).expect("must fall back to bundled Noto");
+        let source = best_system_emoji_source(&empty_db).unwrap_or(EmojiSource::Bundled);
+        assert_eq!(
+            source,
+            EmojiSource::Bundled,
+            "an empty db must resolve to the bundled floor"
+        );
+        let face = load_emoji_face_from_source(&source).expect("bundled floor must load");
         assert!(
             face.has_color_glyphs(),
             "the bundled fallback must be a color emoji face"
@@ -1772,13 +1919,14 @@ mod tests {
         );
     }
 
-    // --- Test 2d: `has_powerline_glyphs` requires the *whole* core set ---
+    // --- Test 2d: `has_powerline_glyphs` accepts a *partial* core set ---
     //
-    // Regression guard for the gating logic itself, independent of any real
-    // font file: a face missing even one of the four core Powerline
-    // separators must not be classified as a Nerd Font. We can't easily
-    // construct a synthetic swash face with an arbitrary partial charmap in
-    // a unit test, so this is exercised indirectly through
+    // Regression guard for the gating logic: a face carrying **any** of the
+    // four core Powerline separators must be classified as a Nerd Font, so a
+    // minimal/partial Powerline patch (e.g. only the two solid triangles) is
+    // not stripped of its win-metrics headroom. We can't easily construct a
+    // synthetic swash face with an arbitrary partial charmap in a unit test,
+    // so the downstream height decision is exercised through
     // `select_cell_height_and_top_pad`'s `is_nerd_font` parameter in the
     // synthetic tests below, which is exactly the boolean `has_powerline_glyphs`
     // feeds into.
