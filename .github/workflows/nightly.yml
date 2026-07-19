@@ -34,18 +34,35 @@ jobs:
         id: check
         run: |
           DATE=$(date -u +%Y%m%d)
-          TAG="nightly-${DATE}"
+          BASE_TAG="nightly-${DATE}"
+
+          # If a nightly tag for today already exists (e.g. the scheduled
+          # run already built one and this is a manual re-run after
+          # merging more changes), append an incrementing ".N" suffix so
+          # each same-day build gets its own unique tag/release instead of
+          # clobbering the previous one.
+          if git rev-parse -q --verify "refs/tags/${BASE_TAG}" >/dev/null; then
+            N=1
+            while git rev-parse -q --verify "refs/tags/${BASE_TAG}.${N}" >/dev/null; do
+              N=$((N + 1))
+            done
+            TAG="${BASE_TAG}.${N}"
+            SUFFIX=".${N}"
+          else
+            TAG="${BASE_TAG}"
+            SUFFIX=""
+          fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
           # Compute nightly version: read base from Cargo.toml, append
           # nightly suffix.  If the version already has a pre-release
-          # (e.g. 0.7.0-beta.1), append ".nightly.YYYYMMDD" to it;
-          # otherwise set it to "X.Y.Z-nightly.YYYYMMDD".
+          # (e.g. 0.7.0-beta.1), append ".nightly.YYYYMMDD[.N]" to it;
+          # otherwise set it to "X.Y.Z-nightly.YYYYMMDD[.N]".
           BASE_VERSION=$(grep -m1 '^version = "' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           if echo "$BASE_VERSION" | grep -q '-'; then
-            NIGHTLY_VERSION="${BASE_VERSION}.nightly.${DATE}"
+            NIGHTLY_VERSION="${BASE_VERSION}.nightly.${DATE}${SUFFIX}"
           else
-            NIGHTLY_VERSION="${BASE_VERSION}-nightly.${DATE}"
+            NIGHTLY_VERSION="${BASE_VERSION}-nightly.${DATE}${SUFFIX}"
           fi
           echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Nightly version: ${NIGHTLY_VERSION}"
@@ -334,10 +351,10 @@ jobs:
 
       - name: Create nightly tag
         run: |
+          # The tag is computed in check-changes with a ".N" suffix if a
+          # same-day tag already exists, so it is guaranteed unique here —
+          # no need to delete/overwrite a prior same-day tag or release.
           TAG="${{ needs.check-changes.outputs.tag }}"
-          # Delete the tag if it already exists (re-run on the same day).
-          git tag -d "$TAG" 2>/dev/null || true
-          git push origin ":refs/tags/$TAG" 2>/dev/null || true
           git tag "$TAG"
           git push origin "$TAG"
 
