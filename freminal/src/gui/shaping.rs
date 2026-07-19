@@ -985,14 +985,18 @@ mod tests {
         #[allow(clippy::cast_precision_loss)]
         let cell_w = fm.cell_width() as f32;
 
-        // U+1F600 (😀) should route to emoji face if available.
+        // U+1F600 (😀) must route to the emoji face. With the bundled Noto
+        // Color Emoji floor (Task #402) there is always an emoji face, so this
+        // is now deterministic rather than environment-dependent.
         let chars = vec![TChar::from('😀')];
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
+        assert!(
+            runs.iter().any(|r| r.face_id == FaceId::Emoji),
+            "emoji must resolve to FaceId::Emoji (bundled Noto floor guarantees one)"
+        );
 
-        // The run should have face_id == FaceId::Emoji (if system has an emoji font)
-        // or some system fallback.  Either way, shaping should succeed.
         let shaped = shape_runs(&runs, &fm, cell_w, false);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());

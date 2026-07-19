@@ -28,6 +28,11 @@ const PRIMARY_BOLD: &str = "freminal-primary-bold";
 const PRIMARY_ITALIC: &str = "freminal-primary-italic";
 const PRIMARY_BOLD_ITALIC: &str = "freminal-primary-bold-italic";
 
+// Bundled color emoji font name (Noto Color Emoji, OFL-1.1). Registered as the
+// lowest-priority emoji fallback so color emoji always render, even with no
+// system emoji font installed (Task #402).
+const BUNDLED_EMOJI: &str = "freminal-bundled-emoji";
+
 /// Configuration for the terminal font stack.
 ///
 /// Controls which font family is used as the primary face, the render size,
@@ -99,17 +104,23 @@ pub fn setup_font_files(ctx: &egui::Context, cfg: &FontConfig) -> FontDefinition
         try_load_user_primary_font(path_or_name, &mut defs);
     }
 
-    // 4. Emoji fallback (system, prioritized)
+    // 4. Emoji fallback (system emoji fonts, prioritized above the bundled
+    //    floor below).
     if cfg.enable_emoji_fallback {
         emoji_fonts::add_emoji_fallback(&mut defs);
     }
 
-    // 5. Last resort system fallback (disabled by default)
+    // 5. Bundled color emoji floor. Registered after the system emoji search so
+    //    a system emoji font (if any) is preferred, but color emoji still
+    //    render on systems with none installed (Task #402).
+    load_bundled_emoji_font(&mut defs);
+
+    // 6. Last resort system fallback (disabled by default)
     if cfg.enable_system_last_resort {
         system_fallback::add_last_resort_system_fonts(&mut defs);
     }
 
-    // 6. Register a placeholder "settings-preview" family pointing at the
+    // 7. Register a placeholder "settings-preview" family pointing at the
     //    bundled primary regular font.  This ensures that
     //    `FontFamily::Name("settings-preview")` is always valid — even before
     //    the settings modal loads a real preview font.  When the modal loads a
@@ -183,6 +194,18 @@ fn load_bundled_primary_fonts(defs: &mut FontDefinitions) {
     mono.insert(0, PRIMARY_REGULAR.to_owned());
 
     info!("Loaded bundled Freminal primary monospace font");
+}
+
+/// Register the bundled Noto Color Emoji font as the lowest-priority emoji
+/// fallback in every terminal font family, so color emoji render even when the
+/// system has no emoji font installed (Task #402).
+fn load_bundled_emoji_font(defs: &mut FontDefinitions) {
+    defs.font_data.insert(
+        BUNDLED_EMOJI.to_owned(),
+        FontData::from_static(include_bytes!("../../../res/NotoColorEmoji.ttf")).into(),
+    );
+    add_fallback_to_terminal_families(defs, BUNDLED_EMOJI);
+    info!("Loaded bundled Noto Color Emoji fallback");
 }
 
 // -------------------------------------------------------------------------------------------------
