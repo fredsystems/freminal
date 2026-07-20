@@ -101,6 +101,13 @@ impl Buffer {
     pub fn clear_all_image_placements(&mut self) {
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: an evicted (or Task-118 compact) row provably holds
+            // no image cells, so skip it — reading its cells would trip
+            // `cells_mut`'s eviction debug_assert (and needlessly decompact a
+            // compact row) for no possible clearing work.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell.has_image() {
@@ -123,6 +130,10 @@ impl Buffer {
     pub fn clear_image_placements_by_id(&mut self, image_id: u64) {
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell
@@ -157,6 +168,10 @@ impl Buffer {
     pub fn clear_image_placements_by_placement(&mut self, image_id: u64, placement_id: u32) {
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell
@@ -241,6 +256,10 @@ impl Buffer {
     pub fn clear_image_placements_by_number(&mut self, number: u32) {
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell
@@ -304,6 +323,10 @@ impl Buffer {
     pub fn clear_image_placements_in_column(&mut self, col: usize) {
         let mut ids_to_clear: Vec<u64> = Vec::new();
         for row in &self.rows {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let cells = row.cells();
             if col < cells.len()
                 && let Some(placement) = cells[col].image_placement()
@@ -407,6 +430,10 @@ impl Buffer {
 
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell
@@ -433,6 +460,10 @@ impl Buffer {
     pub fn clear_image_placements_by_z_index(&mut self, z: i32) {
         let mut cleared = 0usize;
         for (i, row) in self.rows.iter_mut().enumerate() {
+            // Task 119: skip evicted/compact rows — they hold no images.
+            if row.is_compact() || row.is_evicted() {
+                continue;
+            }
             let mut changed = false;
             for cell in row.cells_mut() {
                 if cell.image_placement().is_some_and(|p| p.z_index == z) {

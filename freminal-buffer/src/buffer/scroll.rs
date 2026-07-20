@@ -635,15 +635,25 @@ impl Buffer {
     pub fn scroll_up(&mut self) {
         // Deduct any image cells in the row about to be removed.
         self.image_cell_count -= self.rows[0].count_image_cells();
+        // Task 119: heal any lag before removing/pushing it in lockstep
+        // with `rows`/`row_cache` below (see `row_block_map`'s field doc).
+        self.sync_row_block_map_len();
         // remove topmost row (and its cache entry)
         self.rows.remove(0);
         self.row_cache.remove(0);
+        self.row_block_map.remove(0);
+        // The removed row may have been the last reference to a compressed
+        // block (this method is a whole-buffer row shift, unlike the
+        // bounded `enforce_scrollback_limit`/`erase_scrollback` drains, but
+        // the same reclaim applies).
+        self.gc_unreferenced_blocks();
 
         // add a new empty row at the bottom (BCE: fill with current SGR background)
         let mut new_row = Row::new(self.width);
         new_row.fill_with_tag(&self.current_tag);
         self.rows.push(new_row);
         self.row_cache.push(None);
+        self.row_block_map.push(None);
 
         // DO NOT move the cursor in alternate buffer
         if self.kind == BufferType::Primary {
@@ -672,8 +682,19 @@ impl Buffer {
                     .sum();
                 self.image_cell_count -= drained_images;
             }
+            // Task 119: heal any lag *before* any of the three parallel
+            // vecs are drained (sync depends on `self.rows.len()`, so it
+            // must run while that still reflects the pre-drain length).
+            self.sync_row_block_map_len();
             self.rows.drain(0..visible_start);
             self.row_cache.drain(0..visible_start);
+            // Every compressed block only ever holds rows from scrollback
+            // (never the visible window), so wiping all of scrollback here
+            // always makes every block fully unreferenced — clear
+            // `self.blocks` outright rather than the general-purpose
+            // (slightly more expensive) `gc_unreferenced_blocks` scan.
+            self.row_block_map.drain(0..visible_start);
+            self.blocks.clear();
             self.adjust_prompt_rows(visible_start);
 
             // Adjust cursor

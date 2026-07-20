@@ -6,7 +6,7 @@
 //! Buffer construction, reset, prompt-row tracking, and internal invariant
 //! checking for [`Buffer`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
 
 use freminal_common::buffer_states::{
@@ -44,6 +44,7 @@ impl Buffer {
         // blank rows instead of the actual content at the top.
         let rows = vec![Row::new(width)];
         let row_cache = vec![None];
+        let row_block_map = vec![None];
 
         Self {
             rows,
@@ -74,6 +75,10 @@ impl Buffer {
             image_cell_count: 0,
             prompt_rows: Vec::new(),
             command_blocks: VecDeque::new(),
+            blocks: HashMap::new(),
+            next_block_id: 0,
+            row_block_map,
+            decompress_scratch: Vec::new(),
         }
     }
 
@@ -92,6 +97,12 @@ impl Buffer {
     pub fn full_reset(&mut self) {
         self.rows = vec![Row::new(self.width)];
         self.row_cache = vec![None];
+        // Task 119: discard every compressed block and reset the per-row
+        // map/id counter in lockstep with the row reset above — a full
+        // reset wipes all scrollback, so no compressed content survives it.
+        self.blocks.clear();
+        self.next_block_id = 0;
+        self.row_block_map = vec![None];
         self.cursor = CursorState::default();
         self.current_tag = FormatTag::default();
         self.kind = BufferType::Primary;
@@ -381,6 +392,27 @@ impl Buffer {
             self.rows.len()
         );
 
+        // Task 119: `row_block_map` must be index-parallel to `rows`, same
+        // as `row_cache` above, with one deliberate relaxation: unlike
+        // `row_cache`, it may transiently lag *shorter* immediately after a
+        // handful of row-append call sites outside the compression
+        // subsystem run (three in `lines.rs`, two test-only ones in
+        // `lifecycle.rs` — see the field doc on `Buffer::row_block_map`).
+        // Every mutating entry point this module owns keeps it eagerly in
+        // sync; the few call sites that don't are always simple appends of
+        // a fresh, never-compressed row, and `Buffer::sync_row_block_map_len`
+        // pads the gap with `None` (the exactly-correct value) the next
+        // time compression code touches it. A strict `==` here would fire
+        // on that entirely benign, self-healing lag. It must never be
+        // *longer* than `rows`: nothing removes rows without also
+        // shrinking `row_block_map` in this module.
+        debug_assert!(
+            self.row_block_map.len() <= self.rows.len(),
+            "row_block_map length {} must never exceed rows length {}",
+            self.row_block_map.len(),
+            self.rows.len()
+        );
+
         // Image cell count must match the actual number of image cells across
         // all rows.  This is O(rows × cols) but only runs in debug builds.
         let actual_image_cells: usize = self.rows.iter().map(Row::count_image_cells).sum();
@@ -407,6 +439,7 @@ impl Buffer {
         // non-default background instead of being transparent.
         self.rows.push(row);
         self.row_cache.push(None);
+        self.row_block_map.push(None);
     }
 }
 
