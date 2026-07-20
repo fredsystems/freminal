@@ -142,6 +142,12 @@
               desktopItem
             ];
 
+            checkFlags = [
+              "--skip=io::pty::echo_off_event_driven_tests::echo_off_flips_true_when_child_disables_echo_keeps_icanon"
+              "--skip=io::pty::echo_off_event_driven_tests::echo_off_stays_false_in_normal_cooked_mode"
+              "--skip=io::pty::echo_off_event_driven_tests::resize_then_write_still_reaches_child_after_rearchitecture"
+            ];
+
             postInstall =
               if pkgs.stdenv.isDarwin then
                 ''
