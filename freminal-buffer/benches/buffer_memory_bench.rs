@@ -262,6 +262,21 @@ fn settle_idle_compaction(buf: &mut Buffer) {
     let _ = buf.compact_idle_scrollback(usize::MAX);
 }
 
+/// Run idle scrollback compaction AND compression to completion, modelling
+/// the fully-settled state a real terminal reaches once the PTY thread's
+/// idle tick has both compacted (Task 118) and then compressed (Task 119)
+/// every eligible cold scrollback row into LZ4 blocks.
+///
+/// Mirrors the ordering the live idle tick enforces
+/// (`freminal/src/gui/pty.rs`): compaction must catch up before compression
+/// has anything eligible to compress, so `compact_idle_scrollback` is always
+/// called first. This is the number the Task 119 "flat + LZ4" plan table
+/// (`Documents/PLAN_VERSION_120.md` ~851-855) is measured against.
+fn settle_idle_compression(buf: &mut Buffer) {
+    let _ = buf.compact_idle_scrollback(usize::MAX);
+    let _ = buf.compress_idle_scrollback(usize::MAX);
+}
+
 /// Print one labelled memory report block for a buffer in whatever cache state
 /// the caller has already established. Returns bytes/scrollback-line.
 ///
@@ -274,7 +289,15 @@ fn settle_idle_compaction(buf: &mut Buffer) {
 /// allocator-retention class of bug — is visible rather than hidden.
 fn report_block(label: &str, state: &str, buf: &Buffer) -> usize {
     let breakdown = buf.heap_bytes();
-    let total_bytes = breakdown.rows_bytes + breakdown.row_cache_bytes + breakdown.url_bytes;
+    // `blocks_bytes` (Task 119 — Scrollback Compression) is the resident
+    // cost of LZ4-compressed blocks evicted out of `rows_bytes`; including it
+    // here is what makes this report reflect the compression win rather than
+    // just showing `rows_bytes` drop to ~0 for evicted rows with their real
+    // content now invisible to the accounting.
+    let total_bytes = breakdown.rows_bytes
+        + breakdown.row_cache_bytes
+        + breakdown.url_bytes
+        + breakdown.blocks_bytes;
     let bytes_per_scrollback_line = total_bytes
         .checked_div(breakdown.scrollback_lines)
         .unwrap_or(0);
@@ -290,6 +313,7 @@ fn report_block(label: &str, state: &str, buf: &Buffer) -> usize {
     println!(" rows_bytes          : {}", breakdown.rows_bytes);
     println!(" row_cache_bytes     : {}", breakdown.row_cache_bytes);
     println!(" url_bytes           : {}", breakdown.url_bytes);
+    println!(" blocks_bytes        : {}", breakdown.blocks_bytes);
     println!(" total_bytes         : {total_bytes}");
     println!(" bytes/scrollback_ln : {bytes_per_scrollback_line}");
     match rss {
@@ -301,7 +325,7 @@ fn report_block(label: &str, state: &str, buf: &Buffer) -> usize {
     bytes_per_scrollback_line
 }
 
-/// Print the three-state memory report for one corpus.
+/// Print the four-state memory report for one corpus.
 ///
 /// Each phase builds its OWN buffer and drops it before the next, so buffers
 /// never coexist — otherwise their allocations would accumulate and confound
@@ -343,9 +367,28 @@ fn print_report(label: &str, build: impl Fn() -> Buffer) {
         (bpl, process_rss_bytes())
     };
 
-    // (3) SETTLED + post-search — Ctrl-F full-scrollback flatten on the settled
-    //     buffer; eviction (Task 118.4) reclaims the transient copies, so this
-    //     returns to the settled number.
+    // (3) FULLY COMPRESSED — idle compaction AND idle compression (Task 119)
+    //     have both run to completion, then the render path warms the visible
+    //     window (scrollback stays compressed; only the visible window is
+    //     touched, mirroring steady-state rendering). This is the "flat + LZ4"
+    //     number from the Task 119 feasibility-spike table
+    //     (`Documents/PLAN_VERSION_120.md` ~851-855) made measurable.
+    let (compressed_bpl, rss_compressed) = {
+        let mut compressed = build();
+        settle_idle_compression(&mut compressed);
+        warm_steady_state(&mut compressed);
+        let bpl = report_block(
+            label,
+            "settled + compressed (post-idle-compression)",
+            &compressed,
+        );
+        trim_allocator();
+        (bpl, process_rss_bytes())
+    };
+
+    // (4) SETTLED + post-search — Ctrl-F full-scrollback flatten on the settled
+    //     (compaction-only) buffer; eviction (Task 118.4) reclaims the
+    //     transient copies, so this returns to the settled number.
     let search_bpl = {
         let mut searched = build();
         settle_idle_compaction(&mut searched);
@@ -359,10 +402,17 @@ fn print_report(label: &str, build: impl Fn() -> Buffer) {
         }
         _ => "n/a".to_string(),
     };
+    let rss_delta_compressed = match (rss_before, rss_compressed) {
+        (Some(before), Some(compressed)) => {
+            format!("{} MB", compressed.saturating_sub(before) / 1_000_000)
+        }
+        _ => "n/a".to_string(),
+    };
 
     println!(
         " -> {label}: fresh(pre-idle) {fresh_bpl} B/line, settled {settled_bpl} B/line, \
-         settled+search {search_bpl} B/line, settled RSS delta {rss_delta}\n"
+         settled+compressed {compressed_bpl} B/line, settled+search {search_bpl} B/line, \
+         settled RSS delta {rss_delta}, settled+compressed RSS delta {rss_delta_compressed}\n"
     );
 }
 

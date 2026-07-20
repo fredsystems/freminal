@@ -245,6 +245,14 @@ impl Buffer {
             image_cell_count: saved.image_cell_count,
             prompt_rows: Vec::new(),
             command_blocks: VecDeque::new(),
+            // Task 119: carried through so a resize while on the alternate
+            // screen (which reflows/enforces-scrollback-limit against this
+            // throwaway `Buffer`, not `self`) keeps any compressed primary
+            // scrollback blocks correctly in lockstep.
+            blocks: saved.blocks,
+            next_block_id: saved.next_block_id,
+            row_block_map: saved.row_block_map,
+            decompress_scratch: Vec::new(),
         };
 
         let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);
@@ -262,6 +270,9 @@ impl Buffer {
             saved_cursor: tmp.saved_cursor,
             image_store: tmp.image_store,
             image_cell_count: tmp.image_cell_count,
+            blocks: tmp.blocks,
+            next_block_id: tmp.next_block_id,
+            row_block_map: tmp.row_block_map,
         }
     }
 
@@ -301,6 +312,15 @@ impl Buffer {
             return;
         }
 
+        // Task 119.4: restore every deep-cold compressed row across the
+        // WHOLE buffer back to real (Task-118 `Compact`) content before the
+        // reflow algorithm below reads any cell. This is deliberately the
+        // slow-but-correct decompress-everything path — the existing
+        // synchronous reflow must keep working correctly with compressed
+        // scrollback present; making this fast (only decompressing the
+        // bands reflow actually needs) is Task 120's job, not this one's.
+        self.ensure_decompressed(0..self.rows.len());
+
         let old_cursor_y = self.cursor.pos.y;
         let old_cursor_x = self.cursor.pos.x;
 
@@ -310,7 +330,9 @@ impl Buffer {
 
         // Note: reflow reads each row's cells exactly once via the flatten
         // loop below (`row.characters()`), which decompacts lazily on that
-        // single read, so no up-front `ensure_live` pass is needed.
+        // single read, so no up-front `ensure_live` pass is needed. Every
+        // row is now guaranteed to be `Live` or Task-118 `Compact` (never
+        // evicted) thanks to the `ensure_decompressed` call above.
 
         // 1) Group rows into logical lines based on RowJoin.
         //    While grouping, identify which logical line contains the cursor
@@ -592,6 +614,12 @@ impl Buffer {
         // All rows are freshly constructed (dirty=true by construction), so
         // the entire cache is invalid.  Reset it to match the new row count.
         self.row_cache = vec![None; self.rows.len()];
+        // Every new row is freshly built `Live` content (never compressed);
+        // the `ensure_decompressed` call at the top of this function already
+        // decompressed everything the old `self.rows` referenced, so
+        // `self.blocks` is empty here — reset `row_block_map` to match the
+        // new row count (Task 119.4).
+        self.row_block_map = vec![None; self.rows.len()];
         self.width = new_width;
         // Reflow rebuilds all rows from scratch; recount image cells so the
         // counter stays accurate regardless of how reflow may have clipped or
@@ -726,6 +754,7 @@ impl Buffer {
                 for _ in 0..grow {
                     self.rows.push(Row::new(self.width));
                     self.row_cache.push(None);
+                    self.row_block_map.push(None);
                 }
             } else {
                 // Primary buffer: the visible window is anchored to the BOTTOM
@@ -801,8 +830,15 @@ impl Buffer {
                             self.rows[..excess].iter().map(Row::count_image_cells).sum();
                         self.image_cell_count -= drained_images;
                     }
+                    // The alternate screen never accumulates scrollback and
+                    // so never compresses anything, but keep
+                    // `row_block_map` index-parallel regardless (Task 119).
+                    // Sync *before* draining `rows` (sync depends on the
+                    // pre-drain `rows.len()`).
+                    self.sync_row_block_map_len();
                     self.rows.drain(0..excess);
                     self.row_cache.drain(0..excess);
+                    self.row_block_map.drain(0..excess);
                     self.adjust_prompt_rows(excess);
                     // Adjust cursor Y for the removed rows.
                     self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
@@ -854,15 +890,20 @@ impl Buffer {
     /// stops at the first non-pristine row from the bottom, so it never touches
     /// BCE-filled rows, content, or scrollback.
     fn reclaim_trailing_blank_padding(&mut self) {
+        // Task 119: heal any lag (see the field doc on `row_block_map`)
+        // before popping it in lockstep with `rows`/`row_cache` below.
+        self.sync_row_block_map_len();
         while self.rows.len() > self.cursor.pos.y + 1 {
             // Safe: loop guard guarantees rows.len() >= 2 here.
             let Some(last) = self.rows.last() else { break };
             if last.origin == RowOrigin::ScrollFill && last.characters().is_empty() {
                 // A pristine ScrollFill row has no cells, so it holds no image
                 // cells; image_cell_count needs no adjustment.  Keep row_cache
-                // length in lockstep with rows.
+                // (and row_block_map — always `None` here, these rows are
+                // never compressed) in lockstep with rows.
                 self.rows.pop();
                 self.row_cache.pop();
+                self.row_block_map.pop();
             } else {
                 break;
             }
@@ -923,8 +964,16 @@ impl Buffer {
         // out all their scrollback, snap them to live view.
         let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
+        // Task 119: heal any lag in `row_block_map` (see its field doc)
+        // before draining it in lockstep with `rows`/`row_cache` below.
+        self.sync_row_block_map_len();
+
         // --- Drop the oldest rows (and their cache entries) ---
         // First, account for any image cells in the rows being drained.
+        // `Row::count_image_cells` already short-circuits for both
+        // Task-118 compact rows and Task-119 evicted (compressed) rows
+        // without decompacting/decompressing, since neither can ever hold
+        // an image cell.
         if self.image_cell_count > 0 {
             let drained_images: usize = self.rows[..overflow]
                 .iter()
@@ -934,6 +983,15 @@ impl Buffer {
         }
         self.rows.drain(0..overflow);
         self.row_cache.drain(0..overflow);
+        // `offset_in_block` is block-relative, not buffer-absolute (see
+        // `BlockRowRef`'s doc), so draining the front of `row_block_map`
+        // needs no index remapping — surviving rows keep referencing the
+        // same block at the same in-block offset.
+        self.row_block_map.drain(0..overflow);
+        // A block whose every row was just drained is now unreferenced;
+        // reclaim it immediately rather than leaking it in `self.blocks`
+        // forever (Task 119.4).
+        self.gc_unreferenced_blocks();
         self.adjust_prompt_rows(overflow);
 
         // --- Garbage-collect images no longer referenced by any row ---
@@ -1074,6 +1132,16 @@ impl Buffer {
         }
 
         // Save primary state (rows + cursor + scroll_offset + cache).
+        // Task 119: also move `blocks`/`row_block_map` over verbatim — the
+        // alternate screen never accumulates scrollback and so never
+        // compresses anything, so it starts (and stays) with an empty
+        // `blocks` map and an all-`None` `row_block_map`.
+        // `next_block_id` is a buffer-wide monotonic counter, not something
+        // that is meaningfully "primary" or "alternate"; it is saved here
+        // purely so `resize_saved_primary`'s reconstructed temporary
+        // `Buffer` has a value to use, not because the alternate screen
+        // ever advances it (it can't: `compress_scrollback_block` always
+        // no-ops there — no scrollback exists to compress).
         let saved = SavedPrimaryState {
             rows: self.rows.clone(),
             row_cache: self.row_cache.clone(),
@@ -1087,6 +1155,9 @@ impl Buffer {
             saved_cursor: self.saved_cursor.clone(),
             image_store: self.image_store.clone(),
             image_cell_count: self.image_cell_count,
+            blocks: std::mem::take(&mut self.blocks),
+            next_block_id: self.next_block_id,
+            row_block_map: std::mem::take(&mut self.row_block_map),
         };
         self.saved_primary = Some(saved);
 
@@ -1096,6 +1167,7 @@ impl Buffer {
         // Fresh screen: exactly `height` empty rows, all dirty (None cache entries).
         self.rows = vec![Row::new(self.width); self.height];
         self.row_cache = vec![None; self.height];
+        self.row_block_map = vec![None; self.height];
 
         // Alternate screen has no images.
         self.image_store.clear();
@@ -1141,6 +1213,9 @@ impl Buffer {
             self.saved_cursor = saved.saved_cursor;
             self.image_store = saved.image_store;
             self.image_cell_count = saved.image_cell_count;
+            self.blocks = saved.blocks;
+            self.next_block_id = saved.next_block_id;
+            self.row_block_map = saved.row_block_map;
 
             self.debug_assert_invariants();
             restored_offset

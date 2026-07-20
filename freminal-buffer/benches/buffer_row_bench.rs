@@ -6,7 +6,10 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use freminal_buffer::buffer::Buffer;
+use freminal_buffer::compact_row::CompactRow;
+use freminal_buffer::compressed_block::CompressedBlock;
 use freminal_buffer::image_store::{AnimationControl, ImageSizeMode, ImageStore, InlineImage};
+use freminal_buffer::row::Row;
 use freminal_common::buffer_states::{
     cursor::StateColors,
     fonts::{FontDecorationFlags, FontWeight},
@@ -719,6 +722,238 @@ fn bench_image_store_insert_at_quota(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: CompressedBlock compress/decompress round trip (Task 119.6)
+//
+// Builds a representative 256-row, ~120-col block of colored content (the
+// "shell session" style bracket from the Task 119 feasibility spike — many
+// rows sharing structure with a handful of color changes) and separately
+// measures CompressedBlock::from_rows (compress) and decompress_into
+// (decompress). Used to justify the IDLE_COMPRESSION_BUDGET tuning in
+// freminal/src/gui/pty.rs: per-block decompress cost must stay well under
+// one 16.6ms frame (plan target: ~34µs/256-line block at LZ4 speed).
+// ---------------------------------------------------------------
+fn build_representative_compact_block(rows: usize, width: usize) -> Vec<CompactRow> {
+    let colors = [
+        TerminalColor::Custom(0, 200, 0),
+        TerminalColor::Custom(200, 200, 0),
+        TerminalColor::Default,
+    ];
+
+    (0..rows)
+        .map(|i| {
+            let mut row = Row::new(width);
+            let color = colors[i % colors.len()];
+            let tag = FormatTag {
+                start: 0,
+                end: usize::MAX,
+                colors: StateColors {
+                    color,
+                    ..StateColors::default()
+                },
+                ..FormatTag::default()
+            };
+            let text = format!("scrollback line {i:06} of representative shell output data");
+            let chars: Vec<TChar> = text.bytes().cycle().take(width).map(TChar::Ascii).collect();
+            row.insert_text(0, &chars, &tag);
+            CompactRow::from_row(&row).expect("row should be compactable")
+        })
+        .collect()
+}
+
+fn bench_compressed_block_round_trip(c: &mut Criterion) {
+    const ROWS: usize = 256;
+    const WIDTH: usize = 120;
+
+    let compact_rows = build_representative_compact_block(ROWS, WIDTH);
+
+    let mut group = c.benchmark_group("bench_compressed_block_round_trip");
+    group.throughput(Throughput::Elements(ROWS as u64));
+
+    group.bench_function(BenchmarkId::new("compress", ROWS), |b| {
+        b.iter(|| {
+            std::hint::black_box(CompressedBlock::from_rows(&compact_rows));
+        });
+    });
+
+    let block = CompressedBlock::from_rows(&compact_rows);
+    let mut scratch = Vec::new();
+    group.bench_function(BenchmarkId::new("decompress", ROWS), |b| {
+        b.iter(|| {
+            std::hint::black_box(block.decompress_into(&mut scratch));
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: scrolling into a compressed scrollback region (Task 119.6)
+//
+// Builds a buffer whose entire scrollback has been Task-118-compacted and
+// Task-119-compressed (mirroring the idle-tick's settled state), then
+// measures the real decompress-on-scroll cost paid by a flatten that
+// touches the compressed region. Each iteration rebuilds the compressed
+// buffer from scratch (`iter_batched` + `BatchSize::LargeInput`) because
+// decompression mutates state (single residency — Buffer::ensure_decompressed
+// restores rows to Compact and empties `self.blocks`), so a stale
+// already-decompressed buffer would not measure the cold path a second time.
+// ---------------------------------------------------------------
+fn build_compressed_scrollback_buffer() -> Buffer {
+    let total_lines = 1024 + 24;
+    let mut data = Vec::with_capacity(total_lines * 81);
+    for _ in 0..total_lines {
+        for _ in 0..80 {
+            data.push(TChar::Ascii(b'x'));
+        }
+        data.push(TChar::NewLine);
+    }
+    let mut buf = Buffer::new(80, 24);
+    buf.insert_text(&data);
+    let _ = buf.compact_idle_scrollback(usize::MAX);
+    let _ = buf.compress_idle_scrollback(usize::MAX);
+    buf
+}
+
+fn bench_scroll_into_compressed_region(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_scroll_into_compressed_region");
+    group.throughput(Throughput::Elements(1024 * 80));
+
+    group.bench_function("scrollback_flatten_1024_compressed_rows", |b| {
+        b.iter_batched(
+            build_compressed_scrollback_buffer,
+            |mut buf| {
+                std::hint::black_box(buf.scrollback_as_tchars_and_tags(0));
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    // Also measure the GUI's actual scroll path: a scrolled-back visible
+    // window flatten (the path `scrolled_visible_window_flatten_decompresses_compressed_rows`
+    // in `buffer/compression.rs` regression-tests for correctness) reaching
+    // all the way into the compressed region.
+    group.bench_function("visible_flatten_scrolled_into_compressed", |b| {
+        b.iter_batched(
+            build_compressed_scrollback_buffer,
+            |mut buf| {
+                let max_offset = buf.max_scroll_offset();
+                std::hint::black_box(buf.visible_as_tchars_and_tags(max_offset));
+            },
+            BatchSize::LargeInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: absolute per-idle-tick cost of the budgeted background work
+// (Task 119 follow-up tuning).
+//
+// These measure the CPU cost of ONE real idle tick's worth of work, in
+// isolation, at the SAME per-tick budgets production uses in
+// `freminal/src/gui/pty.rs`. The point is an ABSOLUTE time figure (µs to
+// process one tick's rows), not a wall-clock CPU% on the dev box: a machine
+// Nx slower simply multiplies the measured µs by N, and the justification for
+// the budgets is that even Nx that figure stays far below the 100ms idle-tick
+// interval, so a full-scrollback catch-up burst never stalls the PTY tick loop
+// or pegs a core on modest hardware.
+//
+// The two budgets differ (matching production): compaction runs 1024 rows/tick,
+// compression 4096 rows/tick. Each bench uses its own production budget so its
+// result is directly "one real tick" — no mental scaling needed.
+//
+// Each iteration rebuilds fresh state (`iter_batched` + `BatchSize::LargeInput`)
+// because both operations mutate the buffer (compaction converts Live -> Compact;
+// compression evicts Compact -> block with single residency), so a second call
+// on the same buffer would find less/no work.
+// ---------------------------------------------------------------
+
+/// Matches `IDLE_COMPACTION_BUDGET` in `freminal/src/gui/pty.rs`, so
+/// `bench_idle_compaction_tick` measures exactly one production compaction
+/// tick's worth of work.
+const IDLE_COMPACTION_BUDGET_BENCH: usize = 1024;
+
+/// Matches `IDLE_COMPRESSION_BUDGET` in `freminal/src/gui/pty.rs`, so
+/// `bench_idle_compression_tick` measures exactly one production compression
+/// tick's worth of work (16 blocks of 256 rows).
+const IDLE_COMPRESSION_BUDGET_BENCH: usize = 4096;
+
+/// Build a buffer with `scrollback_rows` rows of representative ~120-col
+/// content, all still `Live` (not compacted) — the worst case a compaction
+/// tick faces.
+fn build_live_scrollback_buffer(scrollback_rows: usize) -> Buffer {
+    const WIDTH: usize = 120;
+    // + a screen's worth so the visible window sits below the scrollback we
+    // want compacted.
+    let total_lines = scrollback_rows + 24;
+    let mut data = Vec::with_capacity(total_lines * (WIDTH + 1));
+    for i in 0..total_lines {
+        let text = format!("scrollback line {i:06} of representative shell output data");
+        for b in text.bytes().cycle().take(WIDTH) {
+            data.push(TChar::Ascii(b));
+        }
+        data.push(TChar::NewLine);
+    }
+    let mut buf = Buffer::new(WIDTH, 24);
+    buf.insert_text(&data);
+    buf
+}
+
+fn bench_idle_compaction_tick(c: &mut Criterion) {
+    // Twice the budget of all-Live scrollback rows so a full budget's worth of
+    // work is available for the tick under test.
+    let scrollback_rows = 2 * IDLE_COMPACTION_BUDGET_BENCH;
+
+    let mut group = c.benchmark_group("bench_idle_compaction_tick");
+    group.throughput(Throughput::Elements(IDLE_COMPACTION_BUDGET_BENCH as u64));
+    group.bench_function(
+        BenchmarkId::new("compact", IDLE_COMPACTION_BUDGET_BENCH),
+        |b| {
+            b.iter_batched(
+                || build_live_scrollback_buffer(scrollback_rows),
+                |mut buf| {
+                    std::hint::black_box(buf.compact_idle_scrollback(IDLE_COMPACTION_BUDGET_BENCH));
+                },
+                BatchSize::LargeInput,
+            );
+        },
+    );
+    group.finish();
+}
+
+fn bench_idle_compression_tick(c: &mut Criterion) {
+    // Twice the budget of fully-compacted (but uncompressed) scrollback rows so
+    // a full compression tick's worth of work (16 blocks of 256 rows) exists.
+    let scrollback_rows = 2 * IDLE_COMPRESSION_BUDGET_BENCH;
+
+    let mut group = c.benchmark_group("bench_idle_compression_tick");
+    group.throughput(Throughput::Elements(IDLE_COMPRESSION_BUDGET_BENCH as u64));
+    group.bench_function(
+        BenchmarkId::new("compress", IDLE_COMPRESSION_BUDGET_BENCH),
+        |b| {
+            b.iter_batched(
+                || {
+                    let mut buf = build_live_scrollback_buffer(scrollback_rows);
+                    // Fully compact first: compression only touches already-compact
+                    // rows, so the tick under test starts from the settled-compact
+                    // state the real idle loop reaches before compressing.
+                    let _ = buf.compact_idle_scrollback(usize::MAX);
+                    buf
+                },
+                |mut buf| {
+                    std::hint::black_box(
+                        buf.compress_idle_scrollback(IDLE_COMPRESSION_BUDGET_BENCH),
+                    );
+                },
+                BatchSize::LargeInput,
+            );
+        },
+    );
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -744,6 +979,10 @@ criterion_group!(
         bench_erase_display_bce,
         bench_command_block_record,
         bench_image_store_insert_at_quota,
+        bench_compressed_block_round_trip,
+        bench_scroll_into_compressed_region,
+        bench_idle_compaction_tick,
+        bench_idle_compression_tick,
 );
 
 criterion_main!(benches);

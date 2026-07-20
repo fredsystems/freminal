@@ -141,6 +141,13 @@ impl Buffer {
         extra_rows: usize,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, extra_rows);
+        // Task 119: when the user scrolls back, this window can reach into
+        // compressed scrollback (a nonzero `scroll_offset` lowers
+        // `visible_window_start`). Decompress any evicted rows in the window
+        // before reading their cells, so `flatten_row` never touches an
+        // evicted placeholder. A no-op when nothing in the window is
+        // compressed (the common live-view case).
+        self.ensure_decompressed(visible_start..visible_end);
         let auto_detect = self.auto_detect_urls;
         Self::rows_as_tchars_and_tags_cached(
             &mut self.rows[visible_start..visible_end],
@@ -172,6 +179,12 @@ impl Buffer {
             // No scrollback rows exist yet.
             return (vec![], vec![], vec![], vec![]);
         }
+
+        // Task 119.4: restore any deep-cold compressed rows in this range
+        // back to real (Task-118 `Compact`) content before flattening. This
+        // is the decompress-on-read seam — the visible window (never
+        // reached here) never needs it.
+        self.ensure_decompressed(0..visible_start);
 
         let auto_detect = self.auto_detect_urls;
         let result = Self::rows_as_tchars_and_tags_cached(
@@ -515,8 +528,11 @@ impl Buffer {
         let mut result = String::new();
 
         for row_idx in start_row..=end_row {
-            let row = &self.rows[row_idx];
-            let cells = row.characters();
+            // Task 119.4: `extract_text` takes `&self`, so it cannot call
+            // `ensure_decompressed` (which needs `&mut self`). A row
+            // evicted to a compressed block is resolved via a transient,
+            // non-mutating peek instead — see `row_cells_for_read`.
+            let cells = self.row_cells_for_read(row_idx);
 
             let col_begin = if row_idx == start_row { start_col } else { 0 };
             let col_end = if row_idx == end_row {
@@ -580,8 +596,10 @@ impl Buffer {
         let mut result = String::new();
 
         for row_idx in start_row..=end_row {
-            let row = &self.rows[row_idx];
-            let cells = row.characters();
+            // Task 119.4: see the matching comment in `extract_text` — this
+            // also takes `&self` and must resolve an evicted row without
+            // mutating `Buffer` state.
+            let cells = self.row_cells_for_read(row_idx);
 
             let mut row_text = String::new();
             for col in col_min..=col_max {

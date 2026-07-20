@@ -133,6 +133,26 @@ pub struct Row {
     /// current cursor row.  This is a rendering attribute only — the renderer
     /// uses it to apply per-row glyph scaling in the vertex builder.
     pub line_width: LineWidth,
+    /// Diagnostic marker (Task 119 — Scrollback Compression): `true` when
+    /// this row's real content has been moved out into a
+    /// [`crate::compressed_block::CompressedBlock`] by
+    /// `Buffer::compress_scrollback_block`, leaving `storage` as an inert
+    /// blank placeholder (always [`RowStorage::Live`] with an empty
+    /// `Vec<Cell>`) that preserves `width`/`origin`/`join`/`line_width` but
+    /// carries no real cell data.
+    ///
+    /// This is deliberately **not** a third [`RowStorage`] variant: `Row`
+    /// itself has no access to `Buffer`'s block store, so it cannot
+    /// self-decompress. The flag exists purely so the read-only accessors
+    /// (`cells()`/`characters()`/`cells_mut()`, via [`Row::cells_ref`] /
+    /// [`Row::cells_vec_mut`]) `debug_assert!` on an accidental direct read
+    /// instead of silently returning blank content — the caller must go
+    /// through `Buffer::ensure_decompressed` first. See
+    /// [`Row::cells_for_image_scan`] for the one accessor that
+    /// deliberately does **not** assert (evicted rows, like compact rows,
+    /// are guaranteed to hold zero images, so whole-buffer image-scan
+    /// passes may safely see an empty slice for them without restoring).
+    evicted_to_block: bool,
 }
 
 impl Row {
@@ -146,6 +166,7 @@ impl Row {
             join: RowJoin::NewLogicalLine,
             dirty: true,
             line_width: LineWidth::Normal,
+            evicted_to_block: false,
         }
     }
 
@@ -159,6 +180,7 @@ impl Row {
             join,
             dirty: true,
             line_width: LineWidth::Normal,
+            evicted_to_block: false,
         }
     }
 
@@ -180,6 +202,7 @@ impl Row {
             join,
             dirty: true,
             line_width: LineWidth::Normal,
+            evicted_to_block: false,
         }
     }
 
@@ -197,6 +220,11 @@ impl Row {
     /// funnels through this (directly, or via [`Row::ensure_live`] /
     /// [`Row::cells_mut`]).
     fn cells_vec_mut(&mut self) -> &mut Vec<Cell> {
+        debug_assert!(
+            !self.evicted_to_block,
+            "mutable read of a row whose content is evicted to a compressed block; \
+             call Buffer::ensure_decompressed first"
+        );
         if let RowStorage::Compact {
             compact,
             decompacted,
@@ -225,6 +253,11 @@ impl Row {
     /// first read. This does not change [`Row::is_compact`]'s answer, and
     /// does not touch `dirty`/`origin`/`join`/`line_width`.
     fn cells_ref(&self) -> &Vec<Cell> {
+        debug_assert!(
+            !self.evicted_to_block,
+            "read of a row whose content is evicted to a compressed block; \
+             call Buffer::ensure_decompressed first"
+        );
         match &self.storage {
             RowStorage::Live(cells) => cells,
             RowStorage::Compact {
@@ -283,6 +316,84 @@ impl Row {
             decompacted: OnceCell::new(),
         };
         true
+    }
+
+    /// Returns `true` if this row's content currently lives only inside a
+    /// [`crate::compressed_block::CompressedBlock`] (Task 119 — Scrollback
+    /// Compression), leaving `storage` as an inert blank placeholder.
+    ///
+    /// See the [`Row::evicted_to_block`](Row) field doc for the full
+    /// rationale. Mirrors [`Row::is_compact`]'s "storage representation,
+    /// not whether data has been read" contract.
+    #[must_use]
+    pub const fn is_evicted(&self) -> bool {
+        self.evicted_to_block
+    }
+
+    /// Borrow this row's [`CompactRow`] **without** decompacting it, or
+    /// `None` if the row is not currently [`Row::is_compact`].
+    ///
+    /// Used by `Buffer::compress_scrollback_block` to read a compact
+    /// scrollback row's already-run-length-encoded content directly, so
+    /// building a [`crate::compressed_block::CompressedBlock`] never has to
+    /// materialize a full `Vec<Cell>` just to immediately re-encode it.
+    #[must_use]
+    pub(crate) const fn as_compact(&self) -> Option<&CompactRow> {
+        match &self.storage {
+            RowStorage::Compact { compact, .. } => Some(compact),
+            RowStorage::Live(_) => None,
+        }
+    }
+
+    /// Move this row's content out to a compressed block (Task 119 —
+    /// Scrollback Compression), replacing `storage` with an inert blank
+    /// placeholder and setting [`Row::is_evicted`].
+    ///
+    /// Only ever called by `Buffer::compress_scrollback_block` on a row that
+    /// is already [`Row::is_compact`] (never mutated in place — the caller
+    /// has already copied the row's [`CompactRow`] into the new
+    /// [`crate::compressed_block::CompressedBlock`] before calling this).
+    /// `width`/`origin`/`join`/`line_width`/`dirty` are left untouched: they
+    /// are ordinary `Row` fields, not part of `storage`, and remain exactly
+    /// correct for the eventual restore via [`Row::restore_from_compact`].
+    pub(crate) fn evict_to_block(&mut self) {
+        self.storage = RowStorage::Live(Vec::new());
+        self.evicted_to_block = true;
+    }
+
+    /// Restore this row's content from a decompressed [`CompactRow`] after
+    /// `Buffer::ensure_decompressed` has decompressed the block it was
+    /// evicted to, clearing [`Row::is_evicted`].
+    ///
+    /// Restores directly to [`Row::is_compact`] storage (not fully `Live`)
+    /// to preserve the Task-118 memory win: `width`/`origin`/`join`/
+    /// `line_width` are left as-is (they were never touched by
+    /// [`Row::evict_to_block`], so they are already correct) rather than
+    /// re-derived from `compact`, avoiding a full decompaction just to read
+    /// four already-known scalar fields.
+    pub(crate) fn restore_from_compact(&mut self, compact: CompactRow) {
+        self.storage = RowStorage::Compact {
+            compact,
+            decompacted: OnceCell::new(),
+        };
+        self.evicted_to_block = false;
+    }
+
+    /// Best-effort recovery from a corrupt/unreadable compressed block
+    /// (`CompressedBlock::decompress_into` returned `None`, or the block's
+    /// row count disagreed with `Buffer::row_block_map` — both should be
+    /// impossible per `CompressedBlock`'s own internal consistency checks).
+    ///
+    /// Clears [`Row::is_evicted`] without restoring any real content,
+    /// leaving the row as a permanently blank (but no-longer-flagged) `Live`
+    /// row. This deliberately favors "wrong but readable" over "correct
+    /// content lost forever behind an assert that fires on every future
+    /// read": per the Task 119 design decision "correctness over ratio,"
+    /// silently returning blank content for one corrupted row is the lesser
+    /// failure compared to a debug-build panic (or a permanently
+    /// unreadable row) every time that row is next touched.
+    pub(crate) const fn abandon_eviction(&mut self) {
+        self.evicted_to_block = false;
     }
 
     /// Release the memoized decompaction cache of a `Compact` row, freeing
@@ -374,8 +485,13 @@ impl Row {
     pub fn count_image_cells(&self) -> usize {
         // A compact row is guaranteed to contain zero image cells (image
         // rows opt out of compaction — see `CompactRow::from_row`), so this
-        // returns 0 immediately without triggering a decompaction.
-        if self.is_compact() {
+        // returns 0 immediately without triggering a decompaction. A row
+        // evicted to a compressed block (Task 119) is compacted first, so
+        // the same guarantee applies — and short-circuiting here (before
+        // `cells_ref`'s debug_assert) is what lets whole-buffer sweeps like
+        // `enforce_scrollback_limit`'s image accounting run safely over
+        // evicted rows without calling `Buffer::ensure_decompressed` first.
+        if self.is_compact() || self.evicted_to_block {
             return 0;
         }
         self.cells_ref().iter().filter(|c| c.has_image()).count()
@@ -386,9 +502,10 @@ impl Row {
     /// Columns beyond the stored cell count are treated as blank (no image).
     #[must_use]
     pub fn count_image_cells_in_range(&self, from: usize, to: usize) -> usize {
-        // See `count_image_cells`: a compact row can never contain an image
-        // cell, so this short-circuits without decompacting.
-        if self.is_compact() {
+        // See `count_image_cells`: a compact OR evicted row can never
+        // contain an image cell, so this short-circuits without
+        // decompacting (and without tripping `cells_ref`'s debug_assert).
+        if self.is_compact() || self.evicted_to_block {
             return 0;
         }
         let cells = self.cells_ref();
@@ -527,9 +644,16 @@ impl Row {
     /// compacted scrollback row's real cells for images would otherwise
     /// defeat its own memory savings the moment any image exists anywhere
     /// in the buffer.
+    ///
+    /// A row evicted to a compressed block (Task 119,
+    /// [`Row::is_evicted`]) is always compacted first, so the same
+    /// zero-images guarantee holds; this is also why this accessor
+    /// deliberately does **not** carry `cells_ref`'s `debug_assert` — an
+    /// evicted row legitimately reads as empty here (matching a compact
+    /// row) rather than requiring `Buffer::ensure_decompressed` first.
     #[must_use]
     pub fn cells_for_image_scan(&self) -> &[Cell] {
-        if self.is_compact() {
+        if self.is_compact() || self.evicted_to_block {
             &[]
         } else {
             self.cells_ref()

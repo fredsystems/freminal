@@ -17,6 +17,7 @@ categories.workspace = true
 [dependencies]
 freminal-common = { path = "../freminal-common" }
 conv2.workspace = true
+lz4_flex.workspace = true
 regex.workspace = true
 
 # dev dependencies

@@ -418,32 +418,64 @@ fn spawn_pty_consumer_thread(
     if let Err(e) = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            // Idle-driven scrollback compaction (Task 118.9b): the only place
-            // `compact_idle_scrollback` is ever called from. Fires ~100ms
-            // after the last PTY read or GUI input event and compacts a
-            // bounded budget of not-yet-compacted scrollback rows, re-arming
-            // itself while work remains and disarming (via `never()`) once
-            // the terminal is fully caught up so a quiescent pane is not
-            // woken forever.
+            // Idle-driven scrollback compaction (Task 118.9b) and compression
+            // (Task 119.5): the only place `compact_idle_scrollback` and
+            // `compress_idle_scrollback` are ever called from. Fires ~100ms
+            // after the last PTY read or GUI input event, compacts a bounded
+            // budget of not-yet-compacted scrollback rows, then — once
+            // compaction reports nothing left to do this tick — compresses a
+            // bounded budget of now-cold compact rows into LZ4 blocks.
+            // Re-arms itself while either has work remaining and disarms
+            // (via `never()`) once the terminal is fully caught up on both,
+            // so a quiescent pane is not woken forever.
             //
             // The interval serves double duty: it is both the idle-detection
             // delay (time since last activity before the first slice runs) and
-            // the inter-slice delay (gap between successive bounded compaction
-            // slices while a backlog drains). At 512 rows / 100ms that is
-            // ~5k rows/sec, so a freshly-dumped very large scrollback (e.g.
-            // 100k lines) takes on the order of ~20s to fully compact in the
-            // background — correct and never blocking, but a slow trickle for
-            // pathological dumps.
+            // the inter-slice delay (gap between successive bounded slices
+            // while a backlog drains). At 1024 compaction rows / 100ms that is
+            // ~10k rows/sec, so a freshly-dumped very large scrollback (e.g.
+            // 100k lines) fully compacts-then-compresses in ~25s of background
+            // idle time (see the compaction-then-compression sequencing in the
+            // idle arm below) — correct and never blocking; a middle ground
+            // between the original 512-row (~40s) trickle and an aggressive
+            // 4096-row budget (~2.5s but a much larger per-tick burst).
             //
-            // TODO(Task 118 follow-up): revisit and make compaction pacing
-            // DYNAMIC based on the number of uncompacted rows outstanding —
-            // e.g. a larger budget and/or shorter inter-slice interval when the
-            // backlog is large, decaying back to this gentle cadence as it
-            // drains. The current fixed 512/100ms is deliberately simple; a
-            // huge dump should probably drain faster than ~20s.
+            // TODO(Task 118 follow-up): compaction pacing could be made DYNAMIC
+            // (larger budget / shorter interval while a large backlog exists,
+            // decaying to a gentle cadence once caught up). That is the right
+            // way to get fast catch-up without a large fixed per-tick burst on
+            // modest hardware; the current fixed budgets are the
+            // deliberately-simple stopgap.
             const IDLE_COMPACTION_INTERVAL: std::time::Duration =
                 std::time::Duration::from_millis(100);
-            const IDLE_COMPACTION_BUDGET: usize = 512;
+            // Compaction is an in-place RLE Live->Compact conversion. Measured
+            // via `bench_idle_compaction_tick`
+            // (`freminal-buffer/benches/buffer_row_bench.rs`, which runs at this
+            // exact 1024-row budget) at ~1.6ms per tick on the dev machine.
+            // That is a ~1.6ms slice per 100ms tick here during a catch-up
+            // burst; even on a CPU ~5x slower (~8ms) it stays far under the
+            // 100ms interval and leaves the core idle most of the time, so a
+            // full-scrollback catch-up never stalls the PTY tick loop or pegs a
+            // core. Kept modest (1024, up from Task 118's 512)
+            // rather than aggressive (4096) precisely so the per-tick burst
+            // stays small on weak hardware; the price is a slower background
+            // catch-up on a pathological all-at-once dump, invisible in normal
+            // incremental use.
+            const IDLE_COMPACTION_BUDGET: usize = 1024;
+            // Compression is a separate idle pass (LZ4 over BLOCK_SIZE-row
+            // blocks of already-compacted rows), run only once compaction has
+            // caught up for the tick. One full budget's worth (4096 rows = 16
+            // blocks of 256) measures ~4.5ms end-to-end on the dev machine
+            // (`bench_idle_compression_tick`) — the real
+            // `compress_idle_scrollback` path (run-scan + per-block LZ4 +
+            // eviction bookkeeping), larger than the ~73µs/block isolated
+            // `bench_compressed_block_round_trip` figure but still well under
+            // the 100ms interval (and under one 16.6ms frame); ~5x slower is
+            // ~22ms, still within one interval. Left at 4096 (vs compaction's
+            // 1024) because compression's per-row cost is lower and it only
+            // runs after compaction settles, so the larger budget drains the
+            // compress backlog without a large burst.
+            const IDLE_COMPRESSION_BUDGET: usize = 4096;
 
             let mut emulator = terminal;
 
@@ -593,16 +625,19 @@ fn spawn_pty_consumer_thread(
             let mut idle_deadline: crossbeam_channel::Receiver<std::time::Instant> =
                 crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
 
-            // Tracks whether any scrollback rows were compacted since the last
-            // time we released freed heap back to the OS. Compaction frees a
-            // large amount of small allocations (`Vec<Cell>` / `RowCacheEntry`);
-            // the system allocator (glibc) retains those pages in its arenas
-            // rather than returning them, so RSS stays high until we explicitly
-            // trim. We trim only once, when the backlog has fully drained
-            // (`compacted == 0`) AND real work happened since the last trim —
-            // never mid-drain (the pages would just be re-faulted by the next
-            // slice) and never on a trivial re-arm that compacted nothing.
-            let mut compaction_since_trim = false;
+            // Tracks whether any scrollback rows were compacted or compressed
+            // since the last time we released freed heap back to the OS.
+            // Compaction frees a large amount of small allocations
+            // (`Vec<Cell>` / `RowCacheEntry`); compression additionally frees
+            // a `CompactRow`'s bytes into an LZ4 block. Either way, the
+            // system allocator (glibc) retains those pages in its arenas
+            // rather than returning them, so RSS stays high until we
+            // explicitly trim. We trim only once, when both are fully
+            // drained (`compacted == 0 && compressed == 0`) AND real work
+            // happened since the last trim — never mid-drain (the pages
+            // would just be re-faulted by the next slice) and never on a
+            // trivial re-arm that did nothing.
+            let mut work_since_trim = false;
 
             // Primary loop: service PTY reads, GUI input events, child-exit
             // signals, and the idle scrollback-compaction tick.
@@ -661,32 +696,43 @@ fn spawn_pty_consumer_thread(
                     }
                     recv(idle_deadline) -> _ => {
                         // Snapshot content is byte-identical after compaction
-                        // (it only changes the internal storage
-                        // representation), so this arm must never call
-                        // `post_event` — doing so would be a spurious GUI
-                        // wake and defeat the idle/battery goal. `continue`
-                        // skips the trailing `post_event` call below.
-                        let compacted = emulator
-                            .internal
-                            .handler
-                            .buffer_mut()
-                            .compact_idle_scrollback(IDLE_COMPACTION_BUDGET);
-                        if compacted > 0 {
+                        // or compression (both only change the internal
+                        // storage representation), so this arm must never
+                        // call `post_event` — doing so would be a spurious
+                        // GUI wake and defeat the idle/battery goal.
+                        // `continue` skips the trailing `post_event` call
+                        // below.
+                        //
+                        // Compact first, compress second: a row must be
+                        // Task-118-compacted before it is a Task-119
+                        // compression candidate, so only spend the
+                        // compression budget once this tick's compaction
+                        // pass reports nothing left to compact — otherwise
+                        // compression would scan a scrollback full of `Live`
+                        // rows and correctly find nothing, wasting the tick.
+                        let buffer = emulator.internal.handler.buffer_mut();
+                        let compacted = buffer.compact_idle_scrollback(IDLE_COMPACTION_BUDGET);
+                        let compressed = if compacted == 0 {
+                            buffer.compress_idle_scrollback(IDLE_COMPRESSION_BUDGET)
+                        } else {
+                            0
+                        };
+                        if compacted > 0 || compressed > 0 {
                             // More may remain — keep draining on the next tick.
-                            compaction_since_trim = true;
+                            work_since_trim = true;
                             idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                         } else {
-                            // Backlog fully drained. If we actually compacted
-                            // anything since the last trim, release the freed
+                            // Both backlogs fully drained. If we actually did
+                            // work since the last trim, release the freed
                             // pages back to the OS now: the transient
                             // allocation churn is over, so the freed heap is
                             // stable and worth returning. Doing this once per
                             // settle (rather than per slice) avoids repeatedly
                             // munmap-ing pages the allocator would re-fault
                             // during an ongoing drain. See `release_freed_heap`.
-                            if compaction_since_trim {
+                            if work_since_trim {
                                 release_freed_heap();
-                                compaction_since_trim = false;
+                                work_since_trim = false;
                             }
                             idle_deadline = crossbeam_channel::never();
                         }

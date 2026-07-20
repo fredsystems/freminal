@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use conv2::ValueFrom;
@@ -18,6 +18,7 @@ use freminal_common::buffer_states::{
 };
 
 use crate::{
+    compressed_block::CompressedBlock,
     image_store::ImageStore,
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
@@ -34,6 +35,7 @@ use freminal_common::buffer_states::{
     modes::{reverse_wrap_around::ReverseWrapAround, xt_rev_wrap2::XtRevWrap2},
 };
 
+mod compression;
 mod cursor;
 mod erase;
 mod flatten;
@@ -66,6 +68,41 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
     let clamped = base_i.saturating_add(delta).max(lo_i).min(hi_i);
     // After max(lo_i) with lo_i >= 0 (usize origin), clamped is non-negative, so this is lossless.
     usize::value_from(clamped).unwrap_or(base)
+}
+
+/// Monotonic identifier for a [`CompressedBlock`] (Task 119 — Scrollback
+/// Compression).
+///
+/// Minted by `Buffer::compress_scrollback_block` from
+/// `Buffer::next_block_id` and never reused within a `Buffer`'s lifetime
+/// (barring the practically-unreachable `u32` exhaustion case — see that
+/// field's doc).
+///
+/// The type is `pub` only so it can appear in the (also `pub`)
+/// [`SavedPrimaryState::blocks`]/[`SavedPrimaryState::row_block_map`]
+/// fields without a private-type-in-public-interface error; its field stays
+/// private, so nothing outside `crate::buffer` can construct, inspect, or
+/// match on one — it is an opaque handle everywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlockId(u32);
+
+/// A scrollback row's reference into a [`CompressedBlock`]: which block
+/// holds its content, and its position within that block.
+///
+/// `offset_in_block` is **block-relative** (0-based from the block's first
+/// row), NOT a buffer-absolute row index. This is what makes a block
+/// survive a front-of-buffer drain (`Buffer::enforce_scrollback_limit`,
+/// `Buffer::erase_scrollback`) for free: draining rows from the front of
+/// `self.rows` never changes any surviving row's position *within* its own
+/// block, so no index remapping is needed on drain (only the front-drain of
+/// `Buffer::row_block_map` itself, in lockstep with `rows`/`row_cache`).
+///
+/// `pub` for the same private-type-in-public-interface reason as
+/// [`BlockId`]; both fields stay private (opaque outside `crate::buffer`).
+#[derive(Debug, Clone, Copy)]
+pub struct BlockRowRef {
+    block_id: BlockId,
+    offset_in_block: u32,
 }
 
 /// The primary terminal buffer owning all rows, the cursor, and display state.
@@ -200,6 +237,56 @@ pub struct Buffer {
     /// as `prompt_rows`).  They are adjusted atomically with row drains via
     /// [`Buffer::adjust_prompt_rows`].
     pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
+
+    /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
+    /// Compression), keyed by [`BlockId`].
+    ///
+    /// Only rows below the visible window that are already Task-118
+    /// [`Row::is_compact`] are ever compressed, via the explicit,
+    /// test-driven `Buffer::compress_scrollback_block` (this subtask has no
+    /// idle-driven compression *policy* yet — that is Task 119.5). A block
+    /// is removed the moment any of its rows is read
+    /// (`Buffer::ensure_decompressed`): a row is never both compressed and
+    /// live at the same time (single residency).
+    pub(in crate::buffer) blocks: HashMap<BlockId, CompressedBlock>,
+
+    /// Monotonic counter used to mint fresh [`BlockId`]s for
+    /// `Buffer::compress_scrollback_block`. Reset only by [`Buffer::new`]
+    /// and [`Buffer::full_reset`] (which also discard every existing
+    /// block). Uses `saturating_add` rather than wrapping, so in the
+    /// practically-unreachable case of exhausting `u32::MAX` block
+    /// allocations in one buffer's lifetime, further compressions simply
+    /// stop minting new ids rather than silently reusing one.
+    pub(in crate::buffer) next_block_id: u32,
+
+    /// Per-row reference into `self.blocks`, index-parallel to `self.rows` /
+    /// `self.row_cache` (same maintained-in-lockstep invariant those two
+    /// already have). `None` means the row is not currently compressed (it
+    /// may be `Live` or Task-118 [`Row::is_compact`]); `Some` means the
+    /// row's real content has been evicted into the referenced block (see
+    /// [`Row::is_evicted`]) and `self.rows[i]` holds only a diagnostic
+    /// placeholder.
+    ///
+    /// May transiently lag *shorter* than `self.rows` immediately after a
+    /// row is appended by a code path outside the compression subsystem
+    /// (namely three direct `self.rows.push` sites in `lines.rs`, and two
+    /// test-only ones in `lifecycle.rs`, none of which know about this
+    /// field). Every such append is always a fresh, never-compressed `Live`
+    /// row, so padding the gap with `None` on next access
+    /// (`Buffer::sync_row_block_map_len`) is exactly the correct value —
+    /// not a workaround for missing data. It can never lag *longer* than
+    /// `self.rows`: nothing removes rows without this module's involvement
+    /// (`erase.rs`/`cursor.rs`/`tabs.rs`/`images.rs` only mutate existing
+    /// rows' content in place, never the row count).
+    pub(in crate::buffer) row_block_map: Vec<Option<BlockRowRef>>,
+
+    /// Reusable scratch buffer for [`CompressedBlock::decompress_into`],
+    /// avoiding a fresh allocation on every block decompression inside
+    /// `Buffer::ensure_decompressed`. Purely a transient perf buffer with no
+    /// observable state, so it is *not* carried across alternate-screen
+    /// save/restore (`SavedPrimaryState` has no equivalent field) — each
+    /// side just uses (and regrows) its own.
+    pub(in crate::buffer) decompress_scratch: Vec<u8>,
 }
 
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
@@ -231,6 +318,17 @@ pub struct SavedPrimaryState {
     pub image_store: ImageStore,
     /// Saved image cell count from the primary buffer.
     pub image_cell_count: usize,
+    /// Saved compressed scrollback blocks from the primary buffer (Task
+    /// 119). The alternate screen never accumulates scrollback and so never
+    /// compresses anything; this is empty for as long as the alternate
+    /// screen is active and is restored verbatim on `leave_alternate`.
+    pub blocks: HashMap<BlockId, CompressedBlock>,
+    /// Saved [`Buffer::next_block_id`] counter from the primary buffer.
+    pub next_block_id: u32,
+    /// Saved per-row compressed-block references from the primary buffer,
+    /// index-parallel to `rows`/`row_cache` above (see
+    /// `Buffer::row_block_map`).
+    pub row_block_map: Vec<Option<BlockRowRef>>,
 }
 
 /// Heap-inclusive memory breakdown for a [`Buffer`]'s row storage, row-flatten
@@ -282,6 +380,20 @@ pub struct BufferHeapBreakdown {
     /// therefore under-counted here — a diagnostic limitation, not a
     /// correctness issue (the cell/tag data itself is unaffected).
     pub url_bytes: usize,
+
+    /// Heap bytes held by `self.blocks` (Task 119 — Scrollback
+    /// Compression): the sum of every resident [`CompressedBlock`]'s
+    /// [`CompressedBlock::heap_bytes`] (its LZ4-compressed payload's
+    /// allocation capacity). Does not include `HashMap<BlockId,
+    /// CompressedBlock>`'s own bucket-array overhead, matching this API's
+    /// existing style of not accounting `url_ptrs`' `HashSet` container
+    /// overhead either.
+    ///
+    /// An evicted row's own `rows_bytes` contribution is already ~0 (its
+    /// placeholder storage is an empty `Vec<Cell>`, same as `Row::new`), so
+    /// this field is where a compressed block's real, still-resident cost
+    /// shows up.
+    pub blocks_bytes: usize,
 
     /// Number of scrollback rows: `self.rows.len().saturating_sub(self.height)`.
     pub scrollback_lines: usize,
@@ -453,9 +565,13 @@ impl Buffer {
         for row in &self.rows {
             rows_bytes += row.storage_heap_bytes();
 
-            // Skip URL scanning for compacted rows without decompacting —
-            // see the doc comment on `BufferHeapBreakdown::url_bytes`.
-            if row.is_compact() {
+            // Skip URL scanning for compacted or evicted (Task 119) rows
+            // without decompacting/decompressing — see the doc comment on
+            // `BufferHeapBreakdown::url_bytes`. An evicted row can never
+            // carry a URL cell any more than a compact one can (it was
+            // compact before eviction), so this is not an additional
+            // under-count beyond the existing compact-row one.
+            if row.is_compact() || row.is_evicted() {
                 continue;
             }
             for cell in row.cells() {
@@ -479,10 +595,13 @@ impl Buffer {
             row_cache_bytes += entry.auto_urls.capacity() * core::mem::size_of::<AutoUrlRange>();
         }
 
+        let blocks_bytes: usize = self.blocks.values().map(CompressedBlock::heap_bytes).sum();
+
         BufferHeapBreakdown {
             rows_bytes,
             row_cache_bytes,
             url_bytes,
+            blocks_bytes,
             scrollback_lines: self.rows.len().saturating_sub(self.height),
             total_rows: self.rows.len(),
         }
@@ -605,6 +724,7 @@ impl Buffer {
                 self.rows
                     .push(Row::new_with_origin(self.width, origin, join));
                 self.row_cache.push(None);
+                self.row_block_map.push(None);
             }
 
             // clone tag here to avoid long-lived borrows of &self

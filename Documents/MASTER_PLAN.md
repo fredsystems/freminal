@@ -188,7 +188,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Complete  | None                   |
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Complete  | None                   |
 | 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Complete  | None                   |
-| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Planned   | Task 118               |
+| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Pending merge | Task 118           |
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 
 ---
@@ -669,6 +669,7 @@ Update this section as tasks complete:
 | 116  | 2026-07-08 | 2026-07-08 | 116.1-116.4 selection release/stuck (tracked-end, commit-flag, interrupted drag) |
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
+| 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; PR pending    |
 
 ---
 
