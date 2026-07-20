@@ -431,27 +431,51 @@ fn spawn_pty_consumer_thread(
             //
             // The interval serves double duty: it is both the idle-detection
             // delay (time since last activity before the first slice runs) and
-            // the inter-slice delay (gap between successive bounded compaction
-            // slices while a backlog drains). At 512 rows / 100ms that is
-            // ~5k rows/sec, so a freshly-dumped very large scrollback (e.g.
-            // 100k lines) takes on the order of ~20s to fully compact in the
-            // background — correct and never blocking, but a slow trickle for
-            // pathological dumps.
+            // the inter-slice delay (gap between successive bounded slices
+            // while a backlog drains). At 1024 compaction rows / 100ms that is
+            // ~10k rows/sec, so a freshly-dumped very large scrollback (e.g.
+            // 100k lines) fully compacts-then-compresses in ~25s of background
+            // idle time (see the compaction-then-compression sequencing in the
+            // idle arm below) — correct and never blocking; a middle ground
+            // between the original 512-row (~40s) trickle and an aggressive
+            // 4096-row budget (~2.5s but a much larger per-tick burst).
             //
-            // TODO(Task 118 follow-up): revisit and make compaction pacing
-            // DYNAMIC based on the number of uncompacted rows outstanding —
-            // e.g. a larger budget and/or shorter inter-slice interval when the
-            // backlog is large, decaying back to this gentle cadence as it
-            // drains. The current fixed 512/100ms is deliberately simple; a
-            // huge dump should probably drain faster than ~20s.
+            // TODO(Task 118 follow-up): compaction pacing could be made DYNAMIC
+            // (larger budget / shorter interval while a large backlog exists,
+            // decaying to a gentle cadence once caught up). That is the right
+            // way to get fast catch-up without a large fixed per-tick burst on
+            // modest hardware; the current fixed budgets are the
+            // deliberately-simple stopgap.
             const IDLE_COMPACTION_INTERVAL: std::time::Duration =
                 std::time::Duration::from_millis(100);
-            const IDLE_COMPACTION_BUDGET: usize = 512;
-            // Compression is heavier per row than compaction (LZ4 over a
-            // whole block, versus an in-place RLE conversion), so it gets a
-            // smaller row budget per idle tick. Tuned alongside block size
-            // in Task 119.6.
-            const IDLE_COMPRESSION_BUDGET: usize = 256;
+            // Compaction is an in-place RLE Live->Compact conversion. Measured
+            // via `bench_idle_compaction_tick`
+            // (`freminal-buffer/benches/buffer_row_bench.rs`) at ~9.8ms per
+            // 4096 rows on the dev machine, i.e. ~2.4ms per 1024 rows. At this
+            // 1024 budget that is a ~2.4ms slice per 100ms tick here during a
+            // catch-up burst; even on a CPU ~5x slower (~12ms) it stays far
+            // under the 100ms interval and leaves the core idle most of the
+            // time, so a full-scrollback catch-up never stalls the PTY tick
+            // loop or pegs a core. Kept modest (1024, up from Task 118's 512)
+            // rather than aggressive (4096) precisely so the per-tick burst
+            // stays small on weak hardware; the price is a slower background
+            // catch-up on a pathological all-at-once dump, invisible in normal
+            // incremental use.
+            const IDLE_COMPACTION_BUDGET: usize = 1024;
+            // Compression is a separate idle pass (LZ4 over BLOCK_SIZE-row
+            // blocks of already-compacted rows), run only once compaction has
+            // caught up for the tick. One full budget's worth (4096 rows = 16
+            // blocks of 256) measures ~4.5ms end-to-end on the dev machine
+            // (`bench_idle_compression_tick`) — the real
+            // `compress_idle_scrollback` path (run-scan + per-block LZ4 +
+            // eviction bookkeeping), larger than the ~73µs/block isolated
+            // `bench_compressed_block_round_trip` figure but still well under
+            // the 100ms interval (and under one 16.6ms frame); ~5x slower is
+            // ~22ms, still within one interval. Left at 4096 (vs compaction's
+            // 1024) because compression's per-row cost is lower and it only
+            // runs after compaction settles, so the larger budget drains the
+            // compress backlog without a large burst.
+            const IDLE_COMPRESSION_BUDGET: usize = 4096;
 
             let mut emulator = terminal;
 
