@@ -401,6 +401,23 @@ mod tests {
     }
 
     #[test]
+    fn heap_bytes_reports_compressed_buffer_capacity() {
+        let rows = [ascii_row(20, "hello world"), ascii_row(20, "goodbye world")];
+        let compact_rows: Vec<CompactRow> = rows
+            .iter()
+            .map(|r| CompactRow::from_row(r).unwrap())
+            .collect();
+        let block = CompressedBlock::from_rows(&compact_rows);
+
+        // `heap_bytes` reports the compressed payload's allocation *capacity*
+        // (the real resident cost that `Buffer::heap_bytes` sums), so it must
+        // be at least the live byte length and never smaller than
+        // `compressed_bytes()` (which reports `len()`).
+        assert!(block.heap_bytes() >= block.compressed_bytes());
+        assert!(block.compressed_bytes() > 0);
+    }
+
+    #[test]
     fn empty_block_round_trips() {
         let block = CompressedBlock::from_rows(&[]);
         assert_eq!(block.row_count(), 0);

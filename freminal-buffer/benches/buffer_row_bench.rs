@@ -850,13 +850,18 @@ fn bench_scroll_into_compressed_region(c: &mut Criterion) {
 // Benchmark: absolute per-idle-tick cost of the budgeted background work
 // (Task 119 follow-up tuning).
 //
-// These measure the CPU cost of ONE idle tick's worth of work at the
-// production budget (4096 rows), in isolation. The point is an ABSOLUTE
-// time figure (µs to process 4096 rows), not a wall-clock CPU% on the dev
-// box: a machine Nx slower simply multiplies the measured µs by N, and the
-// justification for the budget is that even Nx that figure stays far below
-// the 100ms idle-tick interval, so a full-scrollback catch-up burst never
-// stalls the PTY tick loop or pegs a core on modest hardware.
+// These measure the CPU cost of ONE real idle tick's worth of work, in
+// isolation, at the SAME per-tick budgets production uses in
+// `freminal/src/gui/pty.rs`. The point is an ABSOLUTE time figure (µs to
+// process one tick's rows), not a wall-clock CPU% on the dev box: a machine
+// Nx slower simply multiplies the measured µs by N, and the justification for
+// the budgets is that even Nx that figure stays far below the 100ms idle-tick
+// interval, so a full-scrollback catch-up burst never stalls the PTY tick loop
+// or pegs a core on modest hardware.
+//
+// The two budgets differ (matching production): compaction runs 1024 rows/tick,
+// compression 4096 rows/tick. Each bench uses its own production budget so its
+// result is directly "one real tick" — no mental scaling needed.
 //
 // Each iteration rebuilds fresh state (`iter_batched` + `BatchSize::LargeInput`)
 // because both operations mutate the buffer (compaction converts Live -> Compact;
@@ -864,9 +869,15 @@ fn bench_scroll_into_compressed_region(c: &mut Criterion) {
 // on the same buffer would find less/no work.
 // ---------------------------------------------------------------
 
-/// Budget matching `IDLE_COMPACTION_BUDGET` / `IDLE_COMPRESSION_BUDGET` in
-/// `freminal/src/gui/pty.rs`, so the bench measures one real tick's worth.
-const IDLE_TICK_BUDGET: usize = 4096;
+/// Matches `IDLE_COMPACTION_BUDGET` in `freminal/src/gui/pty.rs`, so
+/// `bench_idle_compaction_tick` measures exactly one production compaction
+/// tick's worth of work.
+const IDLE_COMPACTION_BUDGET_BENCH: usize = 1024;
+
+/// Matches `IDLE_COMPRESSION_BUDGET` in `freminal/src/gui/pty.rs`, so
+/// `bench_idle_compression_tick` measures exactly one production compression
+/// tick's worth of work (16 blocks of 256 rows).
+const IDLE_COMPRESSION_BUDGET_BENCH: usize = 4096;
 
 /// Build a buffer with `scrollback_rows` rows of representative ~120-col
 /// content, all still `Live` (not compacted) — the worst case a compaction
@@ -890,47 +901,55 @@ fn build_live_scrollback_buffer(scrollback_rows: usize) -> Buffer {
 }
 
 fn bench_idle_compaction_tick(c: &mut Criterion) {
-    // 8192 all-Live scrollback rows so a 4096-row budget has a full tick of
-    // work to do.
-    let scrollback_rows = 2 * IDLE_TICK_BUDGET;
+    // Twice the budget of all-Live scrollback rows so a full budget's worth of
+    // work is available for the tick under test.
+    let scrollback_rows = 2 * IDLE_COMPACTION_BUDGET_BENCH;
 
     let mut group = c.benchmark_group("bench_idle_compaction_tick");
-    group.throughput(Throughput::Elements(IDLE_TICK_BUDGET as u64));
-    group.bench_function(BenchmarkId::new("compact", IDLE_TICK_BUDGET), |b| {
-        b.iter_batched(
-            || build_live_scrollback_buffer(scrollback_rows),
-            |mut buf| {
-                std::hint::black_box(buf.compact_idle_scrollback(IDLE_TICK_BUDGET));
-            },
-            BatchSize::LargeInput,
-        );
-    });
+    group.throughput(Throughput::Elements(IDLE_COMPACTION_BUDGET_BENCH as u64));
+    group.bench_function(
+        BenchmarkId::new("compact", IDLE_COMPACTION_BUDGET_BENCH),
+        |b| {
+            b.iter_batched(
+                || build_live_scrollback_buffer(scrollback_rows),
+                |mut buf| {
+                    std::hint::black_box(buf.compact_idle_scrollback(IDLE_COMPACTION_BUDGET_BENCH));
+                },
+                BatchSize::LargeInput,
+            );
+        },
+    );
     group.finish();
 }
 
 fn bench_idle_compression_tick(c: &mut Criterion) {
-    // 8192 fully-compacted (but uncompressed) scrollback rows so a 4096-row
-    // compression budget has a full tick of work (16 blocks of 256 rows).
-    let scrollback_rows = 2 * IDLE_TICK_BUDGET;
+    // Twice the budget of fully-compacted (but uncompressed) scrollback rows so
+    // a full compression tick's worth of work (16 blocks of 256 rows) exists.
+    let scrollback_rows = 2 * IDLE_COMPRESSION_BUDGET_BENCH;
 
     let mut group = c.benchmark_group("bench_idle_compression_tick");
-    group.throughput(Throughput::Elements(IDLE_TICK_BUDGET as u64));
-    group.bench_function(BenchmarkId::new("compress", IDLE_TICK_BUDGET), |b| {
-        b.iter_batched(
-            || {
-                let mut buf = build_live_scrollback_buffer(scrollback_rows);
-                // Fully compact first: compression only touches already-compact
-                // rows, so the tick under test starts from the settled-compact
-                // state the real idle loop reaches before compressing.
-                let _ = buf.compact_idle_scrollback(usize::MAX);
-                buf
-            },
-            |mut buf| {
-                std::hint::black_box(buf.compress_idle_scrollback(IDLE_TICK_BUDGET));
-            },
-            BatchSize::LargeInput,
-        );
-    });
+    group.throughput(Throughput::Elements(IDLE_COMPRESSION_BUDGET_BENCH as u64));
+    group.bench_function(
+        BenchmarkId::new("compress", IDLE_COMPRESSION_BUDGET_BENCH),
+        |b| {
+            b.iter_batched(
+                || {
+                    let mut buf = build_live_scrollback_buffer(scrollback_rows);
+                    // Fully compact first: compression only touches already-compact
+                    // rows, so the tick under test starts from the settled-compact
+                    // state the real idle loop reaches before compressing.
+                    let _ = buf.compact_idle_scrollback(usize::MAX);
+                    buf
+                },
+                |mut buf| {
+                    std::hint::black_box(
+                        buf.compress_idle_scrollback(IDLE_COMPRESSION_BUDGET_BENCH),
+                    );
+                },
+                BatchSize::LargeInput,
+            );
+        },
+    );
     group.finish();
 }
 

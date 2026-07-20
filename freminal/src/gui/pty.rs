@@ -450,13 +450,13 @@ fn spawn_pty_consumer_thread(
                 std::time::Duration::from_millis(100);
             // Compaction is an in-place RLE Live->Compact conversion. Measured
             // via `bench_idle_compaction_tick`
-            // (`freminal-buffer/benches/buffer_row_bench.rs`) at ~9.8ms per
-            // 4096 rows on the dev machine, i.e. ~2.4ms per 1024 rows. At this
-            // 1024 budget that is a ~2.4ms slice per 100ms tick here during a
-            // catch-up burst; even on a CPU ~5x slower (~12ms) it stays far
-            // under the 100ms interval and leaves the core idle most of the
-            // time, so a full-scrollback catch-up never stalls the PTY tick
-            // loop or pegs a core. Kept modest (1024, up from Task 118's 512)
+            // (`freminal-buffer/benches/buffer_row_bench.rs`, which runs at this
+            // exact 1024-row budget) at ~1.6ms per tick on the dev machine.
+            // That is a ~1.6ms slice per 100ms tick here during a catch-up
+            // burst; even on a CPU ~5x slower (~8ms) it stays far under the
+            // 100ms interval and leaves the core idle most of the time, so a
+            // full-scrollback catch-up never stalls the PTY tick loop or pegs a
+            // core. Kept modest (1024, up from Task 118's 512)
             // rather than aggressive (4096) precisely so the per-tick burst
             // stays small on weak hardware; the price is a slower background
             // catch-up on a pathological all-at-once dump, invisible in normal
