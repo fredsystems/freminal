@@ -82,6 +82,24 @@ impl Default for PtySize {
     }
 }
 
+/// A readable pty handle that can additionally report the slave's termios.
+///
+/// This mirrors [`std::io::Read`] (output from the slave is readable via this
+/// stream) but adds [`PtyReader::get_termios`], so a reader-owning thread can
+/// inspect the slave's line-discipline flags (e.g. `ECHO`/`ICANON` for
+/// password-prompt detection) right after a read burst, without needing shared
+/// access to the [`MasterPty`] itself. On non-unix platforms `get_termios`
+/// returns `None`.
+pub trait PtyReader: std::io::Read + Send {
+    /// Return the termios associated with the underlying stream, if the
+    /// platform supports it. Mirrors [`MasterPty::get_termios`], but callable
+    /// from the owner of this reader handle.
+    #[cfg(unix)]
+    fn get_termios(&self) -> Option<nix::sys::termios::Termios> {
+        None
+    }
+}
+
 /// Represents the master/control end of the pty
 pub trait MasterPty: Downcast + Send {
     /// Inform the kernel and thus the child process that the window resized.
@@ -93,6 +111,19 @@ pub trait MasterPty: Downcast + Send {
     /// Obtain a readable handle; output from the slave(s) is readable
     /// via this stream.
     fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, Error>;
+    /// Obtain a readable handle that can also report the slave's termios.
+    ///
+    /// Like [`MasterPty::try_clone_reader`], but the returned handle
+    /// implements [`PtyReader`], so the reader-owning thread can query
+    /// termios (e.g. for password-prompt echo detection) directly, rather
+    /// than requiring the [`MasterPty`] to be shared across threads. The
+    /// default implementation returns an error; platforms that support it
+    /// (unix) override it.
+    fn try_clone_reader_termios(&self) -> Result<Box<dyn PtyReader>, Error> {
+        Err(anyhow::anyhow!(
+            "try_clone_reader_termios is not supported on this platform"
+        ))
+    }
     /// Obtain a writable handle; writing to it will send data to the
     /// slave end.
     /// Dropping the writer will send EOF to the slave end.

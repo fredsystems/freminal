@@ -52,11 +52,12 @@ pub struct FreminalPtyInputOutput {
     /// Shared atomic flag reflecting whether the PTY slave currently has
     /// `ECHO` disabled (i.e. a password prompt is active).
     ///
-    /// Updated by the writer thread every 100 ms (via `recv_timeout`) using
-    /// `MasterPty::get_termios()`.  Compiled only on Unix; on Windows the
-    /// `#[cfg(unix)]` termios block is omitted entirely, so the atomic stays
-    /// at its default `false`.  Read by the GUI via a cheap `Relaxed` load
-    /// without any locking overhead.
+    /// Updated by the reader thread once per PTY read burst (event-driven, no
+    /// standing timer) using `PtyReader::get_termios()` on a termios-capable
+    /// reader clone.  Compiled only on Unix; on Windows the `#[cfg(unix)]`
+    /// termios block is omitted entirely, so the atomic stays at its default
+    /// `false`.  Read by the GUI via a cheap `Relaxed` load without any locking
+    /// overhead.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// OS process ID of the PTY child shell.
     ///
@@ -168,10 +169,10 @@ pub struct RunTerminalResult {
     /// Shared atomic flag reflecting whether the PTY slave currently has
     /// `ECHO` disabled.
     ///
-    /// The writer thread polls `pair.master.get_termios()` every 250 ms
-    /// (or immediately after each write/resize).  The PTY consumer thread
-    /// reads it atomically when building snapshots.
-    /// `Arc` lets both threads share ownership without a lock.
+    /// The reader thread checks `PtyReader::get_termios()` once per PTY read
+    /// burst (event-driven; no standing timer). The GUI reads it atomically
+    /// via a cheap `Relaxed` load. `Arc` lets both threads share ownership
+    /// without a lock.
     pub echo_off: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// OS process ID of the PTY child (shell or direct command).
     ///
@@ -613,10 +614,30 @@ pub fn run_terminal(
     // This is important because it is easy to encounter a situation
     // where read/write buffers fill and block either your process
     // or the spawned process.
+    //
+    // We obtain a termios-capable reader clone (`try_clone_reader_termios`)
+    // so the reader thread can check the slave's echo/canonical flags right
+    // after each read burst — see the `echo_off` handling below. This clone
+    // is an independent fd referring to the same pty, so `get_termios()` on
+    // it reports the same flags the master would.
     let mut reader = pair
         .master
-        .try_clone_reader()
+        .try_clone_reader_termios()
         .map_err(|e| PtyInitError::Spawn(e.to_string()))?;
+
+    // Shared atomic flag updated by the reader thread after each read burst.
+    // The PTY consumer thread reads this via `FreminalPtyInputOutput::is_echo_off()`
+    // when building snapshots. Using `Arc<AtomicBool>` avoids any lock on the hot
+    // snapshot path while keeping ownership safely shared between threads.
+    //
+    // The check is event-driven: it runs only after `read()` returns real
+    // output, so an idle pane (whose `read()` is parked) costs zero CPU. A
+    // password prompt always produces output ("Password:"), which unblocks the
+    // read and triggers the check — including for background panes, so the
+    // tab-bar lock indicator stays correct without any standing poll.
+    let echo_off = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    let echo_off_reader = std::sync::Arc::clone(&echo_off);
 
     // Shared shutdown flag. The PTY consumer thread (which owns the
     // `PtyRead` receiver) sets this to `true` immediately before it exits
@@ -668,28 +689,40 @@ pub fn run_terminal(
                     }
                     return;
                 }
+
+                // Event-driven echo-off (password-prompt) detection.
+                //
+                // Runs once per read burst, on the reader thread that already
+                // owns the termios-capable reader clone. Password prompts
+                // (sudo, ssh, getpass) disable `ECHO` but keep `ICANON`
+                // (canonical/line-buffered mode). Shell line editors (zsh ZLE,
+                // bash readline) also disable `ECHO` but additionally disable
+                // `ICANON` (raw/char-at-a-time), so checking `!ECHO && ICANON`
+                // filters out normal interactive editing and only triggers for
+                // genuine password prompts.
+                //
+                // On Windows (ConPTY) there is no termios API, so the atomic
+                // stays at its default `false`.
+                #[cfg(unix)]
+                {
+                    use nix::sys::termios::LocalFlags;
+                    let is_off = reader.get_termios().is_some_and(|t| {
+                        !t.local_flags.contains(LocalFlags::ECHO)
+                            && t.local_flags.contains(LocalFlags::ICANON)
+                    });
+                    let old = echo_off_reader.swap(is_off, std::sync::atomic::Ordering::Relaxed);
+                    if old != is_off {
+                        debug!("echo_off changed: {old} -> {is_off}");
+                    }
+                }
             }
         })
         .map_err(|e| PtyInitError::Spawn(format!("spawn pty-read thread: {e}")))?;
-
-    // Shared atomic flag updated by the writer thread after each PTY event.
-    // The PTY consumer thread reads this via `FreminalPtyInputOutput::is_echo_off()`
-    // when building snapshots.  Using `Arc<AtomicBool>` avoids any lock on the hot
-    // snapshot path while keeping ownership safely shared between threads.
-    let echo_off = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    #[cfg(unix)]
-    let echo_off_writer = std::sync::Arc::clone(&echo_off);
 
     {
         std::thread::Builder::new()
             .name(format!("freminal-pty-write-{pane_id}"))
             .spawn(move || {
-                // Poll interval for checking slave termios echo state.
-                // Used with `recv_timeout` so we detect password prompts
-                // even when no keystrokes are arriving.
-                const ECHO_POLL_INTERVAL: std::time::Duration =
-                    std::time::Duration::from_millis(100);
-
                 if cfg!(target_os = "macos") {
                     // macOS quirk: the child and reader must be started and
                     // allowed a brief grace period to run before we allow
@@ -711,65 +744,19 @@ pub fn run_terminal(
                     }
                 };
 
-                // Use `recv_timeout` so we also poll the slave termios
-                // periodically even when no keystrokes arrive.  This lets the
-                // lock icon appear as soon as a password prompt disables ECHO,
-                // without waiting for user input.
-                //
-                // Termios is polled only on timeout (no pending writes), not
-                // after every keystroke — this avoids ioctl overhead during
-                // rapid typing.
+                // Blocking `recv()`: the writer thread parks with zero CPU when
+                // no keystrokes or resize events are pending. Echo-off detection
+                // no longer lives here (it moved to the reader thread, driven by
+                // PTY output), so there is no standing timer — this is what lets
+                // an idle pane reach a true 0% CPU floor. Resize (`PtyWrite::Resize`)
+                // stays on this thread because it owns `pair.master`, keeping
+                // resize latency unaffected.
+                while let Ok(stuff_to_write) = write_rx.recv() {
+                    process_pty_write(&mut writer, &*pair.master, &stuff_to_write);
 
-                loop {
-                    match write_rx.recv_timeout(ECHO_POLL_INTERVAL) {
-                        Ok(stuff_to_write) => {
-                            process_pty_write(&mut writer, &*pair.master, &stuff_to_write);
-
-                            // Drain any queued writes before polling termios.
-                            while let Ok(more) = write_rx.try_recv() {
-                                process_pty_write(&mut writer, &*pair.master, &more);
-                            }
-                        }
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                            // No input — fall through to poll termios below.
-                        }
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                    }
-
-                    // Poll the slave termios after draining all pending writes
-                    // or on timeout.  The writer thread is the natural place for
-                    // this because it already owns `pair.master`.  When `ECHO` is
-                    // absent and `ICANON` is present, the foreground process
-                    // (e.g. `sudo`) has set up a canonical-mode password prompt.
-                    // Shell line editors (zsh ZLE, bash readline) also disable
-                    // `ECHO` but additionally disable `ICANON`, so checking both
-                    // flags avoids false positives during normal interactive
-                    // editing.
-                    //
-                    // This block is compiled only on Unix; on Windows (ConPTY)
-                    // there is no termios API, so the atomic stays at its
-                    // default `false`.
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::termios::LocalFlags;
-                        // Password prompts (sudo, ssh, getpass) disable ECHO but
-                        // keep ICANON (canonical/line-buffered mode).  Shell line
-                        // editors (zsh ZLE, bash readline) also disable ECHO but
-                        // additionally disable ICANON (raw/char-at-a-time mode)
-                        // because they handle input character by character.
-                        //
-                        // Checking `!ECHO && ICANON` filters out the shell's
-                        // normal interactive editing and only triggers for genuine
-                        // password prompts.
-                        let is_off = pair.master.get_termios().is_some_and(|t| {
-                            !t.local_flags.contains(LocalFlags::ECHO)
-                                && t.local_flags.contains(LocalFlags::ICANON)
-                        });
-                        let old =
-                            echo_off_writer.swap(is_off, std::sync::atomic::Ordering::Relaxed);
-                        if old != is_off {
-                            debug!("echo_off changed: {old} -> {is_off}");
-                        }
+                    // Drain any queued writes in one batch.
+                    while let Ok(more) = write_rx.try_recv() {
+                        process_pty_write(&mut writer, &*pair.master, &more);
                     }
                 }
             })
@@ -830,9 +817,9 @@ impl FreminalPtyInputOutput {
     /// process (e.g. `sudo`, `ssh`) called `tcsetattr()` to turn off echoing so
     /// the typed password does not appear on screen.
     ///
-    /// On Unix the writer thread polls `MasterPty::get_termios()` every 250 ms
-    /// (and after each write/resize) and updates the shared atomic; this method
-    /// simply reads that atomic.
+    /// On Unix the reader thread checks `PtyReader::get_termios()` once per PTY
+    /// read burst (event-driven; no standing timer) and updates the shared
+    /// atomic; this method simply reads that atomic.
     ///
     /// Always returns `false` on Windows where `ConPTY` does not support termios.
     #[must_use]
@@ -1099,6 +1086,188 @@ mod shell_integration_injection_tests {
         assert!(
             cmd.get_env("XDG_DATA_DIRS").is_some(),
             "fish integration must set $XDG_DATA_DIRS"
+        );
+    }
+}
+
+/// Real-PTY integration tests for the event-driven echo-off detection.
+///
+/// These spawn an actual shell via [`run_terminal`], so they are Unix-only
+/// (Windows `ConPTY` has no termios). They assert the reader-thread,
+/// output-triggered termios check (which replaced the old 100 ms writer-thread
+/// poll) flips `echo_off` when a child disables `ECHO` while keeping `ICANON`,
+/// and that resize still reaches the child after the re-architecture.
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod echo_off_event_driven_tests {
+    use super::{PtySpawnConfig, PtyWrite, run_terminal};
+    use crate::io::PtyRead;
+    use freminal_common::pty_write::FreminalTerminalSize;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    const fn small_size() -> FreminalTerminalSize {
+        FreminalTerminalSize {
+            width: 80,
+            height: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    // Drain PtyRead bytes until either `deadline` passes or `pred(echo_off)`
+    // holds. Returns the final observed value. Draining the read channel keeps
+    // the reader thread from blocking on a full channel, so its per-burst
+    // termios check keeps running.
+    fn wait_for_echo_off(
+        send_rx: &crossbeam_channel::Receiver<PtyRead>,
+        echo_off: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        want: bool,
+        deadline: Instant,
+    ) -> bool {
+        loop {
+            // Drain any pending output (each burst drives a termios check on
+            // the reader thread).
+            while send_rx.try_recv().is_ok() {}
+            let current = echo_off.load(Ordering::Relaxed);
+            if current == want {
+                return current;
+            }
+            if Instant::now() >= deadline {
+                return current;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn echo_off_flips_true_when_child_disables_echo_keeps_icanon() {
+        let (_write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
+
+        // `stty -echo icanon` sets the password-prompt shape (!ECHO && ICANON),
+        // then `printf x` produces a read burst that triggers the reader
+        // thread's termios check, then `sleep` holds the pty open.
+        let spawn_cfg = PtySpawnConfig {
+            command: Some((
+                String::from("/bin/sh"),
+                vec![
+                    String::from("-c"),
+                    String::from("stty -echo icanon 2>/dev/null; printf x; sleep 30"),
+                ],
+            )),
+            shell: None,
+            cwd: None,
+            extra_env: None,
+            set_term_program: false,
+        };
+
+        let result = run_terminal(write_rx, send_tx, spawn_cfg, None, &small_size(), 0)
+            .expect("run_terminal");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let observed = wait_for_echo_off(&send_rx, &result.echo_off, true, deadline);
+        assert!(
+            observed,
+            "echo_off should flip to true after the child disables ECHO and \
+             produces output (event-driven reader-thread check)"
+        );
+    }
+
+    #[test]
+    fn echo_off_stays_false_in_normal_cooked_mode() {
+        let (_write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
+
+        // Normal cooked mode (ECHO + ICANON both set) must NOT be flagged as a
+        // password prompt. Emit output to drive several reader-thread checks.
+        let spawn_cfg = PtySpawnConfig {
+            command: Some((
+                String::from("/bin/sh"),
+                vec![
+                    String::from("-c"),
+                    String::from("printf 'hello\\n'; sleep 30"),
+                ],
+            )),
+            shell: None,
+            cwd: None,
+            extra_env: None,
+            set_term_program: false,
+        };
+
+        let result = run_terminal(write_rx, send_tx, spawn_cfg, None, &small_size(), 0)
+            .expect("run_terminal");
+
+        // Give the reader thread ample time / bursts to (not) set the flag.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let observed = wait_for_echo_off(&send_rx, &result.echo_off, true, deadline);
+        assert!(
+            !observed,
+            "echo_off must stay false in normal cooked mode (ECHO + ICANON set)"
+        );
+    }
+
+    #[test]
+    fn resize_then_write_still_reaches_child_after_rearchitecture() {
+        let (write_tx, write_rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let (send_tx, send_rx) = crossbeam_channel::unbounded::<PtyRead>();
+
+        // `cat` echoes back whatever is written to it. The writer thread now
+        // owns `master` and handles BOTH `Resize` (via `master.resize()`) and
+        // `Write` in one drain loop. This test interleaves a resize before a
+        // write and asserts the write still round-trips — proving the resize
+        // did not break or stall the writer loop after the re-architecture
+        // (resize deliberately stayed on the writer thread, not the reader).
+        let spawn_cfg = PtySpawnConfig {
+            command: Some((
+                String::from("/bin/sh"),
+                vec![String::from("-c"), String::from("exec cat")],
+            )),
+            shell: None,
+            cwd: None,
+            extra_env: None,
+            set_term_program: false,
+        };
+
+        // Keep the result bound (`_result`) so its channels/handles live for
+        // the whole test; the writer/reader threads must stay alive.
+        let _result = run_terminal(write_rx, send_tx, spawn_cfg, None, &small_size(), 0)
+            .expect("run_terminal");
+
+        // Interleave a resize (must be accepted by the writer's drain loop)
+        // followed by a write that `cat` will echo back.
+        write_tx
+            .send(PtyWrite::Resize(FreminalTerminalSize {
+                width: 100,
+                height: 40,
+                pixel_width: 0,
+                pixel_height: 0,
+            }))
+            .expect("send resize");
+        write_tx
+            .send(PtyWrite::Write(b"freminal-roundtrip\n".to_vec()))
+            .expect("send write");
+
+        let mut collected: Vec<u8> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_echo = false;
+        while Instant::now() < deadline && !saw_echo {
+            while let Ok(read) = send_rx.try_recv() {
+                collected.extend_from_slice(&read.buf);
+            }
+            if collected
+                .windows(b"freminal-roundtrip".len())
+                .any(|w| w == b"freminal-roundtrip")
+            {
+                saw_echo = true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            saw_echo,
+            "a write following a resize must still round-trip through the \
+             writer thread; collected output was {:?}",
+            String::from_utf8_lossy(&collected)
         );
     }
 }

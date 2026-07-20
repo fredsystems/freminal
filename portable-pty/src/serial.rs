@@ -227,6 +227,13 @@ impl MasterPty for Master {
         Ok(Box::new(Reader { fd }))
     }
 
+    fn try_clone_reader_termios(&self) -> anyhow::Result<Box<dyn crate::PtyReader>> {
+        // Serial ports are not ptys; `PtyReader::get_termios` uses its default
+        // `None` on unix (there is no meaningful password-prompt termios here).
+        let fd = FileDescriptor::dup(&*self.port)?;
+        Ok(Box::new(Reader { fd }))
+    }
+
     fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
         if *self.took_writer.borrow() {
             anyhow::bail!("cannot take writer more than once");
@@ -256,6 +263,8 @@ impl MasterPty for Master {
 struct Reader {
     fd: FileDescriptor,
 }
+
+impl crate::PtyReader for Reader {}
 
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
