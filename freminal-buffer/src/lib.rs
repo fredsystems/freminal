@@ -45,6 +45,7 @@
 pub mod buffer;
 pub mod cell;
 pub mod compact_row;
+pub mod compressed_block;
 pub mod image_store;
 pub mod response;
 pub mod row;
