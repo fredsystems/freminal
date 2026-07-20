@@ -148,10 +148,26 @@ pub struct TerminalEmulator {
     /// `TerminalSnapshot`, so the clean path (no dirty rows) hands them
     /// directly into the snapshot with a refcount bump — no Vec allocation.
     previous_visible_snap: VisibleSnap,
+    /// The flatten cache for the buffer that is **not** currently active.
+    ///
+    /// On a primary↔alternate switch we cannot reuse the active
+    /// `previous_visible_snap` (it holds the other buffer's content), but we
+    /// also must not report a spurious `content_changed = true` when returning
+    /// to a buffer whose restored content is byte-identical to what we last
+    /// rendered on it. So instead of dropping the cache on a switch, we **swap**
+    /// it with the stashed cache for the buffer we are switching *to* (issue
+    /// #405, alt/primary one-frame tax). The very next flatten then compares
+    /// against the correct same-buffer baseline, and `leave_alternate` restoring
+    /// byte-identical primary rows no longer forces a full-flatten redraw.
+    ///
+    /// `previous_visible_snap` always holds the cache for the buffer identified
+    /// by `previous_was_alternate`; this field holds the other one.
+    stashed_visible_snap_other_buffer: VisibleSnap,
     /// Whether the previous snapshot was taken while in the alternate screen
-    /// buffer.  Used to detect primary↔alternate transitions and invalidate
-    /// `previous_visible_snap` so stale content is never reused across a
-    /// buffer switch.
+    /// buffer.  Used to detect primary↔alternate transitions and swap
+    /// `previous_visible_snap` with `stashed_visible_snap_other_buffer` so the
+    /// wrong buffer's content is never reused across a switch, while the
+    /// correct same-buffer baseline is preserved for change detection.
     previous_was_alternate: bool,
     /// Scroll offset requested by the GUI (rows from the bottom, 0 = live).
     ///
@@ -210,6 +226,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             gui_extra_rows: 0,
@@ -239,6 +256,7 @@ impl TerminalEmulator {
             pty_io: None,
             write_tx,
             previous_visible_snap: None,
+            stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             gui_extra_rows: 0,
@@ -319,6 +337,7 @@ impl TerminalEmulator {
             pty_io: Some(io),
             write_tx,
             previous_visible_snap: None,
+            stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
             gui_scroll_offset: 0,
             gui_extra_rows: 0,
@@ -547,8 +566,8 @@ impl TerminalEmulator {
     ///
     /// Returns a clone of the shared `Arc<AtomicBool>` — the caller reads it
     /// with a cheap `Relaxed` atomic load each frame.  The underlying flag is
-    /// refreshed by the writer thread every 100 ms via `tcgetattr()` on the
-    /// master fd (Unix only).
+    /// refreshed by the reader thread once per PTY read burst (event-driven; no
+    /// standing timer) via `tcgetattr()` on a reader-side fd clone (Unix only).
     ///
     /// Returns `None` in headless / benchmark / playback mode where there is
     /// no real PTY.
@@ -629,12 +648,23 @@ impl TerminalEmulator {
             self.gui_extra_rows.min(available_above)
         };
 
-        // ── Invalidate the snap cache on primary ↔ alternate screen switch ───
+        // ── Swap the snap cache on primary ↔ alternate screen switch ─────────
         //
-        // When the buffer type changes, the previous visible_snap belongs to
-        // the other buffer and must never be reused for the new one.
+        // The active `previous_visible_snap` holds the OTHER buffer's content
+        // after a switch, so it must not be reused directly. But dropping it
+        // outright makes the next flatten report `content_changed = true` even
+        // when the buffer we switched *to* was restored byte-identical to what
+        // we last rendered on it (the common `leave_alternate` case). Instead we
+        // swap the active cache with the stashed cache for the buffer we are
+        // switching to: `previous_visible_snap` becomes that buffer's last-seen
+        // baseline (or `None` if we've never rendered it), and the buffer we
+        // just left is stashed for when we return. This preserves same-buffer
+        // change detection across the switch (issue #405, alt/primary tax).
         if is_alternate_screen != self.previous_was_alternate {
-            self.previous_visible_snap = None;
+            std::mem::swap(
+                &mut self.previous_visible_snap,
+                &mut self.stashed_visible_snap_other_buffer,
+            );
             self.previous_was_alternate = is_alternate_screen;
         }
 
@@ -668,6 +698,10 @@ impl TerminalEmulator {
         let current_size = (term_width, term_height);
         if current_size != self.previous_term_size {
             self.previous_visible_snap = None;
+            // A resize applies to BOTH buffers, so the stashed other-buffer
+            // cache is also the wrong dimensions and must not be restored on a
+            // later buffer switch. Clear it too.
+            self.stashed_visible_snap_other_buffer = None;
             self.previous_term_size = current_size;
         }
 
@@ -1331,12 +1365,75 @@ mod tests {
         emu.handle_incoming_data(b"primary content");
         let _ = emu.build_snapshot();
 
-        // Switch to alternate screen — should invalidate cache
+        // Switch to alternate screen — the active cache holds primary content,
+        // which must not be reused; the blank alt screen differs, so this is a
+        // genuine change.
         emu.handle_incoming_data(b"\x1b[?1049h");
         let snap = emu.build_snapshot();
         assert!(
             snap.content_changed,
             "switching to alternate screen should mark content_changed"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_return_to_primary_unchanged_content_is_not_changed() {
+        // Issue #405 alt/primary one-frame tax: returning to the primary screen
+        // with byte-identical restored content must NOT report content_changed.
+        // The per-buffer cache swap preserves the primary baseline across the
+        // alt-screen excursion.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"primary content");
+        let primary_snap = emu.build_snapshot();
+        assert!(
+            primary_snap.content_changed,
+            "first primary snapshot is a change"
+        );
+        // A second primary snapshot with no changes is stable.
+        let stable = emu.build_snapshot();
+        assert!(!stable.content_changed, "idle primary is unchanged");
+
+        // Enter the alternate screen and render it (writes some alt content).
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        emu.handle_incoming_data(b"alt screen stuff");
+        let alt_snap = emu.build_snapshot();
+        assert!(alt_snap.is_alternate_screen);
+
+        // Leave the alternate screen — `leave_alternate` restores the primary
+        // rows exactly as they were. The restored content is byte-identical to
+        // what we last rendered on primary, so the returning snapshot must
+        // report content_changed == false (the fix; previously always true).
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let returned = emu.build_snapshot();
+        assert!(
+            !returned.is_alternate_screen,
+            "should be back on the primary screen"
+        );
+        assert!(
+            !returned.content_changed,
+            "returning to a byte-identical primary screen must not report \
+             content_changed (issue #405 one-frame tax fix)"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_return_to_primary_with_changed_content_is_changed() {
+        // Guard the other direction: if the primary content genuinely differs
+        // when we return (e.g. output arrived on primary via the alt buffer's
+        // exit sequence), content_changed must still be reported true. Here we
+        // change the primary AFTER leaving alt to force a real diff.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"primary content");
+        let _ = emu.build_snapshot();
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let _ = emu.build_snapshot();
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        // New output on the restored primary screen.
+        emu.handle_incoming_data(b" plus more");
+        let returned = emu.build_snapshot();
+        assert!(
+            returned.content_changed,
+            "genuinely changed primary content must report content_changed"
         );
     }
 
