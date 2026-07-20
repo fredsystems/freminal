@@ -563,3 +563,7 @@ profile_export*.xml
 # member crate is invalid and breaks tooling (e.g. Dependabot's resolver). Guard
 # against re-committing a stray nested lockfile.
 */Cargo.lock
+
+# Oversized local scrollback-memory test fixture (~5 MB). Regenerate locally
+# with speed_tests/random_crap.py; too large to track in git.
+speed_tests/100000_lines.txt

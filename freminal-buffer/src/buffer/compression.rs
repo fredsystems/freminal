@@ -29,11 +29,25 @@ use std::ops::Range;
 
 use conv2::ValueFrom;
 
+use freminal_common::buffer_states::buffer_type::BufferType;
+
 use crate::cell::Cell;
 use crate::compact_row::CompactRow;
 use crate::compressed_block::CompressedBlock;
 
 use super::{BlockId, BlockRowRef, Buffer};
+
+/// Maximum number of contiguous eligible rows grouped into a single
+/// `compress_scrollback_block` call by `Buffer::compress_idle_scrollback`.
+///
+/// The plan's target range is ~128-256 logical scrollback rows: large
+/// enough to amortize LZ4's fixed per-call overhead, small enough that
+/// scrolling into a block (which decompresses the whole thing) stays well
+/// under one frame budget. `256` is chosen here as the upper end of that
+/// range; whether `128` yields a meaningfully better ratio/latency
+/// trade-off is validated against measured behavior in Task 119.6's
+/// benches, not here.
+const BLOCK_SIZE: usize = 256;
 
 impl Buffer {
     /// Pad `row_block_map` up to `self.rows.len()` with `None`, healing any
@@ -69,6 +83,111 @@ impl Buffer {
             .filter_map(|entry| entry.map(BlockRowRef::block_id))
             .collect();
         self.blocks.retain(|id, _| referenced.contains(id));
+    }
+
+    /// Compress up to `budget` rows of already-Task-118-compact, cold
+    /// scrollback into LZ4 blocks, returning the number of rows *newly
+    /// compressed*.
+    ///
+    /// Intended to be called from the PTY thread's idle tick immediately
+    /// AFTER `compact_idle_scrollback` has caught up for this same tick
+    /// (see the idle-tick arm in `freminal/src/gui/pty.rs`): a row must be
+    /// Task-118-compacted before it is a compression candidate, so calling
+    /// this while a compaction backlog is still draining would find
+    /// nothing to do — compact first, compress the now-cold result second.
+    ///
+    /// Only contiguous runs of scrollback rows (below the visible window,
+    /// `0..visible_window_start(0)`) that are ALL currently
+    /// [`Row::is_compact`] and not already evicted into a block are
+    /// eligible. A `Live` (not-yet-compacted) row, an already-compressed
+    /// row, or an image row (never compact) breaks the current run —
+    /// those rows become eligible on a later tick once compaction (or a
+    /// prior compression call) has processed them. A no-op (returns `0`)
+    /// on the alternate screen and when there is no scrollback, no budget,
+    /// or nothing left to compress.
+    ///
+    /// Each eligible run is grouped into chunks of at most `BLOCK_SIZE`
+    /// rows and compressed via one `compress_scrollback_block` call per
+    /// chunk. There is deliberately no minimum chunk length: even a
+    /// single-row trailing run is still compressed, trading some
+    /// compression ratio (a one-row block still pays LZ4's fixed per-call
+    /// overhead) for algorithmic simplicity and testability — such a short
+    /// run is rare in practice (only at scrollback's tail, near the visible
+    /// window, or where an image row bisects a run).
+    ///
+    /// `budget` bounds the number of rows *actually compressed* — i.e.
+    /// rows inside chunks for which `compress_scrollback_block` returned
+    /// `true` — mirroring `compact_idle_scrollback`'s "budget counts real
+    /// work, not rows scanned" discipline: a chunk that fails to compress
+    /// (should not happen given the eligibility scan performed here, but
+    /// mirrors `compress_scrollback_block`'s own preconditions defensively)
+    /// does not consume budget. A chunk that would exceed the remaining
+    /// budget is shrunk to fit exactly, so every call makes forward
+    /// progress up to `budget` rather than skipping a run entirely because
+    /// its full size doesn't fit.
+    #[must_use]
+    pub fn compress_idle_scrollback(&mut self, budget: usize) -> usize {
+        if self.kind == BufferType::Alternate || budget == 0 {
+            return 0;
+        }
+        self.sync_row_block_map_len();
+
+        let visible_start = self.visible_window_start(0);
+        if visible_start == 0 {
+            return 0;
+        }
+
+        let mut compressed = 0usize;
+        let mut i = 0usize;
+        while i < visible_start && compressed < budget {
+            if !self.row_is_compression_candidate(i) {
+                i += 1;
+                continue;
+            }
+
+            // Extend the run while rows stay eligible, bounded by the
+            // visible window.
+            let mut run_end = i + 1;
+            while run_end < visible_start && self.row_is_compression_candidate(run_end) {
+                run_end += 1;
+            }
+
+            // Compress the run in `BLOCK_SIZE` chunks, each further capped
+            // by the remaining budget so `budget` is always respected
+            // exactly.
+            let mut chunk_start = i;
+            while chunk_start < run_end && compressed < budget {
+                let remaining_budget = budget - compressed;
+                let chunk_len = (run_end - chunk_start)
+                    .min(BLOCK_SIZE)
+                    .min(remaining_budget);
+                if chunk_len == 0 {
+                    break;
+                }
+                if self.compress_scrollback_block(chunk_start, chunk_len) {
+                    compressed += chunk_len;
+                }
+                chunk_start += chunk_len;
+            }
+
+            i = run_end;
+        }
+
+        self.debug_assert_invariants();
+        compressed
+    }
+
+    /// `true` if scrollback row `idx` is eligible to be grouped into a
+    /// `compress_idle_scrollback` run: currently Task-118 [`Row::is_compact`]
+    /// and not already evicted into a compressed block. Used only by the
+    /// run scan in `compress_idle_scrollback`.
+    fn row_is_compression_candidate(&self, idx: usize) -> bool {
+        let Some(row) = self.rows.get(idx) else {
+            return false;
+        };
+        row.is_compact()
+            && !row.is_evicted()
+            && self.row_block_map.get(idx).copied().flatten().is_none()
     }
 
     /// Compress rows `[start, start + count)` into a single new
@@ -706,5 +825,143 @@ mod tests {
         for i in 0..visible_start {
             assert!(buf.rows[i].is_evicted(), "row {i} must stay evicted");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // compress_idle_scrollback (Task 119.5)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn compress_idle_scrollback_compresses_already_compacted_rows() {
+        let mut buf = Buffer::new(20, 3).with_scrollback_limit(200);
+        push_numbered_lines(&mut buf, 20);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 2, "test needs scrollback");
+
+        let (chars_before, tags_before, offsets_before, urls_before) =
+            buf.scrollback_as_tchars_and_tags(0);
+
+        // Compact first (Task 118), then compress (Task 119.5) — mirrors
+        // the idle-tick sequencing in `freminal/src/gui/pty.rs`.
+        let compacted = buf.compact_idle_scrollback(usize::MAX);
+        assert!(compacted > 0, "test needs rows to compact");
+
+        let compressed = buf.compress_idle_scrollback(usize::MAX);
+        assert!(compressed > 0, "expected some rows to be compressed");
+        assert!(!buf.blocks.is_empty(), "expected at least one block");
+
+        for i in 0..visible_start {
+            assert!(buf.rows[i].is_evicted(), "row {i} should be evicted");
+            assert!(buf.row_block_map[i].is_some());
+        }
+        for i in visible_start..buf.rows.len() {
+            assert!(!buf.rows[i].is_evicted(), "visible row {i} untouched");
+        }
+
+        let (chars_after, tags_after, offsets_after, urls_after) =
+            buf.scrollback_as_tchars_and_tags(0);
+        assert_eq!(
+            chars_before, chars_after,
+            "flattened characters must be identical before/after idle compression"
+        );
+        assert_eq!(tags_before, tags_after);
+        assert_eq!(offsets_before, offsets_after);
+        assert_eq!(urls_before, urls_after);
+    }
+
+    #[test]
+    fn compress_idle_scrollback_on_live_rows_compresses_nothing() {
+        let mut buf = Buffer::new(20, 3).with_scrollback_limit(200);
+        push_numbered_lines(&mut buf, 20);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 2, "test needs scrollback");
+
+        // Deliberately do NOT compact: every scrollback row is still Live,
+        // so compression must find nothing eligible.
+        let compressed = buf.compress_idle_scrollback(usize::MAX);
+
+        assert_eq!(compressed, 0);
+        assert!(buf.blocks.is_empty());
+        for i in 0..visible_start {
+            assert!(!buf.rows[i].is_evicted());
+            assert!(buf.row_block_map.get(i).copied().flatten().is_none());
+        }
+    }
+
+    #[test]
+    fn compress_idle_scrollback_respects_budget_and_drains_over_multiple_calls() {
+        let mut buf = buffer_with_compact_scrollback(2000);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 100, "test needs a large scrollback");
+
+        let budget = 100usize;
+        let mut total_compressed = 0usize;
+        let mut iterations = 0usize;
+        loop {
+            let compressed = buf.compress_idle_scrollback(budget);
+            assert!(
+                compressed <= budget,
+                "a single call must never compress more than its budget"
+            );
+            if compressed == 0 {
+                break;
+            }
+            total_compressed += compressed;
+            iterations += 1;
+            assert!(
+                iterations < 1_000,
+                "compression should fully drain well within this many calls"
+            );
+        }
+
+        assert!(
+            iterations > 1,
+            "a large scrollback should take more than one budgeted call to fully compress"
+        );
+        assert_eq!(total_compressed, visible_start);
+        for i in 0..visible_start {
+            assert!(buf.rows[i].is_evicted(), "row {i} should be evicted");
+        }
+    }
+
+    #[test]
+    fn compress_idle_scrollback_alternate_screen_is_noop() {
+        let mut buf = buffer_with_compact_scrollback(20);
+        buf.enter_alternate(0);
+        assert_eq!(buf.kind, BufferType::Alternate);
+
+        let compressed = buf.compress_idle_scrollback(usize::MAX);
+
+        assert_eq!(compressed, 0);
+        assert!(buf.blocks.is_empty());
+    }
+
+    #[test]
+    fn compress_idle_scrollback_never_touches_the_visible_region() {
+        let mut buf = buffer_with_compact_scrollback(20);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 2, "test needs scrollback");
+
+        let _ = buf.compress_idle_scrollback(usize::MAX);
+
+        for i in visible_start..buf.rows.len() {
+            assert!(
+                !buf.rows[i].is_evicted(),
+                "visible row {i} must never be compressed"
+            );
+            assert!(buf.row_block_map.get(i).copied().flatten().is_none());
+        }
+    }
+
+    #[test]
+    fn compress_idle_scrollback_is_idempotent_once_fully_compressed() {
+        let mut buf = buffer_with_compact_scrollback(20);
+
+        let first_pass = buf.compress_idle_scrollback(usize::MAX);
+        assert!(first_pass > 0, "test needs something to compress");
+
+        // Fully compressed already: further calls must do no busy-work.
+        assert_eq!(buf.compress_idle_scrollback(usize::MAX), 0);
+        assert_eq!(buf.compress_idle_scrollback(usize::MAX), 0);
     }
 }
