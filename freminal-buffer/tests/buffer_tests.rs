@@ -212,6 +212,61 @@ fn bce_scroll_does_not_fill_new_row_with_current_bg() {
     }
 }
 
+/// A line feed that creates a brand-new row at the bottom must NOT apply BCE:
+/// LF only moves the active position, it is not an explicit erase.  The new
+/// row must carry the default background regardless of the active SGR — even a
+/// visually-inert attribute like bold.  Regression test for the "extra blank
+/// line on narrower resize" bug: a lingering `ESC[1m` (bold) used to make the
+/// new row materialise full-width bold-blank cells, which then survived reflow
+/// as a spurious trailing continuation row.
+#[test]
+fn bce_line_feed_new_row_ignores_active_bold() {
+    // Bold, no color — visually inert on a blank cell.
+    let bold_tag = FormatTag {
+        font_weight: freminal_common::buffer_states::fonts::FontWeight::Bold,
+        ..FormatTag::default()
+    };
+
+    let mut buf = Buffer::new(10, 3);
+    buf.insert_text(&[ascii('A'), ascii('B')]);
+    buf.set_format(bold_tag);
+    // Advance past the last row so handle_lf must create a fresh row.
+    buf.handle_lf();
+    buf.handle_lf();
+
+    let rows = buf.rows();
+    let new_row = rows.last().expect("buffer has rows");
+    assert!(
+        new_row.characters().is_empty(),
+        "line-feed-created row under active bold must stay sparse (default bg), \
+         got {} stored cells",
+        new_row.characters().len()
+    );
+}
+
+/// Same as above but for a real background color: this is legitimate content
+/// state, yet a LINE FEED still must not BCE-paint the new row (BCE applies
+/// only to explicit erases — ED/EL — not to cursor movement / scrolling).
+#[test]
+fn bce_line_feed_new_row_ignores_active_bg_color() {
+    let mut buf = Buffer::new(10, 3);
+    buf.insert_text(&[ascii('A'), ascii('B')]);
+    buf.set_format(red_bg_tag());
+    buf.handle_lf();
+    buf.handle_lf();
+
+    let rows = buf.rows();
+    let new_row = rows.last().expect("buffer has rows");
+    for col in 0..10 {
+        let cell = new_row.resolve_cell(col);
+        assert_eq!(
+            cell.tag(),
+            &FormatTag::default(),
+            "col {col}: line-feed-created row must have default background (no BCE)"
+        );
+    }
+}
+
 #[test]
 fn bce_erase_chars_fills_with_current_bg() {
     let mut buf = Buffer::new(10, 5);

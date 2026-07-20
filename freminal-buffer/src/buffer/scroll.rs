@@ -648,9 +648,11 @@ impl Buffer {
         // the same reclaim applies).
         self.gc_unreferenced_blocks();
 
-        // add a new empty row at the bottom (BCE: fill with current SGR background)
-        let mut new_row = Row::new(self.width);
-        new_row.fill_with_tag(&self.current_tag);
+        // add a new empty row at the bottom, using default background (no BCE).
+        // Scrolling only moves content; it is not an explicit erase, so the
+        // scrolled-in row must not inherit the active SGR background — same
+        // rationale as `push_row` and `scroll_slice_up`/`_down`.
+        let new_row = Row::new(self.width);
         self.rows.push(new_row);
         self.row_cache.push(None);
         self.row_block_map.push(None);

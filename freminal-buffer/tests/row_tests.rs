@@ -450,47 +450,6 @@ fn clear_with_tag_nondefault_fills_row() {
 }
 
 #[test]
-fn fill_with_tag_default_leaves_empty_row_sparse() {
-    let mut row = Row::new(10);
-
-    row.fill_with_tag(&FormatTag::default());
-
-    assert!(
-        row.characters().is_empty(),
-        "fill_with_tag(default) should leave row sparse"
-    );
-}
-
-#[test]
-fn fill_with_tag_default_clears_populated_row() {
-    let mut row = Row::new(10);
-    row.insert_text(0, &[ascii('X'), ascii('Y'), ascii('Z')], &tag());
-    assert!(!row.characters().is_empty(), "precondition: row has cells");
-
-    row.fill_with_tag(&FormatTag::default());
-
-    assert!(
-        row.characters().is_empty(),
-        "fill_with_tag(default) on a populated row should clear it to sparse"
-    );
-}
-
-#[test]
-fn fill_with_tag_nondefault_fills_row() {
-    let mut row = Row::new(8);
-    let bce_tag = blue_bg_tag();
-
-    row.fill_with_tag(&bce_tag);
-
-    let chars = row.characters();
-    assert_eq!(chars.len(), 8, "fill should write to all columns");
-    for (col, cell) in chars.iter().enumerate() {
-        assert_eq!(cell.tchar(), &TChar::Space, "col {col}: expected blank");
-        assert_eq!(cell.tag(), &bce_tag, "col {col}: expected blue-bg tag");
-    }
-}
-
-#[test]
 fn erase_cells_at_with_bce_tag() {
     let mut row = Row::new(10);
     let bce_tag = blue_bg_tag();
