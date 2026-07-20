@@ -105,6 +105,15 @@ impl Read for PtyFd {
     }
 }
 
+impl crate::PtyReader for PtyFd {
+    fn get_termios(&self) -> Option<nix::sys::termios::Termios> {
+        // The reader fd is a clone of the master fd (see
+        // `try_clone_reader`/`try_clone_reader_termios`), so it refers to the
+        // same pty and reports the same termios as the master would.
+        nix::sys::termios::tcgetattr(self.0.as_fd()).ok()
+    }
+}
+
 fn tty_name(fd: RawFd) -> Option<PathBuf> {
     let mut buf = vec![0 as std::ffi::c_char; 128];
 
@@ -353,6 +362,11 @@ impl MasterPty for UnixMasterPty {
         Ok(Box::new(fd))
     }
 
+    fn try_clone_reader_termios(&self) -> Result<Box<dyn crate::PtyReader>, Error> {
+        let fd = PtyFd(self.fd.try_clone()?);
+        Ok(Box::new(fd))
+    }
+
     fn take_writer(&self) -> Result<Box<dyn Write + Send>, Error> {
         if *self.took_writer.borrow() {
             anyhow::bail!("cannot take writer more than once");
@@ -413,5 +427,73 @@ impl Write for UnixMasterWriter {
     }
     fn flush(&mut self) -> Result<(), io::Error> {
         self.fd.flush()
+    }
+}
+
+#[cfg(test)]
+mod termios_reader_tests {
+    use crate::{PtySize, PtySystem};
+    use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
+    use std::os::fd::AsFd;
+
+    fn open_pair() -> crate::PtyPair {
+        super::UnixPtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty")
+    }
+
+    // The termios-capable reader clone must observe the SAME termios flags as
+    // the underlying pty: its fd is a clone of the master fd, referring to the
+    // same terminal. This is the invariant the event-driven echo-off detection
+    // relies on (the reader thread reads termios off its reader clone, not the
+    // master).
+    #[test]
+    fn reader_termios_reflects_slave_echo_canonical_state() {
+        let pair = open_pair();
+        let reader = pair
+            .master
+            .try_clone_reader_termios()
+            .expect("try_clone_reader_termios");
+
+        // Baseline: a freshly opened pty has ECHO and ICANON set (cooked mode).
+        let base = reader.get_termios().expect("get_termios baseline");
+        assert!(
+            base.local_flags.contains(LocalFlags::ECHO),
+            "fresh pty should have ECHO set"
+        );
+        assert!(
+            base.local_flags.contains(LocalFlags::ICANON),
+            "fresh pty should have ICANON set"
+        );
+
+        // Simulate a password prompt: disable ECHO, keep ICANON, applied via
+        // the master fd (a stand-in for what `sudo`/`getpass` does on the slave
+        // side — both ends share one termios).
+        let raw_fd = pair.master.as_raw_fd().expect("as_raw_fd");
+        let borrowed = unsafe {
+            // SAFETY: raw_fd is a valid, open master fd owned by `pair` for the
+            // duration of this test.
+            std::os::fd::BorrowedFd::borrow_raw(raw_fd)
+        };
+        let mut t = tcgetattr(borrowed.as_fd()).expect("tcgetattr");
+        t.local_flags.remove(LocalFlags::ECHO);
+        t.local_flags.insert(LocalFlags::ICANON);
+        tcsetattr(borrowed.as_fd(), SetArg::TCSANOW, &t).expect("tcsetattr");
+
+        // The reader clone must now report the password-prompt state.
+        let updated = reader.get_termios().expect("get_termios updated");
+        assert!(
+            !updated.local_flags.contains(LocalFlags::ECHO),
+            "reader clone should observe ECHO cleared"
+        );
+        assert!(
+            updated.local_flags.contains(LocalFlags::ICANON),
+            "reader clone should observe ICANON still set"
+        );
     }
 }

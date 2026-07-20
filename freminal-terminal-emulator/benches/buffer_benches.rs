@@ -324,6 +324,17 @@ fn bench_data_and_format_for_gui(c: &mut Criterion) {
 //     whose rows are all clean (no mutation since the last snapshot).  This
 //     reflects the typical cost when the PTY is idle and the GUI polls for
 //     a fresh snapshot — the cached vectors are simply cloned.
+//
+//   build_snapshot_80x24_partial_dirty
+//     Measures the *partial-dirty path*: exactly ONE visible row is dirtied
+//     per sample (a single-character edit), then `build_snapshot` is called.
+//     This is the "1-of-N rows changed" scenario from issue #405 Part C. The
+//     buffer flatten/merge step is NOT incremental: `any_visible_dirty` gates
+//     a full O(all-visible-rows) merge-and-copy even when a single row changed,
+//     so this bench is expected to land much closer to the fully-dirty cost
+//     than to the clean cost. It exists to QUANTIFY that gap and justify (or
+//     not) the deferred per-row-incremental flatten work — measure before
+//     optimising.
 // ---------------------------------------------------------------
 fn bench_build_snapshot(c: &mut Criterion) {
     let mut group = c.benchmark_group("bench_build_snapshot");
@@ -367,6 +378,34 @@ fn bench_build_snapshot(c: &mut Criterion) {
             });
         });
     }
+
+    // ── Partial-dirty path (exactly 1 of 24 visible rows changed) ────────────
+    // Warm the cache once, then per sample dirty a single row (rewrite one
+    // character on row 12) and build a snapshot. iter_batched sets up the
+    // one-row edit per sample so each measured call sees exactly one dirty row.
+    group.bench_function("build_snapshot_80x24_partial_dirty", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24, 8, 16);
+                let payload = cup_writes_payload(80, 24);
+                let parsed = emulator.internal.parser.push(&payload);
+                emulator.internal.handler.process_outputs(&parsed);
+                // Warm the cache: mark all rows clean.
+                let _ = emulator.build_snapshot();
+                // Dirty exactly one visible row: move to row 12, col 1, write
+                // a single character.
+                let edit = b"\x1b[12;1HZ";
+                let parsed = emulator.internal.parser.push(edit);
+                emulator.internal.handler.process_outputs(&parsed);
+                emulator
+            },
+            |mut emulator| {
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
 
     group.finish();
 }

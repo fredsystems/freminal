@@ -6,6 +6,22 @@ use filedescriptor::{FileDescriptor, Pipe};
 use std::sync::{Arc, Mutex};
 use winapi::um::wincon::COORD;
 
+/// A readable ConPTY handle that also satisfies [`crate::PtyReader`].
+///
+/// Windows ConPTY exposes no termios, so `PtyReader` on this platform is just
+/// `Read + Send` with no extra methods — this wrapper merely forwards reads.
+struct WinPtyReader {
+    inner: FileDescriptor,
+}
+
+impl std::io::Read for WinPtyReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl crate::PtyReader for WinPtyReader {}
+
 #[derive(Default)]
 pub struct ConPtySystem {}
 
@@ -101,6 +117,15 @@ impl MasterPty for ConPtyMasterPty {
 
     fn try_clone_reader(&self) -> anyhow::Result<Box<dyn std::io::Read + Send>> {
         Ok(Box::new(lock_inner(&self.inner)?.readable.try_clone()?))
+    }
+
+    fn try_clone_reader_termios(&self) -> anyhow::Result<Box<dyn crate::PtyReader>> {
+        // Windows ConPTY has no termios; the reader is a plain readable handle.
+        // Wrap it so it satisfies `PtyReader` (which, on non-unix, is just
+        // `Read + Send` with no extra methods).
+        Ok(Box::new(WinPtyReader {
+            inner: lock_inner(&self.inner)?.readable.try_clone()?,
+        }))
     }
 
     fn take_writer(&self) -> anyhow::Result<Box<dyn std::io::Write + Send>> {
