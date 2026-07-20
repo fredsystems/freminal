@@ -38,10 +38,16 @@ show_timing = False
 summary_only = False
 filter_pane = None
 events_only = False
+raw_pty_out = None
 
 for arg in sys.argv[1:]:
     if arg.startswith("--recording-path"):
         filename = arg.split("=", 1)[1]
+    elif arg.startswith("--raw-pty"):
+        # Write concatenated PtyOutput bytes (optionally for one pane via
+        # --pane) to the given file path, in event order. Used to replay a
+        # recording's raw terminal output into a test harness.
+        raw_pty_out = arg.split("=", 1)[1]
     elif arg == "--convert-escape":
         convert_escape = True
     elif arg == "--split-commands":
@@ -318,6 +324,44 @@ if seek_index_offset > 0 and seek_index_offset < len(data):
     end = min(end, seek_index_offset)
 
 event_num = 0
+
+# ---------------------------------------------------------------------------
+# Raw PTY-output export mode (v2): concatenate PtyOutput payload bytes in
+# event order (optionally filtered to one pane) and write them to a file.
+# ---------------------------------------------------------------------------
+
+if raw_pty_out is not None:
+    collected = bytearray()
+    while pos + 13 <= end:
+        _ts = struct.unpack_from("<Q", data, pos)[0]
+        etype = data[pos + 8]
+        plen = struct.unpack_from("<I", data, pos + 9)[0]
+        pos += 13
+        if pos + plen > end:
+            break
+        payload_raw = data[pos:pos + plen]
+        pos += plen
+        if EVENT_TYPES.get(etype) != "PtyOutput":
+            continue
+        try:
+            pd = msgpack.unpackb(payload_raw, raw=False)
+            if isinstance(pd, dict) and len(pd) == 1:
+                inner = next(iter(pd.values()))
+                if isinstance(inner, dict):
+                    pd = inner
+        except Exception:
+            continue
+        if filter_pane is not None and pd.get("pane_id") not in (None, filter_pane):
+            continue
+        raw = pd.get("data", b"")
+        if isinstance(raw, list):
+            raw = bytes(raw)
+        if isinstance(raw, bytes):
+            collected.extend(raw)
+    with open(raw_pty_out, "wb") as out:
+        out.write(collected)
+    print(f"Wrote {len(collected)} bytes of PtyOutput to {raw_pty_out}")
+    sys.exit(0)
 
 # Print header info
 if not events_only:
