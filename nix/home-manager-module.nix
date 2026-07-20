@@ -48,7 +48,12 @@ let
 
       # Only include font section keys that are set.
       fontSection = lib.filterAttrs (_: v: v != null) {
-        inherit (s.font) family size ligatures;
+        inherit (s.font)
+          family
+          size
+          ligatures
+          line_height
+          ;
       };
 
       cursorSection = {
@@ -241,6 +246,16 @@ in
           description = ''
             Enable OpenType ligatures (liga, clig).
             Null uses the default (true).
+          '';
+        };
+
+        line_height = mkOption {
+          type = types.nullOr (types.addCheck types.float (x: x >= 1.0 && x <= 2.0));
+          default = null;
+          description = ''
+            Line-height multiplier applied to the font's ascent + descent to
+            set the row pitch (1.0–2.0). Values above 1.0 add leading between
+            rows. Null uses the default (1.05).
           '';
         };
       };

@@ -106,6 +106,12 @@ pub struct FontConfig {
     pub size: f32,
     /// Enable OpenType ligatures (`liga`, `clig`).  Default: `true`.
     pub ligatures: bool,
+    /// Line-height multiplier applied to the font's tight `ascent + descent`
+    /// ink box to derive the row pitch. Values above `1.0` add leading (blank
+    /// space) between rows, split evenly above and below the glyphs; this
+    /// affects vertical spacing only and never scales the glyphs themselves.
+    /// Default: `1.05`.
+    pub line_height: f32,
 }
 
 impl Default for FontConfig {
@@ -114,6 +120,7 @@ impl Default for FontConfig {
             family: None,
             size: 12.0,
             ligatures: true,
+            line_height: 1.05,
         }
     }
 }
@@ -1587,6 +1594,13 @@ impl Config {
             )));
         }
 
+        if !(1.0..=2.0).contains(&self.font.line_height) {
+            return Err(ConfigError::Validation(format!(
+                "font.line_height={} out of allowed range (1.0–2.0)",
+                self.font.line_height
+            )));
+        }
+
         if self.version == 0 {
             return Err(ConfigError::Validation("version must be >= 1".to_string()));
         }
@@ -2041,6 +2055,67 @@ size = 14.0
     fn full_config_default_has_ligatures_true() {
         let cfg = Config::default();
         assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn font_config_default_line_height_is_1_05() {
+        let cfg = FontConfig::default();
+        assert!(
+            (cfg.line_height - 1.05).abs() < f32::EPSILON,
+            "line_height should default to 1.05, got {}",
+            cfg.line_height
+        );
+    }
+
+    #[test]
+    fn font_config_line_height_round_trips_through_toml() {
+        let cfg = FontConfig {
+            line_height: 1.25,
+            ..FontConfig::default()
+        };
+        let toml_str = toml::to_string_pretty(&cfg).expect("FontConfig should serialize");
+        assert!(
+            toml_str.contains("line_height = 1.25"),
+            "serialized TOML should contain the line_height key: {toml_str}"
+        );
+        let parsed: FontConfig = toml::from_str(&toml_str).expect("valid TOML should parse");
+        assert!(
+            (parsed.line_height - 1.25).abs() < f32::EPSILON,
+            "line_height should survive the round trip, got {}",
+            parsed.line_height
+        );
+    }
+
+    #[test]
+    fn font_config_missing_line_height_defaults_to_1_05() {
+        // Backward compatibility: old config files without `line_height` must
+        // fall back to the 1.05 default.
+        let toml_str = r"
+[font]
+size = 14.0
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("valid TOML should parse");
+        let font = partial.font.expect("font section should be present");
+        assert!(
+            (font.line_height - 1.05).abs() < f32::EPSILON,
+            "missing line_height should default to 1.05, got {}",
+            font.line_height
+        );
+    }
+
+    #[test]
+    fn config_rejects_out_of_range_line_height() {
+        let mut cfg = Config::default();
+        cfg.font.line_height = 3.0;
+        assert!(
+            cfg.validate().is_err(),
+            "line_height above 2.0 must fail validation"
+        );
+        cfg.font.line_height = 0.5;
+        assert!(
+            cfg.validate().is_err(),
+            "line_height below 1.0 must fail validation"
+        );
     }
 
     #[test]
