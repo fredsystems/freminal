@@ -45,7 +45,7 @@ seams at activation before executing.
 | 102 | Kitty File Transfer (OSC 5113)    | Very high | Planned  | Task 99        |
 | 103 | Multiple Cursors (CSI)            | Medium    | Planned  | None           |
 | 118 | Compact Cell Representation       | Medium    | Complete | None           |
-| 119 | Scrollback Compression (LZ4)      | Large     | Planned  | Task 118       |
+| 119 | Scrollback Compression (LZ4)      | Large     | Pending merge | Task 118  |
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub     | Tasks 118, 119 |
 
 ---
