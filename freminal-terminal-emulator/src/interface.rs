@@ -675,6 +675,13 @@ impl TerminalEmulator {
         let scroll_changed = scroll_offset != self.previous_scroll_offset;
         if scroll_changed {
             self.previous_visible_snap = None;
+            // The stashed other-buffer cache also covers a specific viewport.
+            // A primary snapshot stashed while scrolled back must not be
+            // restored after a scroll change (e.g. entering the alternate
+            // screen forces offset 0): its content is for a different visible
+            // window. Clear it so the buffer switch re-flattens instead of
+            // reusing viewport-stale rows.
+            self.stashed_visible_snap_other_buffer = None;
             self.previous_scroll_offset = scroll_offset;
         }
 
@@ -685,6 +692,10 @@ impl TerminalEmulator {
         // reused.
         if extra_rows != self.previous_extra_rows {
             self.previous_visible_snap = None;
+            // Same reasoning as the scroll-change case: the stashed cache
+            // covers a specific flatten window and must not be restored across
+            // an extra-row change.
+            self.stashed_visible_snap_other_buffer = None;
             self.previous_extra_rows = extra_rows;
         }
 
@@ -997,6 +1008,18 @@ mod tests {
     fn make_headless() -> TerminalEmulator {
         let (emu, _rx) = TerminalEmulator::new_headless(None);
         emu
+    }
+
+    /// Return the first visible row's chars (up to the first `NewLine`).
+    /// Used to compare which window of content a snapshot flattened.
+    fn first_visible_row(
+        chars: &[freminal_common::buffer_states::tchar::TChar],
+    ) -> Vec<freminal_common::buffer_states::tchar::TChar> {
+        chars
+            .iter()
+            .take_while(|c| !matches!(c, freminal_common::buffer_states::tchar::TChar::NewLine))
+            .copied()
+            .collect()
     }
 
     // ── extract_selection_text ─────────────────────────────────────────────────
@@ -1413,6 +1436,67 @@ mod tests {
             !returned.content_changed,
             "returning to a byte-identical primary screen must not report \
              content_changed (issue #405 one-frame tax fix)"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_scrolled_primary_to_alt_to_primary_does_not_reuse_scrolled_content() {
+        // Issue #405 / CodeRabbit follow-up: a primary snapshot taken while
+        // scrolled back must NOT be restored (via the per-buffer cache swap)
+        // after returning from the alternate screen, because entering alt
+        // forces scroll_offset = 0 — the stashed content is for a different
+        // visible window. Regression guard for the "stale scrolled-back
+        // viewport reused at offset 0" bug.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        // Produce enough distinct lines to create scrollback. Each line's
+        // content is unique so we can distinguish the scrolled window from the
+        // live bottom.
+        for i in 0..200u32 {
+            emu.handle_incoming_data(format!("line{i}\r\n").as_bytes());
+        }
+        // Snapshot at the live bottom first (warms the primary cache clean).
+        let _ = emu.build_snapshot();
+
+        // Scroll back into history and snapshot — this caches a primary
+        // VisibleSnap for scroll_offset > 0.
+        emu.set_gui_scroll_offset(50);
+        let scrolled = emu.build_snapshot();
+        assert_eq!(scrolled.scroll_offset, 50, "should be scrolled back");
+        let scrolled_first_row = first_visible_row(&scrolled.visible_chars);
+
+        // Enter the alternate screen. This forces scroll_offset = 0, swaps the
+        // scrolled-back primary cache into the stash, and the scroll-change
+        // path must clear that stash.
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let _ = emu.build_snapshot();
+
+        // Leave the alternate screen. GUI offset is still 0, so we are at the
+        // live bottom. The returned snapshot must reflect the live-bottom
+        // primary content, NOT the stale scrolled-back window.
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let returned = emu.build_snapshot();
+        assert_eq!(
+            returned.scroll_offset, 0,
+            "should be at the live bottom after returning"
+        );
+        let returned_first_row = first_visible_row(&returned.visible_chars);
+        assert_ne!(
+            returned_first_row, scrolled_first_row,
+            "returning to the live bottom must not reuse the scrolled-back \
+             primary viewport (stale-viewport cache bug)"
+        );
+
+        // And it must match a fresh flatten at offset 0 (the source of truth).
+        let expected = emu
+            .internal
+            .handler
+            .buffer_mut()
+            .visible_as_tchars_and_tags_extended(0, 0)
+            .0;
+        let expected_first_row = first_visible_row(&expected);
+        assert_eq!(
+            returned_first_row, expected_first_row,
+            "returned content must match a fresh live-bottom flatten"
         );
     }
 
