@@ -1148,9 +1148,16 @@ mod echo_off_event_driven_tests {
         // `stty -echo icanon` sets the password-prompt shape (!ECHO && ICANON),
         // then `printf x` produces a read burst that triggers the reader
         // thread's termios check, then `sleep` holds the pty open.
+        //
+        // The program is the bare name `sh`, resolved via `$PATH` by
+        // `CommandBuilder` -- NOT the absolute path `/bin/sh`. The Nix build
+        // sandbox used by downstream consumers (e.g. the nixos flake's CI)
+        // has no `/bin` at all, so an absolute `/bin/sh` fails to spawn
+        // there (`ENOENT`) even though `bash` (which provides a `sh` symlink)
+        // is present on `$PATH` via `stdenv.initialPath`.
         let spawn_cfg = PtySpawnConfig {
             command: Some((
-                String::from("/bin/sh"),
+                String::from("sh"),
                 vec![
                     String::from("-c"),
                     String::from("stty -echo icanon 2>/dev/null; printf x; sleep 30"),
@@ -1181,9 +1188,13 @@ mod echo_off_event_driven_tests {
 
         // Normal cooked mode (ECHO + ICANON both set) must NOT be flagged as a
         // password prompt. Emit output to drive several reader-thread checks.
+        //
+        // See the `sh` vs. `/bin/sh` comment in the previous test: the bare
+        // name is resolved via `$PATH` so this also spawns inside the Nix
+        // build sandbox, which has no `/bin/sh`.
         let spawn_cfg = PtySpawnConfig {
             command: Some((
-                String::from("/bin/sh"),
+                String::from("sh"),
                 vec![
                     String::from("-c"),
                     String::from("printf 'hello\\n'; sleep 30"),
@@ -1218,9 +1229,13 @@ mod echo_off_event_driven_tests {
         // write and asserts the write still round-trips — proving the resize
         // did not break or stall the writer loop after the re-architecture
         // (resize deliberately stayed on the writer thread, not the reader).
+        //
+        // See the `sh` vs. `/bin/sh` comment above: the bare name is resolved
+        // via `$PATH` so this also spawns inside the Nix build sandbox, which
+        // has no `/bin/sh`.
         let spawn_cfg = PtySpawnConfig {
             command: Some((
-                String::from("/bin/sh"),
+                String::from("sh"),
                 vec![String::from("-c"), String::from("exec cat")],
             )),
             shell: None,
