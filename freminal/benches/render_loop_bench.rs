@@ -397,6 +397,77 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         });
     });
 
+    // Partial-dirty path (issue #405 Part B): prime the cache, then change a
+    // single visible row's content each sample and re-shape. `ShapingCache` is
+    // per-row content-hashed, so only the one changed row re-shapes (rustybuzz)
+    // while every other row is an `Arc::clone` hit. This isolates the shaping
+    // stage's genuinely-incremental behaviour — in contrast to the downstream
+    // vertex builders (`build_bg_instances`/`build_fg_instances`), which are
+    // NOT per-row incremental and rebuild all instances regardless (see
+    // `instanced_bg`/`instanced_fg`). Comparing this against
+    // `shape_visible_cache_hit` (0 changed) and the cold shape (all changed)
+    // quantifies the per-row shaping win that the deferred vertex-incremental
+    // work would need to preserve end-to-end.
+    {
+        let width = 200usize;
+        let height = 50usize;
+        let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
+        group.bench_function("shape_visible_partial_dirty_200x50", |b| {
+            b.iter_batched(
+                || {
+                    let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+                    let mut cache = ShapingCache::new();
+                    #[allow(clippy::cast_precision_loss)]
+                    let cell_w = fm.cell_width() as f32;
+                    // Prime the cache with the base content.
+                    let _ = cache.shape_visible(
+                        &base_chars,
+                        &base_tags,
+                        width,
+                        &mut fm,
+                        cell_w,
+                        false,
+                        &[],
+                    );
+                    // Produce a variant with exactly one row changed. Rows are
+                    // NewLine-delimited; flip one character on the ~middle row.
+                    let mut edited = base_chars.clone();
+                    let newline_positions: Vec<usize> = edited
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| {
+                            matches!(c, freminal_common::buffer_states::tchar::TChar::NewLine)
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    // First char of the middle row (after the preceding newline).
+                    let mid = newline_positions.len() / 2;
+                    let target = if mid == 0 {
+                        0
+                    } else {
+                        newline_positions[mid - 1] + 1
+                    };
+                    if let Some(slot) = edited.get_mut(target) {
+                        *slot = freminal_common::buffer_states::tchar::TChar::Ascii(b'Q');
+                    }
+                    (fm, cache, cell_w, edited)
+                },
+                |(mut fm, mut cache, cell_w, edited)| {
+                    std::hint::black_box(cache.shape_visible(
+                        &edited,
+                        &base_tags,
+                        width,
+                        &mut fm,
+                        cell_w,
+                        false,
+                        &[],
+                    ));
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+
     group.finish();
 }
 
