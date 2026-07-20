@@ -982,6 +982,15 @@ impl SettingsModal {
         ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5));
         ui.add_space(8.0);
 
+        // --- Line Height slider ---
+        ui.label("Line Height:");
+        ui.add(Slider::new(&mut self.draft.font.line_height, 1.0..=2.0).step_by(0.01));
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Vertical spacing between rows (multiplier of the font's ascent + descent).",
+        );
+        ui.add_space(8.0);
+
         // --- Ligatures toggle ---
         ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures");
         ui.colored_label(

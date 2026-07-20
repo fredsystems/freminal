@@ -415,6 +415,11 @@ pub struct FontManager {
     /// Font size in points (as specified by the user in config).
     font_size_pt: f32,
 
+    /// Line-height multiplier (`config.font.line_height`) used as the deliberate
+    /// row-pitch factor over the font's tight `ascent + descent` ink box. See
+    /// [`compute_cell_layout`].
+    line_height: f32,
+
     /// Display scale factor (`egui::Context::pixels_per_point()`).
     ///
     /// Used together with `font_size_pt` to compute the correct ppem value
@@ -452,6 +457,7 @@ impl FontManager {
 
         let bundled = load_bundled_faces()?;
         let font_size_pt = config.font.size;
+        let line_height = config.font.line_height;
 
         let (primary, bundled_fallback, current_family) =
             if let Some(family) = config.font.family.as_deref() {
@@ -491,7 +497,7 @@ impl FontManager {
             underline_offset,
             strikeout_offset,
             stroke_size,
-        } = compute_cell_metrics(&primary.regular, font_size_ppem)?;
+        } = compute_cell_metrics(&primary.regular, font_size_ppem, line_height)?;
 
         Ok(Self {
             primary,
@@ -509,6 +515,7 @@ impl FontManager {
             strikeout_offset,
             stroke_size,
             font_size_pt,
+            line_height,
             pixels_per_point,
             current_family,
             font_db,
@@ -702,7 +709,7 @@ impl FontManager {
             _ => {
                 let face = self.loaded_face(face_id)?;
                 let ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-                let cm = compute_cell_metrics(face, ppem).ok()?;
+                let cm = compute_cell_metrics(face, ppem, self.line_height).ok()?;
                 let cell_h: f32 = cm.cell_height.value_as::<f32>().ok()?;
                 let cell_w: f32 = cm.cell_width.value_as::<f32>().ok()?;
                 Some(FallbackCellMetrics {
@@ -740,12 +747,14 @@ impl FontManager {
     ) -> Result<RebuildResult, FontManagerError> {
         let new_family = config.font.family.as_deref();
         let new_size = config.font.size;
+        let new_line_height = config.font.line_height;
 
         let requested_family_differs = new_family != self.current_family.as_deref();
         let size_changed = (new_size - self.font_size_pt).abs() > f32::EPSILON;
         let ppp_changed = (pixels_per_point - self.pixels_per_point).abs() > f32::EPSILON;
+        let line_height_changed = (new_line_height - self.line_height).abs() > f32::EPSILON;
 
-        if !requested_family_differs && !size_changed && !ppp_changed {
+        if !requested_family_differs && !size_changed && !ppp_changed && !line_height_changed {
             return Ok(RebuildResult::NoChange);
         }
 
@@ -780,9 +789,11 @@ impl FontManager {
         }
 
         self.font_size_pt = new_size;
+        self.line_height = new_line_height;
         self.pixels_per_point = pixels_per_point;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        let metrics =
+            compute_cell_metrics(&self.primary.regular, font_size_ppem, self.line_height)?;
         self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph IDs and system face mappings may differ.
@@ -793,7 +804,7 @@ impl FontManager {
 
         if effective_family_changed {
             Ok(RebuildResult::FamilyChanged)
-        } else if size_changed || ppp_changed {
+        } else if size_changed || ppp_changed || line_height_changed {
             Ok(RebuildResult::SizeChanged)
         } else {
             // The config requested a different family, but after attempting to
@@ -821,7 +832,8 @@ impl FontManager {
 
         self.font_size_pt = size_pt;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        let metrics =
+            compute_cell_metrics(&self.primary.regular, font_size_ppem, self.line_height)?;
         self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph sizes differ at the new ppem.
@@ -862,7 +874,8 @@ impl FontManager {
 
         self.pixels_per_point = pixels_per_point;
         let font_size_ppem = pt_to_ppem(self.font_size_pt, self.pixels_per_point);
-        let metrics = compute_cell_metrics(&self.primary.regular, font_size_ppem)?;
+        let metrics =
+            compute_cell_metrics(&self.primary.regular, font_size_ppem, self.line_height)?;
         self.apply_cell_metrics(metrics);
 
         // Clear caches — glyph sizes differ at new ppem.
@@ -1503,35 +1516,20 @@ fn pt_to_ppem(font_size_pt: f32, pixels_per_point: f32) -> f32 {
 ///
 /// ## Cell height and baseline
 ///
-/// The base height for every font is `ascent + |descent|` — the near-universal
-/// terminal-grid convention.  The font's `leading` (a.k.a. line gap) is a prose
-/// line-spacing concept and is **never** summed into cell height; doing so
-/// (the previous behaviour) made ordinary, non-Nerd-Font faces render with
-/// excess row height because most desktop fonts carry a non-zero line gap
-/// intended for paragraph text, not fixed terminal grids.
-///
-/// The OS/2 `usWinAscent`/`usWinDescent` ("win height") floor is applied on
-/// top of the base height **only when the loaded face is detected as a
-/// Nerd Font / Powerline-patched font** via [`has_powerline_glyphs`]. Nerd
-/// Font glyphs (box-drawing extensions, powerline separators, devicon/Font
-/// Awesome icons, etc.) are drawn to fill the OS/2 win-metrics box, which is
-/// deliberately taller than the typographic ascent/descent box on most Nerd
-/// Font builds. Applying that floor unconditionally — the previous
-/// behaviour — inflated the row height of ordinary fonts that happen to
-/// carry generous (but irrelevant) win metrics.
-///
-/// Whatever extra vertical space ends up in the cell — either genuine
-/// win-metrics headroom (Nerd Font case) or just the sub-pixel slack from
-/// rounding the base height up to a whole pixel (ordinary-font case) — is
-/// split evenly above and below the ascent/descent box, so the glyph baseline
-/// stays vertically centred in the cell rather than being pinned to a
-/// fixed 1-pixel top pad (the previous behaviour, which visibly sat text too
-/// high for fonts with a taller-than-CaskaydiaCove ascent/descent box).
-/// See [`select_cell_height_and_top_pad`] for the exact (and independently
-/// unit-tested) formula.
+/// Cell height is a *deliberate* line height (the tight `ascent + |descent|`
+/// ink box scaled by the configured `font.line_height` factor, floored by the
+/// font's own line-gap and — for Nerd Fonts only — the OS/2 `usWinAscent + usWinDescent`
+/// box). The extra leading over the tight box is then split evenly above the
+/// ascender line and below the descender line, so the space above the tallest
+/// glyphs equals the space below the lowest ones. See [`compute_cell_layout`]
+/// for the exact, independently unit-tested formula and the rationale for
+/// abandoning the previous "cell height = ascent + descent" behaviour (which
+/// had no leading to split, leaving ascenders flush against the top edge and
+/// the glyphless descent band as empty space below — text biased upward).
 fn compute_cell_metrics(
     face: &LoadedFace,
     font_size_ppem: f32,
+    line_height: f32,
 ) -> Result<CellMetrics, FontManagerError> {
     use swash::{TableProvider, tag_from_bytes};
 
@@ -1571,18 +1569,20 @@ fn compute_cell_metrics(
         }
     };
 
-    // --- Determine cell height and baseline padding ---
+    // --- Determine cell height and baseline placement ---
     //
-    // Base height is `ascent + |descent|` only — the font's `leading` (line
-    // gap) is deliberately excluded.  See the doc comment above this function
-    // for the rationale.
+    // See [`compute_cell_layout`] for the full geometry model. In short: a
+    // deliberate line height (factor-scaled ink box, floored by the font's
+    // line-gap), with the baseline placed so the *visible ink* (cap-height
+    // above, descent below) is centred in the cell — anchored on real ink
+    // extent rather than the arbitrary per-font padded ascent.
     let ascent = metrics.ascent;
     let descent = metrics.descent.abs();
+    let leading = metrics.leading.max(0.0);
 
     // Win height from the OS/2 table (font design units → pixels).  This is
     // only actually applied as a height floor when `is_nerd_font` is true
-    // (see `select_cell_height_and_top_pad`), but it is cheap to compute
-    // unconditionally.
+    // (see `compute_cell_layout`), but it is cheap to compute unconditionally.
     let unscaled = font_ref.metrics(&[]);
     let upem_f = if unscaled.units_per_em != 0 {
         f32::from(unscaled.units_per_em)
@@ -1600,18 +1600,23 @@ fn compute_cell_metrics(
         });
 
     let is_nerd_font = has_powerline_glyphs(face);
-    let (cell_height, top_pad) =
-        select_cell_height_and_top_pad(ascent, descent, win_height, is_nerd_font);
-    let baseline_offset = ascent + top_pad;
+    let layout = compute_cell_layout(
+        ascent,
+        descent,
+        leading,
+        win_height,
+        is_nerd_font,
+        line_height,
+    );
 
     // Ensure non-zero dimensions.
     let cell_width = cell_width.max(1);
-    let cell_height = cell_height.max(1);
+    let cell_height = layout.cell_height.max(1);
 
     Ok(CellMetrics {
         cell_width,
         cell_height,
-        ascent: baseline_offset,
+        ascent: layout.baseline_offset,
         descent,
         underline_offset: metrics.underline_offset,
         strikeout_offset: metrics.strikeout_offset,
@@ -1645,7 +1650,7 @@ const POWERLINE_CORE_GLYPHS: [char; 4] = ['\u{E0B0}', '\u{E0B1}', '\u{E0B2}', '\
 /// glyphs ([`POWERLINE_CORE_GLYPHS`]).
 ///
 /// This gates whether the OS/2 `usWinAscent`/`usWinDescent` height floor is
-/// applied in [`select_cell_height_and_top_pad`]: that floor exists to give
+/// applied in [`compute_cell_layout`]: that floor exists to give
 /// Nerd Font box-drawing/icon glyphs enough vertical room, and applying it
 /// to an ordinary font (which has no such glyphs, but may still carry
 /// generous, unrelated win metrics) would inflate that font's row height
@@ -1667,56 +1672,106 @@ fn has_powerline_glyphs(face: &LoadedFace) -> bool {
     POWERLINE_CORE_GLYPHS.iter().any(|&c| face.has_glyph(c))
 }
 
-/// Decide the final cell height (rounded up to a whole pixel) and the
-/// vertical padding to add above the ascent when computing the baseline
-/// offset.
+/// Output of [`compute_cell_layout`]: the final integer cell height and the
+/// baseline offset (distance in pixels from the top of the cell down to the
+/// text baseline).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CellLayout {
+    cell_height: u32,
+    baseline_offset: f32,
+}
+
+/// Decide the final cell height and the baseline offset from font metrics.
 ///
-/// `ascent` and `descent` (already absolute-valued) are pixel-scaled swash
-/// metrics; `win_height` is the OS/2 `usWinAscent + usWinDescent` sum, also
-/// pixel-scaled. `is_nerd_font` gates whether `win_height` is allowed to act
-/// as a height floor at all — see [`has_powerline_glyphs`].
+/// All inputs are pixel-scaled swash metrics (already absolute-valued where
+/// noted). `leading` is the font's own line-gap. `win_height` is the OS/2
+/// `usWinAscent + usWinDescent` sum; `is_nerd_font` gates whether it acts as a
+/// height floor (see [`has_powerline_glyphs`]).
 ///
-/// The cell height is the tight `ascent + |descent|` box (never inflated by
-/// the font's `leading` line-gap), with the OS/2 `win_height` applied as a
-/// lower bound **only** for Nerd/Powerline fonts. A deliberate line-height
-/// *multiplier* is intentionally NOT applied: doing so adds a uniform gap
-/// between every row, which breaks Unicode block-drawing characters — they
-/// are rasterized to fill exactly one `ascent + |descent|` box and must tile
-/// seamlessly into a contiguous image (e.g. the block-art NixOS logo in a
-/// shell prompt). The row pitch is the cell height, so the cell height must
-/// equal the block-glyph height for seamless tiling.
+/// ## The problem this fixes
 ///
-/// The difference between the rounded-up cell height and the tight box (the
-/// sub-pixel rounding slack, or genuine win-metrics headroom for Nerd Fonts)
-/// is split evenly above and below the box so the baseline stays centred.
-fn select_cell_height_and_top_pad(
+/// The previous behaviour set `cell_height = ceil(ascent + |descent|)` and
+/// `baseline = ascent` (plus only the sub-pixel rounding slack, split evenly).
+/// That split *was* symmetric on the ascent/descent box — but there was
+/// essentially no leading to split, so the ascender line sat ~0.2px from the
+/// top edge of the cell. Lines without descenders (e.g. a row of `l`s) then
+/// looked cramped at the top with the whole (glyphless) descent band as empty
+/// space below: text visibly biased upward and the rows uncomfortably tight.
+///
+/// ## The model
+///
+/// 1. **Line height.** The row pitch is the tight ink box `ascent + |descent|`
+///    scaled by `line_height_factor` (the configured `font.line_height`,
+///    clamped to at least 1.0), floored by the font's own `leading` and (for
+///    Nerd Fonts only) the OS/2 `win_height`. This deliberate leading is the
+///    breathing room the tight box lacked.
+/// 2. **Baseline.** The extra leading (`cell_height - (ascent + |descent|)`) is
+///    split evenly above the ascender line and below the descender line:
+///    `baseline = (cell_height + ascent - |descent|) / 2`. The gap above the
+///    tallest glyphs then equals the gap below the lowest ones, for any font.
+/// 3. **Clip guards.** The baseline is clamped so the full ascent always fits
+///    above it and the full descent below it (both hold with margin for the
+///    symmetric split; the guards only bite on pathological metrics).
+///
+/// Block-drawing / box glyphs are unaffected by the taller cell: they are
+/// rasterised *procedurally at the exact current cell size* (see
+/// `emit_procedural_glyph` / `crate::gui::box_drawing`) and span the cell
+/// rectangle exactly, so they tile seamlessly at any cell height. The old
+/// "cell height must equal the font's block-glyph ink box" constraint no
+/// longer applies now that block glyphs are procedural.
+fn compute_cell_layout(
     ascent: f32,
     descent: f32,
+    leading: f32,
     win_height: f32,
     is_nerd_font: bool,
-) -> (u32, f32) {
-    // Tight ink box — the row pitch. Block-drawing glyphs fill exactly this,
-    // so it must be the cell height for them to tile without gaps.
+    line_height_factor: f32,
+) -> CellLayout {
+    // Tight ink box (baseline-relative extent of the padded ascent/descent).
     let tight_box = ascent + descent;
 
-    // Nerd-Font-only win-metrics floor.
-    let effective_height = if is_nerd_font {
-        tight_box.max(win_height)
-    } else {
-        tight_box
-    };
+    // Deliberate line height: factor-scaled tight box, floored by the font's
+    // own line-gap and (Nerd-Font-only) the OS/2 win-metrics box.
+    let factor_height = tight_box * line_height_factor.max(1.0);
+    let gap_height = tight_box + leading.max(0.0);
+    let mut target_height = factor_height.max(gap_height);
+    if is_nerd_font {
+        target_height = target_height.max(win_height);
+    }
 
-    let cell_height_f = effective_height.ceil();
+    let cell_height_f = target_height.ceil();
     let cell_height = cell_height_f.approx_as::<u32>().unwrap_or(1).max(1);
 
-    // Distribute the difference between the final cell height and the tight
-    // box evenly above and below. `ceil` never returns a value smaller than
-    // its input, but guard against floating-point quirks landing a hair below
-    // zero.
-    let extra = (cell_height_f - tight_box).max(0.0);
-    let top_pad = extra * 0.5;
+    // Centre the ascent/descent box within the (now taller) cell: the extra
+    // leading is split evenly above the ascender line and below the descender
+    // line, so the gap above the tallest glyphs equals the gap below the
+    // lowest ones.
+    //
+    //   baseline = top_leading + ascent,  where top_leading = (H - (asc+desc))/2
+    //            = (H + ascent - descent) / 2
+    //
+    // The previous behaviour computed the *same* even split, but the cell
+    // height was pinned to `ceil(ascent + descent)` — so there was essentially
+    // no leading to split, leaving ascenders ~0.2px from the top edge and the
+    // (glyphless) descent band looking like empty space below. Adding the
+    // deliberate line height above and splitting it evenly is what gives the
+    // top and bottom breathing room the same size.
+    let mut baseline_offset = (cell_height_f + ascent - descent) * 0.5;
 
-    (cell_height, top_pad)
+    // Clamp so the full ascent always fits above the baseline (no top clip)
+    // and the full descent fits below it. Both hold with room to spare for the
+    // symmetric split above; the guards only matter for pathological metrics.
+    if baseline_offset < ascent {
+        baseline_offset = ascent;
+    }
+    if baseline_offset + descent > cell_height_f {
+        baseline_offset = cell_height_f - descent;
+    }
+
+    CellLayout {
+        cell_height,
+        baseline_offset,
+    }
 }
 
 /// Cell-geometry output of [`compute_cell_metrics`].
@@ -1739,6 +1794,12 @@ struct CellMetrics {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Reference line-height factor for the layout tests: mirrors the runtime
+    /// default `FontConfig::default().line_height` (1.05). The real value is
+    /// user-configurable via `config.font.line_height` and threaded into
+    /// `compute_cell_layout`; these pure-function tests pin it explicitly.
+    const LINE_HEIGHT_FACTOR: f32 = 1.05;
 
     /// Helper to create a default `FontManager` with bundled fonts.
     ///
@@ -1927,96 +1988,161 @@ mod tests {
     // not stripped of its win-metrics headroom. We can't easily construct a
     // synthetic swash face with an arbitrary partial charmap in a unit test,
     // so the downstream height decision is exercised through
-    // `select_cell_height_and_top_pad`'s `is_nerd_font` parameter in the
-    // synthetic tests below, which is exactly the boolean `has_powerline_glyphs`
-    // feeds into.
+    // `compute_cell_layout`'s `is_nerd_font` parameter in the synthetic tests
+    // below, which is exactly the boolean `has_powerline_glyphs` feeds into.
 
-    // --- Test 2e: height/baseline selection — synthetic, pure-function tests ---
+    // --- Test 2e: cell layout — synthetic, pure-function tests ---
     //
-    // `select_cell_height_and_top_pad` is the pure decision function factored
-    // out of `compute_cell_metrics` specifically so the height-selection
-    // formula can be tested with synthetic ascent/descent/win-height/is_nerd
-    // combinations, independent of any real font file.
+    // `compute_cell_layout` is the pure decision function factored out of
+    // `compute_cell_metrics` so the height/baseline formula can be tested with
+    // synthetic metric combinations, independent of any real font file.
+    //
+    // The invariants that matter most:
+    //   (1) The ascent/descent box is centred in the (taller) cell: the gap
+    //       above the ascender line equals the gap below the descender line.
+    //   (2) A deliberate line height is applied (the tight box gets leading).
+    //   (3) The full ascent/descent never clips.
 
-    #[test]
-    fn height_selection_leading_is_never_a_factor() {
-        // `select_cell_height_and_top_pad` doesn't take `leading` as a
-        // parameter at all — this test documents that fact structurally:
-        // the same ascent/descent/win_height inputs must produce the same
-        // result regardless of how large a font's line-gap might have been
-        // (i.e. there is no code path left that could sum it in).
-        let (h1, p1) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
-        let (h2, p2) = select_cell_height_and_top_pad(10.0, 3.0, 0.0, false);
-        assert_eq!(h1, h2);
-        assert!((p1 - p2).abs() < f32::EPSILON);
-        // Tight box (ascent + descent) is 13.0, already a whole pixel, so
-        // there is zero rounding slack and zero top padding.
-        assert_eq!(h1, 13);
-        assert!(p1.abs() < f32::EPSILON, "top pad should be ~0, got {p1}");
+    /// Cell height as `f32` for a computed layout.
+    fn cell_h_f(layout: CellLayout) -> f32 {
+        f32::from(u16::try_from(layout.cell_height).unwrap_or(u16::MAX))
+    }
+
+    /// Gap above the ascender line for a computed layout.
+    fn gap_above_ascent(layout: CellLayout, ascent: f32) -> f32 {
+        layout.baseline_offset - ascent
+    }
+
+    /// Gap below the descender line for a computed layout.
+    fn gap_below_descent(layout: CellLayout, descent: f32) -> f32 {
+        cell_h_f(layout) - layout.baseline_offset - descent
     }
 
     #[test]
-    fn height_selection_win_floor_only_applies_when_nerd_font() {
-        // tight box = ascent + descent = 10.0; win_height = 20.0 — a large
-        // win-metrics floor honoured only when `is_nerd_font` is true.
-        let (non_nerd_height, non_nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, false);
+    fn layout_centres_ascent_descent_box() {
+        // Balanced-metric font (approximating CaskaydiaCove's typo metrics at
+        // 14pt). The leading above the ascender must equal the leading below
+        // the descender.
+        let ascent = 17.32;
+        let descent = 4.38;
+        let layout = compute_cell_layout(ascent, descent, 0.0, 21.69, true, LINE_HEIGHT_FACTOR);
+        let above = gap_above_ascent(layout, ascent);
+        let below = gap_below_descent(layout, descent);
+        assert!(
+            above >= -0.001,
+            "full ascent must fit (no top clip): {above}"
+        );
+        assert!(
+            below >= -0.001,
+            "full descent must fit (no bottom clip): {below}"
+        );
+        // Balanced within one pixel of integer-rounding slack.
+        assert!(
+            (above - below).abs() <= 1.0,
+            "leading should be split evenly: above {above} vs below {below}"
+        );
+    }
+
+    #[test]
+    fn layout_centres_descent_heavy_font() {
+        // Descent-heavy font (approximating Liberation Mono's hhea metrics at
+        // 14pt: ascent 15.5, descent 5.6). Under the OLD behaviour the cell was
+        // pinned to `ceil(ascent + descent)` with ~0.2px of leading, leaving
+        // ascenders flush against the top. The new layout must give equal
+        // breathing room above and below.
+        let ascent = 15.54;
+        let descent = 5.61;
+        let layout = compute_cell_layout(ascent, descent, 0.0, 21.15, false, LINE_HEIGHT_FACTOR);
+        let above = gap_above_ascent(layout, ascent);
+        let below = gap_below_descent(layout, descent);
+        assert!(
+            above > 0.5,
+            "there must be real breathing room above the ascender, got {above}"
+        );
+        assert!(
+            (above - below).abs() <= 1.0,
+            "leading should be split evenly: above {above} vs below {below}"
+        );
+    }
+
+    #[test]
+    fn layout_applies_line_height_factor() {
+        // Cell height must exceed the tight `ascent + |descent|` ink box by
+        // roughly the LINE_HEIGHT_FACTOR (the deliberate breathing room), not
+        // sit exactly on the tight box as the previous behaviour did.
+        let ascent = 12.0;
+        let descent = 4.0;
+        let tight = ascent + descent; // 16.0
+        let layout = compute_cell_layout(ascent, descent, 0.0, 0.0, false, LINE_HEIGHT_FACTOR);
+        assert!(
+            cell_h_f(layout) >= (tight * LINE_HEIGHT_FACTOR).floor(),
+            "cell height {} should reflect the line-height factor over tight box {tight}",
+            cell_h_f(layout)
+        );
+    }
+
+    #[test]
+    fn layout_honours_font_leading_as_a_floor() {
+        // A font asking for a large line-gap gets at least that much spacing,
+        // even when it exceeds LINE_HEIGHT_FACTOR.
+        let ascent = 12.0;
+        let descent = 4.0;
+        let big_leading = 20.0;
+        let layout =
+            compute_cell_layout(ascent, descent, big_leading, 0.0, false, LINE_HEIGHT_FACTOR);
+        assert!(
+            cell_h_f(layout) >= ascent + descent + big_leading - 1.0,
+            "cell height {} should honour the font's own leading floor",
+            cell_h_f(layout)
+        );
+    }
+
+    #[test]
+    fn layout_win_floor_only_applies_when_nerd_font() {
+        // A large win_height acts as a height floor only for Nerd Fonts.
+        let ascent = 6.0;
+        let descent = 4.0;
+        let win = 40.0;
+        let non_nerd = compute_cell_layout(ascent, descent, 0.0, win, false, LINE_HEIGHT_FACTOR);
+        let nerd = compute_cell_layout(ascent, descent, 0.0, win, true, LINE_HEIGHT_FACTOR);
+        assert!(
+            cell_h_f(non_nerd) < win,
+            "non-Nerd faces must not be inflated by win_height"
+        );
+        assert!(
+            cell_h_f(nerd) >= win,
+            "Nerd faces must be floored to at least win_height"
+        );
+    }
+
+    #[test]
+    fn layout_never_produces_zero_height() {
+        // Degenerate all-zero inputs must still floor to a 1px cell height.
+        let layout = compute_cell_layout(0.0, 0.0, 0.0, 0.0, false, LINE_HEIGHT_FACTOR);
+        assert_eq!(layout.cell_height, 1);
+    }
+
+    #[test]
+    fn layout_larger_factor_adds_more_leading() {
+        // A larger configured line-height factor must produce a taller cell
+        // (more leading), and a factor below 1.0 is clamped to 1.0 (never
+        // shrinks the cell below the tight ink box).
+        let ascent = 12.0;
+        let descent = 4.0;
+        let tight = compute_cell_layout(ascent, descent, 0.0, 0.0, false, 1.0);
+        let loose = compute_cell_layout(ascent, descent, 0.0, 0.0, false, 1.5);
+        assert!(
+            cell_h_f(loose) > cell_h_f(tight),
+            "factor 1.5 (cell {}) must be taller than factor 1.0 (cell {})",
+            cell_h_f(loose),
+            cell_h_f(tight)
+        );
+
+        let clamped = compute_cell_layout(ascent, descent, 0.0, 0.0, false, 0.5);
         assert_eq!(
-            non_nerd_height, 10,
-            "non-Nerd-Font faces must not be inflated by win_height"
+            clamped.cell_height, tight.cell_height,
+            "a factor below 1.0 must be clamped to 1.0 (no sub-tight-box cell)"
         );
-        assert!(
-            non_nerd_pad.abs() < f32::EPSILON,
-            "non-Nerd-Font top pad should be ~0 when the tight box is a whole \
-             pixel, got {non_nerd_pad}"
-        );
-
-        let (nerd_height, nerd_pad) = select_cell_height_and_top_pad(6.0, 4.0, 20.0, true);
-        assert_eq!(
-            nerd_height, 20,
-            "Nerd Font faces must be floored to at least win_height"
-        );
-        // Extra over tight box is (20.0 - 10.0) = 10.0, split evenly -> 5.0.
-        assert!(
-            (nerd_pad - 5.0).abs() < f32::EPSILON,
-            "expected top pad of 5.0, got {nerd_pad}"
-        );
-    }
-
-    #[test]
-    fn height_selection_win_floor_below_tight_box_is_a_no_op() {
-        // win_height smaller than the tight ascent+descent box must never
-        // shrink the cell, even for Nerd Fonts.
-        let (height, pad) = select_cell_height_and_top_pad(8.0, 4.0, 1.0, true);
-        assert_eq!(height, 12);
-        assert!(pad.abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn height_selection_rounding_slack_is_split_evenly() {
-        // Tight box 10.3 rounds up to 11, leaving 0.7px of slack split evenly
-        // above/below (0.35 top pad) regardless of `is_nerd_font` (no win
-        // floor in play here).
-        let (height, pad) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, false);
-        assert_eq!(height, 11);
-        assert!(
-            (pad - 0.35).abs() < 0.001,
-            "expected top pad ~0.35, got {pad}"
-        );
-
-        let (height_nerd, pad_nerd) = select_cell_height_and_top_pad(7.1, 3.2, 0.0, true);
-        assert_eq!(height_nerd, 11);
-        assert!(
-            (pad_nerd - 0.35).abs() < 0.001,
-            "expected top pad ~0.35, got {pad_nerd}"
-        );
-    }
-
-    #[test]
-    fn height_selection_never_produces_zero_height() {
-        // Degenerate all-zero inputs must still floor to a 1px cell height,
-        // matching the `.max(1)` safety net applied by the caller.
-        let (height, _pad) = select_cell_height_and_top_pad(0.0, 0.0, 0.0, false);
-        assert_eq!(height, 1);
     }
 
     // --- Test 3: Fallback chain — ASCII resolves to primary ---
