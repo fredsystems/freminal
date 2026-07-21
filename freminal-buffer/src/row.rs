@@ -455,22 +455,6 @@ impl Row {
         self.storage = RowStorage::Live(Vec::new());
     }
 
-    /// Fill this row with blank cells carrying the given format tag (BCE).
-    ///
-    /// Always clears existing cell data first.  If the tag is visually default
-    /// the row is left sparse (empty `cells` vec).  Otherwise, explicit blank
-    /// cells are written so the renderer picks up the correct background color.
-    pub fn fill_with_tag(&mut self, tag: &FormatTag) {
-        self.clear();
-
-        if tag.is_visually_default() {
-            return;
-        }
-        let width = self.width;
-        self.cells_vec_mut()
-            .resize(width, Cell::blank_with_tag(tag.clone()));
-    }
-
     /// Mark this row as clean (its flat representation is up-to-date in the cache).
     /// Called by the snapshot machinery after producing a cached flat representation.
     pub const fn mark_clean(&mut self) {
@@ -1286,11 +1270,19 @@ impl Row {
         }
         self.dirty = true;
 
-        // Extend cells to reach the target column if needed.
+        // Extend cells to reach the target column if needed.  The gap columns
+        // strictly before `col` were never explicitly written, so they carry
+        // the default blank tag rather than the incoming SGR `tag`; only the
+        // image cell itself (written at `col` below) uses `tag`.
         if col >= self.cells_vec_mut().len() {
-            let pad = col - self.cells_vec_mut().len() + 1;
+            let pad = col - self.cells_vec_mut().len();
+            self.cells_vec_mut().extend(std::iter::repeat_n(
+                Cell::blank_with_tag(FormatTag::default()),
+                pad,
+            ));
+            // Placeholder for the image cell slot itself; overwritten below.
             self.cells_vec_mut()
-                .extend(std::iter::repeat_n(Cell::blank_with_tag(tag.clone()), pad));
+                .push(Cell::blank_with_tag(FormatTag::default()));
         }
 
         // Clean up any wide character at this position.
@@ -1911,6 +1903,36 @@ mod tests {
             "col 0 should be an image cell"
         );
         assert_eq!(row.count_image_cells(), 1);
+    }
+
+    #[test]
+    fn set_image_cell_gap_padding_uses_default_tag() {
+        // Placing an image cell past the row's current length must pad the
+        // skipped gap columns with the DEFAULT tag (those columns were never
+        // explicitly written), not the incoming SGR tag.  Only the image cell
+        // itself carries the caller's tag.
+        let image_id = crate::image_store::next_image_id();
+        let mut bce_tag = FormatTag::default();
+        bce_tag
+            .colors
+            .set_background_color(freminal_common::colors::TerminalColor::Red);
+
+        let mut row = Row::new(80);
+        // Row currently empty; place the image at column 5.
+        row.set_image_cell(5, make_image_placement(image_id), bce_tag.clone());
+
+        for col in 0..5 {
+            let cell = row.resolve_cell(col);
+            assert_eq!(
+                cell.tag(),
+                &FormatTag::default(),
+                "col {col}: gap before an image placement must use the default tag, not the SGR bg"
+            );
+        }
+        assert!(
+            row.char_at(5).unwrap().has_image(),
+            "col 5 should be the image cell"
+        );
     }
 
     // -----------------------------------------------------------------------

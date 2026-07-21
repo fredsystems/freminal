@@ -38,10 +38,19 @@ show_timing = False
 summary_only = False
 filter_pane = None
 events_only = False
+raw_pty_out = None
 
 for arg in sys.argv[1:]:
     if arg.startswith("--recording-path"):
         filename = arg.split("=", 1)[1]
+    elif arg == "--raw-pty" or arg.startswith("--raw-pty="):
+        # Write concatenated PtyOutput bytes (optionally for one pane via
+        # --pane) to the given file path, in event order. Used to replay a
+        # recording's raw terminal output into a test harness.
+        raw_pty_out = arg.split("=", 1)[1] if "=" in arg else ""
+        if not raw_pty_out:
+            print("Error: --raw-pty requires a value (e.g. --raw-pty=out.bin)")
+            sys.exit(1)
     elif arg == "--convert-escape":
         convert_escape = True
     elif arg == "--split-commands":
@@ -318,6 +327,69 @@ if seek_index_offset > 0 and seek_index_offset < len(data):
     end = min(end, seek_index_offset)
 
 event_num = 0
+
+# ---------------------------------------------------------------------------
+# Raw PTY-output export mode (v2): concatenate PtyOutput payload bytes in
+# event order (optionally filtered to one pane) and write them to a file.
+# ---------------------------------------------------------------------------
+
+if raw_pty_out is not None:
+    collected = bytearray()
+    truncated = False
+    decode_failures = []  # byte offsets of events whose payload failed to decode
+    while pos + 13 <= end:
+        _ts = struct.unpack_from("<Q", data, pos)[0]
+        etype = data[pos + 8]
+        plen = struct.unpack_from("<I", data, pos + 9)[0]
+        event_offset = pos
+        pos += 13
+        if pos + plen > end:
+            # The final record's payload runs past the event region: the
+            # recording is truncated and we cannot trust the tail.
+            truncated = True
+            break
+        payload_raw = data[pos:pos + plen]
+        pos += plen
+        if EVENT_TYPES.get(etype) != "PtyOutput":
+            continue
+        try:
+            pd = msgpack.unpackb(payload_raw, raw=False)
+        except (msgpack.exceptions.UnpackException, ValueError):
+            decode_failures.append(event_offset)
+            continue
+        if isinstance(pd, dict) and len(pd) == 1:
+            inner = next(iter(pd.values()))
+            if isinstance(inner, dict):
+                pd = inner
+        if not isinstance(pd, dict):
+            decode_failures.append(event_offset)
+            continue
+        # Strict pane filter: a PtyOutput event with no pane_id (or a
+        # non-matching one) is excluded when --pane is given, rather than
+        # matching every pane.
+        if filter_pane is not None and pd.get("pane_id") != filter_pane:
+            continue
+        raw = pd.get("data", b"")
+        if isinstance(raw, list):
+            raw = bytes(raw)
+        if isinstance(raw, bytes):
+            collected.extend(raw)
+
+    with open(raw_pty_out, "wb") as out:
+        out.write(collected)
+    print(f"Wrote {len(collected)} bytes of PtyOutput to {raw_pty_out}")
+
+    # A partial export (truncated stream or undecodable payloads) must fail
+    # loudly so callers never silently replay incomplete data.
+    if truncated:
+        print("Error: recording is truncated; export is incomplete.", file=sys.stderr)
+    if decode_failures:
+        print(
+            f"Error: {len(decode_failures)} event payload(s) failed to decode "
+            f"(byte offsets: {decode_failures}); export is incomplete.",
+            file=sys.stderr,
+        )
+    sys.exit(1 if (truncated or decode_failures) else 0)
 
 # Print header info
 if not events_only:

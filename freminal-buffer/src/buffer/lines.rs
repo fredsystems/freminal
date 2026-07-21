@@ -180,14 +180,23 @@ impl Buffer {
                     self.cursor.pos.y += 1;
 
                     if self.cursor.pos.y >= self.rows.len() {
-                        // Row doesn't exist yet — always create it fresh.
-                        // BCE: fill with current SGR background.
-                        let mut new_row = Row::new_with_origin(
+                        // Row doesn't exist yet — create it fresh with a
+                        // default (sparse) background.  A line feed only moves
+                        // the active position; it is NOT an explicit erase, so
+                        // BCE (back_color_erase) does not apply here.  Filling
+                        // with `current_tag` would materialise full-width blank
+                        // cells carrying whatever SGR happens to be active
+                        // (e.g. a lingering bold from `ESC[1m`), which then
+                        // survive reflow as spurious trailing cells and produce
+                        // an extra blank continuation row on a narrower resize.
+                        // This mirrors `push_row`, `scroll_slice_up`/`_down`,
+                        // and the scrolled-in-row case below, all of which
+                        // deliberately use default here.
+                        let new_row = Row::new_with_origin(
                             self.width,
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
                         );
-                        new_row.fill_with_tag(&self.current_tag);
                         self.rows.push(new_row);
                         self.row_cache.push(None);
                     } else {
@@ -238,12 +247,13 @@ impl Buffer {
                     if self.cursor.pos.y + 1 < self.rows.len() {
                         self.cursor.pos.y += 1;
                     } else {
-                        let mut new_row = Row::new_with_origin(
+                        // New row from a line feed uses default background, not
+                        // BCE — see the full-screen fast-path comment above.
+                        let new_row = Row::new_with_origin(
                             self.width,
                             RowOrigin::HardBreak,
                             RowJoin::NewLogicalLine,
                         );
-                        new_row.fill_with_tag(&self.current_tag);
                         self.rows.push(new_row);
                         self.row_cache.push(None);
                         self.cursor.pos.y = self.rows.len() - 1;
