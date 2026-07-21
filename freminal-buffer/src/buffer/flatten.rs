@@ -338,17 +338,16 @@ impl Buffer {
     /// produced, so `Arc::try_unwrap` always finds a strong count of 2 and
     /// falls back to cloning.
     ///
-    /// This method sidesteps that wall entirely by hand the `Arc`s back
+    /// This method sidesteps that wall entirely by handing the `Arc`s back
     /// directly — **zero** deep clone, only the refcount bumps
-    /// [`MergeCache`] population already costs. A caller that can accept
-    /// `Arc<Vec<_>>` (anything that would otherwise immediately wrap the
-    /// returned `Vec`s in `Arc::new`, e.g.
+    /// [`MergeCache`] population already costs. Any caller that can accept
+    /// `Arc<Vec<_>>` (i.e. anything that would otherwise immediately wrap
+    /// the returned `Vec`s in `Arc::new`) should call this method instead
+    /// of `visible_as_tchars_and_tags_extended` to realise the actual
+    /// regression fix on the hot per-frame path. The hot-path consumer,
     /// `freminal_terminal_emulator::interface::TerminalEmulator::flatten_visible`,
-    /// which does exactly that today) should call this method instead of
-    /// `visible_as_tchars_and_tags_extended` to realise the actual
-    /// regression fix on the hot per-frame path. That call site lives in
-    /// `freminal-terminal-emulator`, outside this crate's `freminal-buffer`
-    /// scope, so switching it over is a separate follow-up change.
+    /// already calls this Arc-returning method directly, so the snapshot
+    /// path pays no extra deep clone.
     #[must_use]
     pub fn visible_as_tchars_and_tags_extended_arc(
         &mut self,
