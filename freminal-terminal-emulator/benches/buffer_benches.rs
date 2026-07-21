@@ -11,6 +11,8 @@
 //! - Full `handle_incoming_data()` (includes UTF-8 reassembly overhead)
 //! - `data_and_format_data_for_gui()` on a pre-populated handler
 //! - `build_snapshot()` on a pre-populated emulator
+//! - End-to-end alternate-screen transitions (parse `?1049h`/`?1049l` ->
+//!   `build_snapshot()`), issue #405 Part C item 4
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use freminal_terminal_emulator::{
@@ -329,12 +331,13 @@ fn bench_data_and_format_for_gui(c: &mut Criterion) {
 //     Measures the *partial-dirty path*: exactly ONE visible row is dirtied
 //     per sample (a single-character edit), then `build_snapshot` is called.
 //     This is the "1-of-N rows changed" scenario from issue #405 Part C. The
-//     buffer flatten/merge step is NOT incremental: `any_visible_dirty` gates
-//     a full O(all-visible-rows) merge-and-copy even when a single row changed,
-//     so this bench is expected to land much closer to the fully-dirty cost
-//     than to the clean cost. It exists to QUANTIFY that gap and justify (or
-//     not) the deferred per-row-incremental flatten work — measure before
-//     optimising.
+//     buffer flatten/merge step is now incremental (#405 Part C item 1): the
+//     merge reuses the cached prefix strictly before the first dirty row and
+//     only re-merges from that row onward, sharing the result via `Arc` with
+//     the buffer's merge cache (no extra deep copy). At 80x24 this is a wash
+//     versus the previous full-merge (the merge copy is not the dominant cost
+//     at this size); the win shows at larger windows with a dirty row near the
+//     bottom (interactive typing). This bench exists to track that path.
 // ---------------------------------------------------------------
 fn bench_build_snapshot(c: &mut Criterion) {
     let mut group = c.benchmark_group("bench_build_snapshot");
@@ -460,6 +463,126 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_alt_screen_transition_e2e — end-to-end alternate-screen transition
+// cost, driven through the REAL parser and `build_snapshot()`.
+//
+// Issue #405 Part C item 4: the existing `bench_alternate_screen_switch` in
+// `freminal-buffer/benches/buffer_row_bench.rs` measures only the raw
+// `Buffer::enter_alternate` / `leave_alternate` row-vec swap in isolation. It
+// does NOT drive the full pipeline (parse `?1049h`/`?1049l` -> handler ->
+// `build_snapshot`), so it cannot see the one-frame cache-invalidation tax
+// that `interface.rs` pays on the alt/primary transition: entering or
+// leaving the alternate screen clears/swaps `previous_visible_snap` (see
+// `interface.rs` around the `enter_alternate`/`leave_alternate` handling),
+// forcing the next `build_snapshot()` to rebuild rather than reuse the
+// cached visible-row vectors. This group quantifies that end-to-end cost.
+//
+// Three sub-benchmarks:
+//
+//   enter_alt_80x24
+//     Fill + warm the primary screen, then MEASURE: parse `ESC[?1049h`
+//     (enter alternate), process, and build the first alt-screen snapshot.
+//
+//   leave_alt_to_primary_80x24
+//     Fill + warm primary, enter alt and warm an alt-screen snapshot, then
+//     MEASURE: parse `ESC[?1049l` (leave alternate, restore primary),
+//     process, and build_snapshot. This is the return-to-primary path that
+//     pays the `previous_visible_snap` invalidation tax — the specific
+//     scenario item 4 targets.
+//
+//   alt_roundtrip_80x24
+//     Fill + warm primary, then MEASURE a full enter-then-leave round trip
+//     (enter alt + snapshot, leave alt + snapshot) — the vim/tmux
+//     open-then-close pattern.
+// ---------------------------------------------------------------
+fn bench_alt_screen_transition_e2e(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_alt_screen_transition_e2e");
+    group.throughput(Throughput::Elements((80 * 24) as u64));
+
+    // ── Enter alternate screen ───────────────────────────────────────────────
+    group.bench_function("enter_alt_80x24", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24, 8, 16);
+                let payload = cup_writes_payload(80, 24);
+                let parsed = emulator.internal.parser.push(&payload);
+                emulator.internal.handler.process_outputs(&parsed);
+                // Warm the cache on the primary screen before entering alt.
+                let _ = emulator.build_snapshot();
+                emulator
+            },
+            |mut emulator| {
+                let parsed = emulator.internal.parser.push(b"\x1b[?1049h");
+                emulator.internal.handler.process_outputs(&parsed);
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // ── Leave alternate screen, restore primary ──────────────────────────────
+    group.bench_function("leave_alt_to_primary_80x24", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24, 8, 16);
+                let payload = cup_writes_payload(80, 24);
+                let parsed = emulator.internal.parser.push(&payload);
+                emulator.internal.handler.process_outputs(&parsed);
+                // Warm the cache on the primary screen.
+                let _ = emulator.build_snapshot();
+                // Enter alternate and establish an alt-screen snapshot baseline.
+                let parsed = emulator.internal.parser.push(b"\x1b[?1049h");
+                emulator.internal.handler.process_outputs(&parsed);
+                let _ = emulator.build_snapshot();
+                // Write a little content into the alt screen so the return
+                // path has something to invalidate against.
+                let edit = b"\x1b[1;1Halt screen content";
+                let parsed = emulator.internal.parser.push(edit);
+                emulator.internal.handler.process_outputs(&parsed);
+                let _ = emulator.build_snapshot();
+                emulator
+            },
+            |mut emulator| {
+                let parsed = emulator.internal.parser.push(b"\x1b[?1049l");
+                emulator.internal.handler.process_outputs(&parsed);
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
+    // ── Full round trip: enter alt, snapshot, leave alt, snapshot ────────────
+    group.bench_function("alt_roundtrip_80x24", |b| {
+        b.iter_batched(
+            || {
+                let mut emulator = TerminalEmulator::dummy_for_bench();
+                emulator.internal.set_win_size(80, 24, 8, 16);
+                let payload = cup_writes_payload(80, 24);
+                let parsed = emulator.internal.parser.push(&payload);
+                emulator.internal.handler.process_outputs(&parsed);
+                // Warm the cache on the primary screen.
+                let _ = emulator.build_snapshot();
+                emulator
+            },
+            |mut emulator| {
+                let parsed = emulator.internal.parser.push(b"\x1b[?1049h");
+                emulator.internal.handler.process_outputs(&parsed);
+                std::hint::black_box(emulator.build_snapshot());
+
+                let parsed = emulator.internal.parser.push(b"\x1b[?1049l");
+                emulator.internal.handler.process_outputs(&parsed);
+                std::hint::black_box(emulator.build_snapshot());
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
 
     group.finish();
 }
@@ -598,6 +721,7 @@ criterion_group!(
         bench_data_and_format_for_gui,
         bench_build_snapshot,
         bench_build_snapshot_with_scrollback,
+        bench_alt_screen_transition_e2e,
         bench_scrollback_memory_realworld,
 );
 
