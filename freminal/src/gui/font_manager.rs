@@ -2648,6 +2648,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn update_ppp_changed_clears_face_and_plan_caches() {
+        let mut fm = default_manager();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("A");
+        buffer.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        assert_eq!(fm.face_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let _ = fm.update_pixels_per_point(2.0).unwrap();
+
+        assert_eq!(
+            fm.face_cache_len(),
+            0,
+            "face cache must be cleared by update_pixels_per_point()"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            0,
+            "plan cache must be cleared by update_pixels_per_point()"
+        );
+    }
+
     // --- Test 15: swash FontRef creation ---
 
     #[test]

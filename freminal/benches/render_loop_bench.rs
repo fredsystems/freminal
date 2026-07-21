@@ -538,10 +538,15 @@ fn crossframe_shaping_frames(
 /// `ShapingCache` are reused across "frames" (like the real render loop,
 /// which keeps one of each for the whole session) but the visible content
 /// changes on many rows every frame. This models a full-screen TUI like
-/// btop that rewrites most cells every frame, and is the pre-optimization
-/// baseline for any future cross-frame Face/`ShapePlan` cache: today,
-/// `FontManager`/`ShapingCache` have no such cache, so every changed row
-/// re-shapes via rustybuzz from scratch each frame.
+/// btop that rewrites most cells every frame.
+///
+/// Because the `FontManager` persists across frames, this benchmark exercises
+/// the cross-frame Face/`ShapePlan` cache (Task #430): the parsed
+/// `rustybuzz::Face` and compiled `ShapePlan` are reused across every frame,
+/// so a changed row re-shapes via `shape_with_plan` without re-parsing the
+/// face or recompiling the plan. It is the faithful cross-frame model of the
+/// production render loop, in contrast to `shape_visible_partial_dirty_200x50`
+/// (which rebuilds the manager per iteration) — see that bench's note.
 fn bench_shaping_crossframe(c: &mut Criterion) {
     let width = 200usize;
     let height = 50usize;
