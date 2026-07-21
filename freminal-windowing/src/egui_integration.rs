@@ -68,10 +68,11 @@ impl EguiState {
         gl_state: &GlState,
         clear_color: [f32; 4],
         raw_input: egui::RawInput,
+        present_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
         ui_fn: F,
     ) -> FrameOutput
     where
-        F: FnMut(&egui::Context, &glow::Context),
+        F: FnMut(&egui::Context, &glow::Context) -> crate::FrameDamage,
     {
         let mut ui_fn = ui_fn;
 
@@ -79,8 +80,14 @@ impl EguiState {
         // `Context::run_ui` (closure takes the root `&mut Ui`).  Our `App`
         // trait still works in terms of `&Context`; `Ui` derefs to `Context`,
         // so deref explicitly rather than relying on a silent coercion.
+        //
+        // The closure both runs the app's `update` and returns this frame's
+        // damage report; we capture it here to decide the clear/present path
+        // below. Running both inside the one closure avoids two simultaneous
+        // `&mut app` borrows in the caller.
+        let mut frame_damage = crate::FrameDamage::Full;
         let full_output = self.ctx.run_ui(raw_input, |root_ui| {
-            ui_fn(&*root_ui, &gl_state.glow_context);
+            frame_damage = ui_fn(&*root_ui, &gl_state.glow_context);
         });
 
         self.winit_state
@@ -90,7 +97,38 @@ impl EguiState {
         let clipped_primitives = self.ctx.tessellate(full_output.shapes, pixels_per_point);
 
         let size = window.inner_size();
-        gl_state.clear(clear_color);
+
+        // Decide whether this frame may skip the full clear and present only
+        // its damaged region. This is a two-part gate:
+        //   1. The app reports the frame as `Partial` (only the listed rects
+        //      changed; everything else is identical to the previous frame).
+        //   2. The back buffer still holds the previous frame's contents
+        //      (`buffer_age() == 1`), and the surface can present a sub-region.
+        // If either fails we fall back to the always-correct full path:
+        // clear + full paint + full swap.
+        let partial = match frame_damage {
+            crate::FrameDamage::Partial(rects)
+                if !rects.is_empty()
+                    && gl_state.supports_partial_present()
+                    && gl_state.buffer_age() == 1 =>
+            {
+                Some(rects)
+            }
+            _ => None,
+        };
+
+        if partial.is_none() {
+            gl_state.clear(clear_color);
+        }
+
+        // Publish the authoritative decision BEFORE the paint callbacks run
+        // (they execute inside `paint_and_update_textures` below), so any
+        // callback that scissors to the damage region gates on the same
+        // value that decided whether the clear was skipped. Same-thread store
+        // immediately before the reads -> `Relaxed` is sufficient.
+        if let Some(flag) = present_flag {
+            flag.store(partial.is_some(), std::sync::atomic::Ordering::Relaxed);
+        }
 
         self.painter.paint_and_update_textures(
             [size.width, size.height],
@@ -102,7 +140,11 @@ impl EguiState {
         // Pre-present notify for Wayland frame pacing
         window.pre_present_notify();
 
-        if let Err(e) = gl_state.swap_buffers() {
+        let swap_result = partial.as_ref().map_or_else(
+            || gl_state.swap_buffers(),
+            |rects| gl_state.swap_buffers_with_damage(rects),
+        );
+        if let Err(e) = swap_result {
             tracing::error!("swap_buffers failed: {e}");
         }
 

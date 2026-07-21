@@ -172,6 +172,13 @@ impl ToastStack {
         self.entries.len()
     }
 
+    /// Whether the stack currently has no toasts. Used by the frame-damage
+    /// aggregation (#435): a visible toast animates its own region each
+    /// frame, so its presence forces a full-frame present.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     fn push(&mut self, kind: ToastKind, title: String, detail: Option<String>) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);

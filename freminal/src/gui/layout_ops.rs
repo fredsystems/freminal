@@ -720,6 +720,8 @@ impl FreminalGui {
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
+            pending_frame_damage: freminal_windowing::FrameDamage::Full,
+            present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         self.windows.insert(window_id, win);
 

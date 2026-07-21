@@ -1106,6 +1106,20 @@ pub struct PaneRenderCache {
     /// detects the change and forces a full rebuild + texture re-upload even
     /// though `content_changed`/`image_frame_changed` stay false.
     pub(super) last_rendered_image_pixel_ptrs: std::collections::HashMap<u64, usize>,
+    /// Damage report for the frame just rendered (#435).
+    ///
+    /// Records which render path this pane took, so the per-window
+    /// aggregation in `app_impl` can decide whether the whole frame was a
+    /// pure cursor-only update (skip-clear + partial present) or must clear
+    /// and present fully. See [`PaneFrameDamage`] for the three cases. Only
+    /// the active pane ever produces a cursor rect; inactive unchanged panes
+    /// report [`PaneFrameDamage::Unchanged`] and never force a full frame.
+    ///
+    /// Set every frame by [`FreminalTerminalWidget::show`].
+    ///
+    /// [`PaneFrameDamage`]: crate::gui::renderer::PaneFrameDamage
+    /// [`PaneFrameDamage::Unchanged`]: crate::gui::renderer::PaneFrameDamage::Unchanged
+    pub(crate) last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage,
 }
 
 impl PaneRenderCache {
@@ -1142,6 +1156,7 @@ impl PaneRenderCache {
             previous_fold_epoch: 0,
             placeholder_hit_rects: Vec::new(),
             last_rendered_image_pixel_ptrs: std::collections::HashMap::new(),
+            last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage::Unchanged,
         }
     }
 
@@ -1410,6 +1425,7 @@ impl FreminalTerminalWidget {
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
+        present_is_partial: &Arc<std::sync::atomic::AtomicBool>,
     ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -1819,6 +1835,10 @@ impl FreminalTerminalWidget {
         // `cursor_only_verts` are moved into the closure below.
         let mut is_cursor_only = false;
         let mut cursor_only_verts: Vec<f32> = Vec::new();
+        // Damage rect (physical fb pixels, bottom-left origin) for the
+        // cursor-only path, used to scissor the GPU redraw to just the changed
+        // cell(s) (#435). `None` -> no scissor (draw the full grid).
+        let mut cursor_only_scissor: Option<crate::gui::renderer::CursorDamage> = None;
 
         // Suppress the cursor when:
         // - the terminal has hidden it (DECTCEM ?25l),
@@ -2153,6 +2173,11 @@ impl FreminalTerminalWidget {
                     .deco_verts
                     .is_empty();
 
+            // Default: this pane rendered no change (the no-op reuse branch).
+            // The cursor-only and full-rebuild branches below overwrite this
+            // with the appropriate `PaneFrameDamage` (#435).
+            cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Unchanged;
+
             if cursor_only {
                 // Fast path: build just the cursor quad and stash it.
                 let cursor_verts = build_cursor_verts_only(
@@ -2168,6 +2193,51 @@ impl FreminalTerminalWidget {
                 );
                 is_cursor_only = true;
                 cursor_only_verts.clone_from(&cursor_verts);
+
+                // Compute the frame-damage rect (#435): the region that
+                // actually changed this frame, so the windowing layer can
+                // skip the full clear and present only this rect. The changed
+                // region is the union of the cursor's *previous* cell (whose
+                // glyph is revealed when the cursor moves or blinks off) and
+                // its *current* cell. Coordinates are physical framebuffer
+                // pixels; `CursorDamage` handles the Y-flip to GL origin.
+                //
+                // Convert the terminal viewport's logical top-left to physical
+                // pixels, and derive the framebuffer height from egui's screen
+                // rect (logical) scaled by `ppp`.
+                let vp_left_px = terminal_rect.min.x * ppp;
+                let vp_top_px = terminal_rect.min.y * ppp;
+                let screen_h_logical = ui
+                    .ctx()
+                    .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.max.y));
+                let fb_height_px: i32 = (screen_h_logical * ppp)
+                    .ceil()
+                    .approx_as_by::<i32, conv2::RoundToNearest>()
+                    .unwrap_or(0);
+                let cell_w_px = cell_w_f * cursor_x_scale;
+                // Current cursor cell, relative to the viewport top-left.
+                let (cur_x, cur_y) = cursor_pixel_pos;
+                let mut damage_cells: Vec<(f32, f32, f32, f32)> =
+                    vec![(cur_x, cur_y, cell_w_px, row_h_f)];
+                // If the cursor moved since last frame, also damage the old
+                // cell so the present covers the revealed glyph there.
+                let prev = cache.previous_cursor_pos;
+                if prev != snap.cursor_pos {
+                    let prev_x =
+                        prev.x.approx_as::<f32>().unwrap_or(0.0) * cell_w_f * cursor_x_scale;
+                    let prev_y = prev.y.approx_as::<f32>().unwrap_or(0.0) * row_h_f;
+                    damage_cells.push((prev_x, prev_y, cell_w_px, row_h_f));
+                }
+                let cursor_damage = crate::gui::renderer::CursorDamage::from_cursor_cells(
+                    vp_left_px,
+                    vp_top_px,
+                    fb_height_px,
+                    &damage_cells,
+                );
+                cache.last_frame_cursor_damage =
+                    crate::gui::renderer::PaneFrameDamage::CursorOnly(cursor_damage);
+                cursor_only_scissor = cursor_damage;
+
                 let mut rs = render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2200,7 +2270,10 @@ impl FreminalTerminalWidget {
                     .deco_verts
                     .is_empty()
             {
-                // Full rebuild path.
+                // Full rebuild path: the whole pane changed, so the frame
+                // must clear + present fully (#435).
+                cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Full;
+
                 let shaped_lines = cache.shaping_cache.shape_visible(
                     &snap.visible_chars,
                     &snap.visible_tags,
@@ -2520,6 +2593,11 @@ impl FreminalTerminalWidget {
         // data (not `FontManager`) may be captured here.  `is_cursor_only` and
         // `cursor_only_verts` are captured by value (bool is Copy; Vec is moved).
         let render_state_for_cb = Arc::clone(render_state);
+        // Authoritative partial-present flag (#435): the windowing layer sets
+        // it just before this callback runs. The cursor-only scissor is gated
+        // on it, so we never scissor a redraw on a frame where the full clear
+        // actually happened (which would black out the rest of the cell).
+        let present_is_partial_cb = Arc::clone(present_is_partial);
         // The MutexGuard inside the callback intentionally lives through
         // `draw_with_verts` because the renderer and atlas are refs into it.
         #[allow(clippy::significant_drop_tightening)]
@@ -2602,6 +2680,37 @@ impl FreminalTerminalWidget {
                     // image state, so this is the same list `draw_images`
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
+
+                    // Scissor the GPU redraw to just the changed cursor cell(s)
+                    // (#435). The rest of the framebuffer already holds the
+                    // previous (identical) frame — the windowing layer only
+                    // reaches this path when the whole frame is cursor-only and
+                    // `buffer_age() == 1`. Clipping the (still full-grid) draw
+                    // calls to the damage rect restricts the GPU's fragment/
+                    // fill + blend work to those cells. `CursorDamage` is in
+                    // physical framebuffer pixels, bottom-left origin — the
+                    // same convention as `glScissor`.
+                    //
+                    // egui disables `SCISSOR_TEST` after painting all
+                    // primitives, and this callback is self-contained, so we
+                    // enable it here and disable it again afterwards, leaving
+                    // GL scissor state as egui expects.
+                    //
+                    // Gate on the authoritative partial-present flag: only
+                    // scissor when the windowing layer actually SKIPPED the
+                    // full clear this frame. If the clear happened (full
+                    // present — e.g. buffer_age != 1, a shader recomposite, or
+                    // any other pane forcing a full frame), the whole grid
+                    // must be redrawn, so we must NOT scissor.
+                    let present_partial =
+                        present_is_partial_cb.load(std::sync::atomic::Ordering::Relaxed);
+                    let applied_scissor =
+                        cursor_only_scissor
+                            .filter(|_| present_partial)
+                            .map(|d| unsafe {
+                                gl.enable(glow::SCISSOR_TEST);
+                                gl.scissor(d.x, d.y, d.width, d.height);
+                            });
                     renderer.draw_with_cursor_only_update(
                         gl,
                         atlas,
@@ -2621,6 +2730,11 @@ impl FreminalTerminalWidget {
                         bg_image_mode,
                         restore_fbo,
                     );
+                    if applied_scissor.is_some() {
+                        unsafe {
+                            gl.disable(glow::SCISSOR_TEST);
+                        }
+                    }
                 } else {
                     // Full draw path: split-borrow RenderState to pass
                     // vertex slices by reference (no cloning) alongside
