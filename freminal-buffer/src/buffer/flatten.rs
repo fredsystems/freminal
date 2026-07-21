@@ -90,6 +90,17 @@ pub struct RowCacheEntry {
     /// Auto-detected URL ranges (character indices). Empty when detection
     /// was disabled or no URLs were found.
     pub auto_urls: Vec<AutoUrlRange>,
+    /// Precomputed [`url_detect::row_tail_could_be_wrapped_scheme`] result
+    /// for this row's `bytes`. Always `false` when detection was disabled.
+    ///
+    /// Computed once here (at the same time as `auto_urls`, only when the
+    /// row is actually rebuilt) rather than on every merge call, so the
+    /// group-signal check in
+    /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`] stays an O(1)
+    /// cached lookup instead of re-scanning every row's byte tail on every
+    /// flatten — the tail-scan itself is cheap per call, but paying it again
+    /// on every already-cached (non-dirty) row on every single frame is not.
+    pub tail_could_be_wrapped_scheme: bool,
 }
 
 impl RowCacheEntry {
@@ -102,6 +113,7 @@ impl RowCacheEntry {
             bytes: Vec::new(),
             byte_to_char: Vec::new(),
             auto_urls: Vec::new(),
+            tail_could_be_wrapped_scheme: false,
         }
     }
 }
@@ -456,19 +468,25 @@ impl Buffer {
                 group_start = row_idx;
                 group_has_url_signal = false;
             }
-            // Only a match whose raw (pre-trim) end reached this row's raw
-            // byte end is a candidate continuation — a URL that ends
-            // naturally mid-row (the common case: followed by whitespace or
-            // more prose) can never be split by a wrap, no matter how many
-            // other rows in this soft-wrapped run happen to also contain
-            // unrelated, fully self-contained URLs. Only the last match in a
-            // row can possibly reach the row's end (matches are found in
-            // increasing order), so checking `.last()` suffices.
-            if cache[row_idx]
-                .as_ref()
-                .is_some_and(|e| e.auto_urls.last().is_some_and(|r| r.touches_row_end))
-            {
-                group_has_url_signal = true;
+            // Two independent signals that this row might be part of a
+            // wrapped URL:
+            //
+            // 1. A match whose raw (pre-trim) end reached this row's raw
+            //    byte end — a URL that ends naturally mid-row (the common
+            //    case: followed by whitespace or more prose) can never be
+            //    split by a wrap. Only the last match in a row can possibly
+            //    reach the row's end (matches are found in increasing
+            //    order), so checking `.last()` suffices.
+            // 2. The row's tail looks like a *partial* scheme prefix (e.g.
+            //    "see htt"), meaning the wrap split the scheme itself — in
+            //    that case `find_urls_bytes` found no match at all on this
+            //    row, so signal 1 alone would miss it entirely (not just
+            //    truncate it).
+            if let Some(entry) = cache[row_idx].as_ref() {
+                let touches_end = entry.auto_urls.last().is_some_and(|r| r.touches_row_end);
+                if touches_end || entry.tail_could_be_wrapped_scheme {
+                    group_has_url_signal = true;
+                }
             }
         }
         // Finalize the last group (the loop above only finalizes a group
@@ -575,12 +593,20 @@ impl Buffer {
             Vec::new()
         };
 
+        // Precompute the partial-scheme-tail signal once here (see
+        // `RowCacheEntry::tail_could_be_wrapped_scheme`'s doc comment) so it
+        // is a cached O(1) read at merge time instead of a fresh byte scan
+        // on every flatten call.
+        let tail_could_be_wrapped_scheme =
+            auto_detect && url_detect::row_tail_could_be_wrapped_scheme(&bytes);
+
         RowCacheEntry {
             chars,
             tags,
             bytes,
             byte_to_char,
             auto_urls,
+            tail_could_be_wrapped_scheme,
         }
     }
 
@@ -1449,6 +1475,36 @@ mod wrapped_url_tests {
         assert!(
             url_indices.is_empty(),
             "a wrapped line with no URL content must not produce URL tags"
+        );
+    }
+
+    #[test]
+    fn url_wrapping_mid_scheme_is_still_detected() {
+        // Width chosen so "see http" fills row 0 exactly, splitting the
+        // "https://" scheme prefix itself across the wrap boundary. Neither
+        // row's own per-row `find_urls_bytes` call matches anything on its
+        // own ("see http" and "s://example.com" are each missing a
+        // recognized complete scheme), so `touches_row_end` alone can never
+        // fire here — this is what `row_tail_could_be_wrapped_scheme` (the
+        // partial-scheme-prefix signal) exists for. Regression test for a
+        // CodeRabbit review finding on PR #426.
+        let mut buf = Buffer::new(8, 4);
+        assert!(buf.auto_detect_urls());
+        let url = "https://example.com";
+        buf.insert_text(&text(&format!("see {url}")));
+
+        assert_eq!(buf.rows()[1].join, RowJoin::ContinueLogicalLine);
+
+        let (_chars, tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(
+            !url_indices.is_empty(),
+            "a URL whose scheme is split by a wrap must still be auto-detected"
+        );
+
+        let urls = url_strings(&tags, &url_indices);
+        assert!(
+            urls.iter().all(|u| u == url),
+            "the full URL must be reconstructed across the scheme split; got {urls:?}"
         );
     }
 }
