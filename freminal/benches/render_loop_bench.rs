@@ -413,7 +413,15 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         let height = 50usize;
         let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
         group.bench_function("shape_visible_partial_dirty_200x50", |b| {
-            b.iter_batched(
+            // `iter_batched_ref` (not `iter_batched`): the routine takes the
+            // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
+            // (freeing the cached parsed `Face` and compiled `ShapePlan`,
+            // Task #430) happens OUTSIDE the timed region. In production the
+            // `FontManager` lives for the whole session and is never dropped
+            // per frame, so timing its `Drop` here would measure a cost that
+            // never occurs in the real render loop. See `shape_visible_persistent_fm_cache`
+            // for the faithful cross-frame model where the manager persists.
+            b.iter_batched_ref(
                 || {
                     let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
                     let mut cache = ShapingCache::new();
@@ -452,13 +460,13 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
                     }
                     (fm, cache, cell_w, edited)
                 },
-                |(mut fm, mut cache, cell_w, edited)| {
+                |(fm, cache, cell_w, edited)| {
                     std::hint::black_box(cache.shape_visible(
-                        &edited,
+                        edited,
                         &base_tags,
                         width,
-                        &mut fm,
-                        cell_w,
+                        fm,
+                        *cell_w,
                         false,
                         &[],
                     ));
