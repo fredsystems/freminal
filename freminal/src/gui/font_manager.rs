@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
@@ -186,10 +187,14 @@ struct LoadedFace {
 }
 
 /// Font data source — either compiled-in or heap-allocated.
+///
+/// `Owned` holds an `Arc<[u8]>` rather than a bare `Vec<u8>` so the bytes can
+/// be cheaply shared with a cached, self-referential `rustybuzz::Face`
+/// ([`CachedFace`]) without an extra copy (Task #430).
 #[derive(Debug)]
 enum FontData {
     Static(&'static [u8]),
-    Owned(Vec<u8>),
+    Owned(Arc<[u8]>),
 }
 
 impl FontData {
@@ -214,6 +219,7 @@ impl LoadedFace {
 
     /// Load from owned font data.
     fn from_owned(data: Vec<u8>, index: usize) -> Option<Self> {
+        let data: Arc<[u8]> = Arc::from(data);
         let font_ref = swash::FontRef::from_index(&data, index)?;
         let key = font_ref.key;
         Some(Self {
@@ -235,6 +241,22 @@ impl LoadedFace {
 
     fn as_bytes(&self) -> &[u8] {
         self.data.as_bytes()
+    }
+
+    /// Return this face's bytes as a stable, cheaply-cloneable `Arc<[u8]>`
+    /// owner, suitable for constructing a cached self-referential
+    /// `rustybuzz::Face` ([`CachedFace`]) (Task #430).
+    ///
+    /// For [`FontData::Owned`] this is a cheap `Arc::clone`. For
+    /// [`FontData::Static`] it allocates a fresh `Arc<[u8]>` copy of the
+    /// `&'static` bytes — acceptable because this only runs on a face-cache
+    /// miss (once per [`FaceId`] per font load), never per frame or per
+    /// glyph.
+    fn arc_bytes(&self) -> Arc<[u8]> {
+        match &self.data {
+            FontData::Static(bytes) => Arc::from(*bytes),
+            FontData::Owned(arc) => Arc::clone(arc),
+        }
     }
 
     /// Check if this face's charmap contains the given codepoint.
