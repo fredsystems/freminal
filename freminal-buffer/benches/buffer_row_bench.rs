@@ -609,35 +609,87 @@ fn bench_flatten_url_heavy(c: &mut Criterion) {
     let prefix = b"see ";
     let suffix_template = b" for more info xyz";
 
-    let mut data: Vec<TChar> = Vec::with_capacity(height * (width + 1));
-    for _ in 0..height {
-        let mut row_len = 0usize;
-        for &b in prefix {
-            data.push(TChar::Ascii(b));
-            row_len += 1;
+    // One row's content. A real hard break is driven per row via
+    // `handle_lf`/`handle_cr` below (matching how the PTY thread actually
+    // terminates a line) rather than embedding a `TChar::NewLine` cell in the
+    // inserted text: `TChar::NewLine` is an ordinary printable cell to
+    // `insert_text`, not a line-break instruction, so embedding it does not
+    // produce a hard break and would make every row after the first a DECAWM
+    // soft-wrap continuation of one giant logical line — defeating the
+    // point of this benchmark (one complete, self-contained URL per row).
+    let mut row_data: Vec<TChar> = Vec::with_capacity(width);
+    let mut row_len = 0usize;
+    for &b in prefix {
+        row_data.push(TChar::Ascii(b));
+        row_len += 1;
+    }
+    for &b in url {
+        row_data.push(TChar::Ascii(b));
+        row_len += 1;
+    }
+    for &b in suffix_template {
+        if row_len >= width {
+            break;
         }
-        for &b in url {
-            data.push(TChar::Ascii(b));
-            row_len += 1;
-        }
-        for &b in suffix_template {
-            if row_len >= width {
-                break;
-            }
-            data.push(TChar::Ascii(b));
-            row_len += 1;
-        }
-        while row_len < width {
-            data.push(TChar::Ascii(b' '));
-            row_len += 1;
-        }
-        data.push(TChar::NewLine);
+        row_data.push(TChar::Ascii(b));
+        row_len += 1;
+    }
+    while row_len < width {
+        row_data.push(TChar::Ascii(b' '));
+        row_len += 1;
     }
 
     let mut group = c.benchmark_group("bench_flatten_url_heavy");
     group.throughput(Throughput::Elements((width * height) as u64));
 
     group.bench_function("visible_80x50_with_urls", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = Buffer::new(width, height);
+                for i in 0..height {
+                    buf.insert_text(&row_data);
+                    if i + 1 < height {
+                        buf.handle_lf();
+                        buf.handle_cr();
+                    }
+                }
+                buf
+            },
+            |mut buf| {
+                std::hint::black_box(buf.visible_as_tchars_and_tags(0));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// Benchmark: URL auto-detection when it wraps across rows (Task 418)
+//
+// Unlike `bench_flatten_url_heavy` (one complete URL per row, hard-broken by
+// a real newline), this benchmark fills every row edge-to-edge with URL
+// content that DECAWM soft-wraps across many rows, so the group-level
+// redetect path added for GitHub issue #418 (URLs wrapping across rows must
+// be detected in full) is actually exercised on every flatten.
+// ---------------------------------------------------------------
+fn bench_flatten_wrapped_url_heavy(c: &mut Criterion) {
+    let width = 80usize;
+    let height = 50usize;
+
+    // One continuous URL, longer than the whole screen, so it soft-wraps
+    // across every row with no hard breaks at all.
+    let mut url = String::from("https://example.com/");
+    while url.len() < width * height {
+        url.push_str("a/very/long/path/segment/");
+    }
+    let data: Vec<TChar> = url.chars().map(TChar::from).collect();
+
+    let mut group = c.benchmark_group("bench_flatten_wrapped_url_heavy");
+    group.throughput(Throughput::Elements((width * height) as u64));
+
+    group.bench_function("visible_80x50_one_wrapped_url", |b| {
         b.iter_batched(
             || {
                 let mut buf = Buffer::new(width, height);
@@ -967,6 +1019,7 @@ criterion_group!(
         bench_visible_flatten,
         bench_scrollback_flatten,
         bench_flatten_url_heavy,
+        bench_flatten_wrapped_url_heavy,
         bench_insert_with_color_changes,
         bench_cursor_ops,
         bench_move_cursor_relative,

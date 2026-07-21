@@ -39,6 +39,18 @@ pub struct UrlMatch {
     pub byte_start: usize,
     /// Exclusive end byte offset into the row's byte buffer.
     pub byte_end: usize,
+    /// `true` when the **raw regex match**, before trailing-punctuation
+    /// trimming, reached the very end of `bytes`.
+    ///
+    /// This is the precise signal that a match *might* be a DECAWM-wrapped
+    /// URL continuing onto the next physical row: wrapping only ever occurs
+    /// at the row's exact last column, so a URL that got cut off by wrapping
+    /// always has its raw match extend to the row's last byte — regardless
+    /// of whether `trim_trailing` then stripped a few trailing punctuation
+    /// bytes from the reported `byte_end`. A URL that ends naturally mid-row
+    /// (followed by whitespace, a control byte, or simply the end of typed
+    /// text) does not reach the buffer end and this is `false`.
+    pub touches_buffer_end: bool,
 }
 
 /// Regex matching plain URLs for any of the supported schemes.
@@ -82,6 +94,45 @@ fn build_url_regex() -> Regex {
     })
 }
 
+/// The scheme literals matched by [`URL_REGEX`] (kept in sync with
+/// `build_url_regex`'s `PATTERN` by hand — there is no single source of
+/// truth here since the regex alternation and this list serve different
+/// purposes: the regex needs the full literals, `row_tail_could_be_wrapped_scheme`
+/// needs partial prefixes of them).
+const SCHEMES: &[&[u8]] = &[b"https://", b"http://", b"ftp://", b"file://", b"mailto:"];
+
+/// Shortest partial-scheme-prefix length considered a signal that a soft
+/// wrap might have split a URL's *scheme* across the row boundary.
+///
+/// A wrap landing within the first `MIN_PARTIAL_SCHEME_LEN` bytes of a
+/// scheme (e.g. right after just "h" or "ht") is not caught by
+/// [`row_tail_could_be_wrapped_scheme`] — that would require the URL to
+/// start within the row's last 1-2 columns, an exceedingly narrow
+/// coincidence, and checking for it would mean flagging every wrapped row
+/// whose last byte happens to be 'h', 'f', or 'm' (all fairly common in
+/// ordinary wrapped prose) as a candidate. `3` catches the much more likely
+/// case of a wrap landing after most of the scheme identifier (e.g. after
+/// "htt", "ftp", "fil", "mai") while keeping coincidental matches on
+/// ordinary text rare.
+const MIN_PARTIAL_SCHEME_LEN: usize = 3;
+
+/// Returns `true` when `bytes` ends with a **partial** (incomplete) prefix
+/// of one of the schemes [`find_urls_bytes`] recognizes.
+///
+/// A `true` result means a soft wrap may have split the scheme itself across
+/// this row and the next, so [`find_urls_bytes`] found *no match at all* on
+/// this row (unlike a URL that wraps after the scheme is complete, which
+/// still produces a [`UrlMatch`] with [`UrlMatch::touches_buffer_end`] set).
+///
+/// See [`MIN_PARTIAL_SCHEME_LEN`] for the false-positive/completeness
+/// trade-off in how short a partial prefix is recognized.
+#[must_use]
+pub fn row_tail_could_be_wrapped_scheme(bytes: &[u8]) -> bool {
+    SCHEMES.iter().any(|scheme| {
+        (MIN_PARTIAL_SCHEME_LEN..scheme.len()).any(|len| bytes.ends_with(&scheme[..len]))
+    })
+}
+
 /// Find all URL matches in `bytes`.
 ///
 /// Returns ranges relative to `bytes`. Trailing sentence punctuation and
@@ -94,11 +145,13 @@ pub fn find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch> {
     let mut out = Vec::new();
     for m in URL_REGEX.find_iter(bytes) {
         let start = m.start();
-        let end = trim_trailing(bytes, start, m.end());
+        let raw_end = m.end();
+        let end = trim_trailing(bytes, start, raw_end);
         if end > start {
             out.push(UrlMatch {
                 byte_start: start,
                 byte_end: end,
+                touches_buffer_end: raw_end == bytes.len(),
             });
         }
     }
@@ -274,5 +327,74 @@ mod tests {
         // `https://` alone has nothing after the slashes, regex requires at
         // least one non-whitespace byte → no match.
         assert!(detect("https:// is not a url").is_empty());
+    }
+
+    #[test]
+    fn touches_buffer_end_true_when_match_reaches_end_of_bytes() {
+        let s = "https://example.com";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert!(
+            ranges[0].touches_buffer_end,
+            "the match is the last thing in the buffer, so it must touch the end"
+        );
+    }
+
+    #[test]
+    fn touches_buffer_end_false_when_followed_by_more_text() {
+        let s = "https://example.com and more";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert!(
+            !ranges[0].touches_buffer_end,
+            "the match ends before trailing prose, so it must not touch the end"
+        );
+    }
+
+    #[test]
+    fn touches_buffer_end_true_even_when_trailing_punctuation_is_trimmed() {
+        // The raw regex match ("https://example.com.") reaches the buffer
+        // end even though the reported (trimmed) range does not include the
+        // trailing '.'. `touches_buffer_end` must reflect the *raw* match.
+        let s = "see https://example.com.";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            &s[ranges[0].byte_start..ranges[0].byte_end],
+            "https://example.com"
+        );
+        assert!(
+            ranges[0].touches_buffer_end,
+            "trailing-punctuation trimming must not affect touches_buffer_end"
+        );
+    }
+
+    #[test]
+    fn row_tail_partial_scheme_detects_each_scheme() {
+        assert!(row_tail_could_be_wrapped_scheme(b"see htt"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see https:"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see ftp"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see ftp:/"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see fil"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see file:/"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see mai"));
+        assert!(row_tail_could_be_wrapped_scheme(b"see mailto"));
+    }
+
+    #[test]
+    fn row_tail_partial_scheme_ignores_full_scheme() {
+        // A *complete* scheme is not this helper's job — `find_urls_bytes`
+        // already matches it and `UrlMatch::touches_buffer_end` covers the
+        // continuation signal for that case.
+        assert!(!row_tail_could_be_wrapped_scheme(b"see https://"));
+        assert!(!row_tail_could_be_wrapped_scheme(b"see mailto:"));
+    }
+
+    #[test]
+    fn row_tail_partial_scheme_ignores_short_or_unrelated_endings() {
+        assert!(!row_tail_could_be_wrapped_scheme(b"the light"));
+        assert!(!row_tail_could_be_wrapped_scheme(b"a gift"));
+        assert!(!row_tail_could_be_wrapped_scheme(b""));
+        assert!(!row_tail_could_be_wrapped_scheme(b"just prose"));
     }
 }
