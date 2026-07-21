@@ -402,6 +402,18 @@ impl Buffer {
         self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
         self.row_cache[last] = None;
+
+        // Task 121 Part C fix: this loop rotates already-clean `row_cache`
+        // entries between row indices (a moved row's cache moves with it)
+        // without marking the moved rows dirty or nulling their cache, and
+        // without changing `self.rows.len()`. Neither the visible-window
+        // fingerprint nor the per-call first-rebuilt-row tracking in
+        // `flatten.rs` can observe that row *content* moved to a different
+        // index, so a cached incremental merge built before this rotation
+        // would serve stale, pre-rotation row content at the rotated
+        // indices. Null the merge cache so the next flatten does a full
+        // re-merge. See `Buffer::merge_cache`'s field doc.
+        self.merge_cache = None;
     }
 
     /// Scroll a contiguous vertical slice [first, last] DOWN by one line.
@@ -431,6 +443,14 @@ impl Buffer {
         self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
         self.row_cache[first] = None;
+
+        // Task 121 Part C fix: same rationale as the equivalent comment in
+        // `scroll_slice_up` — this loop rotates already-clean `row_cache`
+        // entries between row indices without dirtying the moved rows or
+        // changing `self.rows.len()`, which the fingerprint + first-rebuilt
+        // -row invalidation cannot observe. Null the merge cache to force a
+        // full re-merge next flatten. See `Buffer::merge_cache`'s field doc.
+        self.merge_cache = None;
     }
 
     /// Column-selective scroll-up: shifts cells within `[left_col, right_col]`
@@ -656,6 +676,20 @@ impl Buffer {
         self.rows.push(new_row);
         self.row_cache.push(None);
         self.row_block_map.push(None);
+
+        // Task 121 Part C fix: `rows.remove(0)` + `rows.push(new_row)` nets
+        // to the same `self.rows.len()`, and every already-clean
+        // `row_cache` entry above index 0 shifts down by one index in
+        // lockstep with its row's content — without any of the moved rows
+        // being marked dirty or `None`. This is the same confined
+        // in-place-rotation bug class as `scroll_slice_up`/`_down` (see
+        // `Buffer::merge_cache`'s field doc, which explicitly names
+        // `scroll_up` as part of the confirmed gap): the fingerprint and
+        // first-rebuilt-row invalidation cannot observe the identity shift,
+        // so a cached incremental merge would serve stale, pre-shift row
+        // content. Null the merge cache to force a full re-merge next
+        // flatten.
+        self.merge_cache = None;
 
         // DO NOT move the cursor in alternate buffer
         if self.kind == BufferType::Primary {

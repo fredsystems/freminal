@@ -86,3 +86,14 @@ winreg = "0.56.0"
 
 [workspace.metadata.cargo-machete]
 ignored = ["vergen"]
+
+# Profiling profile: optimized like release but with full debuginfo and
+# without stripping, so `perf` / `cargo flamegraph` produce symbol-rich,
+# inline-aware stacks. Build with `cargo build --profile profiling` (or
+# `cargo flamegraph --profile profiling ...`). No effect on the normal
+# `release` / `dev` builds. See CONTRIBUTING / the profiling notes for the
+# btop idle-CPU investigation (issue #405).
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"

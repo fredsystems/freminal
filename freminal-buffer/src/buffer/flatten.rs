@@ -124,6 +124,121 @@ impl Default for RowCacheEntry {
     }
 }
 
+/// Identifies which flatten "window" a cached merge was built from.
+///
+/// Two calls with an identical `MergeWindowFp` cover *the same row range at
+/// the same detection setting* — a necessary (but not sufficient; see
+/// [`MergeCache`]'s doc comment) precondition for reusing a cached merge's
+/// prefix instead of redoing it from scratch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::buffer) struct MergeWindowFp {
+    /// Absolute (buffer-wide) row index the flatten window starts at, as
+    /// returned by `Buffer::visible_window_bounds`.
+    visible_start: usize,
+    /// Absolute (buffer-wide, exclusive) row index the flatten window ends
+    /// at, as returned by `Buffer::visible_window_bounds`.
+    visible_end: usize,
+    /// `Buffer::auto_detect_urls` at the time of the merge. A toggle changes
+    /// what `RowCacheEntry::auto_urls`/`bytes` contain for every row, so it
+    /// must invalidate a cached merge exactly like a window-bounds change.
+    auto_detect: bool,
+}
+
+/// Task 121 Part C (pass C): incremental cache of the last full merge over a
+/// flatten window (see [`Buffer::merge_cache`]'s field doc for the full
+/// invalidation policy).
+///
+/// Holds the exact same four vectors [`Buffer::rows_as_tchars_and_tags_cached`]
+/// (Step 2) would return, plus the [`MergeWindowFp`] it was computed against.
+/// [`Buffer::visible_as_tchars_and_tags_extended`] uses this to reuse the
+/// prefix of a previous merge — everything strictly before the first row
+/// that changed since that merge — and only re-merges from that row onward,
+/// instead of re-walking and re-rebasing every row's tags on every single
+/// frame.
+///
+/// # Why `fp` + `first_rebuilt_row` alone are not sufficient
+///
+/// `MergeWindowFp` equality only proves the window covers the *same row
+/// range* at the *same detection setting* — not that every individual row
+/// within that range still holds the content it held when this cache was
+/// built. The `first_rebuilt_row` signal (any row that was `dirty` or had a
+/// `None` cache entry on the current call) catches ordinary edits, but
+/// **cannot** catch an in-place *rotation* of already-clean cache entries
+/// between row indices without touching their `dirty`/`None` status — which
+/// is exactly what `scroll.rs`'s confined scroll-region primitives
+/// (`scroll_slice_up`/`scroll_slice_down`) and the whole-buffer `scroll_up`
+/// do. Those three sites don't rely on `fp`/`first_rebuilt_row` at all: each
+/// one sets `self.merge_cache = None` explicitly, at the exact point where
+/// it performs the rotation, forcing the next flatten to take the
+/// full-merge fallback instead of reusing a now-stale prefix. See
+/// `Buffer::merge_cache`'s field doc for the complete accounting of every
+/// invalidation mechanism (fingerprint, `first_rebuilt_row`, and the
+/// explicit-`None` sites) and which sites rely on which.
+///
+/// Every fast-path use of this cache is ALSO cross-checked against the
+/// full-merge oracle under `debug_assert_eq!` before being returned (`#405`
+/// Part C's load-bearing safety net) — release-cost-free. This is not the
+/// mechanism the confined-rotation case above relies on (that's the
+/// explicit `merge_cache = None` in `scroll.rs`); it is a general backstop
+/// that turns any *other*, not-yet-discovered divergence here into an
+/// immediate, loud test failure instead of a silently wrong render. See
+/// `incremental_merge_tests` below for regression tests that exercise the
+/// confined-rotation sites directly against an independent oracle.
+///
+/// ## Regression fix: `Arc` storage, not a second deep clone
+///
+/// The four fields are `Arc<Vec<_>>`, not plain `Vec<_>`. Adversarial
+/// benchmarking (200x50 window) proved that cloning all four freshly-built
+/// `Vec`s a *second* time purely to populate this cache — on top of the
+/// clone already implied by handing the caller an owned copy — is a net
+/// regression: the extra copy scales with window area and outweighs the
+/// tag-rebase work the incremental fast path saves. Wrapping the
+/// just-built vectors in `Arc::new` once and storing `Arc::clone`s here
+/// turns that population into a refcount bump instead of a memcpy.
+///
+/// This alone does not make the existing `Vec`-returning public methods
+/// (`visible_as_tchars_and_tags[_extended]`) any cheaper: since this cache
+/// always retains one strong reference, `Arc::try_unwrap` on the sibling
+/// reference handed back to the caller always fails (refcount 2), forcing
+/// the same one deep clone those methods paid before this change — just
+/// relocated from an explicit `.clone()` into the `unwrap_or_else` fallback
+/// of the strong-count check. The win is realised by
+/// [`Buffer::visible_as_tchars_and_tags_extended_arc`], which returns these
+/// `Arc`s directly with **zero** deep clone. See that method's doc comment
+/// for why exploiting it on the current hot path (`interface.rs`) requires
+/// a follow-up change outside this crate.
+#[derive(Debug)]
+pub(in crate::buffer) struct MergeCache {
+    /// The window this merge was computed over.
+    fp: MergeWindowFp,
+    /// The full merged character stream for the window.
+    chars: Arc<Vec<TChar>>,
+    /// The full merged, globally-rebased, coalesced format tags.
+    tags: Arc<Vec<FormatTag>>,
+    /// `row_offsets[r]` is the flat index into `chars` where row `r`
+    /// (window-relative) begins. Always has exactly one entry per row in
+    /// the window.
+    row_offsets: Arc<Vec<usize>>,
+    /// Indices into `tags` where `tag.url.is_some()`.
+    url_tag_indices: Arc<Vec<usize>>,
+}
+
+/// `Arc`-wrapped `(chars, tags, row_offsets, url_tag_indices)`.
+///
+/// The shape [`MergeCache`] stores and
+/// [`Buffer::rows_as_tchars_and_tags_incremental`] /
+/// [`Buffer::visible_as_tchars_and_tags_extended_arc`] return. Factored into
+/// a named alias purely to satisfy `clippy::type_complexity`; carries no
+/// additional semantics beyond the four-tuple it names. `pub` (not `pub(in
+/// crate::buffer)`) because it appears in the return type of the `pub`
+/// [`Buffer::visible_as_tchars_and_tags_extended_arc`].
+pub type ArcFlattenResult = (
+    Arc<Vec<TChar>>,
+    Arc<Vec<FormatTag>>,
+    Arc<Vec<usize>>,
+    Arc<Vec<usize>>,
+);
+
 impl Buffer {
     /// Convert the currently visible rows into a flat `(Vec<TChar>, Vec<FormatTag>)` pair
     /// Convert visible rows (with the given `scroll_offset`) into flat
@@ -153,12 +268,92 @@ impl Buffer {
     ///
     /// When `extra_rows == 0` this is identical to
     /// [`Self::visible_as_tchars_and_tags`].
+    ///
+    /// ## Task 121 Part C: incremental merge
+    ///
+    /// Unlike [`Self::scrollback_as_tchars_and_tags`] (which always does a
+    /// full [`Self::merge_row_caches_full`]), this is the hot per-frame path,
+    /// so it maintains [`Buffer::merge_cache`] and takes an incremental
+    /// shortcut whenever possible: reuse everything in the previous merge
+    /// strictly before the first row that changed, and only re-merge from
+    /// there onward via [`Self::merge_rows_range`], instead of re-walking and
+    /// re-rebasing every row's tags on every frame.
+    ///
+    /// The fast path requires ALL of:
+    /// - a previous [`MergeCache`] exists,
+    /// - its [`MergeWindowFp`] (window bounds + auto-detect) matches this
+    ///   call's,
+    /// - a `boundary` row index exists (`min` of `first_rebuilt_row` — from
+    ///   Step 1 — and the smallest `row_idx` in `refined_auto_urls` — from
+    ///   Step 1.5; either can be `None`, in which case the other alone is
+    ///   the boundary, and if both are `None` there is no boundary at all,
+    ///   meaning nothing in the window needs re-merging),
+    /// - `boundary >= 1` (row 0 itself must not have changed, or there is no
+    ///   prefix to reuse),
+    /// - `boundary` is in range of both the current window and the cached
+    ///   `row_offsets`.
+    ///
+    /// When `boundary` doesn't exist (nothing changed at all since the last
+    /// call) the cached tuple is returned verbatim — no re-merge work at
+    /// all, not even a partial one.
+    ///
+    /// See [`MergeCache`]'s doc comment for why this is not a 100%
+    /// airtight optimization in the face of `scroll.rs`'s confined
+    /// scroll-region row rotations, and why every fast-path return is
+    /// cross-checked against the full-merge oracle under `debug_assert_eq!`
+    /// first.
     #[must_use]
     pub fn visible_as_tchars_and_tags_extended(
         &mut self,
         scroll_offset: usize,
         extra_rows: usize,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
+        let (chars, tags, row_offsets, url_tag_indices) =
+            self.visible_as_tchars_and_tags_extended_arc(scroll_offset, extra_rows);
+        (
+            Self::unwrap_or_clone(chars),
+            Self::unwrap_or_clone(tags),
+            Self::unwrap_or_clone(row_offsets),
+            Self::unwrap_or_clone(url_tag_indices),
+        )
+    }
+
+    /// `Arc`-returning counterpart of [`Self::visible_as_tchars_and_tags_extended`].
+    ///
+    /// Identical merge behaviour (same [`MergeCache`] fast path, same
+    /// debug-only oracle cross-check) but returns the four result vectors
+    /// wrapped in `Arc` instead of by value.
+    ///
+    /// ## Why this method exists (regression fix, Task 121 Part C follow-up)
+    ///
+    /// [`MergeCache`] must retain its own strong reference to the merged
+    /// `(chars, tags, row_offsets, url_tag_indices)` across calls — that
+    /// retained copy is the entire mechanism the incremental fast path
+    /// reuses a prefix from. Given that, and given that
+    /// [`Self::visible_as_tchars_and_tags_extended`] must keep returning
+    /// owned `Vec`s (many callers/tests depend on that exact signature),
+    /// **one** deep clone per populating call is mathematically
+    /// unavoidable through that method: the cache's `Arc` and the
+    /// caller's `Arc` are both alive at the point an owned `Vec` must be
+    /// produced, so `Arc::try_unwrap` always finds a strong count of 2 and
+    /// falls back to cloning.
+    ///
+    /// This method sidesteps that wall entirely by handing the `Arc`s back
+    /// directly — **zero** deep clone, only the refcount bumps
+    /// [`MergeCache`] population already costs. Any caller that can accept
+    /// `Arc<Vec<_>>` (i.e. anything that would otherwise immediately wrap
+    /// the returned `Vec`s in `Arc::new`) should call this method instead
+    /// of `visible_as_tchars_and_tags_extended` to realise the actual
+    /// regression fix on the hot per-frame path. The hot-path consumer,
+    /// `freminal_terminal_emulator::interface::TerminalEmulator::flatten_visible`,
+    /// already calls this Arc-returning method directly, so the snapshot
+    /// path pays no extra deep clone.
+    #[must_use]
+    pub fn visible_as_tchars_and_tags_extended_arc(
+        &mut self,
+        scroll_offset: usize,
+        extra_rows: usize,
+    ) -> ArcFlattenResult {
         let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, extra_rows);
         // Task 119: when the user scrolls back, this window can reach into
         // compressed scrollback (a nonzero `scroll_offset` lowers
@@ -168,11 +363,274 @@ impl Buffer {
         // compressed (the common live-view case).
         self.ensure_decompressed(visible_start..visible_end);
         let auto_detect = self.auto_detect_urls;
-        Self::rows_as_tchars_and_tags_cached(
-            &mut self.rows[visible_start..visible_end],
-            &mut self.row_cache[visible_start..visible_end],
+        let fp = MergeWindowFp {
+            visible_start,
+            visible_end,
             auto_detect,
+        };
+
+        let rows_slice = &mut self.rows[visible_start..visible_end];
+        let cache_slice = &mut self.row_cache[visible_start..visible_end];
+        let merge_cache = &mut self.merge_cache;
+
+        Self::rows_as_tchars_and_tags_incremental(
+            rows_slice,
+            cache_slice,
+            auto_detect,
+            fp,
+            merge_cache,
         )
+    }
+
+    /// Extract an owned `Vec<T>` from an `Arc<Vec<T>>`, avoiding the clone
+    /// whenever this happens to be the sole strong reference (`strong_count
+    /// == 1`), and falling back to `(*arc).clone()` otherwise.
+    ///
+    /// For the current [`MergeCache`]-backed callers this fallback always
+    /// fires (the cache itself holds the other strong reference) — see
+    /// [`Self::visible_as_tchars_and_tags_extended_arc`]'s doc comment for
+    /// why that is an inherent limit of returning owned `Vec`s from a
+    /// method whose whole point is to retain a persistent cache. Factored
+    /// out as a named helper (rather than inlined four times) so the
+    /// "cheapest possible extraction" intent is documented once and
+    /// automatically benefits from any future call site where the
+    /// sole-owner case does hold.
+    fn unwrap_or_clone<T: Clone>(arc: Arc<Vec<T>>) -> Vec<T> {
+        Arc::try_unwrap(arc).unwrap_or_else(|shared| (*shared).clone())
+    }
+
+    /// The incremental-merge counterpart of [`Self::rows_as_tchars_and_tags_cached`]:
+    /// runs the same Step 1 (+ 1.5) refresh, then either reuses/extends
+    /// `merge_cache` or falls back to a full [`Self::merge_row_caches_full`],
+    /// storing the fresh result back into `merge_cache` either way.
+    ///
+    /// See [`Self::visible_as_tchars_and_tags_extended`]'s doc comment for
+    /// the fast-path precondition list and the debug-only safety net.
+    ///
+    /// Returns `Arc`s rather than owned `Vec`s: every return path stores an
+    /// `Arc::clone` (refcount bump) of the exact same allocation into
+    /// `merge_cache`, so populating the cache never costs a second deep
+    /// copy on top of building the result. See [`MergeCache`]'s doc comment
+    /// and [`Self::visible_as_tchars_and_tags_extended_arc`]'s doc comment
+    /// for the full accounting of where the remaining unavoidable clone
+    /// (converting back to an owned `Vec` for the legacy signature) lives.
+    fn rows_as_tchars_and_tags_incremental(
+        rows: &mut [Row],
+        cache: &mut [Option<RowCacheEntry>],
+        auto_detect: bool,
+        fp: MergeWindowFp,
+        merge_cache: &mut Option<MergeCache>,
+    ) -> ArcFlattenResult {
+        // `reuse_available` is the promise, checked BEFORE Step 1 runs, that
+        // IF a usable incremental boundary comes out of this call, its
+        // reused prefix will come from a merge that is still valid for this
+        // exact window. Only when this holds is it safe to let Step 1 skip
+        // redetecting an unchanged wrapped-URL group — see
+        // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment.
+        let reuse_available = merge_cache.as_ref().is_some_and(|cached| cached.fp == fp);
+
+        let (refined_auto_urls, first_rebuilt_row) =
+            Self::refresh_row_cache_and_refine_wrapped_urls(
+                rows,
+                cache,
+                auto_detect,
+                reuse_available,
+            );
+
+        let refined_min_row = refined_auto_urls.first().map(|(idx, _)| *idx);
+        let boundary = match (first_rebuilt_row, refined_min_row) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+
+        // ── No-op fast path: `reuse_available` held, and nothing in the
+        // window needed rebuilding this call — the previous merge is still
+        // exactly correct, verbatim. (Every group's redetection was
+        // legitimately skipped: with `boundary` absent, every group in the
+        // window has zero rebuilt rows, so `reuse_available`'s promise that
+        // skipped groups are "entirely before the boundary" holds trivially
+        // — there IS no non-reused tail at all.)
+        if reuse_available
+            && boundary.is_none()
+            && let Some(cached) = merge_cache.as_ref()
+        {
+            Self::debug_verify_against_oracle(
+                rows,
+                cache,
+                auto_detect,
+                (
+                    &cached.chars,
+                    &cached.tags,
+                    &cached.row_offsets,
+                    &cached.url_tag_indices,
+                ),
+                "no-op incremental merge",
+            );
+            // Refcount bumps only — `cached` already holds the exact `Arc`s
+            // being handed back, nothing here touches the underlying `Vec`
+            // data.
+            return (
+                Arc::clone(&cached.chars),
+                Arc::clone(&cached.tags),
+                Arc::clone(&cached.row_offsets),
+                Arc::clone(&cached.url_tag_indices),
+            );
+        }
+
+        // ── Incremental fast path: `reuse_available` held and a usable
+        // `boundary` exists — reuse the cached prefix strictly before
+        // `boundary`, re-merge only from `boundary` onward. Every group
+        // Step 1 skipped either lies wholly in this reused prefix (correct)
+        // or had a rebuilt row and so WAS redetected (also correct) — see
+        // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment.
+        if reuse_available
+            && let Some(boundary) = boundary
+            && let Some(cached) = merge_cache.as_ref()
+            && boundary >= 1
+            && boundary <= cached.row_offsets.len()
+            && boundary < cache.len()
+        {
+            let (mut chars, mut tags, mut row_offsets) =
+                Self::build_reused_prefix(cached, boundary);
+
+            Self::merge_rows_range(
+                cache,
+                &refined_auto_urls,
+                boundary,
+                &mut chars,
+                &mut tags,
+                &mut row_offsets,
+            );
+
+            Self::finish_merge(&chars, &mut tags);
+
+            let url_tag_indices = Self::collect_url_tag_indices(&tags);
+
+            // #405 Part C load-bearing safety net: the incremental fast
+            // path is a hand-maintained shortcut around the full-merge
+            // oracle. Any divergence here is a real correctness bug that
+            // must be caught before it reaches a production release build
+            // (where this check compiles out entirely — release-cost-free).
+            Self::debug_verify_against_oracle(
+                rows,
+                cache,
+                auto_detect,
+                (&chars, &tags, &row_offsets, &url_tag_indices),
+                "incremental fast-path merge",
+            );
+
+            // Wrap each freshly-built `Vec` in `Arc` exactly once (a cheap
+            // move of the `Vec` header into a new small allocation, not a
+            // data copy), store an `Arc::clone` (refcount bump) into
+            // `merge_cache`, and return the original `Arc`s. Both the cache
+            // and the return value end up sharing the same underlying
+            // buffers — no second deep clone of `chars`/`tags` is performed
+            // to populate the cache.
+            let chars = Arc::new(chars);
+            let tags = Arc::new(tags);
+            let row_offsets = Arc::new(row_offsets);
+            let url_tag_indices = Arc::new(url_tag_indices);
+
+            *merge_cache = Some(MergeCache {
+                fp,
+                chars: Arc::clone(&chars),
+                tags: Arc::clone(&tags),
+                row_offsets: Arc::clone(&row_offsets),
+                url_tag_indices: Arc::clone(&url_tag_indices),
+            });
+
+            return (chars, tags, row_offsets, url_tag_indices);
+        }
+
+        // ── Fallback: fast-path preconditions not met — full merge, then
+        // (re)populate `merge_cache` so the *next* call can go fast.
+        //
+        // If `reuse_available` was `true` but the boundary turned out
+        // unusable (e.g. row 0 itself changed, so there is no prefix left to
+        // reuse at all), `refined_auto_urls` may be under-detected: Step 1
+        // gated some clean group's redetection on the (now falsified)
+        // assumption that group would be served from a reused prefix. A
+        // full, from-scratch merge must not consume that gated result —
+        // recompute Step 1 with gating disabled first. When
+        // `reuse_available` was already `false`, `refined_auto_urls` is
+        // already fully (ungated) correct and reused as-is.
+        let full_refined_auto_urls = if reuse_available {
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false).0
+        } else {
+            refined_auto_urls
+        };
+
+        let (chars, tags, row_offsets, url_tag_indices) =
+            Self::merge_row_caches_full(cache, &full_refined_auto_urls);
+
+        // Same `Arc`-once, clone-the-`Arc`-not-the-`Vec` pattern as the
+        // incremental fast path above.
+        let chars = Arc::new(chars);
+        let tags = Arc::new(tags);
+        let row_offsets = Arc::new(row_offsets);
+        let url_tag_indices = Arc::new(url_tag_indices);
+
+        *merge_cache = Some(MergeCache {
+            fp,
+            chars: Arc::clone(&chars),
+            tags: Arc::clone(&tags),
+            row_offsets: Arc::clone(&row_offsets),
+            url_tag_indices: Arc::clone(&url_tag_indices),
+        });
+        (chars, tags, row_offsets, url_tag_indices)
+    }
+
+    /// Debug-only cross-check: recompute the full-merge oracle from scratch
+    /// (Step 1 with gating **disabled**, guaranteeing a trustworthy,
+    /// fully-redetected `refined_auto_urls`, then [`Self::merge_row_caches_full`])
+    /// and assert it is byte-identical to `actual`.
+    ///
+    /// This is the `#405` Part C load-bearing safety net for both the
+    /// no-op and incremental fast paths in
+    /// [`Self::rows_as_tchars_and_tags_incremental`]: it re-derives the
+    /// *true* oracle rather than reusing whatever (possibly gated)
+    /// `refined_auto_urls` the fast path itself computed, so a real
+    /// divergence is never masked by comparing two equally-gated results
+    /// against each other. `rows`/`cache` are already fully clean at this
+    /// point (Step 1 already ran once this call), so this second pass does
+    /// no rebuilding — only redetection, which stays a debug-only cost.
+    ///
+    /// Release builds compile this to nothing: `debug_assert_eq!` inside is
+    /// itself a no-op there, but this wrapper is `#[cfg(debug_assertions)]`-gated
+    /// too so the oracle recomputation itself never runs in release.
+    #[cfg(debug_assertions)]
+    fn debug_verify_against_oracle(
+        rows: &mut [Row],
+        cache: &mut [Option<RowCacheEntry>],
+        auto_detect: bool,
+        actual: (&[TChar], &[FormatTag], &[usize], &[usize]),
+        context: &str,
+    ) {
+        let (oracle_refined, _) =
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false);
+        let oracle = Self::merge_row_caches_full(cache, &oracle_refined);
+        assert_eq!(
+            actual,
+            (
+                oracle.0.as_slice(),
+                oracle.1.as_slice(),
+                oracle.2.as_slice(),
+                oracle.3.as_slice()
+            ),
+            "#405 Part C: {context} diverged from the full-merge oracle"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn debug_verify_against_oracle(
+        _rows: &mut [Row],
+        _cache: &mut [Option<RowCacheEntry>],
+        _auto_detect: bool,
+        _actual: (&[TChar], &[FormatTag], &[usize], &[usize]),
+        _context: &str,
+    ) {
     }
 
     /// Flatten all scrollback rows (everything before the visible window) into
@@ -277,23 +735,114 @@ impl Buffer {
         cache: &mut [Option<RowCacheEntry>],
         auto_detect: bool,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
-        let row_count = rows.len();
-
         // ── Step 1 (+ 1.5): ensure every row has an up-to-date cache entry,
         // and fix up auto-detected URLs that wrap across rows. See
-        // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment.
-        let refined_auto_urls =
-            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect);
-        let mut refined_cursor = 0usize;
+        // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment. This
+        // (full, uncached-merge) path never needs the incremental merge
+        // boundary, so `first_rebuilt_row` is discarded. `reuse_available =
+        // false`: there is no merge cache here for a skipped group's rows to
+        // ever be reused from (see that parameter's doc comment), so
+        // redetection gating must stay disabled — every group with URL
+        // signal is always redetected, matching the pre-Part-C behavior.
+        let (refined_auto_urls, _first_rebuilt_row) =
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect, false);
 
-        // ── Step 2: merge per-row results into the global flat vectors ───────
-        // Per-row tags have offsets relative to the start of that row's chars.
-        // We accumulate a running `global_offset` and re-base each tag.
+        // ── Step 2: merge per-row results into the global flat vectors. This
+        // is a pure function of `(cache, refined_auto_urls)` — see
+        // `merge_row_caches_full`'s doc comment.
+        Self::merge_row_caches_full(cache, &refined_auto_urls)
+    }
+
+    /// Step 2 of [`Self::rows_as_tchars_and_tags_cached`] (the **full**
+    /// merge): merge every row's cached flat representation into one global
+    /// `(chars, tags, row_offsets, url_tag_indices)` tuple, from scratch.
+    ///
+    /// This is a **pure function** of `(cache, refined_auto_urls)` — it does
+    /// not read `rows` or any other `Buffer` state. Thin wrapper around
+    /// [`Self::merge_rows_range`] seeded with empty accumulators starting at
+    /// row 0 (i.e. "merge the whole window"), plus the trailing-tag-end
+    /// fixup and `url_tag_indices` computation that both the full merge and
+    /// the incremental merge need at the end.
+    ///
+    /// Serves as the correctness oracle a future (and now present, see
+    /// [`Buffer::visible_as_tchars_and_tags_extended`]) incremental merge
+    /// path is checked against: both take the same cache + refined-URL
+    /// inputs and must produce byte-identical output.
+    ///
+    /// `cache.len()` is the number of rows being merged; every entry is
+    /// expected to be `Some` (Step 1 populates every entry unconditionally).
+    /// A `None` entry contributes no characters or tags for that row (only
+    /// the `NewLine` separator, if any), rather than panicking — this
+    /// function never assumes its precondition holds.
+    fn merge_row_caches_full(
+        cache: &[Option<RowCacheEntry>],
+        refined_auto_urls: &[(usize, Vec<AutoUrlRange>)],
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
-        let mut row_offsets: Vec<usize> = Vec::with_capacity(row_count);
+        let mut row_offsets: Vec<usize> = Vec::with_capacity(cache.len());
 
-        for (row_idx, entry) in cache.iter().enumerate() {
+        Self::merge_rows_range(
+            cache,
+            refined_auto_urls,
+            0,
+            &mut chars,
+            &mut tags,
+            &mut row_offsets,
+        );
+
+        Self::finish_merge(&chars, &mut tags);
+
+        let url_tag_indices = Self::collect_url_tag_indices(&tags);
+        (chars, tags, row_offsets, url_tag_indices)
+    }
+
+    /// Merge rows `[start_row, cache.len())` (window-relative indices) onto
+    /// the END of the given `chars`/`tags`/`row_offsets` accumulators.
+    ///
+    /// This is the per-row loop body shared by both [`Self::merge_row_caches_full`]
+    /// (called with `start_row = 0` and empty accumulators) and the
+    /// incremental fast path in
+    /// [`Buffer::visible_as_tchars_and_tags_extended`] (called with
+    /// `start_row = boundary` and accumulators pre-seeded with a reused
+    /// prefix). Same rebase/coalesce/`NewLine`/splice logic either way —
+    /// seeding `tags` with a clamped prefix tail before calling this
+    /// reproduces the correct coalescing seam automatically, because the
+    /// very first thing this loop does for `start_row` is compare against
+    /// `tags.last_mut()` (whatever the caller seeded) exactly like it would
+    /// against the previous row's tags in a full merge.
+    ///
+    /// Does **not** apply the trailing-tag-end fixup or compute
+    /// `url_tag_indices` — callers that need those (both current callers do)
+    /// call [`Self::finish_merge`] / [`Self::collect_url_tag_indices`]
+    /// afterward, since a truly partial (mid-window) call would not want
+    /// those applied prematurely.
+    ///
+    /// `cache` is always the **whole** window slice (not pre-sliced to
+    /// `[start_row..]`) so that `row_idx` here matches the window-relative
+    /// indices `refined_auto_urls` and `row_offsets` are keyed on.
+    fn merge_rows_range(
+        cache: &[Option<RowCacheEntry>],
+        refined_auto_urls: &[(usize, Vec<AutoUrlRange>)],
+        start_row: usize,
+        chars: &mut Vec<TChar>,
+        tags: &mut Vec<FormatTag>,
+        row_offsets: &mut Vec<usize>,
+    ) {
+        let row_count = cache.len();
+        let mut refined_cursor = 0usize;
+        // Advance the cursor past any refined entries whose row_idx is
+        // before `start_row`, so a partial merge (start_row > 0) begins
+        // looking at the correct position instead of re-scanning entries
+        // that can never apply to the rows this call will actually visit.
+        while refined_auto_urls
+            .get(refined_cursor)
+            .is_some_and(|(idx, _)| *idx < start_row)
+        {
+            refined_cursor += 1;
+        }
+
+        for (row_idx, entry) in cache.iter().enumerate().skip(start_row) {
             // Step 1 populated every entry unconditionally, so `None` cannot
             // occur here.  We use `if let` to satisfy the no-unwrap/expect rule;
             // the `else` branch is unreachable in practice.
@@ -374,8 +923,13 @@ impl Buffer {
                 }
             }
         }
+    }
 
-        // Guarantee at least one tag covering the full range.
+    /// Shared trailing fixup applied once after all rows have been merged
+    /// (by either [`Self::merge_row_caches_full`] or the incremental fast
+    /// path): guarantee at least one tag exists, and that the final tag's
+    /// `end` reaches exactly `chars.len()`.
+    fn finish_merge(chars: &[TChar], tags: &mut Vec<FormatTag>) {
         if tags.is_empty() {
             tags.push(FormatTag {
                 start: 0,
@@ -389,9 +943,46 @@ impl Buffer {
         } else if let Some(last) = tags.last_mut() {
             last.end = chars.len();
         }
+    }
 
-        let url_tag_indices = Self::collect_url_tag_indices(&tags);
-        (chars, tags, row_offsets, url_tag_indices)
+    /// Build the reused prefix (`chars`, `tags`, `row_offsets`) the
+    /// incremental fast path in
+    /// [`Self::rows_as_tchars_and_tags_incremental`] seeds
+    /// [`Self::merge_rows_range`] with: everything from `cached` up to
+    /// (window-relative) row `boundary`, exclusive.
+    ///
+    /// `chars`/`row_offsets` are plain prefix slices. `tags` needs care at
+    /// the cut point `cached.row_offsets[boundary]`: tags are sorted and
+    /// non-overlapping, so this keeps every tag with `end <= cut` verbatim,
+    /// clamps the one tag that straddles `cut` (if any) to `end = cut`, and
+    /// drops everything from the first tag with `start >= cut` onward.
+    fn build_reused_prefix(
+        cached: &MergeCache,
+        boundary: usize,
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>) {
+        let cut = cached.row_offsets[boundary];
+
+        let chars: Vec<TChar> = cached.chars[..cut].to_vec();
+        let row_offsets: Vec<usize> = cached.row_offsets[..boundary].to_vec();
+        let mut tags: Vec<FormatTag> = Vec::with_capacity(cached.tags.len());
+        for tag in cached.tags.iter() {
+            if tag.start >= cut {
+                // Tags are sorted and non-overlapping: once start >= cut,
+                // nothing further can start before cut either.
+                break;
+            }
+            if tag.end <= cut {
+                tags.push(tag.clone());
+            } else {
+                // Straddles the cut: clamp the reused copy to the prefix.
+                let mut clamped = tag.clone();
+                clamped.end = cut;
+                tags.push(clamped);
+                break;
+            }
+        }
+
+        (chars, tags, row_offsets)
     }
 
     /// Step 1 (+ 1.5) of [`Self::rows_as_tchars_and_tags_cached`]: ensure
@@ -421,15 +1012,75 @@ impl Buffer {
     /// change; use the row's own cached `auto_urls`". It stays empty (no heap
     /// allocation) whenever no row needed correction — the overwhelmingly
     /// common case.
+    ///
+    /// Also returns `first_rebuilt_row`: the smallest `row_idx` (window
+    /// relative) whose cache entry was actually rebuilt this call (`row.dirty`
+    /// was set, or its cache entry was `None`/stale) — `None` when nothing in
+    /// the window needed rebuilding at all. [`Buffer::visible_as_tchars_and_tags_extended`]
+    /// uses this as the incremental merge boundary: see its doc comment.
+    ///
+    /// ## Task 121 Part C: gating group redetection on dirtiness
+    ///
+    /// When `reuse_available` is `true`, [`redetect_urls_for_group`] is only
+    /// called for a wrapped-URL group when the group has URL signal **and**
+    /// at least one row in that group was actually rebuilt this call
+    /// (tracked below as `group_has_rebuilt_row`). When `reuse_available` is
+    /// `false`, gating is disabled entirely and every group with URL signal
+    /// is always redetected — the original (Pass A) behavior.
+    ///
+    /// `reuse_available` must be `true` **only** when the caller is about to
+    /// reuse rows skipped here from a previous, still-valid, already-merged
+    /// result (i.e. the incremental fast path in
+    /// `visible_as_tchars_and_tags_extended`, and only once it has confirmed
+    /// `MergeCache::fp` still matches). Every other caller —
+    /// [`Self::rows_as_tchars_and_tags_cached`] (used by the scrollback path,
+    /// which has no merge cache at all) and any debug-only oracle
+    /// recomputation — must pass `false`. Without a previous merge to fall
+    /// back on, skipping redetection for a clean-but-never-refined group
+    /// would permanently bake the group's raw, wrap-truncated per-row
+    /// `auto_urls` into the merge output instead of the correct
+    /// wrap-boundary-safe URL, since nothing else will ever re-derive it.
+    ///
+    /// **Why skipping a clean group cannot diverge from re-detecting it
+    /// anyway, when `reuse_available` is `true`:** when a group is skipped,
+    /// every row in it keeps whatever `auto_urls` its (unchanged)
+    /// `RowCacheEntry` already holds — the exact same `auto_urls` the
+    /// *previous* call's redetection left in place, because nothing rebuilt
+    /// those entries in between. Two cases for where that group sits
+    /// relative to the incremental merge boundary computed from
+    /// `first_rebuilt_row`:
+    ///
+    /// - The group lies **entirely before** the boundary: those rows are
+    ///   reused verbatim from the previous merge's cached prefix (never
+    ///   re-merged), so their previously-spliced URL tags are exactly what
+    ///   ships — consistent by construction. This is exactly the case
+    ///   `reuse_available` promises will hold.
+    /// - The group has **any row at or after** the boundary: that row's
+    ///   cache entry was itself rebuilt (`dirty` or `None`), which is exactly
+    ///   the condition that sets `group_has_rebuilt_row` for this group, so
+    ///   redetection **does** fire and the tail (incremental) merge consumes
+    ///   the freshly refined entry — never silently falls back to a stale
+    ///   per-row `auto_urls`.
+    ///
+    /// So a group is only ever skipped when either (a) it is wholly reused
+    /// from the cached prefix (correct: nothing new to redetect), or (b) it
+    /// is wholly within the freshly-merged tail but happens to have no
+    /// rebuilt row — impossible, since "within the tail" is defined by
+    /// having a rebuilt row. There is no third case — **provided the
+    /// prefix-reuse promise `reuse_available` encodes actually holds**,
+    /// which is the caller's responsibility to verify before passing `true`.
     fn refresh_row_cache_and_refine_wrapped_urls(
         rows: &mut [Row],
         cache: &mut [Option<RowCacheEntry>],
         auto_detect: bool,
-    ) -> Vec<(usize, Vec<AutoUrlRange>)> {
+        reuse_available: bool,
+    ) -> (Vec<(usize, Vec<AutoUrlRange>)>, Option<usize>) {
         let row_count = rows.len();
         let mut refined_auto_urls: Vec<(usize, Vec<AutoUrlRange>)> = Vec::new();
         let mut group_start = 0usize;
         let mut group_has_url_signal = false;
+        let mut group_has_rebuilt_row = false;
+        let mut first_rebuilt_row: Option<usize> = None;
 
         for row_idx in 0..row_count {
             // Invalidate cache entries that were built with a different
@@ -437,7 +1088,7 @@ impl Buffer {
             // auto_detect is true we need `bytes` populated; when false the
             // cache entry may still have them but that is harmless — we keep
             // the entry in that case.
-            {
+            let rebuilt_this_row = {
                 let row = &mut rows[row_idx];
                 let needs_rebuild = row.dirty
                     || cache[row_idx].is_none()
@@ -449,6 +1100,14 @@ impl Buffer {
                     cache[row_idx] = Some(Self::flatten_row(row, auto_detect));
                     row.mark_clean();
                 }
+                needs_rebuild
+            };
+
+            if rebuilt_this_row {
+                if first_rebuilt_row.is_none() {
+                    first_rebuilt_row = Some(row_idx);
+                }
+                group_has_rebuilt_row = true;
             }
 
             if !auto_detect {
@@ -462,11 +1121,15 @@ impl Buffer {
             let starts_new_group =
                 row_idx == 0 || rows[row_idx].join != RowJoin::ContinueLogicalLine;
             if starts_new_group {
-                if row_idx - group_start > 1 && group_has_url_signal {
+                if row_idx - group_start > 1
+                    && group_has_url_signal
+                    && (!reuse_available || group_has_rebuilt_row)
+                {
                     redetect_urls_for_group(cache, group_start, row_idx, &mut refined_auto_urls);
                 }
                 group_start = row_idx;
                 group_has_url_signal = false;
+                group_has_rebuilt_row = rebuilt_this_row;
             }
             // Two independent signals that this row might be part of a
             // wrapped URL:
@@ -491,11 +1154,15 @@ impl Buffer {
         }
         // Finalize the last group (the loop above only finalizes a group
         // once it sees the *next* group start).
-        if auto_detect && row_count - group_start > 1 && group_has_url_signal {
+        if auto_detect
+            && row_count - group_start > 1
+            && group_has_url_signal
+            && (!reuse_available || group_has_rebuilt_row)
+        {
             redetect_urls_for_group(cache, group_start, row_count, &mut refined_auto_urls);
         }
 
-        refined_auto_urls
+        (refined_auto_urls, first_rebuilt_row)
     }
 
     /// Collect the indices of tags in `tags` that carry a URL.
@@ -1506,5 +2173,982 @@ mod wrapped_url_tests {
             urls.iter().all(|u| u == url),
             "the full URL must be reconstructed across the scheme split; got {urls:?}"
         );
+    }
+}
+
+/// Task 121 Part C (pass A): property-test harness for the "full merge"
+/// oracle, [`Buffer::merge_row_caches_full`], extracted from
+/// [`Buffer::rows_as_tchars_and_tags_cached`] in this pass.
+///
+/// There is no incremental merge path yet — these tests currently only ever
+/// exercise the full merge — but they pin the harness, the
+/// oracle-equivalence check, and the output invariants that a later
+/// incremental merge path must also satisfy against this same oracle.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod incremental_merge_equivalence_tests {
+    use crate::buffer::Buffer;
+    use freminal_common::buffer_states::{
+        fonts::FontWeight, format_tag::FormatTag, tchar::TChar, url::Url,
+    };
+    use freminal_common::colors::TerminalColor;
+    use std::sync::Arc;
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// Build a 20-wide, 6-tall buffer covering a representative mix of
+    /// content the merge step must handle:
+    ///
+    /// - a plain text row
+    /// - an SGR color + bold run
+    /// - a soft-wrapped multi-row URL (width 20 forces the 46-char URL to
+    ///   wrap across several physical rows)
+    /// - an OSC-8 hyperlink row
+    /// - a blank row
+    ///
+    /// This produces more rows than the 6-row visible window, so the
+    /// resulting buffer also has scrollback — exercising the same window
+    /// slicing `visible_as_tchars_and_tags` uses in production.
+    fn build_mixed_content_buffer() -> Buffer {
+        let mut buf = Buffer::new(20, 6).with_scrollback_limit(50);
+        assert!(
+            buf.auto_detect_urls(),
+            "test relies on default auto-detect being enabled"
+        );
+
+        // Row: plain text.
+        buf.insert_text(&text("plain text row"));
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Row: SGR color + bold run.
+        let mut colored = buf.current_tag.clone();
+        colored.colors.color = TerminalColor::Red;
+        colored.font_weight = FontWeight::Bold;
+        buf.current_tag = colored;
+        buf.insert_text(&text("bold red text"));
+        buf.current_tag = FormatTag::default();
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Rows: soft-wrapped multi-row URL. At width 20 this 46-char URL
+        // wraps across three physical rows.
+        buf.insert_text(&text("https://example.com/very/long/path/that/wraps"));
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Row: OSC-8 hyperlink.
+        let hyperlink = Arc::new(Url {
+            id: None,
+            url: "https://osc8.example/target".to_string(),
+        });
+        buf.current_tag.url = Some(hyperlink);
+        buf.insert_text(&text("click here"));
+        buf.current_tag = FormatTag::default();
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Row: blank.
+        buf.handle_lf();
+        buf.handle_cr();
+
+        buf
+    }
+
+    /// Mirrors `two_consecutive_scrollback_flattens_are_byte_identical`
+    /// (`scrollback_eviction_tests`) but for the VISIBLE window: flattening
+    /// twice with no mutation in between must produce byte-identical
+    /// output.
+    #[test]
+    fn full_merge_is_deterministic() {
+        let mut buf = build_mixed_content_buffer();
+
+        let first = buf.visible_as_tchars_and_tags(0);
+        let second = buf.visible_as_tchars_and_tags(0);
+
+        assert_eq!(
+            first, second,
+            "flattening the visible window twice with no mutation must be byte-identical"
+        );
+    }
+
+    /// Pins the Part A extraction as behavior-preserving: replaying Step 1
+    /// (`refresh_row_cache_and_refine_wrapped_urls`) followed by the
+    /// extracted Step 2 (`merge_row_caches_full`) directly over the visible
+    /// window must produce exactly the same tuple as the public
+    /// `visible_as_tchars_and_tags` path.
+    #[test]
+    fn merge_helper_matches_cached_path() {
+        let mut buf = build_mixed_content_buffer();
+
+        // Reference: the real public path. This also warms the cache and
+        // clears dirty flags, so the direct replay below hits the same
+        // clean cache state (nothing dirtied in between).
+        let expected = buf.visible_as_tchars_and_tags(0);
+
+        let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+        buf.ensure_decompressed(visible_start..visible_end);
+        let auto_detect = buf.auto_detect_urls;
+        // `reuse_available = false`: this test replays Step 1 + Step 2
+        // directly (bypassing `merge_cache` entirely), so gating must stay
+        // disabled here too — same as the real `merge_row_caches_full`
+        // (scrollback/full-merge) callers.
+        let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
+            &mut buf.rows[visible_start..visible_end],
+            &mut buf.row_cache[visible_start..visible_end],
+            auto_detect,
+            false,
+        );
+        let actual =
+            Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined);
+
+        assert_eq!(
+            expected, actual,
+            "merge_row_caches_full must reproduce the cached path's output exactly"
+        );
+    }
+
+    /// Minimal deterministic linear congruential generator.
+    ///
+    /// `rand` is not a dev-dependency of `freminal-buffer` (only `criterion`,
+    /// `proptest`, and `test-log` are — see `Cargo.toml`), and this task
+    /// must not add one for a single hand-rollable test-only PRNG. Constants
+    /// are the widely used Knuth MMIX LCG parameters.
+    struct Lcg(u64);
+
+    impl Lcg {
+        const fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        /// Return a value in `[0, bound)`. Returns `0` when `bound == 0`.
+        fn next_range(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                return 0;
+            }
+            let bound_u64 = u64::try_from(bound).unwrap_or(u64::MAX);
+            let r = self.next_u64() % bound_u64;
+            usize::try_from(r).unwrap_or(0)
+        }
+    }
+
+    /// Assert the structural invariants a flattened `(chars, tags,
+    /// row_offsets, url_tag_indices)` tuple must always satisfy. These are
+    /// exactly the invariants a future incremental merge path must preserve
+    /// relative to the full-merge oracle.
+    fn assert_merge_invariants(
+        chars: &[TChar],
+        tags: &[FormatTag],
+        row_offsets: &[usize],
+        url_tag_indices: &[usize],
+    ) {
+        for pair in row_offsets.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "row_offsets must be non-decreasing: {row_offsets:?}"
+            );
+        }
+
+        for tag in tags {
+            assert!(
+                tag.start <= chars.len(),
+                "tag.start out of bounds: {tag:?}, chars.len()={}",
+                chars.len()
+            );
+            if tag.end == usize::MAX {
+                assert!(
+                    chars.is_empty(),
+                    "an open-ended (usize::MAX) tag end is only valid for an empty flatten: {tag:?}"
+                );
+            } else {
+                assert!(
+                    tag.end <= chars.len(),
+                    "tag.end out of bounds: {tag:?}, chars.len()={}",
+                    chars.len()
+                );
+                assert!(
+                    tag.start <= tag.end,
+                    "tag.start must be <= tag.end: {tag:?}"
+                );
+            }
+        }
+
+        for pair in tags.windows(2) {
+            assert!(
+                pair[0].end <= pair[1].start,
+                "tags must be sorted and non-overlapping: {pair:?}"
+            );
+        }
+
+        for &idx in url_tag_indices {
+            assert!(
+                tags.get(idx).is_some_and(|t| t.url.is_some()),
+                "url_tag_indices[{idx}] must reference a tag with url.is_some()"
+            );
+        }
+    }
+
+    /// Randomized (LCG-seeded, deterministic) stress test: repeatedly mutate
+    /// one cell in the visible window (random ASCII char, sometimes with a
+    /// random SGR color) and re-flatten, asserting the structural
+    /// invariants hold after every mutation.
+    ///
+    /// This documents the invariants an incremental merge path must
+    /// preserve; today it only exercises the full merge (there is no
+    /// incremental path yet).
+    #[test]
+    fn full_merge_stable_under_repeated_flatten() {
+        let mut buf = build_mixed_content_buffer();
+        let mut rng = Lcg::new(0x0DDB_1A5E_5EED_C0DE);
+
+        let colors = [
+            TerminalColor::Red,
+            TerminalColor::Green,
+            TerminalColor::Blue,
+            TerminalColor::Default,
+        ];
+
+        let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+        let row_span = visible_end - visible_start;
+        let width = buf.terminal_width();
+
+        for _ in 0..200 {
+            let row = visible_start + rng.next_range(row_span);
+            let col = rng.next_range(width);
+
+            if rng.next_range(2) == 0 {
+                let color_idx = rng.next_range(colors.len());
+                let mut tag = FormatTag::default();
+                tag.colors.color = colors[color_idx];
+                buf.current_tag = tag;
+            } else {
+                buf.current_tag = FormatTag::default();
+            }
+
+            let letter_idx = rng.next_range(26);
+            let letter_offset = u8::try_from(letter_idx).unwrap_or(0);
+            let ascii_char = char::from(b'a' + letter_offset);
+
+            buf.cursor.pos.y = row;
+            buf.cursor.pos.x = col;
+            buf.insert_text(&[TChar::from(ascii_char)]);
+
+            let (chars, tags, row_offsets, url_tag_indices) = buf.visible_as_tchars_and_tags(0);
+            assert_merge_invariants(&chars, &tags, &row_offsets, &url_tag_indices);
+        }
+    }
+}
+
+/// Task 121 Part C (pass C): tests for the **incremental** merge path
+/// (`Buffer::rows_as_tchars_and_tags_incremental`, driven through the public
+/// `visible_as_tchars_and_tags[_extended]` entry points).
+///
+/// Every test compares the incremental path's output against
+/// [`independent_oracle`] — a from-scratch, ungated full merge computed
+/// independently of `merge_cache` — rather than trusting the incremental
+/// path's own internal `debug_assert_eq!` cross-check alone, so a failure
+/// here produces a clear test failure (not just a panic message) and the
+/// check still exists even if these tests were ever run with
+/// `debug_assertions` off.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod incremental_merge_tests {
+    use crate::buffer::Buffer;
+    use crate::row::RowJoin;
+    use freminal_common::buffer_states::{
+        fonts::FontWeight, format_tag::FormatTag, tchar::TChar, url::Url,
+    };
+    use freminal_common::colors::TerminalColor;
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// Build a `height`-row, `width`-column buffer with no scrollback (each
+    /// row holds distinct, easily-recognizable plain text), so the visible
+    /// window is the entire buffer and window bounds never shift across
+    /// calls in these tests.
+    fn build_plain_buffer(width: usize, height: usize) -> Buffer {
+        let mut buf = Buffer::new(width, height);
+        for i in 0..height {
+            buf.insert_text(&text(&format!("row{i:02}")));
+            if i + 1 < height {
+                buf.handle_lf();
+                buf.handle_cr();
+            }
+        }
+        assert_eq!(
+            buf.rows().len(),
+            height,
+            "test setup must have no scrollback"
+        );
+        buf
+    }
+
+    /// Independently recompute the full-merge oracle for the buffer's
+    /// current visible window: Step 1 with redetection gating **disabled**
+    /// (guaranteeing a trustworthy, fully-redetected `refined_auto_urls`),
+    /// then [`Buffer::merge_row_caches_full`]. Mirrors exactly what
+    /// `Buffer::debug_verify_against_oracle` does internally, but as an
+    /// explicit, independent assertion in the test itself rather than
+    /// relying solely on the (debug-build-only) internal cross-check.
+    ///
+    /// Must be called AFTER the real path (`visible_as_tchars_and_tags`) so
+    /// every row is already clean — this only re-runs (ungated) redetection,
+    /// never a row rebuild.
+    fn independent_oracle(
+        buf: &mut Buffer,
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
+        let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+        buf.ensure_decompressed(visible_start..visible_end);
+        let auto_detect = buf.auto_detect_urls;
+        let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
+            &mut buf.rows[visible_start..visible_end],
+            &mut buf.row_cache[visible_start..visible_end],
+            auto_detect,
+            false,
+        );
+        Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined)
+    }
+
+    /// Minimal deterministic linear congruential generator (mirrors the one
+    /// in `incremental_merge_equivalence_tests` — duplicated here rather
+    /// than shared, so this module stays self-contained; see that module's
+    /// copy for the constant-choice rationale).
+    struct Lcg(u64);
+
+    impl Lcg {
+        const fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        fn next_range(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                return 0;
+            }
+            let bound_u64 = u64::try_from(bound).unwrap_or(u64::MAX);
+            let r = self.next_u64() % bound_u64;
+            usize::try_from(r).unwrap_or(0)
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Unit tests
+    // ────────────────────────────────────────────────────────────────
+
+    /// Sweep a single dirty row across every row index in the visible
+    /// window (0..height), re-flattening after each and comparing against
+    /// the independent oracle every time. Exercises the `boundary == 0`
+    /// (full-merge fallback), interior-boundary (incremental fast path),
+    /// and (trivially, since content never actually changes) the ordinary
+    /// dirty-row rebuild path.
+    #[test]
+    fn single_dirty_row_swept_matches_full_merge_at_every_position() {
+        let mut buf = build_plain_buffer(20, 6);
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+        for row_idx in visible_start..visible_end {
+            buf.rows[row_idx].mark_dirty();
+            let actual = buf.visible_as_tchars_and_tags(0);
+            let oracle = independent_oracle(&mut buf);
+            assert_eq!(
+                actual, oracle,
+                "row {row_idx} dirty sweep diverged from the full-merge oracle"
+            );
+        }
+    }
+
+    /// Two non-contiguous dirty rows (3 and 19) in a realistically-sized
+    /// (24-row) buffer: the incremental boundary must land at the smaller
+    /// index (3), and the fast path's tail re-merge must still correctly
+    /// reach and refresh row 19 even though row 19 has no rebuilt
+    /// neighbors between it and the boundary.
+    #[test]
+    fn two_non_contiguous_dirty_rows_match_full_merge() {
+        let mut buf = build_plain_buffer(20, 24);
+        let _ = buf.visible_as_tchars_and_tags(0);
+
+        buf.rows[3].mark_dirty();
+        buf.rows[19].mark_dirty();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "two non-contiguous dirty rows (3, 19) diverged from the full-merge oracle"
+        );
+    }
+
+    /// A 3-row soft-wrapped URL group where only the group's LAST row is
+    /// marked dirty: the incremental boundary must retreat all the way to
+    /// the group's first row (not just the dirty row) so the whole group
+    /// gets redetected as one unit, reproducing the exact same
+    /// wrap-boundary-safe URL text as the original (pre-dirty) merge.
+    #[test]
+    fn wrapped_url_group_dirty_last_row_redetects_whole_group() {
+        let mut buf = Buffer::new(20, 4);
+        assert!(buf.auto_detect_urls());
+
+        // Row 0: unrelated content.
+        buf.insert_text(&text("unrelated row"));
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Rows 1-3: a URL that wraps across all three remaining rows.
+        let url = "https://example.com/a/very/long/path/that/keeps/going";
+        buf.insert_text(&text(url));
+
+        assert_eq!(buf.rows().len(), 4, "test setup must have no scrollback");
+        assert_eq!(buf.rows()[2].join, RowJoin::ContinueLogicalLine);
+        assert_eq!(buf.rows()[3].join, RowJoin::ContinueLogicalLine);
+
+        let expected = buf.visible_as_tchars_and_tags(0);
+        let (_c, expected_tags, _ro, expected_urls) = &expected;
+        assert!(!expected_urls.is_empty(), "URL must be detected initially");
+        assert!(
+            expected_urls
+                .iter()
+                .all(|&i| expected_tags[i].url.as_ref().is_some_and(|u| u.url == url)),
+            "initial detection must carry the full, untruncated URL"
+        );
+
+        // Mark only row 3 (the group's LAST row, window-relative index 3)
+        // dirty — the group's first two rows (1, 2) are untouched.
+        buf.rows[3].mark_dirty();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "dirtying only the group's last row diverged from the full-merge oracle"
+        );
+
+        // The whole group must still report the full, untruncated URL —
+        // not a truncated per-row fragment from a skipped redetection.
+        let (_chars, tags, _row_offsets, url_indices) = actual;
+        assert!(!url_indices.is_empty(), "URL must still be detected");
+        assert!(
+            url_indices
+                .iter()
+                .all(|&i| tags[i].url.as_ref().is_some_and(|u| u.url == url)),
+            "redetection after a partial-group dirty must still carry the full URL"
+        );
+    }
+
+    /// A static 3-row wrapped-URL group, flattened many times with no
+    /// mutation in between, must produce byte-identical output every time
+    /// — the no-op fast path must engage (returning the cached merge
+    /// verbatim) rather than the (safe, but pointless) gating disabling
+    /// itself and silently falling back to stale per-row URL fragments.
+    #[test]
+    fn static_wrapped_url_group_repeated_flatten_is_stable() {
+        let mut buf = Buffer::new(20, 4);
+        assert!(buf.auto_detect_urls());
+        buf.insert_text(&text("unrelated row"));
+        buf.handle_lf();
+        buf.handle_cr();
+        let url = "https://example.com/a/very/long/path/that/keeps/going";
+        buf.insert_text(&text(url));
+
+        let first = buf.visible_as_tchars_and_tags(0);
+        for i in 0..10 {
+            let again = buf.visible_as_tchars_and_tags(0);
+            assert_eq!(
+                first, again,
+                "flatten #{i} diverged from the first, unmutated flatten"
+            );
+        }
+
+        let (_chars, tags, _row_offsets, url_indices) = &first;
+        assert!(!url_indices.is_empty());
+        assert!(
+            url_indices
+                .iter()
+                .all(|&i| tags[i].url.as_ref().is_some_and(|u| u.url == url)),
+            "the full URL must still be reported after repeated no-mutation flattens"
+        );
+    }
+
+    /// Seam coalescing, "matches" direction: the reused prefix's last tag
+    /// (clamped at the incremental boundary) has the SAME visual format as
+    /// the freshly-merged tail's first tag — they must coalesce into one
+    /// continuous tag spanning the seam, exactly as a full merge would
+    /// produce.
+    #[test]
+    fn seam_coalesces_when_tail_matches_prefix_format() {
+        let mut buf = build_plain_buffer(10, 4);
+
+        let mut red = FormatTag::default();
+        red.colors.color = TerminalColor::Red;
+
+        // Rows 1 and 2 both fully red.
+        buf.current_tag = red.clone();
+        buf.set_cursor_pos(Some(0), Some(1));
+        buf.insert_text(&text("bbbbbbbbbb"));
+        buf.set_cursor_pos(Some(0), Some(2));
+        buf.insert_text(&text("cccccccccc"));
+        buf.current_tag = FormatTag::default();
+
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        // Re-write row 2 with the SAME red text (dirties it without
+        // changing content), forcing boundary = 2 with a red/red seam.
+        buf.current_tag = red;
+        buf.set_cursor_pos(Some(0), Some(2));
+        buf.insert_text(&text("cccccccccc"));
+        buf.current_tag = FormatTag::default();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "matching-format seam diverged from the oracle"
+        );
+
+        // The red run must be ONE continuous tag spanning row1+row2 (i.e.
+        // strictly fewer tags than if the seam had NOT coalesced).
+        let (_chars, tags, row_offsets, _url_indices) = &actual;
+        let row1_start = row_offsets[1];
+        let row2_end = row_offsets[3];
+        let spanning_tag = tags
+            .iter()
+            .find(|t| t.start <= row1_start && t.end >= row2_end);
+        assert!(
+            spanning_tag.is_some_and(|t| t.colors.color == TerminalColor::Red),
+            "expected one red tag spanning row1..row2, got {tags:?}"
+        );
+    }
+
+    /// Seam coalescing, "differs" direction: the reused prefix's last tag
+    /// (clamped at the incremental boundary) has a DIFFERENT visual format
+    /// than the freshly-merged tail's first tag — they must NOT coalesce;
+    /// the seam must show two distinct tags.
+    #[test]
+    fn seam_stays_separate_when_tail_differs_from_prefix_format() {
+        let mut buf = build_plain_buffer(10, 4);
+
+        let mut red = FormatTag::default();
+        red.colors.color = TerminalColor::Red;
+        let mut green = FormatTag::default();
+        green.colors.color = TerminalColor::Green;
+
+        buf.current_tag = red;
+        buf.set_cursor_pos(Some(0), Some(1));
+        buf.insert_text(&text("bbbbbbbbbb"));
+        buf.set_cursor_pos(Some(0), Some(2));
+        buf.insert_text(&text("cccccccccc"));
+        buf.current_tag = FormatTag::default();
+
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        // Re-write row 2 with GREEN instead — dirties it AND changes its
+        // format relative to row 1's (reused-prefix) trailing red tag.
+        buf.current_tag = green;
+        buf.set_cursor_pos(Some(0), Some(2));
+        buf.insert_text(&text("cccccccccc"));
+        buf.current_tag = FormatTag::default();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "differing-format seam diverged from the oracle"
+        );
+
+        let (_chars, tags, row_offsets, _url_indices) = &actual;
+        let row1_start = row_offsets[1];
+        let row2_start = row_offsets[2];
+        let row2_end = row_offsets[3];
+        let row1_tag = tags
+            .iter()
+            .find(|t| t.start <= row1_start && t.end > row1_start);
+        let row2_tag = tags
+            .iter()
+            .find(|t| t.start >= row2_start && t.start < row2_end);
+        assert_eq!(
+            row1_tag.map(|t| t.colors.color),
+            Some(TerminalColor::Red),
+            "row1 must remain red: {tags:?}"
+        );
+        assert_eq!(
+            row2_tag.map(|t| t.colors.color),
+            Some(TerminalColor::Green),
+            "row2 must be green (not coalesced with row1's red): {tags:?}"
+        );
+        assert_ne!(row1_tag.map(|t| t.end), None, "sanity: row1 tag must exist");
+    }
+
+    /// A URL tag (OSC-8 hyperlink) that soft-wraps across two rows, where
+    /// the incremental boundary lands exactly at the row that the URL
+    /// continues INTO: `build_reused_prefix` must clamp the straddling
+    /// URL-carrying tag rather than dropping or duplicating it, and the
+    /// re-merged tail must reconstruct `url_tag_indices` correctly (via
+    /// re-coalescing with the clamped prefix tag).
+    #[test]
+    fn url_tag_indices_correct_when_url_tag_straddles_boundary() {
+        let mut buf = Buffer::new(10, 4);
+
+        // Row 0: unrelated.
+        buf.insert_text(&text("row0text.."));
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Rows 1-2: an OSC-8 hyperlink spanning the wrap boundary (15 chars
+        // at width 10 -> row1 gets "AAAAABBBBB", row2 starts with "CCCCC"),
+        // followed by plain trailing text finishing out row2.
+        let link = Arc::new(Url {
+            id: None,
+            url: "https://osc8.example/target".to_string(),
+        });
+        buf.current_tag.url = Some(link.clone());
+        buf.insert_text(&text("AAAAABBBBBCCCCC"));
+        buf.current_tag = FormatTag::default();
+        buf.insert_text(&text("DDDDD"));
+        buf.handle_lf();
+        buf.handle_cr();
+
+        // Row 3: unrelated.
+        buf.insert_text(&text("row3text.."));
+
+        assert_eq!(buf.rows().len(), 4, "test setup must have no scrollback");
+        assert_eq!(buf.rows()[2].join, RowJoin::ContinueLogicalLine);
+
+        let expected = buf.visible_as_tchars_and_tags(0);
+        let (_c, expected_tags, _ro, expected_urls) = &expected;
+        assert!(
+            !expected_urls.is_empty(),
+            "hyperlink must be detected initially"
+        );
+        assert!(
+            expected_urls
+                .iter()
+                .any(|&i| expected_tags[i].url.as_ref() == Some(&link)),
+            "initial detection must carry the hyperlink"
+        );
+
+        // Dirty row 2 (re-write with the SAME content) so the incremental
+        // boundary lands exactly where the hyperlink continues into row 2.
+        buf.rows[2].mark_dirty();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "straddling URL tag diverged from the full-merge oracle"
+        );
+
+        let (_chars, tags, _row_offsets, url_indices) = &actual;
+        assert!(
+            !url_indices.is_empty(),
+            "hyperlink must still be present after the incremental re-merge"
+        );
+        for &idx in url_indices {
+            assert!(
+                tags[idx].url.is_some(),
+                "url_tag_indices[{idx}] must reference a url-carrying tag"
+            );
+        }
+        assert!(
+            url_indices
+                .iter()
+                .any(|&i| tags[i].url.as_ref() == Some(&link)),
+            "the hyperlink must still be reachable via url_tag_indices"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Arc-returning variant (regression-fix follow-up): same behaviour as
+    // the owned-`Vec` path, but proves the cache-population cost is a
+    // refcount bump rather than a second deep clone.
+    // ────────────────────────────────────────────────────────────────
+
+    /// [`Buffer::visible_as_tchars_and_tags_extended_arc`] must produce
+    /// content identical to [`Buffer::visible_as_tchars_and_tags`] on an
+    /// otherwise-identical buffer (covers the fallback / first-populate
+    /// path, since no `merge_cache` exists yet on a freshly built buffer).
+    #[test]
+    fn arc_variant_matches_owned_variant_on_fallback_path() {
+        let mut owned_buf = build_plain_buffer(20, 6);
+        let mut arc_buf = build_plain_buffer(20, 6);
+
+        let (chars, tags, row_offsets, url_tag_indices) = owned_buf.visible_as_tchars_and_tags(0);
+        let (achars, atags, arow_offsets, aurl_tag_indices) =
+            arc_buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        assert_eq!(
+            chars, *achars,
+            "chars must match between the two entry points"
+        );
+        assert_eq!(tags, *atags, "tags must match between the two entry points");
+        assert_eq!(
+            row_offsets, *arow_offsets,
+            "row_offsets must match between the two entry points"
+        );
+        assert_eq!(
+            url_tag_indices, *aurl_tag_indices,
+            "url_tag_indices must match between the two entry points"
+        );
+    }
+
+    /// Same equivalence check, but for the **incremental fast path**: warm
+    /// the cache, dirty a single interior row, then compare.
+    #[test]
+    fn arc_variant_matches_owned_variant_on_incremental_fast_path() {
+        let mut owned_buf = build_plain_buffer(20, 6);
+        let mut arc_buf = build_plain_buffer(20, 6);
+
+        let _ = owned_buf.visible_as_tchars_and_tags(0);
+        let _ = arc_buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        owned_buf.rows[3].mark_dirty();
+        arc_buf.rows[3].mark_dirty();
+
+        let (chars, tags, row_offsets, url_tag_indices) = owned_buf.visible_as_tchars_and_tags(0);
+        let (achars, atags, arow_offsets, aurl_tag_indices) =
+            arc_buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        assert_eq!(chars, *achars);
+        assert_eq!(tags, *atags);
+        assert_eq!(row_offsets, *arow_offsets);
+        assert_eq!(url_tag_indices, *aurl_tag_indices);
+    }
+
+    /// The regression-fix property itself: after the incremental fast path
+    /// (or the fallback full merge) populates `merge_cache`, the `Arc`
+    /// handed back to the caller and the `Arc` retained in `merge_cache`
+    /// must point at the exact same heap allocation — proving population
+    /// cost is a refcount bump (`Arc::clone`), never a `Vec` deep clone.
+    #[test]
+    fn arc_variant_shares_allocation_with_merge_cache_on_fallback_path() {
+        let mut buf = build_plain_buffer(20, 6);
+
+        let (chars, tags, row_offsets, url_tag_indices) =
+            buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        assert_eq!(
+            Arc::strong_count(&chars),
+            2,
+            "exactly two owners must exist: the returned Arc and merge_cache's clone"
+        );
+
+        let cached = buf
+            .merge_cache
+            .as_ref()
+            .expect("merge_cache must be populated after a flatten call");
+        assert!(
+            Arc::ptr_eq(&chars, &cached.chars),
+            "merge_cache.chars must be the SAME allocation as the returned Arc"
+        );
+        assert!(Arc::ptr_eq(&tags, &cached.tags));
+        assert!(Arc::ptr_eq(&row_offsets, &cached.row_offsets));
+        assert!(Arc::ptr_eq(&url_tag_indices, &cached.url_tag_indices));
+    }
+
+    /// Same allocation-sharing property, but reached via the incremental
+    /// fast path (rather than the fallback/full-merge path exercised
+    /// above).
+    #[test]
+    fn arc_variant_shares_allocation_with_merge_cache_on_incremental_fast_path() {
+        let mut buf = build_plain_buffer(20, 6);
+        let _ = buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+        buf.rows[3].mark_dirty();
+
+        let (chars, tags, row_offsets, url_tag_indices) =
+            buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        let cached = buf
+            .merge_cache
+            .as_ref()
+            .expect("merge_cache must still be populated");
+        assert!(Arc::ptr_eq(&chars, &cached.chars));
+        assert!(Arc::ptr_eq(&tags, &cached.tags));
+        assert!(Arc::ptr_eq(&row_offsets, &cached.row_offsets));
+        assert!(Arc::ptr_eq(&url_tag_indices, &cached.url_tag_indices));
+    }
+
+    /// The no-op fast path (nothing dirtied since the last call) must hand
+    /// back the exact same allocations across repeated calls — not just
+    /// equal content, but the identical `Arc` — since nothing was rebuilt
+    /// and the previous merge is reused verbatim.
+    #[test]
+    fn arc_variant_no_op_path_reuses_identical_allocation_across_calls() {
+        let mut buf = build_plain_buffer(20, 6);
+
+        let (chars1, tags1, row_offsets1, url_tag_indices1) =
+            buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+        let (chars2, tags2, row_offsets2, url_tag_indices2) =
+            buf.visible_as_tchars_and_tags_extended_arc(0, 0);
+
+        assert!(
+            Arc::ptr_eq(&chars1, &chars2),
+            "no-op fast path must reuse the exact cached chars allocation"
+        );
+        assert!(Arc::ptr_eq(&tags1, &tags2));
+        assert!(Arc::ptr_eq(&row_offsets1, &row_offsets2));
+        assert!(Arc::ptr_eq(&url_tag_indices1, &url_tag_indices2));
+    }
+
+    /// [`Buffer::unwrap_or_clone`] must return the correct values whether it
+    /// takes the zero-copy `try_unwrap` branch (sole owner) or the
+    /// `unwrap_or_else` clone branch (shared).
+    #[test]
+    fn unwrap_or_clone_is_correct_when_sole_owner() {
+        let arc = Arc::new(vec![1_usize, 2, 3]);
+        assert_eq!(Buffer::unwrap_or_clone(arc), vec![1_usize, 2, 3]);
+    }
+
+    #[test]
+    fn unwrap_or_clone_is_correct_when_shared() {
+        let arc = Arc::new(vec![4_usize, 5, 6]);
+        let sibling = Arc::clone(&arc);
+        assert_eq!(Buffer::unwrap_or_clone(arc), vec![4_usize, 5, 6]);
+        // The sibling reference must be untouched by the other side's
+        // (forced-clone) extraction.
+        assert_eq!(*sibling, vec![4_usize, 5, 6]);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Confined scroll-region rotation regression tests
+    //
+    // These prove the fix named in `Buffer::merge_cache`'s field doc: the
+    // explicit `self.merge_cache = None;` in `scroll_slice_up`,
+    // `scroll_slice_down`, and `scroll_up` (scroll.rs) forces a full
+    // re-merge after a confined in-place row rotation, instead of serving
+    // a cached incremental merge whose prefix reuse can't observe that
+    // already-clean row_cache entries moved to different indices.
+    // ────────────────────────────────────────────────────────────────
+
+    /// `scroll_slice_up(first, last)` rotates rows `[first, last]` up by
+    /// one within an 8-row buffer taller than the rotated region (rows 0,
+    /// 1, 6, 7 stay untouched), each row holding distinct content so the
+    /// rotation is observable. After warming `merge_cache` and performing
+    /// the rotation, the next incremental flatten must match a from-scratch
+    /// oracle computed over the post-rotation state — this is exactly the
+    /// scenario that reproducibly diverged before `scroll_slice_up` nulled
+    /// `merge_cache`.
+    #[test]
+    fn incremental_merge_matches_oracle_after_confined_scroll_slice_up() {
+        let mut buf = build_plain_buffer(20, 8);
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        buf.scroll_slice_up(2, 5);
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "confined scroll_slice_up(2, 5) diverged from the full-merge oracle"
+        );
+    }
+
+    /// Mirror of the above for `scroll_slice_down`, the downward confined
+    /// rotation (blank row inserted at `first` instead of `last`).
+    #[test]
+    fn incremental_merge_matches_oracle_after_confined_scroll_slice_down() {
+        let mut buf = build_plain_buffer(20, 8);
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        buf.scroll_slice_down(2, 5);
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "confined scroll_slice_down(2, 5) diverged from the full-merge oracle"
+        );
+    }
+
+    /// Whole-buffer `scroll_up` (used e.g. for autowrap-at-bottom-margin and
+    /// primary-buffer LF at the live bottom) is the same rotation bug class
+    /// as the confined `scroll_slice_up`/`_down` above — `rows.remove(0)` +
+    /// `rows.push(new_row)` nets to the same `rows.len()`, silently
+    /// shifting every clean cache entry down by one index. Verifies its own
+    /// explicit `merge_cache = None` (named alongside the other two in
+    /// `Buffer::merge_cache`'s field doc) is equally load-bearing.
+    #[test]
+    fn incremental_merge_matches_oracle_after_whole_buffer_scroll_up() {
+        let mut buf = build_plain_buffer(20, 8);
+        let _ = buf.visible_as_tchars_and_tags(0); // warm merge_cache
+
+        buf.scroll_up();
+
+        let actual = buf.visible_as_tchars_and_tags(0);
+        let oracle = independent_oracle(&mut buf);
+        assert_eq!(
+            actual, oracle,
+            "whole-buffer scroll_up diverged from the full-merge oracle"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Property test
+    // ────────────────────────────────────────────────────────────────
+
+    proptest! {
+        /// Random buffer size + random per-cell mutation sequence: after
+        /// EVERY mutation, the incremental public path
+        /// (`visible_as_tchars_and_tags`) must match the independently
+        /// recomputed full-merge oracle exactly.
+        #[test]
+        fn incremental_merge_matches_full_merge(
+            width in 5usize..15,
+            height in 3usize..8,
+            actions in proptest::collection::vec(0u8..=255, 5..80),
+        ) {
+            let mut buf = Buffer::new(width, height);
+            let width_u64 = u64::try_from(width).unwrap_or(0);
+            let height_u64 = u64::try_from(height).unwrap_or(0);
+            let mut rng = Lcg::new(width_u64 ^ (height_u64 << 32));
+
+            for a in actions {
+                let row = rng.next_range(height);
+                let col = rng.next_range(width);
+
+                match a % 4 {
+                    0 => buf.current_tag = FormatTag::default(),
+                    1 => {
+                        let mut tag = FormatTag::default();
+                        tag.colors.color = TerminalColor::Red;
+                        tag.font_weight = FontWeight::Bold;
+                        buf.current_tag = tag;
+                    }
+                    2 => {
+                        let mut tag = FormatTag::default();
+                        tag.colors.color = TerminalColor::Green;
+                        buf.current_tag = tag;
+                    }
+                    _ => {}
+                }
+
+                buf.set_cursor_pos(Some(col), Some(row));
+                let ch = char::from(b'a' + (a % 26));
+                buf.insert_text(&[TChar::from(ch)]);
+
+                let actual = buf.visible_as_tchars_and_tags(0);
+                let oracle = independent_oracle(&mut buf);
+                prop_assert_eq!(actual, oracle);
+            }
+        }
     }
 }

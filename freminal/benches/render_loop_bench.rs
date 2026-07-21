@@ -607,6 +607,189 @@ fn bench_fg_instances(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_bg_instances_partial_dirty — all-rows-vs-one-row headroom
+// (issue #405 Part C item 2) for `build_background_instances`.
+// ---------------------------------------------------------------
+//
+// `build_background_instances` `clear()`s its output buffers and walks every
+// visible row unconditionally — there is no per-row incremental path today.
+// This benchmark measures the theoretical recoverable cost: building
+// instances for the FULL 200x50 `shaped_lines` slice vs. building instances
+// for a slice of exactly ONE row. The delta between the two is the headroom
+// a future per-row incremental build could recover; it is not itself an
+// incremental build (none exists yet).
+fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
+    let width = 200;
+    let height = 50;
+    let (lines, fm) = build_shaped_lines_for_size(width, height);
+
+    let mut group = c.benchmark_group("instanced_bg_partial_dirty");
+
+    let cell_width = fm.cell_width();
+    let cell_height = fm.cell_height();
+    let ascent = fm.ascent();
+    let underline_offset = fm.underline_offset();
+    let strikeout_offset = fm.strikeout_offset();
+    let stroke_size = fm.stroke_size();
+
+    let cursor_pixel_pos = (0.0_f32, 0.0_f32);
+    let cursor_style = CursorVisualStyle::BlockCursorSteady;
+
+    group.throughput(Throughput::Elements((width * height) as u64));
+    group.bench_function(
+        BenchmarkId::new("build_bg_instances_all_rows", "200x50"),
+        |b| {
+            let mut instances = Vec::new();
+            let mut deco = Vec::new();
+            b.iter(|| {
+                build_background_instances(
+                    &BackgroundFrame {
+                        shaped_lines: &lines,
+                        cell_width,
+                        cell_height,
+                        ascent,
+                        underline_offset,
+                        strikeout_offset,
+                        stroke_size,
+                        show_cursor: true,
+                        cursor_blink_on: true,
+                        cursor_pixel_pos,
+                        cursor_width_scale: 1.0,
+                        cursor_visual_style: &cursor_style,
+                        selection: None,
+                        selection_is_block: false,
+                        match_highlights: &[],
+                        command_block_hover_rows: None,
+                        term_width_cols: 0,
+                        theme: &CATPPUCCIN_MOCHA,
+                        cursor_color_override: None,
+                        reverse_screen: false,
+                    },
+                    &mut instances,
+                    &mut deco,
+                );
+                std::hint::black_box(instances.len());
+                std::hint::black_box(deco.len());
+            });
+        },
+    );
+
+    group.throughput(Throughput::Elements(width as u64));
+    let single_row = &lines[24..25];
+    group.bench_function(
+        BenchmarkId::new("build_bg_instances_one_row", "200x50"),
+        |b| {
+            let mut instances = Vec::new();
+            let mut deco = Vec::new();
+            b.iter(|| {
+                build_background_instances(
+                    &BackgroundFrame {
+                        shaped_lines: single_row,
+                        cell_width,
+                        cell_height,
+                        ascent,
+                        underline_offset,
+                        strikeout_offset,
+                        stroke_size,
+                        show_cursor: true,
+                        cursor_blink_on: true,
+                        cursor_pixel_pos,
+                        cursor_width_scale: 1.0,
+                        cursor_visual_style: &cursor_style,
+                        selection: None,
+                        selection_is_block: false,
+                        match_highlights: &[],
+                        command_block_hover_rows: None,
+                        term_width_cols: 0,
+                        theme: &CATPPUCCIN_MOCHA,
+                        cursor_color_override: None,
+                        reverse_screen: false,
+                    },
+                    &mut instances,
+                    &mut deco,
+                );
+                std::hint::black_box(instances.len());
+                std::hint::black_box(deco.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_fg_instances_partial_dirty — all-rows-vs-one-row headroom
+// (issue #405 Part C item 2) for `build_foreground_instances`.
+// ---------------------------------------------------------------
+//
+// Same rationale as `bench_bg_instances_partial_dirty`, applied to
+// `build_foreground_instances`: builds instances for the full 200x50
+// `shaped_lines` slice vs. a slice of exactly one row, quantifying the
+// per-row headroom a future incremental foreground build could recover.
+fn bench_fg_instances_partial_dirty(c: &mut Criterion) {
+    let width = 200;
+    let height = 50;
+    let (lines, fm) = build_shaped_lines_for_size(width, height);
+
+    let mut group = c.benchmark_group("instanced_fg_partial_dirty");
+
+    let cell_height = fm.cell_height();
+    let ascent = fm.ascent();
+    let opts = FgRenderOptions::all_visible(None);
+
+    group.throughput(Throughput::Elements((width * height) as u64));
+    group.bench_function(
+        BenchmarkId::new("build_fg_instances_all_rows", "200x50"),
+        |b| {
+            b.iter_batched(
+                || (GlyphAtlas::default(), Vec::new()),
+                |(mut atlas, mut instances)| {
+                    build_foreground_instances(
+                        &lines,
+                        &mut atlas,
+                        &fm,
+                        cell_height,
+                        ascent,
+                        &opts,
+                        &CATPPUCCIN_MOCHA,
+                        &mut instances,
+                    );
+                    std::hint::black_box(instances.len());
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    group.throughput(Throughput::Elements(width as u64));
+    let single_row = &lines[24..25];
+    group.bench_function(
+        BenchmarkId::new("build_fg_instances_one_row", "200x50"),
+        |b| {
+            b.iter_batched(
+                || (GlyphAtlas::default(), Vec::new()),
+                |(mut atlas, mut instances)| {
+                    build_foreground_instances(
+                        single_row,
+                        &mut atlas,
+                        &fm,
+                        cell_height,
+                        ascent,
+                        &opts,
+                        &CATPPUCCIN_MOCHA,
+                        &mut instances,
+                    );
+                    std::hint::black_box(instances.len());
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_shape_placeholder_line — fold-placeholder shaping
 // ---------------------------------------------------------------
 //
@@ -875,6 +1058,8 @@ criterion_group!(
         bench_shaping_ligatures,
         bench_bg_instances,
         bench_fg_instances,
+        bench_bg_instances_partial_dirty,
+        bench_fg_instances_partial_dirty,
         bench_shape_placeholder_line,
         bench_build_visuals,
         bench_image_animation_tick,
