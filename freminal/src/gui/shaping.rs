@@ -177,6 +177,10 @@ impl ShapingCache {
             self.entries.truncate(line_count);
         }
 
+        // Built once per call rather than once per line: the feature list is
+        // identical for every run sharing this `ligatures` setting.
+        let features = shaping_features(ligatures);
+
         let mut result = Vec::with_capacity(line_count);
 
         // Track the character offset into the global flat array for tag lookup.
@@ -214,7 +218,7 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
+                let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures, &features);
                 let shaped_line = Arc::new(ShapedLine {
                     runs: shaped_runs,
                     line_width: lw,
@@ -504,16 +508,19 @@ fn shaping_features(ligatures: bool) -> Vec<rustybuzz::Feature> {
 }
 
 /// Shape a set of `TextRun`s into `ShapedRun`s.
+///
+/// `features` is built once by the caller (see [`ShapingCache::shape_visible`])
+/// rather than once per run, since it is identical for every run sharing the
+/// same `ligatures` setting.
 fn shape_runs(
     runs: &[TextRun],
     font_manager: &FontManager,
     cell_width: f32,
     ligatures: bool,
+    features: &[rustybuzz::Feature],
 ) -> Vec<ShapedRun> {
-    let features = shaping_features(ligatures);
-
     runs.iter()
-        .map(|run| shape_single_run(run, font_manager, cell_width, &features))
+        .map(|run| shape_single_run(run, font_manager, cell_width, ligatures, features))
         .collect()
 }
 
@@ -622,7 +629,8 @@ pub fn shape_placeholder_line(
         });
     }
 
-    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures);
+    let features = shaping_features(ligatures);
+    let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures, &features);
     ShapedLine {
         runs: shaped_runs,
         line_width: LineWidth::Normal,
@@ -634,38 +642,43 @@ fn shape_single_run(
     run: &TextRun,
     font_manager: &FontManager,
     cell_width: f32,
+    ligatures: bool,
     features: &[rustybuzz::Feature],
 ) -> ShapedRun {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
-    // Try to get a rustybuzz face for this run's font.
-    let glyphs = font_manager.rustybuzz_face(run.face_id).map_or_else(
-        || {
-            // No face available — produce tofu (glyph_id=0) per character.
-            build_tofu_glyphs(&run.char_widths, run.col_start, run.face_id, cell_width)
-        },
-        |face| {
-            // Build the input buffer.
-            let mut buffer = rustybuzz::UnicodeBuffer::new();
-            buffer.push_str(&run.text);
+    // Build the input buffer and guess its segment properties (script,
+    // direction) exactly as `rustybuzz::shape()` does internally — this is
+    // required up front because `shape_cached` needs a concrete
+    // script/direction to look up (or build) the matching cached
+    // `ShapePlan` before it can shape.
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(&run.text);
+    buffer.guess_segment_properties();
 
-            // Shape.
-            let output = rustybuzz::shape(&face, features, buffer);
+    // Try to shape via the cached Face + ShapePlan (Task #430).
+    let glyphs = font_manager
+        .shape_cached(run.face_id, ligatures, features, buffer)
+        .map_or_else(
+            || {
+                // No face available — produce tofu (glyph_id=0) per character.
+                build_tofu_glyphs(&run.char_widths, run.col_start, run.face_id, cell_width)
+            },
+            |output| {
+                let infos = output.glyph_infos();
 
-            let infos = output.glyph_infos();
-
-            // Map shaped glyphs back to cell-grid positions.
-            build_shaped_glyphs(
-                infos,
-                &run.text,
-                &run.char_widths,
-                run.col_start,
-                run.face_id,
-                is_emoji_face,
-                cell_width,
-            )
-        },
-    );
+                // Map shaped glyphs back to cell-grid positions.
+                build_shaped_glyphs(
+                    infos,
+                    &run.text,
+                    &run.char_widths,
+                    run.col_start,
+                    run.face_id,
+                    is_emoji_face,
+                    cell_width,
+                )
+            },
+        );
 
     ShapedRun {
         glyphs,
@@ -832,6 +845,18 @@ mod tests {
         FontManager::new(&Config::default(), 1.0).unwrap()
     }
 
+    /// Helper: shape `runs`, building the feature list internally (mirroring
+    /// what `ShapingCache::shape_visible` does once per call in production).
+    fn shape_runs_test(
+        runs: &[TextRun],
+        fm: &FontManager,
+        cell_w: f32,
+        ligatures: bool,
+    ) -> Vec<ShapedRun> {
+        let features = shaping_features(ligatures);
+        shape_runs(runs, fm, cell_w, ligatures, &features)
+    }
+
     /// Helper: create a simple format tag covering a range.
     fn make_tag(start: usize, end: usize) -> FormatTag {
         FormatTag {
@@ -938,7 +963,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w, false);
+        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 3);
@@ -970,7 +995,7 @@ mod tests {
         let tags = vec![make_tag(0, 10)];
 
         let runs = segment_line(&chars, &tags, 0, 80, &mut fm);
-        let shaped = shape_runs(&runs, &fm, cell_w, false);
+        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
 
         assert_eq!(shaped.len(), 1);
         assert_eq!(shaped[0].glyphs.len(), 1);
@@ -997,7 +1022,7 @@ mod tests {
             "emoji must resolve to FaceId::Emoji (bundled Noto floor guarantees one)"
         );
 
-        let shaped = shape_runs(&runs, &fm, cell_w, false);
+        let shaped = shape_runs_test(&runs, &fm, cell_w, false);
         assert_eq!(shaped.len(), 1);
         assert!(!shaped[0].glyphs.is_empty());
     }
@@ -1367,7 +1392,7 @@ mod tests {
         // A same-format ASCII run must stay a single run so a ligature can form.
         assert_eq!(runs.len(), 1, "`{text}` should be one run");
 
-        let shaped = shape_runs(&runs, &fm, cell_w, ligatures);
+        let shaped = shape_runs_test(&runs, &fm, cell_w, ligatures);
         assert_eq!(shaped.len(), 1);
         shaped[0].glyphs.iter().map(|g| g.glyph_id).collect()
     }
@@ -1437,5 +1462,122 @@ mod tests {
             "wide char should span 2 cells (not a ligature)"
         );
         assert!(glyphs[0].x_px.abs() < f32::EPSILON);
+    }
+
+    // --- Task #430: shape_with_plan output-identity vs the old shape() path ---
+
+    /// One shaped glyph's full identity: glyph id, source cluster, and the
+    /// positional data (advances + offsets). Positions are included because
+    /// `kern` is always force-enabled in the feature list, so a plan-caching
+    /// regression could change advances/offsets without changing glyph ids —
+    /// comparing ids alone would miss it.
+    type GlyphIdentity = (u16, u32, i32, i32, i32, i32);
+
+    /// Collect the full per-glyph identity (id, cluster, x/y advance, x/y
+    /// offset) from a shaped `GlyphBuffer`.
+    fn glyph_identities(output: &rustybuzz::GlyphBuffer) -> Vec<GlyphIdentity> {
+        let infos = output.glyph_infos();
+        let positions = output.glyph_positions();
+        infos
+            .iter()
+            .zip(positions.iter())
+            .map(|(info, pos)| {
+                (
+                    u16::value_from(info.glyph_id).unwrap_or(0),
+                    info.cluster,
+                    pos.x_advance,
+                    pos.y_advance,
+                    pos.x_offset,
+                    pos.y_offset,
+                )
+            })
+            .collect()
+    }
+
+    /// Shape `text` as a single same-format run via the OLD `rustybuzz::shape()`
+    /// entry point — bypassing `FontManager`'s face/plan cache entirely, by
+    /// parsing the face directly from the raw bytes — for comparison against
+    /// the new cached `shape_cached` path.
+    fn shape_via_old_api(
+        text: &str,
+        face_id: FaceId,
+        fm: &FontManager,
+        ligatures: bool,
+    ) -> Vec<GlyphIdentity> {
+        let bytes = fm.face_data(face_id).expect("face must be loaded");
+        let index: u32 = fm
+            .face_index(face_id)
+            .and_then(|i| u32::value_from(i).ok())
+            .expect("face index must be loaded and fit in u32");
+        let face = rustybuzz::Face::from_slice(bytes, index).expect("face must parse");
+
+        let features = shaping_features(ligatures);
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(&face, &features, buffer);
+        glyph_identities(&output)
+    }
+
+    /// Shape `text` through the NEW cached `shape_cached` path (the same
+    /// entry point `shape_single_run` uses in production), returning the
+    /// same per-glyph identity sequence for comparison.
+    fn shape_via_new_api(
+        text: &str,
+        face_id: FaceId,
+        fm: &FontManager,
+        ligatures: bool,
+    ) -> Vec<GlyphIdentity> {
+        let features = shaping_features(ligatures);
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let output = fm
+            .shape_cached(face_id, ligatures, &features, buffer)
+            .expect("shape_cached must succeed for a loaded face");
+        glyph_identities(&output)
+    }
+
+    /// Regression guard for the core claim of Task #430: caching the parsed
+    /// `Face` and the compiled `ShapePlan` and shaping via
+    /// `shape_with_plan` must produce IDENTICAL output — glyph ids, source
+    /// clusters, AND positional data (advances + offsets) — to the previous
+    /// `rustybuzz::shape()` call for every kind of content the terminal
+    /// renderer shapes: plain Latin text, ligating/contextual sequences, a
+    /// CJK (wide) character, and an emoji (routed to a different face
+    /// entirely). Positions are asserted because `kern` is always enabled,
+    /// so a plan-caching regression could shift advances without touching
+    /// glyph ids. If this test ever fails, the perf change altered
+    /// rendering, which is the one thing it must never do.
+    #[test]
+    fn shape_with_plan_matches_old_shape_for_mixed_content() {
+        let fm = test_font_manager();
+
+        let samples: &[(&str, FaceId, bool)] = &[
+            ("Hello, world!", FaceId::PrimaryRegular, false),
+            ("->", FaceId::PrimaryRegular, true),
+            ("!=", FaceId::PrimaryRegular, true),
+            ("中", FaceId::PrimaryRegular, false),
+        ];
+
+        for &(text, face_id, ligatures) in samples {
+            let old = shape_via_old_api(text, face_id, &fm, ligatures);
+            let new = shape_via_new_api(text, face_id, &fm, ligatures);
+            assert_eq!(
+                old, new,
+                "`{text}` (ligatures={ligatures}): shape_with_plan output \
+                 must match the old rustybuzz::shape() output exactly"
+            );
+        }
+
+        // Emoji routes to a different face (FaceId::Emoji) entirely — the
+        // bundled Noto Color Emoji floor (Task #402) guarantees one is
+        // always loaded, so this is deterministic across hosts.
+        let old_emoji = shape_via_old_api("😀", FaceId::Emoji, &fm, false);
+        let new_emoji = shape_via_new_api("😀", FaceId::Emoji, &fm, false);
+        assert_eq!(
+            old_emoji, new_emoji,
+            "emoji: shape_with_plan output must match the old rustybuzz::shape() \
+             output exactly"
+        );
     }
 }

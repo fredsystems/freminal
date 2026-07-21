@@ -1544,6 +1544,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "rustybuzz",
+ "self_cell",
  "swash",
  "sysinfo",
  "tempfile",

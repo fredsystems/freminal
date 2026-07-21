@@ -413,7 +413,15 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
         let height = 50usize;
         let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
         group.bench_function("shape_visible_partial_dirty_200x50", |b| {
-            b.iter_batched(
+            // `iter_batched_ref` (not `iter_batched`): the routine takes the
+            // primed `FontManager`/`ShapingCache` by `&mut`, so their teardown
+            // (freeing the cached parsed `Face` and compiled `ShapePlan`,
+            // Task #430) happens OUTSIDE the timed region. In production the
+            // `FontManager` lives for the whole session and is never dropped
+            // per frame, so timing its `Drop` here would measure a cost that
+            // never occurs in the real render loop. See `shape_visible_persistent_fm_cache`
+            // for the faithful cross-frame model where the manager persists.
+            b.iter_batched_ref(
                 || {
                     let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
                     let mut cache = ShapingCache::new();
@@ -452,13 +460,13 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
                     }
                     (fm, cache, cell_w, edited)
                 },
-                |(mut fm, mut cache, cell_w, edited)| {
+                |(fm, cache, cell_w, edited)| {
                     std::hint::black_box(cache.shape_visible(
-                        &edited,
+                        edited,
                         &base_tags,
                         width,
-                        &mut fm,
-                        cell_w,
+                        fm,
+                        *cell_w,
                         false,
                         &[],
                     ));
@@ -467,6 +475,110 @@ fn bench_shaping_ligatures(c: &mut Criterion) {
             );
         });
     }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
+// bench_shaping_crossframe — persistent FontManager/ShapingCache across
+// many differing "frames" (btop-like full-screen TUI redraw)
+// ---------------------------------------------------------------
+
+/// Rotating character pool used to mutate rows across synthetic frames
+/// without needing a numeric-to-`u8` cast.
+const CROSSFRAME_ROTATING_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// Build `num_frames` distinct content frames derived from
+/// [`ligature_heavy_visible_chars`] at `width`x`height`. Each frame mutates
+/// the first character of roughly half its rows with a rotating letter, so
+/// that most rows differ from the previous frame — modelling a full-screen
+/// TUI redraw (e.g. btop) rather than the single-row change already covered
+/// by `shape_visible_partial_dirty_200x50`.
+fn crossframe_shaping_frames(
+    width: usize,
+    height: usize,
+    num_frames: usize,
+) -> Vec<(
+    Vec<freminal_common::buffer_states::tchar::TChar>,
+    Vec<freminal_common::buffer_states::format_tag::FormatTag>,
+)> {
+    use freminal_common::buffer_states::tchar::TChar;
+
+    let (base_chars, base_tags) = ligature_heavy_visible_chars(width, height);
+    let newline_positions: Vec<usize> = base_chars
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, TChar::NewLine))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut frames = Vec::with_capacity(num_frames);
+    for frame_idx in 0..num_frames {
+        let mut frame_chars = base_chars.clone();
+        let mut row_start = 0usize;
+        for (row_idx, &nl_pos) in newline_positions.iter().enumerate() {
+            // Mutate roughly half the rows each frame so most rows are
+            // cache misses, but not every row (a uniform full rebuild would
+            // be indistinguishable from a cold shape of the whole screen).
+            if (row_idx + frame_idx) % 2 == 0 {
+                let ch = CROSSFRAME_ROTATING_CHARS
+                    [(frame_idx + row_idx) % CROSSFRAME_ROTATING_CHARS.len()];
+                if let Some(slot) = frame_chars.get_mut(row_start) {
+                    *slot = TChar::Ascii(ch);
+                }
+            }
+            row_start = nl_pos + 1;
+        }
+        frames.push((frame_chars, base_tags.clone()));
+    }
+    frames
+}
+
+/// Measures cross-frame text-shaping cost when the `FontManager` and
+/// `ShapingCache` are reused across "frames" (like the real render loop,
+/// which keeps one of each for the whole session) but the visible content
+/// changes on many rows every frame. This models a full-screen TUI like
+/// btop that rewrites most cells every frame.
+///
+/// Because the `FontManager` persists across frames, this benchmark exercises
+/// the cross-frame Face/`ShapePlan` cache (Task #430): the parsed
+/// `rustybuzz::Face` and compiled `ShapePlan` are reused across every frame,
+/// so a changed row re-shapes via `shape_with_plan` without re-parsing the
+/// face or recompiling the plan. It is the faithful cross-frame model of the
+/// production render loop, in contrast to `shape_visible_partial_dirty_200x50`
+/// (which rebuilds the manager per iteration) — see that bench's note.
+fn bench_shaping_crossframe(c: &mut Criterion) {
+    let width = 200usize;
+    let height = 50usize;
+    let total_chars = (width * height) as u64;
+    let num_frames = 30usize;
+
+    let frames = crossframe_shaping_frames(width, height, num_frames);
+
+    let mut group = c.benchmark_group("shaping_crossframe");
+    group.throughput(Throughput::Elements(total_chars));
+
+    group.bench_function("shape_visible_persistent_fm_cache", |b| {
+        let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+        let mut cache = ShapingCache::new();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w = fm.cell_width() as f32;
+        let mut idx = 0usize;
+
+        b.iter(|| {
+            let (frame_chars, frame_tags) = &frames[idx % frames.len()];
+            idx += 1;
+            std::hint::black_box(cache.shape_visible(
+                frame_chars,
+                frame_tags,
+                width,
+                &mut fm,
+                cell_w,
+                false,
+                &[],
+            ));
+        });
+    });
 
     group.finish();
 }
@@ -1056,6 +1168,7 @@ criterion_group!(
         bench_build_snapshot_after_feed,
         bench_arcswap_roundtrip,
         bench_shaping_ligatures,
+        bench_shaping_crossframe,
         bench_bg_instances,
         bench_fg_instances,
         bench_bg_instances_partial_dirty,

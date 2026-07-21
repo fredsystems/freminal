@@ -13,6 +13,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
@@ -185,39 +186,49 @@ struct LoadedFace {
     cache_key: swash::CacheKey,
 }
 
-/// Font data source — either compiled-in or heap-allocated.
+/// Font data source.
+///
+/// The bytes are always held behind a single `Arc<[u8]>` — bundled
+/// (`&'static`) fonts are copied into an `Arc` exactly once at load time
+/// (`from_static`), heap-loaded fonts move their `Vec<u8>` into the `Arc`
+/// (`from_owned`). Holding a single owner type means [`LoadedFace::arc_bytes`]
+/// is *always* a cheap `Arc::clone` (refcount bump), so constructing a cached,
+/// self-referential `rustybuzz::Face` ([`CachedFace`]) on a cache miss never
+/// copies the font bytes — not even for bundled fonts (Task #430).
 #[derive(Debug)]
-enum FontData {
-    Static(&'static [u8]),
-    Owned(Vec<u8>),
-}
+struct FontData(Arc<[u8]>);
 
 impl FontData {
     fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Static(b) => b,
-            Self::Owned(v) => v,
-        }
+        &self.0
     }
 }
 
 impl LoadedFace {
     /// Load from static (bundled) font data.
+    ///
+    /// The `&'static` bytes are copied into an `Arc<[u8]>` exactly once here,
+    /// at load time, so that later face-cache misses reuse the same allocation
+    /// via a cheap `Arc::clone` rather than re-copying the (multi-MB) bundled
+    /// font on every miss (Task #430).
     fn from_static(data: &'static [u8]) -> Option<Self> {
-        let font_ref = swash::FontRef::from_index(data, 0)?;
+        let data: Arc<[u8]> = Arc::from(data);
+        let font_ref = swash::FontRef::from_index(&data, 0)?;
+        let key = font_ref.key;
         Some(Self {
-            data: FontData::Static(data),
+            data: FontData(data),
             index: 0,
-            cache_key: font_ref.key,
+            cache_key: key,
         })
     }
 
     /// Load from owned font data.
     fn from_owned(data: Vec<u8>, index: usize) -> Option<Self> {
+        let data: Arc<[u8]> = Arc::from(data);
         let font_ref = swash::FontRef::from_index(&data, index)?;
         let key = font_ref.key;
         Some(Self {
-            data: FontData::Owned(data),
+            data: FontData(data),
             index,
             cache_key: key,
         })
@@ -235,6 +246,17 @@ impl LoadedFace {
 
     fn as_bytes(&self) -> &[u8] {
         self.data.as_bytes()
+    }
+
+    /// Return this face's bytes as a stable, cheaply-cloneable `Arc<[u8]>`
+    /// owner, suitable for constructing a cached self-referential
+    /// `rustybuzz::Face` ([`CachedFace`]) (Task #430).
+    ///
+    /// Always a cheap `Arc::clone` (refcount bump) — the one-time copy of any
+    /// `&'static` bundled bytes into the `Arc` happened at load time in
+    /// [`Self::from_static`], so no font-byte copy occurs here on a cache miss.
+    fn arc_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.data.0)
     }
 
     /// Check if this face's charmap contains the given codepoint.
@@ -278,6 +300,40 @@ impl LoadedFace {
         })
     }
 }
+
+/// Type alias so `self_cell!` can reference `rustybuzz::Face` by a bare
+/// identifier — the macro requires an `ident`, not a path (`rustybuzz::Face`
+/// itself does not work as the `dependent` type).
+type RustybuzzFace<'a> = rustybuzz::Face<'a>;
+
+self_cell::self_cell!(
+    /// A parsed `rustybuzz::Face` bundled together with the `Arc<[u8]>` byte
+    /// buffer it borrows from (Task #430).
+    ///
+    /// `rustybuzz::Face<'a>` borrows the font bytes, so it cannot be stored
+    /// directly as a field on [`FontManager`] alongside the owning
+    /// [`LoadedFace`] — that would be self-referential. `self_cell` ties the
+    /// owner (a cheaply-cloneable, stable `Arc<[u8]>`; see
+    /// [`LoadedFace::arc_bytes`]) and the dependent (the parsed
+    /// `rustybuzz::Face`) together in one heap-allocated, movable struct.
+    /// This lets [`FontManager`] cache the parsed face per [`FaceId`]
+    /// instead of re-parsing the font tables on every shape call.
+    struct CachedFace {
+        owner: Arc<[u8]>,
+
+        #[covariant]
+        dependent: RustybuzzFace,
+    }
+);
+
+/// Cache key for a compiled `rustybuzz::ShapePlan` (Task #430).
+///
+/// Distinguishes plans by face, the ligature-feature-set identity
+/// (`shaping_features(ligatures)` only ever varies on this bool), and the
+/// buffer's guessed script/direction. `rustybuzz::Script` and
+/// `rustybuzz::Direction` already implement `Copy + Eq + Hash`, so no
+/// synthetic hashable representation is needed.
+type PlanKey = (FaceId, bool, rustybuzz::Script, rustybuzz::Direction);
 
 /// The four style variants of a single font family.
 struct PrimaryFaces {
@@ -390,6 +446,22 @@ pub struct FontManager {
     /// primary face). Interior mutability so the renderer can read metrics
     /// through a shared `&FontManager` while still caching.
     fallback_metrics_cache: RefCell<HashMap<FaceId, Option<FallbackCellMetrics>>>,
+
+    /// Per-face cache of parsed `rustybuzz::Face` instances (Task #430).
+    /// Populated lazily by [`Self::build_cached_face`] (invoked from
+    /// [`Self::shape_cached`]) and cleared whenever the underlying font
+    /// bytes may have changed (`rebuild`) or for consistency on a
+    /// size/DPI change (`set_font_size`, `update_pixels_per_point`), even
+    /// though the bytes themselves are unaffected by those. `None` means the
+    /// face is not loaded or failed to parse as a rustybuzz `Face`.
+    face_cache: RefCell<HashMap<FaceId, Option<CachedFace>>>,
+
+    /// Per-`(face, ligatures, script, direction)` cache of compiled
+    /// `rustybuzz::ShapePlan`s (Task #430). Plan compilation is the
+    /// second-most expensive part of cold shaping after face parsing;
+    /// caching it avoids recompiling an identical plan on every shape call.
+    /// Cleared alongside `face_cache`.
+    plan_cache: RefCell<HashMap<PlanKey, Arc<rustybuzz::ShapePlan>>>,
 
     /// Authoritative cell width in integer pixels.
     cell_width: u32,
@@ -507,6 +579,8 @@ impl FontManager {
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
             fallback_metrics_cache: RefCell::new(HashMap::new()),
+            face_cache: RefCell::new(HashMap::new()),
+            plan_cache: RefCell::new(HashMap::new()),
             cell_width,
             cell_height,
             ascent,
@@ -639,19 +713,107 @@ impl FontManager {
         self.loaded_face(face_id).map(|f| f.index)
     }
 
-    /// Create a `rustybuzz::Face` for the given `FaceId`.
+    /// Shape `buffer` for `face_id` using a cached parsed `rustybuzz::Face`
+    /// and a cached compiled `rustybuzz::ShapePlan` (Task #430), instead of
+    /// re-parsing the font tables and recompiling the plan on every call.
     ///
-    /// The returned `Face` borrows the font data owned by this `FontManager`,
-    /// so the caller must not outlive `&self`.
+    /// The caller must have already called
+    /// `buffer.guess_segment_properties()` so `buffer.script()` /
+    /// `buffer.direction()` reflect the buffer's actual (guessed)
+    /// properties — the plan is built to match exactly, mirroring what
+    /// `rustybuzz::shape()` does internally (it also calls
+    /// `guess_segment_properties()` and builds its one-shot plan from the
+    /// resulting `direction`/`script`/`language`), except both the face
+    /// parse and the plan compilation are cached here instead of repeated.
     ///
-    /// Returns `None` if the face is not loaded or the data cannot be parsed.
+    /// Returns `None` if the face is not loaded or fails to parse as a
+    /// rustybuzz `Face` — callers must fall back to tofu glyphs in that
+    /// case, matching the previous `rustybuzz_face`-based behavior.
     #[must_use]
-    pub fn rustybuzz_face(&self, face_id: FaceId) -> Option<rustybuzz::Face<'_>> {
+    pub(crate) fn shape_cached(
+        &self,
+        face_id: FaceId,
+        ligatures: bool,
+        features: &[rustybuzz::Feature],
+        buffer: rustybuzz::UnicodeBuffer,
+    ) -> Option<rustybuzz::GlyphBuffer> {
+        if !self.face_cache.borrow().contains_key(&face_id) {
+            let built = self.build_cached_face(face_id);
+            self.face_cache.borrow_mut().insert(face_id, built);
+        }
+
+        let face_cache = self.face_cache.borrow();
+        let cached = face_cache.get(&face_id)?.as_ref()?;
+        let face = cached.borrow_dependent();
+
+        let script = buffer.script();
+        let direction = buffer.direction();
+        let plan_key: PlanKey = (face_id, ligatures, script, direction);
+
+        // Clone the cached `Arc` (if any) out from under the immutable borrow
+        // first, so the borrow is released before a miss needs `borrow_mut()`
+        // — holding the `Ref` across that call would panic at runtime.
+        let cached_plan = self.plan_cache.borrow().get(&plan_key).cloned();
+        let plan = cached_plan.unwrap_or_else(|| {
+            // We pass `Some(script)` where the internal `rustybuzz::shape()`
+            // passes the buffer's raw `Option<Script>` (which is `None` for a
+            // run whose every char is Common/Inherited/Unknown, e.g. pure ASCII
+            // punctuation). We cannot reach that raw `Option` through
+            // rustybuzz's public API — `UnicodeBuffer::script()` collapses
+            // `None` to `script::UNKNOWN` — and reimplementing the guesser to
+            // recover it would risk drifting from rustybuzz. This collapse is
+            // provably safe: `shape_with_plan` matches a plan to a buffer by
+            // comparing `buffer.script.unwrap_or(UNKNOWN)` against
+            // `plan.script.unwrap_or(UNKNOWN)` (see its `debug_assert_eq!`), so
+            // rustybuzz itself treats `None` and `Some(UNKNOWN)` as equivalent
+            // for plan selection, and no real font registers a `zzzz` (UNKNOWN)
+            // OpenType script tag, so the compiled plan is identical either
+            // way. The output-identity test shapes pure-Common-script runs
+            // (`->`, `!=`) against the old `shape()` path to guard this.
+            let plan = Arc::new(rustybuzz::ShapePlan::new(
+                face,
+                direction,
+                Some(script),
+                None,
+                features,
+            ));
+            self.plan_cache
+                .borrow_mut()
+                .insert(plan_key, Arc::clone(&plan));
+            plan
+        });
+
+        Some(rustybuzz::shape_with_plan(face, &plan, buffer))
+    }
+
+    /// Build (but do not cache) a [`CachedFace`] for `face_id`. Called from
+    /// [`Self::shape_cached`] on a face-cache miss.
+    fn build_cached_face(&self, face_id: FaceId) -> Option<CachedFace> {
         let loaded = self.loaded_face(face_id)?;
-        rustybuzz::Face::from_slice(
-            loaded.as_bytes(),
-            u32::value_from(loaded.index).unwrap_or(0),
-        )
+        let index = u32::value_from(loaded.index).unwrap_or(0);
+        let owner = loaded.arc_bytes();
+        CachedFace::try_new(owner, |bytes| {
+            rustybuzz::Face::from_slice(bytes, index).ok_or(())
+        })
+        .ok()
+    }
+
+    /// Number of faces currently cached in [`Self::face_cache`].
+    ///
+    /// Test-only: exposes cache population without leaking internals into
+    /// the production API.
+    #[cfg(test)]
+    pub(crate) fn face_cache_len(&self) -> usize {
+        self.face_cache.borrow().len()
+    }
+
+    /// Number of shape plans currently cached in [`Self::plan_cache`].
+    ///
+    /// Test-only: exposes cache population without leaking internals into
+    /// the production API.
+    #[cfg(test)]
+    pub(crate) fn plan_cache_len(&self) -> usize {
+        self.plan_cache.borrow().len()
     }
 
     /// Create a `swash::FontRef` for the given `FaceId`.
@@ -801,6 +963,13 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
+        // The font family may have changed, so a cached rustybuzz `Face`
+        // (which borrows a specific `FaceId`'s byte buffer) or `ShapePlan`
+        // (compiled against a specific `Face`) may now reference the wrong
+        // font entirely — this clear is required for correctness, not just
+        // consistency (Task #430).
+        self.face_cache.borrow_mut().clear();
+        self.plan_cache.borrow_mut().clear();
 
         if effective_family_changed {
             Ok(RebuildResult::FamilyChanged)
@@ -841,6 +1010,11 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
+        // The underlying font bytes are unchanged by a size-only change, so
+        // this is not strictly required for correctness, but it is cleared
+        // for consistency with the other per-face caches above (Task #430).
+        self.face_cache.borrow_mut().clear();
+        self.plan_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -883,6 +1057,11 @@ impl FontManager {
         self.system_fallback_cache.clear();
         self.system_faces.clear();
         self.fallback_metrics_cache.borrow_mut().clear();
+        // The underlying font bytes are unchanged by a DPI-only change, so
+        // this is not strictly required for correctness, but it is cleared
+        // for consistency with the other per-face caches above (Task #430).
+        self.face_cache.borrow_mut().clear();
+        self.plan_cache.borrow_mut().clear();
 
         Ok(true)
     }
@@ -2318,15 +2497,184 @@ mod tests {
         assert!(!style.italic);
     }
 
-    // --- Test 14: rustybuzz Face creation ---
+    // --- Test 14: cached rustybuzz Face construction (Task #430) ---
 
     #[test]
-    fn rustybuzz_face_creation() {
+    fn build_cached_face_creation() {
         let fm = default_manager();
-        let face = fm.rustybuzz_face(FaceId::PrimaryRegular);
+        let cached = fm.build_cached_face(FaceId::PrimaryRegular);
         assert!(
-            face.is_some(),
-            "Should be able to create a rustybuzz Face from primary regular"
+            cached.is_some(),
+            "Should be able to build a cached rustybuzz Face from primary regular"
+        );
+    }
+
+    // --- Task #430: shape_cached reuses the Face + ShapePlan caches ---
+
+    #[test]
+    fn shape_cached_reuses_face_and_plan_across_calls() {
+        let fm = default_manager();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("AB");
+        buffer.guess_segment_properties();
+        let first = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        assert!(first.is_some(), "first shape_cached call should succeed");
+        assert_eq!(
+            fm.face_cache_len(),
+            1,
+            "face cache should have one entry after the first call"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            1,
+            "plan cache should have one entry after the first call"
+        );
+
+        let mut buffer2 = rustybuzz::UnicodeBuffer::new();
+        buffer2.push_str("CD");
+        buffer2.guess_segment_properties();
+        let second = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer2);
+        assert!(second.is_some(), "second shape_cached call should succeed");
+        assert_eq!(
+            fm.face_cache_len(),
+            1,
+            "face cache must not grow on a cache hit for the same face"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            1,
+            "plan cache must not grow on a cache hit for the same \
+             (face, ligatures, script, direction) combination"
+        );
+    }
+
+    #[test]
+    fn shape_cached_misses_on_face_change() {
+        let fm = default_manager();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("A");
+        buffer.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+
+        let mut buffer2 = rustybuzz::UnicodeBuffer::new();
+        buffer2.push_str("B");
+        buffer2.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryBold, false, &features, buffer2);
+
+        assert_eq!(
+            fm.face_cache_len(),
+            2,
+            "a different FaceId must populate a separate face-cache entry"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            2,
+            "a different FaceId must populate a separate plan-cache entry"
+        );
+    }
+
+    #[test]
+    fn rebuild_clears_face_and_plan_caches() {
+        let config = Config::default();
+        let mut fm = FontManager::new(&config, 1.0).unwrap();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("A");
+        buffer.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        assert_eq!(fm.face_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let mut new_config = config;
+        new_config.font.size = 24.0;
+        let _ = fm.rebuild(&new_config, 1.0).unwrap();
+
+        assert_eq!(
+            fm.face_cache_len(),
+            0,
+            "face cache must be cleared by rebuild()"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            0,
+            "plan cache must be cleared by rebuild()"
+        );
+    }
+
+    #[test]
+    fn set_font_size_clears_face_and_plan_caches() {
+        let mut fm = default_manager();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("A");
+        buffer.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        assert_eq!(fm.face_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let _ = fm.set_font_size(fm.font_size_pt() + 4.0).unwrap();
+
+        assert_eq!(
+            fm.face_cache_len(),
+            0,
+            "face cache must be cleared by set_font_size()"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            0,
+            "plan cache must be cleared by set_font_size()"
+        );
+    }
+
+    #[test]
+    fn update_ppp_changed_clears_face_and_plan_caches() {
+        let mut fm = default_manager();
+        let features = [rustybuzz::Feature::new(
+            rustybuzz::ttf_parser::Tag::from_bytes(b"kern"),
+            1,
+            ..,
+        )];
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("A");
+        buffer.guess_segment_properties();
+        let _ = fm.shape_cached(FaceId::PrimaryRegular, false, &features, buffer);
+        assert_eq!(fm.face_cache_len(), 1);
+        assert_eq!(fm.plan_cache_len(), 1);
+
+        let _ = fm.update_pixels_per_point(2.0).unwrap();
+
+        assert_eq!(
+            fm.face_cache_len(),
+            0,
+            "face cache must be cleared by update_pixels_per_point()"
+        );
+        assert_eq!(
+            fm.plan_cache_len(),
+            0,
+            "plan cache must be cleared by update_pixels_per_point()"
         );
     }
 
