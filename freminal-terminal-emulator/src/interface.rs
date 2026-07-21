@@ -853,15 +853,11 @@ impl TerminalEmulator {
     ) -> FlattenResult {
         if any_dirty {
             // At least one visible row is dirty — re-flatten via the cache.
-            let (vis_chars, vis_tags, vis_row_offsets, vis_url_indices) = self
+            let (vc, vt, vr, vu) = self
                 .internal
                 .handler
                 .buffer_mut()
-                .visible_as_tchars_and_tags_extended(scroll_offset, extra_rows);
-            let vc = Arc::new(vis_chars);
-            let vt = Arc::new(vis_tags);
-            let vr = Arc::new(vis_row_offsets);
-            let vu = Arc::new(vis_url_indices);
+                .visible_as_tchars_and_tags_extended_arc(scroll_offset, extra_rows);
 
             // `content_changed` is true when the flat content actually differs
             // from the previous snapshot (guards against spurious redraws from
@@ -893,15 +889,11 @@ impl TerminalEmulator {
         } else {
             // First-ever snapshot and nothing is marked dirty yet (e.g. the
             // buffer was just created).  Flatten once to populate the cache.
-            let (vis_chars, vis_tags, vis_row_offsets, vis_url_indices) = self
+            let (vc, vt, vr, vu) = self
                 .internal
                 .handler
                 .buffer_mut()
-                .visible_as_tchars_and_tags_extended(scroll_offset, extra_rows);
-            let vc = Arc::new(vis_chars);
-            let vt = Arc::new(vis_tags);
-            let vr = Arc::new(vis_row_offsets);
-            let vu = Arc::new(vis_url_indices);
+                .visible_as_tchars_and_tags_extended_arc(scroll_offset, extra_rows);
             self.previous_visible_snap = Some((
                 Arc::clone(&vc),
                 Arc::clone(&vt),

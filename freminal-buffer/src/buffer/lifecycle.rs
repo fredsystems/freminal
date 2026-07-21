@@ -49,6 +49,7 @@ impl Buffer {
         Self {
             rows,
             row_cache,
+            merge_cache: None,
             width,
             height,
             cursor: CursorState::default(),
@@ -97,6 +98,11 @@ impl Buffer {
     pub fn full_reset(&mut self) {
         self.rows = vec![Row::new(self.width)];
         self.row_cache = vec![None];
+        // Task 121 Part C: `row_cache` above was just replaced wholesale
+        // with fresh, unrelated content — a stale `merge_cache` (even one
+        // whose `fp` coincidentally still matches, e.g. an unchanged
+        // width/height reset) must not be reused against it.
+        self.merge_cache = None;
         // Task 119: discard every compressed block and reset the per-row
         // map/id counter in lockstep with the row reset above — a full
         // reset wipes all scrollback, so no compressed content survives it.

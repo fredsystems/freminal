@@ -24,7 +24,8 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
-pub use flatten::{AutoUrlRange, RowCacheEntry};
+pub(in crate::buffer) use flatten::MergeCache;
+pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
 
 #[cfg(test)]
@@ -123,6 +124,76 @@ pub struct Buffer {
     /// `Some(entry)` = clean cached flat representation for that row, see
     /// [`RowCacheEntry`].
     pub(in crate::buffer) row_cache: Vec<Option<RowCacheEntry>>,
+
+    /// Task 121 Part C: incremental cache of the last **merge** (Step 2 of
+    /// [`Buffer::visible_as_tchars_and_tags_extended`]) computed over the
+    /// visible window. `None` means no merge has been cached yet (or it was
+    /// explicitly invalidated — see below); `Some(cache)` lets the next
+    /// flatten reuse `cache`'s prefix up to the first row that actually
+    /// needs re-merging, instead of re-merging every row in the window on
+    /// every single frame.
+    ///
+    /// Only the **visible-window** flatten path
+    /// (`visible_as_tchars_and_tags[_extended]`) reads or writes this field.
+    /// [`Buffer::scrollback_as_tchars_and_tags`] (the cold, full-scrollback
+    /// path) always does a full merge and never touches `merge_cache` — it
+    /// covers a completely different, non-overlapping row range each call,
+    /// so an incremental cache would buy nothing there.
+    ///
+    /// ## Invalidation
+    ///
+    /// Three complementary mechanisms together cover every way `row_cache`'s
+    /// *content* can change out from under a cached merge:
+    ///
+    /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): visible
+    ///    window bounds (`visible_start`/`visible_end`) plus
+    ///    `auto_detect_urls`. Any resize/scroll of the window itself, or a
+    ///    detection toggle, changes `fp` and forces a full merge.
+    /// 2. **`first_rebuilt_row`** (recomputed on every call): any row in the
+    ///    window that is `dirty` or has a `None` cache entry. Catches
+    ///    ordinary per-row edits.
+    /// 3. **Explicit `self.merge_cache = None`**, at sites where (1) and (2)
+    ///    cannot observe that cached content is stale:
+    ///    - **Wholesale `row_cache` replacement** — the new content's
+    ///      *identity* differs from what a stale, fp-matching `MergeCache`
+    ///      was built from, without marking every affected row dirty or
+    ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
+    ///      [`Buffer::enter_alternate`], and [`Buffer::leave_alternate`].
+    ///    - **Confined in-place row rotation**, in `scroll.rs`:
+    ///      `scroll_slice_up`, `scroll_slice_down`, and `scroll_up`. These
+    ///      relocate already-clean, non-`None` cache entries between row
+    ///      indices (a moved row keeps its cached representation, only its
+    ///      index changes) without marking the moved rows dirty, and
+    ///      without changing `self.rows.len()` (a shift or a
+    ///      `remove`+`push` nets to the same length) — so *neither* `fp`
+    ///      *nor* `first_rebuilt_row` observes that row content moved to a
+    ///      different index. Each of these three functions contains its own
+    ///      `self.merge_cache = None;` at the point where the rotation
+    ///      happens; that line is load-bearing, **not** a redundant
+    ///      leftover safe to delete — removing it would let a cached
+    ///      incremental merge serve stale, pre-rotation content at the
+    ///      rotated indices. See [`flatten::MergeCache`]'s doc comment for
+    ///      the debug-only oracle cross-check that backstops this case, and
+    ///      `incremental_merge_tests` in `flatten.rs` for the regression
+    ///      tests exercising it directly.
+    ///
+    /// The `_columns` scroll variants (`scroll_slice_up_columns`/
+    /// `_down_columns`, used when DECLRMM confines a scroll horizontally)
+    /// do **not** need an explicit `merge_cache = None`: unlike the
+    /// row-granular rotations above, they call `row.mark_dirty()` and set
+    /// `row_cache[i] = None` on every row they touch instead of relocating
+    /// an existing cache entry to a different index, so mechanism (2)
+    /// already catches them.
+    ///
+    /// Deliberately NOT invalidated here (relying on `fp` instead): the
+    /// row-count-changing sites in `scroll.rs`
+    /// (`enforce_scrollback_limit`'s and `erase_scrollback`'s front
+    /// `drain`s) and the row-append sites in `lines.rs`. Every one of
+    /// those changes `self.rows.len()` without a compensating removal
+    /// elsewhere, which changes the *absolute* `visible_start`/`visible_end`
+    /// bounds `visible_window_bounds` returns, so `fp` mismatches and a
+    /// full merge is forced.
+    pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
     /// Width and height of the terminal grid.
     pub(in crate::buffer) width: usize,

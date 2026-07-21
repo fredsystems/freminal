@@ -215,6 +215,12 @@ impl Buffer {
         let mut tmp = Self {
             rows: saved.rows,
             row_cache: saved.row_cache,
+            // This is a throwaway temporary `Buffer` reconstructed fresh
+            // from `SavedPrimaryState` on every call (`SavedPrimaryState`
+            // has no `merge_cache` field of its own to restore), so there
+            // is no stale merge to invalidate — it starts `None` like any
+            // other freshly constructed `Buffer`.
+            merge_cache: None,
             width: old_width,
             height: old_height,
             cursor: saved.cursor,
@@ -614,6 +620,12 @@ impl Buffer {
         // All rows are freshly constructed (dirty=true by construction), so
         // the entire cache is invalid.  Reset it to match the new row count.
         self.row_cache = vec![None; self.rows.len()];
+        // Task 121 Part C: `row_cache` was just replaced wholesale with
+        // fresh entries for an entirely re-wrapped row layout — a stale
+        // `merge_cache` (which could coincidentally still have a matching
+        // `fp` if the window's row count happens to land on the same
+        // bounds post-reflow) must not be reused against it.
+        self.merge_cache = None;
         // Every new row is freshly built `Live` content (never compressed);
         // the `ensure_decompressed` call at the top of this function already
         // decompressed everything the old `self.rows` referenced, so
@@ -1168,6 +1180,11 @@ impl Buffer {
         self.rows = vec![Row::new(self.width); self.height];
         self.row_cache = vec![None; self.height];
         self.row_block_map = vec![None; self.height];
+        // Task 121 Part C: `row_cache` was just replaced wholesale with a
+        // fresh, blank alternate screen — the primary screen's stale
+        // `merge_cache` must not be reused against it (a matching `fp` here
+        // would be entirely coincidental).
+        self.merge_cache = None;
 
         // Alternate screen has no images.
         self.image_store.clear();
@@ -1205,6 +1222,10 @@ impl Buffer {
             let restored_offset = saved.scroll_offset;
             self.rows = saved.rows;
             self.row_cache = saved.row_cache;
+            // Task 121 Part C: `row_cache` was just replaced wholesale with
+            // the restored primary screen's cache — the alternate screen's
+            // stale `merge_cache` must not be reused against it.
+            self.merge_cache = None;
             self.cursor = saved.cursor;
             self.scroll_region_top = saved.scroll_region_top;
             self.scroll_region_bottom = saved.scroll_region_bottom;
