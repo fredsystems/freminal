@@ -186,34 +186,39 @@ struct LoadedFace {
     cache_key: swash::CacheKey,
 }
 
-/// Font data source — either compiled-in or heap-allocated.
+/// Font data source.
 ///
-/// `Owned` holds an `Arc<[u8]>` rather than a bare `Vec<u8>` so the bytes can
-/// be cheaply shared with a cached, self-referential `rustybuzz::Face`
-/// ([`CachedFace`]) without an extra copy (Task #430).
+/// The bytes are always held behind a single `Arc<[u8]>` — bundled
+/// (`&'static`) fonts are copied into an `Arc` exactly once at load time
+/// (`from_static`), heap-loaded fonts move their `Vec<u8>` into the `Arc`
+/// (`from_owned`). Holding a single owner type means [`LoadedFace::arc_bytes`]
+/// is *always* a cheap `Arc::clone` (refcount bump), so constructing a cached,
+/// self-referential `rustybuzz::Face` ([`CachedFace`]) on a cache miss never
+/// copies the font bytes — not even for bundled fonts (Task #430).
 #[derive(Debug)]
-enum FontData {
-    Static(&'static [u8]),
-    Owned(Arc<[u8]>),
-}
+struct FontData(Arc<[u8]>);
 
 impl FontData {
     fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Static(b) => b,
-            Self::Owned(v) => v,
-        }
+        &self.0
     }
 }
 
 impl LoadedFace {
     /// Load from static (bundled) font data.
+    ///
+    /// The `&'static` bytes are copied into an `Arc<[u8]>` exactly once here,
+    /// at load time, so that later face-cache misses reuse the same allocation
+    /// via a cheap `Arc::clone` rather than re-copying the (multi-MB) bundled
+    /// font on every miss (Task #430).
     fn from_static(data: &'static [u8]) -> Option<Self> {
-        let font_ref = swash::FontRef::from_index(data, 0)?;
+        let data: Arc<[u8]> = Arc::from(data);
+        let font_ref = swash::FontRef::from_index(&data, 0)?;
+        let key = font_ref.key;
         Some(Self {
-            data: FontData::Static(data),
+            data: FontData(data),
             index: 0,
-            cache_key: font_ref.key,
+            cache_key: key,
         })
     }
 
@@ -223,7 +228,7 @@ impl LoadedFace {
         let font_ref = swash::FontRef::from_index(&data, index)?;
         let key = font_ref.key;
         Some(Self {
-            data: FontData::Owned(data),
+            data: FontData(data),
             index,
             cache_key: key,
         })
@@ -247,16 +252,11 @@ impl LoadedFace {
     /// owner, suitable for constructing a cached self-referential
     /// `rustybuzz::Face` ([`CachedFace`]) (Task #430).
     ///
-    /// For [`FontData::Owned`] this is a cheap `Arc::clone`. For
-    /// [`FontData::Static`] it allocates a fresh `Arc<[u8]>` copy of the
-    /// `&'static` bytes — acceptable because this only runs on a face-cache
-    /// miss (once per [`FaceId`] per font load), never per frame or per
-    /// glyph.
+    /// Always a cheap `Arc::clone` (refcount bump) — the one-time copy of any
+    /// `&'static` bundled bytes into the `Arc` happened at load time in
+    /// [`Self::from_static`], so no font-byte copy occurs here on a cache miss.
     fn arc_bytes(&self) -> Arc<[u8]> {
-        match &self.data {
-            FontData::Static(bytes) => Arc::from(*bytes),
-            FontData::Owned(arc) => Arc::clone(arc),
-        }
+        Arc::clone(&self.data.0)
     }
 
     /// Check if this face's charmap contains the given codepoint.
@@ -755,6 +755,21 @@ impl FontManager {
         // — holding the `Ref` across that call would panic at runtime.
         let cached_plan = self.plan_cache.borrow().get(&plan_key).cloned();
         let plan = cached_plan.unwrap_or_else(|| {
+            // We pass `Some(script)` where the internal `rustybuzz::shape()`
+            // passes the buffer's raw `Option<Script>` (which is `None` for a
+            // run whose every char is Common/Inherited/Unknown, e.g. pure ASCII
+            // punctuation). We cannot reach that raw `Option` through
+            // rustybuzz's public API — `UnicodeBuffer::script()` collapses
+            // `None` to `script::UNKNOWN` — and reimplementing the guesser to
+            // recover it would risk drifting from rustybuzz. This collapse is
+            // provably safe: `shape_with_plan` matches a plan to a buffer by
+            // comparing `buffer.script.unwrap_or(UNKNOWN)` against
+            // `plan.script.unwrap_or(UNKNOWN)` (see its `debug_assert_eq!`), so
+            // rustybuzz itself treats `None` and `Some(UNKNOWN)` as equivalent
+            // for plan selection, and no real font registers a `zzzz` (UNKNOWN)
+            // OpenType script tag, so the compiled plan is identical either
+            // way. The output-identity test shapes pure-Common-script runs
+            // (`->`, `!=`) against the old `shape()` path to guard this.
             let plan = Arc::new(rustybuzz::ShapePlan::new(
                 face,
                 direction,
