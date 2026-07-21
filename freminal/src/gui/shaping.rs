@@ -1466,6 +1466,34 @@ mod tests {
 
     // --- Task #430: shape_with_plan output-identity vs the old shape() path ---
 
+    /// One shaped glyph's full identity: glyph id, source cluster, and the
+    /// positional data (advances + offsets). Positions are included because
+    /// `kern` is always force-enabled in the feature list, so a plan-caching
+    /// regression could change advances/offsets without changing glyph ids —
+    /// comparing ids alone would miss it.
+    type GlyphIdentity = (u16, u32, i32, i32, i32, i32);
+
+    /// Collect the full per-glyph identity (id, cluster, x/y advance, x/y
+    /// offset) from a shaped `GlyphBuffer`.
+    fn glyph_identities(output: &rustybuzz::GlyphBuffer) -> Vec<GlyphIdentity> {
+        let infos = output.glyph_infos();
+        let positions = output.glyph_positions();
+        infos
+            .iter()
+            .zip(positions.iter())
+            .map(|(info, pos)| {
+                (
+                    u16::value_from(info.glyph_id).unwrap_or(0),
+                    info.cluster,
+                    pos.x_advance,
+                    pos.y_advance,
+                    pos.x_offset,
+                    pos.y_offset,
+                )
+            })
+            .collect()
+    }
+
     /// Shape `text` as a single same-format run via the OLD `rustybuzz::shape()`
     /// entry point — bypassing `FontManager`'s face/plan cache entirely, by
     /// parsing the face directly from the raw bytes — for comparison against
@@ -1475,7 +1503,7 @@ mod tests {
         face_id: FaceId,
         fm: &FontManager,
         ligatures: bool,
-    ) -> Vec<(u16, u32)> {
+    ) -> Vec<GlyphIdentity> {
         let bytes = fm.face_data(face_id).expect("face must be loaded");
         let index: u32 = fm
             .face_index(face_id)
@@ -1487,22 +1515,18 @@ mod tests {
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
         let output = rustybuzz::shape(&face, &features, buffer);
-        output
-            .glyph_infos()
-            .iter()
-            .map(|info| (u16::value_from(info.glyph_id).unwrap_or(0), info.cluster))
-            .collect()
+        glyph_identities(&output)
     }
 
     /// Shape `text` through the NEW cached `shape_cached` path (the same
     /// entry point `shape_single_run` uses in production), returning the
-    /// same `(glyph_id, cluster)` sequence shape for comparison.
+    /// same per-glyph identity sequence for comparison.
     fn shape_via_new_api(
         text: &str,
         face_id: FaceId,
         fm: &FontManager,
         ligatures: bool,
-    ) -> Vec<(u16, u32)> {
+    ) -> Vec<GlyphIdentity> {
         let features = shaping_features(ligatures);
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
@@ -1510,20 +1534,19 @@ mod tests {
         let output = fm
             .shape_cached(face_id, ligatures, &features, buffer)
             .expect("shape_cached must succeed for a loaded face");
-        output
-            .glyph_infos()
-            .iter()
-            .map(|info| (u16::value_from(info.glyph_id).unwrap_or(0), info.cluster))
-            .collect()
+        glyph_identities(&output)
     }
 
     /// Regression guard for the core claim of Task #430: caching the parsed
     /// `Face` and the compiled `ShapePlan` and shaping via
-    /// `shape_with_plan` must produce IDENTICAL output to the previous
+    /// `shape_with_plan` must produce IDENTICAL output — glyph ids, source
+    /// clusters, AND positional data (advances + offsets) — to the previous
     /// `rustybuzz::shape()` call for every kind of content the terminal
-    /// renderer shapes — plain Latin text, a ligating sequence, a CJK
-    /// (wide) character, and an emoji (routed to a different face
-    /// entirely). If this test ever fails, the perf change altered
+    /// renderer shapes: plain Latin text, ligating/contextual sequences, a
+    /// CJK (wide) character, and an emoji (routed to a different face
+    /// entirely). Positions are asserted because `kern` is always enabled,
+    /// so a plan-caching regression could shift advances without touching
+    /// glyph ids. If this test ever fails, the perf change altered
     /// rendering, which is the one thing it must never do.
     #[test]
     fn shape_with_plan_matches_old_shape_for_mixed_content() {
