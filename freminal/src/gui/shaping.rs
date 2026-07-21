@@ -1463,4 +1463,98 @@ mod tests {
         );
         assert!(glyphs[0].x_px.abs() < f32::EPSILON);
     }
+
+    // --- Task #430: shape_with_plan output-identity vs the old shape() path ---
+
+    /// Shape `text` as a single same-format run via the OLD `rustybuzz::shape()`
+    /// entry point — bypassing `FontManager`'s face/plan cache entirely, by
+    /// parsing the face directly from the raw bytes — for comparison against
+    /// the new cached `shape_cached` path.
+    fn shape_via_old_api(
+        text: &str,
+        face_id: FaceId,
+        fm: &FontManager,
+        ligatures: bool,
+    ) -> Vec<(u16, u32)> {
+        let bytes = fm.face_data(face_id).expect("face must be loaded");
+        let index: u32 = fm
+            .face_index(face_id)
+            .and_then(|i| u32::value_from(i).ok())
+            .expect("face index must be loaded and fit in u32");
+        let face = rustybuzz::Face::from_slice(bytes, index).expect("face must parse");
+
+        let features = shaping_features(ligatures);
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(&face, &features, buffer);
+        output
+            .glyph_infos()
+            .iter()
+            .map(|info| (u16::value_from(info.glyph_id).unwrap_or(0), info.cluster))
+            .collect()
+    }
+
+    /// Shape `text` through the NEW cached `shape_cached` path (the same
+    /// entry point `shape_single_run` uses in production), returning the
+    /// same `(glyph_id, cluster)` sequence shape for comparison.
+    fn shape_via_new_api(
+        text: &str,
+        face_id: FaceId,
+        fm: &FontManager,
+        ligatures: bool,
+    ) -> Vec<(u16, u32)> {
+        let features = shaping_features(ligatures);
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let output = fm
+            .shape_cached(face_id, ligatures, &features, buffer)
+            .expect("shape_cached must succeed for a loaded face");
+        output
+            .glyph_infos()
+            .iter()
+            .map(|info| (u16::value_from(info.glyph_id).unwrap_or(0), info.cluster))
+            .collect()
+    }
+
+    /// Regression guard for the core claim of Task #430: caching the parsed
+    /// `Face` and the compiled `ShapePlan` and shaping via
+    /// `shape_with_plan` must produce IDENTICAL output to the previous
+    /// `rustybuzz::shape()` call for every kind of content the terminal
+    /// renderer shapes — plain Latin text, a ligating sequence, a CJK
+    /// (wide) character, and an emoji (routed to a different face
+    /// entirely). If this test ever fails, the perf change altered
+    /// rendering, which is the one thing it must never do.
+    #[test]
+    fn shape_with_plan_matches_old_shape_for_mixed_content() {
+        let fm = test_font_manager();
+
+        let samples: &[(&str, FaceId, bool)] = &[
+            ("Hello, world!", FaceId::PrimaryRegular, false),
+            ("->", FaceId::PrimaryRegular, true),
+            ("!=", FaceId::PrimaryRegular, true),
+            ("中", FaceId::PrimaryRegular, false),
+        ];
+
+        for &(text, face_id, ligatures) in samples {
+            let old = shape_via_old_api(text, face_id, &fm, ligatures);
+            let new = shape_via_new_api(text, face_id, &fm, ligatures);
+            assert_eq!(
+                old, new,
+                "`{text}` (ligatures={ligatures}): shape_with_plan output \
+                 must match the old rustybuzz::shape() output exactly"
+            );
+        }
+
+        // Emoji routes to a different face (FaceId::Emoji) entirely — the
+        // bundled Noto Color Emoji floor (Task #402) guarantees one is
+        // always loaded, so this is deterministic across hosts.
+        let old_emoji = shape_via_old_api("😀", FaceId::Emoji, &fm, false);
+        let new_emoji = shape_via_new_api("😀", FaceId::Emoji, &fm, false);
+        assert_eq!(
+            old_emoji, new_emoji,
+            "emoji: shape_with_plan output must match the old rustybuzz::shape() \
+             output exactly"
+        );
+    }
 }
