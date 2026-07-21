@@ -39,6 +39,18 @@ pub struct UrlMatch {
     pub byte_start: usize,
     /// Exclusive end byte offset into the row's byte buffer.
     pub byte_end: usize,
+    /// `true` when the **raw regex match**, before trailing-punctuation
+    /// trimming, reached the very end of `bytes`.
+    ///
+    /// This is the precise signal that a match *might* be a DECAWM-wrapped
+    /// URL continuing onto the next physical row: wrapping only ever occurs
+    /// at the row's exact last column, so a URL that got cut off by wrapping
+    /// always has its raw match extend to the row's last byte — regardless
+    /// of whether `trim_trailing` then stripped a few trailing punctuation
+    /// bytes from the reported `byte_end`. A URL that ends naturally mid-row
+    /// (followed by whitespace, a control byte, or simply the end of typed
+    /// text) does not reach the buffer end and this is `false`.
+    pub touches_buffer_end: bool,
 }
 
 /// Regex matching plain URLs for any of the supported schemes.
@@ -94,11 +106,13 @@ pub fn find_urls_bytes(bytes: &[u8]) -> Vec<UrlMatch> {
     let mut out = Vec::new();
     for m in URL_REGEX.find_iter(bytes) {
         let start = m.start();
-        let end = trim_trailing(bytes, start, m.end());
+        let raw_end = m.end();
+        let end = trim_trailing(bytes, start, raw_end);
         if end > start {
             out.push(UrlMatch {
                 byte_start: start,
                 byte_end: end,
+                touches_buffer_end: raw_end == bytes.len(),
             });
         }
     }
@@ -274,5 +288,45 @@ mod tests {
         // `https://` alone has nothing after the slashes, regex requires at
         // least one non-whitespace byte → no match.
         assert!(detect("https:// is not a url").is_empty());
+    }
+
+    #[test]
+    fn touches_buffer_end_true_when_match_reaches_end_of_bytes() {
+        let s = "https://example.com";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert!(
+            ranges[0].touches_buffer_end,
+            "the match is the last thing in the buffer, so it must touch the end"
+        );
+    }
+
+    #[test]
+    fn touches_buffer_end_false_when_followed_by_more_text() {
+        let s = "https://example.com and more";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert!(
+            !ranges[0].touches_buffer_end,
+            "the match ends before trailing prose, so it must not touch the end"
+        );
+    }
+
+    #[test]
+    fn touches_buffer_end_true_even_when_trailing_punctuation_is_trimmed() {
+        // The raw regex match ("https://example.com.") reaches the buffer
+        // end even though the reported (trimmed) range does not include the
+        // trailing '.'. `touches_buffer_end` must reflect the *raw* match.
+        let s = "see https://example.com.";
+        let ranges = find_urls_bytes(s.as_bytes());
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            &s[ranges[0].byte_start..ranges[0].byte_end],
+            "https://example.com"
+        );
+        assert!(
+            ranges[0].touches_buffer_end,
+            "trailing-punctuation trimming must not affect touches_buffer_end"
+        );
     }
 }

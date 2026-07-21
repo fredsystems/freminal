@@ -38,7 +38,7 @@ use freminal_common::buffer_states::{
     buffer_type::BufferType, format_tag::FormatTag, tchar::TChar, url::Url,
 };
 
-use crate::row::Row;
+use crate::row::{Row, RowJoin};
 use crate::url_detect;
 
 use super::tags_same_format;
@@ -58,6 +58,13 @@ pub struct AutoUrlRange {
     pub char_end: usize,
     /// The detected URL, wrapped for cheap splicing into multiple tags.
     pub url: Arc<Url>,
+    /// Mirrors [`url_detect::UrlMatch::touches_buffer_end`]: `true` when the
+    /// raw (pre-trim) match reached the end of the row's byte buffer, i.e.
+    /// this range might be a DECAWM-wrapped URL continuing onto the next
+    /// row. Used as the cheap, precise signal for whether a soft-wrapped
+    /// group of rows needs the group-level URL redetection in
+    /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`].
+    pub touches_row_end: bool,
 }
 
 /// Per-row flatten cache entry.
@@ -258,29 +265,18 @@ impl Buffer {
         cache: &mut [Option<RowCacheEntry>],
         auto_detect: bool,
     ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
-        // ── Step 1: ensure every row has an up-to-date cache entry ──────────
-        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-            // Invalidate cache entries that were built with a different
-            // `auto_detect` mode than the one currently in effect. When
-            // auto_detect is true we need `bytes` populated; when false the
-            // cache entry may still have them but that is harmless — we keep
-            // the entry in that case.
-            let needs_rebuild = row.dirty
-                || entry.is_none()
-                || (auto_detect
-                    && entry
-                        .as_ref()
-                        .is_some_and(|e| e.bytes.is_empty() && !e.chars.is_empty()));
-            if needs_rebuild {
-                *entry = Some(Self::flatten_row(row, auto_detect));
-                row.mark_clean();
-            }
-        }
+        let row_count = rows.len();
+
+        // ── Step 1 (+ 1.5): ensure every row has an up-to-date cache entry,
+        // and fix up auto-detected URLs that wrap across rows. See
+        // `refresh_row_cache_and_refine_wrapped_urls`'s doc comment.
+        let refined_auto_urls =
+            Self::refresh_row_cache_and_refine_wrapped_urls(rows, cache, auto_detect);
+        let mut refined_cursor = 0usize;
 
         // ── Step 2: merge per-row results into the global flat vectors ───────
         // Per-row tags have offsets relative to the start of that row's chars.
         // We accumulate a running `global_offset` and re-base each tag.
-        let row_count = rows.len();
         let mut chars: Vec<TChar> = Vec::new();
         let mut tags: Vec<FormatTag> = Vec::new();
         let mut row_offsets: Vec<usize> = Vec::with_capacity(row_count);
@@ -298,8 +294,21 @@ impl Buffer {
                 // Rebase per-row tags into the global index space, then splice
                 // any auto-detected URL ranges on top. Splicing is done in
                 // row-local character space first (cheap) and the result is
-                // then rebased.
-                let spliced = splice_auto_urls(&row_entry.tags, &row_entry.auto_urls);
+                // then rebased. Prefer the Step 1.5 group-corrected ranges
+                // (whole-URL text, wrap-boundary-safe) when present — `refined_auto_urls`
+                // is sorted by `row_idx`, so a single forward cursor finds the
+                // match (if any) in amortised O(1).
+                while refined_auto_urls
+                    .get(refined_cursor)
+                    .is_some_and(|(idx, _)| *idx < row_idx)
+                {
+                    refined_cursor += 1;
+                }
+                let row_auto_urls = match refined_auto_urls.get(refined_cursor) {
+                    Some((idx, ranges)) if *idx == row_idx => ranges.as_slice(),
+                    _ => &row_entry.auto_urls,
+                };
+                let spliced = splice_auto_urls(&row_entry.tags, row_auto_urls);
 
                 // Append this row's characters, adjusting tag offsets.
                 for row_tag in &spliced {
@@ -371,6 +380,104 @@ impl Buffer {
 
         let url_tag_indices = Self::collect_url_tag_indices(&tags);
         (chars, tags, row_offsets, url_tag_indices)
+    }
+
+    /// Step 1 (+ 1.5) of [`Self::rows_as_tchars_and_tags_cached`]: ensure
+    /// every row has an up-to-date [`RowCacheEntry`], and fix up
+    /// auto-detected URLs that wrap across rows, in one pass over `rows`.
+    ///
+    /// [`Self::flatten_row`] detects URLs using only that row's own bytes, so
+    /// a URL that DECAWM soft-wraps across two or more physical rows is seen
+    /// as several independent, truncated matches. This pass finds contiguous
+    /// runs of rows joined by `RowJoin::ContinueLogicalLine` (soft-wrap
+    /// continuations of one logical line) and, only when the run actually
+    /// contains URL-looking content, re-runs URL detection on the rows'
+    /// concatenated bytes via [`redetect_urls_for_group`] so wrap boundaries
+    /// stop being treated as the end of the URL (both for truncation and for
+    /// the trailing sentence-punctuation heuristic in
+    /// `url_detect::trim_trailing`, which otherwise misfires when a wrap
+    /// boundary lands right before stripped punctuation).
+    ///
+    /// The grouping scan is fused into the same loop that rebuilds dirty row
+    /// caches — rather than a second full pass over `rows` — so the common
+    /// case (nothing wraps, or a wrap has no URL content) costs only a few
+    /// extra cheap comparisons per row instead of a whole extra traversal.
+    ///
+    /// Returns a **sparse** list of `(row_idx, ranges)` pairs, sorted by
+    /// ascending `row_idx`, covering only rows whose `auto_urls` were
+    /// replaced by a group-level redetection. A row not present means "no
+    /// change; use the row's own cached `auto_urls`". It stays empty (no heap
+    /// allocation) whenever no row needed correction — the overwhelmingly
+    /// common case.
+    fn refresh_row_cache_and_refine_wrapped_urls(
+        rows: &mut [Row],
+        cache: &mut [Option<RowCacheEntry>],
+        auto_detect: bool,
+    ) -> Vec<(usize, Vec<AutoUrlRange>)> {
+        let row_count = rows.len();
+        let mut refined_auto_urls: Vec<(usize, Vec<AutoUrlRange>)> = Vec::new();
+        let mut group_start = 0usize;
+        let mut group_has_url_signal = false;
+
+        for row_idx in 0..row_count {
+            // Invalidate cache entries that were built with a different
+            // `auto_detect` mode than the one currently in effect. When
+            // auto_detect is true we need `bytes` populated; when false the
+            // cache entry may still have them but that is harmless — we keep
+            // the entry in that case.
+            {
+                let row = &mut rows[row_idx];
+                let needs_rebuild = row.dirty
+                    || cache[row_idx].is_none()
+                    || (auto_detect
+                        && cache[row_idx]
+                            .as_ref()
+                            .is_some_and(|e| e.bytes.is_empty() && !e.chars.is_empty()));
+                if needs_rebuild {
+                    cache[row_idx] = Some(Self::flatten_row(row, auto_detect));
+                    row.mark_clean();
+                }
+            }
+
+            if !auto_detect {
+                continue;
+            }
+
+            // A new logical-line group starts at row 0, or wherever a row is
+            // not a soft-wrap continuation of the previous one. Runs of
+            // `RowJoin::ContinueLogicalLine` rows are one DECAWM-wrapped
+            // logical line; see `redetect_urls_for_group`'s doc comment.
+            let starts_new_group =
+                row_idx == 0 || rows[row_idx].join != RowJoin::ContinueLogicalLine;
+            if starts_new_group {
+                if row_idx - group_start > 1 && group_has_url_signal {
+                    redetect_urls_for_group(cache, group_start, row_idx, &mut refined_auto_urls);
+                }
+                group_start = row_idx;
+                group_has_url_signal = false;
+            }
+            // Only a match whose raw (pre-trim) end reached this row's raw
+            // byte end is a candidate continuation — a URL that ends
+            // naturally mid-row (the common case: followed by whitespace or
+            // more prose) can never be split by a wrap, no matter how many
+            // other rows in this soft-wrapped run happen to also contain
+            // unrelated, fully self-contained URLs. Only the last match in a
+            // row can possibly reach the row's end (matches are found in
+            // increasing order), so checking `.last()` suffices.
+            if cache[row_idx]
+                .as_ref()
+                .is_some_and(|e| e.auto_urls.last().is_some_and(|r| r.touches_row_end))
+            {
+                group_has_url_signal = true;
+            }
+        }
+        // Finalize the last group (the loop above only finalizes a group
+        // once it sees the *next* group start).
+        if auto_detect && row_count - group_start > 1 && group_has_url_signal {
+            redetect_urls_for_group(cache, group_start, row_count, &mut refined_auto_urls);
+        }
+
+        refined_auto_urls
     }
 
     /// Collect the indices of tags in `tags` that carry a URL.
@@ -629,6 +736,43 @@ impl Buffer {
     }
 }
 
+/// Convert a byte range into a character range using a `byte_to_char` map.
+///
+/// `byte_to_char[i]` is the character index for the character that starts at
+/// byte `i` of the buffer `byte_to_char` was built for (`bytes.len()` bytes
+/// long). Returns `None` when the map is malformed (should never happen, but
+/// this is production code so we cannot unwrap) or when the resulting range
+/// is empty.
+fn byte_range_to_char_range(
+    byte_start: usize,
+    byte_end: usize,
+    bytes_len: usize,
+    byte_to_char: &[u32],
+) -> Option<(usize, usize)> {
+    let &start_u32 = byte_to_char.get(byte_start)?;
+    // `byte_end` is exclusive; we want the character index *after* the last
+    // included character. If `byte_end` reaches the end of the buffer, use
+    // one past the last character index (inferred from the last byte's char
+    // index).
+    let end_char_u32 = if byte_end >= bytes_len {
+        byte_to_char
+            .last()
+            .copied()
+            .map_or(0, |c| c.saturating_add(1))
+    } else {
+        *byte_to_char.get(byte_end)?
+    };
+
+    let char_start = usize::try_from(start_u32).ok()?;
+    let char_end = usize::try_from(end_char_u32).ok()?;
+
+    if char_end <= char_start {
+        return None;
+    }
+
+    Some((char_start, char_end))
+}
+
 /// Convert the detected URL byte ranges into row-local character ranges.
 ///
 /// `bytes` is the row's UTF-8 byte buffer; `byte_to_char` maps each byte
@@ -640,37 +784,11 @@ fn build_auto_urls(bytes: &[u8], byte_to_char: &[u32]) -> Vec<AutoUrlRange> {
     let mut out = Vec::with_capacity(matches.len());
 
     for m in matches {
-        // Guard against malformed `byte_to_char` (should never happen but we
-        // cannot unwrap in production code).
-        let Some(&start_u32) = byte_to_char.get(m.byte_start) else {
+        let Some((char_start, char_end)) =
+            byte_range_to_char_range(m.byte_start, m.byte_end, bytes.len(), byte_to_char)
+        else {
             continue;
         };
-        // `byte_end` is exclusive; we want the character index *after* the
-        // last included character. If `byte_end == bytes.len()`, use
-        // `chars.len()` (the maximum character index + 1 = byte_to_char's
-        // highest value + 1, inferred from the last byte's char index).
-        let end_char_u32 = if m.byte_end >= bytes.len() {
-            // Last character spans to end of byte buffer.
-            byte_to_char
-                .last()
-                .copied()
-                .map_or(0, |c| c.saturating_add(1))
-        } else if let Some(&next) = byte_to_char.get(m.byte_end) {
-            next
-        } else {
-            continue;
-        };
-
-        let Ok(char_start) = usize::try_from(start_u32) else {
-            continue;
-        };
-        let Ok(char_end) = usize::try_from(end_char_u32) else {
-            continue;
-        };
-
-        if char_end <= char_start {
-            continue;
-        }
 
         // Build the URL string from the matched byte range. This is the only
         // per-match string allocation in the pipeline; it is amortised by the
@@ -687,10 +805,111 @@ fn build_auto_urls(bytes: &[u8], byte_to_char: &[u32]) -> Vec<AutoUrlRange> {
                 id: None,
                 url: url_str,
             }),
+            touches_row_end: m.touches_buffer_end,
         });
     }
 
     out
+}
+
+/// Re-detect auto URLs across a run of rows joined by
+/// `RowJoin::ContinueLogicalLine` (`rows[group_start..group_end)`).
+///
+/// Concatenates the already-cached per-row byte buffers into one buffer and
+/// runs [`url_detect::find_urls_bytes`] once on the result, so that a URL
+/// wrap boundary is no longer mistaken for the URL's real end — this both
+/// stops truncation and avoids `trim_trailing` misfiring on a wrap boundary
+/// that happens to land right before stripped punctuation. Each match's byte
+/// range is then mapped back across the contributing rows (via each row's own
+/// `byte_to_char` map) into per-row [`AutoUrlRange`]s that all share one
+/// `Arc<Url>` holding the full, untruncated URL text.
+///
+/// Appends an entry for every row in the group (an empty `Vec` when no match
+/// touches that row), replacing whatever the row's own single-row detection
+/// found. Caller is expected to have already checked that the group actually
+/// contains URL-looking content before calling this (this function does not
+/// check `auto_detect` or the join flags itself — it operates purely on the
+/// cache), and to call groups in ascending `group_start` order so `refined`
+/// stays sorted by `row_idx`.
+fn redetect_urls_for_group(
+    cache: &[Option<RowCacheEntry>],
+    group_start: usize,
+    group_end: usize,
+    refined: &mut Vec<(usize, Vec<AutoUrlRange>)>,
+) {
+    let mut group_bytes: Vec<u8> = Vec::new();
+    let mut row_byte_start: Vec<usize> = Vec::with_capacity(group_end - group_start);
+    for entry in &cache[group_start..group_end] {
+        row_byte_start.push(group_bytes.len());
+        if let Some(entry) = entry.as_ref() {
+            group_bytes.extend_from_slice(&entry.bytes);
+        }
+    }
+    let group_total_len = group_bytes.len();
+
+    let matches = url_detect::find_urls_bytes(&group_bytes);
+
+    // Every row in the group gets an authoritative (possibly empty) refined
+    // entry, superseding its own single-row `auto_urls` — the group
+    // redetection reproduces equivalent matches for URLs fully contained in
+    // one row too, so nothing is lost by replacing wholesale.
+    let first_new_idx = refined.len();
+    refined.extend((group_start..group_end).map(|row_idx| (row_idx, Vec::new())));
+
+    if matches.is_empty() {
+        return;
+    }
+
+    for m in matches {
+        let Ok(url_str) = std::str::from_utf8(&group_bytes[m.byte_start..m.byte_end]) else {
+            continue;
+        };
+        let shared_url = Arc::new(Url {
+            id: None,
+            url: url_str.to_string(),
+        });
+
+        for offset_idx in 0..(group_end - group_start) {
+            let row_idx = group_start + offset_idx;
+            let row_byte_lo = row_byte_start[offset_idx];
+            let row_byte_hi = row_byte_start
+                .get(offset_idx + 1)
+                .copied()
+                .unwrap_or(group_total_len);
+
+            // No overlap between the match and this row's byte span.
+            if m.byte_end <= row_byte_lo || m.byte_start >= row_byte_hi {
+                continue;
+            }
+
+            let Some(entry) = cache[row_idx].as_ref() else {
+                continue;
+            };
+            if entry.bytes.is_empty() {
+                continue;
+            }
+
+            let local_start = m.byte_start.max(row_byte_lo) - row_byte_lo;
+            let local_end = m.byte_end.min(row_byte_hi) - row_byte_lo;
+
+            let Some((char_start, char_end)) = byte_range_to_char_range(
+                local_start,
+                local_end,
+                entry.bytes.len(),
+                &entry.byte_to_char,
+            ) else {
+                continue;
+            };
+
+            let (_, row_ranges) = &mut refined[first_new_idx + offset_idx];
+            row_ranges.push(AutoUrlRange {
+                char_start,
+                char_end,
+                url: shared_url.clone(),
+                touches_row_end: local_end >= entry.bytes.len(),
+            });
+        }
+    }
 }
 
 /// Splice auto-detected URL ranges into a row's per-row tag vec.
@@ -1075,5 +1294,161 @@ mod scrollback_eviction_tests {
         // reporting the image row intact.
         let _ = buf.scrollback_as_tchars_and_tags(0);
         assert!(buf.rows[0].cells().iter().any(crate::cell::Cell::has_image));
+    }
+}
+
+/// Regression coverage for GitHub issue #418: a plain-text URL that
+/// DECAWM-wraps across two or more physical rows must be auto-detected as
+/// one full, untruncated URL — not as several independent per-row fragments.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod wrapped_url_tests {
+    use crate::buffer::Buffer;
+    use crate::row::RowJoin;
+    use freminal_common::buffer_states::tchar::TChar;
+
+    fn text(s: &str) -> Vec<TChar> {
+        s.chars().map(TChar::from).collect()
+    }
+
+    /// Collect the distinct URL strings carried by the tags at `url_indices`.
+    fn url_strings(
+        tags: &[freminal_common::buffer_states::format_tag::FormatTag],
+        url_indices: &[usize],
+    ) -> Vec<String> {
+        url_indices
+            .iter()
+            .filter_map(|&i| tags[i].url.as_ref().map(|u| u.url.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn url_wrapping_across_two_rows_is_detected_in_full() {
+        // Width chosen so the URL itself (not just surrounding prose) spans
+        // the row boundary: "see " (4) + first part of the URL fills row 0,
+        // the remainder wraps onto row 1.
+        let mut buf = Buffer::new(20, 3);
+        assert!(buf.auto_detect_urls());
+        let url = "https://example.com/a/very/long/path";
+        buf.insert_text(&text(&format!("see {url} end")));
+
+        assert_eq!(
+            buf.rows()[1].join,
+            RowJoin::ContinueLogicalLine,
+            "test setup: row 1 must be a soft-wrap continuation of row 0"
+        );
+
+        let (_chars, tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(!url_indices.is_empty(), "URL must be auto-detected");
+
+        let urls = url_strings(&tags, &url_indices);
+        assert!(
+            urls.iter().all(|u| u == url),
+            "every URL-tagged fragment must carry the full, untruncated URL; got {urls:?}"
+        );
+    }
+
+    #[test]
+    fn url_wrapping_across_three_rows_is_detected_in_full() {
+        // A long URL that wraps twice (spans three physical rows), to
+        // exercise the multi-row chaining (not just a single adjacent pair).
+        let mut buf = Buffer::new(15, 5);
+        assert!(buf.auto_detect_urls());
+        let url = "https://example.com/a/very/long/path/that/keeps/going/and/going";
+        buf.insert_text(&text(url));
+
+        assert_eq!(buf.rows()[1].join, RowJoin::ContinueLogicalLine);
+        assert_eq!(buf.rows()[2].join, RowJoin::ContinueLogicalLine);
+
+        let (_chars, tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(!url_indices.is_empty(), "URL must be auto-detected");
+
+        let urls = url_strings(&tags, &url_indices);
+        assert!(
+            urls.iter().all(|u| u == url),
+            "every URL-tagged fragment must carry the full, untruncated URL; got {urls:?}"
+        );
+    }
+
+    #[test]
+    fn wrap_boundary_on_trailing_punctuation_char_is_not_stripped() {
+        // Width chosen so the wrap boundary lands exactly on the '.' in
+        // "index.html" — a single-row detector's `trim_trailing` heuristic
+        // would misidentify that '.' as sentence punctuation and strip it,
+        // even though it is a real path separator continued on the next row.
+        let mut buf = Buffer::new(26, 3);
+        assert!(buf.auto_detect_urls());
+        let url = "https://example.com/index.html";
+        buf.insert_text(&text(url));
+
+        assert_eq!(
+            buf.rows()[0].cells().len(),
+            26,
+            "row 0 must be exactly full width"
+        );
+        assert_eq!(buf.rows()[1].join, RowJoin::ContinueLogicalLine);
+
+        let (_chars, tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(!url_indices.is_empty(), "URL must be auto-detected");
+
+        let urls = url_strings(&tags, &url_indices);
+        assert!(
+            urls.iter().all(|u| u == url),
+            "the '.' before the wrap must be preserved, not stripped; got {urls:?}"
+        );
+    }
+
+    #[test]
+    fn hard_break_after_full_width_url_does_not_merge_with_next_line() {
+        // Row 0 is filled exactly by a URL with no trailing content (so its
+        // per-row match already reaches the row's raw end), but row 1 is a
+        // genuine new logical line (hard break, not a soft wrap) containing
+        // an unrelated URL starting at column 0. These must NOT be merged
+        // into one URL.
+        let url_a = "https://a.example.com/xxxxx"; // 28 chars
+        let mut buf = Buffer::new(28, 3);
+        assert!(buf.auto_detect_urls());
+        buf.insert_text(&text(url_a));
+        buf.handle_lf();
+        buf.handle_cr();
+        buf.insert_text(&text("https://b.example.com"));
+
+        assert_eq!(
+            buf.rows()[1].join,
+            RowJoin::NewLogicalLine,
+            "test setup: row 1 must be a hard break, not a soft wrap"
+        );
+
+        let (_chars, tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        let urls = url_strings(&tags, &url_indices);
+        assert!(urls.contains(&url_a.to_string()), "got {urls:?}");
+        assert!(
+            urls.contains(&"https://b.example.com".to_string()),
+            "got {urls:?}"
+        );
+        assert!(
+            urls.iter()
+                .all(|u| u != &format!("{url_a}https://b.example.com")),
+            "unrelated URLs on a hard-broken next line must not be merged; got {urls:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_line_without_any_url_is_unaffected() {
+        // A long wrapped line with no URL content at all must not produce
+        // any URL tags (and must not panic in the group-redetect pre-check
+        // skip path).
+        let mut buf = Buffer::new(10, 5);
+        assert!(buf.auto_detect_urls());
+        buf.insert_text(&text(
+            "the quick brown fox jumps over the lazy dog again and again",
+        ));
+        assert_eq!(buf.rows()[1].join, RowJoin::ContinueLogicalLine);
+
+        let (_chars, _tags, _row_offsets, url_indices) = buf.visible_as_tchars_and_tags(0);
+        assert!(
+            url_indices.is_empty(),
+            "a wrapped line with no URL content must not produce URL tags"
+        );
     }
 }
