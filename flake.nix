@@ -426,6 +426,7 @@
                 pkgs.imagemagick
                 pkgs.librsvg
                 pkgs.libicns
+                pkgs.cargo-msrv
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
                 pkgs.perf
