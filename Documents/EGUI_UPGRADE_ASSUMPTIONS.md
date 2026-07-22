@@ -265,18 +265,43 @@ hide the gutter-hover / interaction widgets.
 The FULL/REPLAY input gate forces FULL on chrome-affecting input. It relies in
 part on `egui-winit` returning `EventResponse { repaint: true }` for events like
 `ScaleFactorChanged`, so a DPI change forces FULL via the `response.repaint`
-branch even though `is_potential_chrome_input` does not enumerate every such
+branch even though `is_unconditional_chrome_input` does not enumerate every such
 event.
 
 - **Our code:** `freminal-windowing/src/event_loop.rs` —
-  `is_potential_chrome_input` plus the `|| response.repaint` OR at the general
-  event arm.
+  `is_unconditional_chrome_input` plus the `|| response.repaint` OR at the
+  general event arm.
 - **Upstream (0.35.0):** `egui-winit/src/lib.rs` —
   `WindowEvent::ScaleFactorChanged { .. }` arm returning `EventResponse {
   repaint: true, .. }` (`~311-324`).
 - **Symptom if broken:** a DPI / scale-factor change is not forced FULL — the
   chrome renders at the wrong scale on a REPLAY frame until an unrelated FULL
   frame fixes it.
+
+### A13 — egui `pixels_per_point` equals winit `scale_factor` (zoom is off)
+
+The #436.8 region-aware pointer gate hit-tests the physical cursor position
+against chrome rects captured in egui **logical points**. It converts physical
+to logical by dividing by `window.scale_factor()`. This is only correct while
+egui's own `pixels_per_point()` equals `window.scale_factor()` — i.e. while
+egui's zoom factor is exactly `1.0` (egui-winit computes
+`pixels_per_point = scale_factor * ctx.zoom_factor()`). Freminal guarantees
+this by setting `Options::zoom_with_keyboard = false` and never calling
+`Context::set_zoom_factor`.
+
+- **Our code:** `freminal-windowing/src/event_loop.rs` —
+  `physical_to_logical_pos` (divides by `window.scale_factor()`);
+  `freminal/src/gui/rendering.rs` — `options.zoom_with_keyboard = false`.
+- **Upstream (0.35.0):** `egui-winit/src/lib.rs` — `pixels_per_point(ctx,
+  window) = window.scale_factor() * ctx.zoom_factor()`; egui zoom is driven
+  only by `egui::gui_zoom::zoom_with_keyboard` (gated on the option) or an
+  explicit `set_zoom_factor`.
+- **Symptom if broken:** if egui zoom is ever enabled, the pointer gate divides
+  by the wrong factor and silently misclassifies chrome as terminal — pointer
+  interaction with chrome (menu/tab/border) stops forcing FULL, so chrome can
+  go stale under live interaction. No test catches this (the pure-fn tests only
+  exercise the conversion math, not the zoom invariant). Fix: derive the
+  divisor from `ctx.pixels_per_point()` instead of `window.scale_factor()`.
 
 ## What is NOT covered here
 

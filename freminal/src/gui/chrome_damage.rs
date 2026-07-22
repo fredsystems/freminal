@@ -287,11 +287,24 @@ pub const fn decide_chrome_damage(
     }
 }
 
+/// #436.8: is `pos` over any chrome-interactive rect? `head_rects == None`
+/// means no FULL frame has captured them yet -> conservative `true`.
+#[must_use]
+pub fn point_in_chrome_rects(
+    pos: egui::Pos2,
+    head_rects: Option<&[egui::Rect]>,
+    border_rects: &[egui::Rect],
+) -> bool {
+    let Some(head) = head_rects else { return true };
+    head.iter().any(|r| r.contains(pos)) || border_rects.iter().any(|r| r.contains(pos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ChromeSignals, ChromeTabSnapshot, DismissiblePresence, WARMUP_FRAMES, decide_chrome_damage,
         diff_tab_snapshots, dismissible_presence_transitioned, is_chrome_warming_up,
+        point_in_chrome_rects,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
     use crate::gui::tabs::TabId;
@@ -734,5 +747,93 @@ mod tests {
             decide_chrome_damage(&signals, false, false),
             ChromeDamage::Changed
         );
+    }
+
+    // ── #436.8 region-aware pointer gate ─────────────────────────────────
+
+    #[test]
+    fn point_in_chrome_rects_none_head_is_conservative_true() {
+        // No FULL frame has captured head rects yet -> unknown -> true.
+        assert!(point_in_chrome_rects(egui::pos2(10.0, 10.0), None, &[],));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_empty_rects_is_false() {
+        // A FULL frame captured (empty) head rects (e.g. hidden menu bar, no
+        // tab bar) and there are no border sensors: nothing is chrome.
+        assert!(!point_in_chrome_rects(
+            egui::pos2(10.0, 10.0),
+            Some(&[]),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_inside_head_rect_is_true() {
+        let head = [egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(100.0, 20.0),
+        )];
+        assert!(point_in_chrome_rects(
+            egui::pos2(50.0, 10.0),
+            Some(&head),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_outside_head_rect_is_false() {
+        let head = [egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(100.0, 20.0),
+        )];
+        assert!(!point_in_chrome_rects(
+            egui::pos2(50.0, 100.0),
+            Some(&head),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_inside_border_rect_is_true() {
+        let border = [egui::Rect::from_min_max(
+            egui::pos2(97.0, 0.0),
+            egui::pos2(103.0, 200.0),
+        )];
+        assert!(point_in_chrome_rects(
+            egui::pos2(100.0, 50.0),
+            Some(&[]),
+            &border,
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_outside_border_rect_is_false() {
+        let border = [egui::Rect::from_min_max(
+            egui::pos2(97.0, 0.0),
+            egui::pos2(103.0, 200.0),
+        )];
+        assert!(!point_in_chrome_rects(
+            egui::pos2(300.0, 50.0),
+            Some(&[]),
+            &border,
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_inside_neither_is_false() {
+        let head = [egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(100.0, 20.0),
+        )];
+        let border = [egui::Rect::from_min_max(
+            egui::pos2(97.0, 0.0),
+            egui::pos2(103.0, 200.0),
+        )];
+        assert!(!point_in_chrome_rects(
+            egui::pos2(500.0, 500.0),
+            Some(&head),
+            &border,
+        ));
     }
 }

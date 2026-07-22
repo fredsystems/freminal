@@ -313,6 +313,8 @@ impl freminal_windowing::App for FreminalGui {
                         chrome_frames_rendered: 0,
                         pending_terminal_requested_delay: None,
                         cached_central_rect: None,
+                        chrome_head_rects: None,
+                        chrome_border_rects: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -511,6 +513,16 @@ impl freminal_windowing::App for FreminalGui {
         self.windows
             .get(&window_id)
             .map(|win| std::sync::Arc::clone(&win.present_is_partial))
+    }
+
+    fn is_chrome_interactive_at(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
+        self.windows.get(&window_id).is_none_or(|win| {
+            crate::gui::chrome_damage::point_in_chrome_rects(
+                pos,
+                win.chrome_head_rects.as_deref(),
+                &win.chrome_border_rects,
+            )
+        })
     }
 
     fn take_frame_damage(&mut self, window_id: WindowId) -> freminal_windowing::FrameDamage {
@@ -1159,49 +1171,61 @@ impl freminal_windowing::App for FreminalGui {
         // expects them). `any_menu_open` (read inside `central_body` to
         // compute `ui_overlay_open`) is `false` on Replay: with no menu bar
         // built, no menu can be open.
-        let (any_menu_open, chrome_root_ui): (bool, Option<egui::Ui>) =
-            if chrome_mode == freminal_windowing::ChromeMode::Full {
-                // Create a root Ui covering the full available area.  Panels
-                // reserve space from this Ui via `show` (the non-deprecated
-                // API; `show_inside` was renamed to `show` in egui 0.35).
-                let mut root_ui = egui::Ui::new(
-                    ctx.clone(),
-                    egui::Id::new("freminal_root"),
-                    egui::UiBuilder::default(),
-                );
+        let (any_menu_open, chrome_root_ui): (bool, Option<egui::Ui>) = if chrome_mode
+            == freminal_windowing::ChromeMode::Full
+        {
+            // Create a root Ui covering the full available area.  Panels
+            // reserve space from this Ui via `show` (the non-deprecated
+            // API; `show_inside` was renamed to `show` in egui 0.35).
+            let mut root_ui = egui::Ui::new(
+                ctx.clone(),
+                egui::Id::new("freminal_root"),
+                egui::UiBuilder::default(),
+            );
 
-                // Menu bar at the top of the window.
-                let menu_open = if self.config.ui.hide_menu_bar {
-                    false
-                } else {
-                    let (menu_action, menu_open) = Panel::top("menu_bar")
-                        .show(&mut root_ui, |ui| {
-                            self.show_menu_bar(ui, &mut win, window_id)
-                        })
-                        .inner;
-                    self.dispatch_tab_bar_action(menu_action, &mut win);
-                    menu_open
-                };
+            // #436.8: menu-bar / tab-bar rects, captured for the
+            // region-aware pointer chrome-gate (`is_chrome_interactive_at`).
+            // Only ever populated on a FULL frame — a REPLAY frame builds
+            // neither panel, so `win.chrome_head_rects` is left untouched
+            // (stale-but-still-correct: chrome hasn't moved since the
+            // FULL frame that last set it, by the same invariant that
+            // makes REPLAY safe at all).
+            let mut head_rects: Vec<egui::Rect> = Vec::new();
 
-                // Tab bar: shown when multiple tabs are open, or when the
-                // config option `tabs.show_single_tab` is enabled.
-                let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
-
-                if show_tab_bar {
-                    let panel = match self.config.tabs.position {
-                        freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
-                        freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
-                    };
-                    let tab_action = panel
-                        .show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
-                        .inner;
-                    self.dispatch_tab_bar_action(tab_action, &mut win);
-                }
-
-                (menu_open, Some(root_ui))
+            // Menu bar at the top of the window.
+            let menu_open = if self.config.ui.hide_menu_bar {
+                false
             } else {
-                (false, None)
+                let menu_response = Panel::top("menu_bar").show(&mut root_ui, |ui| {
+                    self.show_menu_bar(ui, &mut win, window_id)
+                });
+                head_rects.push(menu_response.response.rect);
+                let (menu_action, menu_open) = menu_response.inner;
+                self.dispatch_tab_bar_action(menu_action, &mut win);
+                menu_open
             };
+
+            // Tab bar: shown when multiple tabs are open, or when the
+            // config option `tabs.show_single_tab` is enabled.
+            let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+
+            if show_tab_bar {
+                let panel = match self.config.tabs.position {
+                    freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
+                    freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
+                };
+                let tab_response = panel.show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui));
+                head_rects.push(tab_response.response.rect);
+                let tab_action = tab_response.inner;
+                self.dispatch_tab_bar_action(tab_action, &mut win);
+            }
+
+            win.chrome_head_rects = Some(head_rects);
+
+            (menu_open, Some(root_ui))
+        } else {
+            (false, None)
+        };
 
         // Help menu → "Keybindings..." routes here.  Opens the Settings
         // Modal with the Keybindings tab preselected, or focuses the
@@ -1727,6 +1751,11 @@ impl freminal_windowing::App for FreminalGui {
                 // on each side of the 1px border line).
                 let sensor_half: f32 = 3.0;
 
+                // #436.8: split-border drag-sensor rects, rebuilt fresh every
+                // frame this branch runs, for the region-aware pointer
+                // chrome-gate (`is_chrome_interactive_at`).
+                let mut border_rects: Vec<egui::Rect> = Vec::with_capacity(borders.len());
+
                 for (border_idx, border) in borders.iter().enumerate() {
                     // Expand the thin 1px border rect into a wider sensor rect.
                     let sensor_rect = match border.direction {
@@ -1747,6 +1776,8 @@ impl freminal_windowing::App for FreminalGui {
                             )
                         }
                     };
+
+                    border_rects.push(sensor_rect);
 
                     let sensor_id = ui.id().with("pane_border_sensor").with(border_idx);
                     let response =
@@ -1800,6 +1831,14 @@ impl freminal_windowing::App for FreminalGui {
                         win.border_drag = None;
                     }
                 }
+
+                win.chrome_border_rects = border_rects;
+            } else {
+                // No sensors built this frame (single pane / zoomed / overlay
+                // open): clear any stale rects from a since-changed layout so
+                // they can't keep classifying terminal content as chrome
+                // (#436.8).
+                win.chrome_border_rects.clear();
             }
 
             // ── Terminal band: shape-index range capture (#436.2a, range
@@ -3156,6 +3195,8 @@ impl FreminalGui {
             chrome_frames_rendered: 0,
             pending_terminal_requested_delay: None,
             cached_central_rect: None,
+            chrome_head_rects: None,
+            chrome_border_rects: Vec::new(),
         }
     }
 

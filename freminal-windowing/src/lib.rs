@@ -323,6 +323,16 @@ pub trait App {
         None
     }
 
+    /// #436.8: whether `pos` (egui LOGICAL points, top-left origin) is over a
+    /// chrome-interactive region of this window (menu bar, tab bar, split-border
+    /// drag sensors) — the region-aware pointer gate. Pointer motion over such a
+    /// region forces `ChromeMode::Full`; motion purely over terminal content does
+    /// not. Default `true` (conservative: an app that hasn't wired this up keeps
+    /// the pre-436.8 "any pointer event forces Full" behavior).
+    fn is_chrome_interactive_at(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+        true
+    }
+
     /// Hook to modify raw input before egui processes it.
     ///
     /// Default implementation does nothing.

@@ -24,7 +24,7 @@ use crate::{
     WindowHandle, WindowId, WindowOp,
 };
 
-use conv2::{ApproxFrom, RoundToZero};
+use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 
 /// Convert an `f64` logical dimension to `u32`, clamping non-positive and
 /// non-finite values to 0 and saturating on overflow.  Used for logical
@@ -104,20 +104,25 @@ const fn is_blocked_key(key_code: winit::keyboard::KeyCode) -> bool {
     )
 }
 
-/// Returns `true` for `WindowEvent`s that could plausibly affect chrome
-/// state (hover, focus, click, drag, scroll, text/IME input) — the
-/// CONSERVATIVE #436.4b §3.2 input gate. Any `true` here forces
-/// `ChromeMode::Full` for that frame via `WindowState::chrome_input_pending`;
-/// deliberately over-broad (any window input, not just input actually over
-/// chrome rather than the terminal band) — refined region-aware in #436.8.
-const fn is_potential_chrome_input(event: &WindowEvent) -> bool {
+/// Returns `true` for `WindowEvent`s that unconditionally force
+/// `ChromeMode::Full` for the frame they arrive in, via
+/// `WindowState::chrome_input_pending` — the non-pointer half of the
+/// #436.4b §3.2 input gate.
+///
+/// Pointer events (`CursorMoved` / `MouseInput` / `MouseWheel`) are
+/// deliberately EXCLUDED here (#436.8): they are region-tested instead (see
+/// [`should_force_chrome_full_for_pointer`]), so that pointer motion purely
+/// over terminal content does not force a chrome rebuild every frame (the
+/// CPU-spike-under-btop complaint). `CursorEntered`/`CursorLeft` stay here
+/// (rare events; not worth region-testing) alongside keyboard, IME, focus,
+/// theme, and touch/gesture input — the maintainer decided pointer-only
+/// narrowing for this subtask, no keyboard narrowing (avoids a one-frame lag
+/// on keyboard-triggered chrome actions).
+const fn is_unconditional_chrome_input(event: &WindowEvent) -> bool {
     matches!(
         event,
-        WindowEvent::CursorMoved { .. }
-            | WindowEvent::CursorEntered { .. }
+        WindowEvent::CursorEntered { .. }
             | WindowEvent::CursorLeft { .. }
-            | WindowEvent::MouseInput { .. }
-            | WindowEvent::MouseWheel { .. }
             | WindowEvent::KeyboardInput { .. }
             | WindowEvent::ModifiersChanged(_)
             | WindowEvent::Ime(_)
@@ -139,6 +144,72 @@ const fn is_potential_chrome_input(event: &WindowEvent) -> bool {
     )
 }
 
+/// Convert a winit physical cursor position to egui logical points (lossy
+/// `f64` -> `f32` narrowing via `conv2`'s default approximation, matching the
+/// `window.scale_factor().approx_as::<f32>()` conversion in
+/// `egui_integration.rs`). Returns `None` for a non-finite or non-positive
+/// scale factor — the caller treats an unknown position conservatively (see
+/// [`should_force_chrome_full_for_pointer`]).
+///
+/// LOAD-BEARING ASSUMPTION (#436.8): the chrome-interactive rects this
+/// position is hit-tested against are captured in egui **logical points**,
+/// which equal `physical / egui.pixels_per_point()`. We divide by
+/// `window.scale_factor()` instead, and those are only equal while
+/// `egui.pixels_per_point() == window.scale_factor()` — i.e. while egui's
+/// zoom factor is exactly 1.0. Freminal guarantees this by setting
+/// `Options::zoom_with_keyboard = false` (`gui/rendering.rs`) and never
+/// calling `Context::set_zoom_factor`. If egui zoom is ever enabled, this
+/// divisor is wrong and the region hit-test silently misclassifies chrome as
+/// terminal (a stale-chrome-under-interaction bug) — see
+/// `Documents/EGUI_UPGRADE_ASSUMPTIONS.md` A13. Fix then: derive the divisor
+/// from `ctx.pixels_per_point()` rather than `window.scale_factor()`.
+fn physical_to_logical_pos(
+    pos: winit::dpi::PhysicalPosition<f64>,
+    scale: f64,
+) -> Option<egui::Pos2> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let x = (pos.x / scale).approx_as::<f32>().ok()?;
+    let y = (pos.y / scale).approx_as::<f32>().ok()?;
+    Some(egui::pos2(x, y))
+}
+
+/// #436.8 region-aware pointer chrome-gate decision: should this pointer
+/// event force `ChromeMode::Full`?
+///
+/// `true` when a chrome-border drag is latched (`drag_latched` — the pointer
+/// may have moved off the sensor mid-drag, but the drag itself is still
+/// chrome-affecting), OR the pointer position is known to be over a
+/// chrome-interactive region (`is_over_chrome == Some(true)`), OR the
+/// position is unknown (`None` — conservative: force `Full` rather than risk
+/// silently starving a chrome interaction of repaints).
+fn should_force_chrome_full_for_pointer(is_over_chrome: Option<bool>, drag_latched: bool) -> bool {
+    drag_latched || is_over_chrome.unwrap_or(true)
+}
+
+/// #436.8 chrome-border drag latch update: tracks presses that started over
+/// a chrome-interactive region so a drag that later moves the pointer off
+/// that region (still forcing `Full` via the latch) is not mistaken for
+/// terminal-content motion. Saturating in both directions so an unbalanced
+/// press/release sequence (e.g. a release delivered to a different window)
+/// can never underflow or runaway-accumulate.
+fn update_chrome_drag_latch(
+    current: u32,
+    button_state: winit::event::ElementState,
+    is_over_chrome: Option<bool>,
+) -> u32 {
+    match button_state {
+        // Conservative: an unknown position (`None`) counts as "over chrome"
+        // for latch purposes, same as the force-Full decision itself.
+        winit::event::ElementState::Pressed if is_over_chrome.unwrap_or(true) => {
+            current.saturating_add(1)
+        }
+        winit::event::ElementState::Pressed => current,
+        winit::event::ElementState::Released => current.saturating_sub(1),
+    }
+}
+
 /// Per-window state.
 struct WindowState {
     window: Window,
@@ -146,15 +217,28 @@ struct WindowState {
     egui: EguiState,
     /// Next scheduled repaint time (if any).
     repaint_at: Option<Instant>,
-    /// #436.4b §3.2 conservative chrome-input gate: set `true` by any window
-    /// input event this frame that could plausibly affect chrome (pointer,
-    /// keyboard, scroll, focus, IME — see [`is_potential_chrome_input`]).
-    /// Drained (`mem::take`) into `run_frame`'s `chrome_input_this_frame`
-    /// parameter at `RedrawRequested`, so a `true` unconditionally forces
-    /// `ChromeMode::Full` for that frame. Deliberately over-broad (ANY
-    /// window input, not just input over chrome) — the region-aware
-    /// refinement is #436.8.
+    /// #436.4b §3.2 chrome-input gate: set `true` by a window input event
+    /// this frame that forces `ChromeMode::Full` — either unconditionally
+    /// (keyboard, focus, IME, theme — see [`is_unconditional_chrome_input`])
+    /// or, for pointer events, only when the pointer is over (or mid-drag on)
+    /// a chrome-interactive region (#436.8, see
+    /// [`should_force_chrome_full_for_pointer`]). Drained (`mem::take`) into
+    /// `run_frame`'s `chrome_input_this_frame` parameter at
+    /// `RedrawRequested`.
     chrome_input_pending: bool,
+    /// #436.8: last-known pointer position in egui logical points, updated on
+    /// every `CursorMoved` and cleared on `CursorLeft`. `None` before the
+    /// first `CursorMoved` (or after the pointer has left the window) — the
+    /// region hit-test then has no position to test and callers treat that
+    /// conservatively (force `Full`).
+    last_cursor_pos: Option<egui::Pos2>,
+    /// #436.8 chrome-border drag latch: incremented on a button press whose
+    /// position is over (or unknown, conservatively) a chrome-interactive
+    /// region, decremented on release. While `> 0`, pointer motion/wheel
+    /// events force `ChromeMode::Full` regardless of the current pointer
+    /// position, so a drag that moves off the sensor mid-drag is not
+    /// mistaken for terminal-content motion.
+    chrome_drag_pressed_count: u32,
 }
 
 impl WindowState {
@@ -262,6 +346,8 @@ impl<A: App> Handler<A> {
             egui,
             repaint_at: Some(Instant::now()),
             chrome_input_pending: false,
+            last_cursor_pos: None,
+            chrome_drag_pressed_count: 0,
         };
 
         self.windows.insert(winit_id, state);
@@ -421,18 +507,77 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         // egui for pointer position tracking but only schedule a repaint if
         // egui actually wants one (e.g. menu hover highlight).  We skip the
         // full window_event path to avoid unnecessary work.
+        //
+        // #436.8: pointer events (`CursorMoved`/`MouseInput`/`MouseWheel`)
+        // handle the chrome-input gate here, region-tested against
+        // `App::is_chrome_interactive_at`, instead of the general path's
+        // `is_unconditional_chrome_input` — see that function's doc for why
+        // pointer events are excluded from it.
         if matches!(
             event,
             WindowEvent::CursorMoved { .. }
                 | WindowEvent::CursorEntered { .. }
                 | WindowEvent::CursorLeft { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
         ) {
             if let Some(state) = self.windows.get_mut(&winit_id) {
                 let response = state.egui.on_window_event(&state.window, &event);
-                // These are all pointer events by construction (the `matches!`
-                // guard above) — always a potential-chrome-input, regardless
-                // of whether egui itself wants a repaint (#436.4b §3.2).
-                state.chrome_input_pending = true;
+                match event {
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let scale = state.window.scale_factor();
+                        state.last_cursor_pos = physical_to_logical_pos(position, scale);
+                        let is_over_chrome = state
+                            .last_cursor_pos
+                            .map(|pos| self.app.is_chrome_interactive_at(WindowId(winit_id), pos));
+                        state.chrome_input_pending |= should_force_chrome_full_for_pointer(
+                            is_over_chrome,
+                            state.chrome_drag_pressed_count > 0,
+                        );
+                    }
+                    WindowEvent::CursorEntered { .. } => {
+                        // Unconditional (matches `is_unconditional_chrome_input`).
+                        state.chrome_input_pending = true;
+                    }
+                    WindowEvent::CursorLeft { .. } => {
+                        // The pointer is gone — a stale position must not be
+                        // used to wrongly classify a later event.
+                        state.last_cursor_pos = None;
+                        // Unconditional (matches `is_unconditional_chrome_input`).
+                        state.chrome_input_pending = true;
+                    }
+                    WindowEvent::MouseInput {
+                        state: btn_state, ..
+                    } => {
+                        let is_over_chrome = state
+                            .last_cursor_pos
+                            .map(|pos| self.app.is_chrome_interactive_at(WindowId(winit_id), pos));
+                        // Decide using the PRE-update latch first, so the
+                        // release event that ends a chrome-border drag still
+                        // forces `Full` before the latch drops to 0.
+                        state.chrome_input_pending |= should_force_chrome_full_for_pointer(
+                            is_over_chrome,
+                            state.chrome_drag_pressed_count > 0,
+                        );
+                        state.chrome_drag_pressed_count = update_chrome_drag_latch(
+                            state.chrome_drag_pressed_count,
+                            btn_state,
+                            is_over_chrome,
+                        );
+                    }
+                    WindowEvent::MouseWheel { .. } => {
+                        let is_over_chrome = state
+                            .last_cursor_pos
+                            .map(|pos| self.app.is_chrome_interactive_at(WindowId(winit_id), pos));
+                        state.chrome_input_pending |= should_force_chrome_full_for_pointer(
+                            is_over_chrome,
+                            state.chrome_drag_pressed_count > 0,
+                        );
+                    }
+                    _ => unreachable!(
+                        "matches! guard above restricts event to the five pointer variants"
+                    ),
+                }
                 if response.repaint {
                     let deadline = Instant::now() + std::time::Duration::from_millis(16);
                     state.repaint_at = Some(
@@ -548,12 +693,13 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         let egui_consumed = if let Some(state) = self.windows.get_mut(&winit_id) {
             let response = state.egui.on_window_event(&state.window, &event);
 
-            // #436.4b §3.2: any window input event that could plausibly
-            // affect chrome (or that egui itself says caused a repaint,
-            // covering event kinds `is_potential_chrome_input` doesn't
-            // enumerate) forces `ChromeMode::Full` for the frame this event
-            // is delivered in.
-            if is_potential_chrome_input(&event) || response.repaint {
+            // #436.4b §3.2: any non-pointer window input event that could
+            // plausibly affect chrome (or that egui itself says caused a
+            // repaint, covering event kinds `is_unconditional_chrome_input`
+            // doesn't enumerate) forces `ChromeMode::Full` for the frame this
+            // event is delivered in. Pointer events never reach this arm —
+            // they're handled, region-tested, in the fast path above (#436.8).
+            if is_unconditional_chrome_input(&event) || response.repaint {
                 state.chrome_input_pending = true;
             }
 
@@ -574,6 +720,15 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     if self.windows.is_empty() {
                         event_loop.exit();
                     }
+                }
+            }
+            WindowEvent::Focused(false) => {
+                // #436.8 safety net: a chrome-border drag interrupted by
+                // focus loss (e.g. alt-tab mid-drag) must not leave the latch
+                // stuck non-zero, which would force every subsequent pointer
+                // event `Full` forever.
+                if let Some(state) = self.windows.get_mut(&winit_id) {
+                    state.chrome_drag_pressed_count = 0;
                 }
             }
             WindowEvent::Resized(size) => {
@@ -973,8 +1128,9 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        ViewportCommandFlags, is_blocked_key, is_potential_chrome_input, logical_coord_to_i32,
-        logical_dim_to_u32, viewport_command_flags,
+        ViewportCommandFlags, is_blocked_key, is_unconditional_chrome_input, logical_coord_to_i32,
+        logical_dim_to_u32, physical_to_logical_pos, should_force_chrome_full_for_pointer,
+        update_chrome_drag_latch, viewport_command_flags,
     };
     use winit::event::{DeviceId, WindowEvent};
     use winit::keyboard::KeyCode;
@@ -1108,30 +1264,17 @@ mod tests {
         assert!(!is_blocked_key(KeyCode::AltRight));
     }
 
-    /// #436.4b §3.2: a representative event from each "potential chrome
-    /// input" category (pointer, keyboard, scroll, focus, IME) forces
-    /// `chrome_input_pending`.
+    /// #436.4b §3.2 / #436.8: a representative event from each
+    /// unconditional-chrome-input category (keyboard, scroll-adjacent focus/
+    /// IME/theme, `CursorEntered`/`CursorLeft`) forces `chrome_input_pending`
+    /// via [`is_unconditional_chrome_input`].
     #[test]
-    fn is_potential_chrome_input_covers_pointer_keyboard_scroll_focus_ime() {
-        assert!(is_potential_chrome_input(&WindowEvent::CursorMoved {
-            device_id: DeviceId::dummy(),
-            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
-        }));
-        assert!(is_potential_chrome_input(&WindowEvent::CursorEntered {
+    fn is_unconditional_chrome_input_covers_keyboard_ime_focus_theme_entered_left() {
+        assert!(is_unconditional_chrome_input(&WindowEvent::CursorEntered {
             device_id: DeviceId::dummy(),
         }));
-        assert!(is_potential_chrome_input(&WindowEvent::CursorLeft {
+        assert!(is_unconditional_chrome_input(&WindowEvent::CursorLeft {
             device_id: DeviceId::dummy(),
-        }));
-        assert!(is_potential_chrome_input(&WindowEvent::MouseInput {
-            device_id: DeviceId::dummy(),
-            state: winit::event::ElementState::Pressed,
-            button: winit::event::MouseButton::Left,
-        }));
-        assert!(is_potential_chrome_input(&WindowEvent::MouseWheel {
-            device_id: DeviceId::dummy(),
-            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
-            phase: winit::event::TouchPhase::Moved,
         }));
         // `KeyEvent` has a private `platform_specific` field (no public
         // constructor), so `KeyboardInput` itself cannot be built outside
@@ -1139,28 +1282,142 @@ mod tests {
         // interception / blocked-key tests elsewhere in this module, both
         // of which set `chrome_input_pending` directly at their early-return
         // sites (see `window_event`) rather than through this helper.
-        assert!(is_potential_chrome_input(&WindowEvent::ModifiersChanged(
-            winit::event::Modifiers::default(),
-        )));
-        assert!(is_potential_chrome_input(&WindowEvent::Focused(true)));
+        assert!(is_unconditional_chrome_input(
+            &WindowEvent::ModifiersChanged(winit::event::Modifiers::default(),)
+        ));
+        assert!(is_unconditional_chrome_input(&WindowEvent::Focused(true)));
         // An OS dark/light switch rebuilds egui chrome visuals synchronously
         // (#436.6): it must force `ChromeMode::Full`.
-        assert!(is_potential_chrome_input(&WindowEvent::ThemeChanged(
+        assert!(is_unconditional_chrome_input(&WindowEvent::ThemeChanged(
             winit::window::Theme::Dark,
         )));
+    }
+
+    /// #436.8: pointer motion/click/scroll events are region-tested instead
+    /// of unconditional — they must NOT be classified as unconditional
+    /// chrome input any more, or region-testing would never actually apply
+    /// (the unconditional check runs first in the general path).
+    #[test]
+    fn is_unconditional_chrome_input_excludes_pointer_events() {
+        assert!(!is_unconditional_chrome_input(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+        }));
+        assert!(!is_unconditional_chrome_input(&WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+        }));
+        assert!(!is_unconditional_chrome_input(&WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: winit::event::TouchPhase::Moved,
+        }));
     }
 
     /// Events unrelated to chrome-affecting input do NOT set the gate —
     /// otherwise every frame would be forced `Full` and REPLAY would never
     /// fire.
     #[test]
-    fn is_potential_chrome_input_excludes_unrelated_events() {
-        assert!(!is_potential_chrome_input(&WindowEvent::RedrawRequested));
-        assert!(!is_potential_chrome_input(&WindowEvent::CloseRequested));
-        assert!(!is_potential_chrome_input(&WindowEvent::Destroyed));
-        assert!(!is_potential_chrome_input(
+    fn is_unconditional_chrome_input_excludes_unrelated_events() {
+        assert!(!is_unconditional_chrome_input(
+            &WindowEvent::RedrawRequested
+        ));
+        assert!(!is_unconditional_chrome_input(&WindowEvent::CloseRequested));
+        assert!(!is_unconditional_chrome_input(&WindowEvent::Destroyed));
+        assert!(!is_unconditional_chrome_input(
             &WindowEvent::HoveredFileCancelled
         ));
-        assert!(!is_potential_chrome_input(&WindowEvent::Occluded(true)));
+        assert!(!is_unconditional_chrome_input(&WindowEvent::Occluded(true)));
+    }
+
+    // ── #436.8 region-aware pointer gate: pure helpers ───────────────────
+
+    #[test]
+    fn should_force_chrome_full_for_pointer_latched_forces_true_regardless_of_position() {
+        assert!(should_force_chrome_full_for_pointer(Some(false), true));
+        assert!(should_force_chrome_full_for_pointer(None, true));
+    }
+
+    #[test]
+    fn should_force_chrome_full_for_pointer_unlatched_unknown_position_is_conservative_true() {
+        assert!(should_force_chrome_full_for_pointer(None, false));
+    }
+
+    #[test]
+    fn should_force_chrome_full_for_pointer_unlatched_over_chrome_is_true() {
+        assert!(should_force_chrome_full_for_pointer(Some(true), false));
+    }
+
+    #[test]
+    fn should_force_chrome_full_for_pointer_unlatched_over_terminal_is_false() {
+        assert!(!should_force_chrome_full_for_pointer(Some(false), false));
+    }
+
+    #[test]
+    fn update_chrome_drag_latch_press_over_chrome_increments() {
+        assert_eq!(
+            update_chrome_drag_latch(0, winit::event::ElementState::Pressed, Some(true)),
+            1
+        );
+    }
+
+    #[test]
+    fn update_chrome_drag_latch_press_off_chrome_is_unchanged() {
+        assert_eq!(
+            update_chrome_drag_latch(0, winit::event::ElementState::Pressed, Some(false)),
+            0
+        );
+    }
+
+    #[test]
+    fn update_chrome_drag_latch_press_unknown_position_is_conservative_increment() {
+        assert_eq!(
+            update_chrome_drag_latch(0, winit::event::ElementState::Pressed, None),
+            1
+        );
+    }
+
+    #[test]
+    fn update_chrome_drag_latch_release_decrements() {
+        assert_eq!(
+            update_chrome_drag_latch(1, winit::event::ElementState::Released, Some(true)),
+            0
+        );
+    }
+
+    #[test]
+    fn update_chrome_drag_latch_release_at_zero_saturates() {
+        assert_eq!(
+            update_chrome_drag_latch(0, winit::event::ElementState::Released, Some(true)),
+            0
+        );
+    }
+
+    // ── #436.8 physical -> logical pointer position conversion ──────────
+
+    #[test]
+    fn physical_to_logical_pos_normal_scale_halves_at_scale_two() {
+        let pos = winit::dpi::PhysicalPosition::new(100.0, 50.0);
+        let logical = physical_to_logical_pos(pos, 2.0).expect("scale 2.0 is valid");
+        assert!((logical.x - 50.0).abs() < f32::EPSILON);
+        assert!((logical.y - 25.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn physical_to_logical_pos_scale_one_is_identity() {
+        let pos = winit::dpi::PhysicalPosition::new(123.0, 45.0);
+        let logical = physical_to_logical_pos(pos, 1.0).expect("scale 1.0 is valid");
+        assert!((logical.x - 123.0).abs() < f32::EPSILON);
+        assert!((logical.y - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn physical_to_logical_pos_invalid_scale_is_none() {
+        let pos = winit::dpi::PhysicalPosition::new(10.0, 10.0);
+        assert!(physical_to_logical_pos(pos, 0.0).is_none());
+        assert!(physical_to_logical_pos(pos, -1.0).is_none());
+        assert!(physical_to_logical_pos(pos, f64::NAN).is_none());
+        assert!(physical_to_logical_pos(pos, f64::INFINITY).is_none());
     }
 }

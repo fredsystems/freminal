@@ -351,4 +351,13 @@ pub(super) struct PerWindowState {
     /// the first FULL frame (a REPLAY can never be chosen then, since
     /// `chrome_cache` is also `None` at that point).
     pub(super) cached_central_rect: Option<egui::Rect>,
+
+    /// #436.8 menu-bar + tab-bar rects (egui logical points), captured on FULL
+    /// frames (REPLAY skips building the panels). `None` until the first FULL
+    /// frame => `is_chrome_interactive_at` returns the conservative `true`.
+    pub(super) chrome_head_rects: Option<Vec<egui::Rect>>,
+    /// #436.8 split-border drag-sensor rects (egui logical points), rebuilt every
+    /// frame; explicitly cleared on frames that build no sensors (single pane /
+    /// zoomed / overlay open).
+    pub(super) chrome_border_rects: Vec<egui::Rect>,
 }
