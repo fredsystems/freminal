@@ -39,7 +39,10 @@
         "glutin-winit",
         "winit",
         "raw-window-handle"
-      ]
+      ],
+      "description": "The chrome-caching work relies on undocumented internal behaviour of the egui 0.35.0 stack; egui/egui_glow/egui-winit are exact-pinned. Never auto-merge these, and require explicit Dependency-Dashboard approval before a bump PR is even opened, so a human consciously runs the Documents/EGUI_UPGRADE_ASSUMPTIONS.md re-verification checklist first.",
+      "automerge": false,
+      "dependencyDashboardApproval": true
     },
     {
       "groupName": "tracing",
