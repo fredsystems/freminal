@@ -297,6 +297,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_force_close: false,
                         pending_raw_keys: Vec::new(),
                         pending_frame_damage: freminal_windowing::FrameDamage::Full,
+                        pending_terminal_band_shapes: Vec::new(),
                         present_is_partial: std::sync::Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
@@ -512,6 +513,20 @@ impl freminal_windowing::App for FreminalGui {
                     &mut win.pending_frame_damage,
                     freminal_windowing::FrameDamage::Full,
                 )
+            })
+    }
+
+    fn take_terminal_band_shapes(
+        &mut self,
+        window_id: WindowId,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        // Drain the terminal-band shapes captured during `update()` for this
+        // window, leaving an empty `Vec` behind so a stale frame's shapes can
+        // never be reused by a later caller that does not recompute them.
+        self.windows
+            .get_mut(&window_id)
+            .map_or_else(Vec::new, |win| {
+                std::mem::take(&mut win.pending_terminal_band_shapes)
             })
     }
 
@@ -1375,6 +1390,7 @@ impl freminal_windowing::App for FreminalGui {
             // the loop.
 
             let available_rect = ui.available_rect_before_wrap();
+
             let active_pane_id = win.tabs.active_tab().active_pane;
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
@@ -1660,6 +1676,51 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 }
             }
+
+            // ── Terminal band: shape-index range capture (#436.2a) ───
+            //
+            // Everything from here through the broadcast label that paints
+            // via `ui` — pane content (GL callbacks), pane borders, and the
+            // per-pane decorations — lands in the SAME `LayerId::background()`
+            // layer chrome (menu bar, tab bar) already paints into, and is
+            // therefore captured in the shape-index range below. (Per-pane
+            // pop-ups reached from inside this region — the context menu,
+            // command-history palette, and search bar — deliberately use
+            // their own `Order::Foreground` `egui::Area`s, so they live in a
+            // different layer and are correctly excluded from the captured
+            // background range.) An earlier version of this subtask routed
+            // the band into a dedicated second `Order::Background` layer
+            // instead, but that
+            // trips egui 0.35's cross-layer hit-test "hidden" rule
+            // (`hit_test.rs:145`): a widget is hidden from hover/click/drag
+            // if a later widget on a DIFFERENT layer contains its rect, and
+            // two untracked same-`Order` layers tie-break by hash iteration
+            // order — nondeterministically hiding every `ui.interact()`
+            // widget in the band (e.g. the command-block gutter hover
+            // highlight). Staying in the shared background layer keeps both
+            // paint topology and hit-test topology identical to `main`; we
+            // instead remember where the band's shapes start and end within
+            // that single `PaintList` so they can be cloned out below for
+            // `App::take_terminal_band_shapes` (436.4 will tessellate/paint
+            // them separately).
+            //
+            // Capture point justification: nothing between `available_rect`
+            // above and here paints into the background layer. The
+            // intervening code only reads window-manipulation state, shows
+            // dialogs (save-layout prompt, paste/broadcast/close guards,
+            // about window, welcome overlay — all `egui::Window`, which is
+            // backed by an `Area` with its own distinct `LayerId`, never
+            // `LayerId::background()`), dispatches queued menu actions (no
+            // painting), and registers pane-border drag sensors via
+            // `ui.interact()` (which does not append any shape). So the
+            // background layer's `PaintList` has not grown since the menu
+            // bar / tab bar chrome painted (before this `CentralPanel`
+            // closure began); capturing the count here bounds the range to
+            // exactly the band.
+            let band_shape_start = ctx.graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
 
             // ── Pre-clear the window post-processing FBO ──────────
             //
@@ -2413,6 +2474,39 @@ impl freminal_windowing::App for FreminalGui {
                     );
                 }
             }
+            // ── Terminal band: clone the captured shape range (#436.2a) ──
+            //
+            // Clone the band's shapes — the range appended to the background
+            // layer's `PaintList` since `band_shape_start` above — out for
+            // `App::take_terminal_band_shapes`, for a later subtask (436.4)
+            // to tessellate/paint independently of chrome.
+            //
+            // This subtask deliberately does NOT remove/neutralize the
+            // originals: separate painting of the band does not exist yet,
+            // so neutralizing here would blank the terminal (the only
+            // remaining copy of the geometry would go nowhere). The clone is
+            // a pure read — the real shapes are left in place in
+            // `LayerId::background()`'s `PaintList` and drain into
+            // `FullOutput.shapes` exactly as before, so this frame renders
+            // byte-identically to before this subtask (and to `main`, since
+            // the band paints into the same layer, in the same call order,
+            // as it always has). Neutralization is introduced in 436.4 at
+            // the same time as the separate band paint call, so the two
+            // changes land together and a blank or double-painted frame is
+            // never observable in between.
+            //
+            // Capture point justification (end): nothing between the
+            // broadcast-label loop above and here paints into the background
+            // layer either — this is the very next statement — so
+            // `all_entries().skip(band_shape_start)` is exactly the shapes
+            // painted by the pre-clear callback through the broadcast label,
+            // i.e. exactly the band.
+            let band_shapes: Vec<egui::epaint::ClippedShape> = ctx.graphics(|g| {
+                g.get(egui::LayerId::background()).map_or_else(Vec::new, |list| {
+                    list.all_entries().skip(band_shape_start).cloned().collect()
+                })
+            });
+            win.pending_terminal_band_shapes = band_shapes;
 
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
@@ -2750,6 +2844,7 @@ impl FreminalGui {
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
+            pending_terminal_band_shapes: Vec::new(),
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
         }
@@ -2991,6 +3086,274 @@ mod tests {
         assert_eq!(
             settings_owner_close_decision(true, true),
             SettingsOwnerCloseDecision::VetoWithPrompt
+        );
+    }
+
+    // ── Terminal band shape-index-range extraction (#436.2a) ────────────
+    //
+    // These tests pin the mechanism `update()` uses for the `band_shapes`
+    // binding: paint the band into the SAME `LayerId::background()` layer
+    // chrome already uses (no dedicated layer), remember the shape count
+    // before ("`band_shape_start`") and read `all_entries().skip(start)` to
+    // clone out exactly the range appended since. A full
+    // `FreminalGui`/`PerWindowState` cannot be constructed headlessly
+    // (`freminal_windowing::WindowId` has no public constructor outside the
+    // real winit event loop), so this validates the extraction primitive
+    // directly against a bare `egui::Context`, independent of the app.
+
+    #[test]
+    fn band_shape_range_extraction_finds_only_shapes_painted_after_start() {
+        let ctx = egui::Context::default();
+
+        // A shape painted *before* `band_shape_start` is captured (mirrors
+        // chrome — menu bar, tab bar — painting into the background layer
+        // earlier in the same pass) must NOT be included in the extracted
+        // range.
+        let mut extracted: Vec<egui::epaint::ClippedShape> = Vec::new();
+        let mut chrome_shape_count = 0usize;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // "Chrome" shape, painted before the band region starts.
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(5.0, 5.0)),
+                0.0,
+                egui::Color32::BLUE,
+            );
+            chrome_shape_count = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            // Capture point, exactly as production does immediately before
+            // the band region.
+            let band_shape_start = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            // Band shapes, painted into the same `ui` (background layer).
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::RED,
+            );
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(30.0, 30.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::GREEN,
+            );
+
+            extracted = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or_else(Vec::new, |list| {
+                        list.all_entries().skip(band_shape_start).cloned().collect()
+                    })
+            });
+        });
+
+        assert_eq!(
+            chrome_shape_count, 1,
+            "sanity: exactly one chrome shape painted before the band"
+        );
+        assert_eq!(
+            extracted.len(),
+            2,
+            "expected exactly the two band shapes, none of the chrome shape painted \
+             before `band_shape_start`"
+        );
+    }
+
+    #[test]
+    fn band_shape_range_extraction_is_a_clone_not_a_drain() {
+        // 436.2a's correctness requirement: extraction must NOT remove the
+        // shapes from the background layer (that is deferred to 436.4,
+        // alongside separate band painting). Confirms the real shapes are
+        // still present after our clone-only extraction, and that egui's
+        // own `end_pass` still drains them into `FullOutput.shapes` — i.e.
+        // rendering is unaffected by the extraction seam existing.
+        let ctx = egui::Context::default();
+
+        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let band_shape_start = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::RED,
+            );
+
+            // Clone-only extraction (no removal from the layer), exactly as
+            // production does in this subtask.
+            let extracted: Vec<egui::epaint::ClippedShape> = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or_else(Vec::new, |list| {
+                        list.all_entries().skip(band_shape_start).cloned().collect()
+                    })
+            });
+            assert!(!extracted.is_empty());
+        });
+
+        assert!(
+            !full_output.shapes.is_empty(),
+            "the background layer's shapes must still drain into FullOutput.shapes \
+             (byte-identical rendering) because this subtask does not remove them \
+             — that is 436.4's job, done together with separate band painting"
+        );
+    }
+
+    // ── Regression test: same-layer widgets are not cross-layer-hidden ──
+    //
+    // This is the blocker the adversarial review caught in the FIRST attempt
+    // at 436.2a: routing the terminal band into a *second*
+    // `Order::Background` layer (distinct from `LayerId::background()`,
+    // which chrome — menu bar, tab bar, and the `CentralPanel`'s own root
+    // widget rect — paints into) trips egui 0.35's cross-layer hit-test
+    // "hidden" rule (`egui-0.35.0/src/hit_test.rs:145-148`): a widget is
+    // hidden from hover/click/drag if a LATER widget on a DIFFERENT layer
+    // contains its rect. `CentralPanel`'s content-area widget rect covers
+    // the whole band, so once the band moved to its own layer, every
+    // `ui.interact()` widget inside the band (e.g. the command-block gutter
+    // hover highlight) was liable to be permanently hidden — the two
+    // untracked `Order::Background` layers tie-break by `IdMap` (hash)
+    // iteration order (`nohash_hasher::IntMap`), which the second test below
+    // reproduces deterministically for the exact `band_layer_id` scheme the
+    // first attempt used, and is NOT controlled by paint call order.
+    //
+    // This is a real behavioral test (not merely structural): it drives two
+    // full `egui::Context::run_ui` passes with an injected
+    // `Event::PointerMoved`, exactly as a real frame would, and reads
+    // `Response::hovered()` — which is the same mechanism the failing
+    // command-block gutter hover highlight relies on.
+    #[test]
+    fn same_layer_widget_is_not_hidden_by_containing_widget() {
+        let big_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let small_rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(20.0, 20.0));
+        let pointer_pos = small_rect.center();
+
+        let ctx = egui::Context::default();
+
+        // Frame 1: register both widgets on the SAME layer as `ui`
+        // (`LayerId::background()`) — mirroring the fixed `update()`, where
+        // the band paints directly into `ui` rather than a dedicated
+        // `band_layer_id`. `big` mimics `CentralPanel`'s content-area
+        // widget rect (which fully contains the band); `small` mimics a
+        // band-region interactive widget (e.g. the command-block gutter).
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let _small = ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+        });
+
+        // Frame 2: pointer is over `small_rect`. Hit-testing (computed at
+        // the start of this frame from frame 1's registered widget rects)
+        // must find `band_widget` hovered — same-layer widgets are never
+        // subject to the cross-layer "hidden" rule, regardless of paint
+        // order, since `hit_test.rs` only hides a widget when
+        // `current.layer_id != next.layer_id`.
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(pointer_pos)],
+            ..Default::default()
+        };
+        let mut small_hovered = false;
+        let _ = ctx.run_ui(raw_input, |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let small_response = ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+            small_hovered = small_response.hovered();
+        });
+
+        assert!(
+            small_hovered,
+            "a widget fully contained by another widget on the SAME layer must \
+             still be hoverable — this is the invariant the terminal band relies \
+             on by staying in `LayerId::background()` rather than a dedicated layer"
+        );
+    }
+
+    #[test]
+    fn dedicated_background_layer_hides_contained_widget_cross_layer() {
+        // Reproduces the actual blocker: the FIRST 436.2a attempt routed the
+        // band into `band_layer_id` (a second `Order::Background` layer,
+        // keyed by window id, exactly as constructed below) instead of
+        // `LayerId::background()`. This deterministically demonstrates that
+        // scheme hides a band widget behind the root content-area widget,
+        // for this pinned egui/ahash version (the `IdMap` hash tie-break
+        // ordering between two `Order::Background` layers is fixed for a
+        // given ahash seed/version but is an internal implementation detail
+        // — NOT something application code controls or should rely on,
+        // which is precisely why the band must not use a second layer at
+        // all, in either tie-break order).
+        let big_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let small_rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(20.0, 20.0));
+        let pointer_pos = small_rect.center();
+        let band_layer_id = egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("freminal_terminal_band").with(egui::Id::new("probe_window")),
+        );
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let band_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(big_rect)
+                    .layer_id(band_layer_id),
+            );
+            let _small = band_ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+        });
+
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(pointer_pos)],
+            ..Default::default()
+        };
+        let mut small_hovered = false;
+        let _ = ctx.run_ui(raw_input, |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let band_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(big_rect)
+                    .layer_id(band_layer_id),
+            );
+            let small_response = band_ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+            small_hovered = small_response.hovered();
+        });
+
+        assert!(
+            !small_hovered,
+            "expected the dedicated-layer scheme to reproduce the cross-layer \
+             hidden-widget blocker (this pins down WHY that approach was reverted)"
         );
     }
 }

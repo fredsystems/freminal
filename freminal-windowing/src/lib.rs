@@ -160,6 +160,33 @@ pub trait App {
         FrameDamage::Full
     }
 
+    /// Drain the terminal-band egui shapes produced during [`App::update`]
+    /// for this window (#436.2a).
+    ///
+    /// The "terminal band" is the region of the frame — pane content, pane
+    /// borders, and related overlays — that is rebuilt every frame and is
+    /// intended to be tessellated/painted separately from the rest of the
+    /// chrome (menu bar, tab bar, modals) in a later optimization. An app
+    /// that wants to participate paints the band into the SAME egui layer as
+    /// the rest of its chrome during `update()` (routing it into a dedicated
+    /// layer instead trips egui's cross-layer hit-test "hidden" rule and can
+    /// suppress hover/click/drag on band widgets), remembers the band's
+    /// shape-index range within that layer's `PaintList`, and returns a
+    /// clone of exactly that range here.
+    ///
+    /// Called by the windowing layer once per frame, after [`App::update`]
+    /// returns for that window, mirroring [`App::take_frame_damage`].
+    ///
+    /// The default returns an empty `Vec` — the conservative, always-correct
+    /// behavior for an app that does not participate in this optimization
+    /// (or has not yet wired it up).
+    fn take_terminal_band_shapes(
+        &mut self,
+        _window_id: WindowId,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        Vec::new()
+    }
+
     /// Shared flag through which the windowing layer publishes the
     /// **authoritative** partial-present decision for each frame.
     ///
@@ -438,5 +465,54 @@ mod tests {
 
         let err = Error::SwapBuffers("swap fail".to_owned());
         assert!(err.to_string().contains("swap fail"));
+    }
+
+    /// Minimal `App` implementer that relies entirely on default method
+    /// bodies, used to pin the default behavior of
+    /// `App::take_terminal_band_shapes` (#436.2a) — mirroring the
+    /// pre-existing `take_frame_damage` default — without constructing a
+    /// full `freminal::gui::FreminalGui`, which is impractical headlessly
+    /// (its windows are keyed by a real winit `WindowId`).
+    struct DummyApp;
+
+    impl App for DummyApp {
+        fn update(
+            &mut self,
+            _window_id: WindowId,
+            _ctx: &egui::Context,
+            _gl: &glow::Context,
+            _handle: &WindowHandle<'_>,
+        ) {
+        }
+
+        fn on_window_created(
+            &mut self,
+            _window_id: WindowId,
+            _ctx: &egui::Context,
+            _handle: &WindowHandle<'_>,
+            _inner_size: (u32, u32),
+        ) {
+        }
+
+        fn on_close_requested(&mut self, _window_id: WindowId) -> bool {
+            true
+        }
+
+        fn clear_color(&self, _window_id: WindowId) -> [f32; 4] {
+            [0.0, 0.0, 0.0, 1.0]
+        }
+    }
+
+    #[test]
+    fn take_terminal_band_shapes_default_is_empty_and_reset_on_read() {
+        let mut app = DummyApp;
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        // Empty by default (no `update()` has run / default trait body).
+        assert!(app.take_terminal_band_shapes(window_id).is_empty());
+
+        // Reset-on-read: a second call still returns empty, never a stale
+        // or accumulated value.
+        assert!(app.take_terminal_band_shapes(window_id).is_empty());
     }
 }
