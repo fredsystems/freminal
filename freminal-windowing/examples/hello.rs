@@ -1,6 +1,6 @@
 //! Minimal example: opens a window with an egui label.
 
-use freminal_windowing::{App, WindowConfig, WindowHandle, WindowId};
+use freminal_windowing::{App, ChromeMode, WindowConfig, WindowHandle, WindowId};
 
 struct HelloApp;
 
@@ -11,6 +11,7 @@ impl App for HelloApp {
         ctx: &egui::Context,
         _gl: &glow::Context,
         _handle: &WindowHandle<'_>,
+        _chrome_mode: ChromeMode,
     ) {
         let mut root_ui = egui::Ui::new(
             ctx.clone(),

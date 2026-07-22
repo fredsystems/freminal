@@ -220,27 +220,26 @@ pub(super) struct PerWindowState {
     /// [`FrameDamage::Full`]: freminal_windowing::FrameDamage::Full
     pub(super) pending_frame_damage: freminal_windowing::FrameDamage,
 
-    /// Egui shapes for the "terminal band" (the pre-clear FBO callback, the
-    /// per-pane render loop, the post-shader composite callback, pane border
-    /// lines, and the broadcast label) painted during the most recent
-    /// `update()` of this window (#436.2a), drained by
-    /// `App::take_terminal_band_shapes`.
+    /// Shape-index range for the "terminal band" (the pre-clear FBO
+    /// callback, the per-pane render loop, the post-shader composite
+    /// callback, pane border lines, and the broadcast label) within this
+    /// frame's `full_output.shapes`, drained by
+    /// `App::take_terminal_band_range` (#436.4a; supersedes the #436.2a
+    /// shape-cloning approach previously exposed via the now-removed
+    /// `take_terminal_band_shapes`).
     ///
-    /// Set at the end of each `update()` by cloning the shape-index range
-    /// `[band_shape_start, band_shape_end)` out of
-    /// `LayerId::background()`'s `PaintList` via `ctx.graphics(..)` — see the
-    /// extraction comment at the `band_shapes` binding in `update()`. The
-    /// band paints into the SAME background layer chrome uses (not a
-    /// dedicated layer: routing it into a second `Order::Background` layer
-    /// trips egui's cross-layer hit-test "hidden" rule and suppresses band
-    /// widget interaction — see the capture-point comments in `update()`).
-    /// This subtask (436.2a) only establishes the extraction seam: the
-    /// shapes are cloned (not removed from the background layer), so they
-    /// still drain into `FullOutput.shapes` and render exactly as before.
-    /// Separate tessellation/painting of the band — which requires
-    /// neutralizing those shapes so they are not double-painted — is 436.4.
-    /// Defaults to empty before the first frame.
-    pub(super) pending_terminal_band_shapes: Vec<egui::epaint::ClippedShape>,
+    /// Set at the end of each `update()` to `band_shape_start..band_shape_end`
+    /// — the range appended to `LayerId::background()`'s `PaintList` since
+    /// `band_shape_start` was captured — see the extraction comment at the
+    /// `band_shape_end` binding in `update()`. The band paints
+    /// into the SAME background layer chrome uses (not a dedicated layer:
+    /// routing it into a second `Order::Background` layer trips egui's
+    /// cross-layer hit-test "hidden" rule and suppresses band widget
+    /// interaction — see the capture-point comments in `update()`). Since
+    /// the background layer drains first into `FullOutput.shapes`, this
+    /// range is valid as-is against `full_output.shapes` in `run_frame`.
+    /// Defaults to `0..0` before the first frame.
+    pub(super) pending_terminal_band_range: std::ops::Range<usize>,
 
     /// The `(active tab, active pane)` shown on the previous frame.
     ///

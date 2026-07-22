@@ -31,7 +31,7 @@
 use freminal::gui::chrome_style::build_visuals;
 use freminal_common::gui_theme::{GuiTheme, StyleProfile};
 use freminal_common::themes::{self, ThemePalette};
-use freminal_windowing::{App, WindowConfig, WindowHandle, WindowId};
+use freminal_windowing::{App, ChromeMode, WindowConfig, WindowHandle, WindowId};
 
 /// All built-in themes, in registry order, so every theme can be audited
 /// (112.3f/g) — not a curated subset.
@@ -253,6 +253,7 @@ impl App for ChromeGallery {
         ctx: &egui::Context,
         _gl: &glow::Context,
         _handle: &WindowHandle<'_>,
+        _chrome_mode: ChromeMode,
     ) {
         // Apply the draft style as the window's GLOBAL visuals so that
         // top-level popup surfaces (combo dropdowns, context menus) — which

@@ -110,6 +110,43 @@ pub enum ChromeDamage {
     Unchanged,
 }
 
+/// Whether the app should rebuild chrome widgets this frame or may reuse
+/// cached chrome primitives from a previous frame (#436.4a scaffolding).
+///
+/// The default, [`ChromeMode::Full`], is the always-correct behavior: the
+/// app re-records and re-tessellates every widget, exactly as it always
+/// has. [`ChromeMode::Replay`] is not yet produced by `run_frame` — 436.4b
+/// wires up the decision (chrome-damage + cache-validity gates) that flips
+/// this to `Replay` for eligible frames. An app that has not been updated
+/// to consult this parameter may simply ignore it; doing so is always safe
+/// because the windowing layer only passes `Full` until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromeMode {
+    /// Rebuild chrome widgets this frame (re-record + re-tessellate).
+    #[default]
+    Full,
+    /// Reuse cached chrome primitives; skip chrome-widget construction.
+    /// (Not yet produced by `run_frame` — 436.4b flips this on.)
+    Replay,
+}
+
+/// Per-frame signals drained from the [`App`] immediately after
+/// [`App::update`] returns, consumed by the windowing layer to decide
+/// paint-order splitting (#436.4a) and, in later subtasks, chrome replay.
+#[derive(Debug, Clone)]
+pub struct FrameSignals {
+    /// How much of the frame changed (see [`FrameDamage`]).
+    pub frame_damage: FrameDamage,
+    /// The terminal band's shape-index range within this frame's
+    /// `full_output.shapes` (#436.4a) — the contiguous `[start, end)` slice
+    /// painted separately from chrome. Defaults to `0..0` (empty) for an
+    /// app that has not wired up the band range; in that case the whole
+    /// shape list is treated as "tail" and painted in a single
+    /// `paint_primitives` call, byte-identical to the pre-#436.4a
+    /// single-call path.
+    pub band_range: std::ops::Range<usize>,
+}
+
 /// Configuration for creating a new window.
 pub struct WindowConfig {
     /// Window title.
@@ -134,12 +171,20 @@ pub trait App {
     ///
     /// `handle` allows queuing window operations (title, close, repaint, etc.)
     /// that are executed after this callback returns.
+    ///
+    /// `chrome_mode` is the #436.4a scaffold for chrome-primitive replay: the
+    /// app should skip chrome-widget construction (menu bar, tab bar, and
+    /// other static chrome) when it is [`ChromeMode::Replay`], rebuilding
+    /// only the terminal band. As of this subtask the windowing layer always
+    /// passes [`ChromeMode::Full`] — 436.4b is what starts passing `Replay`
+    /// — so an implementer may ignore this parameter for now.
     fn update(
         &mut self,
         window_id: WindowId,
         ctx: &egui::Context,
         gl: &glow::Context,
         handle: &WindowHandle<'_>,
+        chrome_mode: ChromeMode,
     );
 
     /// Called when a window is created.
@@ -181,31 +226,36 @@ pub trait App {
         FrameDamage::Full
     }
 
-    /// Drain the terminal-band egui shapes produced during [`App::update`]
-    /// for this window (#436.2a).
+    /// Drain the terminal band's shape-index range within this frame's
+    /// `full_output.shapes` (#436.4a).
     ///
     /// The "terminal band" is the region of the frame — pane content, pane
     /// borders, and related overlays — that is rebuilt every frame and is
-    /// intended to be tessellated/painted separately from the rest of the
-    /// chrome (menu bar, tab bar, modals) in a later optimization. An app
+    /// tessellated/painted separately from the rest of the chrome (menu bar,
+    /// tab bar, modals) by `run_frame`'s 3-way head/band/tail split. An app
     /// that wants to participate paints the band into the SAME egui layer as
     /// the rest of its chrome during `update()` (routing it into a dedicated
     /// layer instead trips egui's cross-layer hit-test "hidden" rule and can
     /// suppress hover/click/drag on band widgets), remembers the band's
     /// shape-index range within that layer's `PaintList`, and returns a
-    /// clone of exactly that range here.
+    /// clone of exactly that range here. This range is interpreted as an
+    /// index range into `full_output.shapes` (the background layer drains
+    /// first, so the two coincide) — supersedes the shape-cloning approach
+    /// of the prior `take_terminal_band_shapes` (#436.2a), which is no
+    /// longer needed once `run_frame` slices by range directly.
     ///
     /// Called by the windowing layer once per frame, after [`App::update`]
     /// returns for that window, mirroring [`App::take_frame_damage`].
+    /// Reset-on-read: the app leaves `0..0` behind so a stale range can
+    /// never be reused by a frame that didn't recompute it.
     ///
-    /// The default returns an empty `Vec` — the conservative, always-correct
+    /// The default returns `0..0` — the conservative, always-correct
     /// behavior for an app that does not participate in this optimization
-    /// (or has not yet wired it up).
-    fn take_terminal_band_shapes(
-        &mut self,
-        _window_id: WindowId,
-    ) -> Vec<egui::epaint::ClippedShape> {
-        Vec::new()
+    /// (or has not yet wired it up): `run_frame` treats an empty range as
+    /// "everything is tail", painting the whole frame in one call, exactly
+    /// as before #436.4a.
+    fn take_terminal_band_range(&mut self, _window_id: WindowId) -> std::ops::Range<usize> {
+        0..0
     }
 
     /// Drain the chrome-damage decision computed during `update()` for this
@@ -499,10 +549,11 @@ mod tests {
 
     /// Minimal `App` implementer that relies entirely on default method
     /// bodies, used to pin the default behavior of
-    /// `App::take_terminal_band_shapes` (#436.2a) — mirroring the
-    /// pre-existing `take_frame_damage` default — without constructing a
-    /// full `freminal::gui::FreminalGui`, which is impractical headlessly
-    /// (its windows are keyed by a real winit `WindowId`).
+    /// `App::take_terminal_band_range` (#436.4a, superseding the removed
+    /// #436.2a `take_terminal_band_shapes`) — mirroring the pre-existing
+    /// `take_frame_damage` default — without constructing a full
+    /// `freminal::gui::FreminalGui`, which is impractical headlessly (its
+    /// windows are keyed by a real winit `WindowId`).
     struct DummyApp;
 
     impl App for DummyApp {
@@ -512,6 +563,7 @@ mod tests {
             _ctx: &egui::Context,
             _gl: &glow::Context,
             _handle: &WindowHandle<'_>,
+            _chrome_mode: ChromeMode,
         ) {
         }
 
@@ -534,20 +586,21 @@ mod tests {
     }
 
     #[test]
-    fn take_terminal_band_shapes_default_is_empty_and_reset_on_read() {
+    fn take_terminal_band_range_default_is_empty_and_reset_on_read() {
         let mut app = DummyApp;
         let window_id = WindowId(winit::window::WindowId::dummy());
 
-        // Empty by default (no `update()` has run / default trait body).
-        assert!(app.take_terminal_band_shapes(window_id).is_empty());
+        // Empty (`0..0`) by default (no `update()` has run / default trait
+        // body).
+        assert_eq!(app.take_terminal_band_range(window_id), 0..0);
 
-        // Reset-on-read: a second call still returns empty, never a stale
+        // Reset-on-read: a second call still returns `0..0`, never a stale
         // or accumulated value.
-        assert!(app.take_terminal_band_shapes(window_id).is_empty());
+        assert_eq!(app.take_terminal_band_range(window_id), 0..0);
     }
 
     /// Pins the default behavior of `App::take_chrome_damage` (#436.3) —
-    /// mirroring the `take_frame_damage`/`take_terminal_band_shapes` default
+    /// mirroring the `take_frame_damage`/`take_terminal_band_range` default
     /// discipline above — using the same `DummyApp` (real `FreminalGui`
     /// windows are keyed by a real winit `WindowId`, impractical headlessly).
     #[test]

@@ -299,7 +299,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_force_close: false,
                         pending_raw_keys: Vec::new(),
                         pending_frame_damage: freminal_windowing::FrameDamage::Full,
-                        pending_terminal_band_shapes: Vec::new(),
+                        pending_terminal_band_range: 0..0,
                         present_is_partial: std::sync::Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
@@ -525,18 +525,13 @@ impl freminal_windowing::App for FreminalGui {
             })
     }
 
-    fn take_terminal_band_shapes(
-        &mut self,
-        window_id: WindowId,
-    ) -> Vec<egui::epaint::ClippedShape> {
-        // Drain the terminal-band shapes captured during `update()` for this
-        // window, leaving an empty `Vec` behind so a stale frame's shapes can
-        // never be reused by a later caller that does not recompute them.
-        self.windows
-            .get_mut(&window_id)
-            .map_or_else(Vec::new, |win| {
-                std::mem::take(&mut win.pending_terminal_band_shapes)
-            })
+    fn take_terminal_band_range(&mut self, window_id: WindowId) -> std::ops::Range<usize> {
+        // Drain the terminal-band range captured during `update()` for this
+        // window, leaving `0..0` behind so a stale frame's range can never
+        // be reused by a later caller that does not recompute it.
+        self.windows.get_mut(&window_id).map_or(0..0, |win| {
+            std::mem::replace(&mut win.pending_terminal_band_range, 0..0)
+        })
     }
 
     fn take_chrome_damage(&mut self, window_id: WindowId) -> freminal_windowing::ChromeDamage {
@@ -563,7 +558,13 @@ impl freminal_windowing::App for FreminalGui {
         ctx: &egui::Context,
         _gl: &glow::Context,
         handle: &freminal_windowing::WindowHandle<'_>,
+        chrome_mode: freminal_windowing::ChromeMode,
     ) {
+        // 436.4b consumes this to skip chrome-widget construction on
+        // `ChromeMode::Replay` frames. `run_frame` only passes `Full` as of
+        // 436.4a, so there is nothing to branch on yet.
+        let _ = chrome_mode;
+
         trace!("Starting new frame");
         let now = std::time::Instant::now();
 
@@ -1730,7 +1731,8 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // ── Terminal band: shape-index range capture (#436.2a) ───
+            // ── Terminal band: shape-index range capture (#436.2a, range
+            // exposed via `App::take_terminal_band_range` as of #436.4a) ───
             //
             // Everything from here through the broadcast label that paints
             // via `ui` — pane content (GL callbacks), pane borders, and the
@@ -1753,9 +1755,10 @@ impl freminal_windowing::App for FreminalGui {
             // highlight). Staying in the shared background layer keeps both
             // paint topology and hit-test topology identical to `main`; we
             // instead remember where the band's shapes start and end within
-            // that single `PaintList` so they can be cloned out below for
-            // `App::take_terminal_band_shapes` (436.4 will tessellate/paint
-            // them separately).
+            // that single `PaintList` and hand back that `[start, end)` range
+            // for `App::take_terminal_band_range`, which `run_frame` uses to
+            // slice `full_output.shapes` into head/band/tail and paint each
+            // separately (#436.4a).
             //
             // Capture point justification: nothing between `available_rect`
             // above and here paints into the background layer. The
@@ -2541,39 +2544,34 @@ impl freminal_windowing::App for FreminalGui {
                     );
                 }
             }
-            // ── Terminal band: clone the captured shape range (#436.2a) ──
+            // ── Terminal band: capture the end of the shape range (#436.4a) ──
             //
-            // Clone the band's shapes — the range appended to the background
-            // layer's `PaintList` since `band_shape_start` above — out for
-            // `App::take_terminal_band_shapes`, for a later subtask (436.4)
-            // to tessellate/paint independently of chrome.
-            //
-            // This subtask deliberately does NOT remove/neutralize the
-            // originals: separate painting of the band does not exist yet,
-            // so neutralizing here would blank the terminal (the only
-            // remaining copy of the geometry would go nowhere). The clone is
-            // a pure read — the real shapes are left in place in
+            // Read the background layer's current shape count as
+            // `band_shape_end`, so `[band_shape_start, band_shape_end)` is
+            // exactly the band's range within `LayerId::background()`'s
+            // `PaintList`. `run_frame` slices `full_output.shapes` by this
+            // range directly (the background layer drains first into
+            // `full_output.shapes`), so — unlike 436.2a's approach — nothing
+            // is cloned here: this is a pure read of the shape count, and
+            // the real shapes are left in place in
             // `LayerId::background()`'s `PaintList` and drain into
-            // `FullOutput.shapes` exactly as before, so this frame renders
-            // byte-identically to before this subtask (and to `main`, since
-            // the band paints into the same layer, in the same call order,
-            // as it always has). Neutralization is introduced in 436.4 at
-            // the same time as the separate band paint call, so the two
-            // changes land together and a blank or double-painted frame is
-            // never observable in between.
+            // `FullOutput.shapes` exactly as before. `run_frame`'s 3-way
+            // split (head/band/tail, each tessellated and painted
+            // separately, in that order) reconstructs the same total shape
+            // set with the same paint order as the pre-#436.4a single-call
+            // path, so this frame renders byte-identically to before.
             //
             // Capture point justification (end): nothing between the
             // broadcast-label loop above and here paints into the background
             // layer either — this is the very next statement — so
-            // `all_entries().skip(band_shape_start)` is exactly the shapes
-            // painted by the pre-clear callback through the broadcast label,
-            // i.e. exactly the band.
-            let band_shapes: Vec<egui::epaint::ClippedShape> = ctx.graphics(|g| {
-                g.get(egui::LayerId::background()).map_or_else(Vec::new, |list| {
-                    list.all_entries().skip(band_shape_start).cloned().collect()
-                })
+            // `band_shape_end` is exactly the count after the pre-clear
+            // callback through the broadcast label, i.e. exactly the end of
+            // the band.
+            let band_shape_end = ctx.graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(band_shape_start, |list| list.all_entries().len())
             });
-            win.pending_terminal_band_shapes = band_shapes;
+            win.pending_terminal_band_range = band_shape_start..band_shape_end;
 
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
@@ -2975,7 +2973,7 @@ impl FreminalGui {
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
-            pending_terminal_band_shapes: Vec::new(),
+            pending_terminal_band_range: 0..0,
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
             pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
@@ -3227,17 +3225,22 @@ mod tests {
         );
     }
 
-    // ── Terminal band shape-index-range extraction (#436.2a) ────────────
+    // ── Terminal band shape-index-range extraction (#436.2a / #436.4a) ──
     //
-    // These tests pin the mechanism `update()` uses for the `band_shapes`
-    // binding: paint the band into the SAME `LayerId::background()` layer
-    // chrome already uses (no dedicated layer), remember the shape count
-    // before ("`band_shape_start`") and read `all_entries().skip(start)` to
-    // clone out exactly the range appended since. A full
-    // `FreminalGui`/`PerWindowState` cannot be constructed headlessly
-    // (`freminal_windowing::WindowId` has no public constructor outside the
-    // real winit event loop), so this validates the extraction primitive
-    // directly against a bare `egui::Context`, independent of the app.
+    // These tests pin the underlying mechanism `update()` uses to bound the
+    // terminal band's shape-index range: paint the band into the SAME
+    // `LayerId::background()` layer chrome already uses (no dedicated
+    // layer), remember the shape count before ("`band_shape_start`"), and
+    // read `all_entries().skip(start)` to identify exactly the range
+    // appended since. Production (as of #436.4a) captures `band_shape_end`
+    // the same way and hands back `[band_shape_start, band_shape_end)` as a
+    // range via `App::take_terminal_band_range`, rather than cloning the
+    // shapes out here — but the boundary-counting primitive these tests
+    // exercise is identical either way. A full `FreminalGui`/`PerWindowState`
+    // cannot be constructed headlessly (`freminal_windowing::WindowId` has
+    // no public constructor outside the real winit event loop), so this
+    // validates the extraction primitive directly against a bare
+    // `egui::Context`, independent of the app.
 
     #[test]
     fn band_shape_range_extraction_finds_only_shapes_painted_after_start() {

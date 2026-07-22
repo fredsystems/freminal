@@ -20,8 +20,8 @@ use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
 use crate::{
-    App, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry, WindowHandle, WindowId,
-    WindowOp,
+    App, FrameSignals, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry,
+    WindowHandle, WindowId, WindowOp,
 };
 
 use conv2::{ApproxFrom, RoundToZero};
@@ -595,9 +595,12 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     clear_color,
                     raw_input,
                     present_flag.as_ref(),
-                    |ctx, gl| {
-                        app.update(window_id, ctx, gl, &handle);
-                        app.take_frame_damage(window_id)
+                    |ctx, gl, chrome_mode| {
+                        app.update(window_id, ctx, gl, &handle, chrome_mode);
+                        FrameSignals {
+                            frame_damage: app.take_frame_damage(window_id),
+                            band_range: app.take_terminal_band_range(window_id),
+                        }
                     },
                 );
 
