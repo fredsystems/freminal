@@ -1093,6 +1093,15 @@ impl freminal_windowing::App for FreminalGui {
         let (snap, pane_scroll_offset) = {
             let Some(active_pane_ref) = win.tabs.active_tab().active_pane() else {
                 warn!("update: active tab has no active pane; skipping render frame");
+                // CLEANUP-436-A: `win` was moved out of `self.windows` at the
+                // top of this frame (`self.windows.remove(&window_id)`); every
+                // early return after that point must reinsert it (see the
+                // `CannotCloseLastPane` arm above, which does). Skipping the
+                // reinsert here permanently orphans this window's
+                // `PerWindowState` — including, since #436, its chrome cache and
+                // self-dismissal settle state — leaving the window rendering a
+                // blank/fatal-error surface forever. Reinsert before returning.
+                self.windows.insert(window_id, win);
                 return;
             };
             (
