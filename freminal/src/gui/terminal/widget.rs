@@ -1083,6 +1083,28 @@ pub struct PaneRenderCache {
     /// Pointer identity of the `visible_chars` `Arc` used for the last URL
     /// hover lookup.
     pub(super) hover_snap_ptr: usize,
+    /// The `visible_chars` `Arc` this pane observed on the previous frame
+    /// (issue #439 fix #4).
+    ///
+    /// The PTY thread only publishes a new `Arc<TerminalSnapshot>` when real
+    /// output arrives (~a few times/sec under a settled full-screen TUI), but
+    /// the GUI reads the currently-published snapshot on *every* frame
+    /// (~60fps). `TerminalSnapshot::content_changed` is a flag baked into the
+    /// snapshot at build time, so re-reading the *same* published `Arc` sees a
+    /// stale `content_changed == true` on every frame between real updates.
+    ///
+    /// Comparing the current `visible_chars` `Arc` against this field via
+    /// `Arc::ptr_eq` tells us whether *this* frame is the first observation of
+    /// a genuinely-new snapshot. It gates the content-driven 16ms repaint
+    /// scheduling in `app_impl` so an already-drawn snapshot does not
+    /// perpetually re-arm a 60fps wake for pixels that are not changing.
+    ///
+    /// Distinct from [`Self::last_rendered_visible`], which tracks the last
+    /// *full rebuild* (conditionally updated inside the render path); this
+    /// tracks the last *observation* (updated unconditionally every frame,
+    /// before the widget draws). An owned `Arc` (not a bare address) is stored
+    /// to avoid the ABA hazard of a freed allocation reusing an old address.
+    pub(super) last_observed_visible: Option<Arc<Vec<TChar>>>,
     /// Per-pane shaping cache for text layout.
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
     /// Whether the user is currently dragging the scrollbar thumb.
@@ -1174,6 +1196,7 @@ impl PaneRenderCache {
             previous_command_block_hover_rows: None,
             cached_hovered_url: None,
             hover_snap_ptr: 0,
+            last_observed_visible: None,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
             scrollbar_dragging: false,
             pointer_in_gutter_last_frame: false,
@@ -1209,6 +1232,31 @@ impl PaneRenderCache {
     #[must_use]
     pub(crate) const fn hover_tooltip_active(&self) -> bool {
         self.cached_hovered_url.is_some()
+    }
+
+    /// Record that this pane observed `visible_chars` this frame and report
+    /// whether it is the first observation of a genuinely-new snapshot
+    /// allocation (issue #439 fix #4).
+    ///
+    /// Returns `true` only when `visible_chars` is a different `Arc`
+    /// allocation from the one observed on the previous call — i.e. the PTY
+    /// thread published a new snapshot since last frame. Returns `false` when
+    /// the same published snapshot is being re-read (the ~14 idle frames
+    /// between real updates under a settled full-screen TUI).
+    ///
+    /// Always updates the stored `Arc` (a cheap refcount bump), so it must be
+    /// called exactly once per pane per frame, before the content-driven
+    /// repaint decision. `last_observed_visible` is `pub(super)`
+    /// (render-pipeline internal); this narrow accessor lets `app_impl.rs`'s
+    /// repaint scheduler consult it without widening the field's visibility,
+    /// mirroring [`Self::super_pressed`] / [`Self::hover_tooltip_active`].
+    pub(crate) fn observe_visible_snapshot(&mut self, visible_chars: &Arc<Vec<TChar>>) -> bool {
+        let is_new = self
+            .last_observed_visible
+            .as_ref()
+            .is_none_or(|prev| !Arc::ptr_eq(prev, visible_chars));
+        self.last_observed_visible = Some(Arc::clone(visible_chars));
+        is_new
     }
 
     /// Invalidate the cached theme pointer so the next frame forces a full
@@ -1944,6 +1992,21 @@ impl FreminalTerminalWidget {
             // is a different allocation from the one we last rendered, the
             // content has changed regardless of the `content_changed` flag.
             //
+            // We deliberately do NOT OR in the snapshot's `content_changed`
+            // flag here (issue #439 fix #4). That flag is baked into the
+            // published snapshot at build time, so when the GUI re-reads the
+            // SAME `Arc` on the ~14 frames between real PTY updates it reads a
+            // stale `true` and forces a full vertex rebuild every frame — a
+            // ~60fps rebuild for a screen changing a few times/sec. The
+            // `Arc::ptr_eq` check below already detects every genuine change:
+            // whenever real content changes, `flatten_visible` allocates a NEW
+            // `visible_chars` `Arc` (so ptr_eq fails and we rebuild), and a
+            // cursor-blink re-flatten that produces a byte-identical-but-new
+            // `Arc` also fails ptr_eq and rebuilds. Re-observing the same `Arc`
+            // correctly reports "unchanged". So the raw flag is redundant here
+            // and, worse, sticky — dropping it is what lets an idle screen fall
+            // through to the cheap cursor-only / no-op path.
+            //
             // Also force a full rebuild when the theme palette changes, since
             // foreground/background colors are baked into the vertex buffers.
             let theme_changed = cache
@@ -1962,8 +2025,7 @@ impl FreminalTerminalWidget {
             // the cached background/foreground vertex buffers are stale even
             // if `visible_chars` is byte-identical.
             let folds_changed = fold_epoch != cache.previous_fold_epoch;
-            let content_changed = snap.content_changed
-                || theme_changed
+            let content_changed = theme_changed
                 || dims_changed
                 || folds_changed
                 || cache
@@ -3567,6 +3629,52 @@ mod subtask_1_7_tests {
         assert_eq!(super::truncate_url(url, 5), "abcde");
         // One over — truncates.
         assert_eq!(super::truncate_url(url, 4), "abcd…");
+    }
+
+    #[test]
+    fn observe_visible_snapshot_reports_new_only_on_first_observation() {
+        // Issue #439 fix #4: the repaint scheduler gates the content-driven
+        // 16ms wake on this returning `true` only when a genuinely-new
+        // snapshot allocation is observed. Re-observing the SAME `Arc` (the
+        // idle frames between real PTY updates) must return `false` so the
+        // wake is not re-armed.
+        use freminal_common::buffer_states::tchar::TChar;
+
+        let mut cache = PaneRenderCache::new();
+        let snap_a = Arc::new(vec![TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
+        let snap_b = Arc::new(vec![TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+
+        // First ever observation of any snapshot is new.
+        assert!(
+            cache.observe_visible_snapshot(&snap_a),
+            "first observation of a snapshot must report new"
+        );
+        // Re-observing the SAME Arc is NOT new (the idle re-read case).
+        assert!(
+            !cache.observe_visible_snapshot(&snap_a),
+            "re-observing the same Arc must report not-new"
+        );
+        assert!(
+            !cache.observe_visible_snapshot(&snap_a),
+            "still not-new on a third re-read of the same Arc"
+        );
+        // A different allocation is new again.
+        assert!(
+            cache.observe_visible_snapshot(&snap_b),
+            "observing a different Arc allocation must report new"
+        );
+        assert!(
+            !cache.observe_visible_snapshot(&snap_b),
+            "re-observing the new Arc must then report not-new"
+        );
+        // A byte-identical but distinct allocation is still "new" (ptr
+        // identity, not value equality) — matching how `flatten_visible`
+        // allocates a fresh Arc whenever it re-flattens dirty rows.
+        let snap_b_clone_bytes = Arc::new(vec![TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+        assert!(
+            cache.observe_visible_snapshot(&snap_b_clone_bytes),
+            "a distinct allocation with identical bytes is a new observation"
+        );
     }
 }
 

@@ -24,7 +24,7 @@ use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, PtyRead, WindowCommand};
 use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
@@ -103,6 +103,71 @@ pub(crate) fn forward_command_events(
             CommandFinishedEvent { pane_id, block },
             "Failed to send command-finished event to GUI"
         );
+    }
+}
+
+/// Upper bound on how many *additional* queued `PtyRead` messages a single
+/// [`drain_pty_reads`] call folds into one batch before yielding back to the
+/// consumer thread's `select!` loop.
+///
+/// The blocking-recv'd message is always processed; this caps only the
+/// non-blocking `try_recv` drain that follows. It exists so a sustained
+/// high-throughput producer that outpaces parsing cannot keep the consumer
+/// inside the drain loop indefinitely and starve `input_rx` / `child_exit`.
+/// At the reader thread's 4096-byte read buffer, 64 chunks is ~256 KiB of
+/// output per batch — comfortably more than any single interactive redraw,
+/// while bounding worst-case input-handling latency to one batch of parses.
+const MAX_PTY_READ_BATCH: usize = 64;
+
+/// Feed a just-received `PtyRead` and every `PtyRead` already queued behind it
+/// (up to [`MAX_PTY_READ_BATCH`]) into `sink`, in arrival order, in a single
+/// batch (issue #439).
+///
+/// The PTY consumer thread's `select!` loop calls `post_event`
+/// (`build_snapshot` then `arc_swap.store` then a repaint request) exactly once
+/// per loop iteration. Before this batching, a single visual redraw from a
+/// full-screen TUI (btop, htop, vim, less) exceeded the reader thread's
+/// 4096-byte buffer and so arrived as N separate `PtyRead` messages, each
+/// triggering its own iteration and thus its own full vertex rebuild plus
+/// repaint: a ~20-40x over-draw for a screen that visually changes ~2x/sec.
+///
+/// This helper feeds `first` (the message the blocking `recv` already took)
+/// and then non-blockingly drains up to [`MAX_PTY_READ_BATCH`] further queued
+/// messages via `try_recv`, so a burst of currently-available output is folded
+/// into the emulator before the single trailing `post_event`. It mirrors the
+/// write-side drain idiom in `freminal-terminal-emulator/src/io/pty.rs`.
+///
+/// The batch is **capped** rather than draining to exhaustion: under a
+/// sustained high-throughput producer that outpaces parsing (`yes`,
+/// `cat bigfile`, a log flood), an unbounded drain could keep the consumer
+/// thread inside this loop indefinitely, starving the sibling `select!` arms
+/// (`input_rx` keystrokes/resize, `child_exit`). Capping at
+/// [`MAX_PTY_READ_BATCH`] bounds worst-case input latency to one batch of
+/// parses while still coalescing any realistic single visual redraw (btop's is
+/// ~5-6 chunks) into one snapshot. Anything beyond the cap simply stays queued
+/// and is drained by the next `select!` iteration, which also re-services the
+/// other arms first-come-first-served.
+///
+/// It is architecturally clean: the consumer thread owns the emulator
+/// exclusively, and the terminal handler's `handle_incoming_data` never itself
+/// builds a snapshot or requests a repaint — it only mutates emulator state and
+/// sets per-row dirty flags that the single trailing `build_snapshot` consults
+/// once. Ordering is preserved (crossbeam channels are FIFO), which is required
+/// for both correct escape-sequence parsing and byte-accurate recording.
+///
+/// Extracted as a free function so the "process the first message, then drain
+/// up to the cap in order, exactly once each" contract is unit-testable without
+/// spinning up a real shell.
+fn drain_pty_reads<F>(first: PtyRead, rx: &Receiver<PtyRead>, mut sink: F)
+where
+    F: FnMut(PtyRead),
+{
+    sink(first);
+    for _ in 0..MAX_PTY_READ_BATCH {
+        match rx.try_recv() {
+            Ok(read) => sink(read),
+            Err(_) => break,
+        }
     }
 }
 
@@ -523,7 +588,15 @@ fn spawn_pty_consumer_thread(
                     arc_swap.store(Arc::new(snap));
 
                     if let Some((proxy, wid)) = repaint_handle.get() {
-                        proxy.request_repaint_after(*wid, std::time::Duration::from_millis(8));
+                        // 16ms == the 60fps frame budget and the same floor
+                        // enforced everywhere else (issue #439). The previous
+                        // 8ms value bypassed that floor via the unclamped
+                        // `RequestRepaintAfter` proxy path, letting a bursty
+                        // PTY stream drive the GUI toward ~120fps. The event
+                        // loop now also clamps this path to 16ms, so this is
+                        // belt-and-braces: request the correct delay AND rely
+                        // on the floor as a backstop.
+                        proxy.request_repaint_after(*wid, std::time::Duration::from_millis(16));
                     }
                 };
 
@@ -645,14 +718,41 @@ fn spawn_pty_consumer_thread(
                 crossbeam_channel::select! {
                     recv(pty_read_rx) -> msg => {
                         if let Ok(read) = msg {
-                            let data = &read.buf[0..read.read_amount];
-                            if let Some(rec) = recording_swap.load_full() {
-                                rec.emit(EventPayload::PtyOutput {
-                                    pane_id: recording_pane_id,
-                                    data: data.to_vec(),
-                                });
-                            }
-                            emulator.handle_incoming_data(data);
+                            // Batch-drain (issue #439): a single visual redraw
+                            // from a full-screen TUI (btop, htop, vim, less)
+                            // exceeds the 4096-byte reader buffer, so one
+                            // redraw arrives as N `PtyRead` chunks. Feed the
+                            // blocking-recv'd chunk AND every chunk already
+                            // queued behind it into the emulator, then fall
+                            // through to a SINGLE `post_event` (build_snapshot
+                            // + arc_swap.store + repaint) at the bottom of the
+                            // loop. Without this drain, N chunks became N full
+                            // vertex rebuilds + N repaint requests — a ~20-40x
+                            // over-draw for a screen that changes ~2x/sec.
+                            //
+                            // This mirrors the write-side drain idiom in
+                            // `io/pty.rs` (`while let Ok(..) = try_recv()`) and
+                            // the `child_exit` drain arm below. It is
+                            // architecturally clean: this consumer thread owns
+                            // the emulator exclusively, and `handle_incoming_data`
+                            // never itself builds a snapshot or requests a
+                            // repaint — it only mutates emulator state and sets
+                            // per-row dirty flags that the single trailing
+                            // `build_snapshot` consults once.
+                            //
+                            // Recording fidelity is preserved: every chunk is
+                            // still emitted to the recorder individually, in
+                            // arrival order, exactly as before.
+                            drain_pty_reads(read, &pty_read_rx, |read: PtyRead| {
+                                let data = &read.buf[0..read.read_amount];
+                                if let Some(rec) = recording_swap.load_full() {
+                                    rec.emit(EventPayload::PtyOutput {
+                                        pane_id: recording_pane_id,
+                                        data: data.to_vec(),
+                                    });
+                                }
+                                emulator.handle_incoming_data(data);
+                            });
                             idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                         } else {
                             info!("PTY read channel closed; signaling tab death");
@@ -756,6 +856,127 @@ mod tests {
     /// Helper: build a fresh `CommandBlock` with the given fid.
     fn block_with_fid(fid: &str) -> CommandBlock {
         CommandBlock::new_running(0, None, fid.to_owned())
+    }
+
+    #[test]
+    fn drain_pty_reads_processes_first_then_queue_in_order_exactly_once() {
+        // Issue #439: the consumer must fold the blocking-recv'd chunk plus
+        // every already-queued chunk into ONE batch, in FIFO order, each
+        // exactly once, before the single trailing `post_event`. Collect the
+        // read_amounts to prove order + exactly-once without touching a parser.
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyRead>();
+        tx.send(PtyRead {
+            buf: b"CD".to_vec(),
+            read_amount: 2,
+        })
+        .unwrap();
+        tx.send(PtyRead {
+            buf: b"EF".to_vec(),
+            read_amount: 3,
+        })
+        .unwrap();
+
+        let first = PtyRead {
+            buf: b"AB".to_vec(),
+            read_amount: 1,
+        };
+        let mut seen: Vec<usize> = Vec::new();
+        drain_pty_reads(first, &rx, |read| seen.push(read.read_amount));
+
+        assert_eq!(
+            seen,
+            vec![1, 2, 3],
+            "first message must be processed first, then the queue in FIFO order, each once"
+        );
+        assert!(rx.try_recv().is_err(), "the queue must be fully drained");
+    }
+
+    #[test]
+    fn drain_pty_reads_single_message_processes_only_that_one() {
+        // The common steady-state case: nothing queued behind the recv'd
+        // message. Exactly one sink call, queue left empty.
+        let (_tx, rx) = crossbeam_channel::unbounded::<PtyRead>();
+        let first = PtyRead {
+            buf: b"x".to_vec(),
+            read_amount: 1,
+        };
+        let mut count = 0u32;
+        drain_pty_reads(first, &rx, |_read| count += 1);
+        assert_eq!(count, 1, "a lone message must be processed exactly once");
+    }
+
+    #[test]
+    fn drain_pty_reads_caps_batch_and_leaves_remainder_queued() {
+        // Responsiveness guard: a sustained producer must not keep the consumer
+        // inside the drain forever. `drain_pty_reads` processes `first` plus at
+        // most MAX_PTY_READ_BATCH queued messages, then returns so the caller's
+        // `select!` loop can re-service input_rx / child_exit. Anything beyond
+        // the cap stays queued for the next iteration.
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyRead>();
+        // Queue far more than the cap behind the first message.
+        let queued = MAX_PTY_READ_BATCH * 3;
+        for _ in 0..queued {
+            tx.send(PtyRead {
+                buf: b"y".to_vec(),
+                read_amount: 1,
+            })
+            .unwrap();
+        }
+        let first = PtyRead {
+            buf: b"y".to_vec(),
+            read_amount: 1,
+        };
+        let mut count = 0usize;
+        drain_pty_reads(first, &rx, |_read| count += 1);
+
+        // Exactly first (1) + MAX_PTY_READ_BATCH processed this call.
+        assert_eq!(
+            count,
+            1 + MAX_PTY_READ_BATCH,
+            "must process the first message plus at most MAX_PTY_READ_BATCH queued"
+        );
+        // The rest remain queued for the next select! iteration.
+        assert_eq!(
+            rx.len(),
+            queued - MAX_PTY_READ_BATCH,
+            "over-cap messages must stay queued, not be dropped"
+        );
+    }
+
+    #[test]
+    fn drain_pty_reads_feeds_emulator_bytes_in_order() {
+        // End-to-end against a real headless emulator: three chunks whose
+        // concatenation spells "ABCDEF" must be parsed as "ABCDEF" — an
+        // out-of-order or duplicated feed would produce a different string.
+        use freminal_terminal_emulator::interface::TerminalEmulator;
+
+        let (mut emu, _write_rx) = TerminalEmulator::new_headless(None);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyRead>();
+        tx.send(PtyRead {
+            buf: b"CD".to_vec(),
+            read_amount: 2,
+        })
+        .unwrap();
+        tx.send(PtyRead {
+            buf: b"EF".to_vec(),
+            read_amount: 2,
+        })
+        .unwrap();
+
+        let first = PtyRead {
+            buf: b"AB".to_vec(),
+            read_amount: 2,
+        };
+        drain_pty_reads(first, &rx, |read| {
+            emu.handle_incoming_data(&read.buf[0..read.read_amount]);
+        });
+
+        let text = emu.extract_selection_text(0, 0, 0, 5, false);
+        assert!(
+            text.contains("ABCDEF"),
+            "batched chunks must be parsed in arrival order; got: {text:?}"
+        );
+        assert!(rx.try_recv().is_err(), "the queue must be fully drained");
     }
 
     #[test]

@@ -70,6 +70,36 @@ const fn settings_owner_close_decision(
     SettingsOwnerCloseDecision::CloseNow
 }
 
+/// Whether a pane's blink-style cursor needs the periodic ~500ms repaint
+/// wake this frame.
+///
+/// A blinking cursor only needs to be re-rendered on a timer while it is
+/// actually visible on screen. The drawing side computes visibility as
+/// `snap.show_cursor && !is_echo_off && is_active_pane`
+/// (`terminal/widget.rs`'s `effective_show_cursor`); the repaint scheduler
+/// MUST gate the blink wake on the same condition, or a full-screen TUI that
+/// hides the cursor via DECTCEM (`\e[?25l`) — btop, htop, vim, less — keeps
+/// the default blink *style* and makes the terminal wake ~2x/sec forever to
+/// redraw an unchanged, cursor-hidden screen (a real idle-CPU drain).
+///
+/// Returns `true` only when the cursor style is a blink variant AND the
+/// cursor is actually visible (DECTCEM-shown, this is the active pane, and
+/// password-echo-off is not hiding it).
+const fn cursor_blink_wants_repaint(
+    style: &freminal_common::cursor::CursorVisualStyle,
+    show_cursor: bool,
+    is_active: bool,
+    is_echo_off: bool,
+) -> bool {
+    let is_blink_style = matches!(
+        style,
+        freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
+            | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
+            | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+    );
+    is_blink_style && show_cursor && is_active && !is_echo_off
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -315,6 +345,7 @@ impl freminal_windowing::App for FreminalGui {
                         cached_central_rect: None,
                         chrome_head_rects: None,
                         chrome_border_rects: Vec::new(),
+                        frame_stats: super::window::FrameStats::default(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -2040,6 +2071,34 @@ impl freminal_windowing::App for FreminalGui {
                     pane.view_state.scroll_offset = pane_snap.scroll_offset;
                 }
 
+                // First-observation gate (issue #439 fix #4).
+                //
+                // The PTY thread publishes a new `Arc<TerminalSnapshot>` only
+                // when real output arrives (a few times/sec under a settled
+                // full-screen TUI like btop), but this `update()` runs every
+                // frame (~60fps) and re-reads whatever snapshot is currently
+                // published. `pane_snap.content_changed` is baked into the
+                // snapshot at build time, so on the ~14 frames between real
+                // updates it reads a stale `true`, which used to re-arm a 16ms
+                // content repaint every frame — a self-perpetuating 60fps wake
+                // for pixels that are not changing.
+                //
+                // Compare the current `visible_chars` `Arc` against the one
+                // observed last frame: `is_new_snapshot` is `true` only on the
+                // first frame a genuinely-new snapshot appears. We update the
+                // cache unconditionally (every frame, before the widget draws)
+                // — distinct from `last_rendered_visible`, which the widget
+                // updates only on a full rebuild. Missing a real update is
+                // impossible: every `build_snapshot` in the PTY thread is
+                // paired with its own `request_repaint_after` (min-merged into
+                // the wake schedule), so a new snapshot always gets at least
+                // one wake independent of this gate; the gate only suppresses
+                // the redundant self-scheduled repaints of already-drawn
+                // content.
+                let is_new_snapshot = pane
+                    .render_cache
+                    .observe_visible_snapshot(&pane_snap.visible_chars);
+
                 // OSC 1338 HISTFILE reload trigger (Task 72.15).  When the
                 // shell-integration scripts publish a new HISTFILE path
                 // through `OSC 1338 ; HISTFILE=<path> ST`, the snapshot's
@@ -2288,14 +2347,58 @@ impl freminal_windowing::App for FreminalGui {
                 }
 
                 // Determine repaint delay for this pane.
-                let cursor_is_blinking = matches!(
-                    pane_snap.cursor_visual_style,
-                    freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
-                        | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
-                        | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+                //
+                // A blink-style cursor only needs the periodic ~500ms wake
+                // when the cursor is ACTUALLY on screen — i.e. exactly the
+                // condition the drawing side gates on (`effective_show_cursor`
+                // in `terminal/widget.rs`: `snap.show_cursor && !is_echo_off
+                // && is_active_pane`). Scheduling the wake off the configured
+                // cursor *style* alone (ignoring `show_cursor`) is a real
+                // over-repaint bug: a full-screen TUI that hides the cursor
+                // via DECTCEM (`\e[?25l`) — btop, vim, htop, less, … — keeps
+                // the default blink *style*, so the terminal wakes ~2x/sec to
+                // redraw an unchanged, cursor-hidden screen forever. Gating on
+                // the real cursor visibility lets those idle-at-hidden-cursor
+                // frames drop to zero.
+                let cursor_blink_wants_repaint = cursor_blink_wants_repaint(
+                    &pane_snap.cursor_visual_style,
+                    pane_snap.show_cursor,
+                    is_active,
+                    is_echo_off,
                 );
-                if pane_snap.content_changed || cursor_is_blinking || pane_snap.has_blinking_text {
-                    let delay = if pane_snap.content_changed {
+                // Honour `content_changed` only on the first observation of a
+                // genuinely-new snapshot (issue #439 fix #4). Re-reading the
+                // same published `Arc` on a later frame sees the same
+                // (byte-identical) pixels, so scheduling another content
+                // repaint buys nothing and only perpetuates the 60fps wake.
+                let content_wants_repaint = is_new_snapshot && pane_snap.content_changed;
+                // Diagnostic: count the ~2Hz phantom wakes the `show_cursor`
+                // gate now suppresses — a blink-STYLE cursor on the active
+                // pane, content unchanged, no blinking text, but the cursor
+                // is actually hidden (DECTCEM / echo-off), so the old code
+                // would have scheduled a 500ms wake and the new code does not.
+                // Uses `content_wants_repaint` (the gated signal actually
+                // driving scheduling) rather than the raw sticky flag so the
+                // counter tracks the real scheduling decision.
+                if is_active
+                    && !content_wants_repaint
+                    && !pane_snap.has_blinking_text
+                    && !cursor_blink_wants_repaint
+                    && matches!(
+                        pane_snap.cursor_visual_style,
+                        freminal_common::cursor::CursorVisualStyle::BlockCursorBlink
+                            | freminal_common::cursor::CursorVisualStyle::UnderlineCursorBlink
+                            | freminal_common::cursor::CursorVisualStyle::VerticalLineCursorBlink,
+                    )
+                {
+                    win.frame_stats.blink_wake_suppressed =
+                        win.frame_stats.blink_wake_suppressed.saturating_add(1);
+                }
+                if content_wants_repaint
+                    || cursor_blink_wants_repaint
+                    || pane_snap.has_blinking_text
+                {
+                    let delay = if content_wants_repaint {
                         std::time::Duration::from_millis(16)
                     } else if pane_snap.has_blinking_text {
                         view_state::TEXT_BLINK_TICK_DURATION
@@ -2368,6 +2471,10 @@ impl freminal_windowing::App for FreminalGui {
             // no window input event, exactly the frame a REPLAY would
             // otherwise be chosen.
             let mut foreground_overlay_open = false;
+            // Diagnostic: capture the active pane's per-frame damage class
+            // (reused from the #435 signal) for the frame-attribution stats
+            // flushed below; `None` if the active pane isn't resolved.
+            let mut active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage> = None;
             let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
                 Vec::with_capacity(pane_layout.len());
             for (pane_id, _) in &pane_layout {
@@ -2386,6 +2493,9 @@ impl freminal_windowing::App for FreminalGui {
                     || pane.view_state.search_state.is_open
                     || pane.view_state.command_history.is_open
                     || pane.render_cache.hover_tooltip_active();
+                if *pane_id == active_pane_id {
+                    active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage);
+                }
                 per_pane_damage.push(frame_damage::PaneDamageInput {
                     bell_active: pane.view_state.bell_since.is_some(),
                     cursor_damage: pane.render_cache.last_frame_cursor_damage,
@@ -2396,6 +2506,47 @@ impl freminal_windowing::App for FreminalGui {
                 toast_active,
                 &per_pane_damage,
             );
+
+            // Diagnostic frame-attribution stats (reuses the #435 damage
+            // signal). One `update()` == one drawn frame; classify the active
+            // pane's damage so a CPU investigation can see, without a
+            // profiler, how many drawn frames were genuinely-unchanged
+            // (no CPU rebuild), cursor-only patches, or full vertex rebuilds.
+            {
+                let stats = &mut win.frame_stats;
+                stats.frames_drawn = stats.frames_drawn.saturating_add(1);
+                match active_pane_damage {
+                    Some(crate::gui::renderer::PaneFrameDamage::Unchanged) => {
+                        stats.unchanged = stats.unchanged.saturating_add(1);
+                    }
+                    Some(crate::gui::renderer::PaneFrameDamage::CursorOnly(_)) => {
+                        stats.cursor_only = stats.cursor_only.saturating_add(1);
+                    }
+                    Some(crate::gui::renderer::PaneFrameDamage::Full) | None => {
+                        stats.full = stats.full.saturating_add(1);
+                    }
+                }
+                if stats
+                    .frames_drawn
+                    .is_multiple_of(super::window::FrameStats::FLUSH_EVERY)
+                {
+                    // `debug!`, not `info!`: this is an investigative
+                    // diagnostic for chasing idle-CPU / over-repaint issues,
+                    // not end-user-facing telemetry. At `info` it would write
+                    // a line to the user's persistent log every ~2s of active
+                    // use forever; keep it out of the default log stream.
+                    tracing::debug!(
+                        frames_drawn = stats.frames_drawn,
+                        unchanged = stats.unchanged,
+                        cursor_only = stats.cursor_only,
+                        full = stats.full,
+                        blink_wake_suppressed = stats.blink_wake_suppressed,
+                        "frame-attribution stats (#439 diag): drawn frames split \
+                         by active-pane damage class; blink_wake_suppressed = \
+                         ~2Hz phantom wakes avoided by the show_cursor gate"
+                    );
+                }
+            }
 
             // ── Chrome-damage signals (#436.3 §3.3) ───────────────────
             //
@@ -3206,6 +3357,7 @@ impl FreminalGui {
             cached_central_rect: None,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
+            frame_stats: super::window::FrameStats::default(),
         }
     }
 
@@ -3416,7 +3568,74 @@ impl FreminalGui {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsOwnerCloseDecision, settings_owner_close_decision};
+    use super::{
+        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, settings_owner_close_decision,
+    };
+    use freminal_common::cursor::CursorVisualStyle;
+
+    #[test]
+    fn blink_cursor_wants_repaint_only_when_actually_visible() {
+        // Visible, active, echo on, blink style -> wants the ~500ms wake.
+        assert!(cursor_blink_wants_repaint(
+            &CursorVisualStyle::BlockCursorBlink,
+            true,
+            true,
+            false
+        ));
+        // DECTCEM-hidden (show_cursor false) -> NO wake. This is the btop /
+        // full-screen-TUI case: the fix. Style is still blink, but the
+        // cursor is hidden, so we must not wake ~2x/sec.
+        assert!(!cursor_blink_wants_repaint(
+            &CursorVisualStyle::BlockCursorBlink,
+            false,
+            true,
+            false
+        ));
+        // Not the active pane -> no wake (only the active pane draws a cursor).
+        assert!(!cursor_blink_wants_repaint(
+            &CursorVisualStyle::BlockCursorBlink,
+            true,
+            false,
+            false
+        ));
+        // Password echo-off hides the cursor -> no wake.
+        assert!(!cursor_blink_wants_repaint(
+            &CursorVisualStyle::BlockCursorBlink,
+            true,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn non_blink_cursor_never_wants_blink_repaint() {
+        // A steady (non-blink) cursor never needs the periodic wake, even
+        // when fully visible.
+        for style in [
+            CursorVisualStyle::BlockCursorSteady,
+            CursorVisualStyle::UnderlineCursorSteady,
+            CursorVisualStyle::VerticalLineCursorSteady,
+        ] {
+            assert!(
+                !cursor_blink_wants_repaint(&style, true, true, false),
+                "steady style {style:?} must not request a blink wake"
+            );
+        }
+    }
+
+    #[test]
+    fn each_blink_style_variant_wants_repaint_when_visible() {
+        for style in [
+            CursorVisualStyle::BlockCursorBlink,
+            CursorVisualStyle::UnderlineCursorBlink,
+            CursorVisualStyle::VerticalLineCursorBlink,
+        ] {
+            assert!(
+                cursor_blink_wants_repaint(&style, true, true, false),
+                "blink style {style:?} must request a wake when visible"
+            );
+        }
+    }
 
     #[test]
     fn not_owner_ignores_other_state() {

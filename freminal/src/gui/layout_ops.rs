@@ -735,6 +735,7 @@ impl FreminalGui {
             cached_central_rect: None,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
+            frame_stats: super::window::FrameStats::default(),
         };
         self.windows.insert(window_id, win);
 
