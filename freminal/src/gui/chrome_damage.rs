@@ -50,6 +50,16 @@ use crate::gui::tabs::TabId;
 /// steady state.
 pub const WARMUP_FRAMES: u32 = 3;
 
+/// Whether a window is still in its startup warm-up window (#436 §7): the
+/// first [`WARMUP_FRAMES`] rendered frames are always forced `Changed` while
+/// the font atlas / layout / `PanelState` id-maps settle. `frames_rendered`
+/// is the count of frames rendered so far for this window (0 on the very
+/// first frame).
+#[must_use]
+pub const fn is_chrome_warming_up(frames_rendered: u32) -> bool {
+    frames_rendered < WARMUP_FRAMES
+}
+
 /// Everything the app measured this frame that bears on whether static
 /// chrome changed (#436 §3.3). Each field maps to a row of the §3.3 table
 /// that the app can compute without any `run_frame`-side state; see the
@@ -280,8 +290,8 @@ pub const fn decide_chrome_damage(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChromeSignals, ChromeTabSnapshot, DismissiblePresence, decide_chrome_damage,
-        diff_tab_snapshots, dismissible_presence_transitioned,
+        ChromeSignals, ChromeTabSnapshot, DismissiblePresence, WARMUP_FRAMES, decide_chrome_damage,
+        diff_tab_snapshots, dismissible_presence_transitioned, is_chrome_warming_up,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
     use crate::gui::tabs::TabId;
@@ -691,5 +701,38 @@ mod tests {
         assert!(!diff.tab_set_changed);
         assert!(!diff.tab_title_changed);
         assert!(!diff.pane_layout_changed);
+    }
+
+    // ── #436.7 §7 warm-up ───────────────────────────────────────────────
+
+    #[test]
+    fn warming_up_covers_exactly_the_first_warmup_frames() {
+        // Frames 0..WARMUP_FRAMES are warming up; WARMUP_FRAMES onward are not.
+        for frames_rendered in 0..WARMUP_FRAMES {
+            assert!(
+                is_chrome_warming_up(frames_rendered),
+                "frame {frames_rendered} (< {WARMUP_FRAMES}) must still be warming up"
+            );
+        }
+        for frames_rendered in WARMUP_FRAMES..(WARMUP_FRAMES + 3) {
+            assert!(
+                !is_chrome_warming_up(frames_rendered),
+                "frame {frames_rendered} (>= {WARMUP_FRAMES}) must be past warm-up"
+            );
+        }
+    }
+
+    #[test]
+    fn warming_up_forces_chrome_damage_changed() {
+        // The warm-up signal, alone, must force Changed (so the first frames
+        // are never REPLAYed before steady state).
+        let signals = ChromeSignals {
+            warming_up: true,
+            ..ChromeSignals::default()
+        };
+        assert_eq!(
+            decide_chrome_damage(&signals, false, false),
+            ChromeDamage::Changed
+        );
     }
 }

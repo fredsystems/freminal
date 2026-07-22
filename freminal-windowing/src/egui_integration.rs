@@ -786,6 +786,149 @@ mod tests {
         );
     }
 
+    // ── #436.7: multi-frame FULL/REPLAY sequence properties ─────────────
+    //
+    // `decide_chrome_mode` is pure and consumes only last-frame signals, so
+    // a frame sequence is faithfully modelled by chaining calls and threading
+    // each frame's outputs into the next frame's `prev_*` inputs — exactly
+    // what `run_frame` does (see the `self.prev_* = ...` stashes at the end
+    // of `run_frame`). These tests drive the design's mandatory sequence
+    // scenarios (#436 §9 tests #6-#8 + OQ-4) at the decision layer. The
+    // pixel-level halves (byte-identical framebuffer, real texture isolation,
+    // real ghost-free rendering) need the GPU harness and are 436.9's.
+
+    /// Design test #8: the settings window NEVER REPLAYs. It has no
+    /// `PerWindowState`, so `App::take_chrome_damage` returns its
+    /// `ChromeDamage::Changed` default every frame; `run_frame` stashes that
+    /// into `prev_chrome_damage`. Even once its own cache is valid at a stable
+    /// size/ppp and egui is settled, `prev_chrome_damage == Changed` forces
+    /// `Full` on every single frame, forever — never `Replay`.
+    #[test]
+    fn settings_window_never_replays_over_a_frame_sequence() {
+        // Frame 0: no cache yet -> Full regardless of everything else.
+        let frame0 = Inputs {
+            cache_valid: false,
+            ..Inputs::all_clear()
+        };
+        assert_eq!(frame0.decide(), crate::ChromeMode::Full);
+
+        // Frames 1..N: cache is now valid at a stable size/ppp and egui is
+        // fully settled — the ONLY thing keeping it Full is that
+        // `take_chrome_damage` always returns `Changed` for a window with no
+        // `PerWindowState`, which `run_frame` fed back as `prev_chrome_damage`.
+        for frame in 1..8 {
+            let inputs = Inputs {
+                cache_valid: true,
+                prev_chrome_damage: crate::ChromeDamage::Changed,
+                ..Inputs::all_clear()
+            };
+            assert_eq!(
+                inputs.decide(),
+                crate::ChromeMode::Full,
+                "settings-window frame {frame} must be Full (stuck on Changed forever)"
+            );
+        }
+    }
+
+    /// Design test #7 (decision-layer half): two windows decide independently.
+    /// `decide_chrome_mode` takes only explicit per-window inputs and holds no
+    /// shared state, so one window's decision cannot influence another's. The
+    /// GPU/texture-isolation half is 436.9's.
+    #[test]
+    fn two_windows_decide_independently() {
+        // Window A: fully idle/settled -> Replay.
+        let window_a = Inputs::all_clear();
+        // Window B: mid-resize (size mismatch) and chrome changed last frame
+        // -> Full. Same frame, different window, independent inputs.
+        let window_b = Inputs {
+            cur_size: [1024, 768],
+            prev_chrome_damage: crate::ChromeDamage::Changed,
+            ..Inputs::all_clear()
+        };
+        assert_eq!(window_a.decide(), crate::ChromeMode::Replay);
+        assert_eq!(window_b.decide(), crate::ChromeMode::Full);
+        // Re-decide A after B to prove B left no residue (pure fn, but pin it).
+        assert_eq!(window_a.decide(), crate::ChromeMode::Replay);
+    }
+
+    /// OQ-4 golden idle sequence: after startup, a steady idle screen yields
+    /// exactly ONE Full frame (frame 0, cache not yet built) and then all
+    /// REPLAY. Models warm-up completing and the cache arming.
+    #[test]
+    fn golden_idle_sequence_is_one_full_then_all_replay() {
+        // Frame 0: cache not yet built -> Full (builds the cache).
+        let frame0 = Inputs {
+            cache_valid: false,
+            ..Inputs::all_clear()
+        };
+        assert_eq!(frame0.decide(), crate::ChromeMode::Full);
+
+        // Frames 1..N: cache valid, nothing changed, egui settled, no input
+        // -> Replay every frame. (Warm-up's extra forced-Full frames are
+        // modelled via `prev_chrome_damage`; here we start from the
+        // post-warm-up steady state where chrome has gone Unchanged.)
+        for frame in 1..10 {
+            let inputs = Inputs::all_clear();
+            assert_eq!(
+                inputs.decide(),
+                crate::ChromeMode::Replay,
+                "idle frame {frame} after warm-up must be Replay"
+            );
+        }
+    }
+
+    /// Design test #6 (decision-layer half): an overlay opening then closing
+    /// re-arms the cache only after chrome has been quiet through the settle
+    /// window — the decision sequence never permits a REPLAY frame that would
+    /// paint a stale "overlay still open" tail. Models the `ChromeDamage`
+    /// sequence a modal open->close produces (§3.5 settle rule keeps the
+    /// close frame AND the next frame `Changed`).
+    #[test]
+    fn overlay_open_close_rearms_cache_only_after_settle() {
+        // A helper: decide this frame given the chrome_damage the PREVIOUS
+        // frame reported (that is what run_frame threads into prev_chrome_damage).
+        let decide_with_prev = |prev: crate::ChromeDamage| {
+            Inputs {
+                prev_chrome_damage: prev,
+                ..Inputs::all_clear()
+            }
+            .decide()
+        };
+
+        // The chrome_damage each frame REPORTS (as decide_chrome_damage would):
+        //   f1 modal opens          -> Changed
+        //   f2 modal still open      -> Changed
+        //   f3 modal closes (transition) -> Changed
+        //   f4 settle frame (§3.5)   -> Changed
+        //   f5 quiet                 -> Unchanged
+        //   f6 quiet                 -> Unchanged
+        // run_frame decides frame N using frame N-1's reported chrome_damage.
+        // So the earliest REPLAY is the frame whose PREVIOUS frame reported
+        // Unchanged — i.e. f6 (prev = f5 = Unchanged).
+        assert_eq!(
+            decide_with_prev(crate::ChromeDamage::Changed),
+            crate::ChromeMode::Full
+        ); // during f2 (prev f1)
+        assert_eq!(
+            decide_with_prev(crate::ChromeDamage::Changed),
+            crate::ChromeMode::Full
+        ); // during f3 (prev f2)
+        assert_eq!(
+            decide_with_prev(crate::ChromeDamage::Changed),
+            crate::ChromeMode::Full
+        ); // during f4 (prev f3, the close)
+        assert_eq!(
+            decide_with_prev(crate::ChromeDamage::Changed),
+            crate::ChromeMode::Full
+        ); // during f5 (prev f4, the settle)
+        // Only now, after a fully-quiet previous frame, may the cache re-arm:
+        assert_eq!(
+            decide_with_prev(crate::ChromeDamage::Unchanged),
+            crate::ChromeMode::Replay,
+            "cache may re-arm to Replay only after chrome was quiet last frame"
+        );
+    }
+
     // ── #436.4c §5.2: `atlas_grew` ──────────────────────────────────────
 
     /// A tiny 2x2 filled `ImageData`, sufficient to build `ImageDelta`

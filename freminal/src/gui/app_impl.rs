@@ -717,7 +717,7 @@ impl freminal_windowing::App for FreminalGui {
         // #436 §7 warm-up: force `Changed` for the first few frames after
         // window creation, while font atlas / layout / PanelState id-maps
         // are still settling.
-        let chrome_warming_up = win.chrome_frames_rendered < chrome_damage::WARMUP_FRAMES;
+        let chrome_warming_up = chrome_damage::is_chrome_warming_up(win.chrome_frames_rendered);
         win.chrome_frames_rendered = win.chrome_frames_rendered.saturating_add(1);
 
         // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
