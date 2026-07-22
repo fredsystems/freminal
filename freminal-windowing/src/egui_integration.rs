@@ -21,36 +21,32 @@ pub struct FrameOutput {
     pub repaint_delay: std::time::Duration,
 }
 
-/// Cached chrome (head + tail) shapes and tessellated primitives from the
-/// most recent FULL frame (#436.4a scaffolding).
+/// Cached tessellated chrome (head + tail) primitives from the most recent
+/// FULL frame (#436.4a/#436.4b).
 ///
-/// Populated at the end of every frame (which, in this subtask, is always a
-/// FULL frame — replay does not exist yet) but never read to decide replay;
-/// 436.4b is what starts consulting this cache to skip re-tessellating
-/// chrome on eligible frames.
-// TODO(#436.4b): every field here is read once the replay decision path
-// lands (cache-validity check against `ppp`/`size`, then reuse of
-// `head_primitives`/`tail_primitives` in place of re-tessellating
-// `head_shapes`/`tail_shapes`). Until then the fields are write-only
-// scaffolding, landed in 436.4a alongside the paint-order split they
-// describe so the two changes review together.
-#[allow(dead_code)]
+/// Populated at the end of every FULL frame; consulted (via
+/// [`decide_chrome_mode`]) to decide whether a later frame may REPLAY, and
+/// when it does, `run_frame` paints `head_primitives`/`tail_primitives`
+/// directly instead of re-tessellating. Only the tessellated primitives are
+/// retained — not the source shapes — because #436.4b invalidates the
+/// whole cache (forcing `ChromeMode::Full`) on any `ppp`/`size` mismatch
+/// rather than re-tessellating the same shapes at a new `ppp`; a future
+/// subtask that wants that finer-grained recovery would need to retain the
+/// shapes too.
 struct ChromeCache {
-    /// Chrome shapes painted *before* the terminal band in `full_output.shapes`
-    /// (e.g. the `CentralPanel` background fill, menu bar, tab bar).
-    head_shapes: Vec<egui::epaint::ClippedShape>,
-    /// Chrome shapes painted *after* the terminal band (overlays, pane
-    /// borders drawn as part of chrome, modals, tooltips).
-    tail_shapes: Vec<egui::epaint::ClippedShape>,
-    /// Tessellation of `head_shapes` at `ppp`/`size`.
+    /// Tessellation of the chrome shapes painted *before* the terminal band
+    /// in `full_output.shapes` (e.g. the `CentralPanel` background fill,
+    /// menu bar, tab bar), at `ppp`/`size`.
     head_primitives: Vec<egui::ClippedPrimitive>,
-    /// Tessellation of `tail_shapes` at `ppp`/`size`.
+    /// Tessellation of the chrome shapes painted *after* the terminal band
+    /// (overlays, pane borders drawn as part of chrome, modals, tooltips),
+    /// at `ppp`/`size`.
     tail_primitives: Vec<egui::ClippedPrimitive>,
     /// `pixels_per_point` the cached primitives were tessellated at. A
-    /// mismatch on a later frame invalidates the cache (436.4b).
+    /// mismatch on a later frame invalidates the cache.
     ppp: f32,
     /// Physical framebuffer size the cached primitives were tessellated
-    /// for. A mismatch on a later frame invalidates the cache (436.4b).
+    /// for. A mismatch on a later frame invalidates the cache.
     size: [u32; 2],
 }
 
@@ -59,20 +55,93 @@ pub struct EguiState {
     pub(crate) ctx: egui::Context,
     pub(crate) winit_state: egui_winit::State,
     pub(crate) painter: egui_glow::Painter,
-    /// Cached chrome primitives from the last FULL frame (#436.4a). Not yet
-    /// consulted for replay decisions — see [`ChromeCache`].
+    /// Cached chrome primitives from the last FULL frame — see [`ChromeCache`].
     chrome_cache: Option<ChromeCache>,
-    /// The repaint delay `run_frame` returned last frame (#436.4a
-    /// scaffolding). Not yet consulted — 436.4b uses this alongside
-    /// `prev_chrome_damage` to help decide replay eligibility.
+    /// The repaint delay `run_frame` returned last frame. Consulted, via
+    /// [`chrome_repaint_settled`], to decide this frame's [`crate::ChromeMode`].
     prev_repaint_delay: std::time::Duration,
-    /// The chrome-damage decision drained last frame (#436.4a scaffolding).
-    /// Not yet updated per-frame or consulted — 436.4b wires both the write
-    /// (from `App::take_chrome_damage`) and the read (replay gate).
-    // TODO(#436.4b): read (and start writing, per-frame) to gate the
-    // chrome-replay decision. Write-only scaffolding until then.
-    #[allow(dead_code)]
+    /// The chrome-damage decision drained last frame (from
+    /// `App::take_chrome_damage`). Consulted to decide this frame's
+    /// [`crate::ChromeMode`]: a REPLAY is only permitted when the PREVIOUS
+    /// frame reported [`crate::ChromeDamage::Unchanged`].
     prev_chrome_damage: crate::ChromeDamage,
+    /// The delay the app itself requested via `ctx.request_repaint_after`
+    /// last frame (from `App::take_terminal_requested_delay`), if any.
+    /// Consulted, via [`chrome_repaint_settled`], alongside
+    /// `prev_repaint_delay` to decide this frame's [`crate::ChromeMode`].
+    prev_terminal_requested_delay: Option<std::time::Duration>,
+}
+
+/// #436 §3.1 (amended): a REPLAY is permitted only if nothing OTHER than
+/// freminal's own blink/content repaint scheduling asked egui for a wake this
+/// frame. `repaint_delay` is egui's per-viewport requested delay (`Duration::MAX`
+/// = egui itself wants no further repaint); `terminal_requested_delay` is what
+/// the app itself passed to `ctx.request_repaint_after` this frame (its blink /
+/// content / shader-anim scheduling). If egui's delay is SHORTER than what the
+/// app requested, something egui-internal (a hover-fade, menu animation, a
+/// cursor blink in a focused `TextEdit`, etc.) also wants a wake -> chrome is
+/// not settled -> no replay. A literal `== Duration::MAX` gate would never
+/// pass while a cursor blinks (the app calls `request_repaint_after(500ms)`
+/// every frame), defeating the headline blink-under-idle case; comparing
+/// against the app's own request is exact, not a heuristic.
+fn chrome_repaint_settled(
+    repaint_delay: std::time::Duration,
+    terminal_requested_delay: Option<std::time::Duration>,
+) -> bool {
+    terminal_requested_delay.map_or_else(
+        || repaint_delay == std::time::Duration::MAX,
+        |app_delay| repaint_delay >= app_delay,
+    )
+}
+
+/// #436.4b: decide this frame's [`crate::ChromeMode`].
+///
+/// A REPLAY is permitted only when ALL of the following hold:
+///   - `cache_valid` — a chrome cache exists from a prior FULL frame.
+///   - `cache_size`/`cache_ppp` match `cur_size`/`cur_ppp` — the cached
+///     primitives were tessellated at this frame's framebuffer size and
+///     scale factor (a mismatch, e.g. a resize or DPI change, invalidates
+///     the whole cache rather than attempting a partial re-tessellation).
+///   - [`chrome_repaint_settled`] — nothing egui-internal wants a wake
+///     sooner than the app's own scheduling this frame (§3.1 amendment).
+///   - `prev_chrome_damage` is [`crate::ChromeDamage::Unchanged`] — the
+///     PREVIOUS frame proved static chrome did not change (§3.3/§3.5).
+///   - `!chrome_input_this_frame` — no window input event this frame could
+///     plausibly have affected chrome (§3.2, conservative: any qualifying
+///     input forces `Full`, refined region-aware in #436.8).
+///
+/// Any failure forces `ChromeMode::Full` — the always-correct, conservative
+/// default. Pure (no `self`/`egui` state), so directly unit-testable.
+// Nine independent, unrelated gate inputs (cache validity/size/ppp, this
+// frame's size/ppp, the two settle-rule delays, prior chrome damage, and the
+// input gate) -- bundling them into a struct would just relocate the same
+// fields without adding clarity, and this function exists specifically so
+// tests can drive each one independently.
+#[allow(clippy::too_many_arguments)]
+fn decide_chrome_mode(
+    cache_valid: bool,
+    cache_size: [u32; 2],
+    cache_ppp: f32,
+    cur_size: [u32; 2],
+    cur_ppp: f32,
+    prev_repaint_delay: std::time::Duration,
+    prev_terminal_requested_delay: Option<std::time::Duration>,
+    prev_chrome_damage: crate::ChromeDamage,
+    chrome_input_this_frame: bool,
+) -> crate::ChromeMode {
+    let cache_matches =
+        cache_valid && cache_size == cur_size && (cache_ppp - cur_ppp).abs() < f32::EPSILON;
+
+    let replay_allowed = cache_matches
+        && chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay)
+        && prev_chrome_damage == crate::ChromeDamage::Unchanged
+        && !chrome_input_this_frame;
+
+    if replay_allowed {
+        crate::ChromeMode::Replay
+    } else {
+        crate::ChromeMode::Full
+    }
 }
 
 impl EguiState {
@@ -101,6 +170,7 @@ impl EguiState {
             chrome_cache: None,
             prev_repaint_delay: std::time::Duration::MAX,
             prev_chrome_damage: crate::ChromeDamage::Changed,
+            prev_terminal_requested_delay: None,
         })
     }
 
@@ -111,7 +181,27 @@ impl EguiState {
 
     /// Run a single egui frame and paint, using pre-collected raw input.
     ///
+    /// `chrome_input_this_frame` is the #436.4b §3.2 conservative input gate:
+    /// `true` if ANY window input event this frame could plausibly affect
+    /// chrome (pointer/keyboard/scroll/focus/IME — see `event_loop`'s
+    /// `is_potential_chrome_input`). `true` unconditionally forces
+    /// `ChromeMode::Full` this frame; the region-aware refinement (only
+    /// input actually over chrome, not the terminal band, forces `Full`) is
+    /// deferred to #436.8.
+    ///
     /// Returns [`FrameOutput`] containing viewport commands and repaint timing.
+    // too_many_arguments: `chrome_input_this_frame` (#436.4b) is the one
+    // parameter pushing this over the threshold; the others are pre-existing
+    // (window/gl/clear_color/raw_input/present_flag/ui_fn), each independent
+    // and already load-bearing -- bundling them into a struct would only
+    // relocate the count, not reduce it.
+    // too_many_lines: this is the single frame-lifecycle function (decide
+    // chrome_mode -> run_ui -> tessellate head/band/tail -> present -> stash
+    // next frame's signals); splitting it would scatter a single atomic
+    // sequence across artificial sub-functions without reducing coupling
+    // (mirrors the existing `too_many_lines` allows on `event_loop.rs`'s
+    // `window_event`/`run` and `app_impl.rs`'s `update`).
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) fn run_frame<F>(
         &mut self,
         window: &Window,
@@ -119,6 +209,7 @@ impl EguiState {
         clear_color: [f32; 4],
         raw_input: egui::RawInput,
         present_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        chrome_input_this_frame: bool,
         ui_fn: F,
     ) -> FrameOutput
     where
@@ -126,30 +217,86 @@ impl EguiState {
     {
         let mut ui_fn = ui_fn;
 
+        // ── #436.4b: decide this frame's `ChromeMode` BEFORE `run_ui` ──────
+        //
+        // The decision must be made before `run_ui` because `chrome_mode` is
+        // passed INTO the app's `update()` call (inside the `run_ui`
+        // closure below), which is what lets the app skip chrome-widget
+        // construction on an eligible frame. It is therefore based on LAST
+        // frame's signals (`prev_repaint_delay`, `prev_terminal_requested_delay`,
+        // `prev_chrome_damage`) plus THIS frame's cache-validity inputs
+        // (`size`, `pixels_per_point`) and input gate — never on anything
+        // only knowable from this frame's own `update()` call (that data
+        // does not exist yet).
+        //
+        // `pixels_per_point()` is read here BEFORE `run_ui`, which returns
+        // whatever was in effect as of the END of the previous frame's
+        // `begin_pass` (egui only updates its stored `pixels_per_point` file
+        // during `begin_pass`, which is inside `run_ui`) — i.e. exactly the
+        // value the chrome cache was tessellated at, UNLESS the incoming
+        // `raw_input` we are about to feed into `run_ui` carries a changed
+        // scale factor for THIS frame. In that rare case this pre-`run_ui`
+        // read is stale by one frame: `decide_chrome_mode` would (wrongly)
+        // see `cur_ppp == cache.ppp` and permit `Replay`, while the
+        // definitive post-`run_ui` `pixels_per_point()` used below to
+        // tessellate the band would reflect the NEW value. The visible
+        // consequence is bounded to a single frame — cached chrome painted
+        // at the old scale while the freshly-tessellated band paints at the
+        // new one — because this frame's own `ChromeDamage` (driven by the
+        // app's `ppp_changed` signal, sourced from the same post-`run_ui`
+        // value) reports `Changed`, forcing the NEXT frame back to `Full`.
+        // `window.inner_size()` has no such caveat: it is a direct winit
+        // query, always current.
+        let size = window.inner_size();
+        let size_arr = [size.width, size.height];
+        let ppp_before_run_ui = self.ctx.pixels_per_point();
+        let (cache_valid, cache_size, cache_ppp) = self
+            .chrome_cache
+            .as_ref()
+            .map_or((false, [0, 0], 0.0), |cache| (true, cache.size, cache.ppp));
+        let chrome_mode = decide_chrome_mode(
+            cache_valid,
+            cache_size,
+            cache_ppp,
+            size_arr,
+            ppp_before_run_ui,
+            self.prev_repaint_delay,
+            self.prev_terminal_requested_delay,
+            self.prev_chrome_damage,
+            chrome_input_this_frame,
+        );
+
         // egui 0.35 replaced `Context::run` (closure took `&Context`) with
         // `Context::run_ui` (closure takes the root `&mut Ui`).  Our `App`
         // trait still works in terms of `&Context`; `Ui` derefs to `Context`,
         // so deref explicitly rather than relying on a silent coercion.
         //
         // The closure both runs the app's `update` and returns this frame's
-        // signals (damage report + terminal-band range, #436.4a); we capture
-        // them here to decide the clear/present path and the head/band/tail
-        // split below. Running both inside the one closure avoids two
-        // simultaneous `&mut app` borrows in the caller.
-        //
-        // `chrome_mode` is always `Full` in this subtask — 436.4b is what
-        // starts computing a real replay decision and passing `Replay`.
+        // signals (damage report, terminal-band range, chrome-damage
+        // decision, and the app's own requested repaint delay); we capture
+        // them here to decide the clear/present path, the head/band/tail
+        // split below, and next frame's `chrome_mode` decision. Running both
+        // inside the one closure avoids two simultaneous `&mut app` borrows
+        // in the caller.
         let mut frame_damage = crate::FrameDamage::Full;
         let mut band_range: std::ops::Range<usize> = 0..0;
+        let mut chrome_damage = crate::ChromeDamage::Changed;
+        let mut terminal_requested_delay: Option<std::time::Duration> = None;
         let full_output = self.ctx.run_ui(raw_input, |root_ui| {
-            let signals = ui_fn(&*root_ui, &gl_state.glow_context, crate::ChromeMode::Full);
+            let signals = ui_fn(&*root_ui, &gl_state.glow_context, chrome_mode);
             frame_damage = signals.frame_damage;
             band_range = signals.band_range;
+            chrome_damage = signals.chrome_damage;
+            terminal_requested_delay = signals.terminal_requested_delay;
         });
 
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
 
+        // Definitive `pixels_per_point` for THIS frame — read AFTER `run_ui`
+        // has processed `raw_input` via `begin_pass`, so (unlike
+        // `ppp_before_run_ui` above) this always reflects a scale-factor
+        // change delivered this frame. Used for all tessellation below.
         let pixels_per_point = self.ctx.pixels_per_point();
 
         // ── 3-way paint-order split (#436.4a) ──────────────────────────
@@ -173,32 +320,53 @@ impl EguiState {
         let shapes = full_output.shapes;
         let start = band_range.start.min(shapes.len());
         let end = band_range.end.clamp(start, shapes.len());
-        let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
         let band_shapes: Vec<egui::epaint::ClippedShape> = shapes[start..end].to_vec();
-        let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
 
-        // When `band_range` is the default `0..0` (an app that has not
-        // wired up the band range), `start == end == 0`, so `head_shapes`
-        // and `band_shapes` are empty and `tail_shapes` is the ENTIRE shape
-        // list. Painting all shapes as a single "tail" `paint_primitives`
-        // call is exactly what the pre-#436.4a single-call path did —
-        // byte-identical rendering for an app that does not participate.
-        let head_primitives = self.ctx.tessellate(head_shapes.clone(), pixels_per_point);
+        // The band is ALWAYS fresh — tessellated from this frame's own
+        // shapes regardless of `chrome_mode` — since the terminal band is
+        // rebuilt every frame whether or not chrome was.
         let band_primitives = self.ctx.tessellate(band_shapes, pixels_per_point);
-        let tail_primitives = self.ctx.tessellate(tail_shapes.clone(), pixels_per_point);
 
-        let size = window.inner_size();
-
-        // Populate the chrome cache (#436.4a scaffolding). Never read to
-        // decide replay yet — that is 436.4b.
-        self.chrome_cache = Some(ChromeCache {
-            head_shapes,
-            tail_shapes,
-            head_primitives: head_primitives.clone(),
-            tail_primitives: tail_primitives.clone(),
-            ppp: pixels_per_point,
-            size: [size.width, size.height],
-        });
+        // Head/tail: FULL re-tessellates from this frame's shapes (and
+        // repopulates the cache for a future REPLAY); REPLAY reuses the
+        // cached primitives from the last FULL frame instead. On a REPLAY
+        // frame the app skipped chrome-widget construction, so
+        // `shapes[..start]`/`shapes[end..]` are expected to be empty (or, for
+        // an app that has not wired up the band range, `shapes[..start]` is
+        // trivially empty per the `0..0` default) — but even if the app
+        // painted something there, a REPLAY frame must ignore it: the whole
+        // point of replay is that head/tail are NOT re-tessellated, so
+        // painting anything from `shapes[..start]`/`shapes[end..]` here
+        // would silently diverge from what the cache (and therefore this
+        // frame's actual pixels) represents.
+        let (head_primitives, tail_primitives) = match chrome_mode {
+            crate::ChromeMode::Full => {
+                let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
+                let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
+                let head_primitives = self.ctx.tessellate(head_shapes, pixels_per_point);
+                let tail_primitives = self.ctx.tessellate(tail_shapes, pixels_per_point);
+                self.chrome_cache = Some(ChromeCache {
+                    head_primitives: head_primitives.clone(),
+                    tail_primitives: tail_primitives.clone(),
+                    ppp: pixels_per_point,
+                    size: size_arr,
+                });
+                (head_primitives, tail_primitives)
+            }
+            crate::ChromeMode::Replay => {
+                self.chrome_cache.as_ref().map_or_else(
+                    || {
+                        // Defensive fallback: `decide_chrome_mode` proved
+                        // `cache_valid` (`self.chrome_cache.is_some()`) before
+                        // choosing `Replay`, so this should be unreachable —
+                        // but degrade gracefully (empty chrome this frame)
+                        // rather than panic if it ever is.
+                        (Vec::new(), Vec::new())
+                    },
+                    |cache| (cache.head_primitives.clone(), cache.tail_primitives.clone()),
+                )
+            }
+        };
 
         // Decide whether this frame may skip the full clear and present only
         // its damaged region. This is a two-part gate:
@@ -283,9 +451,10 @@ impl EguiState {
         // causes an unbounded render loop on platforms where `swap_buffers`
         // returns immediately (macOS with vsync disabled).
 
-        // Stash this frame's repaint delay for 436.4b's replay-eligibility
-        // gate. Not consumed yet.
+        // Stash this frame's signals for next frame's `chrome_mode` decision.
         self.prev_repaint_delay = repaint_delay;
+        self.prev_chrome_damage = chrome_damage;
+        self.prev_terminal_requested_delay = terminal_requested_delay;
 
         FrameOutput {
             commands,
@@ -334,8 +503,195 @@ impl EguiState {
 
 #[cfg(test)]
 mod tests {
+    use super::{chrome_repaint_settled, decide_chrome_mode};
     use egui::epaint::Primitive;
     use egui::{Color32, Rect, pos2, vec2};
+    use std::time::Duration;
+
+    // ── #436.4b: `chrome_repaint_settled` ──────────────────────────────
+
+    #[test]
+    fn settled_when_egui_wants_no_repaint_and_app_requested_none() {
+        assert!(chrome_repaint_settled(Duration::MAX, None));
+    }
+
+    #[test]
+    fn settled_when_egui_wants_no_repaint_even_if_app_requested_a_blink_delay() {
+        // Nothing is shorter than "no repaint at all" (Duration::MAX) --
+        // the app's own 500ms blink request is not itself evidence of an
+        // unsettled chrome.
+        assert!(chrome_repaint_settled(
+            Duration::MAX,
+            Some(Duration::from_millis(500))
+        ));
+    }
+
+    #[test]
+    fn not_settled_when_egui_wants_repaint_sooner_than_the_apps_own_request() {
+        // Something egui-internal (hover fade, menu animation, a focused
+        // TextEdit's cursor blink) wants a wake sooner than the app's own
+        // 500ms blink schedule -- not settled.
+        assert!(!chrome_repaint_settled(
+            Duration::from_millis(16),
+            Some(Duration::from_millis(500))
+        ));
+    }
+
+    #[test]
+    fn settled_when_egui_delay_exactly_matches_the_apps_own_request() {
+        // Nothing SHORTER than what the app itself asked for -- settled.
+        assert!(chrome_repaint_settled(
+            Duration::from_millis(500),
+            Some(Duration::from_millis(500))
+        ));
+    }
+
+    #[test]
+    fn settled_when_egui_delay_is_longer_than_the_apps_own_request() {
+        assert!(chrome_repaint_settled(
+            Duration::from_secs(1),
+            Some(Duration::from_millis(500))
+        ));
+    }
+
+    #[test]
+    fn not_settled_when_app_requested_nothing_but_egui_still_wants_a_repaint() {
+        assert!(!chrome_repaint_settled(Duration::from_millis(16), None));
+    }
+
+    // ── #436.4b: `decide_chrome_mode` ──────────────────────────────────
+
+    /// Bundles `decide_chrome_mode`'s nine gate inputs so each test can
+    /// start from an all-clear baseline (which decides `Replay`) and flip
+    /// exactly one field to prove that field alone forces `Full`. A plain
+    /// tuple would work too but trips `clippy::type_complexity`; a named
+    /// struct is also more readable at each call site below.
+    struct Inputs {
+        cache_valid: bool,
+        cache_size: [u32; 2],
+        cache_ppp: f32,
+        cur_size: [u32; 2],
+        cur_ppp: f32,
+        prev_repaint_delay: Duration,
+        prev_terminal_requested_delay: Option<Duration>,
+        prev_chrome_damage: crate::ChromeDamage,
+        chrome_input_this_frame: bool,
+    }
+
+    impl Inputs {
+        /// An all-clear input set that should decide `Replay`.
+        fn all_clear() -> Self {
+            Self {
+                cache_valid: true,
+                cache_size: [800, 600],
+                cache_ppp: 1.0,
+                cur_size: [800, 600],
+                cur_ppp: 1.0,
+                prev_repaint_delay: Duration::MAX,
+                prev_terminal_requested_delay: None,
+                prev_chrome_damage: crate::ChromeDamage::Unchanged,
+                chrome_input_this_frame: false,
+            }
+        }
+
+        fn decide(&self) -> crate::ChromeMode {
+            decide_chrome_mode(
+                self.cache_valid,
+                self.cache_size,
+                self.cache_ppp,
+                self.cur_size,
+                self.cur_ppp,
+                self.prev_repaint_delay,
+                self.prev_terminal_requested_delay,
+                self.prev_chrome_damage,
+                self.chrome_input_this_frame,
+            )
+        }
+    }
+
+    #[test]
+    fn all_clear_decides_replay() {
+        assert_eq!(Inputs::all_clear().decide(), crate::ChromeMode::Replay);
+    }
+
+    #[test]
+    fn invalid_cache_decides_full() {
+        let inputs = Inputs {
+            cache_valid: false, // no cache yet (e.g. frame 0)
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    #[test]
+    fn size_mismatch_decides_full() {
+        let inputs = Inputs {
+            cur_size: [801, 600], // resized since the cache was built
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    #[test]
+    fn ppp_mismatch_decides_full() {
+        let inputs = Inputs {
+            cur_ppp: 1.25, // DPI/zoom changed since the cache was built
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    #[test]
+    fn prev_chrome_damage_changed_decides_full() {
+        let inputs = Inputs {
+            prev_chrome_damage: crate::ChromeDamage::Changed,
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    #[test]
+    fn chrome_input_this_frame_decides_full() {
+        let inputs = Inputs {
+            chrome_input_this_frame: true, // e.g. a mouse click landed this frame
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    #[test]
+    fn not_settled_repaint_decides_full() {
+        let inputs = Inputs {
+            // egui wants a wake sooner than what the app itself requested.
+            prev_repaint_delay: Duration::from_millis(16),
+            prev_terminal_requested_delay: Some(Duration::from_millis(500)),
+            ..Inputs::all_clear()
+        };
+        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
+    }
+
+    /// The headline #436 case (design's test #2): a blinking cursor with
+    /// nothing else happening -- egui's delay matches exactly what the app
+    /// itself requested (its own blink schedule), chrome is provably
+    /// unchanged, and there is no chrome input this frame -- decides
+    /// `Replay`.
+    #[test]
+    fn blinking_cursor_idle_frame_decides_replay() {
+        assert_eq!(
+            decide_chrome_mode(
+                true,
+                [800, 600],
+                1.0,
+                [800, 600],
+                1.0,
+                Duration::from_millis(500),
+                Some(Duration::from_millis(500)),
+                crate::ChromeDamage::Unchanged,
+                false,
+            ),
+            crate::ChromeMode::Replay
+        );
+    }
 
     /// Sum the vertex/index counts across every `Mesh` primitive in a
     /// tessellation result. `Callback` primitives (paint callbacks) carry no

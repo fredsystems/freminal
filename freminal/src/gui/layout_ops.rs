@@ -731,6 +731,8 @@ impl FreminalGui {
             prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
             prev_window_focused: false,
             chrome_frames_rendered: 0,
+            pending_terminal_requested_delay: None,
+            cached_central_rect: None,
         };
         self.windows.insert(window_id, win);
 

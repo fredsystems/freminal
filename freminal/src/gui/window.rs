@@ -325,4 +325,30 @@ pub(super) struct PerWindowState {
     /// below that count, `ChromeSignals::warming_up` is `true`,
     /// unconditionally forcing `ChromeDamage::Changed`.
     pub(super) chrome_frames_rendered: u32,
+
+    /// The delay `update()` itself requested via `ctx.request_repaint_after`
+    /// on the most recent frame (#436.4b §3.1 amendment), drained by
+    /// `App::take_terminal_requested_delay`.
+    ///
+    /// Set at the end of each `update()` from `shortest_repaint_delay` (the
+    /// shortest interval any rendered pane needed — cursor blink, content
+    /// update, or shader animation). Compared against egui's own requested
+    /// repaint delay by `egui_integration::chrome_repaint_settled` to decide
+    /// whether a REPLAY is permitted: a REPLAY requires that nothing OTHER
+    /// than this frame's own request also wants a wake. Defaults to `None`.
+    pub(super) pending_terminal_requested_delay: Option<std::time::Duration>,
+
+    /// The `CentralPanel` content rect (`ui.available_rect_before_wrap()`)
+    /// captured on the most recent FULL frame (#436.4b).
+    ///
+    /// On a REPLAY frame `update()` skips building the menu bar, tab bar,
+    /// and `CentralPanel` (all cached chrome), so there is no fresh
+    /// `available_rect` to read the terminal band's content rect from.
+    /// Instead the band's `Ui` is constructed directly at this cached rect,
+    /// in the same background layer chrome uses — valid because a REPLAY is
+    /// only permitted when chrome (including window size) is proven
+    /// unchanged since the frame that last set this field. `None` before
+    /// the first FULL frame (a REPLAY can never be chosen then, since
+    /// `chrome_cache` is also `None` at that point).
+    pub(super) cached_central_rect: Option<egui::Rect>,
 }

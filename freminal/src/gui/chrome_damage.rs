@@ -110,6 +110,17 @@ pub struct ChromeSignals {
     /// creation (#436 §7) — force `Changed` unconditionally until steady
     /// state.
     pub warming_up: bool,
+    /// Any rendered pane has an open overlay that paints ABOVE the terminal
+    /// band: the `Order::Foreground` right-click context menu, in-terminal
+    /// search bar, or command-history palette, OR the `Order::Tooltip`
+    /// URL-hover tooltip. These all paint outside the captured terminal-band
+    /// range (TAIL chrome), so a REPLAY frame would otherwise discard their
+    /// freshly-built shapes and repaint the stale cached tail from before the
+    /// overlay opened — making the open overlay vanish or ghost. Issue #436 §1
+    /// names context-menu/command-history and the URL tooltip as chrome that
+    /// must be covered. (The name predates the tooltip addition; it covers all
+    /// above-band per-pane terminal overlays, not only `Order::Foreground`.)
+    pub foreground_overlay_open: bool,
 }
 
 impl ChromeSignals {
@@ -131,6 +142,7 @@ impl ChromeSignals {
             || self.ppp_changed
             || self.focus_changed
             || self.warming_up
+            || self.foreground_overlay_open
     }
 }
 
@@ -297,7 +309,7 @@ mod tests {
     #[test]
     fn each_signal_field_alone_forces_changed() {
         type Setter = fn(&mut ChromeSignals);
-        let setters: [(&str, Setter); 14] = [
+        let setters: [(&str, Setter); 15] = [
             ("any_overlay_open", |s| s.any_overlay_open = true),
             ("style_changed", |s| s.style_changed = true),
             ("active_pane_changed", |s| s.active_pane_changed = true),
@@ -314,6 +326,9 @@ mod tests {
             ("ppp_changed", |s| s.ppp_changed = true),
             ("focus_changed", |s| s.focus_changed = true),
             ("warming_up", |s| s.warming_up = true),
+            ("foreground_overlay_open", |s| {
+                s.foreground_overlay_open = true;
+            }),
         ];
 
         for (name, set) in setters {
@@ -325,6 +340,27 @@ mod tests {
                 "expected field `{name}` alone to force Changed"
             );
         }
+    }
+
+    /// Regression test for the #436.4b defect: an open per-pane
+    /// `Order::Foreground` overlay (context menu, in-terminal search bar, or
+    /// command-history palette) must alone force `Changed`, so a REPLAY
+    /// frame never discards its freshly-built shapes in favor of the stale
+    /// cached tail chrome from before the overlay opened. The table test
+    /// above also covers this row; this test documents the fix intent
+    /// explicitly since it is a targeted regression fix rather than a
+    /// generic table entry.
+    #[test]
+    fn foreground_overlay_open_alone_forces_changed() {
+        let signals = ChromeSignals {
+            foreground_overlay_open: true,
+            ..ChromeSignals::default()
+        };
+        assert_eq!(
+            decide_chrome_damage(&signals, false, false),
+            ChromeDamage::Changed,
+            "an open context-menu/search-bar/command-history overlay must force Changed"
+        );
     }
 
     #[test]

@@ -132,7 +132,7 @@ pub enum ChromeMode {
 
 /// Per-frame signals drained from the [`App`] immediately after
 /// [`App::update`] returns, consumed by the windowing layer to decide
-/// paint-order splitting (#436.4a) and, in later subtasks, chrome replay.
+/// paint-order splitting (#436.4a) and chrome replay (#436.4b).
 #[derive(Debug, Clone)]
 pub struct FrameSignals {
     /// How much of the frame changed (see [`FrameDamage`]).
@@ -145,6 +145,19 @@ pub struct FrameSignals {
     /// `paint_primitives` call, byte-identical to the pre-#436.4a
     /// single-call path.
     pub band_range: std::ops::Range<usize>,
+    /// Whether static chrome changed this frame (#436.3/#436.4b) — mirrors
+    /// [`App::take_chrome_damage`]. Consulted, together with cache validity
+    /// and the §3.1 settle gate, to decide next frame's [`ChromeMode`].
+    pub chrome_damage: ChromeDamage,
+    /// The delay the app itself requested via `ctx.request_repaint_after`
+    /// during this frame's `update()` (#436.4b §3.1 amendment), if any.
+    /// `None` when the app made no such request this frame. Compared
+    /// against egui's own requested repaint delay (returned by `run_frame`)
+    /// to distinguish "only our own blink/content scheduling wants a wake"
+    /// from "something egui-internal (hover fade, menu animation, a
+    /// focused `TextEdit`'s cursor blink) also wants one" — see
+    /// `egui_integration::chrome_repaint_settled`.
+    pub terminal_requested_delay: Option<std::time::Duration>,
 }
 
 /// Configuration for creating a new window.
@@ -265,6 +278,22 @@ pub trait App {
     /// stale `Unchanged` can never be reused by a frame that didn't recompute it.
     fn take_chrome_damage(&mut self, _window_id: WindowId) -> ChromeDamage {
         ChromeDamage::Changed
+    }
+
+    /// Drain the delay the app itself requested via `ctx.request_repaint_after`
+    /// during this frame's `update()` (#436.4b §3.1 amendment), for this
+    /// window. Called once per frame after `update()` returns, mirroring
+    /// `take_frame_damage`/`take_chrome_damage`/`take_terminal_band_range`.
+    ///
+    /// The default returns `None` — the conservative, always-correct
+    /// behavior: paired with `chrome_repaint_settled`'s `None` branch (which
+    /// requires egui's own `repaint_delay` to be exactly `Duration::MAX`),
+    /// an app that does not opt in never falsely reports "settled" while it
+    /// is still driving its own blink/content repaint schedule under the
+    /// hood some other way. Reset-on-read: the app leaves `None` behind so a
+    /// stale delay can never be reused by a frame that didn't recompute it.
+    fn take_terminal_requested_delay(&mut self, _window_id: WindowId) -> Option<Duration> {
+        None
     }
 
     /// Shared flag through which the windowing layer publishes the
@@ -615,5 +644,18 @@ mod tests {
         // Reset-on-read: a second call still returns `Changed`, never a
         // stale `Unchanged` a prior frame might have left behind.
         assert_eq!(app.take_chrome_damage(window_id), ChromeDamage::Changed);
+    }
+
+    /// Pins the default behavior of `App::take_terminal_requested_delay`
+    /// (#436.4b) — mirroring the `take_chrome_damage` default discipline
+    /// above, using the same `DummyApp`.
+    #[test]
+    fn take_terminal_requested_delay_default_is_none_and_reset_on_read() {
+        let mut app = DummyApp;
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        assert_eq!(app.take_terminal_requested_delay(window_id), None);
+        // Reset-on-read: a second call still returns `None`.
+        assert_eq!(app.take_terminal_requested_delay(window_id), None);
     }
 }

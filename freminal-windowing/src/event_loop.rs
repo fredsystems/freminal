@@ -104,6 +104,33 @@ const fn is_blocked_key(key_code: winit::keyboard::KeyCode) -> bool {
     )
 }
 
+/// Returns `true` for `WindowEvent`s that could plausibly affect chrome
+/// state (hover, focus, click, drag, scroll, text/IME input) — the
+/// CONSERVATIVE #436.4b §3.2 input gate. Any `true` here forces
+/// `ChromeMode::Full` for that frame via `WindowState::chrome_input_pending`;
+/// deliberately over-broad (any window input, not just input actually over
+/// chrome rather than the terminal band) — refined region-aware in #436.8.
+const fn is_potential_chrome_input(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::CursorMoved { .. }
+            | WindowEvent::CursorEntered { .. }
+            | WindowEvent::CursorLeft { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. }
+            | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_)
+            | WindowEvent::Ime(_)
+            | WindowEvent::Focused(_)
+            | WindowEvent::Touch(_)
+            | WindowEvent::PinchGesture { .. }
+            | WindowEvent::PanGesture { .. }
+            | WindowEvent::DoubleTapGesture { .. }
+            | WindowEvent::RotationGesture { .. }
+            | WindowEvent::TouchpadPressure { .. }
+    )
+}
+
 /// Per-window state.
 struct WindowState {
     window: Window,
@@ -111,6 +138,15 @@ struct WindowState {
     egui: EguiState,
     /// Next scheduled repaint time (if any).
     repaint_at: Option<Instant>,
+    /// #436.4b §3.2 conservative chrome-input gate: set `true` by any window
+    /// input event this frame that could plausibly affect chrome (pointer,
+    /// keyboard, scroll, focus, IME — see [`is_potential_chrome_input`]).
+    /// Drained (`mem::take`) into `run_frame`'s `chrome_input_this_frame`
+    /// parameter at `RedrawRequested`, so a `true` unconditionally forces
+    /// `ChromeMode::Full` for that frame. Deliberately over-broad (ANY
+    /// window input, not just input over chrome) — the region-aware
+    /// refinement is #436.8.
+    chrome_input_pending: bool,
 }
 
 impl WindowState {
@@ -217,6 +253,7 @@ impl<A: App> Handler<A> {
             gl,
             egui,
             repaint_at: Some(Instant::now()),
+            chrome_input_pending: false,
         };
 
         self.windows.insert(winit_id, state);
@@ -384,6 +421,10 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         ) {
             if let Some(state) = self.windows.get_mut(&winit_id) {
                 let response = state.egui.on_window_event(&state.window, &event);
+                // These are all pointer events by construction (the `matches!`
+                // guard above) — always a potential-chrome-input, regardless
+                // of whether egui itself wants a repaint (#436.4b §3.2).
+                state.chrome_input_pending = true;
                 if response.repaint {
                     let deadline = Instant::now() + std::time::Duration::from_millis(16);
                     state.repaint_at = Some(
@@ -440,6 +481,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     {
                         state.egui.inject_paste(text);
                         state.repaint_at = Some(Instant::now());
+                        // A keyboard event, and it just mutated pane content
+                        // via a paste — a potential-chrome-input (#436.4b §3.2).
+                        state.chrome_input_pending = true;
                         // Don't pass to egui-winit — it would produce a
                         // duplicate paste on windows where its clipboard works.
                         self.update_control_flow(event_loop);
@@ -482,6 +526,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 self.app
                     .on_raw_key_event(WindowId(winit_id), raw_event, raw_mods);
                 state.repaint_at = Some(Instant::now());
+                // A keyboard event, routed straight to the app — a
+                // potential-chrome-input (#436.4b §3.2).
+                state.chrome_input_pending = true;
             }
             // Don't pass to egui-winit — this key has no egui `Key` variant
             // and would otherwise be silently dropped.
@@ -492,6 +539,15 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         // Pass to egui first
         let egui_consumed = if let Some(state) = self.windows.get_mut(&winit_id) {
             let response = state.egui.on_window_event(&state.window, &event);
+
+            // #436.4b §3.2: any window input event that could plausibly
+            // affect chrome (or that egui itself says caused a repaint,
+            // covering event kinds `is_potential_chrome_input` doesn't
+            // enumerate) forces `ChromeMode::Full` for the frame this event
+            // is delivered in.
+            if is_potential_chrome_input(&event) || response.repaint {
+                state.chrome_input_pending = true;
+            }
 
             if response.repaint {
                 state.repaint_at = Some(Instant::now());
@@ -589,17 +645,25 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 // it mid-frame without a second `&mut app` borrow.
                 let present_flag = app.present_partial_flag(window_id);
 
+                // Drain this frame's #436.4b §3.2 chrome-input gate,
+                // resetting it so a later frame with no new input events
+                // never inherits a stale `true`.
+                let chrome_input_this_frame = std::mem::take(&mut state.chrome_input_pending);
+
                 let frame_output = state.egui.run_frame(
                     &state.window,
                     &state.gl,
                     clear_color,
                     raw_input,
                     present_flag.as_ref(),
+                    chrome_input_this_frame,
                     |ctx, gl, chrome_mode| {
                         app.update(window_id, ctx, gl, &handle, chrome_mode);
                         FrameSignals {
                             frame_damage: app.take_frame_damage(window_id),
                             band_range: app.take_terminal_band_range(window_id),
+                            chrome_damage: app.take_chrome_damage(window_id),
+                            terminal_requested_delay: app.take_terminal_requested_delay(window_id),
                         }
                     },
                 );
@@ -901,9 +965,10 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        ViewportCommandFlags, is_blocked_key, logical_coord_to_i32, logical_dim_to_u32,
-        viewport_command_flags,
+        ViewportCommandFlags, is_blocked_key, is_potential_chrome_input, logical_coord_to_i32,
+        logical_dim_to_u32, viewport_command_flags,
     };
+    use winit::event::{DeviceId, WindowEvent};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -1033,5 +1098,56 @@ mod tests {
         assert!(!is_blocked_key(KeyCode::Space));
         assert!(!is_blocked_key(KeyCode::Escape));
         assert!(!is_blocked_key(KeyCode::AltRight));
+    }
+
+    /// #436.4b §3.2: a representative event from each "potential chrome
+    /// input" category (pointer, keyboard, scroll, focus, IME) forces
+    /// `chrome_input_pending`.
+    #[test]
+    fn is_potential_chrome_input_covers_pointer_keyboard_scroll_focus_ime() {
+        assert!(is_potential_chrome_input(&WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+        }));
+        assert!(is_potential_chrome_input(&WindowEvent::CursorEntered {
+            device_id: DeviceId::dummy(),
+        }));
+        assert!(is_potential_chrome_input(&WindowEvent::CursorLeft {
+            device_id: DeviceId::dummy(),
+        }));
+        assert!(is_potential_chrome_input(&WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+        }));
+        assert!(is_potential_chrome_input(&WindowEvent::MouseWheel {
+            device_id: DeviceId::dummy(),
+            delta: winit::event::MouseScrollDelta::LineDelta(0.0, 1.0),
+            phase: winit::event::TouchPhase::Moved,
+        }));
+        // `KeyEvent` has a private `platform_specific` field (no public
+        // constructor), so `KeyboardInput` itself cannot be built outside
+        // winit; it is exercised in a real frame instead via the paste-
+        // interception / blocked-key tests elsewhere in this module, both
+        // of which set `chrome_input_pending` directly at their early-return
+        // sites (see `window_event`) rather than through this helper.
+        assert!(is_potential_chrome_input(&WindowEvent::ModifiersChanged(
+            winit::event::Modifiers::default(),
+        )));
+        assert!(is_potential_chrome_input(&WindowEvent::Focused(true)));
+    }
+
+    /// Events unrelated to chrome-affecting input do NOT set the gate —
+    /// otherwise every frame would be forced `Full` and REPLAY would never
+    /// fire.
+    #[test]
+    fn is_potential_chrome_input_excludes_unrelated_events() {
+        assert!(!is_potential_chrome_input(&WindowEvent::RedrawRequested));
+        assert!(!is_potential_chrome_input(&WindowEvent::CloseRequested));
+        assert!(!is_potential_chrome_input(&WindowEvent::Destroyed));
+        assert!(!is_potential_chrome_input(
+            &WindowEvent::HoveredFileCancelled
+        ));
+        assert!(!is_potential_chrome_input(&WindowEvent::Occluded(true)));
     }
 }
