@@ -17,6 +17,7 @@ use freminal_windowing::WindowId;
 use glow::HasContext;
 use tracing::{debug, error, trace, warn};
 
+use super::frame_damage;
 use super::panes;
 use super::renderer::WindowPostRenderer;
 use super::rendering;
@@ -2161,78 +2162,41 @@ impl freminal_windowing::App for FreminalGui {
             // pointer moves (hover). Presenting only the cursor rect on such a
             // frame would leave that chrome stale, so both force `Full`.
             let pointer_moving = ctx.input(|i| i.pointer.is_moving());
-            win.pending_frame_damage = 'damage: {
-                if ui_overlay_open
-                    || shader_recomposites
-                    || active_pane_changed
-                    || pointer_moving
-                {
-                    break 'damage freminal_windowing::FrameDamage::Full;
-                }
-                // A toast being visible animates its own region each frame.
-                let toast_active = self
-                    .toasts
-                    .try_borrow()
-                    .is_ok_and(|stack| !stack.is_empty());
-                if toast_active {
-                    break 'damage freminal_windowing::FrameDamage::Full;
-                }
-                // Inspect only the panes actually rendered this frame — the
-                // entries in `pane_layout`. Under zoom, only the zoomed pane is
-                // rendered; iterating the whole tree would read stale
-                // `last_frame_cursor_damage` from non-rendered siblings and
-                // wrongly force `Full` every frame. Per-pane outcomes (#435):
-                //   - `Full`            -> that pane rebuilt content; whole
-                //                          frame must present fully.
-                //   - `CursorOnly(rect)`-> the (active) pane's cursor changed;
-                //                          add its rect to the damage set. On
-                //                          an active-pane switch, the old and
-                //                          new active panes both report this
-                //                          (old erases its cursor, new draws
-                //                          one), so both rects are collected.
-                //   - `CursorOnly(None)`-> cursor region did not resolve to a
-                //                          valid rect; be cautious -> Full.
-                //   - `Unchanged`       -> inactive/idle pane; contributes no
-                //                          damage and does NOT force Full.
-                //   - a bell flash overlay on a pane animates a full-pane
-                //     region each frame -> force Full.
-                // Only the active pane ever draws a cursor, so a pure blink
-                // yields exactly one rect; a pane switch yields two.
-                let active_tab = win.tabs.active_tab();
-                let mut rects: Vec<freminal_windowing::DamageRect> = Vec::new();
-                for (pane_id, _) in &pane_layout {
-                    let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
-                        // A pane in the layout we cannot resolve -> be safe.
-                        rects.clear();
-                        break;
-                    };
-                    if pane.view_state.bell_since.is_some() {
-                        rects.clear();
-                        break;
-                    }
-                    match pane.render_cache.last_frame_cursor_damage {
-                        crate::gui::renderer::PaneFrameDamage::Unchanged => {}
-                        crate::gui::renderer::PaneFrameDamage::CursorOnly(Some(d)) => {
-                            rects.push(freminal_windowing::DamageRect {
-                                x: d.x,
-                                y: d.y,
-                                width: d.width,
-                                height: d.height,
-                            });
-                        }
-                        crate::gui::renderer::PaneFrameDamage::CursorOnly(None)
-                        | crate::gui::renderer::PaneFrameDamage::Full => {
-                            rects.clear();
-                            break;
-                        }
-                    }
-                }
-                if rects.is_empty() {
-                    freminal_windowing::FrameDamage::Full
-                } else {
-                    freminal_windowing::FrameDamage::Partial(rects)
-                }
-            };
+            let force_full =
+                ui_overlay_open || shader_recomposites || active_pane_changed || pointer_moving;
+            // A toast being visible animates its own region each frame.
+            let toast_active = self
+                .toasts
+                .try_borrow()
+                .is_ok_and(|stack| !stack.is_empty());
+            // Inspect only the panes actually rendered this frame — the
+            // entries in `pane_layout`. Under zoom, only the zoomed pane is
+            // rendered; iterating the whole tree would read stale
+            // `last_frame_cursor_damage` from non-rendered siblings and
+            // wrongly force `Full` every frame. The per-pane -> `FrameDamage`
+            // decision itself (and its full case-by-case rationale) is
+            // extracted into `decide_frame_damage` (#436.2b) so both this
+            // path and the future REPLAY path compute it identically.
+            let active_tab = win.tabs.active_tab();
+            let mut unresolved_pane = false;
+            let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
+                Vec::with_capacity(pane_layout.len());
+            for (pane_id, _) in &pane_layout {
+                let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
+                    // A pane in the layout we cannot resolve -> be safe.
+                    unresolved_pane = true;
+                    break;
+                };
+                per_pane_damage.push(frame_damage::PaneDamageInput {
+                    bell_active: pane.view_state.bell_since.is_some(),
+                    cursor_damage: pane.render_cache.last_frame_cursor_damage,
+                });
+            }
+            win.pending_frame_damage = frame_damage::decide_frame_damage(
+                force_full || unresolved_pane,
+                toast_active,
+                &per_pane_damage,
+            );
 
             // ── Window-level post-processing pass ────────────────────
             //

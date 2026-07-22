@@ -42,6 +42,7 @@ pub mod chrome_style;
 mod close_guard;
 mod command_blocks;
 mod command_history;
+mod frame_damage;
 mod hot_reload;
 pub(crate) mod icons;
 mod layout_ops;
