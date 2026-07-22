@@ -583,13 +583,21 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 let mut raw_input = state.egui.take_egui_input(&state.window);
                 app.raw_input_hook(window_id, &mut raw_input);
 
+                // Fetch the partial-present flag up front (immutable borrow of
+                // `app`, released before the `ui_fn` mutable borrow) so the
+                // windowing layer can publish the authoritative decision into
+                // it mid-frame without a second `&mut app` borrow.
+                let present_flag = app.present_partial_flag(window_id);
+
                 let frame_output = state.egui.run_frame(
                     &state.window,
                     &state.gl,
                     clear_color,
                     raw_input,
+                    present_flag.as_ref(),
                     |ctx, gl| {
                         app.update(window_id, ctx, gl, &handle);
+                        app.take_frame_damage(window_id)
                     },
                 );
 

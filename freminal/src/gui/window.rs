@@ -201,4 +201,39 @@ pub(super) struct PerWindowState {
         freminal_windowing::RawKeyEvent,
         freminal_windowing::RawKeyMods,
     )>,
+
+    /// Frame-damage report for the most recent `update()` of this window
+    /// (#435), drained by `App::take_frame_damage`.
+    ///
+    /// Set at the end of each `update()`: [`FrameDamage::Partial`] with the
+    /// cursor damage rect(s) when the frame was a pure cursor-only update
+    /// (every rendered pane took the cursor-only fast path and nothing else in
+    /// the window changed), otherwise [`FrameDamage::Full`]. Defaults to
+    /// `Full` so a window that has not yet rendered, or any frame the
+    /// aggregation does not positively prove cursor-only, presents fully.
+    ///
+    /// [`FrameDamage::Partial`]: freminal_windowing::FrameDamage::Partial
+    /// [`FrameDamage::Full`]: freminal_windowing::FrameDamage::Full
+    pub(super) pending_frame_damage: freminal_windowing::FrameDamage,
+
+    /// The `(active tab, active pane)` shown on the previous frame.
+    ///
+    /// Compared each frame to detect when the active pane changes — whether by
+    /// a pane switch within a tab or by a tab switch (which changes the active
+    /// pane too). On a change, the newly-active pane's cursor blink phase is
+    /// re-anchored so its cursor appears immediately rather than inheriting the
+    /// global blink cycle's current half. `None` before the first frame.
+    pub(super) previous_active_pane_key: Option<(TabId, crate::gui::panes::PaneId)>,
+
+    /// Authoritative partial-present flag for this window (#435).
+    ///
+    /// The windowing layer stores into this each frame — `true` when it
+    /// skipped the full clear and is presenting only the damage region,
+    /// `false` for a normal full clear + present — **before** the pane paint
+    /// callbacks run. The callbacks read it (a clone is captured into each)
+    /// to gate their scissor optimization, so a pane only scissors its redraw
+    /// when the clear was actually skipped. Shared via `Arc` because the pane
+    /// `PaintCallback` closures require `'static` captures; only ever touched
+    /// on the GUI thread, so `Relaxed` ordering suffices.
+    pub(super) present_is_partial: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }

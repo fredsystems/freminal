@@ -43,6 +43,52 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId(winit::window::WindowId);
 
+/// A rectangle in **physical framebuffer pixels**, origin at the
+/// **bottom-left** of the surface (OpenGL / EGL convention).
+///
+/// Used to describe the damaged (changed) region of a frame for
+/// partial-present and scissored-clear optimizations. The bottom-left
+/// origin matches both `glScissor` and `eglSwapBuffersWithDamageKHR`, so
+/// no coordinate flip is needed between the damage rect and either GL call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamageRect {
+    /// X of the lower-left corner, in physical pixels.
+    pub x: i32,
+    /// Y of the lower-left corner, in physical pixels (bottom-left origin).
+    pub y: i32,
+    /// Width in physical pixels.
+    pub width: i32,
+    /// Height in physical pixels.
+    pub height: i32,
+}
+
+/// Describes how much of a rendered frame actually changed, so the
+/// windowing layer can decide whether it may skip the full-framebuffer
+/// clear and present only the changed region.
+///
+/// The default is [`FrameDamage::Full`]: the whole surface changed and
+/// must be cleared, redrawn, and presented. This is the conservative,
+/// always-correct behavior — an app that does not opt in gets exactly the
+/// pre-optimization path.
+///
+/// [`FrameDamage::Partial`] is a *hint*, honored only when the platform can
+/// prove the previous frame's contents are still in the back buffer (via
+/// `buffer_age() == 1`). When that proof is unavailable (non-EGL backends,
+/// a rotated/aged buffer, a resize) the windowing layer falls back to a
+/// full frame regardless.
+#[derive(Debug, Clone, Default)]
+pub enum FrameDamage {
+    /// The entire surface changed. Clear + full redraw + full present.
+    #[default]
+    Full,
+    /// Only the listed rectangles changed since the previous frame. The
+    /// caller guarantees every pixel outside these rects is identical to
+    /// the previous frame's, so — when the back buffer still holds that
+    /// previous frame — the clear may be skipped and the present may be
+    /// restricted to these rects.
+    Partial(Vec<DamageRect>),
+}
+
 /// Configuration for creating a new window.
 pub struct WindowConfig {
     /// Window title.
@@ -96,6 +142,50 @@ pub trait App {
 
     /// GL clear color for the given window (supports transparency via alpha).
     fn clear_color(&self, window_id: WindowId) -> [f32; 4];
+
+    /// Report how much of the frame just rendered in [`App::update`]
+    /// actually changed, so the windowing layer can decide whether to skip
+    /// the full-framebuffer clear and present only the damaged region.
+    ///
+    /// Called by the windowing layer **once per frame, immediately after
+    /// [`App::update`] returns** for that window. The app should compute the
+    /// answer during `update` and hand it back here (typically by draining a
+    /// per-window value it set during the UI pass).
+    ///
+    /// The default returns [`FrameDamage::Full`] — the conservative,
+    /// always-correct behavior. An app only needs to override this to opt
+    /// into partial-present / skip-clear optimizations, and returning `Full`
+    /// at any time is always safe.
+    fn take_frame_damage(&mut self, _window_id: WindowId) -> FrameDamage {
+        FrameDamage::Full
+    }
+
+    /// Shared flag through which the windowing layer publishes the
+    /// **authoritative** partial-present decision for each frame.
+    ///
+    /// Returning `Some(flag)` opts the window into damage-aware presentation.
+    /// Each frame, after the windowing layer resolves the partial-present gate
+    /// (the app's [`FrameDamage`] *and* buffer-age *and* platform support) and
+    /// **before** the paint callbacks execute, it stores the result into this
+    /// flag with [`Ordering::Relaxed`](std::sync::atomic::Ordering::Relaxed):
+    /// `true` when only the damaged region is being presented (the full clear
+    /// was skipped), `false` for a normal full clear + present.
+    ///
+    /// This is the single source of truth. An app that scissors its own draws
+    /// to the damage region must read this same flag inside its paint
+    /// callbacks, so the scissor can never disagree with whether the clear was
+    /// actually skipped (the black-cell hazard). Because the callbacks run on
+    /// the same thread immediately after the store, `Relaxed` ordering is
+    /// sufficient.
+    ///
+    /// The default returns `None`: the window is presented fully every frame
+    /// and no flag is published.
+    fn present_partial_flag(
+        &self,
+        _window_id: WindowId,
+    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
 
     /// Hook to modify raw input before egui processes it.
     ///

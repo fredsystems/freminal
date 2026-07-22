@@ -296,6 +296,11 @@ impl freminal_windowing::App for FreminalGui {
                         close_dialog: super::close_guard::CloseGuardDialog::default(),
                         pending_force_close: false,
                         pending_raw_keys: Vec::new(),
+                        pending_frame_damage: freminal_windowing::FrameDamage::Full,
+                        present_is_partial: std::sync::Arc::new(
+                            std::sync::atomic::AtomicBool::new(false),
+                        ),
+                        previous_active_pane_key: None,
                     };
                     self.windows.insert(window_id, win);
 
@@ -485,6 +490,29 @@ impl freminal_windowing::App for FreminalGui {
             let color = egui::Color32::from_rgb(r, g, b);
             color.to_normalized_gamma_f32()
         }
+    }
+
+    fn present_partial_flag(
+        &self,
+        window_id: WindowId,
+    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        self.windows
+            .get(&window_id)
+            .map(|win| std::sync::Arc::clone(&win.present_is_partial))
+    }
+
+    fn take_frame_damage(&mut self, window_id: WindowId) -> freminal_windowing::FrameDamage {
+        // Drain the damage computed during `update()` for this window, leaving
+        // `Full` behind so a stale value can never be reused on a later frame
+        // that does not recompute it.
+        self.windows
+            .get_mut(&window_id)
+            .map_or(freminal_windowing::FrameDamage::Full, |win| {
+                std::mem::replace(
+                    &mut win.pending_frame_damage,
+                    freminal_windowing::FrameDamage::Full,
+                )
+            })
     }
 
     // Inherently large: the main per-frame UI function handles menu bar, settings modal, window
@@ -1351,6 +1379,23 @@ impl freminal_windowing::App for FreminalGui {
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
 
+            // Re-anchor the cursor blink phase when the active pane changes —
+            // by a pane switch within the tab OR a tab switch (both change the
+            // "which pane is active-and-visible" key). This makes the newly
+            // active pane's cursor appear immediately instead of inheriting the
+            // global blink cycle's current half (the cursor-appear lag). The
+            // flag is captured on that pane's next render, when the egui input
+            // clock is available. Only reset on an actual change so we don't
+            // re-anchor (and cause a spurious extra blink) every frame.
+            let active_pane_key = (win.tabs.active_tab().id, active_pane_id);
+            let active_pane_changed = win.previous_active_pane_key != Some(active_pane_key);
+            if active_pane_changed {
+                if let Some(pane) = win.tabs.active_tab_mut().pane_tree.find_mut(active_pane_id) {
+                    pane.view_state.cursor_blink_reset_pending = true;
+                }
+                win.previous_active_pane_key = Some(active_pane_key);
+            }
+
             // Broadcast input (Task 74): when the active tab has broadcast
             // enabled, collect the (pane id, input sender) of every leaf pane
             // up front. Senders are cheap to clone. The active pane's render
@@ -1664,6 +1709,12 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
+            // Clone the per-window partial-present flag once, before the pane
+            // loop, so each pane's `show()` can pass it into its PaintCallback
+            // without re-borrowing `win` while `win` is mutably borrowed in
+            // the loop (#435).
+            let present_is_partial_for_panes = std::sync::Arc::clone(&win.present_is_partial);
+
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
                 // Each pane edge that is interior (shared with another pane)
@@ -1865,6 +1916,7 @@ impl freminal_windowing::App for FreminalGui {
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
                             &key_broadcast_targets,
+                            &present_is_partial_for_panes,
                         )
                     });
                 let (left_clicked, deferred_actions) = show_result.inner;
@@ -2018,6 +2070,108 @@ impl freminal_windowing::App for FreminalGui {
                         Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
                 }
             }
+
+            // ── Frame-damage aggregation (#435) ───────────────────────
+            //
+            // Decide whether this whole frame was a pure cursor-only update,
+            // so the windowing layer may skip the full-framebuffer clear and
+            // present only the changed cursor region. This is deliberately
+            // conservative: `Partial` is emitted ONLY when every condition
+            // below positively proves nothing but the cursor blinked/moved.
+            // Any doubt falls through to `Full` (a normal clear + present),
+            // which is always correct. The windowing layer additionally
+            // requires `buffer_age() == 1` before honoring `Partial`, so a
+            // false positive here still cannot corrupt the frame on a fresh
+            // or aged back buffer — but we avoid false positives regardless.
+            //
+            // A window-post shader recomposites the entire window every frame,
+            // so it forces `Full`.
+            let shader_recomposites = {
+                let wpr = win
+                    .window_post
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                wpr.is_active() || wpr.pending_shader.is_some()
+            };
+            // The pane-border active-pane highlight, menu/tab-bar hover tints,
+            // and other chrome are painted by the plain egui painter every
+            // frame — outside the per-pane damage tracking. They only *change*
+            // pixels when the active pane changes (border moves) or the
+            // pointer moves (hover). Presenting only the cursor rect on such a
+            // frame would leave that chrome stale, so both force `Full`.
+            let pointer_moving = ctx.input(|i| i.pointer.is_moving());
+            win.pending_frame_damage = 'damage: {
+                if ui_overlay_open
+                    || shader_recomposites
+                    || active_pane_changed
+                    || pointer_moving
+                {
+                    break 'damage freminal_windowing::FrameDamage::Full;
+                }
+                // A toast being visible animates its own region each frame.
+                let toast_active = self
+                    .toasts
+                    .try_borrow()
+                    .is_ok_and(|stack| !stack.is_empty());
+                if toast_active {
+                    break 'damage freminal_windowing::FrameDamage::Full;
+                }
+                // Inspect only the panes actually rendered this frame — the
+                // entries in `pane_layout`. Under zoom, only the zoomed pane is
+                // rendered; iterating the whole tree would read stale
+                // `last_frame_cursor_damage` from non-rendered siblings and
+                // wrongly force `Full` every frame. Per-pane outcomes (#435):
+                //   - `Full`            -> that pane rebuilt content; whole
+                //                          frame must present fully.
+                //   - `CursorOnly(rect)`-> the (active) pane's cursor changed;
+                //                          add its rect to the damage set. On
+                //                          an active-pane switch, the old and
+                //                          new active panes both report this
+                //                          (old erases its cursor, new draws
+                //                          one), so both rects are collected.
+                //   - `CursorOnly(None)`-> cursor region did not resolve to a
+                //                          valid rect; be cautious -> Full.
+                //   - `Unchanged`       -> inactive/idle pane; contributes no
+                //                          damage and does NOT force Full.
+                //   - a bell flash overlay on a pane animates a full-pane
+                //     region each frame -> force Full.
+                // Only the active pane ever draws a cursor, so a pure blink
+                // yields exactly one rect; a pane switch yields two.
+                let active_tab = win.tabs.active_tab();
+                let mut rects: Vec<freminal_windowing::DamageRect> = Vec::new();
+                for (pane_id, _) in &pane_layout {
+                    let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
+                        // A pane in the layout we cannot resolve -> be safe.
+                        rects.clear();
+                        break;
+                    };
+                    if pane.view_state.bell_since.is_some() {
+                        rects.clear();
+                        break;
+                    }
+                    match pane.render_cache.last_frame_cursor_damage {
+                        crate::gui::renderer::PaneFrameDamage::Unchanged => {}
+                        crate::gui::renderer::PaneFrameDamage::CursorOnly(Some(d)) => {
+                            rects.push(freminal_windowing::DamageRect {
+                                x: d.x,
+                                y: d.y,
+                                width: d.width,
+                                height: d.height,
+                            });
+                        }
+                        crate::gui::renderer::PaneFrameDamage::CursorOnly(None)
+                        | crate::gui::renderer::PaneFrameDamage::Full => {
+                            rects.clear();
+                            break;
+                        }
+                    }
+                }
+                if rects.is_empty() {
+                    freminal_windowing::FrameDamage::Full
+                } else {
+                    freminal_windowing::FrameDamage::Partial(rects)
+                }
+            };
 
             // ── Window-level post-processing pass ────────────────────
             //
@@ -2595,6 +2749,9 @@ impl FreminalGui {
             close_dialog: super::close_guard::CloseGuardDialog::default(),
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
+            pending_frame_damage: freminal_windowing::FrameDamage::Full,
+            present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            previous_active_pane_key: None,
         }
     }
 
