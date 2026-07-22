@@ -1176,4 +1176,130 @@ mod tests {
         assert!(band_shapes.is_empty());
         assert_eq!(tail_shapes.len(), shapes.len());
     }
+
+    /// Extract, in order, the `rect` of every `Primitive::Callback` in a
+    /// tessellated primitive list. `run_frame`'s band contains GL
+    /// `PaintCallback`s (the pre-clear FBO callback, one per-pane draw
+    /// callback per pane, and the post-shader composite callback); their
+    /// `rect` is a stable, headlessly-observable identity we can assert
+    /// order/containment against without a GL context.
+    fn callback_rects(primitives: &[egui::ClippedPrimitive]) -> Vec<Rect> {
+        primitives
+            .iter()
+            .filter_map(|clipped| match &clipped.primitive {
+                Primitive::Callback(cb) => Some(cb.rect),
+                Primitive::Mesh(_) => None,
+            })
+            .collect()
+    }
+
+    /// #436.5: the terminal band's GL `PaintCallback`s (pre-clear FBO,
+    /// per-pane draw(s), post-shader composite) must stay CONTIGUOUS and IN
+    /// ORDER inside the band slice across the head/band/tail split, so their
+    /// offscreen-FBO round-trip is never interrupted by a chrome
+    /// `paint_primitives` call. This is the property "Finding A" relies on:
+    /// because `band_shape_start` is captured before the pre-clear callback
+    /// and `band_shape_end` after the post-shader callback (`app_impl.rs`),
+    /// all three callback kinds fall inside the band's contiguous shape
+    /// range by construction, and egui's tessellator (verified against
+    /// epaint 0.35: `tessellate_clipped_shape` emits each `Shape::Callback`
+    /// as its own `Primitive::Callback`, never merged into an adjacent mesh,
+    /// in input order) preserves that.
+    ///
+    /// This is a data-shape/ordering test only — it does NOT invoke the
+    /// callbacks or exercise any GL. The closures are inert. Real FBO-state
+    /// atomicity and pixel output are GPU-bound and deferred to 436.9's
+    /// pixel harness (no headless-GL harness exists in-repo).
+    #[test]
+    fn band_gl_callbacks_stay_contiguous_and_ordered_across_the_split() {
+        use std::sync::Arc;
+
+        // Distinguishable rects identify each callback by position in the
+        // tessellated output (their `rect` survives tessellation verbatim).
+        let preclear_rect = Rect::from_min_size(pos2(1.0, 0.0), vec2(100.0, 100.0));
+        let pane0_rect = Rect::from_min_size(pos2(2.0, 0.0), vec2(40.0, 40.0));
+        let pane1_rect = Rect::from_min_size(pos2(3.0, 0.0), vec2(40.0, 40.0));
+        let postshader_rect = Rect::from_min_size(pos2(4.0, 0.0), vec2(100.0, 100.0));
+
+        let make_cb = |rect: Rect| egui::PaintCallback {
+            rect,
+            // Inert closure — never invoked in this headless test; mirrors
+            // production's `Arc::new(egui_glow::CallbackFn::new(move |info,
+            // painter| { .. }))` construction shape (app_impl.rs:1876,2427).
+            callback: Arc::new(egui_glow::CallbackFn::new(|_info, _painter| {})),
+        };
+
+        let ctx = egui::Context::default();
+        let pixels_per_point = 1.0;
+
+        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // HEAD: chrome painted before the band (menu/tab bar stand-in).
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)),
+                0.0,
+                Color32::RED,
+            );
+
+            // BAND begins here — mirrors app_impl.rs's terminal-band order:
+            // pre-clear FBO callback, then per-pane draw callbacks, then the
+            // post-shader composite callback, then a pane-border rect
+            // (Band-C chrome, still inside the band range).
+            ui.painter().add(make_cb(preclear_rect));
+            ui.painter().add(make_cb(pane0_rect));
+            ui.painter().add(make_cb(pane1_rect));
+            ui.painter().add(make_cb(postshader_rect));
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(10.0, 10.0), vec2(5.0, 5.0)),
+                0.0,
+                Color32::GREEN,
+            );
+
+            // TAIL: chrome painted after the band (overlay/tooltip stand-in).
+            ui.painter().rect_filled(
+                Rect::from_min_size(pos2(30.0, 30.0), vec2(5.0, 5.0)),
+                0.0,
+                Color32::YELLOW,
+            );
+        });
+
+        let shapes = full_output.shapes;
+        // 1 head rect + 4 callbacks + 1 border rect + 1 tail rect.
+        assert_eq!(shapes.len(), 7, "sanity: exactly the shapes painted");
+
+        // Band range: from the first callback (index 1) through the border
+        // rect (index 5, exclusive end 6) — as `band_shape_start`/
+        // `band_shape_end` would bracket it in production.
+        let start = 1;
+        let end = 6;
+        let head_primitives = ctx.tessellate(shapes[..start].to_vec(), pixels_per_point);
+        let band_primitives = ctx.tessellate(shapes[start..end].to_vec(), pixels_per_point);
+        let tail_primitives = ctx.tessellate(shapes[end..].to_vec(), pixels_per_point);
+
+        // The band slice contains exactly the four callbacks, in order.
+        assert_eq!(
+            callback_rects(&band_primitives),
+            vec![preclear_rect, pane0_rect, pane1_rect, postshader_rect],
+            "the band must contain pre-clear -> pane0 -> pane1 -> post-shader \
+             callbacks, contiguous and in order"
+        );
+        // No callback leaks into head or tail.
+        assert!(
+            callback_rects(&head_primitives).is_empty(),
+            "no GL callback may fall in the chrome_head slice"
+        );
+        assert!(
+            callback_rects(&tail_primitives).is_empty(),
+            "no GL callback may fall in the chrome_tail slice"
+        );
+
+        // Splitting must not drop, duplicate, or reorder callbacks vs.
+        // tessellating the whole list at once.
+        let whole_primitives = ctx.tessellate(shapes, pixels_per_point);
+        assert_eq!(
+            callback_rects(&whole_primitives),
+            vec![preclear_rect, pane0_rect, pane1_rect, postshader_rect],
+            "the whole-list tessellation must carry the same callbacks in the \
+             same order the split does"
+        );
+    }
 }
