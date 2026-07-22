@@ -122,6 +122,14 @@ const fn is_potential_chrome_input(event: &WindowEvent) -> bool {
             | WindowEvent::ModifiersChanged(_)
             | WindowEvent::Ime(_)
             | WindowEvent::Focused(_)
+            // An OS dark/light theme switch synchronously rebuilds egui's
+            // chrome visuals (see the `ThemeMode::Auto` path in the app's
+            // `update`), so it must force `ChromeMode::Full` — otherwise the
+            // app-level `style_changed` signal (which lags a frame, keyed off
+            // the terminal snapshot's theme rather than the OS state) could
+            // miss it and a REPLAY frame would paint stale-theme chrome
+            // (#436.6 / §6 safety-net completeness).
+            | WindowEvent::ThemeChanged(_)
             | WindowEvent::Touch(_)
             | WindowEvent::PinchGesture { .. }
             | WindowEvent::PanGesture { .. }
@@ -1135,6 +1143,11 @@ mod tests {
             winit::event::Modifiers::default(),
         )));
         assert!(is_potential_chrome_input(&WindowEvent::Focused(true)));
+        // An OS dark/light switch rebuilds egui chrome visuals synchronously
+        // (#436.6): it must force `ChromeMode::Full`.
+        assert!(is_potential_chrome_input(&WindowEvent::ThemeChanged(
+            winit::window::Theme::Dark,
+        )));
     }
 
     /// Events unrelated to chrome-affecting input do NOT set the gate —

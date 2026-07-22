@@ -117,11 +117,38 @@ pub fn decide_frame_damage(
     }
 }
 
+/// #435/#436 composition (§6): reconcile the #435 partial-present decision
+/// with the #436 chrome-cache decision. They are computed separately but must
+/// agree: if the chrome changed pixels this frame
+/// ([`freminal_windowing::ChromeDamage::Changed`]), the frame must NOT be
+/// presented [`freminal_windowing::FrameDamage::Partial`] — #435's
+/// `buffer_age() == 1` fast path assumes every pixel outside the damage rect
+/// is bit-identical to the previous frame, but a chrome rebuild may have
+/// changed pixels outside a cursor rect, which would then be left stale on
+/// screen. So a `Changed` chrome frame forces `Full`.
+///
+/// On a REPLAY frame `chrome_damage` is `Unchanged` by construction (REPLAY is
+/// only chosen when the previous frame was `Unchanged` and no chrome input
+/// landed this frame), so this is a no-op there and the headline cursor-only
+/// partial-present path (idle blink) is preserved. When `chrome_damage` is
+/// `Changed` this conservatively presents `Full` rather than risk a stale
+/// `Partial`.
+#[must_use]
+pub fn compose_with_chrome_damage(
+    frame_damage: freminal_windowing::FrameDamage,
+    chrome_damage: freminal_windowing::ChromeDamage,
+) -> freminal_windowing::FrameDamage {
+    match chrome_damage {
+        freminal_windowing::ChromeDamage::Changed => freminal_windowing::FrameDamage::Full,
+        freminal_windowing::ChromeDamage::Unchanged => frame_damage,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PaneDamageInput, decide_frame_damage};
+    use super::{PaneDamageInput, compose_with_chrome_damage, decide_frame_damage};
     use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
-    use freminal_windowing::{DamageRect, FrameDamage};
+    use freminal_windowing::{ChromeDamage, DamageRect, FrameDamage};
 
     /// `FrameDamage` does not implement `PartialEq` (see its definition),
     /// so tests compare it structurally by hand.
@@ -295,5 +322,39 @@ mod tests {
             },
         ];
         assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    // ── #435/#436 composition (§6): compose_with_chrome_damage ──────────
+
+    #[test]
+    fn chrome_changed_forces_full_even_when_frame_damage_was_partial() {
+        // The load-bearing case: a Partial (cursor-only) present must be
+        // upgraded to Full when chrome changed pixels this frame, or the
+        // changed chrome outside the cursor rect would be left stale.
+        let partial = FrameDamage::Partial(vec![rect(0, 0, 8, 16)]);
+        let composed = compose_with_chrome_damage(partial, ChromeDamage::Changed);
+        assert_full(&composed);
+    }
+
+    #[test]
+    fn chrome_changed_forces_full_when_frame_damage_was_already_full() {
+        let composed = compose_with_chrome_damage(FrameDamage::Full, ChromeDamage::Changed);
+        assert_full(&composed);
+    }
+
+    #[test]
+    fn chrome_unchanged_preserves_partial() {
+        // The headline REPLAY / idle-blink case: chrome is Unchanged, so the
+        // cursor-only Partial present survives untouched.
+        let rects = [rect(10, 20, 8, 16)];
+        let partial = FrameDamage::Partial(rects.to_vec());
+        let composed = compose_with_chrome_damage(partial, ChromeDamage::Unchanged);
+        assert_partial(&composed, &rects);
+    }
+
+    #[test]
+    fn chrome_unchanged_preserves_full() {
+        let composed = compose_with_chrome_damage(FrameDamage::Full, ChromeDamage::Unchanged);
+        assert_full(&composed);
     }
 }

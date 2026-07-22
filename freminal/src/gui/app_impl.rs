@@ -2841,6 +2841,24 @@ impl freminal_windowing::App for FreminalGui {
             chrome_settle_frame_pending,
         );
 
+        // ── #435/#436 composition (§6): chrome change forces FrameDamage::Full ──
+        //
+        // The #435 partial-present decision (`pending_frame_damage`, computed
+        // in `central_body`) and the #436 chrome-cache decision
+        // (`pending_chrome_damage`, just computed) are separate but MUST
+        // agree. See `frame_damage::compose_with_chrome_damage` for the full
+        // rationale; in short, a frame that changed chrome pixels must not be
+        // presented `Partial` (it would leave chrome outside the cursor rect
+        // stale under #435's `buffer_age() == 1` assumption). Reconciled here,
+        // after both decisions are final, via the pure helper.
+        win.pending_frame_damage = frame_damage::compose_with_chrome_damage(
+            std::mem::replace(
+                &mut win.pending_frame_damage,
+                freminal_windowing::FrameDamage::Full,
+            ),
+            win.pending_chrome_damage,
+        );
+
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
             format!("Frame time={}ms", elapsed.as_millis())
