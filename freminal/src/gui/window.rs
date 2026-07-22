@@ -9,7 +9,11 @@ use egui;
 use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
-    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabId, tabs::TabManager,
+    PaneBorderDrag,
+    chrome_damage::{ChromeSignals, ChromeTabSnapshot, DismissiblePresence},
+    renderer::WindowPostRenderer,
+    tabs::TabId,
+    tabs::TabManager,
     terminal::FreminalTerminalWidget,
 };
 
@@ -216,6 +220,27 @@ pub(super) struct PerWindowState {
     /// [`FrameDamage::Full`]: freminal_windowing::FrameDamage::Full
     pub(super) pending_frame_damage: freminal_windowing::FrameDamage,
 
+    /// Shape-index range for the "terminal band" (the pre-clear FBO
+    /// callback, the per-pane render loop, the post-shader composite
+    /// callback, pane border lines, and the broadcast label) within this
+    /// frame's `full_output.shapes`, drained by
+    /// `App::take_terminal_band_range` (#436.4a; supersedes the #436.2a
+    /// shape-cloning approach previously exposed via the now-removed
+    /// `take_terminal_band_shapes`).
+    ///
+    /// Set at the end of each `update()` to `band_shape_start..band_shape_end`
+    /// — the range appended to `LayerId::background()`'s `PaintList` since
+    /// `band_shape_start` was captured — see the extraction comment at the
+    /// `band_shape_end` binding in `update()`. The band paints
+    /// into the SAME background layer chrome uses (not a dedicated layer:
+    /// routing it into a second `Order::Background` layer trips egui's
+    /// cross-layer hit-test "hidden" rule and suppresses band widget
+    /// interaction — see the capture-point comments in `update()`). Since
+    /// the background layer drains first into `FullOutput.shapes`, this
+    /// range is valid as-is against `full_output.shapes` in `run_frame`.
+    /// Defaults to `0..0` before the first frame.
+    pub(super) pending_terminal_band_range: std::ops::Range<usize>,
+
     /// The `(active tab, active pane)` shown on the previous frame.
     ///
     /// Compared each frame to detect when the active pane changes — whether by
@@ -236,4 +261,103 @@ pub(super) struct PerWindowState {
     /// `PaintCallback` closures require `'static` captures; only ever touched
     /// on the GUI thread, so `Relaxed` ordering suffices.
     pub(super) present_is_partial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Chrome-damage decision for the most recent `update()` of this window
+    /// (#436.3), drained by `App::take_chrome_damage`.
+    ///
+    /// Set at the end of each `update()` from [`super::chrome_damage::decide_chrome_damage`].
+    /// Defaults to [`freminal_windowing::ChromeDamage::Changed`] — the
+    /// conservative, always-correct behavior for a window that has not yet
+    /// rendered, or any frame whose computation is skipped by an early
+    /// return (mirrors `pending_frame_damage`'s same risk/precedent).
+    pub(super) pending_chrome_damage: freminal_windowing::ChromeDamage,
+
+    /// The individual #436 §3.3 signals computed during the most recent
+    /// `update()` of this window, staged here because most of them are only
+    /// available inside the `CentralPanel` closure while the final decision
+    /// (which also needs the post-toast-render dismissible-presence sample)
+    /// can only be made after that closure returns. Combined with the §3.5
+    /// presence-transition/settle inputs into `pending_chrome_damage` right
+    /// before `update()` returns. Defaults to all-`false` — harmless, since
+    /// it is always overwritten before being read on any frame that reaches
+    /// the point where `pending_chrome_damage` is computed.
+    pub(super) pending_chrome_signals: ChromeSignals,
+
+    /// #436 §3.5 self-dismissal settle rule: `true` when a dismissible
+    /// element (toast, About, Welcome, paste/broadcast/close-guard dialogs,
+    /// save-layout prompt) transitioned presence on the PREVIOUS frame, which
+    /// forces THIS frame `ChromeDamage::Changed` too (the "settle frame").
+    /// Reassigned every frame to that frame's own transition result — see
+    /// `chrome_damage::decide_chrome_damage`'s doc for why this needs no
+    /// separate reset step. `false` before the first frame.
+    pub(super) chrome_settle_pending: bool,
+
+    /// Presence of every dismissible chrome element, sampled once at the end
+    /// of the previous frame (after all `.show()` calls that frame,
+    /// including the toast stack's).
+    ///
+    /// Compared against this frame's own after-`.show()` sample to catch a
+    /// transition NOT caused by that element's own self-dismissal (e.g. a
+    /// menu action closing a dialog) — the cross-frame half of the §3.5
+    /// settle rule. The intra-frame (before-vs-after within a single frame)
+    /// half, which is what catches the toast self-dismissal hazard
+    /// (adversarial finding 1), uses a frame-local `before`/`after` pair
+    /// instead and does not need to be stored here. Defaults to
+    /// all-`false` (nothing dismissible present before the first frame).
+    pub(super) prev_dismissible_presence: DismissiblePresence,
+
+    /// Previous frame's tab/pane snapshot for the §3.3 tab-set / tab-title /
+    /// pane-layout / broadcast-state change-detection rows (#436.3). See
+    /// [`super::chrome_damage::ChromeTabSnapshot`] and
+    /// [`super::chrome_damage::diff_tab_snapshots`]. Defaults to empty,
+    /// which naturally reports every row as "changed" on the first
+    /// comparison — harmless, since the first few frames are also covered
+    /// by the warm-up counter below.
+    pub(super) prev_chrome_tab_snapshot: ChromeTabSnapshot,
+
+    /// Previous frame's `window_focused` value (#436.3 §3.3 "Window focus
+    /// change" row). Compared each frame to the freshly-read value to
+    /// detect focus in/out. `false` before the first frame.
+    pub(super) prev_window_focused: bool,
+
+    /// Frames rendered since this window was created, saturating at
+    /// [`super::chrome_damage::WARMUP_FRAMES`] (#436.3 §7 warm-up). While
+    /// below that count, `ChromeSignals::warming_up` is `true`,
+    /// unconditionally forcing `ChromeDamage::Changed`.
+    pub(super) chrome_frames_rendered: u32,
+
+    /// The delay `update()` itself requested via `ctx.request_repaint_after`
+    /// on the most recent frame (#436.4b §3.1 amendment), drained by
+    /// `App::take_terminal_requested_delay`.
+    ///
+    /// Set at the end of each `update()` from `shortest_repaint_delay` (the
+    /// shortest interval any rendered pane needed — cursor blink, content
+    /// update, or shader animation). Compared against egui's own requested
+    /// repaint delay by `egui_integration::chrome_repaint_settled` to decide
+    /// whether a REPLAY is permitted: a REPLAY requires that nothing OTHER
+    /// than this frame's own request also wants a wake. Defaults to `None`.
+    pub(super) pending_terminal_requested_delay: Option<std::time::Duration>,
+
+    /// The `CentralPanel` content rect (`ui.available_rect_before_wrap()`)
+    /// captured on the most recent FULL frame (#436.4b).
+    ///
+    /// On a REPLAY frame `update()` skips building the menu bar, tab bar,
+    /// and `CentralPanel` (all cached chrome), so there is no fresh
+    /// `available_rect` to read the terminal band's content rect from.
+    /// Instead the band's `Ui` is constructed directly at this cached rect,
+    /// in the same background layer chrome uses — valid because a REPLAY is
+    /// only permitted when chrome (including window size) is proven
+    /// unchanged since the frame that last set this field. `None` before
+    /// the first FULL frame (a REPLAY can never be chosen then, since
+    /// `chrome_cache` is also `None` at that point).
+    pub(super) cached_central_rect: Option<egui::Rect>,
+
+    /// #436.8 menu-bar + tab-bar rects (egui logical points), captured on FULL
+    /// frames (REPLAY skips building the panels). `None` until the first FULL
+    /// frame => `is_chrome_interactive_at` returns the conservative `true`.
+    pub(super) chrome_head_rects: Option<Vec<egui::Rect>>,
+    /// #436.8 split-border drag-sensor rects (egui logical points), rebuilt every
+    /// frame; explicitly cleared on frames that build no sensors (single pane /
+    /// zoomed / overlay open).
+    pub(super) chrome_border_rects: Vec<egui::Rect>,
 }

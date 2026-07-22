@@ -11,7 +11,7 @@ use freminal_windowing::{RepaintProxy, WindowId};
 use tracing::{debug, error};
 
 use super::window::PerWindowState;
-use super::{FreminalGui, panes, renderer, rendering, tabs, terminal};
+use super::{FreminalGui, chrome_damage, panes, renderer, rendering, tabs, terminal};
 
 /// Pre-allocated `(repaint_handle, window_post)` pair passed to
 /// `build_window_from_pending_layout` for the first window.  The first
@@ -721,8 +721,20 @@ impl FreminalGui {
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
+            pending_terminal_band_range: 0..0,
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
+            pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
+            pending_chrome_signals: chrome_damage::ChromeSignals::default(),
+            chrome_settle_pending: false,
+            prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
+            prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
+            prev_window_focused: false,
+            chrome_frames_rendered: 0,
+            pending_terminal_requested_delay: None,
+            cached_central_rect: None,
+            chrome_head_rects: None,
+            chrome_border_rects: Vec::new(),
         };
         self.windows.insert(window_id, win);
 

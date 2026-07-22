@@ -1199,6 +1199,18 @@ impl PaneRenderCache {
         self.super_state.any()
     }
 
+    /// Whether a URL-hover tooltip is currently displayed for this pane
+    /// (#436.4b). `cached_hovered_url` is `pub(super)` (render-pipeline
+    /// internal); this narrow accessor lets `app_impl.rs`'s chrome-damage
+    /// aggregation know the `Order::Tooltip` URL tooltip is on screen —
+    /// TAIL chrome that must force `ChromeDamage::Changed` so a REPLAY frame
+    /// does not discard it. Mirrors [`Self::super_pressed`]'s pattern rather
+    /// than widening the field's visibility.
+    #[must_use]
+    pub(crate) const fn hover_tooltip_active(&self) -> bool {
+        self.cached_hovered_url.is_some()
+    }
+
     /// Invalidate the cached theme pointer so the next frame forces a full
     /// vertex rebuild with the new palette colors.
     pub const fn invalidate_theme_cache(&mut self) {

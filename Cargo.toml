@@ -33,9 +33,14 @@ crossbeam-channel = "0.5.16"
 directories = "6.0.0"
 downcast-rs = "2.0.2"
 duct = "1.1.1"
-egui = { version = "0.35.0", default-features = false, features = ["default_fonts", "persistence"] }
-egui_glow = { version = "0.35.0", default-features = false }
-egui-winit = "0.35.0"
+# Exact-pinned (`=`) as a matched set: #436 relies on egui_glow 0.35.0's
+# (undocumented) tolerance of multiple `paint_primitives` calls per frame for
+# the chrome-cache head/band/tail split, so even a patch bump must be a
+# deliberate, re-verified change. egui / egui_glow / egui-winit must move in
+# lockstep, so all three are exact-pinned together.
+egui = { version = "=0.35.0", default-features = false, features = ["default_fonts", "persistence"] }
+egui_glow = { version = "=0.35.0", default-features = false }
+egui-winit = "=0.35.0"
 filedescriptor = "0.8.3"
 flate2 = "1.1.9"
 fontdb = "0.23.0"

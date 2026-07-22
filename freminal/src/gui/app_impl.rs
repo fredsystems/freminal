@@ -17,6 +17,8 @@ use freminal_windowing::WindowId;
 use glow::HasContext;
 use tracing::{debug, error, trace, warn};
 
+use super::chrome_damage;
+use super::frame_damage;
 use super::panes;
 use super::renderer::WindowPostRenderer;
 use super::rendering;
@@ -297,10 +299,22 @@ impl freminal_windowing::App for FreminalGui {
                         pending_force_close: false,
                         pending_raw_keys: Vec::new(),
                         pending_frame_damage: freminal_windowing::FrameDamage::Full,
+                        pending_terminal_band_range: 0..0,
                         present_is_partial: std::sync::Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
                         previous_active_pane_key: None,
+                        pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
+                        pending_chrome_signals: chrome_damage::ChromeSignals::default(),
+                        chrome_settle_pending: false,
+                        prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
+                        prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
+                        prev_window_focused: false,
+                        chrome_frames_rendered: 0,
+                        pending_terminal_requested_delay: None,
+                        cached_central_rect: None,
+                        chrome_head_rects: None,
+                        chrome_border_rects: Vec::new(),
                     };
                     self.windows.insert(window_id, win);
 
@@ -501,6 +515,16 @@ impl freminal_windowing::App for FreminalGui {
             .map(|win| std::sync::Arc::clone(&win.present_is_partial))
     }
 
+    fn is_chrome_interactive_at(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
+        self.windows.get(&window_id).is_none_or(|win| {
+            crate::gui::chrome_damage::point_in_chrome_rects(
+                pos,
+                win.chrome_head_rects.as_deref(),
+                &win.chrome_border_rects,
+            )
+        })
+    }
+
     fn take_frame_damage(&mut self, window_id: WindowId) -> freminal_windowing::FrameDamage {
         // Drain the damage computed during `update()` for this window, leaving
         // `Full` behind so a stale value can never be reused on a later frame
@@ -515,6 +539,42 @@ impl freminal_windowing::App for FreminalGui {
             })
     }
 
+    fn take_terminal_band_range(&mut self, window_id: WindowId) -> std::ops::Range<usize> {
+        // Drain the terminal-band range captured during `update()` for this
+        // window, leaving `0..0` behind so a stale frame's range can never
+        // be reused by a later caller that does not recompute it.
+        self.windows.get_mut(&window_id).map_or(0..0, |win| {
+            std::mem::replace(&mut win.pending_terminal_band_range, 0..0)
+        })
+    }
+
+    fn take_chrome_damage(&mut self, window_id: WindowId) -> freminal_windowing::ChromeDamage {
+        // Drain the chrome-damage decision computed during `update()` for
+        // this window, leaving `Changed` behind so a stale `Unchanged` can
+        // never be reused by a later frame that does not recompute it.
+        self.windows
+            .get_mut(&window_id)
+            .map_or(freminal_windowing::ChromeDamage::Changed, |win| {
+                std::mem::replace(
+                    &mut win.pending_chrome_damage,
+                    freminal_windowing::ChromeDamage::Changed,
+                )
+            })
+    }
+
+    fn take_terminal_requested_delay(
+        &mut self,
+        window_id: WindowId,
+    ) -> Option<std::time::Duration> {
+        // Drain the delay `update()` itself requested via
+        // `ctx.request_repaint_after` this window's most recent frame,
+        // leaving `None` behind so a stale delay can never be reused by a
+        // later frame that does not recompute it.
+        self.windows
+            .get_mut(&window_id)
+            .and_then(|win| win.pending_terminal_requested_delay.take())
+    }
+
     // Inherently large: the main per-frame UI function handles menu bar, settings modal, window
     // manipulation drain, terminal widget layout, and resize detection — all in one pass over
     // the shared snapshot. Artificial sub-functions would not reduce the coupling.
@@ -525,6 +585,7 @@ impl freminal_windowing::App for FreminalGui {
         ctx: &egui::Context,
         _gl: &glow::Context,
         handle: &freminal_windowing::WindowHandle<'_>,
+        chrome_mode: freminal_windowing::ChromeMode,
     ) {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
@@ -654,6 +715,23 @@ impl freminal_windowing::App for FreminalGui {
             return;
         };
 
+        // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
+        //
+        // Sampled as early as possible in `update()` — before ANY dialog's
+        // `.show(ctx)` this frame (including the toast stack's, which runs
+        // after `win` is reinserted at the end of this function) — so it
+        // reflects presence strictly BEFORE this frame's rendering can
+        // mutate it. Compared against the "after" sample taken once
+        // everything dismissible has shown (see the end of this function) to
+        // catch a self-dismissal that happens DURING this frame's rendering
+        // (adversarial finding 1; see `chrome_damage`'s module doc).
+        let chrome_dismissible_before = self.sample_dismissible_presence(&win);
+        // #436 §7 warm-up: force `Changed` for the first few frames after
+        // window creation, while font atlas / layout / PanelState id-maps
+        // are still settling.
+        let chrome_warming_up = chrome_damage::is_chrome_warming_up(win.chrome_frames_rendered);
+        win.chrome_frames_rendered = win.chrome_frames_rendered.saturating_add(1);
+
         // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
         // PaintCallbacks run on the render thread and can't access `self`, so
         // they stash compile/init errors in `WindowPostRenderer::last_error`.
@@ -699,6 +777,11 @@ impl freminal_windowing::App for FreminalGui {
         // ── Track last known window geometry (for save_layout) ───────────────
         // Query the windowing layer directly.  See the settings-window branch
         // above for why `ctx.input().viewport()` is not reliable here.
+        //
+        // `chrome_size_before` is captured for the #436.3 §3.3 "window
+        // resize" chrome signal: compared against `win.last_known_size`
+        // after this block updates it.
+        let chrome_size_before = win.last_known_size;
         if let Some(geom) = handle.window_geometry(window_id) {
             if let Some(size) = geom.size {
                 win.last_known_size = Some(<[u32; 2]>::from(size));
@@ -707,6 +790,7 @@ impl freminal_windowing::App for FreminalGui {
                 win.last_known_position = Some(<[i32; 2]>::from(pos));
             }
         }
+        let chrome_size_changed = win.last_known_size != chrome_size_before;
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget
@@ -1009,6 +1093,15 @@ impl freminal_windowing::App for FreminalGui {
         let (snap, pane_scroll_offset) = {
             let Some(active_pane_ref) = win.tabs.active_tab().active_pane() else {
                 warn!("update: active tab has no active pane; skipping render frame");
+                // CLEANUP-436-A: `win` was moved out of `self.windows` at the
+                // top of this frame (`self.windows.remove(&window_id)`); every
+                // early return after that point must reinsert it (see the
+                // `CannotCloseLastPane` arm above, which does). Skipping the
+                // reinsert here permanently orphans this window's
+                // `PerWindowState` — including, since #436, its chrome cache and
+                // self-dismissal settle state — leaving the window rendering a
+                // blank/fatal-error surface forever. Reinsert before returning.
+                self.windows.insert(window_id, win);
                 return;
             };
             (
@@ -1048,10 +1141,14 @@ impl freminal_windowing::App for FreminalGui {
         // read the post-`ThemeChange` snapshot (a race that left the
         // background/chrome stale until a mouseover repaint).
         let bg_opacity = self.config.ui.background_opacity;
+        // Hoisted out of the block below (rather than a plain `let` inside
+        // it) so the #436.3 chrome-damage signal computed further down can
+        // read this frame's style-change verdict too.
+        let chrome_style_changed;
         {
             let gui_theme = self.gui_theme;
             let chrome_theme = self.preview_theme.unwrap_or(snap.theme);
-            let style_changed = match win.style_cache {
+            chrome_style_changed = match win.style_cache {
                 Some((prev_theme, prev_opacity, prev_gui_theme)) => {
                     !std::ptr::eq(prev_theme, chrome_theme)
                         || prev_opacity.to_bits() != bg_opacity.to_bits()
@@ -1059,7 +1156,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
                 None => true,
             };
-            if style_changed {
+            if chrome_style_changed {
                 let visuals =
                     crate::gui::chrome_style::build_visuals(&gui_theme, chrome_theme, bg_opacity);
                 ctx.global_style_mut(|style| {
@@ -1070,32 +1167,82 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // Create a root Ui covering the full available area.  Panels reserve
-        // space from this Ui via `show` (the non-deprecated API; `show_inside`
-        // was renamed to `show` in egui 0.35).
-        let mut root_ui = egui::Ui::new(
-            ctx.clone(),
-            egui::Id::new("freminal_root"),
-            egui::UiBuilder::default(),
-        );
+        // ── #436.4b: FULL vs REPLAY chrome construction ──────────────────────
+        //
+        // On `ChromeMode::Full` the root Ui, menu bar, and tab bar are built
+        // exactly as before, and `CentralPanel` reserves the remaining space
+        // for `central_body` below. On `ChromeMode::Replay` the windowing
+        // layer has already proven chrome (including window size) is
+        // unchanged since the last FULL frame, so none of that is rebuilt —
+        // `central_body` runs directly against a `Ui` constructed at the
+        // cached content rect instead, in the SAME background layer chrome
+        // uses (so the terminal band's shapes land exactly where `run_frame`
+        // expects them). `any_menu_open` (read inside `central_body` to
+        // compute `ui_overlay_open`) is `false` on Replay: with no menu bar
+        // built, no menu can be open.
+        let (any_menu_open, chrome_root_ui): (bool, Option<egui::Ui>) = if chrome_mode
+            == freminal_windowing::ChromeMode::Full
+        {
+            // Create a root Ui covering the full available area.  Panels
+            // reserve space from this Ui via `show` (the non-deprecated
+            // API; `show_inside` was renamed to `show` in egui 0.35).
+            let mut root_ui = egui::Ui::new(
+                ctx.clone(),
+                egui::Id::new("freminal_root"),
+                egui::UiBuilder::default(),
+            );
 
-        // Menu bar at the top of the window.
-        let mut any_menu_open = false;
-        if !self.config.ui.hide_menu_bar {
-            let (menu_action, menu_open) = Panel::top("menu_bar")
-                .show(&mut root_ui, |ui| {
+            // #436.8: menu-bar / tab-bar rects, captured for the
+            // region-aware pointer chrome-gate (`is_chrome_interactive_at`).
+            // Only ever populated on a FULL frame — a REPLAY frame builds
+            // neither panel, so `win.chrome_head_rects` is left untouched
+            // (stale-but-still-correct: chrome hasn't moved since the
+            // FULL frame that last set it, by the same invariant that
+            // makes REPLAY safe at all).
+            let mut head_rects: Vec<egui::Rect> = Vec::new();
+
+            // Menu bar at the top of the window.
+            let menu_open = if self.config.ui.hide_menu_bar {
+                false
+            } else {
+                let menu_response = Panel::top("menu_bar").show(&mut root_ui, |ui| {
                     self.show_menu_bar(ui, &mut win, window_id)
-                })
-                .inner;
-            any_menu_open = menu_open;
-            self.dispatch_tab_bar_action(menu_action, &mut win);
-        }
+                });
+                head_rects.push(menu_response.response.rect);
+                let (menu_action, menu_open) = menu_response.inner;
+                self.dispatch_tab_bar_action(menu_action, &mut win);
+                menu_open
+            };
+
+            // Tab bar: shown when multiple tabs are open, or when the
+            // config option `tabs.show_single_tab` is enabled.
+            let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+
+            if show_tab_bar {
+                let panel = match self.config.tabs.position {
+                    freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
+                    freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
+                };
+                let tab_response = panel.show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui));
+                head_rects.push(tab_response.response.rect);
+                let tab_action = tab_response.inner;
+                self.dispatch_tab_bar_action(tab_action, &mut win);
+            }
+
+            win.chrome_head_rects = Some(head_rects);
+
+            (menu_open, Some(root_ui))
+        } else {
+            (false, None)
+        };
 
         // Help menu → "Keybindings..." routes here.  Opens the Settings
         // Modal with the Keybindings tab preselected, or focuses the
         // existing settings window if one is already open.  Mirrors the
         // Settings menu item in `show_menu_bar`, but jumps to the
-        // Keybindings tab instead of the default Font tab.
+        // Keybindings tab instead of the default Font tab. Independent of
+        // `chrome_mode`: it only mutates modal-open state (no painting), so
+        // it runs every frame regardless of whether chrome was rebuilt.
         if self.pending_open_keybindings {
             self.pending_open_keybindings = false;
             if self.settings_window_id.is_some() {
@@ -1117,22 +1264,24 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // Tab bar: shown when multiple tabs are open, or when the config
-        // option `tabs.show_single_tab` is enabled.
-        let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+        // Copy the cached content rect (`egui::Rect` is `Copy`) out of `win`
+        // BEFORE `central_body` captures `win` by mutable reference below —
+        // reading `win.cached_central_rect` after that point (e.g. inside
+        // the REPLAY arm further down) would conflict with the closure's
+        // borrow. Only actually used on a REPLAY frame; harmless (and cheap)
+        // to compute unconditionally otherwise. Falls back to egui's own
+        // content rect in the unreachable case described where it is used.
+        let cached_central_rect_for_replay = win
+            .cached_central_rect
+            .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
 
-        if show_tab_bar {
-            let panel = match self.config.tabs.position {
-                freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
-                freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
-            };
-            let tab_action = panel
-                .show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui))
-                .inner;
-            self.dispatch_tab_bar_action(tab_action, &mut win);
-        }
-
-        let _panel_response = CentralPanel::default().show(&mut root_ui, |ui| {
+        // The terminal band + (on Full only) chrome dialogs/overlays. Shared
+        // between the FULL path (called via `CentralPanel::show`, below) and
+        // the REPLAY path (called directly against a `Ui` built at the
+        // cached content rect) so the band's rendering logic — the per-pane
+        // loop, borders, broadcast label, band-range capture, chrome-damage
+        // signal staging, and repaint scheduling — is defined exactly once.
+        let mut central_body = |ui: &mut egui::Ui| {
             // Synchronise font metrics with the current display scale *before*
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
@@ -1199,6 +1348,9 @@ impl freminal_windowing::App for FreminalGui {
                 .active_tab()
                 .active_pane()
                 .is_some_and(|p| p.view_state.window_focused);
+            // #436.3 §3.3 "Window focus change" chrome signal.
+            let chrome_focus_changed = window_focused != win.prev_window_focused;
+            win.prev_window_focused = window_focused;
             // OSC 9 / OSC 777 notifications collected from every pane this
             // frame, routed after the loop (Task 76.4).
             let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
@@ -1286,8 +1438,7 @@ impl freminal_windowing::App for FreminalGui {
             // stack, and the OSC 99 session maps are borrowable without
             // conflicting with the `win.tabs` borrow.
             if !osc99_notifications.is_empty() {
-                let window_minimized =
-                    ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+                let window_minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
                 if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
                     self.toasts.try_borrow_mut(),
                     self.osc99_icon_cache.try_borrow_mut(),
@@ -1355,9 +1506,8 @@ impl freminal_windowing::App for FreminalGui {
                         // OSC 99 p=? capability handshake (Task 99.7): answer
                         // with freminal's truthfully-advertised OSC 99
                         // capabilities.
-                        let bytes = crate::gui::notifications::osc99_query_response(
-                            control.id.as_deref(),
-                        );
+                        let bytes =
+                            crate::gui::notifications::osc99_query_response(control.id.as_deref());
                         send_or_log!(
                             tx,
                             PtyWrite::Write(bytes),
@@ -1375,6 +1525,14 @@ impl freminal_windowing::App for FreminalGui {
             // the loop.
 
             let available_rect = ui.available_rect_before_wrap();
+
+            // #436.4b: cache the content rect so a later REPLAY frame can
+            // reconstruct an equivalent `Ui` without rebuilding the menu
+            // bar / tab bar / `CentralPanel` chrome that produced it.
+            // Idempotent on a REPLAY frame itself (`available_rect` is then
+            // already exactly the cached value).
+            win.cached_central_rect = Some(available_rect);
+
             let active_pane_id = win.tabs.active_tab().active_pane;
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
@@ -1436,111 +1594,127 @@ impl freminal_windowing::App for FreminalGui {
 
             let mut all_deferred_actions = Vec::new();
 
-            // Floating "Save Layout" name-entry prompt.  Shown whenever the
-            // user clicked "Save Layout" in the Layouts menu.  Returns true
-            // exactly once (the frame the user confirms), at which point we
-            // enqueue the SaveLayout action for dispatch.
-            if self.show_save_layout_prompt(ctx) {
-                all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
-            }
-
-            // Smart paste guard confirm dialog (Task 77).  Shown whenever a
-            // flagged paste is pending for this window.  On confirm, the
-            // resolved (possibly edited) payload is sent to the active pane;
-            // on cancel the paste is discarded.
-            match win.paste_dialog.show(ctx) {
-                super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
-                    // Route to the pane captured when the dialog opened, not
-                    // the currently-active pane: focus-follows-mouse can change
-                    // the active pane when the cursor moves onto the dialog
-                    // buttons (Task 106 bug).
-                    Self::send_paste_to_target(&mut win, target, payload);
+            // ── #436.4b: chrome dialogs/overlays — FULL only ──────────────
+            //
+            // These are all cached TAIL chrome (each uses its own
+            // `egui::Window`/`Area`, a distinct layer from the terminal
+            // band's `LayerId::background()`). A REPLAY frame is only ever
+            // entered when the PREVIOUS frame proved `ui_overlay_open` was
+            // `false` (any dialog open forces `ChromeDamage::Changed` every
+            // frame it is — see `ChromeSignals::any_fired`) and no chrome
+            // input landed this frame, so by construction none of these can
+            // be open (or becoming open) on a REPLAY frame. Skipping their
+            // `.show()` calls is therefore safe; running them would be
+            // wasted work whose freshly-painted shapes `run_frame` would
+            // discard anyway (REPLAY reuses the cached tail primitives, not
+            // this frame's own tail shapes).
+            if chrome_mode == freminal_windowing::ChromeMode::Full {
+                // Floating "Save Layout" name-entry prompt.  Shown whenever the
+                // user clicked "Save Layout" in the Layouts menu.  Returns true
+                // exactly once (the frame the user confirms), at which point we
+                // enqueue the SaveLayout action for dispatch.
+                if self.show_save_layout_prompt(ctx) {
+                    all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
                 }
-                super::paste_guard::PasteDialogOutcome::Cancelled
-                | super::paste_guard::PasteDialogOutcome::Idle => {}
-            }
 
-            // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
-            // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
-            // On confirm, broadcast is enabled on the dialog's target tab.
-            match win.broadcast_dialog.show(ctx) {
-                super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
-                    if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
-                        tab.broadcast_input = true;
-                        let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
-                        self.push_info_toast(
-                            "Broadcast input enabled",
-                            Some(format!(
-                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
-                            )),
-                        );
+                // Smart paste guard confirm dialog (Task 77).  Shown whenever a
+                // flagged paste is pending for this window.  On confirm, the
+                // resolved (possibly edited) payload is sent to the active pane;
+                // on cancel the paste is discarded.
+                match win.paste_dialog.show(ctx) {
+                    super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
+                        // Route to the pane captured when the dialog opened, not
+                        // the currently-active pane: focus-follows-mouse can change
+                        // the active pane when the cursor moves onto the dialog
+                        // buttons (Task 106 bug).
+                        Self::send_paste_to_target(&mut win, target, payload);
+                    }
+                    super::paste_guard::PasteDialogOutcome::Cancelled
+                    | super::paste_guard::PasteDialogOutcome::Idle => {}
+                }
+
+                // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
+                // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
+                // On confirm, broadcast is enabled on the dialog's target tab.
+                match win.broadcast_dialog.show(ctx) {
+                    super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
+                        if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
+                            tab.broadcast_input = true;
+                            let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                            self.push_info_toast(
+                                "Broadcast input enabled",
+                                Some(format!(
+                                    "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                                )),
+                            );
+                        }
+                    }
+                    super::broadcast_guard::BroadcastDialogOutcome::Cancelled
+                    | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
+                }
+
+                // Close-on-running-command guard dialog (Task 98).  Shown while a
+                // pane / tab / window close is suspended pending confirmation.  On
+                // Force Close the original close is executed with the guard
+                // bypassed; on Cancel the close is abandoned.
+                // A pending ForceClose key action resolves an open close-guard
+                // dialog as Force Close; harmless no-op when nothing is open.
+                let force_close_requested = std::mem::take(&mut win.pending_force_close);
+                if let Some(scope) = win.close_dialog.scope() {
+                    let outcome = if force_close_requested {
+                        win.close_dialog.force_close_now();
+                        super::close_guard::CloseDialogOutcome::ForceClose
+                    } else {
+                        win.close_dialog.show(ctx)
+                    };
+                    match outcome {
+                        super::close_guard::CloseDialogOutcome::ForceClose => match scope {
+                            super::close_guard::CloseScope::Pane => {
+                                Self::close_focused_pane(ui, &mut win);
+                            }
+                            super::close_guard::CloseScope::Tab(index) => {
+                                win.close_tab(index);
+                            }
+                            super::close_guard::CloseScope::Window => {
+                                // Mark this window as user-confirmed so the
+                                // on_close_requested guard lets the resulting
+                                // ViewportCommand::Close through without re-prompting.
+                                self.force_close_windows.insert(window_id);
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            super::close_guard::CloseScope::WindowUnsavedSettings => {
+                                // User chose to discard the unsaved settings
+                                // edits. Close the settings OS window directly —
+                                // `handle` is available right here, unlike in
+                                // `on_close_requested` — then re-issue this
+                                // window's close. Clearing `settings_owner` here
+                                // (rather than a separate "confirmed" flag) is
+                                // what makes the retry's `on_close_requested`
+                                // call see `is_owner == false` and skip the
+                                // guard without re-prompting (issue #401).
+                                self.settings_modal.is_open = false;
+                                self.settings_owner = None;
+                                if let Some(sid) = self.settings_window_id.take() {
+                                    handle.close_window(sid);
+                                }
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        },
+                        super::close_guard::CloseDialogOutcome::Cancelled
+                        | super::close_guard::CloseDialogOutcome::Idle => {}
                     }
                 }
-                super::broadcast_guard::BroadcastDialogOutcome::Cancelled
-                | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
+
+                // Floating "About Freminal" dialog.  Shown whenever the user
+                // clicked "About Freminal" in the Help menu.  Self-dismissing
+                // via its own Close button or title-bar X.
+                self.show_about_window(ctx);
+
+                // First-run welcome overlay (subtask 71.20).  Opened on first
+                // launch or from Help -> Show Welcome; persists
+                // `first_run_complete = true` on dismissal.
+                self.show_welcome_overlay(ctx);
             }
-
-            // Close-on-running-command guard dialog (Task 98).  Shown while a
-            // pane / tab / window close is suspended pending confirmation.  On
-            // Force Close the original close is executed with the guard
-            // bypassed; on Cancel the close is abandoned.
-            // A pending ForceClose key action resolves an open close-guard
-            // dialog as Force Close; harmless no-op when nothing is open.
-            let force_close_requested = std::mem::take(&mut win.pending_force_close);
-            if let Some(scope) = win.close_dialog.scope() {
-                let outcome = if force_close_requested {
-                    win.close_dialog.force_close_now();
-                    super::close_guard::CloseDialogOutcome::ForceClose
-                } else {
-                    win.close_dialog.show(ctx)
-                };
-                match outcome {
-                    super::close_guard::CloseDialogOutcome::ForceClose => match scope {
-                        super::close_guard::CloseScope::Pane => {
-                            Self::close_focused_pane(ui, &mut win);
-                        }
-                        super::close_guard::CloseScope::Tab(index) => {
-                            win.close_tab(index);
-                        }
-                        super::close_guard::CloseScope::Window => {
-                            // Mark this window as user-confirmed so the
-                            // on_close_requested guard lets the resulting
-                            // ViewportCommand::Close through without re-prompting.
-                            self.force_close_windows.insert(window_id);
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        super::close_guard::CloseScope::WindowUnsavedSettings => {
-                            // User chose to discard the unsaved settings
-                            // edits. Close the settings OS window directly —
-                            // `handle` is available right here, unlike in
-                            // `on_close_requested` — then re-issue this
-                            // window's close. Clearing `settings_owner` here
-                            // (rather than a separate "confirmed" flag) is
-                            // what makes the retry's `on_close_requested`
-                            // call see `is_owner == false` and skip the
-                            // guard without re-prompting (issue #401).
-                            self.settings_modal.is_open = false;
-                            self.settings_owner = None;
-                            if let Some(sid) = self.settings_window_id.take() {
-                                handle.close_window(sid);
-                            }
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    },
-                    super::close_guard::CloseDialogOutcome::Cancelled
-                    | super::close_guard::CloseDialogOutcome::Idle => {}
-                }
-            }
-
-            // Floating "About Freminal" dialog.  Shown whenever the user
-            // clicked "About Freminal" in the Help menu.  Self-dismissing
-            // via its own Close button or title-bar X.
-            self.show_about_window(ctx);
-
-            // First-run welcome overlay (subtask 71.20).  Opened on first
-            // launch or from Help -> Show Welcome; persists
-            // `first_run_complete = true` on dismissal.
-            self.show_welcome_overlay(ctx);
 
             // Drain pending menu actions (Edit menu clicks: Copy, Paste,
             // Select All, Find...).  These were queued during
@@ -1586,6 +1760,11 @@ impl freminal_windowing::App for FreminalGui {
                 // on each side of the 1px border line).
                 let sensor_half: f32 = 3.0;
 
+                // #436.8: split-border drag-sensor rects, rebuilt fresh every
+                // frame this branch runs, for the region-aware pointer
+                // chrome-gate (`is_chrome_interactive_at`).
+                let mut border_rects: Vec<egui::Rect> = Vec::with_capacity(borders.len());
+
                 for (border_idx, border) in borders.iter().enumerate() {
                     // Expand the thin 1px border rect into a wider sensor rect.
                     let sensor_rect = match border.direction {
@@ -1606,6 +1785,8 @@ impl freminal_windowing::App for FreminalGui {
                             )
                         }
                     };
+
+                    border_rects.push(sensor_rect);
 
                     let sensor_id = ui.id().with("pane_border_sensor").with(border_idx);
                     let response =
@@ -1659,7 +1840,62 @@ impl freminal_windowing::App for FreminalGui {
                         win.border_drag = None;
                     }
                 }
+
+                win.chrome_border_rects = border_rects;
+            } else {
+                // No sensors built this frame (single pane / zoomed / overlay
+                // open): clear any stale rects from a since-changed layout so
+                // they can't keep classifying terminal content as chrome
+                // (#436.8).
+                win.chrome_border_rects.clear();
             }
+
+            // ── Terminal band: shape-index range capture (#436.2a, range
+            // exposed via `App::take_terminal_band_range` as of #436.4a) ───
+            //
+            // Everything from here through the broadcast label that paints
+            // via `ui` — pane content (GL callbacks), pane borders, and the
+            // per-pane decorations — lands in the SAME `LayerId::background()`
+            // layer chrome (menu bar, tab bar) already paints into, and is
+            // therefore captured in the shape-index range below. (Per-pane
+            // pop-ups reached from inside this region — the context menu,
+            // command-history palette, and search bar — deliberately use
+            // their own `Order::Foreground` `egui::Area`s, so they live in a
+            // different layer and are correctly excluded from the captured
+            // background range.) An earlier version of this subtask routed
+            // the band into a dedicated second `Order::Background` layer
+            // instead, but that
+            // trips egui 0.35's cross-layer hit-test "hidden" rule
+            // (`hit_test.rs:145`): a widget is hidden from hover/click/drag
+            // if a later widget on a DIFFERENT layer contains its rect, and
+            // two untracked same-`Order` layers tie-break by hash iteration
+            // order — nondeterministically hiding every `ui.interact()`
+            // widget in the band (e.g. the command-block gutter hover
+            // highlight). Staying in the shared background layer keeps both
+            // paint topology and hit-test topology identical to `main`; we
+            // instead remember where the band's shapes start and end within
+            // that single `PaintList` and hand back that `[start, end)` range
+            // for `App::take_terminal_band_range`, which `run_frame` uses to
+            // slice `full_output.shapes` into head/band/tail and paint each
+            // separately (#436.4a).
+            //
+            // Capture point justification: nothing between `available_rect`
+            // above and here paints into the background layer. The
+            // intervening code only reads window-manipulation state, shows
+            // dialogs (save-layout prompt, paste/broadcast/close guards,
+            // about window, welcome overlay — all `egui::Window`, which is
+            // backed by an `Area` with its own distinct `LayerId`, never
+            // `LayerId::background()`), dispatches queued menu actions (no
+            // painting), and registers pane-border drag sensors via
+            // `ui.interact()` (which does not append any shape). So the
+            // background layer's `PaintList` has not grown since the menu
+            // bar / tab bar chrome painted (before this `CentralPanel`
+            // closure began); capturing the count here bounds the range to
+            // exactly the band.
+            let band_shape_start = ctx.graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
 
             // ── Pre-clear the window post-processing FBO ──────────
             //
@@ -2100,77 +2336,119 @@ impl freminal_windowing::App for FreminalGui {
             // pointer moves (hover). Presenting only the cursor rect on such a
             // frame would leave that chrome stale, so both force `Full`.
             let pointer_moving = ctx.input(|i| i.pointer.is_moving());
-            win.pending_frame_damage = 'damage: {
-                if ui_overlay_open
-                    || shader_recomposites
-                    || active_pane_changed
-                    || pointer_moving
-                {
-                    break 'damage freminal_windowing::FrameDamage::Full;
-                }
-                // A toast being visible animates its own region each frame.
-                let toast_active = self
-                    .toasts
-                    .try_borrow()
-                    .is_ok_and(|stack| !stack.is_empty());
-                if toast_active {
-                    break 'damage freminal_windowing::FrameDamage::Full;
-                }
-                // Inspect only the panes actually rendered this frame — the
-                // entries in `pane_layout`. Under zoom, only the zoomed pane is
-                // rendered; iterating the whole tree would read stale
-                // `last_frame_cursor_damage` from non-rendered siblings and
-                // wrongly force `Full` every frame. Per-pane outcomes (#435):
-                //   - `Full`            -> that pane rebuilt content; whole
-                //                          frame must present fully.
-                //   - `CursorOnly(rect)`-> the (active) pane's cursor changed;
-                //                          add its rect to the damage set. On
-                //                          an active-pane switch, the old and
-                //                          new active panes both report this
-                //                          (old erases its cursor, new draws
-                //                          one), so both rects are collected.
-                //   - `CursorOnly(None)`-> cursor region did not resolve to a
-                //                          valid rect; be cautious -> Full.
-                //   - `Unchanged`       -> inactive/idle pane; contributes no
-                //                          damage and does NOT force Full.
-                //   - a bell flash overlay on a pane animates a full-pane
-                //     region each frame -> force Full.
-                // Only the active pane ever draws a cursor, so a pure blink
-                // yields exactly one rect; a pane switch yields two.
-                let active_tab = win.tabs.active_tab();
-                let mut rects: Vec<freminal_windowing::DamageRect> = Vec::new();
-                for (pane_id, _) in &pane_layout {
-                    let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
-                        // A pane in the layout we cannot resolve -> be safe.
-                        rects.clear();
-                        break;
-                    };
-                    if pane.view_state.bell_since.is_some() {
-                        rects.clear();
-                        break;
-                    }
-                    match pane.render_cache.last_frame_cursor_damage {
-                        crate::gui::renderer::PaneFrameDamage::Unchanged => {}
-                        crate::gui::renderer::PaneFrameDamage::CursorOnly(Some(d)) => {
-                            rects.push(freminal_windowing::DamageRect {
-                                x: d.x,
-                                y: d.y,
-                                width: d.width,
-                                height: d.height,
-                            });
-                        }
-                        crate::gui::renderer::PaneFrameDamage::CursorOnly(None)
-                        | crate::gui::renderer::PaneFrameDamage::Full => {
-                            rects.clear();
-                            break;
-                        }
-                    }
-                }
-                if rects.is_empty() {
-                    freminal_windowing::FrameDamage::Full
-                } else {
-                    freminal_windowing::FrameDamage::Partial(rects)
-                }
+            let force_full =
+                ui_overlay_open || shader_recomposites || active_pane_changed || pointer_moving;
+            // A toast being visible animates its own region each frame.
+            let toast_active = self
+                .toasts
+                .try_borrow()
+                .is_ok_and(|stack| !stack.is_empty());
+            // Inspect only the panes actually rendered this frame — the
+            // entries in `pane_layout`. Under zoom, only the zoomed pane is
+            // rendered; iterating the whole tree would read stale
+            // `last_frame_cursor_damage` from non-rendered siblings and
+            // wrongly force `Full` every frame. The per-pane -> `FrameDamage`
+            // decision itself (and its full case-by-case rationale) is
+            // extracted into `decide_frame_damage` (#436.2b) so both this
+            // path and the future REPLAY path compute it identically.
+            let active_tab = win.tabs.active_tab();
+            let mut unresolved_pane = false;
+            // OR-accumulated across every rendered pane: does ANY of them
+            // have an open overlay that paints ABOVE the terminal band —
+            // the `Order::Foreground` context menu, in-terminal search bar,
+            // or command-history palette, OR the `Order::Tooltip` URL-hover
+            // tooltip? All of these paint as TAIL chrome outside the captured
+            // terminal-band range, so a REPLAY frame (which reuses the stale
+            // cached tail) must not be permitted while one is open, or it
+            // would vanish/ghost (#436.4b fix — see
+            // `ChromeSignals::foreground_overlay_open`). The URL tooltip is
+            // driven by `render_cache.cached_hovered_url`, which is recomputed
+            // even under a STATIONARY mouse when PTY output scrolls new
+            // content under the cursor — i.e. it can change on a frame with
+            // no window input event, exactly the frame a REPLAY would
+            // otherwise be chosen.
+            let mut foreground_overlay_open = false;
+            let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
+                Vec::with_capacity(pane_layout.len());
+            for (pane_id, _) in &pane_layout {
+                let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
+                    // A pane in the layout we cannot resolve -> be safe. This
+                    // also aborts the `foreground_overlay_open` scan before
+                    // every pane has been inspected, so conservatively treat
+                    // an unresolved pane as if a foreground overlay were open
+                    // — it already forces `FrameDamage::Full` below, and the
+                    // chrome decision must be at least as conservative.
+                    unresolved_pane = true;
+                    foreground_overlay_open = true;
+                    break;
+                };
+                foreground_overlay_open |= pane.view_state.context_menu_pos.is_some()
+                    || pane.view_state.search_state.is_open
+                    || pane.view_state.command_history.is_open
+                    || pane.render_cache.hover_tooltip_active();
+                per_pane_damage.push(frame_damage::PaneDamageInput {
+                    bell_active: pane.view_state.bell_since.is_some(),
+                    cursor_damage: pane.render_cache.last_frame_cursor_damage,
+                });
+            }
+            win.pending_frame_damage = frame_damage::decide_frame_damage(
+                force_full || unresolved_pane,
+                toast_active,
+                &per_pane_damage,
+            );
+
+            // ── Chrome-damage signals (#436.3 §3.3) ───────────────────
+            //
+            // Stage the individual §3.3 signals this frame, computed from
+            // values already available here (several — `ui_overlay_open`,
+            // `active_pane_changed`, `shader_recomposites`, `ppp_changed`,
+            // `chrome_focus_changed`, per-pane bell state — only exist inside
+            // this `CentralPanel` closure). The final `ChromeDamage` decision
+            // additionally needs the after-toast-render dismissible-presence
+            // sample, which can only be taken once this closure returns (the
+            // toast overlay renders after it) — so `win.pending_chrome_signals`
+            // is a staging value, combined into `win.pending_chrome_damage`
+            // near the end of `update()`.
+            let chrome_tab_snapshot = chrome_damage::ChromeTabSnapshot {
+                tab_ids: win.tabs.iter().map(|t| t.id).collect(),
+                active_tab_id: Some(win.tabs.active_tab().id),
+                tab_titles: win
+                    .tabs
+                    .iter()
+                    .map(|t| {
+                        t.display_name(
+                            self.config.tab_title.policy,
+                            &self.config.tab_title.separator,
+                        )
+                        .into_owned()
+                    })
+                    .collect(),
+                pane_ids: pane_layout.iter().map(|(id, _)| *id).collect(),
+                zoomed_pane,
+                broadcast_input: win.tabs.active_tab().broadcast_input,
+            };
+            let chrome_tab_diff = chrome_damage::diff_tab_snapshots(
+                &win.prev_chrome_tab_snapshot,
+                &chrome_tab_snapshot,
+            );
+            win.prev_chrome_tab_snapshot = chrome_tab_snapshot;
+
+            win.pending_chrome_signals = chrome_damage::ChromeSignals {
+                any_overlay_open: ui_overlay_open,
+                style_changed: chrome_style_changed,
+                active_pane_changed,
+                tab_set_changed: chrome_tab_diff.tab_set_changed,
+                tab_title_changed: chrome_tab_diff.tab_title_changed,
+                pane_layout_changed: chrome_tab_diff.pane_layout_changed,
+                broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
+                shader_active: shader_recomposites,
+                bell_active: per_pane_damage.iter().any(|p| p.bell_active),
+                toast_active,
+                size_changed: chrome_size_changed,
+                ppp_changed,
+                focus_changed: chrome_focus_changed,
+                warming_up: chrome_warming_up,
+                foreground_overlay_open,
             };
 
             // ── Window-level post-processing pass ────────────────────
@@ -2413,6 +2691,34 @@ impl freminal_windowing::App for FreminalGui {
                     );
                 }
             }
+            // ── Terminal band: capture the end of the shape range (#436.4a) ──
+            //
+            // Read the background layer's current shape count as
+            // `band_shape_end`, so `[band_shape_start, band_shape_end)` is
+            // exactly the band's range within `LayerId::background()`'s
+            // `PaintList`. `run_frame` slices `full_output.shapes` by this
+            // range directly (the background layer drains first into
+            // `full_output.shapes`), so — unlike 436.2a's approach — nothing
+            // is cloned here: this is a pure read of the shape count, and
+            // the real shapes are left in place in
+            // `LayerId::background()`'s `PaintList` and drain into
+            // `FullOutput.shapes` exactly as before. `run_frame`'s 3-way
+            // split (head/band/tail, each tessellated and painted
+            // separately, in that order) reconstructs the same total shape
+            // set with the same paint order as the pre-#436.4a single-call
+            // path, so this frame renders byte-identically to before.
+            //
+            // Capture point justification (end): nothing between the
+            // broadcast-label loop above and here paints into the background
+            // layer either — this is the very next statement — so
+            // `band_shape_end` is exactly the count after the pre-clear
+            // callback through the broadcast label, i.e. exactly the end of
+            // the band.
+            let band_shape_end = ctx.graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(band_shape_start, |list| list.all_entries().len())
+            });
+            win.pending_terminal_band_range = band_shape_start..band_shape_end;
 
             // Handle key actions that couldn't be dispatched at the input
             // layer because they require full GUI state.
@@ -2478,18 +2784,128 @@ impl freminal_windowing::App for FreminalGui {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(win.last_window_title.clone()));
             }
 
+            // Stash this frame's own repaint request for #436.4b's
+            // `chrome_repaint_settled` gate (drained by
+            // `App::take_terminal_requested_delay`): the NEXT frame's replay
+            // decision needs to know what delay THIS frame itself asked for,
+            // to distinguish "only our own blink/content scheduling wants a
+            // wake" from "something egui-internal also wants one sooner".
+            win.pending_terminal_requested_delay = shortest_repaint_delay;
+
             // Schedule a repaint at the shortest interval needed by any pane.
             if let Some(delay) = shortest_repaint_delay {
                 ctx.request_repaint_after(delay);
             }
-        });
+        };
+
+        if let Some(mut root_ui) = chrome_root_ui {
+            let _panel_response = CentralPanel::default().show(&mut root_ui, central_body);
+        } else {
+            // REPLAY: construct the band's `Ui` directly at the cached
+            // content rect, in the SAME background layer chrome uses, so the
+            // terminal band's shapes land where a FULL frame's `CentralPanel`
+            // content would have put them. The id is NOT the same, though:
+            // this uses `Id::new("freminal_root")` directly (the root Ui's
+            // own id), while the FULL path's `CentralPanel::show` allocates
+            // its content `Ui` via `root_ui.new_child(..)` with no explicit
+            // id salt, which egui auto-derives from `root_ui`'s id plus a
+            // per-frame child-index counter — a different, and not
+            // necessarily stable, id. This is a known accepted limitation:
+            // any widget that keys persistent state off its `Ui`-derived id
+            // (e.g. collapsing-header open state) could in principle churn
+            // that state across a Full<->Replay mode toggle. In practice
+            // this is inert, because real user interaction with such a
+            // widget forces `ChromeMode::Full` on the same frame (via
+            // `ui_overlay_open`/pointer-motion/etc.), so REPLAY is only ever
+            // entered while nothing is interacting with mismatched-id
+            // widgets. Tracked as a follow-up if a concrete widget is ever
+            // found to rely on cross-mode id stability.
+            // `decide_chrome_mode` only chooses `Replay` when the chrome
+            // cache is valid at this frame's size/ppp, which is only ever
+            // populated on a FULL frame — and every FULL frame sets
+            // `cached_central_rect` (via `central_body`) before that cache is
+            // populated — so falling back to egui's own content rect
+            // (`cached_central_rect_for_replay`'s fallback, computed above)
+            // should be unreachable in practice.
+            let mut band_ui = egui::Ui::new(
+                ctx.clone(),
+                egui::Id::new("freminal_root"),
+                egui::UiBuilder::new()
+                    .layer_id(egui::LayerId::background())
+                    .max_rect(cached_central_rect_for_replay),
+            );
+            central_body(&mut band_ui);
+        }
 
         // Render the app-level toast stack as an overlay on top of all panels.
         // Toasts are shared across every window, so they appear consistently
-        // regardless of which window the user is looking at.
-        if let Ok(mut stack) = self.toasts.try_borrow_mut() {
+        // regardless of which window the user is looking at. TAIL chrome
+        // (#436.4b): skipped on REPLAY for the same reason as the dialogs
+        // above — a toast being visible forces `ChromeDamage::Changed` every
+        // frame it is (`ChromeSignals::toast_active`), so a REPLAY frame can
+        // only ever be entered while the stack is provably empty, making
+        // `.show()` a no-op here anyway.
+        if chrome_mode == freminal_windowing::ChromeMode::Full
+            && let Ok(mut stack) = self.toasts.try_borrow_mut()
+        {
             stack.show(ctx);
         }
+
+        // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────
+        //
+        // Taken here — after every dismissible element's `.show(ctx)` this
+        // frame, including the toast stack's above — and diffed against
+        // `chrome_dismissible_before` (sampled at the very top of this
+        // function, before any of them showed) to catch a self-dismissal
+        // that happened DURING this frame's rendering (adversarial finding
+        // 1: e.g. a toast expiring in its own `.show()` and requesting no
+        // further repaint because the stack is now empty). Also diffed
+        // against `win.prev_dismissible_presence` (last frame's own "after"
+        // sample) to catch a transition caused by something other than the
+        // element's own self-dismissal (e.g. a menu action closing a
+        // dialog). Either comparison finding a difference counts as a
+        // transition — see `chrome_damage::dismissible_presence_transitioned`'s
+        // doc for why the intra-frame comparison is the load-bearing one.
+        let chrome_dismissible_after = self.sample_dismissible_presence(&win);
+        let chrome_presence_transitioned = chrome_damage::dismissible_presence_transitioned(
+            chrome_dismissible_before,
+            chrome_dismissible_after,
+        ) || chrome_damage::dismissible_presence_transitioned(
+            win.prev_dismissible_presence,
+            chrome_dismissible_after,
+        );
+        win.prev_dismissible_presence = chrome_dismissible_after;
+
+        // §3.5's "+ next frame FULL" half: read last frame's pending flag as
+        // this frame's settle input, then reassign it to THIS frame's own
+        // transition result for the next frame to read (no separate "reset"
+        // step — see `decide_chrome_damage`'s doc).
+        let chrome_settle_frame_pending = win.chrome_settle_pending;
+        win.chrome_settle_pending = chrome_presence_transitioned;
+
+        win.pending_chrome_damage = chrome_damage::decide_chrome_damage(
+            &win.pending_chrome_signals,
+            chrome_presence_transitioned,
+            chrome_settle_frame_pending,
+        );
+
+        // ── #435/#436 composition (§6): chrome change forces FrameDamage::Full ──
+        //
+        // The #435 partial-present decision (`pending_frame_damage`, computed
+        // in `central_body`) and the #436 chrome-cache decision
+        // (`pending_chrome_damage`, just computed) are separate but MUST
+        // agree. See `frame_damage::compose_with_chrome_damage` for the full
+        // rationale; in short, a frame that changed chrome pixels must not be
+        // presented `Partial` (it would leave chrome outside the cursor rect
+        // stale under #435's `buffer_age() == 1` assumption). Reconciled here,
+        // after both decisions are final, via the pure helper.
+        win.pending_frame_damage = frame_damage::compose_with_chrome_damage(
+            std::mem::replace(
+                &mut win.pending_frame_damage,
+                freminal_windowing::FrameDamage::Full,
+            ),
+            win.pending_chrome_damage,
+        );
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
@@ -2555,6 +2971,32 @@ impl freminal_windowing::App for FreminalGui {
 }
 
 impl FreminalGui {
+    /// Sample the presence of every dismissible chrome element (#436 §3.5).
+    ///
+    /// Called twice per `update()` for the window being rendered — once as
+    /// early as possible (before any dialog's `.show(ctx)` this frame) and
+    /// once after all of them (including the shared toast stack's `.show`,
+    /// which runs after `win` is reinserted — see the call site) — so the
+    /// two samples can be diffed to catch a self-dismissal that happens
+    /// DURING a `.show()` call this same frame (adversarial finding 1).
+    fn sample_dismissible_presence(
+        &self,
+        win: &PerWindowState,
+    ) -> chrome_damage::DismissiblePresence {
+        chrome_damage::DismissiblePresence {
+            about: self.about_window_open,
+            welcome: self.welcome.is_open(),
+            paste_dialog: win.paste_dialog.is_open(),
+            broadcast_dialog: win.broadcast_dialog.is_open(),
+            close_dialog: win.close_dialog.is_open(),
+            save_layout_prompt: self.pending_save_layout.is_some(),
+            any_toast: self
+                .toasts
+                .try_borrow()
+                .is_ok_and(|stack| !stack.is_empty()),
+        }
+    }
+
     /// First-window spawn path when no layout or session restore will apply.
     ///
     /// Spawns a default single-pane PTY.  PTY-spawn failures surface as a
@@ -2750,8 +3192,20 @@ impl FreminalGui {
             pending_force_close: false,
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
+            pending_terminal_band_range: 0..0,
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
+            pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
+            pending_chrome_signals: chrome_damage::ChromeSignals::default(),
+            chrome_settle_pending: false,
+            prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
+            prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
+            prev_window_focused: false,
+            chrome_frames_rendered: 0,
+            pending_terminal_requested_delay: None,
+            cached_central_rect: None,
+            chrome_head_rects: None,
+            chrome_border_rects: Vec::new(),
         }
     }
 
@@ -2991,6 +3445,279 @@ mod tests {
         assert_eq!(
             settings_owner_close_decision(true, true),
             SettingsOwnerCloseDecision::VetoWithPrompt
+        );
+    }
+
+    // ── Terminal band shape-index-range extraction (#436.2a / #436.4a) ──
+    //
+    // These tests pin the underlying mechanism `update()` uses to bound the
+    // terminal band's shape-index range: paint the band into the SAME
+    // `LayerId::background()` layer chrome already uses (no dedicated
+    // layer), remember the shape count before ("`band_shape_start`"), and
+    // read `all_entries().skip(start)` to identify exactly the range
+    // appended since. Production (as of #436.4a) captures `band_shape_end`
+    // the same way and hands back `[band_shape_start, band_shape_end)` as a
+    // range via `App::take_terminal_band_range`, rather than cloning the
+    // shapes out here — but the boundary-counting primitive these tests
+    // exercise is identical either way. A full `FreminalGui`/`PerWindowState`
+    // cannot be constructed headlessly (`freminal_windowing::WindowId` has
+    // no public constructor outside the real winit event loop), so this
+    // validates the extraction primitive directly against a bare
+    // `egui::Context`, independent of the app.
+
+    #[test]
+    fn band_shape_range_extraction_finds_only_shapes_painted_after_start() {
+        let ctx = egui::Context::default();
+
+        // A shape painted *before* `band_shape_start` is captured (mirrors
+        // chrome — menu bar, tab bar — painting into the background layer
+        // earlier in the same pass) must NOT be included in the extracted
+        // range.
+        let mut extracted: Vec<egui::epaint::ClippedShape> = Vec::new();
+        let mut chrome_shape_count = 0usize;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            // "Chrome" shape, painted before the band region starts.
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(5.0, 5.0)),
+                0.0,
+                egui::Color32::BLUE,
+            );
+            chrome_shape_count = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            // Capture point, exactly as production does immediately before
+            // the band region.
+            let band_shape_start = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            // Band shapes, painted into the same `ui` (background layer).
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::RED,
+            );
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(30.0, 30.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::GREEN,
+            );
+
+            extracted = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or_else(Vec::new, |list| {
+                        list.all_entries().skip(band_shape_start).cloned().collect()
+                    })
+            });
+        });
+
+        assert_eq!(
+            chrome_shape_count, 1,
+            "sanity: exactly one chrome shape painted before the band"
+        );
+        assert_eq!(
+            extracted.len(),
+            2,
+            "expected exactly the two band shapes, none of the chrome shape painted \
+             before `band_shape_start`"
+        );
+    }
+
+    #[test]
+    fn band_shape_range_extraction_is_a_clone_not_a_drain() {
+        // 436.2a's correctness requirement: extraction must NOT remove the
+        // shapes from the background layer (that is deferred to 436.4,
+        // alongside separate band painting). Confirms the real shapes are
+        // still present after our clone-only extraction, and that egui's
+        // own `end_pass` still drains them into `FullOutput.shapes` — i.e.
+        // rendering is unaffected by the extraction seam existing.
+        let ctx = egui::Context::default();
+
+        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let band_shape_start = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or(0, |list| list.all_entries().len())
+            });
+
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+                0.0,
+                egui::Color32::RED,
+            );
+
+            // Clone-only extraction (no removal from the layer), exactly as
+            // production does in this subtask.
+            let extracted: Vec<egui::epaint::ClippedShape> = ui.ctx().graphics(|g| {
+                g.get(egui::LayerId::background())
+                    .map_or_else(Vec::new, |list| {
+                        list.all_entries().skip(band_shape_start).cloned().collect()
+                    })
+            });
+            assert!(!extracted.is_empty());
+        });
+
+        assert!(
+            !full_output.shapes.is_empty(),
+            "the background layer's shapes must still drain into FullOutput.shapes \
+             (byte-identical rendering) because this subtask does not remove them \
+             — that is 436.4's job, done together with separate band painting"
+        );
+    }
+
+    // ── Regression test: same-layer widgets are not cross-layer-hidden ──
+    //
+    // This is the blocker the adversarial review caught in the FIRST attempt
+    // at 436.2a: routing the terminal band into a *second*
+    // `Order::Background` layer (distinct from `LayerId::background()`,
+    // which chrome — menu bar, tab bar, and the `CentralPanel`'s own root
+    // widget rect — paints into) trips egui 0.35's cross-layer hit-test
+    // "hidden" rule (`egui-0.35.0/src/hit_test.rs:145-148`): a widget is
+    // hidden from hover/click/drag if a LATER widget on a DIFFERENT layer
+    // contains its rect. `CentralPanel`'s content-area widget rect covers
+    // the whole band, so once the band moved to its own layer, every
+    // `ui.interact()` widget inside the band (e.g. the command-block gutter
+    // hover highlight) was liable to be permanently hidden — the two
+    // untracked `Order::Background` layers tie-break by `IdMap` (hash)
+    // iteration order (`nohash_hasher::IntMap`), which the second test below
+    // reproduces deterministically for the exact `band_layer_id` scheme the
+    // first attempt used, and is NOT controlled by paint call order.
+    //
+    // This is a real behavioral test (not merely structural): it drives two
+    // full `egui::Context::run_ui` passes with an injected
+    // `Event::PointerMoved`, exactly as a real frame would, and reads
+    // `Response::hovered()` — which is the same mechanism the failing
+    // command-block gutter hover highlight relies on.
+    #[test]
+    fn same_layer_widget_is_not_hidden_by_containing_widget() {
+        let big_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let small_rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(20.0, 20.0));
+        let pointer_pos = small_rect.center();
+
+        let ctx = egui::Context::default();
+
+        // Frame 1: register both widgets on the SAME layer as `ui`
+        // (`LayerId::background()`) — mirroring the fixed `update()`, where
+        // the band paints directly into `ui` rather than a dedicated
+        // `band_layer_id`. `big` mimics `CentralPanel`'s content-area
+        // widget rect (which fully contains the band); `small` mimics a
+        // band-region interactive widget (e.g. the command-block gutter).
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let _small = ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+        });
+
+        // Frame 2: pointer is over `small_rect`. Hit-testing (computed at
+        // the start of this frame from frame 1's registered widget rects)
+        // must find `band_widget` hovered — same-layer widgets are never
+        // subject to the cross-layer "hidden" rule, regardless of paint
+        // order, since `hit_test.rs` only hides a widget when
+        // `current.layer_id != next.layer_id`.
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(pointer_pos)],
+            ..Default::default()
+        };
+        let mut small_hovered = false;
+        let _ = ctx.run_ui(raw_input, |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let small_response = ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+            small_hovered = small_response.hovered();
+        });
+
+        assert!(
+            small_hovered,
+            "a widget fully contained by another widget on the SAME layer must \
+             still be hoverable — this is the invariant the terminal band relies \
+             on by staying in `LayerId::background()` rather than a dedicated layer"
+        );
+    }
+
+    #[test]
+    fn dedicated_background_layer_hides_contained_widget_cross_layer() {
+        // Reproduces the actual blocker: the FIRST 436.2a attempt routed the
+        // band into `band_layer_id` (a second `Order::Background` layer,
+        // keyed by window id, exactly as constructed below) instead of
+        // `LayerId::background()`. This deterministically demonstrates that
+        // scheme hides a band widget behind the root content-area widget,
+        // for this pinned egui/ahash version (the `IdMap` hash tie-break
+        // ordering between two `Order::Background` layers is fixed for a
+        // given ahash seed/version but is an internal implementation detail
+        // — NOT something application code controls or should rely on,
+        // which is precisely why the band must not use a second layer at
+        // all, in either tie-break order).
+        let big_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let small_rect = egui::Rect::from_min_size(egui::pos2(50.0, 50.0), egui::vec2(20.0, 20.0));
+        let pointer_pos = small_rect.center();
+        let band_layer_id = egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("freminal_terminal_band").with(egui::Id::new("probe_window")),
+        );
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let band_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(big_rect)
+                    .layer_id(band_layer_id),
+            );
+            let _small = band_ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+        });
+
+        let raw_input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(pointer_pos)],
+            ..Default::default()
+        };
+        let mut small_hovered = false;
+        let _ = ctx.run_ui(raw_input, |ui| {
+            let _big = ui.interact(
+                big_rect,
+                egui::Id::new("root_content_area"),
+                egui::Sense::hover(),
+            );
+            let band_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(big_rect)
+                    .layer_id(band_layer_id),
+            );
+            let small_response = band_ui.interact(
+                small_rect,
+                egui::Id::new("band_widget"),
+                egui::Sense::click(),
+            );
+            small_hovered = small_response.hovered();
+        });
+
+        assert!(
+            !small_hovered,
+            "expected the dedicated-layer scheme to reproduce the cross-layer \
+             hidden-widget blocker (this pins down WHY that approach was reverted)"
         );
     }
 }
