@@ -99,6 +99,10 @@ impl CursorDamage {
         fb_height: i32,
         cursor_cells: &[(f32, f32, f32, f32)],
     ) -> Option<Self> {
+        // 1px safety pad applied outward on every side before clamping (see
+        // below). Declared here to satisfy `items_after_statements`.
+        const PAD: i32 = 1;
+
         if cursor_cells.is_empty() {
             return None;
         }
@@ -117,14 +121,20 @@ impl CursorDamage {
             max_y = max_y.max(top + ch);
         }
 
-        // Round outward to whole pixels so the rect never clips a partially
-        // covered edge pixel. The values are already integral (floor/ceil), so
-        // the rounding scheme only resolves the trait; `RoundToNearest` is
-        // exact here.
-        let px_min_x: i32 = min_x.floor().approx_as_by::<i32, RoundToNearest>().ok()?;
-        let px_min_y: i32 = min_y.floor().approx_as_by::<i32, RoundToNearest>().ok()?;
-        let px_max_x: i32 = max_x.ceil().approx_as_by::<i32, RoundToNearest>().ok()?;
-        let px_max_y: i32 = max_y.ceil().approx_as_by::<i32, RoundToNearest>().ok()?;
+        // Round outward to whole pixels, then expand by a 1px safety pad on
+        // every side. The values are already integral (floor/ceil), so the
+        // rounding scheme only resolves the trait. The pad absorbs two sources
+        // of sub-pixel error without risk: (a) the framebuffer height fed in is
+        // reconstructed from egui's logical screen rect times the (possibly
+        // fractional) scale factor, which can be off by up to a pixel; (b) a
+        // cursor at a fractional cell origin. Over-presenting a slightly larger
+        // region is always correct — every pixel in it is the freshly-drawn,
+        // correct pixel — whereas under-covering leaves stale pixels. This also
+        // makes the (unclamped-on-the-right) X edge robust.
+        let px_min_x: i32 = min_x.floor().approx_as_by::<i32, RoundToNearest>().ok()? - PAD;
+        let px_min_y: i32 = min_y.floor().approx_as_by::<i32, RoundToNearest>().ok()? - PAD;
+        let px_max_x: i32 = max_x.ceil().approx_as_by::<i32, RoundToNearest>().ok()? + PAD;
+        let px_max_y: i32 = max_y.ceil().approx_as_by::<i32, RoundToNearest>().ok()? + PAD;
 
         // Clamp to the framebuffer so we never emit a negative-origin or
         // out-of-bounds rect (a cursor at row 0 / col 0, or sub-pixel slop).
@@ -154,18 +164,21 @@ mod cursor_damage_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::CursorDamage;
 
+    // All expectations below include the 1px safety pad applied outward on
+    // every side before clamping (see `from_cursor_cells`).
+
     #[test]
     fn single_cell_blink_flips_y_to_bottom_left_origin() {
         // Framebuffer 800x600. Terminal viewport at top-left (0,0). A cell of
         // 10x20 px at column 0, row 0 (top-left corner of the viewport).
         let d = CursorDamage::from_cursor_cells(0.0, 0.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
             .expect("one cell yields damage");
-        // Top-left cell spans y=[0,20] from the top; bottom-left origin y is
-        // 600 - 20 = 580, height 20.
+        // x: [-1,11] clamped-left to [0,11] -> x=0, width=11.
         assert_eq!(d.x, 0);
-        assert_eq!(d.width, 10);
-        assert_eq!(d.height, 20);
-        assert_eq!(d.y, 580);
+        assert_eq!(d.width, 11);
+        // top: -1 clamped to 0; bottom: 21 -> height 21; y = 600 - 21 = 579.
+        assert_eq!(d.height, 21);
+        assert_eq!(d.y, 579);
     }
 
     #[test]
@@ -173,12 +186,12 @@ mod cursor_damage_tests {
         // Viewport starts 100px right, 50px down (e.g. a gutter + menu bar).
         let d = CursorDamage::from_cursor_cells(100.0, 50.0, 600, &[(30.0, 40.0, 10.0, 20.0)])
             .expect("damage");
-        // Cell top-left in fb coords: x=130, top=90, bottom=110.
-        assert_eq!(d.x, 130);
-        assert_eq!(d.width, 10);
-        assert_eq!(d.height, 20);
-        // y (bottom-left) = 600 - 110 = 490.
-        assert_eq!(d.y, 490);
+        // Cell top-left in fb coords: x=130, top=90, bottom=110; +/-1 pad.
+        assert_eq!(d.x, 129);
+        assert_eq!(d.width, 12);
+        assert_eq!(d.height, 22);
+        // bottom 110 + pad 1 = 111; y = 600 - 111 = 489.
+        assert_eq!(d.y, 489);
     }
 
     #[test]
@@ -191,11 +204,11 @@ mod cursor_damage_tests {
             &[(0.0, 0.0, 10.0, 20.0), (50.0, 0.0, 10.0, 20.0)],
         )
         .expect("damage");
-        // Union spans x=[0,60], so width 60.
+        // Union x[0,60] -> pad [-1,61] -> clamp-left [0,61] -> width 61.
         assert_eq!(d.x, 0);
-        assert_eq!(d.width, 60);
-        assert_eq!(d.height, 20);
-        assert_eq!(d.y, 580);
+        assert_eq!(d.width, 61);
+        assert_eq!(d.height, 21);
+        assert_eq!(d.y, 579);
     }
 
     #[test]
@@ -203,12 +216,12 @@ mod cursor_damage_tests {
         // A cell at a fractional origin must not clip its edge pixels.
         let d = CursorDamage::from_cursor_cells(0.0, 0.0, 600, &[(0.5, 0.5, 10.0, 20.0)])
             .expect("damage");
-        // left floors to 0, right ceils to 11 -> width 11; top floors 0,
-        // bottom ceils 21 -> height 21.
+        // left floor 0 -1 = -1 -> clamp 0; right ceil 11 +1 = 12 -> width 12.
         assert_eq!(d.x, 0);
-        assert_eq!(d.width, 11);
-        assert_eq!(d.height, 21);
-        assert_eq!(d.y, 600 - 21);
+        assert_eq!(d.width, 12);
+        // top floor 0 -1 -> 0; bottom ceil 21 +1 = 22 -> height 22.
+        assert_eq!(d.height, 22);
+        assert_eq!(d.y, 600 - 22);
     }
 
     #[test]
@@ -222,8 +235,9 @@ mod cursor_damage_tests {
         // negative-origin or oversized rect.
         let d = CursorDamage::from_cursor_cells(0.0, 590.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
             .expect("damage");
-        // top=590, bottom clamps to 600 -> height 10; y = 600-600 = 0.
-        assert_eq!(d.height, 10);
+        // top 590 - 1 = 589; bottom 610 + 1 = 611 clamped to 600 -> height 11;
+        // y = 600 - 600 = 0.
+        assert_eq!(d.height, 11);
         assert_eq!(d.y, 0);
     }
 }

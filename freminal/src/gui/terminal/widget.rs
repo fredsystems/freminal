@@ -2255,10 +2255,24 @@ impl FreminalTerminalWidget {
                 // cell so the present covers the revealed glyph there.
                 let prev = cache.previous_cursor_pos;
                 if prev != snap.cursor_pos {
-                    let prev_x =
-                        prev.x.approx_as::<f32>().unwrap_or(0.0) * cell_w_f * cursor_x_scale;
+                    // The vacated cell's horizontal scale is the PREVIOUS
+                    // row's line width, not the current row's — they can
+                    // differ (DECDWL/DECDHL), and using the current row's
+                    // scale would under-cover a revealed double-width glyph.
+                    let prev_x_scale = snap
+                        .visible_line_widths
+                        .get(prev.y)
+                        .copied()
+                        .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
+                    let prev_scale = if prev_x_scale.is_double_width() {
+                        2.0
+                    } else {
+                        1.0
+                    };
+                    let prev_x = prev.x.approx_as::<f32>().unwrap_or(0.0) * cell_w_f * prev_scale;
                     let prev_y = prev.y.approx_as::<f32>().unwrap_or(0.0) * row_h_f;
-                    damage_cells.push((prev_x, prev_y, cell_w_px, row_h_f));
+                    let prev_cell_w = cell_w_f * prev_scale;
+                    damage_cells.push((prev_x, prev_y, prev_cell_w, row_h_f));
                 }
                 let cursor_damage = crate::gui::renderer::CursorDamage::from_cursor_cells(
                     vp_left_px,

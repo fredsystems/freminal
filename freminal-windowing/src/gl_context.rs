@@ -323,10 +323,14 @@ fn probe_egl_damage_support(
         .to_str()
         .unwrap_or("");
 
+    // The EGL extension string is space-separated; match whole tokens rather
+    // than substrings so a longer extension name that merely contains one of
+    // ours as a substring can't produce a false positive.
+    let has_ext = |name: &str| extensions.split(' ').any(|tok| tok == name);
     // Prefer KHR, then EXT; both share the same signature.
-    let symbol = if extensions.contains("EGL_KHR_swap_buffers_with_damage") {
+    let symbol = if has_ext("EGL_KHR_swap_buffers_with_damage") {
         Some(c"eglSwapBuffersWithDamageKHR")
-    } else if extensions.contains("EGL_EXT_swap_buffers_with_damage") {
+    } else if has_ext("EGL_EXT_swap_buffers_with_damage") {
         Some(c"eglSwapBuffersWithDamageEXT")
     } else {
         None
