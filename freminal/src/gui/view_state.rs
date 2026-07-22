@@ -585,6 +585,29 @@ pub struct ViewState {
     /// will record the timestamp without moving the cursor).
     pub cursor_last_frame: Option<Instant>,
 
+    /// egui-input-clock anchor for the cursor blink phase.
+    ///
+    /// The blink phase is normally derived from the global wall clock
+    /// (`ui.input().time`), shared by all panes. When a pane *becomes* the
+    /// active/visible pane, its cursor must appear immediately rather than
+    /// inheriting whatever half of the global blink cycle happens to be
+    /// current (which could leave a freshly-focused or freshly-revealed pane's
+    /// cursor invisible for up to one blink interval). Re-basing the phase to
+    /// the activation time makes the cursor start in the visible half. `None`
+    /// uses the global phase (steady state — once the first full cycle has
+    /// elapsed the anchored and global phases are indistinguishable).
+    pub cursor_blink_anchor: Option<f64>,
+
+    /// Set by the GUI when this pane becomes the active pane of the active tab
+    /// (a pane switch or a tab switch). Consumed on the next render, where the
+    /// egui input clock is available: [`Self::cursor_blink_anchor`] is set to
+    /// the current time so the cursor is immediately visible. Decoupling the
+    /// *request* (activation, GUI event time) from the *capture* (next render,
+    /// when `ui.input().time` exists) avoids needing the clock at activation
+    /// time and works uniformly for panes that were not being rendered (an
+    /// inactive tab's pane).
+    pub cursor_blink_reset_pending: bool,
+
     // ── Search overlay ───────────────────────────────────────────────
     /// Search overlay state: open/closed, query, matches, navigation.
     ///
@@ -643,6 +666,8 @@ impl Default for ViewState {
             cursor_target_col: 0.0,
             cursor_target_row: 0.0,
             cursor_last_frame: None,
+            cursor_blink_anchor: None,
+            cursor_blink_reset_pending: true,
             search_state: SearchState::default(),
             command_history: CommandHistoryState::default(),
             image_anim_clocks: HashMap::new(),

@@ -68,6 +68,32 @@ use tracing::error;
 /// appended.  When `width_cols` is too small to fit even the minimal
 /// `"▶ N lines…"` form, the helper falls back to `"▶…"` (or `""` if the
 /// width is zero).
+/// Compute the cursor blink phase (`true` = cursor visible) at `time`.
+///
+/// The phase toggles every `tick_seconds`. When `anchor` is `Some`, the phase
+/// is measured relative to that activation time, so the first `tick_seconds`
+/// after activation are always in the visible ("on") half — this makes a
+/// freshly-activated pane's cursor appear immediately instead of inheriting
+/// whichever half of the global cycle happens to be current. When `anchor` is
+/// `None`, the global wall-clock phase is used.
+///
+/// A conversion failure (absurd `time`) is treated as "visible", matching the
+/// pre-existing fallback: a shown cursor is always the safe default.
+#[must_use]
+fn cursor_blink_phase(time: f64, anchor: Option<f64>, tick_seconds: f64) -> bool {
+    let blink_time = anchor.map_or(time, |a| time - a);
+    match <i64 as ApproxFrom<f64, RoundToZero>>::approx_from((blink_time / tick_seconds).floor()) {
+        Ok(ticks) => ticks % 2 == 0,
+        Err(e) => {
+            error!("Failed to convert blink ticks to i64: {e}");
+            true
+        }
+    }
+}
+
+/// Format the fold-placeholder text for a collapsed command block.
+///
+/// See the render path (`show`) for how this is used.
 #[must_use]
 pub fn format_placeholder_text(hidden_rows: usize, width_cols: usize) -> String {
     let suffix = if hidden_rows == 1 { "line" } else { "lines" };
@@ -1746,15 +1772,21 @@ impl FreminalTerminalWidget {
         // Blink state must be computed here — cannot call `ui.input` inside
         // the `Arc<CallbackFn>` closure (it must be `Send + Sync`).
         let time = ui.input(|i| i.time);
-        let cursor_blink_on = match <i64 as ApproxFrom<f64, RoundToZero>>::approx_from(
-            (time / BLINK_TICK_SECONDS).floor(),
-        ) {
-            Ok(ticks) => ticks % 2 == 0,
-            Err(e) => {
-                error!("Failed to convert blink ticks to i64: {e}");
-                true
-            }
-        };
+
+        // The blink phase is derived relative to the activation anchor (if
+        // set), else the global wall clock. The anchor is (re)set by the GUI
+        // at the single point where the active pane or active tab changes (see
+        // `reset_blink_anchor_on_activation` in `app_impl`), so a
+        // freshly-activated OR freshly-revealed pane starts in the visible
+        // ("on") half regardless of the global cycle — no cursor-appear lag on
+        // pane switch or tab switch. The anchor is captured lazily on the
+        // first render after activation, when a valid `time` is available.
+        if view_state.cursor_blink_reset_pending {
+            view_state.cursor_blink_anchor = Some(time);
+            view_state.cursor_blink_reset_pending = false;
+        }
+        let cursor_blink_on =
+            cursor_blink_phase(time, view_state.cursor_blink_anchor, BLINK_TICK_SECONDS);
 
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
@@ -3379,6 +3411,55 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
             egui::FontId::proportional(20.0),
             Color32::WHITE,
         );
+    }
+}
+
+#[cfg(test)]
+mod cursor_blink_phase_tests {
+    use super::cursor_blink_phase;
+
+    const TICK: f64 = 0.50;
+
+    #[test]
+    fn global_phase_toggles_every_tick() {
+        // No anchor -> global wall-clock phase; on for [0,0.5), off for
+        // [0.5,1.0), on for [1.0,1.5), ...
+        assert!(cursor_blink_phase(0.0, None, TICK), "t=0 on");
+        assert!(cursor_blink_phase(0.25, None, TICK), "t=0.25 on");
+        assert!(!cursor_blink_phase(0.5, None, TICK), "t=0.5 off");
+        assert!(!cursor_blink_phase(0.75, None, TICK), "t=0.75 off");
+        assert!(cursor_blink_phase(1.0, None, TICK), "t=1.0 on");
+    }
+
+    #[test]
+    fn anchor_makes_cursor_visible_immediately_on_activation() {
+        // The bug: activating a pane at a "global-off" moment (t=0.7) would
+        // leave its cursor hidden until the global phase flipped. With an
+        // anchor at the activation time, the phase re-bases so the first
+        // half-cycle after activation is visible regardless of global phase.
+        let activation = 0.7; // global phase here is "off"
+        assert!(
+            !cursor_blink_phase(activation, None, TICK),
+            "global off at 0.7"
+        );
+        // Anchored: measured from activation, so t-anchor in [0,0.5) -> on.
+        assert!(
+            cursor_blink_phase(activation, Some(activation), TICK),
+            "anchored on at activation"
+        );
+        assert!(
+            cursor_blink_phase(activation + 0.4, Some(activation), TICK),
+            "anchored still on 0.4s after activation"
+        );
+    }
+
+    #[test]
+    fn anchored_phase_toggles_relative_to_activation() {
+        let anchor = 0.7;
+        // 0.5s after activation -> first "off" half.
+        assert!(!cursor_blink_phase(anchor + 0.5, Some(anchor), TICK));
+        // 1.0s after activation -> "on" again.
+        assert!(cursor_blink_phase(anchor + 1.0, Some(anchor), TICK));
     }
 }
 

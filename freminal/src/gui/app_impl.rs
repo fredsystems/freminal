@@ -300,6 +300,7 @@ impl freminal_windowing::App for FreminalGui {
                         present_is_partial: std::sync::Arc::new(
                             std::sync::atomic::AtomicBool::new(false),
                         ),
+                        previous_active_pane_key: None,
                     };
                     self.windows.insert(window_id, win);
 
@@ -1377,6 +1378,22 @@ impl freminal_windowing::App for FreminalGui {
             let active_pane_id = win.tabs.active_tab().active_pane;
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
             let has_multiple_panes = win.tabs.active_tab().pane_tree.pane_count().unwrap_or(1) > 1;
+
+            // Re-anchor the cursor blink phase when the active pane changes —
+            // by a pane switch within the tab OR a tab switch (both change the
+            // "which pane is active-and-visible" key). This makes the newly
+            // active pane's cursor appear immediately instead of inheriting the
+            // global blink cycle's current half (the cursor-appear lag). The
+            // flag is captured on that pane's next render, when the egui input
+            // clock is available. Only reset on an actual change so we don't
+            // re-anchor (and cause a spurious extra blink) every frame.
+            let active_pane_key = (win.tabs.active_tab().id, active_pane_id);
+            if win.previous_active_pane_key != Some(active_pane_key) {
+                if let Some(pane) = win.tabs.active_tab_mut().pane_tree.find_mut(active_pane_id) {
+                    pane.view_state.cursor_blink_reset_pending = true;
+                }
+                win.previous_active_pane_key = Some(active_pane_key);
+            }
 
             // Broadcast input (Task 74): when the active tab has broadcast
             // enabled, collect the (pane id, input sender) of every leaf pane
@@ -2711,6 +2728,7 @@ impl FreminalGui {
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            previous_active_pane_key: None,
         }
     }
 
