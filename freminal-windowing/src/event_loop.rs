@@ -614,7 +614,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     ),
                 }
                 if response.repaint {
-                    let deadline = Instant::now() + std::time::Duration::from_millis(16);
+                    let deadline = Instant::now() + MIN_REPAINT_INTERVAL;
                     state.repaint_at = Some(
                         state
                             .repaint_at
@@ -906,14 +906,13 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 };
                 state.repaint_at = None;
 
-                // Honour egui's repaint_delay but clamp to a minimum of 16ms
-                // to prevent unbounded rendering from zero-delay requests
-                // (hover state, tooltip updates).  This ensures layout-settling
-                // frames still fire while keeping idle CPU near zero.
+                // Honour egui's repaint_delay but clamp to the shared
+                // MIN_REPAINT_INTERVAL floor to prevent unbounded rendering
+                // from zero-delay requests (hover state, tooltip updates).
+                // This ensures layout-settling frames still fire while keeping
+                // idle CPU near zero.
                 if frame_output.repaint_delay < std::time::Duration::from_hours(1) {
-                    let min_delay = std::time::Duration::from_millis(16);
-                    let delay = frame_output.repaint_delay.max(min_delay);
-                    let deadline = Instant::now() + delay;
+                    let deadline = Instant::now() + clamp_repaint_delay(frame_output.repaint_delay);
                     state.repaint_at = Some(deadline);
                 }
 
@@ -951,8 +950,10 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             UserEvent::RequestRepaint(id) => {
                 if let Some(state) = self.windows.get_mut(&id.0) {
                     // Schedule rather than calling request_redraw() directly,
-                    // same throttle as window_event to prevent unbounded rendering.
-                    let min_deadline = Instant::now() + std::time::Duration::from_millis(16);
+                    // throttled to the shared MIN_REPAINT_INTERVAL floor (same
+                    // as window_event / RequestRepaintAfter) to prevent
+                    // unbounded rendering.
+                    let min_deadline = Instant::now() + MIN_REPAINT_INTERVAL;
                     state.repaint_at = Some(
                         state
                             .repaint_at

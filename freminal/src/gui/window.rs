@@ -361,8 +361,8 @@ pub(super) struct PerWindowState {
     /// zoomed / overlay open).
     pub(super) chrome_border_rects: Vec<egui::Rect>,
 
-    /// Per-frame render attribution counters (diagnostic), flushed to an
-    /// `info` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
+    /// Per-frame render attribution counters (diagnostic), flushed to a
+    /// `debug` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
     /// a CPU investigation see, without a profiler, how many frames are
     /// actually drawn and how they split across the #435 per-frame damage
     /// classes (a genuinely-unchanged redraw costs no CPU rebuild; a `Full`
@@ -389,6 +389,6 @@ pub(super) struct FrameStats {
 }
 
 impl FrameStats {
-    /// Emit an `info` summary once every this many drawn frames.
+    /// Emit a `debug` summary once every this many drawn frames.
     pub(super) const FLUSH_EVERY: u64 = 120;
 }
