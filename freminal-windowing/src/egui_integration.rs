@@ -22,25 +22,32 @@ pub struct FrameOutput {
 }
 
 /// Cached tessellated chrome (head + tail) primitives from the most recent
-/// FULL frame (#436.4a/#436.4b).
+/// FULL frame (#436.4a/#436.4b/#436.4c).
 ///
 /// Populated at the end of every FULL frame; consulted (via
 /// [`decide_chrome_mode`]) to decide whether a later frame may REPLAY, and
 /// when it does, `run_frame` paints `head_primitives`/`tail_primitives`
-/// directly instead of re-tessellating. Only the tessellated primitives are
-/// retained — not the source shapes — because #436.4b invalidates the
-/// whole cache (forcing `ChromeMode::Full`) on any `ppp`/`size` mismatch
-/// rather than re-tessellating the same shapes at a new `ppp`; a future
-/// subtask that wants that finer-grained recovery would need to retain the
-/// shapes too.
+/// directly instead of re-tessellating. The source `head_shapes`/
+/// `tail_shapes` are retained too (#436.4c, §5.2): a REPLAY frame that
+/// detects the font atlas grew this frame (a new glyph shaped by the
+/// terminal band, e.g.) re-tessellates these cached shapes against the
+/// now-current atlas rather than painting stale UVs baked against the old
+/// (smaller) atlas — see the `atlas_grew`/self-heal handling in
+/// [`EguiState::run_frame`].
 struct ChromeCache {
-    /// Tessellation of the chrome shapes painted *before* the terminal band
-    /// in `full_output.shapes` (e.g. the `CentralPanel` background fill,
-    /// menu bar, tab bar), at `ppp`/`size`.
+    /// The chrome shapes painted *before* the terminal band in
+    /// `full_output.shapes` (e.g. the `CentralPanel` background fill, menu
+    /// bar, tab bar), as recorded on the last FULL frame. Retained (#436.4c)
+    /// so the §5.2 atlas-resize self-heal can re-tessellate them without
+    /// re-running `update()`.
+    head_shapes: Vec<egui::epaint::ClippedShape>,
+    /// The chrome shapes painted *after* the terminal band (overlays, pane
+    /// borders drawn as part of chrome, modals, tooltips), as recorded on
+    /// the last FULL frame. Retained for the same reason as `head_shapes`.
+    tail_shapes: Vec<egui::epaint::ClippedShape>,
+    /// Tessellation of `head_shapes`, at `ppp`/`size`.
     head_primitives: Vec<egui::ClippedPrimitive>,
-    /// Tessellation of the chrome shapes painted *after* the terminal band
-    /// (overlays, pane borders drawn as part of chrome, modals, tooltips),
-    /// at `ppp`/`size`.
+    /// Tessellation of `tail_shapes`, at `ppp`/`size`.
     tail_primitives: Vec<egui::ClippedPrimitive>,
     /// `pixels_per_point` the cached primitives were tessellated at. A
     /// mismatch on a later frame invalidates the cache.
@@ -92,6 +99,31 @@ fn chrome_repaint_settled(
         || repaint_delay == std::time::Duration::MAX,
         |app_delay| repaint_delay >= app_delay,
     )
+}
+
+/// #436.4c §5.2: did the font atlas (`TextureId::default()`) grow this
+/// frame?
+///
+/// `egui`'s `TextureAtlas::allocate` grows the shared font atlas by
+/// doubling its height when a not-yet-shaped glyph needs room; glyph UVs
+/// are normalized to `[0, 1]` at tessellation time by dividing by the
+/// atlas size *current at that call* and baked into the mesh — so a mesh
+/// tessellated before a resize samples the wrong rows if painted after
+/// one. `ImageDelta::is_whole()` (`pos.is_none()`) distinguishes a
+/// whole-texture upload (initial allocation or a resize/respecify) from
+/// an incremental patch (`pos: Some(_)`, a normal new-glyph-added-to-the-
+/// existing-atlas upload that does NOT invalidate previously baked UVs).
+/// Only `TextureId::default()` — the font atlas — is relevant; a whole
+/// upload of some other (e.g. image-protocol) texture does not affect
+/// chrome glyph UVs.
+///
+/// Pure (no `self`/`egui::Context` state needed beyond the delta itself),
+/// so directly unit-testable.
+fn atlas_grew(textures_delta: &egui::TexturesDelta) -> bool {
+    textures_delta
+        .set
+        .iter()
+        .any(|(id, delta)| *id == egui::TextureId::default() && delta.is_whole())
 }
 
 /// #436.4b: decide this frame's [`crate::ChromeMode`].
@@ -299,6 +331,15 @@ impl EguiState {
         // change delivered this frame. Used for all tessellation below.
         let pixels_per_point = self.ctx.pixels_per_point();
 
+        // #436.4c §5.2: did the font atlas grow (or otherwise get wholly
+        // re-specified) THIS frame? Glyph shaping happens during `run_ui`
+        // (layout/galley creation), so `full_output.textures_delta` already
+        // reflects any atlas growth caused by this frame's chrome OR
+        // terminal-band content — read this once, up front, before the
+        // head/band/tail split below, since it drives the REPLAY self-heal
+        // path and is irrelevant (see below) on the FULL path.
+        let atlas_grew_this_frame = atlas_grew(&full_output.textures_delta);
+
         // ── 3-way paint-order split (#436.4a) ──────────────────────────
         //
         // Slice `full_output.shapes` into head (chrome painted before the
@@ -339,13 +380,19 @@ impl EguiState {
         // painting anything from `shapes[..start]`/`shapes[end..]` here
         // would silently diverge from what the cache (and therefore this
         // frame's actual pixels) represents.
+        // On a FULL frame `atlas_grew_this_frame` is irrelevant: every band
+        // is re-tessellated fresh from this frame's own shapes regardless,
+        // so there is no stale-UV hazard to self-heal — the self-heal below
+        // is REPLAY-only.
         let (head_primitives, tail_primitives) = match chrome_mode {
             crate::ChromeMode::Full => {
                 let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
                 let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
-                let head_primitives = self.ctx.tessellate(head_shapes, pixels_per_point);
-                let tail_primitives = self.ctx.tessellate(tail_shapes, pixels_per_point);
+                let head_primitives = self.ctx.tessellate(head_shapes.clone(), pixels_per_point);
+                let tail_primitives = self.ctx.tessellate(tail_shapes.clone(), pixels_per_point);
                 self.chrome_cache = Some(ChromeCache {
+                    head_shapes,
+                    tail_shapes,
                     head_primitives: head_primitives.clone(),
                     tail_primitives: tail_primitives.clone(),
                     ppp: pixels_per_point,
@@ -353,7 +400,52 @@ impl EguiState {
                 });
                 (head_primitives, tail_primitives)
             }
+            crate::ChromeMode::Replay if atlas_grew_this_frame => {
+                // #436.4c §5.2 self-heal: the font atlas grew this frame (a
+                // new glyph shaped by the band or an overlay). The cached
+                // chrome primitives' UVs were baked against the SMALLER
+                // atlas that existed when they were last tessellated;
+                // painting them now would sample the wrong texture rows
+                // (garbled chrome text). Re-tessellate the cached SHAPES
+                // (not `update()`, which is not idempotent and must never
+                // be re-run mid-frame) against the current atlas and
+                // refresh the cached primitives so the NEXT replay reuses
+                // correct UVs too. One rare extra tessellate, zero visible
+                // glitch.
+                //
+                // Clone the shapes out of an immutable borrow first (and
+                // let that borrow end) before tessellating via `self.ctx`
+                // and then re-borrowing `self.chrome_cache` mutably to
+                // store the refreshed primitives — holding the cache borrow
+                // across the `self.ctx.tessellate` calls would conflict
+                // with `&self.ctx` while `self.chrome_cache` is exclusively
+                // borrowed.
+                let cached_shapes = self
+                    .chrome_cache
+                    .as_ref()
+                    .map(|cache| (cache.head_shapes.clone(), cache.tail_shapes.clone()));
+                cached_shapes.map_or_else(
+                    || {
+                        // Defensive fallback: `decide_chrome_mode` proved
+                        // `cache_valid` before choosing `Replay`, so this
+                        // should be unreachable — but degrade gracefully
+                        // (empty chrome this frame) rather than panic.
+                        (Vec::new(), Vec::new())
+                    },
+                    |(head_shapes, tail_shapes)| {
+                        let head_primitives = self.ctx.tessellate(head_shapes, pixels_per_point);
+                        let tail_primitives = self.ctx.tessellate(tail_shapes, pixels_per_point);
+                        if let Some(cache) = self.chrome_cache.as_mut() {
+                            cache.head_primitives.clone_from(&head_primitives);
+                            cache.tail_primitives.clone_from(&tail_primitives);
+                        }
+                        (head_primitives, tail_primitives)
+                    },
+                )
+            }
             crate::ChromeMode::Replay => {
+                // Normal replay: no atlas growth this frame, cached
+                // primitives' UVs remain valid — reuse them directly.
                 self.chrome_cache.as_ref().map_or_else(
                     || {
                         // Defensive fallback: `decide_chrome_mode` proved
@@ -503,9 +595,10 @@ impl EguiState {
 
 #[cfg(test)]
 mod tests {
-    use super::{chrome_repaint_settled, decide_chrome_mode};
-    use egui::epaint::Primitive;
-    use egui::{Color32, Rect, pos2, vec2};
+    use super::{atlas_grew, chrome_repaint_settled, decide_chrome_mode};
+    use egui::ImageData;
+    use egui::epaint::{ImageDelta, Primitive};
+    use egui::{Color32, ColorImage, Rect, TextureId, TextureOptions, TexturesDelta, pos2, vec2};
     use std::time::Duration;
 
     // ── #436.4b: `chrome_repaint_settled` ──────────────────────────────
@@ -690,6 +783,197 @@ mod tests {
                 false,
             ),
             crate::ChromeMode::Replay
+        );
+    }
+
+    // ── #436.4c §5.2: `atlas_grew` ──────────────────────────────────────
+
+    /// A tiny 2x2 filled `ImageData`, sufficient to build `ImageDelta`
+    /// values without depending on any real font/image data.
+    fn tiny_image() -> egui::ImageData {
+        ImageData::Color(std::sync::Arc::new(ColorImage::filled(
+            [2, 2],
+            Color32::WHITE,
+        )))
+    }
+
+    #[test]
+    fn atlas_grew_false_on_empty_delta() {
+        assert!(!atlas_grew(&TexturesDelta::default()));
+    }
+
+    #[test]
+    fn atlas_grew_true_on_font_atlas_whole_upload() {
+        // `ImageDelta::full` sets `pos: None` -- `is_whole() == true` --
+        // exactly the resize/respecify marker the self-heal watches for,
+        // on `TextureId::default()` (the font atlas).
+        let delta = ImageDelta::full(tiny_image(), TextureOptions::default());
+        assert!(delta.is_whole(), "sanity: ImageDelta::full is whole");
+        let mut textures_delta = TexturesDelta::default();
+        textures_delta.set.push((TextureId::default(), delta));
+        assert!(atlas_grew(&textures_delta));
+    }
+
+    #[test]
+    fn atlas_grew_false_on_font_atlas_incremental_patch() {
+        // `ImageDelta::partial` sets `pos: Some(_)` -- a normal
+        // new-glyph-added-to-the-existing-atlas upload, NOT a resize. Must
+        // NOT be mistaken for atlas growth.
+        let delta = ImageDelta::partial([0, 0], tiny_image(), TextureOptions::default());
+        assert!(
+            !delta.is_whole(),
+            "sanity: ImageDelta::partial is not whole"
+        );
+        let mut textures_delta = TexturesDelta::default();
+        textures_delta.set.push((TextureId::default(), delta));
+        assert!(!atlas_grew(&textures_delta));
+    }
+
+    #[test]
+    fn atlas_grew_false_on_whole_upload_of_a_non_font_texture() {
+        // A whole-texture upload of some OTHER texture (e.g. an
+        // image-protocol texture) is not the font atlas and must not
+        // trigger the chrome-UV self-heal.
+        let delta = ImageDelta::full(tiny_image(), TextureOptions::default());
+        let mut textures_delta = TexturesDelta::default();
+        textures_delta.set.push((TextureId::User(42), delta));
+        assert!(!atlas_grew(&textures_delta));
+    }
+
+    #[test]
+    fn atlas_grew_true_when_font_atlas_whole_upload_mixed_with_other_entries() {
+        // A realistic frame may carry multiple texture deltas; growth must
+        // be detected even when the font-atlas entry is not the only one
+        // (or not first).
+        let mut textures_delta = TexturesDelta::default();
+        textures_delta.set.push((
+            TextureId::User(7),
+            ImageDelta::partial([0, 0], tiny_image(), TextureOptions::default()),
+        ));
+        textures_delta.set.push((
+            TextureId::default(),
+            ImageDelta::full(tiny_image(), TextureOptions::default()),
+        ));
+        assert!(atlas_grew(&textures_delta));
+    }
+
+    /// Reproduces the exact §5.2 hazard end-to-end using only
+    /// `egui::Context` (pure CPU, no GL/painter needed — this does NOT
+    /// require the 436.9 pixel harness) and proves the self-heal's core
+    /// operation — re-tessellating cached shapes against the current atlas
+    /// — actually fixes it.
+    ///
+    /// Mechanics (see `atlas_grew`'s doc comment): a `rect_filled` shape's
+    /// UV is the constant `WHITE_UV` (invariant to atlas size — verified
+    /// against `epaint::WHITE_UV`/`Mesh::add_colored_rect`), but a TEXT
+    /// shape's glyph UVs are normalized by the LIVE atlas size at the
+    /// moment `ctx.tessellate` is called
+    /// (`epaint::tessellator::Tessellator::tessellate_text`).
+    /// `TextureAtlas::allocate` doubles the atlas height *in place*
+    /// whenever a glyph's row does not fit, marking the WHOLE image dirty
+    /// (`ImageDelta::full`, `pos: None`) for that frame's `textures_delta`
+    /// — so cached chrome text tessellated *before* a resize holds
+    /// different glyph UVs than tessellating the identical shapes again
+    /// *afterward*.
+    ///
+    /// How this test forces the resize: it rasterizes a large run of glyphs
+    /// at a font size (80pt) far taller than the freshly-initialized atlas's
+    /// first row, which reliably overflows the initial atlas height and
+    /// triggers the in-place doubling on the very next frame. The *specific*
+    /// glyphs are immaterial — the trigger is atlas-space exhaustion, not
+    /// glyph novelty per se (the bundled egui fonts have no CJK coverage, so
+    /// the U+4E00.. codepoints below actually rasterize as the fallback/tofu
+    /// glyph; that does not matter, since a single tall glyph is enough to
+    /// overflow the tiny initial row). In production the same resize is
+    /// driven by any glyph the terminal band or an overlay shapes that does
+    /// not fit the current atlas — a normal-size never-before-seen glyph is
+    /// the common case; a large one is simply the most reliable way to force
+    /// it deterministically in a test. The `atlas_grew` sanity assert below
+    /// fails loudly (never vacuously passes) if the resize ever stops
+    /// happening, so the test cannot silently rot into a no-op.
+    #[test]
+    fn atlas_growth_invalidates_cached_text_uvs_and_retessellation_fixes_it() {
+        let ctx = egui::Context::default();
+        let ppp = 1.0;
+
+        // Frame 1 ("chrome"): a small text label. Establishes a baseline
+        // atlas and a cached shape list + its tessellation — this stands
+        // in for `ChromeCache::{head_shapes, head_primitives}` after a
+        // FULL frame.
+        let chrome_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label("Chrome");
+        });
+        let cached_shapes = chrome_output.shapes;
+        let cached_primitives_before = ctx.tessellate(cached_shapes.clone(), ppp);
+
+        // Frame 2 ("terminal band"): a large run of glyphs at a font size
+        // (80pt) far taller than the freshly-initialized atlas's first row,
+        // which overflows the initial atlas height and forces the in-place
+        // doubling. This is NOT a chrome trigger (#436 §3.3 — terminal
+        // content never forces FULL on its own) — exactly the
+        // REPLAY-candidate scenario §5.2 describes: the band grows the shared
+        // font atlas mid-REPLAY. (The codepoints are in the CJK range but the
+        // bundled fonts lack CJK coverage, so they rasterize as the fallback
+        // glyph — immaterial, since the resize is driven by glyph SIZE
+        // overflowing the atlas row, not by which glyph it is; see the fn
+        // doc comment.)
+        let big_text: String = (0x4E00u32..0x4E00u32 + 300)
+            .filter_map(char::from_u32)
+            .collect();
+        let band_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.label(egui::RichText::new(big_text.clone()).size(80.0));
+        });
+
+        assert!(
+            atlas_grew(&band_output.textures_delta),
+            "sanity: the band frame must actually grow the font atlas for \
+             this test to exercise the hazard"
+        );
+
+        // The hazard: painting `cached_primitives_before` now (after
+        // growth, without re-tessellating) would sample the WRONG atlas
+        // rows — prove it by re-tessellating the IDENTICAL cached shapes
+        // and observing at least one glyph UV changed. `WHITE_UV`-only
+        // vertices (rect fills) are excluded since they are
+        // atlas-size-invariant by construction.
+        let cached_primitives_after = ctx.tessellate(cached_shapes.clone(), ppp);
+        let mut any_glyph_uv_changed = false;
+        for (before, after) in cached_primitives_before
+            .iter()
+            .zip(cached_primitives_after.iter())
+        {
+            if let (Primitive::Mesh(mesh_before), Primitive::Mesh(mesh_after)) =
+                (&before.primitive, &after.primitive)
+            {
+                for (vb, va) in mesh_before.vertices.iter().zip(mesh_after.vertices.iter()) {
+                    if vb.uv != egui::epaint::WHITE_UV && vb.uv != va.uv {
+                        any_glyph_uv_changed = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            any_glyph_uv_changed,
+            "the cached chrome text's glyph UVs must differ before/after \
+             atlas growth -- this is the exact staleness `run_frame`'s \
+             REPLAY self-heal (re-tessellating `cache.head_shapes`/\
+             `cache.tail_shapes`) corrects"
+        );
+
+        // The fix: this IS the self-heal's operation
+        // (`self.ctx.tessellate(cache.head_shapes.clone(), pixels_per_point)`
+        // in `run_frame`). Prove it converges: tessellating the cached
+        // shapes AGAIN, with no further atlas change, reproduces the exact
+        // same (correct, current-atlas) primitives — i.e. the self-heal
+        // result is stable once applied, matching what `run_frame` stores
+        // back into `cache.head_primitives`/`cache.tail_primitives`.
+        let cached_primitives_after_again = ctx.tessellate(cached_shapes, ppp);
+        assert_eq!(
+            flatten_mesh_geometry(&cached_primitives_after),
+            flatten_mesh_geometry(&cached_primitives_after_again),
+            "re-tessellating the self-healed shapes again (no further atlas \
+             change) must reproduce identical geometry -- the self-heal \
+             result is stable"
         );
     }
 
