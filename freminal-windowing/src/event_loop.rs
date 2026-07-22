@@ -1394,6 +1394,121 @@ mod tests {
         );
     }
 
+    // ── #436.8 drag-latch multi-press/multi-release SEQUENCES (436.9 follow-up) ──
+    //
+    // The single-call tests above pin each transition in isolation. These
+    // chain `update_chrome_drag_latch` across realistic event sequences,
+    // asserting the latch value AND, at each step, what
+    // `should_force_chrome_full_for_pointer` decides given the pre-update
+    // latch (the ordering `event_loop.rs` uses: decide with the PRE-update
+    // latch, then update — so a release ending a chrome drag still forces
+    // Full before the latch drops).
+
+    /// Press ON chrome -> pointer moves OFF chrome mid-drag -> release.
+    /// The mandate-critical case: the whole drag must force Full (latch keeps
+    /// it Full even while the pointer is over terminal content), and the latch
+    /// must land back at exactly 0 after release.
+    #[test]
+    fn drag_latch_sequence_press_on_chrome_move_off_release_stays_full_throughout() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        let mut latch = 0u32;
+
+        // Press over chrome. Decide with pre-update latch (0) but is_over_chrome
+        // = Some(true) -> Full. Then latch -> 1.
+        assert!(should_force_chrome_full_for_pointer(Some(true), latch > 0));
+        latch = update_chrome_drag_latch(latch, Pressed, Some(true));
+        assert_eq!(latch, 1);
+
+        // Pointer moves OFF chrome (over terminal content) while dragging.
+        // is_over_chrome = Some(false), but latch (1) > 0 -> still Full.
+        assert!(should_force_chrome_full_for_pointer(Some(false), latch > 0));
+        // (motion doesn't touch the latch)
+        assert_eq!(latch, 1);
+
+        // Release (delivered while pointer is off chrome). Decide with the
+        // PRE-update latch (1 > 0) -> Full, THEN decrement.
+        assert!(should_force_chrome_full_for_pointer(Some(false), latch > 0));
+        latch = update_chrome_drag_latch(latch, Released, Some(false));
+        assert_eq!(latch, 0);
+
+        // Post-drag: pointer still over terminal content, latch 0 -> NOT Full.
+        assert!(!should_force_chrome_full_for_pointer(
+            Some(false),
+            latch > 0
+        ));
+    }
+
+    /// Nested/rapid presses (e.g. a second button pressed before the first
+    /// releases) must balance out to exactly 0 and force Full throughout.
+    #[test]
+    fn drag_latch_sequence_nested_presses_balance_to_zero() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        let mut latch = 0u32;
+        latch = update_chrome_drag_latch(latch, Pressed, Some(true));
+        latch = update_chrome_drag_latch(latch, Pressed, Some(true));
+        assert_eq!(latch, 2);
+        // Both buttons held -> Full.
+        assert!(should_force_chrome_full_for_pointer(Some(false), latch > 0));
+
+        latch = update_chrome_drag_latch(latch, Released, Some(false));
+        assert_eq!(latch, 1);
+        // One button still held -> still Full.
+        assert!(should_force_chrome_full_for_pointer(Some(false), latch > 0));
+
+        latch = update_chrome_drag_latch(latch, Released, Some(false));
+        assert_eq!(latch, 0);
+        assert!(!should_force_chrome_full_for_pointer(
+            Some(false),
+            latch > 0
+        ));
+    }
+
+    /// A press that STARTS over terminal content does not latch, so subsequent
+    /// motion over terminal content stays REPLAY (the "helps normal mouse use"
+    /// mandate piece: text-selection drags must not force chrome Full).
+    #[test]
+    fn drag_latch_sequence_press_on_terminal_never_latches() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        let mut latch = 0u32;
+        // Press over terminal content -> no latch.
+        latch = update_chrome_drag_latch(latch, Pressed, Some(false));
+        assert_eq!(latch, 0);
+        // Dragging (text selection) over terminal content -> NOT Full.
+        assert!(!should_force_chrome_full_for_pointer(
+            Some(false),
+            latch > 0
+        ));
+        // Release over terminal content -> still 0, still not Full.
+        latch = update_chrome_drag_latch(latch, Released, Some(false));
+        assert_eq!(latch, 0);
+        assert!(!should_force_chrome_full_for_pointer(
+            Some(false),
+            latch > 0
+        ));
+    }
+
+    /// An unbalanced release (delivered without a matching press, e.g. to a
+    /// different window) must saturate at 0, never underflow to `u32::MAX` (which
+    /// would force Full forever).
+    #[test]
+    fn drag_latch_sequence_unbalanced_release_saturates_not_underflows() {
+        use winit::event::ElementState::{Pressed, Released};
+
+        let mut latch = 0u32;
+        // Spurious release first.
+        latch = update_chrome_drag_latch(latch, Released, Some(true));
+        assert_eq!(latch, 0);
+        // A subsequent real press still latches correctly (not offset by the
+        // spurious release).
+        latch = update_chrome_drag_latch(latch, Pressed, Some(true));
+        assert_eq!(latch, 1);
+        latch = update_chrome_drag_latch(latch, Released, Some(true));
+        assert_eq!(latch, 0);
+    }
+
     // ── #436.8 physical -> logical pointer position conversion ──────────
 
     #[test]

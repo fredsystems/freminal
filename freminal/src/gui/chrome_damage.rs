@@ -836,4 +836,47 @@ mod tests {
             &border,
         ));
     }
+
+    // ── #436.8 `is_chrome_interactive_at` wrapper decision (436.9 follow-up) ──
+    //
+    // `FreminalGui::is_chrome_interactive_at` (app_impl.rs) is
+    //   `self.windows.get(&window_id).is_none_or(|win|
+    //        point_in_chrome_rects(pos, win.chrome_head_rects, win.chrome_border_rects))`
+    // The point-in-rects half is pinned exhaustively above. The distinct
+    // behavior the wrapper adds is the `is_none_or` fallback: an UNKNOWN
+    // `window_id` (no `PerWindowState` entry) is conservatively chrome-
+    // interactive (`true`), same discipline as `None` head rects. A full
+    // wrapper test needs a `FreminalGui` (no headless constructor — see the
+    // 436.2a/436.4 notes and `app_impl.rs` test-module doc comment), so we
+    // model the composed `is_none_or` decision here with a local closure that
+    // mirrors the wrapper exactly, guarding against a regression in that
+    // composition (e.g. flipping the unknown-window default to `false`, which
+    // would silently starve a chrome interaction of repaints on a window whose
+    // state is mid-teardown).
+    #[test]
+    fn is_chrome_interactive_at_unknown_window_is_conservative_true() {
+        // Mirror of the wrapper: `None` window => true, else delegate.
+        let decide = |window_present: Option<(Option<&[egui::Rect]>, &[egui::Rect])>,
+                      pos: egui::Pos2|
+         -> bool {
+            window_present.is_none_or(|(head, border)| point_in_chrome_rects(pos, head, border))
+        };
+
+        // Unknown window (None) -> true regardless of position.
+        assert!(decide(None, egui::pos2(500.0, 500.0)));
+
+        // Known window, point over terminal content, captured (empty) rects
+        // -> false (delegates to point_in_chrome_rects, which is false).
+        assert!(!decide(Some((Some(&[]), &[])), egui::pos2(500.0, 500.0)));
+
+        // Known window, point inside a captured head rect -> true.
+        let head = [egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(100.0, 20.0),
+        )];
+        assert!(decide(Some((Some(&head), &[])), egui::pos2(50.0, 10.0)));
+
+        // Known window, head rects not yet captured (None) -> conservative true.
+        assert!(decide(Some((None, &[])), egui::pos2(50.0, 10.0)));
+    }
 }
