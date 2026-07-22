@@ -89,6 +89,27 @@ pub enum FrameDamage {
     Partial(Vec<DamageRect>),
 }
 
+/// Whether the static chrome changed on the frame just rendered.
+///
+/// "Chrome" is the menu bar, tab bar, pane borders, broadcast label, and all
+/// overlays (modals/toasts/tooltips/popups) — the #436 decision input for
+/// whether a frame may REPLAY cached chrome primitives or must do a FULL
+/// chrome rebuild.
+///
+/// The default is [`ChromeDamage::Changed`]: the conservative,
+/// always-correct behavior. An app that does not opt in (or has not yet
+/// wired up the #436 §3.3/§3.5 signals) always reports `Changed`, so a
+/// consumer of this signal (436.4) never mistakenly REPLAYs stale chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromeDamage {
+    /// Chrome changed (or we can't prove it didn't) — the next frame must be FULL.
+    #[default]
+    Changed,
+    /// Chrome provably did not change this frame — a REPLAY is permitted
+    /// (subject to the other #436 gates in §3.4).
+    Unchanged,
+}
+
 /// Configuration for creating a new window.
 pub struct WindowConfig {
     /// Window title.
@@ -185,6 +206,15 @@ pub trait App {
         _window_id: WindowId,
     ) -> Vec<egui::epaint::ClippedShape> {
         Vec::new()
+    }
+
+    /// Drain the chrome-damage decision computed during `update()` for this
+    /// window (#436). Called once per frame after `update()` returns, mirroring
+    /// `take_frame_damage`. Default returns `ChromeDamage::Changed` (always safe:
+    /// forces a FULL frame). Reset-on-read: the app leaves `Changed` behind so a
+    /// stale `Unchanged` can never be reused by a frame that didn't recompute it.
+    fn take_chrome_damage(&mut self, _window_id: WindowId) -> ChromeDamage {
+        ChromeDamage::Changed
     }
 
     /// Shared flag through which the windowing layer publishes the
@@ -514,5 +544,23 @@ mod tests {
         // Reset-on-read: a second call still returns empty, never a stale
         // or accumulated value.
         assert!(app.take_terminal_band_shapes(window_id).is_empty());
+    }
+
+    /// Pins the default behavior of `App::take_chrome_damage` (#436.3) —
+    /// mirroring the `take_frame_damage`/`take_terminal_band_shapes` default
+    /// discipline above — using the same `DummyApp` (real `FreminalGui`
+    /// windows are keyed by a real winit `WindowId`, impractical headlessly).
+    #[test]
+    fn take_chrome_damage_default_is_changed_and_reset_on_read() {
+        let mut app = DummyApp;
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        // Conservative default: `Changed` (no `update()` has run / default
+        // trait body), so a consumer never mistakenly REPLAYs stale chrome.
+        assert_eq!(app.take_chrome_damage(window_id), ChromeDamage::Changed);
+
+        // Reset-on-read: a second call still returns `Changed`, never a
+        // stale `Unchanged` a prior frame might have left behind.
+        assert_eq!(app.take_chrome_damage(window_id), ChromeDamage::Changed);
     }
 }

@@ -17,6 +17,7 @@ use freminal_windowing::WindowId;
 use glow::HasContext;
 use tracing::{debug, error, trace, warn};
 
+use super::chrome_damage;
 use super::frame_damage;
 use super::panes;
 use super::renderer::WindowPostRenderer;
@@ -303,6 +304,13 @@ impl freminal_windowing::App for FreminalGui {
                             std::sync::atomic::AtomicBool::new(false),
                         ),
                         previous_active_pane_key: None,
+                        pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
+                        pending_chrome_signals: chrome_damage::ChromeSignals::default(),
+                        chrome_settle_pending: false,
+                        prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
+                        prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
+                        prev_window_focused: false,
+                        chrome_frames_rendered: 0,
                     };
                     self.windows.insert(window_id, win);
 
@@ -531,6 +539,20 @@ impl freminal_windowing::App for FreminalGui {
             })
     }
 
+    fn take_chrome_damage(&mut self, window_id: WindowId) -> freminal_windowing::ChromeDamage {
+        // Drain the chrome-damage decision computed during `update()` for
+        // this window, leaving `Changed` behind so a stale `Unchanged` can
+        // never be reused by a later frame that does not recompute it.
+        self.windows
+            .get_mut(&window_id)
+            .map_or(freminal_windowing::ChromeDamage::Changed, |win| {
+                std::mem::replace(
+                    &mut win.pending_chrome_damage,
+                    freminal_windowing::ChromeDamage::Changed,
+                )
+            })
+    }
+
     // Inherently large: the main per-frame UI function handles menu bar, settings modal, window
     // manipulation drain, terminal widget layout, and resize detection — all in one pass over
     // the shared snapshot. Artificial sub-functions would not reduce the coupling.
@@ -670,6 +692,23 @@ impl freminal_windowing::App for FreminalGui {
             return;
         };
 
+        // ── Chrome-damage (#436.3): §3.5 "before" sample + warm-up counter ───
+        //
+        // Sampled as early as possible in `update()` — before ANY dialog's
+        // `.show(ctx)` this frame (including the toast stack's, which runs
+        // after `win` is reinserted at the end of this function) — so it
+        // reflects presence strictly BEFORE this frame's rendering can
+        // mutate it. Compared against the "after" sample taken once
+        // everything dismissible has shown (see the end of this function) to
+        // catch a self-dismissal that happens DURING this frame's rendering
+        // (adversarial finding 1; see `chrome_damage`'s module doc).
+        let chrome_dismissible_before = self.sample_dismissible_presence(&win);
+        // #436 §7 warm-up: force `Changed` for the first few frames after
+        // window creation, while font atlas / layout / PanelState id-maps
+        // are still settling.
+        let chrome_warming_up = win.chrome_frames_rendered < chrome_damage::WARMUP_FRAMES;
+        win.chrome_frames_rendered = win.chrome_frames_rendered.saturating_add(1);
+
         // ── Drain shader/renderer errors stashed by last frame's PaintCallback ──
         // PaintCallbacks run on the render thread and can't access `self`, so
         // they stash compile/init errors in `WindowPostRenderer::last_error`.
@@ -715,6 +754,11 @@ impl freminal_windowing::App for FreminalGui {
         // ── Track last known window geometry (for save_layout) ───────────────
         // Query the windowing layer directly.  See the settings-window branch
         // above for why `ctx.input().viewport()` is not reliable here.
+        //
+        // `chrome_size_before` is captured for the #436.3 §3.3 "window
+        // resize" chrome signal: compared against `win.last_known_size`
+        // after this block updates it.
+        let chrome_size_before = win.last_known_size;
         if let Some(geom) = handle.window_geometry(window_id) {
             if let Some(size) = geom.size {
                 win.last_known_size = Some(<[u32; 2]>::from(size));
@@ -723,6 +767,7 @@ impl freminal_windowing::App for FreminalGui {
                 win.last_known_position = Some(<[i32; 2]>::from(pos));
             }
         }
+        let chrome_size_changed = win.last_known_size != chrome_size_before;
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget
@@ -1064,10 +1109,14 @@ impl freminal_windowing::App for FreminalGui {
         // read the post-`ThemeChange` snapshot (a race that left the
         // background/chrome stale until a mouseover repaint).
         let bg_opacity = self.config.ui.background_opacity;
+        // Hoisted out of the block below (rather than a plain `let` inside
+        // it) so the #436.3 chrome-damage signal computed further down can
+        // read this frame's style-change verdict too.
+        let chrome_style_changed;
         {
             let gui_theme = self.gui_theme;
             let chrome_theme = self.preview_theme.unwrap_or(snap.theme);
-            let style_changed = match win.style_cache {
+            chrome_style_changed = match win.style_cache {
                 Some((prev_theme, prev_opacity, prev_gui_theme)) => {
                     !std::ptr::eq(prev_theme, chrome_theme)
                         || prev_opacity.to_bits() != bg_opacity.to_bits()
@@ -1075,7 +1124,7 @@ impl freminal_windowing::App for FreminalGui {
                 }
                 None => true,
             };
-            if style_changed {
+            if chrome_style_changed {
                 let visuals =
                     crate::gui::chrome_style::build_visuals(&gui_theme, chrome_theme, bg_opacity);
                 ctx.global_style_mut(|style| {
@@ -1215,6 +1264,9 @@ impl freminal_windowing::App for FreminalGui {
                 .active_tab()
                 .active_pane()
                 .is_some_and(|p| p.view_state.window_focused);
+            // #436.3 §3.3 "Window focus change" chrome signal.
+            let chrome_focus_changed = window_focused != win.prev_window_focused;
+            win.prev_window_focused = window_focused;
             // OSC 9 / OSC 777 notifications collected from every pane this
             // frame, routed after the loop (Task 76.4).
             let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
@@ -2198,6 +2250,57 @@ impl freminal_windowing::App for FreminalGui {
                 &per_pane_damage,
             );
 
+            // ── Chrome-damage signals (#436.3 §3.3) ───────────────────
+            //
+            // Stage the individual §3.3 signals this frame, computed from
+            // values already available here (several — `ui_overlay_open`,
+            // `active_pane_changed`, `shader_recomposites`, `ppp_changed`,
+            // `chrome_focus_changed`, per-pane bell state — only exist inside
+            // this `CentralPanel` closure). The final `ChromeDamage` decision
+            // additionally needs the after-toast-render dismissible-presence
+            // sample, which can only be taken once this closure returns (the
+            // toast overlay renders after it) — so `win.pending_chrome_signals`
+            // is a staging value, combined into `win.pending_chrome_damage`
+            // near the end of `update()`.
+            let chrome_tab_snapshot = chrome_damage::ChromeTabSnapshot {
+                tab_ids: win.tabs.iter().map(|t| t.id).collect(),
+                active_tab_id: Some(win.tabs.active_tab().id),
+                tab_titles: win
+                    .tabs
+                    .iter()
+                    .map(|t| {
+                        t.display_name(
+                            self.config.tab_title.policy,
+                            &self.config.tab_title.separator,
+                        )
+                        .into_owned()
+                    })
+                    .collect(),
+                pane_ids: pane_layout.iter().map(|(id, _)| *id).collect(),
+                zoomed_pane,
+                broadcast_input: win.tabs.active_tab().broadcast_input,
+            };
+            let chrome_tab_diff =
+                chrome_damage::diff_tab_snapshots(&win.prev_chrome_tab_snapshot, &chrome_tab_snapshot);
+            win.prev_chrome_tab_snapshot = chrome_tab_snapshot;
+
+            win.pending_chrome_signals = chrome_damage::ChromeSignals {
+                any_overlay_open: ui_overlay_open,
+                style_changed: chrome_style_changed,
+                active_pane_changed,
+                tab_set_changed: chrome_tab_diff.tab_set_changed,
+                tab_title_changed: chrome_tab_diff.tab_title_changed,
+                pane_layout_changed: chrome_tab_diff.pane_layout_changed,
+                broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
+                shader_active: shader_recomposites,
+                bell_active: per_pane_damage.iter().any(|p| p.bell_active),
+                toast_active,
+                size_changed: chrome_size_changed,
+                ppp_changed,
+                focus_changed: chrome_focus_changed,
+                warming_up: chrome_warming_up,
+            };
+
             // ── Window-level post-processing pass ────────────────────
             //
             // When a user GLSL shader is active, the window FBO now contains
@@ -2549,6 +2652,44 @@ impl freminal_windowing::App for FreminalGui {
             stack.show(ctx);
         }
 
+        // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────
+        //
+        // Taken here — after every dismissible element's `.show(ctx)` this
+        // frame, including the toast stack's above — and diffed against
+        // `chrome_dismissible_before` (sampled at the very top of this
+        // function, before any of them showed) to catch a self-dismissal
+        // that happened DURING this frame's rendering (adversarial finding
+        // 1: e.g. a toast expiring in its own `.show()` and requesting no
+        // further repaint because the stack is now empty). Also diffed
+        // against `win.prev_dismissible_presence` (last frame's own "after"
+        // sample) to catch a transition caused by something other than the
+        // element's own self-dismissal (e.g. a menu action closing a
+        // dialog). Either comparison finding a difference counts as a
+        // transition — see `chrome_damage::dismissible_presence_transitioned`'s
+        // doc for why the intra-frame comparison is the load-bearing one.
+        let chrome_dismissible_after = self.sample_dismissible_presence(&win);
+        let chrome_presence_transitioned = chrome_damage::dismissible_presence_transitioned(
+            chrome_dismissible_before,
+            chrome_dismissible_after,
+        ) || chrome_damage::dismissible_presence_transitioned(
+            win.prev_dismissible_presence,
+            chrome_dismissible_after,
+        );
+        win.prev_dismissible_presence = chrome_dismissible_after;
+
+        // §3.5's "+ next frame FULL" half: read last frame's pending flag as
+        // this frame's settle input, then reassign it to THIS frame's own
+        // transition result for the next frame to read (no separate "reset"
+        // step — see `decide_chrome_damage`'s doc).
+        let chrome_settle_frame_pending = win.chrome_settle_pending;
+        win.chrome_settle_pending = chrome_presence_transitioned;
+
+        win.pending_chrome_damage = chrome_damage::decide_chrome_damage(
+            &win.pending_chrome_signals,
+            chrome_presence_transitioned,
+            chrome_settle_frame_pending,
+        );
+
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
             format!("Frame time={}ms", elapsed.as_millis())
@@ -2613,6 +2754,32 @@ impl freminal_windowing::App for FreminalGui {
 }
 
 impl FreminalGui {
+    /// Sample the presence of every dismissible chrome element (#436 §3.5).
+    ///
+    /// Called twice per `update()` for the window being rendered — once as
+    /// early as possible (before any dialog's `.show(ctx)` this frame) and
+    /// once after all of them (including the shared toast stack's `.show`,
+    /// which runs after `win` is reinserted — see the call site) — so the
+    /// two samples can be diffed to catch a self-dismissal that happens
+    /// DURING a `.show()` call this same frame (adversarial finding 1).
+    fn sample_dismissible_presence(
+        &self,
+        win: &PerWindowState,
+    ) -> chrome_damage::DismissiblePresence {
+        chrome_damage::DismissiblePresence {
+            about: self.about_window_open,
+            welcome: self.welcome.is_open(),
+            paste_dialog: win.paste_dialog.is_open(),
+            broadcast_dialog: win.broadcast_dialog.is_open(),
+            close_dialog: win.close_dialog.is_open(),
+            save_layout_prompt: self.pending_save_layout.is_some(),
+            any_toast: self
+                .toasts
+                .try_borrow()
+                .is_ok_and(|stack| !stack.is_empty()),
+        }
+    }
+
     /// First-window spawn path when no layout or session restore will apply.
     ///
     /// Spawns a default single-pane PTY.  PTY-spawn failures surface as a
@@ -2811,6 +2978,13 @@ impl FreminalGui {
             pending_terminal_band_shapes: Vec::new(),
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
+            pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
+            pending_chrome_signals: chrome_damage::ChromeSignals::default(),
+            chrome_settle_pending: false,
+            prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
+            prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
+            prev_window_focused: false,
+            chrome_frames_rendered: 0,
         }
     }
 

@@ -38,6 +38,7 @@ pub mod view_state;
 mod actions;
 mod app_impl;
 mod broadcast_guard;
+mod chrome_damage;
 pub mod chrome_style;
 mod close_guard;
 mod command_blocks;

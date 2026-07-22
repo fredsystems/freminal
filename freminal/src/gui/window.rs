@@ -9,7 +9,11 @@ use egui;
 use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
-    PaneBorderDrag, renderer::WindowPostRenderer, tabs::TabId, tabs::TabManager,
+    PaneBorderDrag,
+    chrome_damage::{ChromeSignals, ChromeTabSnapshot, DismissiblePresence},
+    renderer::WindowPostRenderer,
+    tabs::TabId,
+    tabs::TabManager,
     terminal::FreminalTerminalWidget,
 };
 
@@ -258,4 +262,68 @@ pub(super) struct PerWindowState {
     /// `PaintCallback` closures require `'static` captures; only ever touched
     /// on the GUI thread, so `Relaxed` ordering suffices.
     pub(super) present_is_partial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Chrome-damage decision for the most recent `update()` of this window
+    /// (#436.3), drained by `App::take_chrome_damage`.
+    ///
+    /// Set at the end of each `update()` from [`super::chrome_damage::decide_chrome_damage`].
+    /// Defaults to [`freminal_windowing::ChromeDamage::Changed`] — the
+    /// conservative, always-correct behavior for a window that has not yet
+    /// rendered, or any frame whose computation is skipped by an early
+    /// return (mirrors `pending_frame_damage`'s same risk/precedent).
+    pub(super) pending_chrome_damage: freminal_windowing::ChromeDamage,
+
+    /// The individual #436 §3.3 signals computed during the most recent
+    /// `update()` of this window, staged here because most of them are only
+    /// available inside the `CentralPanel` closure while the final decision
+    /// (which also needs the post-toast-render dismissible-presence sample)
+    /// can only be made after that closure returns. Combined with the §3.5
+    /// presence-transition/settle inputs into `pending_chrome_damage` right
+    /// before `update()` returns. Defaults to all-`false` — harmless, since
+    /// it is always overwritten before being read on any frame that reaches
+    /// the point where `pending_chrome_damage` is computed.
+    pub(super) pending_chrome_signals: ChromeSignals,
+
+    /// #436 §3.5 self-dismissal settle rule: `true` when a dismissible
+    /// element (toast, About, Welcome, paste/broadcast/close-guard dialogs,
+    /// save-layout prompt) transitioned presence on the PREVIOUS frame, which
+    /// forces THIS frame `ChromeDamage::Changed` too (the "settle frame").
+    /// Reassigned every frame to that frame's own transition result — see
+    /// `chrome_damage::decide_chrome_damage`'s doc for why this needs no
+    /// separate reset step. `false` before the first frame.
+    pub(super) chrome_settle_pending: bool,
+
+    /// Presence of every dismissible chrome element, sampled once at the end
+    /// of the previous frame (after all `.show()` calls that frame,
+    /// including the toast stack's).
+    ///
+    /// Compared against this frame's own after-`.show()` sample to catch a
+    /// transition NOT caused by that element's own self-dismissal (e.g. a
+    /// menu action closing a dialog) — the cross-frame half of the §3.5
+    /// settle rule. The intra-frame (before-vs-after within a single frame)
+    /// half, which is what catches the toast self-dismissal hazard
+    /// (adversarial finding 1), uses a frame-local `before`/`after` pair
+    /// instead and does not need to be stored here. Defaults to
+    /// all-`false` (nothing dismissible present before the first frame).
+    pub(super) prev_dismissible_presence: DismissiblePresence,
+
+    /// Previous frame's tab/pane snapshot for the §3.3 tab-set / tab-title /
+    /// pane-layout / broadcast-state change-detection rows (#436.3). See
+    /// [`super::chrome_damage::ChromeTabSnapshot`] and
+    /// [`super::chrome_damage::diff_tab_snapshots`]. Defaults to empty,
+    /// which naturally reports every row as "changed" on the first
+    /// comparison — harmless, since the first few frames are also covered
+    /// by the warm-up counter below.
+    pub(super) prev_chrome_tab_snapshot: ChromeTabSnapshot,
+
+    /// Previous frame's `window_focused` value (#436.3 §3.3 "Window focus
+    /// change" row). Compared each frame to the freshly-read value to
+    /// detect focus in/out. `false` before the first frame.
+    pub(super) prev_window_focused: bool,
+
+    /// Frames rendered since this window was created, saturating at
+    /// [`super::chrome_damage::WARMUP_FRAMES`] (#436.3 §7 warm-up). While
+    /// below that count, `ChromeSignals::warming_up` is `true`,
+    /// unconditionally forcing `ChromeDamage::Changed`.
+    pub(super) chrome_frames_rendered: u32,
 }
