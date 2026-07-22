@@ -57,6 +57,35 @@ fn logical_coord_to_i32(v: f64) -> i32 {
     })
 }
 
+/// Minimum interval between *delay-scheduled* repaints — the 60fps frame
+/// budget.
+///
+/// Every path that schedules a repaint *after a delay* (both the cross-thread
+/// [`UserEvent::RequestRepaintAfter`] and the same-thread
+/// [`WindowOp::RequestRepaintAfter`], plus egui's own
+/// `frame_output.repaint_delay`) floors that delay to this value so that no
+/// single source can drive the GUI faster than ~60fps while idle. (Discrete
+/// *immediate* repaints — `RequestRepaint`, resize/scale/occlusion redraws —
+/// are one-shot responses to real events, not continuous streams, and are
+/// intentionally not throttled here.)
+///
+/// This closes the issue #439 loophole where the cross-thread
+/// [`UserEvent::RequestRepaintAfter`] path (used by the PTY consumer thread)
+/// accepted an unclamped sub-16ms delay and `min`'d below any already-floored
+/// deadline, letting a bursty PTY output stream (btop, htop, vim, less) drive
+/// ~40+ full frames/sec for a screen that visually changes ~2x/sec.
+const MIN_REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Floor a requested repaint delay to [`MIN_REPAINT_INTERVAL`].
+///
+/// Pure so it can be unit-tested without a running event loop. A caller may
+/// legitimately request a longer delay (e.g. a 500ms cursor-blink wake or a
+/// 250ms toast-fade); those pass through unchanged. Only sub-16ms requests
+/// are raised to the floor.
+fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
+    delay.max(MIN_REPAINT_INTERVAL)
+}
+
 /// Returns `true` for the narrow set of physical keys that egui 0.35 cannot
 /// deliver: print/pause/menu keys, keypad operators and digits, and the
 /// media keys winit's `KeyCode` exposes (Task 114). These are intercepted
@@ -446,7 +475,13 @@ impl<A: App> Handler<A> {
                 }
                 WindowOp::RequestRepaintAfter(id, delay) => {
                     if let Some(state) = self.windows.get_mut(&id.0) {
-                        let deadline = Instant::now() + delay;
+                        // Same 16ms floor as every other repaint-scheduling
+                        // path (issue #439). This same-thread `WindowOp` path
+                        // has no sub-16ms caller today, but flooring it keeps
+                        // the "no scheduling path can drive the GUI past
+                        // ~60fps" invariant true for every caller, present and
+                        // future.
+                        let deadline = Instant::now() + clamp_repaint_delay(delay);
                         state.repaint_at = Some(
                             state
                                 .repaint_at
@@ -927,7 +962,17 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             }
             UserEvent::RequestRepaintAfter(id, delay) => {
                 if let Some(state) = self.windows.get_mut(&id.0) {
-                    let deadline = Instant::now() + delay;
+                    // Clamp the caller-supplied delay to the same 16ms floor
+                    // the in-frame `frame_output.repaint_delay` path and the
+                    // `RequestRepaint` arm enforce (issue #439). Without this
+                    // floor, a cross-thread caller (the PTY consumer thread's
+                    // `post_event`) could request an 8ms wake that `min`s
+                    // below any 16ms-floored deadline already scheduled,
+                    // defeating the floor entirely and letting a bursty PTY
+                    // output stream drive the GUI past 60fps. Flooring here
+                    // closes the loophole for every caller of this path, not
+                    // just the one we know about today.
+                    let deadline = Instant::now() + clamp_repaint_delay(delay);
                     state.repaint_at = Some(
                         state
                             .repaint_at
@@ -1128,12 +1173,55 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        ViewportCommandFlags, is_blocked_key, is_unconditional_chrome_input, logical_coord_to_i32,
-        logical_dim_to_u32, physical_to_logical_pos, should_force_chrome_full_for_pointer,
-        update_chrome_drag_latch, viewport_command_flags,
+        MIN_REPAINT_INTERVAL, ViewportCommandFlags, clamp_repaint_delay, is_blocked_key,
+        is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
+        physical_to_logical_pos, should_force_chrome_full_for_pointer, update_chrome_drag_latch,
+        viewport_command_flags,
     };
     use winit::event::{DeviceId, WindowEvent};
     use winit::keyboard::KeyCode;
+
+    #[test]
+    fn clamp_repaint_delay_raises_sub_floor_delays_to_the_floor() {
+        // Issue #439: the PTY consumer thread previously requested an 8ms
+        // repaint delay through the unclamped cross-thread path, bypassing the
+        // 60fps floor and letting bursty output (btop, htop, vim, less) drive
+        // the GUI past 60fps. Any sub-16ms request must now be raised.
+        assert_eq!(
+            clamp_repaint_delay(std::time::Duration::from_millis(8)),
+            MIN_REPAINT_INTERVAL,
+            "the historical 8ms bypass must be floored to 16ms"
+        );
+        assert_eq!(
+            clamp_repaint_delay(std::time::Duration::ZERO),
+            MIN_REPAINT_INTERVAL,
+            "a zero-delay (immediate) request must still respect the floor"
+        );
+        assert_eq!(
+            clamp_repaint_delay(std::time::Duration::from_millis(15)),
+            MIN_REPAINT_INTERVAL,
+            "just-below-floor must be raised"
+        );
+    }
+
+    #[test]
+    fn clamp_repaint_delay_passes_through_at_and_above_the_floor() {
+        // Exactly the floor is unchanged.
+        assert_eq!(
+            clamp_repaint_delay(MIN_REPAINT_INTERVAL),
+            MIN_REPAINT_INTERVAL
+        );
+        // Longer legitimate delays (cursor-blink ~500ms, toast-fade ~250ms)
+        // must pass through untouched — the floor is a minimum, not a cap.
+        for ms in [17u64, 50, 100, 250, 500, 1000] {
+            let d = std::time::Duration::from_millis(ms);
+            assert_eq!(
+                clamp_repaint_delay(d),
+                d,
+                "delay {ms}ms >= floor must pass through unchanged"
+            );
+        }
+    }
 
     #[test]
     fn request_paste_command_sets_only_paste_flag() {

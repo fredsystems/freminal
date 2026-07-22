@@ -1432,6 +1432,86 @@ mod tests {
     }
 
     #[test]
+    fn build_snapshot_idle_rebuild_reuses_same_visible_chars_arc() {
+        // Issue #439 fix #4 relies EXCLUSIVELY on `Arc::ptr_eq` of
+        // `visible_chars` (not the sticky `content_changed` flag) to decide
+        // whether the GUI must rebuild. That is only sound if an idle
+        // `build_snapshot` (nothing dirty) returns the *same* `Arc`
+        // allocation, not a fresh clone with identical bytes. Assert the
+        // pointer identity directly so the invariant is guarded by a test, not
+        // only by inspection.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"stable content");
+        let first = emu.build_snapshot();
+        let second = emu.build_snapshot();
+        assert!(
+            !second.content_changed,
+            "an idle rebuild must not report content_changed"
+        );
+        assert!(
+            Arc::ptr_eq(&first.visible_chars, &second.visible_chars),
+            "an idle rebuild must reuse the SAME visible_chars Arc allocation \
+             (Arc::ptr_eq) so the GUI's ptr-identity change detection is sound"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_repeated_primary_alt_bounce_without_writes_reuses_arc() {
+        // Issue #439 fix #4 adversarial-review follow-up: walk
+        // primary -> alt -> primary -> alt (2nd time) with NO writes to the
+        // alt buffer, and assert the returning primary snapshot both reports
+        // `!content_changed` AND reuses the byte-identical `visible_chars`
+        // Arc. This exercises the per-buffer cache-swap stash across a REPEATED
+        // bounce (the existing tests only do a single round trip), which is the
+        // path the reviewer flagged as relied-on-but-untested now that the raw
+        // `content_changed` flag no longer backs up the ptr_eq check on the
+        // GUI side.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"primary baseline");
+        let _ = emu.build_snapshot();
+        let primary_stable = emu.build_snapshot();
+        assert!(!primary_stable.content_changed, "idle primary is stable");
+        let primary_arc = Arc::clone(&primary_stable.visible_chars);
+
+        // First excursion: enter alt (no writes), render, leave.
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let _ = emu.build_snapshot();
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let returned_once = emu.build_snapshot();
+        assert!(
+            !returned_once.is_alternate_screen,
+            "back on primary after first excursion"
+        );
+        assert!(
+            !returned_once.content_changed,
+            "returning to byte-identical primary must not report content_changed"
+        );
+        assert!(
+            Arc::ptr_eq(&returned_once.visible_chars, &primary_arc),
+            "first return must reuse the primary visible_chars Arc"
+        );
+
+        // Second excursion: enter alt AGAIN (still no writes), render, leave.
+        emu.handle_incoming_data(b"\x1b[?1049h");
+        let _ = emu.build_snapshot();
+        emu.handle_incoming_data(b"\x1b[?1049l");
+        let returned_twice = emu.build_snapshot();
+        assert!(
+            !returned_twice.is_alternate_screen,
+            "back on primary after second excursion"
+        );
+        assert!(
+            !returned_twice.content_changed,
+            "second return to byte-identical primary must not report content_changed"
+        );
+        assert!(
+            Arc::ptr_eq(&returned_twice.visible_chars, &primary_arc),
+            "second return must STILL reuse the primary visible_chars Arc \
+             (repeated bounce must not silently reallocate)"
+        );
+    }
+
+    #[test]
     fn build_snapshot_scrolled_primary_to_alt_to_primary_does_not_reuse_scrolled_content() {
         // Issue #405 / CodeRabbit follow-up: a primary snapshot taken while
         // scrolled back must NOT be restored (via the per-buffer cache swap)

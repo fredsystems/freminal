@@ -360,4 +360,35 @@ pub(super) struct PerWindowState {
     /// frame; explicitly cleared on frames that build no sensors (single pane /
     /// zoomed / overlay open).
     pub(super) chrome_border_rects: Vec<egui::Rect>,
+
+    /// Per-frame render attribution counters (diagnostic), flushed to an
+    /// `info` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
+    /// a CPU investigation see, without a profiler, how many frames are
+    /// actually drawn and how they split across the #435 per-frame damage
+    /// classes (a genuinely-unchanged redraw costs no CPU rebuild; a `Full`
+    /// frame rebuilds the visible vertex data).
+    pub(super) frame_stats: FrameStats,
+}
+
+/// Diagnostic per-frame render attribution (see [`PerWindowState::frame_stats`]).
+///
+/// Every counted frame is one `update()` call for a window (i.e. one drawn
+/// frame). `unchanged`/`cursor_only`/`full` classify the ACTIVE pane's
+/// `PaneFrameDamage` that frame (the #435 signal), and
+/// `blink_wake_suppressed` counts frames where a blink-style cursor was
+/// hidden (DECTCEM / inactive / echo-off) so the old ~500ms blink wake was
+/// correctly NOT scheduled (validates the `cursor_blink_wants_repaint` fix —
+/// each such frame is a ~2Hz phantom wake that no longer happens).
+#[derive(Debug, Default)]
+pub(super) struct FrameStats {
+    pub(super) frames_drawn: u64,
+    pub(super) unchanged: u64,
+    pub(super) cursor_only: u64,
+    pub(super) full: u64,
+    pub(super) blink_wake_suppressed: u64,
+}
+
+impl FrameStats {
+    /// Emit an `info` summary once every this many drawn frames.
+    pub(super) const FLUSH_EVERY: u64 = 120;
 }
