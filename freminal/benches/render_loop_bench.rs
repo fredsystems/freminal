@@ -1156,6 +1156,101 @@ fn bench_build_image_verts(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_chrome_frame_record — "replay frame" chrome-only cost (Issue #436)
+// ---------------------------------------------------------------
+//
+// Issue #436 caches egui chrome primitives and skips `run_ui` + `tessellate`
+// on a REPLAY frame (chrome unchanged, only terminal content/cursor changed).
+// This benchmark measures the CPU cost that a REPLAY frame *avoids*: running
+// the egui UI closure and tessellating the resulting shapes for a
+// representative chrome layout (menu bar + tab bar + empty central area), with
+// NO GL paint callbacks and NO terminal content.
+//
+// It mirrors `freminal-windowing`'s frame path — `EguiState::new` constructs a
+// bare `egui::Context::default()` (no GL), and `run_frame` does
+// `ctx.run_ui(raw_input, ...)` then `ctx.tessellate(shapes, ppp)`. Only the
+// `egui_glow::Painter` needs a GL context; `run_ui`/`tessellate` are pure CPU
+// and run headless (like every other bench in this file).
+//
+// The chrome is a **synthetic approximation** of freminal's real menu/tab bars
+// (`show_menu_bar` / `show_tab_bar` in `gui::menu`), which are private methods
+// on the non-`pub` `FreminalGui`/`PerWindowState` and cannot be reached from a
+// bench. It uses the same egui panel/widget shape (`Panel::top` menu row,
+// `Panel::top` tab row, `CentralPanel`) so the tessellation cost is
+// directionally representative of the cost a REPLAY frame elides. After #436,
+// the REPLAY path performs none of this work.
+//
+// The `egui::Context` is warmed once (outside the timed region) so the
+// steady-state recurring per-frame cost is measured, not the one-time
+// first-pass font-atlas population that only happens on the very first frame.
+
+/// Physical/logical screen size for the synthetic chrome frame.
+const CHROME_BENCH_WIDTH: f32 = 1280.0;
+const CHROME_BENCH_HEIGHT: f32 = 800.0;
+/// Representative number of open tabs in the synthetic tab bar.
+const CHROME_BENCH_NUM_TABS: usize = 6;
+
+/// Build the `RawInput` for one synthetic chrome frame at a fixed size / scale.
+fn chrome_bench_raw_input() -> egui::RawInput {
+    let mut raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(CHROME_BENCH_WIDTH, CHROME_BENCH_HEIGHT),
+        )),
+        ..Default::default()
+    };
+    if let Some(vp) = raw_input.viewports.get_mut(&egui::ViewportId::ROOT) {
+        vp.native_pixels_per_point = Some(1.0);
+    }
+    raw_input
+}
+
+/// Draw the synthetic chrome (menu bar + tab bar + empty central area) into a
+/// running egui frame. Matches freminal's real panel shape (`Panel::top` for
+/// both bars, `CentralPanel` for the terminal viewport) without terminal
+/// content or GL callbacks.
+fn chrome_bench_ui(root_ui: &mut egui::Ui) {
+    egui::Panel::top("bench_menu_bar").show(root_ui, |ui| {
+        ui.horizontal(|ui| {
+            for label in ["Freminal", "Tab", "View", "Help"] {
+                let _ = ui.button(label);
+            }
+        });
+    });
+
+    egui::Panel::top("bench_tab_bar").show(root_ui, |ui| {
+        ui.horizontal(|ui| {
+            for i in 0..CHROME_BENCH_NUM_TABS {
+                let _ = ui.button(format!("tab {i}"));
+            }
+        });
+    });
+
+    egui::CentralPanel::default().show(root_ui, |_ui| {});
+}
+
+fn bench_chrome_frame_record(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chrome_frame_record");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("run_ui_and_tessellate", |b| {
+        // Warm the context once so the timed region measures the recurring
+        // steady-state cost, not the first-frame font-atlas population.
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+
+        b.iter(|| {
+            let full_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+            let ppp = ctx.pixels_per_point();
+            let clipped = ctx.tessellate(full_output.shapes, ppp);
+            std::hint::black_box(clipped);
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 criterion_group!(
@@ -1177,6 +1272,7 @@ criterion_group!(
         bench_build_visuals,
         bench_image_animation_tick,
         bench_build_image_verts,
+        bench_chrome_frame_record,
 );
 
 criterion_main!(benches);
