@@ -379,7 +379,11 @@ impl GlState {
     }
 
     /// Always `false` on Apple platforms — there is no EGL backend.
+    // `&self` is kept for call-site symmetry with the non-Apple variant (the
+    // caller does `self.supports_partial_present()`); the Apple answer is a
+    // constant, so `self` is genuinely unused here.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[allow(clippy::unused_self)]
     pub(crate) const fn supports_partial_present(&self) -> bool {
         false
     }
