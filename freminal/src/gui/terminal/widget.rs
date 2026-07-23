@@ -1968,10 +1968,12 @@ impl FreminalTerminalWidget {
         };
 
         // Cursor-only state captured before the PaintCallback closure (which
-        // requires `Send + Sync + 'static`).  `is_cursor_only` and
-        // `cursor_only_verts` are moved into the closure below.
+        // requires `Send + Sync + 'static`).  `is_cursor_only` is moved into
+        // the closure below. The decoration data itself (including the
+        // patched-in cursor quad) lives in `RenderState::deco_verts` and is
+        // read fresh by the closure — it is not captured here, so it always
+        // reflects whatever was last written to it.
         let mut is_cursor_only = false;
-        let mut cursor_only_verts: Vec<f32> = Vec::new();
         // Damage rect (physical fb pixels, bottom-left origin) for the
         // cursor-only path, used to scissor the GPU redraw to just the changed
         // cell(s) (#435). `None` -> no scissor (draw the full grid).
@@ -2343,7 +2345,6 @@ impl FreminalTerminalWidget {
                     snap.cursor_color_override,
                 );
                 is_cursor_only = true;
-                cursor_only_verts.clone_from(&cursor_verts);
 
                 // Compute the frame-damage rect (#435): the region that
                 // actually changed this frame, so the windowing layer can
@@ -2599,7 +2600,7 @@ impl FreminalTerminalWidget {
                 // disjoint field accesses (MutexGuard's DerefMut is opaque).
                 let rs_ref: &mut RenderState = &mut rs;
 
-                build_background_instances(
+                let cursor_quad_appended = build_background_instances(
                     &BackgroundFrame {
                         shaped_lines: &rendered_shaped_lines,
                         cell_width: cell_w,
@@ -2632,9 +2633,17 @@ impl FreminalTerminalWidget {
                 );
 
                 // Record where the cursor quad starts in the decoration VBO.
-                // The cursor is always appended at the END of deco_verts, and is
-                // exactly CURSOR_QUAD_FLOATS floats (or absent when hidden).
-                let cursor_vert_float_offset = if effective_show_cursor {
+                // The cursor is always appended at the END of deco_verts, and
+                // is exactly CURSOR_QUAD_FLOATS floats (or absent when
+                // hidden). MUST use `cursor_quad_appended` (the authoritative
+                // answer from `build_background_instances`) rather than
+                // re-deriving it from `effective_show_cursor` alone —
+                // `effective_show_cursor` does not account for the blink
+                // phase, so recomputing it here could disagree with what was
+                // actually appended whenever this rebuild happened to land on
+                // the cursor's blink-off phase, corrupting a later
+                // cursor-only patch (issue #432).
+                let cursor_vert_float_offset = if cursor_quad_appended {
                     rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
                 } else {
                     rs_ref.deco_verts.len()
@@ -2755,8 +2764,10 @@ impl FreminalTerminalWidget {
 
         // Hand off the draw call to egui's paint phase via PaintCallback.
         // The closure must be `Send + Sync + 'static`, so only `Arc<Mutex<…>>`
-        // data (not `FontManager`) may be captured here.  `is_cursor_only` and
-        // `cursor_only_verts` are captured by value (bool is Copy; Vec is moved).
+        // data (not `FontManager`) may be captured here.  `is_cursor_only` is
+        // captured by value (bool is Copy). The decoration vertex data itself
+        // is read from `RenderState::deco_verts` inside the closure, not
+        // captured separately.
         let render_state_for_cb = Arc::clone(render_state);
         // Authoritative partial-present flag (#435): the windowing layer sets
         // it just before this callback runs. The cursor-only scissor is gated
@@ -2823,23 +2834,30 @@ impl FreminalTerminalWidget {
                 let restore_fbo = painter.intermediate_fbo();
 
                 if is_cursor_only {
-                    // Cursor-only fast path: patch just the cursor quad on the
-                    // GPU via `glBufferSubData` (no VBO orphan, no full upload).
-                    let deco_len = rs.deco_verts.len();
+                    // Cursor-only fast path: bg/fg/image are unchanged and
+                    // simply redrawn from the last full rebuild's slot.
+                    // `deco_verts` (underline/strike/search/hover/selection/
+                    // cursor quads) DOES change every such frame (the cursor
+                    // moved/blinked), so it is always fully re-uploaded via a
+                    // safe orphan-then-write into its own double-buffer slot
+                    // — never patched live with `glBufferSubData` into a
+                    // buffer a pending GPU read may still be using (#432).
                     let bg_len = rs.bg_instances.len();
                     let fg_len = rs.fg_instances.len();
                     let img_len = rs.image_verts.len();
-                    let cfo_bytes = rs.cursor_vert_float_offset * std::mem::size_of::<f32>();
                     let cw = rs.cell_width_px;
                     let ch = rs.cell_height_px;
                     let opacity = rs.bg_opacity;
                     let bg_image_opacity = rs.bg_image_opacity;
                     let bg_image_mode = rs.bg_image_mode;
                     // Split borrow: renderer + atlas are disjoint from the
-                    // scalar fields and image_draw_order.
+                    // scalar fields, deco_verts, and image_draw_order.
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
+                    // The full, current decoration data — already patched
+                    // in place with the cursor quad above.
+                    let deco_verts = &rs_ref.deco_verts;
                     // Reuse the draw order retained from the last full
                     // rebuild — the cursor-only path does not recompute
                     // image state, so this is the same list `draw_images`
@@ -2879,10 +2897,8 @@ impl FreminalTerminalWidget {
                     renderer.draw_with_cursor_only_update(
                         gl,
                         atlas,
-                        cfo_bytes,
-                        deco_len,
+                        deco_verts,
                         bg_len,
-                        &cursor_only_verts,
                         fg_len,
                         img_len,
                         draw_order,
