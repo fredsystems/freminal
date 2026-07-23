@@ -339,14 +339,30 @@ pub struct BackgroundFrame<'a> {
 ///
 /// The cursor quad (if visible) is always appended **last** in `deco_verts`
 /// so that cursor-only partial updates can patch just the tail.
+///
+/// Returns `true` if a cursor quad was actually appended to `deco_verts`,
+/// `false` otherwise. The caller **must** use this return value (not its own
+/// copy of `frame.show_cursor`) to compute where the cursor's tail quad
+/// begins for later cursor-only patches — `frame.show_cursor` alone does not
+/// account for the blink-visibility gate (`cursor_blink_is_visible`) applied
+/// here, and recomputing the append decision independently let the two
+/// silently disagree whenever a full rebuild happened to run during the
+/// cursor's blink-off phase (issue #432): the offset bookkeeping would then
+/// assume a cursor quad was appended when it was not, causing a later
+/// cursor-only frame to blink the cursor back on by overwriting whatever
+/// quad actually occupies that tail position — in practice the bottom-most
+/// row's selection highlight quad, since selection quads are appended in
+/// top-to-bottom row order and the bottom row's is therefore always the last
+/// one pushed before the (absent) cursor quad.
 // All parameters are required geometric and style inputs for GPU instance data generation.
 // Inherently large: iterates all shaped lines, resolving background color for every cell.
 #[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn build_background_instances(
     frame: &BackgroundFrame<'_>,
     instances: &mut Vec<f32>,
     deco: &mut Vec<f32>,
-) {
+) -> bool {
     let shaped_lines = frame.shaped_lines;
     let cell_width = frame.cell_width;
     let cell_height = frame.cell_height;
@@ -601,7 +617,9 @@ pub fn build_background_instances(
     }
 
     // --- Cursor quad (always last in deco so cursor-only patches work) ---
-    if show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on) {
+    let cursor_quad_appended =
+        show_cursor && cursor_blink_is_visible(cursor_visual_style, cursor_blink_on);
+    if cursor_quad_appended {
         let (cx, cy) = cursor_pixel_pos;
         let cw = gl_f32_u32(cell_width) * cursor_width_scale;
         let ch = gl_f32_u32(cell_height);
@@ -623,6 +641,8 @@ pub fn build_background_instances(
             }
         }
     }
+
+    cursor_quad_appended
 }
 
 // ---------------------------------------------------------------------------
@@ -1899,7 +1919,7 @@ mod tests {
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        build_background_instances(
+        let _cursor_quad_appended = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: lines,
                 cell_width,
@@ -1941,7 +1961,7 @@ mod tests {
     ) -> (Vec<f32>, Vec<f32>) {
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        build_background_instances(
+        let _cursor_quad_appended = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: lines,
                 cell_width: 8,
@@ -2924,6 +2944,87 @@ mod tests {
         );
     }
 
+    /// Regression for issue #432: a full rebuild that happens to run during
+    /// the cursor's blink-*off* phase (a blinking cursor style, not steady)
+    /// must report `cursor_quad_appended == false` and must NOT reserve
+    /// `CURSOR_QUAD_FLOATS` tail floats for a cursor quad that was never
+    /// actually pushed.
+    ///
+    /// Before the fix, callers computed the cursor's tail offset from
+    /// `show_cursor` alone (ignoring blink phase), so this exact scenario —
+    /// `show_cursor: true`, a blinking style, `cursor_blink_on: false` —
+    /// caused the caller to believe a cursor quad occupied the last
+    /// `CURSOR_QUAD_FLOATS` floats of `deco_verts` when in fact NO cursor
+    /// quad was appended at all, and those floats actually belonged to the
+    /// bottom-most (here: only) selection highlight quad. A later cursor-only
+    /// frame, when blink flipped back on, would then overwrite that
+    /// mis-identified region — clobbering the selection quad with the
+    /// cursor's own geometry and color instead of the cursor's absent quad.
+    #[test]
+    fn full_rebuild_during_blink_off_does_not_append_cursor_quad_over_selection() {
+        let line = make_line(3, 8.0, default_colors(), FontDecorationFlags::empty());
+        let mut instances = Vec::new();
+        let mut deco = Vec::new();
+
+        let cursor_quad_appended = build_background_instances(
+            &BackgroundFrame {
+                shaped_lines: std::slice::from_ref(&line),
+                cell_width: 8,
+                cell_height: 16,
+                ascent: 14.0,
+                underline_offset: 13.0,
+                strikeout_offset: 8.0,
+                stroke_size: 1.0,
+                // The cursor is structurally supposed to show...
+                show_cursor: true,
+                // ...but this frame lands on the blink-off half of the cycle...
+                cursor_blink_on: false,
+                cursor_pixel_pos: (0.0, 0.0),
+                cursor_width_scale: 1.0,
+                // ...and the style is a *blinking* one, so blink phase matters
+                // (a steady style would ignore `cursor_blink_on` entirely).
+                cursor_visual_style: &CursorVisualStyle::BlockCursorBlink,
+                // A single-row selection spanning the whole shaped line.
+                selection: Some((0, 0, 2, 0)),
+                selection_is_block: false,
+                match_highlights: &[],
+                command_block_hover_rows: None,
+                term_width_cols: 0,
+                theme: &themes::CATPPUCCIN_MOCHA,
+                cursor_color_override: None,
+                reverse_screen: false,
+            },
+            &mut instances,
+            &mut deco,
+        );
+
+        assert!(
+            !cursor_quad_appended,
+            "blink-off phase with a blinking cursor style must not append a cursor quad"
+        );
+        assert_eq!(
+            deco.len(),
+            CURSOR_QUAD_FLOATS,
+            "deco_verts should contain exactly the one selection quad — no reserved \
+             cursor tail floats — since no cursor quad was actually appended"
+        );
+        // The one quad present must be the selection's color, not the
+        // cursor's — i.e. every float in deco_verts genuinely belongs to the
+        // selection quad, confirming there is no separate reserved cursor
+        // region hiding at the tail.
+        let expected_color = selection_bg_f(&themes::CATPPUCCIN_MOCHA);
+        // Layout: vertex 0 = (x, y, r, g, b, a) — color starts at index 2.
+        let actual_color = [deco[2], deco[3], deco[4], deco[5]];
+        assert!(
+            actual_color
+                .iter()
+                .zip(expected_color.iter())
+                .all(|(a, b)| (a - b).abs() < f32::EPSILON),
+            "the sole quad in deco_verts must be the selection highlight, not a cursor quad: \
+             got {actual_color:?}, expected {expected_color:?}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     //  is_cell_selected tests
     // -----------------------------------------------------------------------
@@ -3221,7 +3322,7 @@ mod tests {
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        build_background_instances(
+        let cursor_quad_appended = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
@@ -3247,6 +3348,7 @@ mod tests {
             &mut instances,
             &mut deco,
         );
+        assert!(!cursor_quad_appended, "show_cursor was false");
 
         // The only deco quad produced (no cursor, no underlines, no
         // selection, no search highlights) is the hover-tint quad.
@@ -3284,7 +3386,7 @@ mod tests {
         );
         let mut instances = Vec::new();
         let mut deco = Vec::new();
-        build_background_instances(
+        let cursor_quad_appended = build_background_instances(
             &BackgroundFrame {
                 shaped_lines: &[line],
                 cell_width: cell_width_px,
@@ -3310,6 +3412,7 @@ mod tests {
             &mut instances,
             &mut deco,
         );
+        assert!(!cursor_quad_appended, "show_cursor was false");
         assert!(
             deco.is_empty(),
             "expected no deco quads when term_width_cols == 0"

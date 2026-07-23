@@ -637,7 +637,7 @@ fn bench_bg_instances(c: &mut Criterion) {
                 let mut instances = Vec::new();
                 let mut deco = Vec::new();
                 b.iter(|| {
-                    build_background_instances(
+                    let _cursor_quad_appended = build_background_instances(
                         &BackgroundFrame {
                             shaped_lines: &lines,
                             cell_width,
@@ -754,7 +754,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
             let mut instances = Vec::new();
             let mut deco = Vec::new();
             b.iter(|| {
-                build_background_instances(
+                let _cursor_quad_appended = build_background_instances(
                     &BackgroundFrame {
                         shaped_lines: &lines,
                         cell_width,
@@ -794,7 +794,7 @@ fn bench_bg_instances_partial_dirty(c: &mut Criterion) {
             let mut instances = Vec::new();
             let mut deco = Vec::new();
             b.iter(|| {
-                build_background_instances(
+                let _cursor_quad_appended = build_background_instances(
                     &BackgroundFrame {
                         shaped_lines: single_row,
                         cell_width,

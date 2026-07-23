@@ -27,8 +27,8 @@ use super::shaders::{
     POST_VERT_SRC,
 };
 use super::vertex::{
-    BG_INSTANCE_FLOATS, CURSOR_QUAD_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS,
-    IMG_VERTEX_FLOATS, ImageDrawEntry, VERTS_PER_QUAD, extract_atlas_rect,
+    BG_INSTANCE_FLOATS, DECO_VERTEX_FLOATS, FG_INSTANCE_FLOATS, IMG_VERTEX_FLOATS, ImageDrawEntry,
+    VERTS_PER_QUAD, extract_atlas_rect,
 };
 use freminal_terminal_emulator::InlineImage;
 
@@ -184,6 +184,20 @@ pub struct TerminalRenderer {
 
     // ---- double-buffer index ----
     vbo_index: usize,
+    /// Independent double-buffer index for `deco_vbo` only.
+    ///
+    /// The decoration buffer (underline/strike/search/hover/selection/cursor
+    /// quads) is the one buffer that changes on a "cursor-only" frame (the
+    /// cursor blinks or moves while everything else stays the same). Unlike
+    /// `bg_inst_vbo`/`fg_vbo`/`img_vbo` — which are simply *not* re-uploaded
+    /// on a cursor-only frame and so can safely keep reading from whichever
+    /// slot the last full rebuild wrote — `deco_vbo` genuinely needs a fresh
+    /// upload every such frame. Giving it its own index lets a cursor-only
+    /// frame always orphan-then-write into the slot the GPU is *not*
+    /// currently reading (see [`Self::draw_with_cursor_only_update`]),
+    /// instead of patching live bytes into a buffer a pending draw from the
+    /// previous frame may still be reading (issue #432).
+    deco_vbo_index: usize,
 }
 
 impl Default for TerminalRenderer {
@@ -239,6 +253,7 @@ impl TerminalRenderer {
             img_u_viewport: None,
             img_u_image: None,
             vbo_index: 0,
+            deco_vbo_index: 0,
         }
     }
 
@@ -555,9 +570,18 @@ impl TerminalRenderer {
         self.sync_image_textures(gl, snap_images);
 
         // 2. Upload pre-built vertex data using orphan-then-write.
+        //
+        // `deco_vbo` uses its OWN double-buffer index (`deco_vbo_index`),
+        // independent of `vbo_index` (shared by bg/fg/image), so that the
+        // cursor-only fast path (which re-uploads only `deco_vbo` every
+        // frame the cursor blinks) can always write into the slot that is
+        // NOT the one just drawn from — never patching live bytes into a
+        // buffer a pending GPU read may still be using (see
+        // `draw_with_cursor_only_update`, issue #432).
         let buf_idx = self.vbo_index;
+        let deco_buf_idx = self.deco_vbo_index;
         self.upload_bg_instances(gl, bg_instances, buf_idx);
-        self.upload_deco_verts(gl, deco_verts, buf_idx);
+        self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
         self.upload_fg_instances(gl, fg_instances, buf_idx);
         self.upload_img_verts(gl, image_verts, buf_idx);
 
@@ -579,7 +603,7 @@ impl TerminalRenderer {
             bg_opacity,
             buf_idx,
         );
-        self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, buf_idx);
+        self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, deco_buf_idx);
         self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), image_draw_order, vp_w, vp_h, buf_idx);
 
@@ -588,22 +612,37 @@ impl TerminalRenderer {
             gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
         }
 
-        // Advance double-buffer index.
+        // Advance double-buffer indices.
         self.vbo_index = 1 - self.vbo_index;
+        self.deco_vbo_index = 1 - self.deco_vbo_index;
     }
 
     /// Render a cursor-only update.
     ///
     /// When the terminal content has not changed but the cursor blink state
-    /// has toggled (or the cursor moved), this method patches only the cursor
-    /// quad region of the decoration VBO and redraws all passes.  The
-    /// foreground VBO and instanced background VBO are untouched.
+    /// has toggled (or the cursor moved), this method skips the expensive
+    /// CPU-side shaping/rebuild of the background-instance and foreground
+    /// buffers (they are unchanged and simply redrawn from whichever slot
+    /// the last full rebuild wrote), but always fully re-uploads
+    /// `deco_verts` — the decoration buffer holding underline, strikethrough,
+    /// search, hover, selection, and cursor quads.
     ///
-    /// `cursor_vert_byte_offset` is the byte offset into the decoration VBO
-    /// where the cursor quad data begins.  `deco_total_floats` is the total
-    /// float count of the most recently uploaded decoration VBO (needed to
-    /// set the draw vertex count correctly).  `cursor_verts` contains exactly
-    /// `CURSOR_QUAD_FLOATS` floats (or is empty when the cursor is hidden).
+    /// `deco_verts` must be the complete, current decoration vertex data
+    /// (the caller has already patched the cursor quad into its cached copy
+    /// in place). It is uploaded via the same safe orphan-then-write pattern
+    /// [`Self::draw_with_verts`] uses, into `deco_vbo`'s own independent
+    /// double-buffer slot (`deco_vbo_index`) — **never** patched live with
+    /// `glBufferSubData` into the slot that may still be read by a pending
+    /// GPU draw from the previous frame. An earlier version of this method
+    /// did exactly that unsynchronized in-place patch and it was the
+    /// confirmed root cause of issue #432 (selection-highlight quads
+    /// intermittently corrupted while the cursor blinks, anywhere in the
+    /// pane — not only at the cursor's own cell).
+    ///
+    /// The re-upload cost is negligible: `deco_verts` holds only a handful of
+    /// decoration quads (never one per cell or per glyph), unlike the
+    /// background-instance and foreground buffers this fast path exists to
+    /// avoid rebuilding.
     ///
     /// # Safety
     ///
@@ -614,10 +653,8 @@ impl TerminalRenderer {
         &mut self,
         gl: &glow::Context,
         atlas: &mut GlyphAtlas,
-        cursor_vert_byte_offset: usize,
-        deco_total_floats: usize,
+        deco_verts: &[f32],
         bg_inst_total_floats: usize,
-        cursor_verts: &[f32],
         fg_total_floats: usize,
         image_total_floats: usize,
         image_draw_order: &[ImageDrawEntry],
@@ -638,25 +675,20 @@ impl TerminalRenderer {
         // 1. Sync atlas (may have new glyphs from a previous frame).
         self.sync_atlas(gl, atlas);
 
-        // Use the slot that was last fully written by `draw_with_verts`.
-        // After a full frame, `draw_with_verts` advances `vbo_index` to the
-        // *next* slot.  The cursor-only path patches and draws from the
-        // *previous* slot (the one with valid data).
+        // bg/fg/image are unchanged since the last full rebuild: reuse the
+        // slot that was last fully written by `draw_with_verts` (which
+        // advances `vbo_index` to the *next* slot after writing, so the
+        // valid data sits at `1 - vbo_index`).
         let buf_idx = 1 - self.vbo_index;
 
-        // 2. Patch just the cursor region of the deco VBO (no orphan).
-        if cursor_verts.is_empty() {
-            // Cursor is hidden: zero out the cursor quad region so no stale
-            // cursor is painted.  We write CURSOR_QUAD_FLOATS zeros.
-            if let Some(vbo) = self.deco_vbo[buf_idx] {
-                let zeros = vec![0.0f32; CURSOR_QUAD_FLOATS];
-                upload_verts_sub(gl, vbo, cursor_vert_byte_offset, &zeros);
-            }
-        } else if let Some(vbo) = self.deco_vbo[buf_idx] {
-            upload_verts_sub(gl, vbo, cursor_vert_byte_offset, cursor_verts);
-        }
+        // deco_vbo DOES change this frame (the cursor moved/blinked), so it
+        // gets a real orphan-then-write upload — but into its own
+        // independent slot, never the one a pending draw might still be
+        // reading.
+        let deco_buf_idx = self.deco_vbo_index;
+        self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
 
-        // 3. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
+        // 2. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
 
@@ -671,7 +703,7 @@ impl TerminalRenderer {
             bg_opacity,
             buf_idx,
         );
-        self.draw_decorations(gl, deco_total_floats, vp_w, vp_h, buf_idx);
+        self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, deco_buf_idx);
         self.draw_foreground(gl, fg_total_floats, vp_w, vp_h, buf_idx);
         self.draw_images(
             gl,
@@ -682,14 +714,16 @@ impl TerminalRenderer {
             buf_idx,
         );
 
-        // 4. Restore egui's framebuffer binding.
+        // 3. Restore egui's framebuffer binding.
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, intermediate_fbo);
         }
 
-        // Do NOT advance the double-buffer index: we reused the same buffer
-        // slot this frame (no full orphan).  The next full-frame draw will
-        // advance normally.
+        // Do NOT advance `vbo_index`: bg/fg/image reused the same slot this
+        // frame (no upload happened for them). DO advance `deco_vbo_index`:
+        // we just orphan-wrote a fresh slot for deco and must not reuse it
+        // for the next write without the GPU having had a chance to read it.
+        self.deco_vbo_index = 1 - self.deco_vbo_index;
     }
 
     /// Synchronise the atlas CPU data to the GPU texture.
@@ -1626,30 +1660,6 @@ fn upload_verts(gl: &glow::Context, vbo: glow::Buffer, verts: &[f32]) {
         // Orphan the buffer first to avoid sync stalls.
         gl.buffer_data_size(glow::ARRAY_BUFFER, gl_i32(bytes.len()), glow::STREAM_DRAW);
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-    }
-}
-
-/// Upload a sub-range of a VBO **without orphaning** the whole buffer.
-///
-/// Used for cursor-only partial updates: the caller has already orphaned the
-/// buffer (or it is large enough) and just wants to patch a specific byte
-/// range.
-///
-/// `byte_offset` is the byte offset into the existing VBO data.
-fn upload_verts_sub(gl: &glow::Context, vbo: glow::Buffer, byte_offset: usize, verts: &[f32]) {
-    if verts.is_empty() {
-        return;
-    }
-
-    // SAFETY: we reinterpret `&[f32]` as `&[u8]` for the GL call.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), std::mem::size_of_val(verts))
-    };
-
-    unsafe {
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, gl_i32(byte_offset), bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
 }
