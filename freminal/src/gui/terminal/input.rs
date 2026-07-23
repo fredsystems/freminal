@@ -2039,7 +2039,6 @@ pub(super) fn write_input_to_terminal(
                 continue;
             }
             Event::WindowFocused(focused) => {
-                view_state.window_focused = *focused;
                 // Forward focus change to the PTY consumer thread so it can
                 // send the focus-reporting escape sequence if enabled.
                 send_or_log!(

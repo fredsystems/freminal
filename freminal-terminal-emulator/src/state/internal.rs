@@ -186,7 +186,9 @@ impl TerminalState {
 
     /// Send the focus-change escape sequence to the PTY if focus reporting is enabled.
     ///
-    /// This no longer touches `window_focused`; the GUI owns that field on `ViewState`.
+    /// This is purely a PTY-facing side effect; the GUI tracks the window's
+    /// actual focus state itself (queried live from egui) rather than through
+    /// any state owned by the terminal handler.
     pub fn send_focus_event(&mut self, focused: bool) {
         if self.modes.focus_reporting == XtMseWin::Disabled {
             return;

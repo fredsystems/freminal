@@ -422,9 +422,6 @@ pub struct ViewState {
     /// The last mouse position reported to the terminal, if any.
     pub mouse_position: Option<egui::Pos2>,
 
-    /// Whether the terminal window currently has keyboard focus.
-    pub window_focused: bool,
-
     /// The last `(width, height)` in character cells that was sent to the PTY
     /// as a resize.  Used to debounce resize events so we only send a new
     /// `InputEvent::Resize` when the size actually changes.
@@ -642,7 +639,6 @@ impl Default for ViewState {
         Self {
             scroll_offset: 0,
             mouse_position: None,
-            window_focused: false,
             last_sent_size: (0, 0),
             previous_key: None,
             previous_scroll_amount: 0.0,

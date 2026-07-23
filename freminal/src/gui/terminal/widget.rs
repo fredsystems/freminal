@@ -482,6 +482,50 @@ const BELL_FLASH_MAX_ALPHA: u8 = 60;
 /// window is unfocused and a bell has fired (0–255).
 const BELL_PERSISTENT_ALPHA: u8 = 30;
 
+/// Outcome of evaluating whether a visual bell overlay should still be
+/// shown, computed by the pure [`bell_flash_outcome`] decision function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BellFlashOutcome {
+    /// Window is unfocused: paint a persistent, non-fading overlay at the
+    /// given alpha and keep `bell_since` set. Self-heals (re-evaluated as
+    /// `Fading`/`Cleared`) the moment the window is next found focused.
+    Persistent { alpha: u8 },
+    /// Window is focused and the flash duration has not yet elapsed: paint
+    /// a fading overlay at the given alpha and keep `bell_since` set so the
+    /// fade continues next frame.
+    Fading { alpha: u8 },
+    /// Window is focused and the flash duration has elapsed: clear
+    /// `bell_since`, nothing more to paint.
+    Cleared,
+}
+
+/// Pure decision logic for [`paint_bell_flash`], factored out so it is
+/// unit-testable without a live `egui::Ui`/`Context`.
+///
+/// `window_focused` must be the OS window's *current* focus state — see the
+/// caller-discipline note on [`paint_bell_flash`] for why this must never be
+/// a per-pane cached flag.
+fn bell_flash_outcome(window_focused: bool, elapsed: Duration) -> BellFlashOutcome {
+    if !window_focused {
+        return BellFlashOutcome::Persistent {
+            alpha: BELL_PERSISTENT_ALPHA,
+        };
+    }
+
+    // Focused: if the flash duration has elapsed the bell either fired
+    // while unfocused (the user just alt-tabbed back) or the fade-out
+    // already completed — either way, clear immediately.
+    if elapsed >= BELL_FLASH_DURATION {
+        return BellFlashOutcome::Cleared;
+    }
+
+    // Linear fade from BELL_FLASH_MAX_ALPHA → 0 over the flash duration.
+    let progress = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+    let alpha_f = f32::from(BELL_FLASH_MAX_ALPHA) * (1.0 - progress);
+    let alpha: u8 = alpha_f.approx_as::<u8>().unwrap_or(0);
+    BellFlashOutcome::Fading { alpha }
+}
+
 /// Paint a semi-transparent white overlay for the visual bell.
 ///
 /// **Focused window:** a brief flash that fades from [`BELL_FLASH_MAX_ALPHA`]
@@ -492,41 +536,42 @@ const BELL_PERSISTENT_ALPHA: u8 = 30;
 /// [`BELL_PERSISTENT_ALPHA`] that remains until the window regains focus.
 /// When focus returns the flash duration will have long since elapsed, so
 /// `bell_since` is cleared on the first focused frame (no fade).
+///
+/// Focus is read live from `ui.ctx().input(|i| i.focused)` every frame
+/// rather than from any per-pane cached flag. This function runs for every
+/// rendered pane (active or not, in the active tab or a background one), so
+/// the focus check must reflect the OS window's *current* focus state
+/// unconditionally -- a value that is only updated while a given pane
+/// happens to be the active one would go stale for every other pane and
+/// get permanently stuck on the "unfocused, non-fading, no-repaint" branch
+/// below (regression fixed here: a bell firing in a background/inactive
+/// pane, or a newly created split/tab that never itself received a real
+/// focus transition, would flash once and then never clear).
 fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
     let Some(since) = view_state.bell_since else {
         return;
     };
 
-    if !view_state.window_focused {
-        // Unfocused: show a persistent, non-fading overlay.  No repaint
-        // request — the overlay is static and doesn't need continuous
-        // redraws while the window is in the background.
-        let alpha = BELL_PERSISTENT_ALPHA;
-        let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
-        ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
-        return;
+    let window_focused = ui.ctx().input(|i| i.focused);
+    match bell_flash_outcome(window_focused, since.elapsed()) {
+        BellFlashOutcome::Persistent { alpha } => {
+            // No repaint request — the overlay is static and doesn't need
+            // continuous redraws while the window is in the background.
+            let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+            ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
+        }
+        BellFlashOutcome::Fading { alpha } => {
+            let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
+            ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
+
+            // Request a repaint so the fade-out continues next frame (~60 fps cap).
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(16));
+        }
+        BellFlashOutcome::Cleared => {
+            view_state.bell_since = None;
+        }
     }
-
-    // Focused: if the flash duration has elapsed the bell either fired
-    // while unfocused (the user just alt-tabbed back) or the fade-out
-    // already completed — either way, clear immediately.
-    let elapsed = since.elapsed();
-    if elapsed >= BELL_FLASH_DURATION {
-        view_state.bell_since = None;
-        return;
-    }
-
-    // Linear fade from BELL_FLASH_MAX_ALPHA → 0 over the flash duration.
-    let progress = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
-    let alpha_f = f32::from(BELL_FLASH_MAX_ALPHA) * (1.0 - progress);
-    let alpha: u8 = alpha_f.approx_as::<u8>().unwrap_or(0);
-
-    let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
-    ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
-
-    // Request a repaint so the fade-out animation continues next frame (~60 fps cap).
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
 }
 
 /// Context menu action produced by the right-click popup.
@@ -3498,6 +3543,89 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
             "Drop files here",
             egui::FontId::proportional(20.0),
             Color32::WHITE,
+        );
+    }
+}
+
+#[cfg(test)]
+mod bell_flash_tests {
+    //! Tests for [`bell_flash_outcome`], the pure decision function behind
+    //! [`paint_bell_flash`]. Covers the fade/clear/persistent boundaries and
+    //! guards the regression where a bell overlay got stuck forever: the
+    //! overlay must clear once focused and the flash duration has elapsed,
+    //! *regardless* of how the caller learned `window_focused` — the fix
+    //! removed the only source of staleness (a per-pane cached flag) by
+    //! deleting `ViewState::window_focused` entirely and requiring callers
+    //! to pass a live-queried value instead.
+
+    use super::{
+        BELL_FLASH_DURATION, BELL_FLASH_MAX_ALPHA, BELL_PERSISTENT_ALPHA, BellFlashOutcome,
+        bell_flash_outcome,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn focused_fresh_bell_fades_from_max_alpha() {
+        let outcome = bell_flash_outcome(true, Duration::from_millis(0));
+        assert_eq!(
+            outcome,
+            BellFlashOutcome::Fading {
+                alpha: BELL_FLASH_MAX_ALPHA
+            }
+        );
+    }
+
+    #[test]
+    fn focused_partway_through_fade_has_reduced_alpha() {
+        let half = BELL_FLASH_DURATION / 2;
+        let BellFlashOutcome::Fading { alpha } = bell_flash_outcome(true, half) else {
+            panic!("expected Fading at the halfway point");
+        };
+        assert!(
+            alpha > 0 && alpha < BELL_FLASH_MAX_ALPHA,
+            "alpha {alpha} should be strictly between 0 and max at the halfway point"
+        );
+    }
+
+    #[test]
+    fn focused_exactly_at_duration_clears() {
+        // Regression guard: this is the boundary that must actually clear.
+        // A stuck bell would show as this never returning `Cleared`.
+        assert_eq!(
+            bell_flash_outcome(true, BELL_FLASH_DURATION),
+            BellFlashOutcome::Cleared
+        );
+    }
+
+    #[test]
+    fn focused_past_duration_clears() {
+        assert_eq!(
+            bell_flash_outcome(true, BELL_FLASH_DURATION + Duration::from_secs(1)),
+            BellFlashOutcome::Cleared
+        );
+        // Also true for a bell that has been "stuck" for a long time (e.g.
+        // the pre-fix scenario of an entire session) — once the caller
+        // passes the correct live `window_focused = true`, it clears
+        // immediately rather than requiring a fresh focus *transition*.
+        assert_eq!(
+            bell_flash_outcome(true, Duration::from_hours(1)),
+            BellFlashOutcome::Cleared
+        );
+    }
+
+    #[test]
+    fn unfocused_is_persistent_regardless_of_elapsed() {
+        assert_eq!(
+            bell_flash_outcome(false, Duration::from_millis(0)),
+            BellFlashOutcome::Persistent {
+                alpha: BELL_PERSISTENT_ALPHA
+            }
+        );
+        assert_eq!(
+            bell_flash_outcome(false, Duration::from_hours(1)),
+            BellFlashOutcome::Persistent {
+                alpha: BELL_PERSISTENT_ALPHA
+            }
         );
     }
 }

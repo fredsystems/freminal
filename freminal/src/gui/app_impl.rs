@@ -928,11 +928,11 @@ impl freminal_windowing::App for FreminalGui {
         // routed after the loop, where `self.config` / the toast stack are
         // borrowable without conflicting with `win.tabs`.
         let active_tab_idx = win.tabs.active_index();
-        let cmd_window_focused = win
-            .tabs
-            .active_tab()
-            .active_pane()
-            .is_some_and(|p| p.view_state.window_focused);
+        // Read live from egui rather than a per-pane cached flag: the latter
+        // is only ever updated while a given pane happens to be the active
+        // one, so it goes permanently stale for every other pane (regression
+        // that left the visual bell overlay stuck; see `paint_bell_flash`).
+        let cmd_window_focused = ctx.input(|i| i.focused);
         let mut command_notifications: Vec<crate::gui::notifications::NotificationRequest> =
             Vec::new();
         let tab_title_policy = self.config.tab_title.policy;
@@ -1374,11 +1374,11 @@ impl freminal_windowing::App for FreminalGui {
             // window geometry.
             let active_idx = win.tabs.active_index();
             let active_pane_id_for_drain = win.tabs.active_tab().active_pane;
-            let window_focused = win
-                .tabs
-                .active_tab()
-                .active_pane()
-                .is_some_and(|p| p.view_state.window_focused);
+            // Read live from egui rather than a per-pane cached flag: the
+            // latter is only ever updated while a given pane happens to be
+            // the active one, so it goes permanently stale for every other
+            // pane (regression that left the visual bell overlay stuck).
+            let window_focused = ui.input(|i| i.focused);
             // #436.3 §3.3 "Window focus change" chrome signal.
             let chrome_focus_changed = window_focused != win.prev_window_focused;
             win.prev_window_focused = window_focused;
