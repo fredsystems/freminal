@@ -91,6 +91,58 @@ fn cursor_blink_phase(time: f64, anchor: Option<f64>, tick_seconds: f64) -> bool
     }
 }
 
+/// Patch the cursor's quad into `deco_verts` for a cursor-only frame
+/// (content, selection, and everything else unchanged; only the cursor's
+/// blink state, position, or color changed since the last frame).
+///
+/// `cfo` (`cursor_vert_float_offset`) is the offset recorded by the most
+/// recent full rebuild. It reflects whether that rebuild actually appended a
+/// cursor quad (`cursor_quad_appended` from [`build_background_instances`]),
+/// which depends on blink phase as well as `show_cursor` — so `cfo` can
+/// legitimately equal `deco_verts.len()` (no reserved tail region) when that
+/// rebuild happened to land on the cursor's blink-off half of the cycle.
+///
+/// `cursor_verts` is the freshly-built cursor quad for *this* frame — empty
+/// when the cursor should not be visible right now (hidden, or blink-off),
+/// or exactly `CURSOR_QUAD_FLOATS` floats when it should be.
+///
+/// Three cases:
+/// - A reserved region exists (`cfo + CURSOR_QUAD_FLOATS <= deco_verts.len()`)
+///   and the cursor should be hidden now: zero it out in place.
+/// - A reserved region exists and the cursor should be visible now: overwrite
+///   it in place with the new quad.
+/// - **No** reserved region exists (`cfo == deco_verts.len()`, the blink-off
+///   rebuild case above) and the cursor should be visible now: the quad must
+///   be *appended*, not patched in place — issue #432's follow-up defect,
+///   where skipping this case silently left the cursor invisible until an
+///   unrelated full rebuild happened to run. This is safe precisely because
+///   the GPU upload path always re-uploads `deco_verts` based on its current
+///   (dynamic) length rather than a fixed reserved-tail count. `cfo` itself
+///   never needs updating: it already equals the offset the newly-appended
+///   quad lands at.
+///
+/// Any other combination (an out-of-bounds `cfo` that is neither a valid
+/// reserved region nor exactly the tail) is a defensive no-op — this should
+/// not occur given `cfo` is always produced by the full-rebuild bookkeeping,
+/// but silently doing nothing is safer than a panic or corrupting unrelated
+/// data.
+fn patch_cursor_only_deco_verts(deco_verts: &mut Vec<f32>, cfo: usize, cursor_verts: &[f32]) {
+    if cursor_verts.is_empty() {
+        // Hide cursor: zero out the region, if one is actually reserved.
+        if cfo + CURSOR_QUAD_FLOATS <= deco_verts.len() {
+            for f in &mut deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
+                *f = 0.0;
+            }
+        }
+    } else if cursor_verts.len() == CURSOR_QUAD_FLOATS {
+        if cfo + CURSOR_QUAD_FLOATS <= deco_verts.len() {
+            deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(cursor_verts);
+        } else if cfo == deco_verts.len() {
+            deco_verts.extend_from_slice(cursor_verts);
+        }
+    }
+}
+
 /// Format the fold-placeholder text for a collapsed command block.
 ///
 /// See the render path (`show`) for how this is used.
@@ -2407,22 +2459,10 @@ impl FreminalTerminalWidget {
                 let mut rs = render_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // detect the cursor-only mode via a separate flag.
                 // We overwrite the cursor quad data in the CPU copy so that if
                 // a full rebuild happens next frame it starts from correct state.
                 let cfo = rs.cursor_vert_float_offset;
-                if cursor_verts.is_empty() {
-                    // Hide cursor: zero out the region.
-                    if cfo + CURSOR_QUAD_FLOATS <= rs.deco_verts.len() {
-                        for f in &mut rs.deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS] {
-                            *f = 0.0;
-                        }
-                    }
-                } else if cfo + CURSOR_QUAD_FLOATS <= rs.deco_verts.len()
-                    && cursor_verts.len() == CURSOR_QUAD_FLOATS
-                {
-                    rs.deco_verts[cfo..cfo + CURSOR_QUAD_FLOATS].copy_from_slice(&cursor_verts);
-                }
+                patch_cursor_only_deco_verts(&mut rs.deco_verts, cfo, &cursor_verts);
             } else if content_changed
                 || selection_changed
                 || text_blink_changed
@@ -3692,6 +3732,105 @@ mod cursor_blink_phase_tests {
         assert!(!cursor_blink_phase(anchor + 0.5, Some(anchor), TICK));
         // 1.0s after activation -> "on" again.
         assert!(cursor_blink_phase(anchor + 1.0, Some(anchor), TICK));
+    }
+}
+
+#[cfg(test)]
+mod patch_cursor_only_deco_verts_tests {
+    //! Tests for [`patch_cursor_only_deco_verts`], the pure cursor-only
+    //! decoration-buffer patch decision. Covers the two pre-existing cases
+    //! (in-place hide/show) plus the issue #432 follow-up defect: a
+    //! CodeRabbit-flagged regression where `cfo` legitimately pointing past
+    //! the end of `deco_verts` (no reserved tail — the last full rebuild
+    //! landed on the cursor's blink-off phase) combined with a now-visible
+    //! cursor silently dropped the write instead of appending, leaving the
+    //! cursor invisible until an unrelated full rebuild happened to run.
+
+    use super::{CURSOR_QUAD_FLOATS, patch_cursor_only_deco_verts};
+
+    /// A fake "cursor quad" of the correct size, filled with a distinct
+    /// sentinel value so tests can assert on its presence/absence precisely.
+    fn fake_cursor_quad() -> Vec<f32> {
+        vec![9.0; CURSOR_QUAD_FLOATS]
+    }
+
+    #[test]
+    fn hides_cursor_by_zeroing_a_reserved_region() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS]; // selection quad, say
+        deco.extend(fake_cursor_quad()); // reserved cursor tail
+        let cfo = CURSOR_QUAD_FLOATS;
+
+        patch_cursor_only_deco_verts(&mut deco, cfo, &[]);
+
+        assert_eq!(deco.len(), CURSOR_QUAD_FLOATS * 2, "must not resize");
+        assert!(
+            deco[cfo..].iter().all(|&f| f == 0.0),
+            "reserved cursor region must be zeroed"
+        );
+        assert!(
+            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
+            "content before the cursor region must be untouched"
+        );
+    }
+
+    #[test]
+    fn overwrites_a_reserved_region_in_place() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
+        deco.extend(vec![0.0; CURSOR_QUAD_FLOATS]); // previously hidden/zeroed
+        let cfo = CURSOR_QUAD_FLOATS;
+        let cursor_verts = fake_cursor_quad();
+
+        patch_cursor_only_deco_verts(&mut deco, cfo, &cursor_verts);
+
+        assert_eq!(deco.len(), CURSOR_QUAD_FLOATS * 2, "must not resize");
+        assert_eq!(
+            deco[cfo..],
+            cursor_verts[..],
+            "reserved cursor region must contain the new cursor quad"
+        );
+        assert!(
+            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
+            "content before the cursor region must be untouched"
+        );
+    }
+
+    /// Regression for the CodeRabbit-flagged follow-up to issue #432: `cfo`
+    /// pointing exactly at the end of `deco_verts` (no reserved tail, because
+    /// the last full rebuild landed on blink-off) with a now-visible cursor
+    /// must *append* the quad, not silently drop it.
+    #[test]
+    fn appends_cursor_quad_when_no_tail_was_reserved() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS]; // e.g. one selection quad
+        let cfo = deco.len(); // no reserved region: cfo == len
+        let cursor_verts = fake_cursor_quad();
+
+        patch_cursor_only_deco_verts(&mut deco, cfo, &cursor_verts);
+
+        assert_eq!(
+            deco.len(),
+            CURSOR_QUAD_FLOATS * 2,
+            "the cursor quad must be appended, growing deco_verts"
+        );
+        assert_eq!(
+            deco[cfo..],
+            cursor_verts[..],
+            "the appended region must be the new cursor quad"
+        );
+        assert!(
+            deco[..cfo].iter().all(|&f| (f - 1.0).abs() < f32::EPSILON),
+            "pre-existing content must be untouched"
+        );
+    }
+
+    #[test]
+    fn no_reserved_tail_and_cursor_hidden_is_a_no_op() {
+        let mut deco = vec![1.0; CURSOR_QUAD_FLOATS];
+        let cfo = deco.len();
+        let original = deco.clone();
+
+        patch_cursor_only_deco_verts(&mut deco, cfo, &[]);
+
+        assert_eq!(deco, original, "nothing to hide, nothing to append");
     }
 }
 
