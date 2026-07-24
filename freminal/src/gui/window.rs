@@ -87,6 +87,13 @@ pub(super) struct PerWindowState {
     /// (in `gui::terminal::widget`) for the full rationale.
     pub(super) window_post: Arc<Mutex<WindowPostRenderer>>,
 
+    /// Per-window GL renderer state for the toast overlay (issue #433).
+    /// `Arc<Mutex<…>>` is GUI-thread interior mutability for the
+    /// `Send + Sync + 'static` `PaintCallback` capture (mirrors `window_post`),
+    /// not cross-thread sync.
+    pub(super) toast_render_state:
+        std::sync::Arc<std::sync::Mutex<crate::gui::renderer::ToastRenderState>>,
+
     /// Shared repaint handle for this window's PTY threads.
     ///
     /// Each window gets its own `Arc<OnceLock<(RepaintProxy, WindowId)>>`

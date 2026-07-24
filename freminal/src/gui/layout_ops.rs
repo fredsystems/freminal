@@ -705,6 +705,7 @@ impl FreminalGui {
             border_drag: None,
             shader_last_mtime: None,
             window_post,
+            toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
             repaint_handle,
             pending_new_window: false,
             pending_geometry,

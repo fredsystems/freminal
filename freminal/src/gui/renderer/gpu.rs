@@ -48,8 +48,11 @@ use freminal_terminal_emulator::InlineImage;
 /// Convert a `usize` to `i32` for OpenGL counts, strides, or byte offsets.
 /// Returns `0` on overflow (astronomically unlikely for terminal dimensions)
 /// and logs an error so the impossible is visible if it ever occurs.
+///
+/// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
+/// can reuse this conversion instead of duplicating it.
 #[inline]
-fn gl_i32(val: usize) -> i32 {
+pub(super) fn gl_i32(val: usize) -> i32 {
     i32::value_from(val).unwrap_or_else(|_| {
         error!("gl_i32: usize {val} overflows i32");
         0
@@ -70,8 +73,11 @@ fn gl_i32_u32(val: u32) -> i32 {
 /// Convert an `i32` to `f32` for GPU viewport uniforms.
 /// Returns `0.0` on precision loss (viewport sizes are always small)
 /// and logs an error so the impossible is visible if it ever occurs.
+///
+/// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
+/// can reuse this conversion instead of duplicating it.
 #[inline]
-fn gl_f32_i32(val: i32) -> f32 {
+pub(super) fn gl_f32_i32(val: i32) -> f32 {
     f32::approx_from(val).unwrap_or_else(|_| {
         error!("gl_f32_i32: i32 {val} cannot be approximated as f32");
         0.0
@@ -1526,7 +1532,12 @@ unsafe fn setup_deco_attribs(gl: &glow::Context) {
 /// - Location 3: `vec4  a_uv_rect`      (u0, v0, u1, v1)  — divisor 1
 /// - Location 4: `vec4  a_fg_color`     (r, g, b, a)      — divisor 1
 /// - Location 5: `float a_is_color`     (1.0 or 0.0)      — divisor 1
-unsafe fn setup_fg_inst_attribs(
+///
+/// `pub(super)` so sibling passes under `renderer/` (e.g.
+/// [`super::toast_text_pass`], which draws toast label/icon text through
+/// this same instanced foreground shader) can reuse this attribute binder
+/// instead of duplicating it.
+pub(super) unsafe fn setup_fg_inst_attribs(
     gl: &glow::Context,
     unit_quad_vbo: glow::Buffer,
     instance_vbo: glow::Buffer,
@@ -1586,7 +1597,10 @@ unsafe fn setup_img_attribs(gl: &glow::Context) {
 // ---------------------------------------------------------------------------
 
 /// Compile and link a GLSL program from vertex and fragment source strings.
-fn compile_program(
+///
+/// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
+/// can reuse the same compile/link error handling instead of duplicating it.
+pub(super) fn compile_program(
     gl: &glow::Context,
     vert_src: &str,
     frag_src: &str,
@@ -1645,7 +1659,10 @@ unsafe fn compile_shader(
 // ---------------------------------------------------------------------------
 
 /// Upload a `&[f32]` to a VBO using the orphan-then-write pattern.
-fn upload_verts(gl: &glow::Context, vbo: glow::Buffer, verts: &[f32]) {
+///
+/// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
+/// can reuse the same orphan-then-write upload instead of duplicating it.
+pub(super) fn upload_verts(gl: &glow::Context, vbo: glow::Buffer, verts: &[f32]) {
     if verts.is_empty() {
         return;
     }
