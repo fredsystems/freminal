@@ -3006,14 +3006,14 @@ impl freminal_windowing::App for FreminalGui {
             // below), so this cannot reuse `central_body`'s own locals
             // (`pane_layout`, `available_rect`), which are scoped to that
             // closure.
-            let window_rect = win
+            let content_rect = win
                 .cached_central_rect
                 .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
             let active_tab = win.tabs.active_tab();
             let active_pane_id = active_tab.active_pane;
             let active_pane_rect = active_tab.zoomed_pane.map_or_else(
                 || {
-                    active_tab.pane_tree.layout(window_rect).ok().and_then(
+                    active_tab.pane_tree.layout(content_rect).ok().and_then(
                         |pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)>| {
                             pane_layout
                                 .into_iter()
@@ -3022,10 +3022,10 @@ impl freminal_windowing::App for FreminalGui {
                         },
                     )
                 },
-                |zoomed_id| (zoomed_id == active_pane_id).then_some(window_rect),
+                |zoomed_id| (zoomed_id == active_pane_id).then_some(content_rect),
             );
             let geom = super::toast::ToastGeometry {
-                window_rect,
+                content_rect,
                 active_pane_rect,
             };
             stack.show(

@@ -74,8 +74,11 @@ void main() {
     float glow_a = clamp(glow_mask, 0.0, 1.0) * v_glow.a;
     vec3 glow_rgb = v_glow.rgb;
 
-    // Composite bottom-to-top with the standard straight-alpha "over"
-    // operator: out_rgb = top*top_a + bottom*(1-top_a); out_a analogous.
+    // Composite bottom-to-top with the "over" operator, accumulating
+    // PREMULTIPLIED color: out_rgb = top_rgb*top_a + out_rgb*(1-top_a);
+    // out_a = top_a + out_a*(1-top_a). Each layer's color arrives
+    // straight-alpha; the products below premultiply it as it accumulates,
+    // which is what the final premultiplied emit at the bottom relies on.
     vec3 out_rgb = shadow_rgb;
     float out_a = shadow_a;
 

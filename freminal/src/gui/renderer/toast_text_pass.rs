@@ -66,7 +66,9 @@ use tracing::{error, warn};
 use super::super::atlas::{GlyphAtlas, GlyphKey};
 use super::super::font_manager::{FontManager, GlyphStyle};
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
-use super::gpu::{compile_program, gl_f32_i32, gl_i32, setup_fg_inst_attribs, upload_verts};
+use super::gpu::{
+    compile_program, gl_f32_i32, gl_i32, gl_i32_u32, setup_fg_inst_attribs, upload_verts,
+};
 use super::shaders::{FG_FRAG_SRC, FG_VERT_SRC};
 use super::vertex::{FG_INSTANCE_FLOATS, extract_atlas_rect};
 
@@ -621,20 +623,6 @@ impl ToastTextRenderer {
 // ---------------------------------------------------------------------------
 //  GL upload helper (standalone, not a `TerminalRenderer` method)
 // ---------------------------------------------------------------------------
-
-/// Convert a `u32` atlas dimension to `i32` for GL texture calls.
-///
-/// Mirrors `gpu::gl_i32_u32`, reproduced here because that helper is
-/// private to `gpu.rs`. Returns `0` on overflow (atlas sizes are always well
-/// within `i32` range — the atlas itself refuses to grow past
-/// [`ATLAS_MAX_SIZE_PX`]) and logs an error so the impossible is visible if
-/// it ever occurs.
-fn gl_i32_u32(val: u32) -> i32 {
-    i32::value_from(val).unwrap_or_else(|_| {
-        error!("toast_text_pass: u32 {val} overflows i32");
-        0
-    })
-}
 
 /// Synchronise `atlas`'s CPU-side pixel data to `texture` on the GPU.
 ///

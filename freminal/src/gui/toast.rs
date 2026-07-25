@@ -357,7 +357,7 @@ pub(super) struct ToastAnim {
 // on the main thread, calls `layout_toasts`, and hands the resulting
 // `ToastQuad`/`ToastTextRun` data to a single `PaintCallback`.
 
-use super::renderer::{ToastQuad, ToastTextMetrics, ToastTextRun};
+use super::renderer::{ToastQuad, ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 
 /// Inner padding between a pill's edge and its content, logical points.
 const PILL_PAD_X_PTS: f32 = 14.0;
@@ -412,8 +412,13 @@ pub(super) enum ToastPosition {
 /// rects live in).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ToastGeometry {
-    /// The full window rect.
-    pub window_rect: egui::Rect,
+    /// The central-panel content rect — the terminal area, i.e. the window
+    /// *minus* the menu/tab chrome (it is `win.cached_central_rect`). This is
+    /// deliberately not the full OS-window rect: toasts anchor within the
+    /// content area so they never overlap chrome, and a future
+    /// [`ToastPosition::WindowCentered`] caller centers within this content
+    /// rect, not the whole window.
+    pub content_rect: egui::Rect,
     /// The currently-active pane's rect, if known. Consulted only by
     /// [`ToastPosition::PaneCentered`].
     pub active_pane_rect: Option<egui::Rect>,
@@ -439,14 +444,19 @@ pub(super) struct ToastLayoutInput {
     pub id: u64,
     /// The toast's severity — drives color and icon.
     pub kind: ToastKind,
-    /// The exact `"Kind: title"` label string that was measured.
+    /// The exact `"Kind: title"` label string that was measured — already
+    /// whitespace-normalized and, if it would otherwise overflow the pill,
+    /// truncated with a trailing ellipsis (see [`fit_text`]). This is *the*
+    /// string handed to the emitted [`ToastTextRun`], so it is guaranteed to
+    /// fit the width [`Self::label`] (below) reports.
     pub label_text: String,
     /// The physical pixel size `label_text` was measured/rasterized at.
     pub label_size_px: f32,
     /// Measured `label_text`, in **physical** pixels (see [`ToastTextMetrics`]).
     pub label: ToastTextMetrics,
-    /// The exact detail string that was measured. Empty when `has_detail`
-    /// is `false`.
+    /// The exact detail string that was measured — already
+    /// whitespace-normalized and fitted the same way as [`Self::label_text`]
+    /// (see [`fit_text`]). Empty when `has_detail` is `false`.
     pub detail_text: String,
     /// The physical pixel size `detail_text` was measured/rasterized at.
     pub detail_size_px: f32,
@@ -529,6 +539,105 @@ fn lighten(rgba: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
+/// Available width, in physical pixels, for the label/detail text portion
+/// of a toast pill, given a measured `icon_width`.
+///
+/// This mirrors the exact non-text geometry [`settled_pill_size`] subtracts
+/// from [`MAX_PILL_WIDTH_PTS`] to derive its clamped pill width. It is used
+/// by [`ToastStack::measure_inputs`] to fit (truncate + ellipsize, see
+/// [`fit_text`]) the label/detail strings *before* they are measured for
+/// pill sizing, so `settled_pill_size` and the emitted [`ToastTextRun`]s
+/// always agree on how wide the text is — the regression this fixes: the
+/// pill width was clamped, but the un-truncated text was still measured
+/// (and rendered) past that clamp, all the way to the window edge.
+fn text_width_budget(icon_width: f32, ppp: f32) -> f32 {
+    let pad_x = PILL_PAD_X_PTS * ppp;
+    let icon_label_gap = ICON_LABEL_GAP_PTS * ppp;
+    let label_close_gap = LABEL_CLOSE_GAP_PTS * ppp;
+    let close_size = CLOSE_SIZE_PTS * ppp;
+    let max_pill_width = MAX_PILL_WIDTH_PTS * ppp;
+    let non_text_width = pad_x.mul_add(
+        2.0,
+        icon_width + icon_label_gap + label_close_gap + close_size,
+    );
+    max_pill_width - non_text_width
+}
+
+/// Collapse embedded newlines and other whitespace runs (`\n`, `\r`, `\t`,
+/// runs of plain spaces, ...) to a single space, and trim the result.
+///
+/// Toast text runs are shaped as a single line (see the module's
+/// single-face-per-run docs in `renderer::toast_text_pass`), so raw
+/// multi-line input — a shader compile log, a layout/session error
+/// carrying a multi-line path — must never reach a [`ToastTextRun`] with
+/// its newlines intact: they would shape as tofu/invisible glyphs rather
+/// than an actual line break.
+fn normalize_ws(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Fit `raw` for display as a single-line toast text run within
+/// `max_width` physical pixels: normalize embedded whitespace (see
+/// [`normalize_ws`]), then, if the normalized text still measures wider
+/// than `max_width`, truncate it on a char boundary and append a trailing
+/// ellipsis ("…") — binary-searching the longest char-prefix that still
+/// fits alongside the ellipsis, since width is monotonically
+/// non-decreasing in prefix length.
+///
+/// Returns the (possibly-truncated) string together with its own measured
+/// [`ToastTextMetrics`]. Callers MUST use both the returned string (in the
+/// emitted [`ToastTextRun`]) and the returned metrics (for pill sizing) —
+/// never the original `raw` text — so the pill's width and the text
+/// actually drawn can never disagree.
+///
+/// **Must be called on the main thread** — like [`ToastTextRenderer::measure`]
+/// itself, it takes `&mut FontManager`.
+fn fit_text(
+    renderer: &ToastTextRenderer,
+    raw: &str,
+    size_px: f32,
+    max_width: f32,
+    font_manager: &mut FontManager,
+) -> (String, ToastTextMetrics) {
+    let normalized = normalize_ws(raw);
+    let metrics = renderer.measure(&normalized, size_px, font_manager);
+    if metrics.width <= max_width {
+        return (normalized, metrics);
+    }
+
+    let ellipsis_metrics = renderer.measure("…", size_px, font_manager);
+    if ellipsis_metrics.width > max_width {
+        // Nothing shorter to try — even a bare ellipsis doesn't fit. Return
+        // it anyway (best effort); the caller floors `max_width` at this
+        // same width for the label/detail budget it passes in, so this is
+        // only reachable via a mismatched budget (e.g. a different, larger
+        // font size than the one `max_width` was floored against).
+        return ("…".to_owned(), ellipsis_metrics);
+    }
+
+    let chars: Vec<char> = normalized.chars().collect();
+    // Binary search the longest char-prefix length `p` in `0..=chars.len()`
+    // such that `chars[..p]` plus a trailing ellipsis still fits
+    // `max_width`. `lo` always holds a known-fitting length — `0` fits,
+    // since the bare ellipsis was just confirmed to fit above — and `best`
+    // is kept in lock-step with `lo` so the loop can return it directly.
+    let mut lo = 0_usize;
+    let mut hi = chars.len();
+    let mut best = ("…".to_owned(), ellipsis_metrics);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let candidate: String = chars[..mid].iter().collect::<String>() + "…";
+        let candidate_metrics = renderer.measure(&candidate, size_px, font_manager);
+        if candidate_metrics.width <= max_width {
+            best = (candidate, candidate_metrics);
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    best
+}
+
 /// The settled (pre-animation) pill width/height, in physical pixels, for
 /// one toast's measured content.
 fn settled_pill_size(input: &ToastLayoutInput, ppp: f32) -> (f32, f32) {
@@ -594,7 +703,7 @@ fn settled_origins(
 
     match position {
         ToastPosition::TopRightStack => {
-            let (_, win_min_y, win_max_x, _) = rect_for(geom.window_rect);
+            let (_, win_min_y, win_max_x, _) = rect_for(geom.content_rect);
             let base_y = STACK_TOP_INSET_PTS.mul_add(ppp, win_min_y);
             let right_edge = STACK_RIGHT_INSET_PTS.mul_add(-ppp, win_max_x);
             sizes
@@ -604,7 +713,7 @@ fn settled_origins(
                 .collect()
         }
         ToastPosition::WindowCentered => {
-            let (win_min_x, win_min_y, win_max_x, win_max_y) = rect_for(geom.window_rect);
+            let (win_min_x, win_min_y, win_max_x, win_max_y) = rect_for(geom.content_rect);
             let center_x = win_min_x.midpoint(win_max_x);
             let base_y = win_min_y.midpoint(win_max_y) - total_height / 2.0;
             sizes
@@ -614,7 +723,7 @@ fn settled_origins(
                 .collect()
         }
         ToastPosition::PaneCentered => {
-            let pane_rect = geom.active_pane_rect.unwrap_or(geom.window_rect);
+            let pane_rect = geom.active_pane_rect.unwrap_or(geom.content_rect);
             let (pane_min_x, pane_min_y, pane_max_x, pane_max_y) = rect_for(pane_rect);
             let center_x = pane_min_x.midpoint(pane_max_x);
             let base_y = pane_min_y.midpoint(pane_max_y) - total_height / 2.0;
@@ -901,6 +1010,23 @@ pub(super) struct ToastStack {
 /// Maximum simultaneous toasts.  Older ones are evicted.
 const MAX_TOASTS: usize = 5;
 
+/// The font sizes (physical pixels) and `pixels_per_point` scale
+/// [`ToastStack::measure_inputs`] needs, bundled into one struct so that
+/// function stays under the `too_many_arguments` limit.
+#[derive(Debug, Clone, Copy)]
+struct ToastMeasureSizes {
+    /// Physical pixel size the label is rasterized at.
+    label_size_px: f32,
+    /// Physical pixel size the detail line is rasterized at.
+    detail_size_px: f32,
+    /// Physical pixel size the icon glyph is rasterized at.
+    icon_size_px: f32,
+    /// `pixels_per_point`, needed to convert the logical-point pill-geometry
+    /// constants into the same physical-pixel space the measured text
+    /// widths live in (see [`text_width_budget`]).
+    ppp: f32,
+}
+
 impl ToastStack {
     /// Push a new error toast onto the stack.
     pub(super) fn error(&mut self, title: impl Into<String>, detail: Option<String>) {
@@ -977,6 +1103,12 @@ impl ToastStack {
         let label_size_px = Self::LABEL_SIZE_PTS * ppp;
         let detail_size_px = Self::DETAIL_SIZE_PTS * ppp;
         let icon_size_px = label_size_px;
+        let sizes = ToastMeasureSizes {
+            label_size_px,
+            detail_size_px,
+            icon_size_px,
+            ppp,
+        };
 
         // Measure + shape every toast's text on the main thread; the lock is
         // held only for the duration of this call — no GL is touched.
@@ -984,19 +1116,12 @@ impl ToastStack {
             let rs = render_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.measure_inputs(
-                &rs,
-                font_manager,
-                label_size_px,
-                detail_size_px,
-                icon_size_px,
-                now,
-            )
+            self.measure_inputs(&rs, font_manager, sizes, now)
         };
 
         // `layout_toasts` emits window-origin-absolute physical-pixel
-        // coordinates (it scales `geom.window_rect` directly, without
-        // subtracting `window_rect.min`) — see its own field docs. The
+        // coordinates (it scales `geom.content_rect` directly, without
+        // subtracting `content_rect.min`) — see its own field docs. The
         // `PaintCallback` registered by `paint_toasts` below uses
         // `rect: ctx.content_rect()` (the full window, origin `(0,0)`), so
         // its GL viewport starts at the window's own origin and these
@@ -1052,15 +1177,26 @@ impl ToastStack {
     /// [`ToastLayoutInput`]s [`layout_toasts`] needs plus whether any toast
     /// is currently mid-animation (entry or exit). Split out of
     /// [`Self::show`] to keep it under the line-count limit.
+    ///
+    /// The label/detail text is fit to the available pill content width
+    /// (see [`text_width_budget`] / [`fit_text`]) *before* being measured
+    /// here, so the metrics stored on the returned [`ToastLayoutInput`] —
+    /// and therefore both [`settled_pill_size`] and the emitted
+    /// [`ToastTextRun`]s — always describe the exact same (possibly
+    /// truncated + ellipsized) string.
     fn measure_inputs(
         &self,
         rs: &ToastRenderState,
         font_manager: &mut FontManager,
-        label_size_px: f32,
-        detail_size_px: f32,
-        icon_size_px: f32,
+        sizes: ToastMeasureSizes,
         now: Instant,
     ) -> (Vec<ToastLayoutInput>, bool) {
+        let ToastMeasureSizes {
+            label_size_px,
+            detail_size_px,
+            icon_size_px,
+            ppp,
+        } = sizes;
         let mut inputs = Vec::with_capacity(self.entries.len());
         let mut any_animating = false;
         for toast in &self.entries {
@@ -1070,21 +1206,52 @@ impl ToastStack {
             let icon_text = toast.kind.icon().glyph();
             let close_text = ChromeIcon::Close.glyph();
 
-            let label = rs.text.measure(&label_text, label_size_px, font_manager);
-            let detail = if has_detail {
-                rs.text.measure(&detail_text, detail_size_px, font_manager)
-            } else {
-                ToastTextMetrics {
-                    width: 0.0,
-                    height: 0.0,
-                    ascent: 0.0,
-                }
-            };
+            // Icon and close glyph are single fixed glyphs (never
+            // user-controlled text), so they are measured as-is — only
+            // label/detail (arbitrary, possibly very long, possibly
+            // multi-line, user/program-controlled text) go through
+            // `fit_text`. The icon must be measured first: its width feeds
+            // `text_width_budget`.
             let icon = rs.text.measure(&icon_text, icon_size_px, font_manager);
             // Rasterized at the same size as the kind icon, for visual
             // consistency between the leading icon and the trailing "x".
             let close_size_px = icon_size_px;
             let close = rs.text.measure(&close_text, close_size_px, font_manager);
+
+            let raw_budget = text_width_budget(icon.width, ppp);
+            // Floor the budget at the width of a single ellipsis glyph
+            // (measured at the label's, generally larger, font size) so a
+            // pathological input (a tiny window, an oversized icon glyph)
+            // still leaves `fit_text` a positive width to terminate
+            // against, rather than a zero/negative budget.
+            let ellipsis_floor = rs.text.measure("…", label_size_px, font_manager).width;
+            let text_budget = raw_budget.max(ellipsis_floor).max(1.0);
+
+            let (label_text, label) = fit_text(
+                &rs.text,
+                &label_text,
+                label_size_px,
+                text_budget,
+                font_manager,
+            );
+            let (detail_text, detail) = if has_detail {
+                fit_text(
+                    &rs.text,
+                    &detail_text,
+                    detail_size_px,
+                    text_budget,
+                    font_manager,
+                )
+            } else {
+                (
+                    detail_text,
+                    ToastTextMetrics {
+                        width: 0.0,
+                        height: 0.0,
+                        ascent: 0.0,
+                    },
+                )
+            };
 
             let anim = toast.anim(now);
             if anim.opacity < 1.0 || anim.slide_x.abs() > f32::EPSILON || anim.scale < 1.0 {
@@ -1131,32 +1298,37 @@ impl ToastStack {
         outputs: &[ToastLayoutOutput],
         now: Instant,
     ) -> Vec<u64> {
-        // Allocate an interactive click region per toast so egui consumes any
-        // click that lands on a toast (keeping it off the terminal). egui's
-        // own arbitration reports the click on whichever region it picked; we
-        // additionally derive the hover target and the (single, topmost)
+        // Allocate one interactive `Area` PER TOAST, each sized and positioned
+        // exactly to its pill's hit rect, so egui consumes a click that lands
+        // on a toast (keeping it off the terminal). Deliberately NOT a single
+        // window-spanning area anchored at the origin: egui 0.35's cross-layer
+        // hit-test hides a lower-layer widget whose rect is fully contained by
+        // a higher-layer one, so a full-window interactive area would suppress
+        // interaction with the chrome beneath it. Tight per-toast areas only
+        // cover the pills.
+        //
+        // egui's own arbitration reports the click on whichever area it picked;
+        // we additionally derive the hover target and the single, topmost
         // dismiss target from the pointer position via `topmost_hit`, so the
         // overlap-precedence rule has one tested source of truth.
         let mut any_clicked = false;
-        let pointer = egui::Area::new(egui::Id::new("toast_interaction"))
-            .order(egui::Order::Foreground)
-            .interactable(true)
-            .fixed_pos(egui::Pos2::ZERO)
-            .show(ctx, |ui| {
-                for out in outputs {
-                    let [min_x, min_y, max_x, max_y] = out.hit_rect_logical;
-                    let rect = egui::Rect::from_min_max(
-                        egui::pos2(min_x, min_y),
-                        egui::pos2(max_x, max_y),
-                    );
-                    if ui.allocate_rect(rect, egui::Sense::click()).clicked() {
-                        any_clicked = true;
-                    }
-                }
-                ui.input(|i| i.pointer.hover_pos())
-            })
-            .inner;
+        for (i, out) in outputs.iter().enumerate() {
+            let [min_x, min_y, max_x, max_y] = out.hit_rect_logical;
+            let rect = egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
+            let clicked = egui::Area::new(egui::Id::new(("toast_interaction", i)))
+                .order(egui::Order::Foreground)
+                .interactable(true)
+                .fixed_pos(rect.min)
+                .show(ctx, |ui| {
+                    ui.allocate_rect(rect, egui::Sense::click()).clicked()
+                })
+                .inner;
+            if clicked {
+                any_clicked = true;
+            }
+        }
 
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
         let Some(pos) = pointer else {
             return Vec::new();
         };
@@ -1542,6 +1714,164 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    //  normalize_ws / fit_text — single-line truncation (regression: the
+    //  pill's width was clamped but the label/detail text was not, so long
+    //  text rendered straight past the pill's right edge; see the `fit_text`
+    //  doc comment).
+    // -----------------------------------------------------------------
+
+    /// A real `FontManager`, exactly as `renderer::toast_text_pass`'s own
+    /// `measure`/`build_instances` test suite constructs one — `fit_text`
+    /// calls `ToastTextRenderer::measure`, which needs real shaping.
+    fn test_font_manager() -> FontManager {
+        FontManager::new(&freminal_common::config::Config::default(), 1.0).unwrap()
+    }
+
+    #[test]
+    fn normalize_ws_collapses_embedded_newlines_and_trims() {
+        // A raw multi-line shader-compile-log-shaped string, the real
+        // trigger for this regression (`push_error_toast("Shader error",
+        // Some(multi_line_glsl_log))`).
+        let raw = "  line one\nline two\r\n\tline three  ";
+        assert_eq!(normalize_ws(raw), "line one line two line three");
+    }
+
+    #[test]
+    fn normalize_ws_leaves_single_line_text_unchanged() {
+        assert_eq!(normalize_ws("Shader error"), "Shader error");
+    }
+
+    #[test]
+    fn fit_text_short_text_is_returned_unchanged() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let (text, metrics) = fit_text(&renderer, "spawn failed", 14.0, 1000.0, &mut fm);
+        assert_eq!(text, "spawn failed");
+        assert!(!text.ends_with('…'));
+        assert!(metrics.width > 0.0);
+    }
+
+    #[test]
+    fn fit_text_long_text_truncates_with_ellipsis_within_budget() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let long = "x".repeat(500);
+        let max_width = 100.0;
+        let (text, metrics) = fit_text(&renderer, &long, 14.0, max_width, &mut fm);
+        assert!(
+            text.ends_with('…'),
+            "truncated text must end in an ellipsis: {text:?}"
+        );
+        assert!(
+            text.chars().count() < long.chars().count(),
+            "truncated text must be shorter than the input"
+        );
+        assert!(
+            metrics.width <= max_width,
+            "truncated text ({}) must measure within the budget ({max_width})",
+            metrics.width
+        );
+    }
+
+    #[test]
+    fn fit_text_respects_char_boundaries_for_multibyte_text() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        // "é" is 2 bytes in UTF-8; a byte-index truncation would either
+        // panic or split the codepoint. Building `text` here at all (a
+        // `String`) already proves it is valid UTF-8.
+        let long = "é".repeat(200);
+        let (text, metrics) = fit_text(&renderer, &long, 14.0, 60.0, &mut fm);
+        assert!(text.ends_with('…'));
+        assert!(text.chars().all(|c| c == 'é' || c == '…'));
+        assert!(metrics.width <= 60.0);
+    }
+
+    #[test]
+    fn fit_text_normalizes_embedded_newlines_before_truncating() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let raw = "line one\nline two\nline three";
+        let (text, _metrics) = fit_text(&renderer, raw, 14.0, 10_000.0, &mut fm);
+        assert!(!text.contains('\n'), "no newline should survive: {text:?}");
+        assert_eq!(text, "line one line two line three");
+    }
+
+    #[test]
+    fn fit_text_falls_back_to_bare_ellipsis_when_budget_only_fits_that() {
+        let renderer = ToastTextRenderer::new();
+        let mut fm = test_font_manager();
+        let ellipsis_width = renderer.measure("…", 14.0, &mut fm).width;
+        let (text, metrics) = fit_text(
+            &renderer,
+            "hello world, this is long",
+            14.0,
+            ellipsis_width,
+            &mut fm,
+        );
+        assert_eq!(text, "…");
+        assert!((metrics.width - ellipsis_width).abs() < f32::EPSILON);
+    }
+
+    // -----------------------------------------------------------------
+    //  measure_inputs — end-to-end: truncation keeps the pill within the
+    //  clamp, short toasts are unaffected.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn measure_inputs_leaves_a_short_toast_unchanged() {
+        let mut stack = ToastStack::default();
+        stack.error("short", None);
+        let rs = ToastRenderState::default();
+        let mut fm = test_font_manager();
+        let ppp = 1.0;
+        let sizes = ToastMeasureSizes {
+            label_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
+            detail_size_px: ToastStack::DETAIL_SIZE_PTS * ppp,
+            icon_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
+            ppp,
+        };
+        let (inputs, _any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].label_text, "Error: short");
+        assert!(!inputs[0].label_text.ends_with('…'));
+    }
+
+    #[test]
+    fn measure_inputs_truncates_long_detail_and_pill_stays_within_max_width() {
+        let mut stack = ToastStack::default();
+        // A raw multi-line GLSL compile log, the real trigger path
+        // (`push_error_toast("Shader error", Some(msg))`) that produced the
+        // overflow this fixes.
+        let long_detail = "ERROR: 0:12: 'foo' : undeclared identifier\n".repeat(20);
+        stack.error("Shader error", Some(long_detail));
+        let rs = ToastRenderState::default();
+        let mut fm = test_font_manager();
+        let ppp = 1.0;
+        let sizes = ToastMeasureSizes {
+            label_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
+            detail_size_px: ToastStack::DETAIL_SIZE_PTS * ppp,
+            icon_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
+            ppp,
+        };
+        let (inputs, _any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert!(
+            !input.detail_text.contains('\n'),
+            "no newline should survive into the emitted run: {:?}",
+            input.detail_text
+        );
+        assert!(input.detail_text.ends_with('…'));
+
+        let (width, _height) = settled_pill_size(input, ppp);
+        assert!(
+            width <= MAX_PILL_WIDTH_PTS.mul_add(ppp, 0.01),
+            "pill width ({width}) must stay within the max-width clamp"
+        );
+    }
+
+    // -----------------------------------------------------------------
     //  layout_toasts — pure geometry
     // -----------------------------------------------------------------
 
@@ -1614,7 +1944,7 @@ mod tests {
             test_input(1, 100.0, false, SETTLED_ANIM),
         ];
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1640,7 +1970,7 @@ mod tests {
     #[test]
     fn wider_label_produces_wider_pill_up_to_clamp() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1675,7 +2005,7 @@ mod tests {
     #[test]
     fn detail_line_adds_height() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1708,7 +2038,7 @@ mod tests {
     #[test]
     fn entry_animation_starts_transparent_and_displaced() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1748,7 +2078,7 @@ mod tests {
     #[test]
     fn settled_animation_is_unslid_and_opaque() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1782,7 +2112,7 @@ mod tests {
     fn window_centered_centers_pill_in_window_rect() {
         let window_rect = test_window_rect();
         let geom = ToastGeometry {
-            window_rect,
+            content_rect: window_rect,
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1806,7 +2136,7 @@ mod tests {
         let pane_rect =
             egui::Rect::from_min_size(egui::pos2(400.0, 300.0), egui::vec2(400.0, 300.0));
         let geom = ToastGeometry {
-            window_rect,
+            content_rect: window_rect,
             active_pane_rect: Some(pane_rect),
         };
         let visuals = egui::Visuals::dark();
@@ -1830,7 +2160,7 @@ mod tests {
     fn pane_centered_falls_back_to_window_rect_when_no_active_pane() {
         let window_rect = test_window_rect();
         let geom = ToastGeometry {
-            window_rect,
+            content_rect: window_rect,
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1852,7 +2182,7 @@ mod tests {
     fn hit_rect_logical_divides_out_pixels_per_point() {
         let ppp = 2.0;
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1874,7 +2204,7 @@ mod tests {
     #[test]
     fn output_id_matches_input_id() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1890,7 +2220,7 @@ mod tests {
     #[test]
     fn close_glyph_run_sits_inside_the_pill_near_the_right_padding() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1937,7 +2267,7 @@ mod tests {
     #[test]
     fn empty_input_produces_empty_output() {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();
@@ -1954,7 +2284,7 @@ mod tests {
     /// cover the pure hit-precedence geometry it relies on.
     fn single_toast_outputs(id: u64) -> Vec<ToastLayoutOutput> {
         let geom = ToastGeometry {
-            window_rect: test_window_rect(),
+            content_rect: test_window_rect(),
             active_pane_rect: None,
         };
         let visuals = egui::Visuals::dark();

@@ -63,7 +63,7 @@ pub(super) fn gl_i32(val: usize) -> i32 {
 /// Returns `0` on overflow (texture sizes are always well within `i32` range)
 /// and logs an error so the impossible is visible if it ever occurs.
 #[inline]
-fn gl_i32_u32(val: u32) -> i32 {
+pub(super) fn gl_i32_u32(val: u32) -> i32 {
     i32::value_from(val).unwrap_or_else(|_| {
         error!("gl_i32_u32: u32 {val} overflows i32");
         0
