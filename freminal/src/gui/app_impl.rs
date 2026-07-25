@@ -313,6 +313,7 @@ impl freminal_windowing::App for FreminalGui {
                         border_drag: None,
                         shader_last_mtime: None,
                         window_post,
+                        toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
                         repaint_handle,
                         pending_new_window: false,
                         pending_geometry: None,
@@ -2999,7 +3000,41 @@ impl freminal_windowing::App for FreminalGui {
         if chrome_mode == freminal_windowing::ChromeMode::Full
             && let Ok(mut stack) = self.toasts.try_borrow_mut()
         {
-            stack.show(ctx);
+            // Rebuild the same geometry `central_body` used to populate
+            // `cached_central_rect`/the pane layout — `win` is a local
+            // variable here (removed from `self.windows` above, reinserted
+            // below), so this cannot reuse `central_body`'s own locals
+            // (`pane_layout`, `available_rect`), which are scoped to that
+            // closure.
+            let content_rect = win
+                .cached_central_rect
+                .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
+            let active_tab = win.tabs.active_tab();
+            let active_pane_id = active_tab.active_pane;
+            let active_pane_rect = active_tab.zoomed_pane.map_or_else(
+                || {
+                    active_tab.pane_tree.layout(content_rect).ok().and_then(
+                        |pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)>| {
+                            pane_layout
+                                .into_iter()
+                                .find(|(id, _)| *id == active_pane_id)
+                                .map(|(_, r)| r)
+                        },
+                    )
+                },
+                |zoomed_id| (zoomed_id == active_pane_id).then_some(content_rect),
+            );
+            let geom = super::toast::ToastGeometry {
+                content_rect,
+                active_pane_rect,
+            };
+            stack.show(
+                ctx,
+                geom,
+                &win.toast_render_state,
+                win.terminal_widget.font_manager_mut(),
+                ctx.pixels_per_point(),
+            );
         }
 
         // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────
@@ -3127,7 +3162,8 @@ impl FreminalGui {
     /// Called twice per `update()` for the window being rendered — once as
     /// early as possible (before any dialog's `.show(ctx)` this frame) and
     /// once after all of them (including the shared toast stack's `.show`,
-    /// which runs after `win` is reinserted — see the call site) — so the
+    /// which runs against the still-local `win` before it is reinserted into
+    /// `self.windows` at the end of `update()` — see the call site) — so the
     /// two samples can be diffed to catch a self-dismissal that happens
     /// DURING a `.show()` call this same frame (adversarial finding 1).
     fn sample_dismissible_presence(
@@ -3327,6 +3363,7 @@ impl FreminalGui {
             border_drag: None,
             shader_last_mtime: None,
             window_post,
+            toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
             repaint_handle,
             pending_new_window: false,
             pending_geometry: None,

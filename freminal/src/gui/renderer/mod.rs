@@ -11,18 +11,56 @@
 //!   (decoration, background, foreground, image).
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
 //!   Contains the full test suite for vertex generation logic.
+//! - [`toast_pass`] — [`ToastRenderer`], a self-contained SDF rounded-rect
+//!   pill pass for the toast-notification overlay (issue #433). Driven each
+//!   frame from the owned `ToastStack::show` `PaintCallback`; see
+//!   `toast_pass` module docs.
+//! - [`toast_text_pass`] — [`ToastTextRenderer`], a self-contained pass that
+//!   draws toast label/icon text through the shared instanced foreground
+//!   shader (issue #433). Companion to `toast_pass`; see `toast_text_pass`
+//!   module docs.
 
 pub mod errors;
 pub mod gpu;
 pub(super) mod shaders;
+pub mod toast_pass;
+pub mod toast_text_pass;
 pub mod vertex;
 
 pub use gpu::{TerminalRenderer, WindowPostRenderer};
+pub use toast_pass::{ToastQuad, ToastRenderer};
+pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 pub use vertex::{
     BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
     build_background_instances, build_cursor_verts_only, build_foreground_instances,
     build_image_verts,
 };
+
+/// Per-window GL state for the fully-owned toast overlay (issue #433).
+///
+/// The pill pass and the text pass share one window (one GL context).
+/// Created lazily; both sub-renderers `init()` on first draw inside the
+/// toast `PaintCallback` (see `super::toast::ToastStack::show`).
+#[derive(Default)]
+pub struct ToastRenderState {
+    /// Draws each toast's rounded-rect pill background (glow + gradient +
+    /// accent bar).
+    pub pill: ToastRenderer,
+    /// Draws each toast's icon/label/detail text on top of the pills.
+    pub text: ToastTextRenderer,
+}
+
+impl ToastRenderState {
+    /// Construct a fresh, `Arc<Mutex<_>>`-wrapped instance, as stored in
+    /// `PerWindowState::toast_render_state`. A tiny shared constructor
+    /// (rather than duplicating the three-line `Arc::new(Mutex::new(...))`
+    /// at each of the three `PerWindowState` construction sites) so none of
+    /// them tip over the `too_many_lines` limit.
+    #[must_use]
+    pub fn new_shared() -> std::sync::Arc<std::sync::Mutex<Self>> {
+        std::sync::Arc::new(std::sync::Mutex::new(Self::default()))
+    }
+}
 
 use conv2::{ConvUtil, RoundToNearest};
 

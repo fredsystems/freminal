@@ -1518,6 +1518,14 @@ impl FreminalTerminalWidget {
         self.font_manager.load_font_bytes_for_family(family)
     }
 
+    /// Mutable access to this window's shared `FontManager`, for main-thread
+    /// shaping/measuring outside the terminal grid (e.g. the toast overlay,
+    /// issue #433). Shaping must never happen inside a `PaintCallback`
+    /// (`FontManager` is `!Sync`); this is called on the GUI thread.
+    pub(crate) const fn font_manager_mut(&mut self) -> &mut FontManager {
+        &mut self.font_manager
+    }
+
     /// If the egui chrome fonts were marked dirty by a no-ctx config change,
     /// re-register them now with the provided context and clear the flag.
     pub fn flush_egui_fonts_if_dirty(&mut self, ctx: &egui::Context, config: &Config) {
