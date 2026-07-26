@@ -1550,6 +1550,24 @@ pub const fn should_focus_inactive_pane(
     left_clicked || (focus_follows_mouse && pointer_over_content)
 }
 
+/// Find which pane (if any) a point lands in, given the current pane
+/// layout (issue #453).
+///
+/// Used on pane-border drag release to determine which pane should receive
+/// focus, since focus-follows-mouse is frozen for the duration of the drag
+/// (see `should_focus_inactive_pane` callers in `app_impl.rs`). `layout` is
+/// the `Vec<(PaneId, Rect)>` produced by `PaneNode::layout`; the first
+/// entry whose rect contains `pos` wins. Returns `None` when `pos` is not
+/// over any pane in `layout` (e.g. the drag ended outside the terminal
+/// band).
+#[must_use]
+pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: egui::Pos2) -> Option<PaneId> {
+    layout
+        .iter()
+        .find(|(_, rect)| rect.contains(pos))
+        .map(|(id, _)| *id)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1580,6 +1598,56 @@ mod tests {
         // A non-active pane with no click and no pointer-over does not focus.
         assert!(!should_focus_inactive_pane(false, true, false));
         assert!(!should_focus_inactive_pane(false, false, false));
+    }
+
+    // ── pane_at_pos tests (issue #453) ───────────────────────────────
+
+    #[test]
+    fn pane_at_pos_finds_containing_pane() {
+        let pane_a = PaneId(0);
+        let pane_b = PaneId(1);
+        let layout = vec![
+            (
+                pane_a,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+            ),
+            (
+                pane_b,
+                Rect::from_min_max(egui::pos2(100.0, 0.0), egui::pos2(200.0, 100.0)),
+            ),
+        ];
+
+        assert_eq!(
+            pane_at_pos(&layout, egui::pos2(50.0, 50.0)),
+            Some(pane_a),
+            "point inside pane A's rect must resolve to pane A"
+        );
+        assert_eq!(
+            pane_at_pos(&layout, egui::pos2(150.0, 50.0)),
+            Some(pane_b),
+            "point inside pane B's rect must resolve to pane B"
+        );
+    }
+
+    #[test]
+    fn pane_at_pos_outside_all_panes_returns_none() {
+        let pane_a = PaneId(0);
+        let layout = vec![(
+            pane_a,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+        )];
+
+        assert_eq!(
+            pane_at_pos(&layout, egui::pos2(500.0, 500.0)),
+            None,
+            "point outside every pane rect must resolve to None"
+        );
+    }
+
+    #[test]
+    fn pane_at_pos_empty_layout_returns_none() {
+        let layout: Vec<(PaneId, Rect)> = Vec::new();
+        assert_eq!(pane_at_pos(&layout, egui::pos2(0.0, 0.0)), None);
     }
 
     // ── PaneId tests ─────────────────────────────────────────────────

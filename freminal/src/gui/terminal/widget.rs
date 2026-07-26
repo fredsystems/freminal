@@ -1174,6 +1174,14 @@ pub struct PaneRenderCache {
     /// Whether a UI overlay (modal dialog or dropdown menu) was open on the
     /// previous frame.
     pub(super) overlay_was_open_last_frame: bool,
+    /// Whether a pane-border drag-to-resize was active on the previous
+    /// frame. Mirrors `overlay_was_open_last_frame`'s one-frame release tail
+    /// but tracks a distinct cause: the release-click that ends a divider
+    /// drag must not leak through to the terminal on the same frame
+    /// `border_drag_active` goes false (issue #453 review). Kept separate
+    /// from `overlay_was_open_last_frame` so each latch tracks only its own
+    /// cause.
+    pub(super) border_drag_was_active_last_frame: bool,
     /// Number of search matches from the most recently rendered frame.
     pub(super) previous_search_match_count: usize,
     /// Current match index from the most recently rendered frame.
@@ -1297,6 +1305,7 @@ impl PaneRenderCache {
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
             overlay_was_open_last_frame: false,
+            border_drag_was_active_last_frame: false,
             previous_search_match_count: 0,
             previous_search_current_match: 0,
             previous_hover_cell: None,
@@ -1589,6 +1598,12 @@ impl FreminalTerminalWidget {
     /// - `clipboard_rx` — receives clipboard content from the PTY write-back.
     /// - `search_buffer_rx` — receives full-buffer search content from the PTY thread.
     /// - `ui_overlay_open` — suppresses terminal input while a modal or menu dropdown is visible.
+    /// - `border_drag_active` — suppresses terminal input and clears any
+    ///   phantom selection while a pane-border drag-to-resize is in
+    ///   progress. The invisible drag-sensor rect geometrically overlaps
+    ///   the adjacent pane's `terminal_rect`, so without this the same
+    ///   press+drag would also start/extend a real text selection there
+    ///   (issue #453).
     /// - `bg_opacity` — background panel opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_opacity` — background image opacity (`0.0`–`1.0`) from config.
     /// - `bg_image_mode` — background image fit mode from config.
@@ -1607,6 +1622,11 @@ impl FreminalTerminalWidget {
     // All parameters are required: each pane needs its own render state, cache, channels, and
     // view state; there is no sensible grouping that reduces the count without hiding the intent.
     #[allow(clippy::too_many_arguments)]
+    // Each bool gates an independent, unrelated suppression/state concern
+    // (overlay-open, border-drag-active, echo-off, active-pane); bundling
+    // them into an enum would not express any real combined state and
+    // would only obscure the call site.
+    #[allow(clippy::fn_params_excessive_bools)]
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -1618,6 +1638,7 @@ impl FreminalTerminalWidget {
         clipboard_rx: &Receiver<String>,
         search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
         ui_overlay_open: bool,
+        border_drag_active: bool,
         bg_opacity: f32,
         bg_image_opacity: f32,
         bg_image_mode: freminal_common::config::BackgroundImageMode,
@@ -1648,11 +1669,16 @@ impl FreminalTerminalWidget {
         let logical_cell_w = cell_w_f / ppp;
         let logical_cell_h = row_h_f / ppp;
 
-        // Suppress input for one extra frame after a modal closes.
-        // This prevents the dismiss-click (Cancel / X / click-away) from
-        // leaking through to the terminal as a pointer event.
-        let suppress_input = ui_overlay_open || cache.overlay_was_open_last_frame;
+        // Suppress input for one extra frame after a modal closes, or after
+        // a pane-border drag-to-resize ends. This prevents the dismiss-click
+        // (Cancel / X / click-away) or the drag-release-click from leaking
+        // through to the terminal as a pointer event (issue #453 review).
+        let suppress_input = ui_overlay_open
+            || border_drag_active
+            || cache.overlay_was_open_last_frame
+            || cache.border_drag_was_active_last_frame;
         cache.overlay_was_open_last_frame = ui_overlay_open;
+        cache.border_drag_was_active_last_frame = border_drag_active;
 
         // Claim the full available space.
         let available = ui.available_size();
@@ -1877,18 +1903,28 @@ impl FreminalTerminalWidget {
             cache.previous_key = None;
             cache.previous_mouse_state = None;
             cache.previous_scroll_amount = 0.0;
-            // Task 116.3 (defect 3): route through `finalize_interrupted_drag`
-            // instead of bluntly clearing `is_selecting`. An in-progress drag
-            // interrupted here (modal/menu/search/command-history opening,
-            // scrollbar-drag starting, or a split-pane-boundary release that
-            // never reaches this pane's `write_input_to_terminal` call) would
-            // otherwise strand `anchor`/`end` with `is_selecting = false`,
-            // making the next primary press see a stale `has_selection()`
-            // and clear instead of starting a new drag. Finalizing collapses
-            // a not-yet-dragged point selection (clears everything) or keeps
-            // a real range as a completed selection, matching what a normal
-            // mouse-release would have done.
-            view_state.selection.finalize_interrupted_drag();
+            if border_drag_active {
+                // A pane-border drag geometrically overlaps the adjacent
+                // pane's `terminal_rect`; the same press+drag would
+                // otherwise start and extend a phantom text selection
+                // here (issue #453). Fully clear it rather than
+                // finalize-and-keep, since the gesture was a resize, not
+                // a selection.
+                view_state.selection.clear();
+            } else {
+                // Task 116.3 (defect 3): route through `finalize_interrupted_drag`
+                // instead of bluntly clearing `is_selecting`. An in-progress drag
+                // interrupted here (modal/menu/search/command-history opening,
+                // scrollbar-drag starting, or a split-pane-boundary release that
+                // never reaches this pane's `write_input_to_terminal` call) would
+                // otherwise strand `anchor`/`end` with `is_selecting = false`,
+                // making the next primary press see a stale `has_selection()`
+                // and clear instead of starting a new drag. Finalizing collapses
+                // a not-yet-dragged point selection (clears everything) or keeps
+                // a real range as a completed selection, matching what a normal
+                // mouse-release would have done.
+                view_state.selection.finalize_interrupted_drag();
+            }
         } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
@@ -4327,6 +4363,140 @@ mod overlay_suppress_input_tests {
         let overlay_is_open = false;
         let suppress = overlay_is_open || overlay_was_open_last_frame;
         assert!(!suppress, "fresh widget should not suppress input");
+    }
+
+    /// Issue #453: a pane-border drag-to-resize must suppress terminal
+    /// input the same way a modal/menu overlay does. The `suppress_input`
+    /// flag is computed as:
+    ///   `ui_overlay_open || border_drag_active || self.overlay_was_open_last_frame`
+    /// Verify that `border_drag_active` alone (no overlay open, no
+    /// one-frame latch active) is sufficient to suppress input.
+    #[test]
+    fn border_drag_active_suppresses_input() {
+        let ui_overlay_open = false;
+        let overlay_was_open_last_frame = false;
+
+        let border_drag_active = true;
+        let suppress = ui_overlay_open || border_drag_active || overlay_was_open_last_frame;
+        assert!(
+            suppress,
+            "border_drag_active alone must suppress input, matching the \
+             ui_overlay_open || border_drag_active || overlay_was_open_last_frame \
+             computation in FreminalTerminalWidget::show"
+        );
+
+        let border_drag_active = false;
+        let suppress = ui_overlay_open || border_drag_active || overlay_was_open_last_frame;
+        assert!(
+            !suppress,
+            "with everything else false, no border drag must NOT suppress input"
+        );
+    }
+
+    /// Issue #453 root cause: a pane-border drag sensor sits geometrically
+    /// inside the adjacent pane's `terminal_rect`, so the same press+drag
+    /// also starts/extends a phantom text selection in that pane.
+    ///
+    /// This locks in that the border-drag suppression branch fully CLEARS
+    /// the phantom selection (`SelectionState::clear`) rather than
+    /// finalizing-and-keeping it (`SelectionState::finalize_interrupted_drag`,
+    /// used for every OTHER suppression cause). Finalizing would keep a
+    /// real anchor != end range as a "completed" selection — which is
+    /// exactly the bug: the phantom selection painted during a divider
+    /// drag would survive the drag ending instead of disappearing.
+    #[test]
+    fn border_drag_clears_phantom_selection() {
+        use crate::gui::view_state::{CellCoord, SelectionState};
+
+        // Build a phantom in-progress selection exactly as described in
+        // the root-cause diagnostic: one endpoint pinned at the mouse-down
+        // anchor, the other tracking the drag, `is_selecting = true`.
+        let make_phantom = || SelectionState {
+            anchor: Some(CellCoord { col: 2, row: 3 }),
+            end: Some(CellCoord { col: 9, row: 3 }),
+            is_selecting: true,
+            ..SelectionState::default()
+        };
+
+        // Contrast case: on every OTHER suppression cause, the existing
+        // `finalize_interrupted_drag()` KEEPS a real range as a completed
+        // selection (only `is_selecting` is cleared).
+        let mut finalized = make_phantom();
+        finalized.finalize_interrupted_drag();
+        assert!(
+            finalized.has_selection(),
+            "finalize_interrupted_drag must KEEP a real anchor != end range"
+        );
+        assert!(!finalized.is_selecting, "drag flag must be cleared");
+        assert_eq!(finalized.anchor, Some(CellCoord { col: 2, row: 3 }));
+        assert_eq!(finalized.end, Some(CellCoord { col: 9, row: 3 }));
+
+        // Fix under test: when the suppression cause is a border drag, the
+        // widget must call `clear()` instead, fully discarding the phantom
+        // rather than keeping it as a "completed" selection.
+        let mut cleared = make_phantom();
+        cleared.clear();
+        assert!(
+            !cleared.has_selection(),
+            "border-drag suppression must fully clear the phantom selection"
+        );
+        assert!(!cleared.is_selecting);
+        assert_eq!(cleared.anchor, None);
+        assert_eq!(cleared.end, None);
+    }
+
+    /// Issue #453 review: the release-click that ends a pane-border drag
+    /// must not leak through to the terminal on the same frame
+    /// `border_drag_active` goes false, mirroring the existing overlay
+    /// one-frame release tail. `suppress_input` is computed as:
+    ///   `ui_overlay_open || border_drag_active
+    ///       || overlay_was_open_last_frame || border_drag_was_active_last_frame`
+    /// and `border_drag_was_active_last_frame` is then set to
+    /// `border_drag_active`, kept as its own latch separate from
+    /// `overlay_was_open_last_frame`.
+    #[test]
+    fn border_drag_one_frame_release_tail() {
+        let mut overlay_was_open_last_frame = false;
+        let mut border_drag_was_active_last_frame = false;
+
+        let mut frame = |ui_overlay_open: bool, border_drag_active: bool| -> bool {
+            let suppress = ui_overlay_open
+                || border_drag_active
+                || overlay_was_open_last_frame
+                || border_drag_was_active_last_frame;
+            overlay_was_open_last_frame = ui_overlay_open;
+            border_drag_was_active_last_frame = border_drag_active;
+            suppress
+        };
+
+        // Frame 1: no overlay, no drag → input NOT suppressed.
+        assert!(!frame(false, false), "frame 1: idle → no suppression");
+
+        // Frame 2: drag starts → input suppressed.
+        assert!(frame(false, true), "frame 2: drag active → suppressed");
+
+        // Frame 3: drag still in progress → input suppressed.
+        assert!(
+            frame(false, true),
+            "frame 3: drag still active → suppressed"
+        );
+
+        // Frame 4: drag ends (release click lands this frame) → input
+        // STILL suppressed because `border_drag_was_active_last_frame` is
+        // true, exactly mirroring the overlay dismiss-click tail.
+        assert!(
+            frame(false, false),
+            "frame 4: drag-release frame → still suppressed"
+        );
+
+        // Frame 5: drag ended last frame, no overlay → input allowed again.
+        assert!(
+            !frame(false, false),
+            "frame 5: fully settled → input allowed"
+        );
+
+        // Frame 6: verify stable — stays unsuppressed.
+        assert!(!frame(false, false), "frame 6: stable → input allowed");
     }
 }
 

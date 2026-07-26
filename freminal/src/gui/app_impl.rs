@@ -1883,6 +1883,35 @@ impl freminal_windowing::App for FreminalGui {
 
                     // Clear drag state when drag ends.
                     if response.drag_stopped() {
+                        // On release, focus the pane the pointer ends in (focus
+                        // was frozen during the drag, issue #453). Use the
+                        // release pointer position; fall back to leaving focus
+                        // unchanged if it isn't over any pane.
+                        if let Some(pos) = ui.ctx().pointer_hover_pos()
+                            && let Some(under_id) = panes::pane_at_pos(&pane_layout, pos)
+                        {
+                            let tab = win.tabs.active_tab_mut();
+                            if tab.active_pane != under_id {
+                                let old_active = tab.active_pane;
+                                if let Some(old_pane) = tab.pane_tree.find(old_active)
+                                    && let Err(e) =
+                                        old_pane.input_tx.send(InputEvent::FocusChange(false))
+                                {
+                                    error!(
+                                        "Failed to send FocusChange(false) to pane {old_active}: {e}"
+                                    );
+                                }
+                                tab.active_pane = under_id;
+                                if let Some(new_pane) = tab.pane_tree.find(under_id)
+                                    && let Err(e) =
+                                        new_pane.input_tx.send(InputEvent::FocusChange(true))
+                                {
+                                    error!(
+                                        "Failed to send FocusChange(true) to pane {under_id}: {e}"
+                                    );
+                                }
+                            }
+                        }
                         win.border_drag = None;
                     }
                 }
@@ -1895,6 +1924,26 @@ impl freminal_windowing::App for FreminalGui {
                 // (#436.8).
                 win.chrome_border_rects.clear();
             }
+
+            // Defensive: a border drag can only be in progress while the primary
+            // button is held. If the button is up but `border_drag` is still set,
+            // the drag-sensor loop missed its `drag_stopped()` transition (e.g. an
+            // overlay opened mid-drag and gated the sensor block off). Clear it so a
+            // stuck value can't permanently freeze input via `border_drag_active`
+            // (issue #453 review). This runs every frame, independent of
+            // `ui_overlay_open`/`has_multiple_panes`/`zoomed_pane`, so it can never
+            // be gated off the same way the sensor block above can be.
+            if win.border_drag.is_some() && !ui.ctx().input(|i| i.pointer.primary_down()) {
+                win.border_drag = None;
+            }
+
+            // Whether a pane-border drag-to-resize is currently in progress.
+            // Read into a local now (after the drag-sensor block above has
+            // had a chance to start/stop it this frame) so the per-pane loop
+            // below can pass it to `show()` without holding a borrow of
+            // `win.border_drag` across the mutable borrow of
+            // `win.terminal_widget` (issue #453).
+            let border_drag_active = win.border_drag.is_some();
 
             // ── Terminal band: shape-index range capture (#436.2a, range
             // exposed via `App::take_terminal_band_range` as of #436.4a) ───
@@ -2226,6 +2275,7 @@ impl freminal_windowing::App for FreminalGui {
                             &pane.clipboard_rx,
                             &pane.search_buffer_rx,
                             ui_overlay_open,
+                            border_drag_active,
                             bg_opacity,
                             self.config.ui.background_image_opacity,
                             self.config.ui.background_image_mode,
@@ -2349,7 +2399,12 @@ impl freminal_windowing::App for FreminalGui {
                     .ctx()
                     .pointer_hover_pos()
                     .is_some_and(|pos| content_rect.contains(pos));
+                // Freeze focus while dragging a pane divider so the active pane
+                // doesn't flicker between panes as the pointer moves (issue
+                // #453). On release, focus is set to the pane under the
+                // pointer (see the drag_stopped handler).
                 let should_focus = !is_active
+                    && !border_drag_active
                     && crate::gui::panes::should_focus_inactive_pane(
                         left_clicked,
                         self.config.tabs.focus_follows_mouse,
