@@ -113,28 +113,31 @@ pub(super) const POST_PASSTHROUGH_FRAG_SRC: &str = include_str!("./shaders/post_
 //  Toast pass (issue #433)
 // ---------------------------------------------------------------------------
 //
-// SDF rounded-rect pill with a soft drop shadow, an outer glow halo, a
-// vertical gradient fill, and an optional left accent bar. Used by the
-// toast-notification overlay. Non-instanced: one expanded quad (6 vertices)
-// per toast, all pill parameters duplicated across the 6 vertices.
+// SDF rounded-rect pill with a soft drop shadow, a solid neutral gradient
+// fill, an optional left accent bar, and a neutral chrome border ring. Used
+// by the toast-notification overlay. Non-instanced: one expanded quad
+// (6 vertices) per toast, all pill parameters duplicated across the 6
+// vertices. (The issue #433 visual redesign removed the former outer glow.)
 //
-// Vertex layout — `TOAST_VERTEX_FLOATS = 24` floats per vertex, stride
-// `24 * size_of::<f32>()` = 96 bytes:
+// Vertex layout — `TOAST_VERTEX_FLOATS = 25` floats per vertex, stride
+// `25 * size_of::<f32>()` = 100 bytes:
 //   location 0: `vec2  a_pos`            — expanded-quad corner, physical px
 //   location 1: `vec2  a_pill_center`    — pill rect center, physical px
 //   location 2: `vec2  a_pill_halfsize`  — pill half-extent (w/2, h/2), px
 //   location 3: `float a_corner`         — corner radius, px
 //   location 4: `vec4  a_color_top`      — straight RGBA
 //   location 5: `vec4  a_color_bottom`   — straight RGBA
-//   location 6: `vec4  a_glow`           — rgb + intensity in .a
-//   location 7: `vec4  a_accent`         — straight RGBA, alpha 0 disables
-//   location 8: `float a_opacity`        — overall fade-in/out multiplier
+//   location 6: `vec4  a_border_color`   — straight RGBA, alpha 0 disables
+//   location 7: `float a_border_width`   — border thickness, px (0 disables)
+//   location 8: `vec4  a_accent`         — straight RGBA, alpha 0 disables
+//   location 9: `float a_opacity`        — overall fade-in/out multiplier
 
 /// Toast pass vertex shader — see module-level doc above for the full
 /// vertex layout.
 pub(super) const TOAST_VERT_SRC: &str = include_str!("./shaders/toast.vert");
 
-/// Toast pass fragment shader — SDF rounded-rect, shadow, glow, gradient,
-/// and accent bar, composited via straight-alpha "over" and output
-/// premultiplied. See `toast.frag` for the full layering breakdown.
+/// Toast pass fragment shader — SDF rounded-rect, soft drop shadow, neutral
+/// gradient fill, left accent bar, and neutral border ring, composited via
+/// straight-alpha "over" and output premultiplied. See `toast.frag` for the
+/// full layering breakdown.
 pub(super) const TOAST_FRAG_SRC: &str = include_str!("./shaders/toast.frag");
