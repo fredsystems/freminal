@@ -579,6 +579,38 @@ impl FreminalGui {
         }
     }
 
+    /// Route a freminal-derived, toast-only notification through its
+    /// per-category routing policy (see
+    /// [`NotificationRouter::route_freminal_toast`]). Best-effort with the
+    /// same borrow semantics as [`Self::push_info_toast`]: if the toast
+    /// stack is already borrowed, the toast is dropped after a warning.
+    ///
+    /// `&self` because the stack lives behind a `RefCell` and `config` is a
+    /// plain field.
+    pub(super) fn route_freminal_toast(
+        &self,
+        category: freminal_common::config::FreminalToastCategory,
+        kind: toast::ToastKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+    ) {
+        match self.toasts.try_borrow_mut() {
+            Ok(mut stack) => {
+                notifications::NotificationRouter::route_freminal_toast(
+                    category,
+                    kind,
+                    title,
+                    detail,
+                    &self.config.notifications,
+                    &mut stack,
+                );
+            }
+            Err(_) => {
+                tracing::warn!("toast stack was already borrowed; dropping freminal toast");
+            }
+        }
+    }
+
     /// Compute the initial PTY terminal size from pixel dimensions and cell size.
     ///
     /// Falls back to [`DEFAULT_WIDTH`]x[`DEFAULT_HEIGHT`] if the cell size is zero

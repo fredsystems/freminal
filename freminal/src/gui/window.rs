@@ -23,6 +23,66 @@ use super::{
 /// Position is typically `None` on Wayland.
 pub(super) type PendingGeometry = (Option<[u32; 2]>, Option<[i32; 2]>);
 
+/// Transient state for the resize overlay (issue #433): a passive,
+/// window-centered HUD showing the terminal's new size while the user is
+/// resizing the window or a split, fading out shortly after resizing stops.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResizeOverlayState {
+    /// The size to display, in character cells: (cols, rows).
+    pub(super) size: (usize, usize),
+    /// When the most recent resize event was observed. Drives the linger /
+    /// fade-out timeout.
+    pub(super) last_update: std::time::Instant,
+}
+
+/// How long the resize overlay lingers after the last genuine resize event
+/// before disappearing entirely (issue #433).
+pub(super) const RESIZE_OVERLAY_LINGER: std::time::Duration = std::time::Duration::from_millis(900);
+
+/// How long, at the tail end of [`RESIZE_OVERLAY_LINGER`], the overlay fades
+/// out linearly (issue #433).
+pub(super) const RESIZE_OVERLAY_FADE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Alpha multiplier (1.0 = fully opaque, 0.0 = invisible) for the resize
+/// overlay, given how long it has been since the last genuine resize event.
+///
+/// Fully opaque until the last `fade` window before `linger` elapses, then
+/// fades linearly to 0, and is 0 at/after `linger`. Pure function so the
+/// timing math is unit-testable without an egui frame (issue #433).
+pub(super) fn resize_overlay_alpha(
+    elapsed: std::time::Duration,
+    linger: std::time::Duration,
+    fade: std::time::Duration,
+) -> f32 {
+    if elapsed >= linger {
+        return 0.0;
+    }
+    let remaining = linger.saturating_sub(elapsed);
+    if remaining >= fade || fade.is_zero() {
+        1.0
+    } else {
+        (remaining.as_secs_f32() / fade.as_secs_f32()).clamp(0.0, 1.0)
+    }
+}
+
+/// Whether an observed char-grid size change is a GENUINE OS-window resize,
+/// rather than the spurious `last_sent_size` churn caused by new
+/// window/tab/split/pane-close/zoom transitions (which reset `last_sent_size`
+/// to `(0, 0)`) (issue #433).
+///
+/// `window_resized` must be true only for a real resize between two KNOWN
+/// window sizes (see `window_genuinely_resized` at the call site) — NOT for
+/// the first `None -> Some` geometry observation of a freshly created window,
+/// which would otherwise flash the overlay on launch / new-window spawn.
+///
+/// Split-border drags are deliberately excluded: the overlay reports the
+/// whole-window `cols × rows`, which does not change when an internal border
+/// moves, so showing a frozen number during a split drag would be
+/// uninformative.
+pub(super) const fn resize_is_genuine(size_changed: bool, window_resized: bool) -> bool {
+    size_changed && window_resized
+}
+
 /// Per-window state for a single OS window.
 ///
 /// Each window (whether it was the first or spawned later via `Ctrl+Shift+N`)
@@ -71,6 +131,10 @@ pub(super) struct PerWindowState {
 
     /// Active pane border drag state (mouse drag-to-resize).
     pub(super) border_drag: Option<PaneBorderDrag>,
+
+    /// Active resize-overlay HUD state, or `None` when no resize is in
+    /// progress / the overlay has timed out (issue #433).
+    pub(super) resize_overlay: Option<ResizeOverlayState>,
 
     /// Last modified time of the shader file, used for hot-reload detection.
     /// `None` when no shader is configured or hot-reload is disabled.
@@ -398,4 +462,74 @@ pub(super) struct FrameStats {
 impl FrameStats {
     /// Emit a `debug` summary once every this many drawn frames.
     pub(super) const FLUSH_EVERY: u64 = 120;
+}
+
+#[cfg(test)]
+mod resize_overlay_tests {
+    use super::{
+        RESIZE_OVERLAY_FADE, RESIZE_OVERLAY_LINGER, resize_is_genuine, resize_overlay_alpha,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn alpha_is_full_at_zero_elapsed() {
+        assert!(
+            (resize_overlay_alpha(Duration::ZERO, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE)
+                - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn alpha_is_full_just_before_fade_window_starts() {
+        // linger=900ms, fade=250ms -> fade starts at elapsed=650ms.
+        let elapsed = RESIZE_OVERLAY_LINGER
+            .saturating_sub(RESIZE_OVERLAY_FADE)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or(Duration::ZERO);
+        let alpha = resize_overlay_alpha(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE);
+        assert!((alpha - 1.0).abs() < 0.01, "alpha was {alpha}");
+    }
+
+    #[test]
+    fn alpha_is_half_midway_through_fade() {
+        // elapsed = linger - fade/2 -> remaining = fade/2 -> alpha = 0.5.
+        let elapsed = RESIZE_OVERLAY_LINGER
+            .checked_sub(RESIZE_OVERLAY_FADE / 2)
+            .unwrap_or(Duration::ZERO);
+        let alpha = resize_overlay_alpha(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE);
+        assert!((alpha - 0.5).abs() < 0.01, "alpha was {alpha}");
+    }
+
+    #[test]
+    fn alpha_is_zero_at_and_after_linger() {
+        let at_linger = resize_overlay_alpha(
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE,
+        );
+        assert!(at_linger.abs() < f32::EPSILON, "alpha was {at_linger}");
+        let past_linger = resize_overlay_alpha(
+            RESIZE_OVERLAY_LINGER + Duration::from_secs(5),
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE,
+        );
+        assert!(past_linger.abs() < f32::EPSILON, "alpha was {past_linger}");
+    }
+
+    #[test]
+    fn genuine_requires_size_change_and_window_resize() {
+        // Truth table: size_changed, window_resized -> expected.
+        assert!(!resize_is_genuine(false, false));
+        assert!(!resize_is_genuine(false, true));
+        // The spurious case the adversarial review flagged: char-grid size
+        // changed (e.g. new tab/split reset last_sent_size to (0,0), or the
+        // first `None -> Some` geometry observation on launch) but the OS
+        // window did not genuinely resize between two known sizes.
+        assert!(!resize_is_genuine(true, false));
+        // The only genuine case: a real OS-window resize alongside a char-grid
+        // change.
+        assert!(resize_is_genuine(true, true));
+    }
 }

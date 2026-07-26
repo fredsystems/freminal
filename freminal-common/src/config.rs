@@ -953,8 +953,8 @@ impl NotificationRouting {
 }
 
 /// Routing for freminal's own toast-only notifications (e.g. "Copied to
-/// clipboard", "resize"). These never have a desktop-notification leg, so
-/// the only choices are an in-app toast or nothing.
+/// clipboard", "Layout saved"). These never have a desktop-notification leg,
+/// so the only choices are an in-app toast or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FreminalToastRouting {
@@ -974,6 +974,30 @@ impl FreminalToastRouting {
             Self::Disabled => false,
         }
     }
+}
+
+/// The category of a freminal-derived, toast-only notification.
+///
+/// Each category routes independently via its own `routing_*` field on
+/// [`NotificationsConfig`], so a user can silence e.g. layout toasts while
+/// keeping clipboard toasts. These are freminal's own UI events, distinct
+/// from the terminal-application-driven notifications (OSC 9/777/99/133)
+/// modelled by [`NotificationKind`]/[`NotificationRouting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreminalToastCategory {
+    /// Local selection copied to the system clipboard (Ctrl+C / menu Copy).
+    ClipboardCopy,
+    /// A terminal application wrote to, or was blocked from reading, the
+    /// system clipboard via OSC 52.
+    ClipboardRemote,
+    /// A layout was saved or loaded.
+    Layout,
+    /// Session recording started or stopped.
+    Recording,
+    /// A paste was blocked by the smart-paste guard.
+    PasteBlocked,
+    /// The configuration was reloaded from disk.
+    ConfigReload,
 }
 
 /// Configuration for the notification system (Task 76).
@@ -1054,6 +1078,36 @@ pub struct NotificationsConfig {
     /// [`NotificationRouting::SystemWhenUnfocused`].
     pub routing_command_finished: NotificationRouting,
 
+    /// Routing for the 'copied to clipboard' toast (local Ctrl+C / menu
+    /// Copy). Default: [`FreminalToastRouting::Toast`].
+    pub routing_clipboard_copy: FreminalToastRouting,
+
+    /// Routing for the OSC 52 remote-clipboard toast (an application wrote
+    /// to, or was blocked from reading, the clipboard). Default:
+    /// [`FreminalToastRouting::Toast`].
+    pub routing_clipboard_remote: FreminalToastRouting,
+
+    /// When `true`, a transient overlay showing the terminal's new size
+    /// (cols×rows) appears while a window or pane is being resized, and
+    /// fades shortly after. Default: `true`.
+    pub show_resize_overlay: bool,
+
+    /// Routing for the layout saved/loaded toast. Default:
+    /// [`FreminalToastRouting::Toast`].
+    pub routing_layout: FreminalToastRouting,
+
+    /// Routing for the recording started/stopped toast. Default:
+    /// [`FreminalToastRouting::Toast`].
+    pub routing_recording: FreminalToastRouting,
+
+    /// Routing for the 'paste blocked' toast (smart-paste guard). Default:
+    /// [`FreminalToastRouting::Toast`].
+    pub routing_paste_blocked: FreminalToastRouting,
+
+    /// Routing for the 'config reloaded' toast. Default:
+    /// [`FreminalToastRouting::Toast`].
+    pub routing_config_reload: FreminalToastRouting,
+
     /// Template for the body of command-finished notifications.
     ///
     /// Supported tokens, substituted at notification time:
@@ -1084,9 +1138,34 @@ impl Default for NotificationsConfig {
             routing_osc_text: NotificationRouting::Toast,
             routing_osc99: NotificationRouting::Both,
             routing_command_finished: NotificationRouting::SystemWhenUnfocused,
+            routing_clipboard_copy: FreminalToastRouting::Toast,
+            routing_clipboard_remote: FreminalToastRouting::Toast,
+            show_resize_overlay: true,
+            routing_layout: FreminalToastRouting::Toast,
+            routing_recording: FreminalToastRouting::Toast,
+            routing_paste_blocked: FreminalToastRouting::Toast,
+            routing_config_reload: FreminalToastRouting::Toast,
             command_finished_template: String::from(
                 "{command} finished in {duration} (exit {exit_code})",
             ),
+        }
+    }
+}
+
+impl NotificationsConfig {
+    /// The routing policy for a given freminal-derived toast category.
+    #[must_use]
+    pub const fn routing_for_category(
+        &self,
+        category: FreminalToastCategory,
+    ) -> FreminalToastRouting {
+        match category {
+            FreminalToastCategory::ClipboardCopy => self.routing_clipboard_copy,
+            FreminalToastCategory::ClipboardRemote => self.routing_clipboard_remote,
+            FreminalToastCategory::Layout => self.routing_layout,
+            FreminalToastCategory::Recording => self.routing_recording,
+            FreminalToastCategory::PasteBlocked => self.routing_paste_blocked,
+            FreminalToastCategory::ConfigReload => self.routing_config_reload,
         }
     }
 }
@@ -2338,6 +2417,22 @@ size = 14.0
     }
 
     #[test]
+    fn freminal_toast_categories_default_to_toast() {
+        let cfg = NotificationsConfig::default();
+        assert_eq!(cfg.routing_clipboard_copy, FreminalToastRouting::Toast);
+        assert_eq!(cfg.routing_clipboard_remote, FreminalToastRouting::Toast);
+        assert_eq!(cfg.routing_layout, FreminalToastRouting::Toast);
+        assert_eq!(cfg.routing_recording, FreminalToastRouting::Toast);
+        assert_eq!(cfg.routing_paste_blocked, FreminalToastRouting::Toast);
+        assert_eq!(cfg.routing_config_reload, FreminalToastRouting::Toast);
+    }
+
+    #[test]
+    fn resize_overlay_defaults_on() {
+        assert!(NotificationsConfig::default().show_resize_overlay);
+    }
+
+    #[test]
     fn notifications_round_trip_through_toml() {
         let mut cfg = Config::default();
         cfg.notifications.enabled = true;
@@ -2482,6 +2577,90 @@ routing_info = \"system\"
         let parsed_disabled: Wrapper =
             toml::from_str(&disabled_toml).expect("re-parse FreminalToastRouting::Disabled");
         assert_eq!(parsed_disabled.routing, FreminalToastRouting::Disabled);
+    }
+
+    #[test]
+    fn freminal_toast_category_routing_round_trips() {
+        let mut cfg = Config::default();
+        cfg.notifications.routing_clipboard_copy = FreminalToastRouting::Disabled;
+        cfg.notifications.routing_clipboard_remote = FreminalToastRouting::Toast;
+        cfg.notifications.routing_layout = FreminalToastRouting::Toast;
+        cfg.notifications.routing_recording = FreminalToastRouting::Toast;
+        cfg.notifications.routing_paste_blocked = FreminalToastRouting::Disabled;
+        cfg.notifications.routing_config_reload = FreminalToastRouting::Toast;
+        cfg.notifications.show_resize_overlay = false;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        assert!(
+            toml.contains("routing_paste_blocked = \"disabled\""),
+            "Disabled should serialize as the literal string \"disabled\": {toml}"
+        );
+
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+
+        assert_eq!(
+            parsed.notifications.routing_clipboard_copy,
+            FreminalToastRouting::Disabled
+        );
+        assert_eq!(
+            parsed.notifications.routing_clipboard_remote,
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            parsed.notifications.routing_layout,
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            parsed.notifications.routing_recording,
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            parsed.notifications.routing_paste_blocked,
+            FreminalToastRouting::Disabled
+        );
+        assert_eq!(
+            parsed.notifications.routing_config_reload,
+            FreminalToastRouting::Toast
+        );
+        assert!(!parsed.notifications.show_resize_overlay);
+    }
+
+    #[test]
+    fn routing_for_category_maps_each_variant() {
+        let cfg = NotificationsConfig {
+            routing_clipboard_copy: FreminalToastRouting::Disabled,
+            routing_clipboard_remote: FreminalToastRouting::Toast,
+            routing_layout: FreminalToastRouting::Toast,
+            routing_recording: FreminalToastRouting::Disabled,
+            routing_paste_blocked: FreminalToastRouting::Toast,
+            routing_config_reload: FreminalToastRouting::Disabled,
+            ..NotificationsConfig::default()
+        };
+
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::ClipboardCopy),
+            FreminalToastRouting::Disabled
+        );
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::ClipboardRemote),
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::Layout),
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::Recording),
+            FreminalToastRouting::Disabled
+        );
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::PasteBlocked),
+            FreminalToastRouting::Toast
+        );
+        assert_eq!(
+            cfg.routing_for_category(FreminalToastCategory::ConfigReload),
+            FreminalToastRouting::Disabled
+        );
     }
 
     #[test]

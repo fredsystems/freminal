@@ -184,6 +184,12 @@ impl super::FreminalGui {
                 tracing::info!("Started recording to {}", path.display());
                 self.recording_swap.store(Some(Arc::new(handle)));
                 self.recording_join = Some(join);
+                self.route_freminal_toast(
+                    freminal_common::config::FreminalToastCategory::Recording,
+                    crate::gui::toast::ToastKind::Info,
+                    "Recording started",
+                    Some(format!("Saving to {}", path.display())),
+                );
                 self.recording_path = Some(path);
             }
             Err(e) => {
@@ -212,8 +218,20 @@ impl super::FreminalGui {
 
         if let Some(path) = self.recording_path.take() {
             tracing::info!("Stopped recording; file saved to {}", path.display());
+            self.route_freminal_toast(
+                freminal_common::config::FreminalToastCategory::Recording,
+                crate::gui::toast::ToastKind::Info,
+                "Recording stopped",
+                Some(format!("Saved to {}", path.display())),
+            );
         } else {
             tracing::info!("Stopped recording");
+            self.route_freminal_toast(
+                freminal_common::config::FreminalToastCategory::Recording,
+                crate::gui::toast::ToastKind::Info,
+                "Recording stopped",
+                None,
+            );
         }
     }
 }

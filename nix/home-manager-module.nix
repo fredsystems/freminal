@@ -166,6 +166,13 @@ let
           routing_osc_text
           routing_osc99
           routing_command_finished
+          routing_clipboard_copy
+          routing_clipboard_remote
+          show_resize_overlay
+          routing_layout
+          routing_recording
+          routing_paste_blocked
+          routing_config_reload
           ;
       };
 
@@ -945,6 +952,106 @@ in
             Routing for command-finished notifications (see routing_error for
             the value meanings).
             Null uses the default ("system_when_unfocused").
+          '';
+        };
+
+        routing_clipboard_copy = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the "copied to clipboard" toast (local Ctrl+C /
+            menu Copy): "toast" (in-app only) or "disabled" (suppress).
+            Null uses the default ("toast").
+          '';
+        };
+
+        routing_clipboard_remote = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the OSC 52 remote-clipboard toast (an application
+            wrote to, or was blocked from reading, the clipboard): "toast"
+            (in-app only) or "disabled" (suppress).
+            Null uses the default ("toast").
+          '';
+        };
+
+        show_resize_overlay = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Show a transient cols×rows overlay while resizing a window or
+            pane. Null uses the default (true).
+          '';
+        };
+
+        routing_layout = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the layout saved/loaded toast: "toast" (in-app
+            only) or "disabled" (suppress).
+            Null uses the default ("toast").
+          '';
+        };
+
+        routing_recording = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the recording started/stopped toast: "toast"
+            (in-app only) or "disabled" (suppress).
+            Null uses the default ("toast").
+          '';
+        };
+
+        routing_paste_blocked = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the "paste blocked" toast (smart-paste guard):
+            "toast" (in-app only) or "disabled" (suppress).
+            Null uses the default ("toast").
+          '';
+        };
+
+        routing_config_reload = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for the "config reloaded" toast: "toast" (in-app only)
+            or "disabled" (suppress).
+            Null uses the default ("toast").
           '';
         };
       };

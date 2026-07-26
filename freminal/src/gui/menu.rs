@@ -224,6 +224,12 @@ impl super::FreminalGui {
                     }) {
                         Ok(resolved) => {
                             self.pending_load_layout = Some(resolved);
+                            self.route_freminal_toast(
+                                freminal_common::config::FreminalToastCategory::Layout,
+                                crate::gui::toast::ToastKind::Info,
+                                "Layout loaded",
+                                Some(summary.name.clone()),
+                            );
                         }
                         Err(e) => {
                             tracing::error!("Failed to load layout '{}': {e}", summary.name);

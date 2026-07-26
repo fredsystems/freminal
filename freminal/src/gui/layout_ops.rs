@@ -703,6 +703,7 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
+            resize_overlay: None,
             shader_last_mtime: None,
             window_post,
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
@@ -740,7 +741,19 @@ impl FreminalGui {
         };
         self.windows.insert(window_id, win);
 
-        // Emit WindowCreate recording event.
+        self.emit_window_create_recording(window_id, inner_size);
+
+        Some(commands)
+    }
+
+    /// Emit a `WindowCreate` recording event for a newly built window, if a
+    /// recording is active. Extracted from `build_window_from_pending_layout`
+    /// to keep that function under the line limit.
+    fn emit_window_create_recording(
+        &mut self,
+        window_id: freminal_windowing::WindowId,
+        inner_size: (u32, u32),
+    ) {
         let rec_wid = self.recording_window_id(window_id);
         if let Some(h) = self.recording_swap.load_full() {
             h.emit(
@@ -753,8 +766,6 @@ impl FreminalGui {
                 },
             );
         }
-
-        Some(commands)
     }
 }
 

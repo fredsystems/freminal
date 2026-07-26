@@ -419,6 +419,20 @@ limit = 10000
 
 # routing_command_finished = "system_when_unfocused"
 
+# Routing for freminal's own toast-only notifications. Unlike the OSC
+# routing above, these only ever produce an in-app toast, so the only
+# values are "toast" (default) or "disabled" (suppress that toast).
+# routing_clipboard_copy = "toast"
+# routing_clipboard_remote = "toast"
+# routing_layout = "toast"
+# routing_recording = "toast"
+# routing_paste_blocked = "toast"
+# routing_config_reload = "toast"
+
+# Show a transient overlay with the terminal's new size (cols×rows) while a
+# window or pane is being resized. Default: true.
+# show_resize_overlay = true
+
 # Template for the body of command-finished notifications.  Tokens:
 #   {command}   - the command text (or "Command" if it scrolled away)
 #   {duration}  - human-readable elapsed time (e.g. "3s", "2m15s")

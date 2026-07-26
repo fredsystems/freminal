@@ -73,9 +73,8 @@ const HOVER_HOLD: Duration = Duration::from_millis(200);
 pub(super) enum ToastKind {
     /// Non-fatal error that the user should see.
     Error,
-    /// Warning that does not prevent continued operation.
-    #[allow(dead_code)]
-    // Reserved for future subtasks (71.3 layout non-fatal, 71.4 shader warnings).
+    /// Warning that does not prevent continued operation. Used by the
+    /// paste-blocked toast (see [`ToastStack::warning`]).
     Warning,
     /// Informational message.
     Info,
@@ -1038,11 +1037,24 @@ impl ToastStack {
         self.push(ToastKind::Info, title.into(), detail);
     }
 
+    /// Push a new warning toast onto the stack.
+    pub(super) fn warning(&mut self, title: impl Into<String>, detail: Option<String>) {
+        self.push(ToastKind::Warning, title.into(), detail);
+    }
+
     /// Number of toasts currently on the stack. Test-only helper used by the
     /// notification router tests to assert toast-leg routing decisions.
     #[cfg(test)]
     pub(super) const fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The kind of the last (most-recently pushed) toast, if any. Test-only
+    /// accessor (also used by the notification-router tests to assert
+    /// freminal-toast severity mapping).
+    #[cfg(test)]
+    pub(super) fn last_kind(&self) -> Option<ToastKind> {
+        self.entries.last().map(|t| t.kind)
     }
 
     /// Whether the stack currently has no toasts. Used by the frame-damage
@@ -1465,6 +1477,18 @@ mod tests {
         assert_eq!(s.entries[0].kind, ToastKind::Error);
         assert_eq!(s.entries[0].title, "spawn failed");
         assert_eq!(s.entries[0].detail.as_deref(), Some("no such file"));
+    }
+
+    // -----------------------------------------------------------------
+    //  ToastStack::warning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn warning_pushes_warning_kind() {
+        let mut s = ToastStack::default();
+        s.warning("paste blocked", None);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.last_kind(), Some(ToastKind::Warning));
     }
 
     #[test]

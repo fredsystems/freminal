@@ -1798,6 +1798,8 @@ impl SettingsModal {
             &mut self.draft.notifications.routing_command_finished,
         );
 
+        self.show_freminal_toast_routing_section(ui);
+
         ui.add_space(12.0);
         ui.heading("Template");
         ui.label("Command-finished notification body:");
@@ -1833,6 +1835,57 @@ impl SettingsModal {
             ui.visuals().weak_text_color(),
             "Mirrors the toggle in the Bell tab. The bell mode is configured \
              there.",
+        );
+    }
+
+    /// Render the "Freminal toasts" subsection: routing rows for the
+    /// freminal-originated toast categories (clipboard, layout, recording,
+    /// paste guard, config reload), plus the resize-overlay toggle.
+    /// Extracted from [`Self::show_notifications_tab`] to keep that
+    /// function under the `too_many_lines` threshold.
+    fn show_freminal_toast_routing_section(&mut self, ui: &mut Ui) {
+        ui.add_space(12.0);
+        ui.heading("Freminal toasts");
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "In-app toasts for freminal's own events. Each can be shown as a \
+             toast (default) or disabled.",
+        );
+        ui.add_space(4.0);
+        Self::freminal_toast_routing_row(
+            ui,
+            "Copied to clipboard",
+            &mut self.draft.notifications.routing_clipboard_copy,
+        );
+        Self::freminal_toast_routing_row(
+            ui,
+            "Remote clipboard (OSC 52)",
+            &mut self.draft.notifications.routing_clipboard_remote,
+        );
+        Self::freminal_toast_routing_row(
+            ui,
+            "Layout saved / loaded",
+            &mut self.draft.notifications.routing_layout,
+        );
+        Self::freminal_toast_routing_row(
+            ui,
+            "Recording started / stopped",
+            &mut self.draft.notifications.routing_recording,
+        );
+        Self::freminal_toast_routing_row(
+            ui,
+            "Paste blocked",
+            &mut self.draft.notifications.routing_paste_blocked,
+        );
+        Self::freminal_toast_routing_row(
+            ui,
+            "Config reloaded",
+            &mut self.draft.notifications.routing_config_reload,
+        );
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.draft.notifications.show_resize_overlay,
+            "Show resize overlay (cols×rows while resizing)",
         );
     }
 
@@ -1875,6 +1928,34 @@ impl SettingsModal {
                         routing,
                         config::NotificationRouting::Disabled,
                         notification_routing_label(config::NotificationRouting::Disabled),
+                    );
+                });
+        });
+    }
+
+    /// Render one labeled routing combo box for a freminal-derived toast
+    /// category, whose only choices are an in-app toast or nothing
+    /// ([`config::FreminalToastRouting`]). Mirrors
+    /// [`Self::notification_routing_row`] but with the two-variant enum.
+    fn freminal_toast_routing_row(
+        ui: &mut Ui,
+        label: &str,
+        routing: &mut config::FreminalToastRouting,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ComboBox::from_id_salt(format!("freminal_toast_routing_{label}"))
+                .selected_text(freminal_toast_routing_label(*routing))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        routing,
+                        config::FreminalToastRouting::Toast,
+                        freminal_toast_routing_label(config::FreminalToastRouting::Toast),
+                    );
+                    ui.selectable_value(
+                        routing,
+                        config::FreminalToastRouting::Disabled,
+                        freminal_toast_routing_label(config::FreminalToastRouting::Disabled),
                     );
                 });
         });
@@ -2722,6 +2803,13 @@ const fn notification_routing_label(routing: config::NotificationRouting) -> &'s
     }
 }
 
+const fn freminal_toast_routing_label(routing: config::FreminalToastRouting) -> &'static str {
+    match routing {
+        config::FreminalToastRouting::Toast => "Toast",
+        config::FreminalToastRouting::Disabled => "Disabled",
+    }
+}
+
 /// Returns `true` when a startup layout is configured but not present in
 /// the discovered layout list.  Extracted for unit testing since the
 /// `ComboBox` UI itself is hard to exercise in isolation.
@@ -3050,6 +3138,18 @@ mod tests {
         );
         assert_eq!(
             notification_routing_label(config::NotificationRouting::Disabled),
+            "Disabled"
+        );
+    }
+
+    #[test]
+    fn freminal_toast_routing_label_covers_both_variants() {
+        assert_eq!(
+            freminal_toast_routing_label(config::FreminalToastRouting::Toast),
+            "Toast"
+        );
+        assert_eq!(
+            freminal_toast_routing_label(config::FreminalToastRouting::Disabled),
             "Disabled"
         );
     }
