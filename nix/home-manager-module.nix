@@ -990,8 +990,9 @@ in
           type = types.nullOr types.bool;
           default = null;
           description = ''
-            Show a transient cols×rows overlay while resizing a window or
-            pane. Null uses the default (true).
+            Show a transient cols×rows overlay while resizing the OS window
+            (not on split-border / pane-border drags).
+            Null uses the default (true).
           '';
         };
 

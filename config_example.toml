@@ -429,8 +429,9 @@ limit = 10000
 # routing_paste_blocked = "toast"
 # routing_config_reload = "toast"
 
-# Show a transient overlay with the terminal's new size (cols×rows) while a
-# window or pane is being resized. Default: true.
+# Show a transient overlay with the terminal's new size (cols×rows) while the
+# OS window is being resized (not on split-border / pane-border drags).
+# Default: true.
 # show_resize_overlay = true
 
 # Template for the body of command-finished notifications.  Tokens:

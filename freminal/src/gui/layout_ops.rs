@@ -748,8 +748,9 @@ impl FreminalGui {
 
     /// Emit a `WindowCreate` recording event for a newly built window, if a
     /// recording is active. Extracted from `build_window_from_pending_layout`
-    /// to keep that function under the line limit.
-    fn emit_window_create_recording(
+    /// (and reused by the two `on_window_created` spawn paths) to centralise
+    /// the event construction and keep those functions under the line limit.
+    pub(super) fn emit_window_create_recording(
         &mut self,
         window_id: freminal_windowing::WindowId,
         inner_size: (u32, u32),

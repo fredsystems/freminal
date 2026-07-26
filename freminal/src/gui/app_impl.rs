@@ -170,19 +170,7 @@ impl freminal_windowing::App for FreminalGui {
                 );
             }
 
-            // Emit WindowCreate recording event.
-            let rec_wid = self.recording_window_id(window_id);
-            if let Some(h) = self.recording_swap.load_full() {
-                h.emit(
-                    freminal_terminal_emulator::recording::EventPayload::WindowCreate {
-                        window_id: rec_wid,
-                        width_px: inner_size.0,
-                        height_px: inner_size.1,
-                        x: 0,
-                        y: 0,
-                    },
-                );
-            }
+            self.emit_window_create_recording(window_id, inner_size);
         } else {
             // Subsequent window — check if a layout window is waiting, otherwise
             // spawn a default single-pane PTY tab.
@@ -351,19 +339,7 @@ impl freminal_windowing::App for FreminalGui {
                     };
                     self.windows.insert(window_id, win);
 
-                    // Emit WindowCreate recording event.
-                    let rec_wid = self.recording_window_id(window_id);
-                    if let Some(h) = self.recording_swap.load_full() {
-                        h.emit(
-                            freminal_terminal_emulator::recording::EventPayload::WindowCreate {
-                                window_id: rec_wid,
-                                width_px: inner_size.0,
-                                height_px: inner_size.1,
-                                x: 0,
-                                y: 0,
-                            },
-                        );
-                    }
+                    self.emit_window_create_recording(window_id, inner_size);
                 }
                 Err(e) => {
                     error!("Failed to spawn PTY for new window: {e}");
@@ -2536,11 +2512,16 @@ impl freminal_windowing::App for FreminalGui {
             let pointer_moving = ctx.input(|i| i.pointer.is_moving());
             let force_full =
                 ui_overlay_open || shader_recomposites || active_pane_changed || pointer_moving;
-            // A toast being visible animates its own region each frame.
-            let toast_active = self
-                .toasts
-                .try_borrow()
-                .is_ok_and(|stack| !stack.is_empty());
+            // A toast being visible animates its own region each frame. The
+            // resize overlay (issue #433) animates the same way — it fades out
+            // over its linger window on the plain painter — so it must force a
+            // `Full` present too, or a cursor-only `Partial` frame would leave
+            // the fading overlay outside the damage rect stale/ghosted.
+            let toast_active = win.resize_overlay.is_some()
+                || self
+                    .toasts
+                    .try_borrow()
+                    .is_ok_and(|stack| !stack.is_empty());
             // Inspect only the panes actually rendered this frame — the
             // entries in `pane_layout`. Under zoom, only the zoomed pane is
             // rendered; iterating the whole tree would read stale

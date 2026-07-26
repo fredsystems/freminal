@@ -1088,8 +1088,9 @@ pub struct NotificationsConfig {
     pub routing_clipboard_remote: FreminalToastRouting,
 
     /// When `true`, a transient overlay showing the terminal's new size
-    /// (cols×rows) appears while a window or pane is being resized, and
-    /// fades shortly after. Default: `true`.
+    /// (cols×rows) appears while the OS window is being resized (not on
+    /// split-border / pane-border drags, whose whole-window readout does not
+    /// change), and fades shortly after. Default: `true`.
     pub show_resize_overlay: bool,
 
     /// Routing for the layout saved/loaded toast. Default:
