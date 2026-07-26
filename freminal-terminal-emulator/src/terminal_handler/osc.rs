@@ -154,9 +154,14 @@ impl TerminalHandler {
             // OSC 9 / OSC 777 — desktop notification.  Forward to the GUI via
             // the window-command channel; the GUI's notification router
             // (Task 76.4) applies the `[notifications]` routing policy.
-            AnsiOscType::Notify { title, body } => {
+            AnsiOscType::Notify {
+                source,
+                title,
+                body,
+            } => {
                 self.window_commands.push(WindowManipulation::Notification {
                     kind: NotificationKind::OscText,
+                    source: *source,
                     title: title.clone(),
                     body: body.clone(),
                 });
@@ -236,7 +241,7 @@ impl TerminalHandler {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::TerminalHandler;
-    use freminal_common::buffer_states::osc::AnsiOscType;
+    use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{
         NotificationOccasion, NotificationUrgency, Osc99Actions, Osc99Command, Osc99PayloadType,
     };
@@ -256,14 +261,21 @@ mod tests {
         );
 
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify {
+            source: OscNotifySource::Osc777,
             title: Some("Build".to_owned()),
             body: "done".to_owned(),
         })]);
 
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
-            WindowManipulation::Notification { kind, title, body } => {
+            WindowManipulation::Notification {
+                kind,
+                source,
+                title,
+                body,
+            } => {
                 assert_eq!(*kind, NotificationKind::OscText);
+                assert_eq!(*source, OscNotifySource::Osc777);
                 assert_eq!(title.as_deref(), Some("Build"));
                 assert_eq!(body, "done");
             }
@@ -276,14 +288,21 @@ mod tests {
         let mut handler = TerminalHandler::new(80, 24);
 
         handler.process_outputs(&[TerminalOutput::OscResponse(AnsiOscType::Notify {
+            source: OscNotifySource::Osc9,
             title: None,
             body: "hello".to_owned(),
         })]);
 
         assert_eq!(handler.window_commands.len(), 1);
         match &handler.window_commands[0] {
-            WindowManipulation::Notification { kind, title, body } => {
+            WindowManipulation::Notification {
+                kind,
+                source,
+                title,
+                body,
+            } => {
                 assert_eq!(*kind, NotificationKind::OscText);
+                assert_eq!(*source, OscNotifySource::Osc9);
                 assert_eq!(*title, None);
                 assert_eq!(body, "hello");
             }

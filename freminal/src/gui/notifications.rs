@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use conv2::ValueInto;
 use crossbeam_channel::Sender;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
+use freminal_common::buffer_states::osc::OscNotifySource;
 use freminal_common::buffer_states::window_manipulation::{
     Notification99Data, NotificationKind, Osc99ControlKind,
 };
@@ -44,6 +45,14 @@ use super::toast::ToastStack;
 pub(super) struct NotificationRequest {
     /// The notification category, selecting the routing policy.
     pub kind: NotificationKind,
+    /// Which OSC sequence produced this notification, if any.
+    ///
+    /// `Some` only for the OSC 9 / OSC 777 path, so the router can honour
+    /// the per-source `notifications.osc_9` / `notifications.osc_777`
+    /// enable toggles. `None` for command-finished requests and the
+    /// Settings "Test Notification" button, neither of which has an OSC
+    /// source.
+    pub source: Option<OscNotifySource>,
     /// The notification title. `None` falls back to a kind-derived default.
     pub title: Option<String>,
     /// The notification body text.
@@ -53,11 +62,12 @@ pub(super) struct NotificationRequest {
 impl NotificationRequest {
     /// A sample notification used by the Settings "Test Notification" button
     /// so the user can verify their routing/template configuration without
-    /// running a command. Categorised as [`NotificationKind::Info`] so it
-    /// follows the `routing_info` policy.
+    /// running a command. Categorised as [`NotificationKind::OscText`] so it
+    /// follows the `routing_osc_text` policy.
     pub(super) fn sample() -> Self {
         Self {
-            kind: NotificationKind::Info,
+            kind: NotificationKind::OscText,
+            source: None,
             title: Some("Freminal".to_owned()),
             body: "Test notification".to_owned(),
         }
@@ -67,7 +77,7 @@ impl NotificationRequest {
     /// category-derived default when the source supplied no title.
     fn summary(&self) -> &str {
         self.title.as_deref().unwrap_or(match self.kind {
-            NotificationKind::OscText | NotificationKind::Info => "Notification",
+            NotificationKind::OscText => "Notification",
             NotificationKind::CommandFinished => "Command finished",
             NotificationKind::Error => "Error",
         })
@@ -142,6 +152,7 @@ pub(super) fn command_finished_request(
 
     Some(NotificationRequest {
         kind,
+        source: None,
         title: None,
         body,
     })
@@ -225,6 +236,14 @@ impl NotificationRouter {
             return;
         }
 
+        // Honour the per-source enable toggles for OSC-text notifications,
+        // mirroring the osc_99 kill-switch in route_osc99.
+        match req.source {
+            Some(OscNotifySource::Osc9) if !config.osc_9 => return,
+            Some(OscNotifySource::Osc777) if !config.osc_777 => return,
+            _ => {}
+        }
+
         let routing = Self::routing_for(req.kind, config);
 
         if routing.wants_toast(focused) {
@@ -249,6 +268,16 @@ impl NotificationRouter {
         focused: bool,
         toasts: &mut ToastStack,
     ) {
+        // Same per-source enable-toggle gate as `route`. The Test button's
+        // sample request always has `source: None`, so this is a no-op in
+        // practice, but kept identical for uniformity between the two entry
+        // points.
+        match req.source {
+            Some(OscNotifySource::Osc9) if !config.osc_9 => return,
+            Some(OscNotifySource::Osc777) if !config.osc_777 => return,
+            _ => {}
+        }
+
         let routing = Self::routing_for(req.kind, config);
 
         if routing.wants_toast(focused) {
@@ -268,8 +297,7 @@ impl NotificationRouter {
         match kind {
             NotificationKind::Error => config.routing_error,
             NotificationKind::CommandFinished => config.routing_command_finished,
-            // OSC text and explicit Info both follow the info policy.
-            NotificationKind::OscText | NotificationKind::Info => config.routing_info,
+            NotificationKind::OscText => config.routing_osc_text,
         }
     }
 
@@ -279,9 +307,9 @@ impl NotificationRouter {
         let detail = (!req.body.is_empty()).then(|| req.body.clone());
         match req.kind {
             NotificationKind::Error => toasts.error(req.summary().to_owned(), detail),
-            NotificationKind::OscText
-            | NotificationKind::CommandFinished
-            | NotificationKind::Info => toasts.info(req.summary().to_owned(), detail),
+            NotificationKind::OscText | NotificationKind::CommandFinished => {
+                toasts.info(req.summary().to_owned(), detail);
+            }
         }
     }
 
@@ -523,7 +551,11 @@ impl NotificationRouter {
     /// Task 99.8), or when the occasion gate says the notification should
     /// not be displayed right now (in which case it is also not recorded in
     /// `live` — an occasion-suppressed notification never happened as far
-    /// as later update/close tracking is concerned).
+    /// as later update/close tracking is concerned). The toast and system
+    /// legs are additionally gated per-leg by
+    /// [`NotificationsConfig::routing_osc99`] (3.3/3.4), mirroring
+    /// [`Self::route`]; a request routed [`NotificationRouting::Disabled`]
+    /// is not recorded in `live` either, since neither leg displayed it.
     pub(super) fn route_osc99(
         data: &Notification99Data,
         config: &NotificationsConfig,
@@ -555,28 +587,49 @@ impl NotificationRouter {
             return;
         }
 
-        // Toast leg: OSC 99 has no per-category routing config row, so
-        // 99.5a always attempts both legs (toast + OS notification) —
-        // simple, honest, and works without a notification daemon.
-        let summary = data
-            .title
-            .clone()
-            .or_else(|| data.body.clone())
-            .unwrap_or_default();
-        let detail = data
-            .body
-            .as_deref()
-            .filter(|body| !body.is_empty())
-            .map(str::to_owned);
-        if data.urgency == Some(2) {
-            toasts.error(summary, detail);
-        } else {
-            toasts.info(summary, detail);
+        // Toast/system legs honour `routing_osc99` (3.3/3.4), mirroring
+        // `route`'s focus-aware gating. Bind each leg's gate once so the
+        // toast leg, the system leg, and the live-map tracking below all
+        // agree on the same decision.
+        let routing = config.routing_osc99;
+        let wants_toast = routing.wants_toast(ctx.window_focused);
+        let wants_system = routing.wants_system(ctx.window_focused);
+
+        if wants_toast {
+            let summary = data
+                .title
+                .clone()
+                .or_else(|| data.body.clone())
+                .unwrap_or_default();
+            let detail = data
+                .body
+                .as_deref()
+                .filter(|body| !body.is_empty())
+                .map(str::to_owned);
+            if data.urgency == Some(2) {
+                toasts.error(summary, detail);
+            } else {
+                toasts.info(summary, detail);
+            }
         }
 
-        Self::show_system_osc99(data, resolved_icon, pty_write_tx.clone());
+        if wants_system {
+            Self::show_system_osc99(data, resolved_icon, pty_write_tx.clone());
+        }
 
-        if let Some(id) = &data.id {
+        // Only track this notification in `live` if the SYSTEM leg fired.
+        // The `live` map exists solely for `p=alive` / `p=close`
+        // reconciliation, and the only mechanism that ever observes a close
+        // or activation is `wait_for_action`, spawned inside
+        // `show_system_osc99` — i.e. it exists only when a desktop
+        // notification was actually shown. Tracking a toast-only (or
+        // `Disabled`-routed) notification would leave a phantom entry that
+        // can never be pruned by an OS-observed close, so a later `p=alive`
+        // poll would report it alive indefinitely. A toast has no lifecycle
+        // to report, so it must not enter `live`.
+        if let Some(id) = &data.id
+            && wants_system
+        {
             let entry = Osc99LiveEntry {
                 report_activation: data.report_activation,
                 close_report: data.close_report,
@@ -598,7 +651,6 @@ impl NotificationRouter {
             live.insert(id.clone(), entry);
         }
     }
-
     /// Evaluate the OSC 99 `o=` occasion gate.
     ///
     /// - `None` (Always) — always display.
@@ -963,6 +1015,7 @@ mod tests {
     fn osc_req(body: &str) -> NotificationRequest {
         NotificationRequest {
             kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc9),
             title: None,
             body: body.to_owned(),
         }
@@ -976,14 +1029,13 @@ mod tests {
         assert_eq!(req.summary(), "Command finished");
         req.kind = NotificationKind::Error;
         assert_eq!(req.summary(), "Error");
-        req.kind = NotificationKind::Info;
-        assert_eq!(req.summary(), "Notification");
     }
 
     #[test]
     fn summary_uses_explicit_title_when_present() {
         let req = NotificationRequest {
             kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc777),
             title: Some("Build".to_owned()),
             body: "done".to_owned(),
         };
@@ -994,7 +1046,7 @@ mod tests {
     fn routing_for_maps_each_kind() {
         let mut config = NotificationsConfig {
             routing_error: NotificationRouting::Both,
-            routing_info: NotificationRouting::Toast,
+            routing_osc_text: NotificationRouting::Toast,
             routing_command_finished: NotificationRouting::System,
             ..NotificationsConfig::default()
         };
@@ -1010,10 +1062,6 @@ mod tests {
         );
         assert_eq!(
             NotificationRouter::routing_for(NotificationKind::OscText, &config),
-            NotificationRouting::Toast
-        );
-        assert_eq!(
-            NotificationRouter::routing_for(NotificationKind::Info, &config),
             NotificationRouting::Toast
         );
     }
@@ -1032,7 +1080,7 @@ mod tests {
         // fire so the Settings "Test Notification" button gives feedback.
         let config = NotificationsConfig {
             enabled: false,
-            routing_info: NotificationRouting::Toast,
+            routing_osc_text: NotificationRouting::Toast,
             ..NotificationsConfig::default()
         };
         let mut toasts = ToastStack::default();
@@ -1041,9 +1089,9 @@ mod tests {
     }
 
     #[test]
-    fn sample_request_is_info_kind() {
+    fn sample_request_is_osc_text_kind() {
         let req = NotificationRequest::sample();
-        assert_eq!(req.kind, NotificationKind::Info);
+        assert_eq!(req.kind, NotificationKind::OscText);
         assert_eq!(req.summary(), "Freminal");
     }
 
@@ -1051,7 +1099,7 @@ mod tests {
     fn enabled_toast_routing_pushes_one_toast() {
         let config = NotificationsConfig {
             enabled: true,
-            routing_info: NotificationRouting::Toast,
+            routing_osc_text: NotificationRouting::Toast,
             ..NotificationsConfig::default()
         };
         let mut toasts = ToastStack::default();
@@ -1064,7 +1112,7 @@ mod tests {
     fn system_only_routing_pushes_no_toast() {
         let config = NotificationsConfig {
             enabled: true,
-            routing_info: NotificationRouting::System,
+            routing_osc_text: NotificationRouting::System,
             ..NotificationsConfig::default()
         };
         let mut toasts = ToastStack::default();
@@ -1072,6 +1120,106 @@ mod tests {
         // and not asserted here).
         NotificationRouter::route(&osc_req("hello"), &config, false, &mut toasts);
         assert_eq!(toasts.len(), 0);
+    }
+
+    // ── Per-source enable-toggle gate (issue #433, subtask 3.2) ──────────
+
+    /// Build an OSC-777-sourced request (used to test the `osc_777` toggle
+    /// independently of `osc_req`'s OSC 9 source).
+    fn osc777_req(body: &str) -> NotificationRequest {
+        NotificationRequest {
+            kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc777),
+            title: None,
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn osc_9_disabled_suppresses_osc9_sourced_request() {
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_9: false,
+            routing_osc_text: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route(&osc_req("hello"), &config, true, &mut toasts);
+        assert_eq!(
+            toasts.len(),
+            0,
+            "osc_9 = false must suppress an Osc9 request"
+        );
+    }
+
+    #[test]
+    fn osc_777_disabled_suppresses_osc777_sourced_request() {
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_777: false,
+            routing_osc_text: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route(&osc777_req("hello"), &config, true, &mut toasts);
+        assert_eq!(
+            toasts.len(),
+            0,
+            "osc_777 = false must suppress an Osc777 request"
+        );
+    }
+
+    #[test]
+    fn both_osc_sources_enabled_still_route() {
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_9: true,
+            osc_777: true,
+            routing_osc_text: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route(&osc_req("from osc9"), &config, true, &mut toasts);
+        assert_eq!(toasts.len(), 1, "osc_9 = true must still route");
+
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route(&osc777_req("from osc777"), &config, true, &mut toasts);
+        assert_eq!(toasts.len(), 1, "osc_777 = true must still route");
+    }
+
+    #[test]
+    fn osc_9_disabled_does_not_suppress_osc777_sourced_request() {
+        let config = NotificationsConfig {
+            enabled: true,
+            osc_9: false,
+            osc_777: true,
+            routing_osc_text: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route(&osc777_req("hello"), &config, true, &mut toasts);
+        assert_eq!(
+            toasts.len(),
+            1,
+            "the osc_9 toggle must not affect an Osc777-sourced request"
+        );
+    }
+
+    #[test]
+    fn no_source_request_is_unaffected_by_osc_toggles() {
+        // Command-finished / Test-button requests carry `source: None` and
+        // must never be suppressed by the OSC 9/777 kill-switches.
+        let config = NotificationsConfig {
+            enabled: false,
+            osc_9: false,
+            osc_777: false,
+            routing_osc_text: NotificationRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_test(&NotificationRequest::sample(), &config, true, &mut toasts);
+        assert_eq!(toasts.len(), 1);
     }
 
     fn finished_block(exit_code: Option<i32>, dur_secs: u64) -> CommandBlock {
@@ -1211,7 +1359,7 @@ mod tests {
     fn system_when_unfocused_pushes_toast_only_when_focused() {
         let config = NotificationsConfig {
             enabled: true,
-            routing_info: NotificationRouting::SystemWhenUnfocused,
+            routing_osc_text: NotificationRouting::SystemWhenUnfocused,
             ..NotificationsConfig::default()
         };
 
@@ -1697,6 +1845,163 @@ mod tests {
 
         assert_eq!(toasts.len(), 0);
         assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_routing_disabled_pushes_no_toast_and_no_live_entry() {
+        // 3.3/3.4: `routing_osc99 = Disabled` must suppress both legs, and
+        // since nothing was displayed, the notification must not be tracked
+        // in `live` either.
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::Disabled,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = Notification99Data {
+            id: Some("n3".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn route_osc99_routing_toast_pushes_a_toast() {
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::Toast,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn route_osc99_toast_only_routing_does_not_track_live_entry() {
+        // Regression (issue #433 adversarial review): a toast-only routed
+        // OSC 99 notification carrying an `id` must NOT be inserted into
+        // `live`. The `live` map is reconciled only via the system leg's
+        // `wait_for_action` observer (inside `show_system_osc99`); a toast
+        // has no close/activation lifecycle, so tracking it would leave a
+        // phantom entry that `p=alive` reports as alive forever.
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::Toast,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = Notification99Data {
+            id: Some("toast-only".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 1, "toast leg should still fire");
+        assert!(
+            live.is_empty(),
+            "a toast-only notification has no lifecycle and must not be tracked in `live`"
+        );
+    }
+
+    #[test]
+    fn route_osc99_system_leg_tracks_live_entry() {
+        // The complementary case to the toast-only test: default `Both`
+        // routing fires the system leg, so an id-bearing notification IS
+        // tracked in `live` for later `p=alive` / `p=close` reconciliation.
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::Both,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = Notification99Data {
+            id: Some("tracked".to_owned()),
+            ..default_n99()
+        };
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert!(
+            live.contains_key("tracked"),
+            "a system-leg notification must be tracked in `live`"
+        );
+    }
+
+    #[test]
+    fn route_osc99_routing_system_pushes_no_toast() {
+        // The system leg is skipped under `cfg(test)` regardless (see
+        // `show_system`'s doc comment for the equivalent OSC 9/777 case), so
+        // this only asserts the toast leg was correctly gated off.
+        let config = NotificationsConfig {
+            routing_osc99: NotificationRouting::System,
+            ..enabled_config(0.0)
+        };
+        let mut toasts = ToastStack::default();
+        let mut icon_cache = HashMap::new();
+        let mut live = HashMap::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let data = default_n99();
+
+        NotificationRouter::route_osc99(
+            &data,
+            &config,
+            osc99_ctx(true, false),
+            &mut toasts,
+            &mut icon_cache,
+            &mut live,
+            &tx,
+        );
+
+        assert_eq!(toasts.len(), 0);
     }
 
     // ── 99.5c: forget_osc99 prune helper ──────────────────────────────────────

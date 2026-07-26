@@ -533,8 +533,18 @@ pub(super) fn handle_window_manipulation(
             // the out-parameter; the caller in `app_impl::update()` (where
             // `self.config` and the toast stack are in scope) dispatches each
             // request through the `NotificationRouter`.
-            WindowManipulation::Notification { kind, title, body } => {
-                notifications.push(NotificationRequest { kind, title, body });
+            WindowManipulation::Notification {
+                kind,
+                source,
+                title,
+                body,
+            } => {
+                notifications.push(NotificationRequest {
+                    kind,
+                    source: Some(source),
+                    title,
+                    body,
+                });
             }
             // OSC 99 stateful notification (Task 99.5a). Collect for
             // post-loop routing in `app_impl::update()`, where `self.config`,

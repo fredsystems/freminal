@@ -1786,7 +1786,12 @@ impl SettingsModal {
         ui.add_space(12.0);
         ui.heading("Routing");
         Self::notification_routing_row(ui, "Errors", &mut self.draft.notifications.routing_error);
-        Self::notification_routing_row(ui, "Info", &mut self.draft.notifications.routing_info);
+        Self::notification_routing_row(
+            ui,
+            "OSC 9 / 777 text",
+            &mut self.draft.notifications.routing_osc_text,
+        );
+        Self::notification_routing_row(ui, "OSC 99", &mut self.draft.notifications.routing_osc99);
         Self::notification_routing_row(
             ui,
             "Command finished",
@@ -1831,7 +1836,7 @@ impl SettingsModal {
         );
     }
 
-    /// Render one labeled routing combo box. Extracted so the three routing
+    /// Render one labeled routing combo box. Extracted so the routing
     /// categories share identical UI and the per-category borrow of
     /// `self.draft.notifications` stays scoped.
     fn notification_routing_row(
@@ -1865,6 +1870,11 @@ impl SettingsModal {
                         notification_routing_label(
                             config::NotificationRouting::SystemWhenUnfocused,
                         ),
+                    );
+                    ui.selectable_value(
+                        routing,
+                        config::NotificationRouting::Disabled,
+                        notification_routing_label(config::NotificationRouting::Disabled),
                     );
                 });
         });
@@ -2708,6 +2718,7 @@ const fn notification_routing_label(routing: config::NotificationRouting) -> &'s
         config::NotificationRouting::System => "System",
         config::NotificationRouting::Both => "Both",
         config::NotificationRouting::SystemWhenUnfocused => "System when unfocused",
+        config::NotificationRouting::Disabled => "Disabled",
     }
 }
 
@@ -3036,6 +3047,10 @@ mod tests {
         assert_eq!(
             notification_routing_label(config::NotificationRouting::SystemWhenUnfocused),
             "System when unfocused"
+        );
+        assert_eq!(
+            notification_routing_label(config::NotificationRouting::Disabled),
+            "Disabled"
         );
     }
 
