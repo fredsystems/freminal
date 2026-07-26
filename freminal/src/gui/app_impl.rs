@@ -170,19 +170,7 @@ impl freminal_windowing::App for FreminalGui {
                 );
             }
 
-            // Emit WindowCreate recording event.
-            let rec_wid = self.recording_window_id(window_id);
-            if let Some(h) = self.recording_swap.load_full() {
-                h.emit(
-                    freminal_terminal_emulator::recording::EventPayload::WindowCreate {
-                        window_id: rec_wid,
-                        width_px: inner_size.0,
-                        height_px: inner_size.1,
-                        x: 0,
-                        y: 0,
-                    },
-                );
-            }
+            self.emit_window_create_recording(window_id, inner_size);
         } else {
             // Subsequent window — check if a layout window is waiting, otherwise
             // spawn a default single-pane PTY tab.
@@ -311,6 +299,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_close_pane: false,
                         pending_focus_direction: None,
                         border_drag: None,
+                        resize_overlay: None,
                         shader_last_mtime: None,
                         window_post,
                         toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
@@ -350,19 +339,7 @@ impl freminal_windowing::App for FreminalGui {
                     };
                     self.windows.insert(window_id, win);
 
-                    // Emit WindowCreate recording event.
-                    let rec_wid = self.recording_window_id(window_id);
-                    if let Some(h) = self.recording_swap.load_full() {
-                        h.emit(
-                            freminal_terminal_emulator::recording::EventPayload::WindowCreate {
-                                window_id: rec_wid,
-                                width_px: inner_size.0,
-                                height_px: inner_size.1,
-                                x: 0,
-                                y: 0,
-                            },
-                        );
-                    }
+                    self.emit_window_create_recording(window_id, inner_size);
                 }
                 Err(e) => {
                     error!("Failed to spawn PTY for new window: {e}");
@@ -823,6 +800,17 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
         let chrome_size_changed = win.last_known_size != chrome_size_before;
+        // Resize-overlay trigger (issue #433): a GENUINE OS-window resize is a
+        // change between two KNOWN sizes. The first observation of a new
+        // window is `None -> Some(initial)`, which `chrome_size_changed`
+        // (correctly, for chrome damage) treats as a change but which must NOT
+        // pop the resize overlay — otherwise the HUD flashes on every app
+        // launch and every `Ctrl+Shift+N`. Requiring `Some -> Some` with
+        // different values suppresses that launch/spawn false-positive.
+        let window_genuinely_resized = matches!(
+            (chrome_size_before, win.last_known_size),
+            (Some(before), Some(after)) if before != after
+        );
 
         // ── Deferred egui font update from standalone settings window ────────
         win.terminal_widget
@@ -1403,6 +1391,9 @@ impl freminal_windowing::App for FreminalGui {
                 crate::gui::notifications::Osc99Control,
                 crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
             )> = Vec::new();
+            // OSC 52 clipboard events (remote write / blocked read) collected from
+            // every pane this frame, routed to a toast after the loop (issue #433).
+            let mut osc52_events: Vec<rendering::Osc52ToastEvent> = Vec::new();
             for (idx, tab) in win.tabs.iter_mut().enumerate() {
                 let is_active_tab = idx == active_idx;
                 let is_only_pane = match tab.pane_tree.pane_count() {
@@ -1437,6 +1428,7 @@ impl freminal_windowing::App for FreminalGui {
                             &mut osc_notifications,
                             &mut osc99_notifications,
                             &mut osc99_controls,
+                            &mut osc52_events,
                         );
                         if shell_set {
                             tab_shell_set_title = true;
@@ -1463,6 +1455,19 @@ impl freminal_windowing::App for FreminalGui {
                         &mut toasts,
                     );
                 }
+            }
+
+            // Surface OSC 52 remote-clipboard events as toasts (issue #433).
+            // Done after the pane loop so `self.config`/`self.toasts` are
+            // borrowable without conflicting with the `win.tabs` borrow.
+            for event in &osc52_events {
+                let (title, detail) = rendering::osc52_toast_text(event);
+                self.route_freminal_toast(
+                    freminal_common::config::FreminalToastCategory::ClipboardRemote,
+                    crate::gui::toast::ToastKind::Info,
+                    title,
+                    detail,
+                );
             }
 
             // Route OSC 99 stateful notifications collected above (Task
@@ -1661,8 +1666,15 @@ impl freminal_windowing::App for FreminalGui {
                         // buttons (Task 106 bug).
                         Self::send_paste_to_target(&mut win, target, payload);
                     }
-                    super::paste_guard::PasteDialogOutcome::Cancelled
-                    | super::paste_guard::PasteDialogOutcome::Idle => {}
+                    super::paste_guard::PasteDialogOutcome::Cancelled => {
+                        self.route_freminal_toast(
+                            freminal_common::config::FreminalToastCategory::PasteBlocked,
+                            crate::gui::toast::ToastKind::Warning,
+                            "Paste blocked",
+                            None,
+                        );
+                    }
+                    super::paste_guard::PasteDialogOutcome::Idle => {}
                 }
 
                 // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
@@ -1983,6 +1995,15 @@ impl freminal_windowing::App for FreminalGui {
             // the loop (#435).
             let present_is_partial_for_panes = std::sync::Arc::clone(&win.present_is_partial);
 
+            // Resize overlay (issue #433): whether any pane's char grid
+            // changed this frame (the debounced-resize check below). Only a
+            // trigger — the displayed dimensions are recomputed from the
+            // whole window content area after the loop, where `win.tabs` is
+            // no longer borrowed. Captured here rather than written straight
+            // to `win.resize_overlay` because the per-pane loop mutably
+            // borrows `win.tabs`.
+            let mut grid_size_changed = false;
+
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
                 // Each pane edge that is interior (shared with another pane)
@@ -2063,6 +2084,7 @@ impl freminal_windowing::App for FreminalGui {
                         error!("Failed to send resize event for {pane_id}: {e}");
                     } else {
                         pane.view_state.last_sent_size = new_size;
+                        grid_size_changed = true;
                     }
                 }
 
@@ -2185,9 +2207,11 @@ impl freminal_windowing::App for FreminalGui {
                 });
 
                 // Render this pane into a child UI scoped to its content rect.
-                // show() returns (left_clicked, deferred_key_actions).
+                // show() returns (left_clicked, copied_to_clipboard, deferred_key_actions).
                 // left_clicked is true when a primary left-click was pressed inside
-                // this pane's rect — used below for click-to-focus.
+                // this pane's rect — used below for click-to-focus. copied_to_clipboard
+                // is true when a non-empty local selection was copied this frame
+                // (Subtask D3), used below to route a "Copied to clipboard" toast.
                 let show_result =
                     ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |pane_ui| {
                         win.terminal_widget.show(
@@ -2215,8 +2239,17 @@ impl freminal_windowing::App for FreminalGui {
                             &present_is_partial_for_panes,
                         )
                     });
-                let (left_clicked, deferred_actions) = show_result.inner;
+                let (left_clicked, copied_to_clipboard, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
+
+                if copied_to_clipboard {
+                    self.route_freminal_toast(
+                        freminal_common::config::FreminalToastCategory::ClipboardCopy,
+                        crate::gui::toast::ToastKind::Info,
+                        "Copied to clipboard",
+                        None,
+                    );
+                }
 
                 // Task 114.7: drain any egui-blocked raw key events queued
                 // this frame (keypad operators/directional, media,
@@ -2411,6 +2444,43 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
+            // Resize overlay (issue #433): show a transient cols×rows HUD only
+            // on a genuine OS-window resize, not the last_sent_size churn from
+            // new tabs/splits/pane-close/zoom (which reset last_sent_size to
+            // (0, 0)) nor the first geometry observation on window creation.
+            // Split-border drags are excluded: the whole-window readout does
+            // not change when an internal border moves. See `resize_is_genuine`
+            // and `window_genuinely_resized`.
+            //
+            // `grid_size_changed` is only a TRIGGER (did any pane's char
+            // grid change this frame); the displayed dimensions are the
+            // WHOLE terminal content area, not one pane's — the overlay is
+            // window-scoped. Compute cols×rows from `available_rect` (the
+            // central content rect the overlay centers in) using the same
+            // cell size and gutter inset the per-pane sizing uses. For a
+            // single-pane window this is exact; for a split layout it is an
+            // approximate whole-window reading (each pane pays the gutter
+            // individually), which is acceptable for a transient readout.
+            if self.config.notifications.show_resize_overlay
+                && super::window::resize_is_genuine(grid_size_changed, window_genuinely_resized)
+            {
+                let window_content_width = (available_rect.width() - gutter_inset_logical).max(0.0);
+                let window_cols = (window_content_width / logical_char_w)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or(0)
+                    .max(1);
+                let window_rows = (available_rect.height() / logical_char_h)
+                    .floor()
+                    .approx_as::<usize>()
+                    .unwrap_or(0)
+                    .max(1);
+                win.resize_overlay = Some(super::window::ResizeOverlayState {
+                    size: (window_cols, window_rows),
+                    last_update: now,
+                });
+            }
+
             // ── Frame-damage aggregation (#435) ───────────────────────
             //
             // Decide whether this whole frame was a pure cursor-only update,
@@ -2442,11 +2512,16 @@ impl freminal_windowing::App for FreminalGui {
             let pointer_moving = ctx.input(|i| i.pointer.is_moving());
             let force_full =
                 ui_overlay_open || shader_recomposites || active_pane_changed || pointer_moving;
-            // A toast being visible animates its own region each frame.
-            let toast_active = self
-                .toasts
-                .try_borrow()
-                .is_ok_and(|stack| !stack.is_empty());
+            // A toast being visible animates its own region each frame. The
+            // resize overlay (issue #433) animates the same way — it fades out
+            // over its linger window on the plain painter — so it must force a
+            // `Full` present too, or a cursor-only `Partial` frame would leave
+            // the fading overlay outside the damage rect stale/ghosted.
+            let toast_active = win.resize_overlay.is_some()
+                || self
+                    .toasts
+                    .try_borrow()
+                    .is_ok_and(|stack| !stack.is_empty());
             // Inspect only the panes actually rendered this frame — the
             // entries in `pane_layout`. Under zoom, only the zoomed pane is
             // rendered; iterating the whole tree would read stale
@@ -2843,6 +2918,53 @@ impl freminal_windowing::App for FreminalGui {
                     );
                 }
             }
+
+            // Resize overlay HUD (issue #433): a passive, window-centered
+            // "cols × rows" readout, drawn on the plain painter like the
+            // broadcast label above — no input, no `ui_overlay_open`
+            // registration needed. Bind the `Copy` state up front so the
+            // subsequent `win.resize_overlay = None` on timeout (below)
+            // doesn't conflict with the `ui.painter()` borrow used to draw it.
+            let resize_overlay_state = win.resize_overlay;
+            if let Some(overlay) = resize_overlay_state {
+                let elapsed = now.saturating_duration_since(overlay.last_update);
+                if elapsed >= super::window::RESIZE_OVERLAY_LINGER {
+                    win.resize_overlay = None;
+                } else {
+                    let alpha = super::window::resize_overlay_alpha(
+                        elapsed,
+                        super::window::RESIZE_OVERLAY_LINGER,
+                        super::window::RESIZE_OVERLAY_FADE,
+                    );
+                    let text_alpha = (255.0 * alpha)
+                        .round()
+                        .clamp(0.0, 255.0)
+                        .approx_as::<u8>()
+                        .unwrap_or(255);
+                    let bg_alpha = (180.0 * alpha)
+                        .round()
+                        .clamp(0.0, 255.0)
+                        .approx_as::<u8>()
+                        .unwrap_or(180);
+                    let (cols, rows) = overlay.size;
+                    let text_color =
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, text_alpha);
+                    let painter = ui.painter();
+                    let galley = painter.layout_no_wrap(
+                        format!("{cols} × {rows}"),
+                        egui::FontId::monospace(28.0),
+                        text_color,
+                    );
+                    let text_rect = egui::Align2::CENTER_CENTER
+                        .anchor_size(available_rect.center(), galley.size())
+                        .expand(12.0);
+                    painter.rect_filled(text_rect, 6.0, egui::Color32::from_black_alpha(bg_alpha));
+                    painter.galley(text_rect.min + egui::vec2(12.0, 12.0), galley, text_color);
+                    // Keep animating/timing-out even without further input.
+                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                }
+            }
+
             // ── Terminal band: capture the end of the shape range (#436.4a) ──
             //
             // Read the background layer's current shape count as
@@ -3361,6 +3483,7 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
+            resize_overlay: None,
             shader_last_mtime: None,
             window_post,
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),

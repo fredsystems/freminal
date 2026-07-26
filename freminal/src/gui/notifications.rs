@@ -29,12 +29,12 @@ use freminal_common::buffer_states::osc::OscNotifySource;
 use freminal_common::buffer_states::window_manipulation::{
     Notification99Data, NotificationKind, Osc99ControlKind,
 };
-use freminal_common::config::{NotificationRouting, NotificationsConfig};
+use freminal_common::config::{FreminalToastCategory, NotificationRouting, NotificationsConfig};
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 
 use super::command_blocks::format_command_duration;
-use super::toast::ToastStack;
+use super::toast::{ToastKind, ToastStack};
 
 /// A fully-formed notification ready to be routed.
 ///
@@ -310,6 +310,35 @@ impl NotificationRouter {
             NotificationKind::OscText | NotificationKind::CommandFinished => {
                 toasts.info(req.summary().to_owned(), detail);
             }
+        }
+    }
+
+    /// Route a freminal-derived, toast-only notification (e.g. "Copied to
+    /// clipboard", "Layout saved") through its per-category routing policy.
+    ///
+    /// Unlike [`Self::route`], there is no desktop-notification leg and no
+    /// `enabled` master-switch gate: these are freminal's own UI feedback
+    /// toasts, governed solely by their `routing_<category>` config field
+    /// ([`FreminalToastRouting`], which is `Toast` or `Disabled`). When the
+    /// category routes to `Disabled`, nothing is pushed.
+    ///
+    /// `kind` selects the toast severity (e.g. [`ToastKind::Warning`] for a
+    /// blocked paste, [`ToastKind::Info`] for a normal confirmation).
+    pub(super) fn route_freminal_toast(
+        category: FreminalToastCategory,
+        kind: ToastKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+        config: &NotificationsConfig,
+        toasts: &mut ToastStack,
+    ) {
+        if !config.routing_for_category(category).wants_toast() {
+            return;
+        }
+        match kind {
+            ToastKind::Error => toasts.error(title, detail),
+            ToastKind::Warning => toasts.warning(title, detail),
+            ToastKind::Info => toasts.info(title, detail),
         }
     }
 
@@ -1011,6 +1040,7 @@ impl NotificationRouter {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use freminal_common::config::FreminalToastRouting;
 
     fn osc_req(body: &str) -> NotificationRequest {
         NotificationRequest {
@@ -1220,6 +1250,81 @@ mod tests {
         let mut toasts = ToastStack::default();
         NotificationRouter::route_test(&NotificationRequest::sample(), &config, true, &mut toasts);
         assert_eq!(toasts.len(), 1);
+    }
+
+    // ── Freminal-derived toast gate (issue #433, subtask C) ──────────────
+
+    #[test]
+    fn freminal_toast_routes_when_enabled() {
+        let config = NotificationsConfig::default();
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_freminal_toast(
+            FreminalToastCategory::Layout,
+            ToastKind::Info,
+            "Layout saved",
+            None,
+            &config,
+            &mut toasts,
+        );
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn freminal_toast_suppressed_when_disabled() {
+        let config = NotificationsConfig {
+            routing_layout: FreminalToastRouting::Disabled,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_freminal_toast(
+            FreminalToastCategory::Layout,
+            ToastKind::Info,
+            "Layout saved",
+            None,
+            &config,
+            &mut toasts,
+        );
+        assert_eq!(toasts.len(), 0);
+    }
+
+    #[test]
+    fn freminal_toast_ignores_enabled_master_switch() {
+        // Freminal toasts are governed only by their `routing_<category>`
+        // field, not by `NotificationsConfig::enabled` — proving these
+        // bypass the master switch by design.
+        let config = NotificationsConfig {
+            enabled: false,
+            routing_layout: FreminalToastRouting::Toast,
+            ..NotificationsConfig::default()
+        };
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_freminal_toast(
+            FreminalToastCategory::Layout,
+            ToastKind::Info,
+            "Layout saved",
+            None,
+            &config,
+            &mut toasts,
+        );
+        assert_eq!(toasts.len(), 1);
+    }
+
+    #[test]
+    fn freminal_toast_kind_maps_to_severity() {
+        let config = NotificationsConfig::default();
+        let mut toasts = ToastStack::default();
+        NotificationRouter::route_freminal_toast(
+            FreminalToastCategory::PasteBlocked,
+            ToastKind::Warning,
+            "Paste blocked",
+            None,
+            &config,
+            &mut toasts,
+        );
+        assert_eq!(toasts.len(), 1);
+        // Assert the severity actually maps to Warning (not just that *a*
+        // toast was pushed) — guards `route_freminal_toast`'s kind match.
+        assert_eq!(toasts.last_kind(), Some(ToastKind::Warning));
     }
 
     fn finished_block(exit_code: Option<i32>, dur_secs: u64) -> CommandBlock {

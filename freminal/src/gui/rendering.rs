@@ -137,6 +137,47 @@ pub(super) struct WindowManipFlags {
     pub is_only_pane: bool,
 }
 
+/// An OSC 52 clipboard event observed during a frame's window-manipulation
+/// drain, collected so the caller can surface a toast after the per-pane
+/// loop releases its `win.tabs` borrow (the handler itself has no access to
+/// the app-level config/toast stack). See
+/// [`FreminalToastCategory::ClipboardRemote`].
+///
+/// [`FreminalToastCategory::ClipboardRemote`]: freminal_common::config::FreminalToastCategory::ClipboardRemote
+#[derive(Debug, Clone)]
+pub(super) enum Osc52ToastEvent {
+    /// A terminal application wrote text to the system clipboard (OSC 52
+    /// set). Carries the byte length of the written payload for the toast
+    /// detail (never the content itself — do not leak clipboard data into a
+    /// toast).
+    Wrote { bytes: usize },
+    /// A terminal application attempted to READ the system clipboard (OSC 52
+    /// query) but was blocked by `[security] allow_clipboard_read = false`.
+    ReadBlocked,
+}
+
+/// Maps an [`Osc52ToastEvent`] to the `(title, detail)` pair used for the
+/// resulting toast. Pure and free of `egui`/config access so it can be
+/// unit-tested directly; the caller (`app_impl::update()`) supplies the
+/// category gating and the toast stack via `FreminalGui::route_freminal_toast`.
+pub(super) fn osc52_toast_text(event: &Osc52ToastEvent) -> (&'static str, Option<String>) {
+    match event {
+        Osc52ToastEvent::Wrote { bytes } => (
+            "Clipboard updated",
+            Some(format!(
+                "An application copied {bytes} bytes to the clipboard."
+            )),
+        ),
+        Osc52ToastEvent::ReadBlocked => (
+            "Clipboard read blocked",
+            Some(
+                "An application tried to read the clipboard; blocked by your security settings."
+                    .to_owned(),
+            ),
+        ),
+    }
+}
+
 /// Drain and dispatch all pending [`WindowCommand`]s for this frame.
 ///
 /// ## Flow
@@ -201,6 +242,7 @@ pub(super) fn handle_window_manipulation(
     notifications: &mut Vec<NotificationRequest>,
     osc99_notifications: &mut Vec<(Notification99Data, Sender<PtyWrite>)>,
     osc99_controls: &mut Vec<(Osc99Control, Sender<PtyWrite>)>,
+    osc52_events: &mut Vec<Osc52ToastEvent>,
 ) -> bool {
     // Whether the shell set (or restored) a title during this frame.  Used
     // by the caller to clear any user-assigned custom tab name, so
@@ -485,6 +527,9 @@ pub(super) fn handle_window_manipulation(
 
             // OSC 52 clipboard set: copy decoded text to the system clipboard.
             WindowManipulation::SetClipboard(_sel, content) => {
+                osc52_events.push(Osc52ToastEvent::Wrote {
+                    bytes: content.len(),
+                });
                 ui.ctx().copy_text(content);
             }
 
@@ -498,6 +543,7 @@ pub(super) fn handle_window_manipulation(
                     tracing::debug!(
                         "OSC 52 query for selection '{sel}' — blocked by security config"
                     );
+                    osc52_events.push(Osc52ToastEvent::ReadBlocked);
                     String::new()
                 };
                 send_pty_response(pty_write_tx, &format!("\x1b]52;{sel};{payload}\x1b\\"));
@@ -566,4 +612,32 @@ pub(super) fn handle_window_manipulation(
         }
     }
     shell_set_title
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod osc52_toast_text_tests {
+    use super::{Osc52ToastEvent, osc52_toast_text};
+
+    #[test]
+    fn wrote_maps_to_clipboard_updated_with_byte_count() {
+        let (title, detail) = osc52_toast_text(&Osc52ToastEvent::Wrote { bytes: 5 });
+        assert_eq!(title, "Clipboard updated");
+        let detail = detail.expect("write event should carry a detail message");
+        assert!(
+            detail.contains('5'),
+            "detail should mention the byte count: {detail}"
+        );
+        // Privacy: the detail must never contain clipboard content, only the
+        // byte count. This test can't prove a negative for arbitrary content,
+        // but it does assert the message is the fixed template, not raw text.
+        assert_eq!(detail, "An application copied 5 bytes to the clipboard.");
+    }
+
+    #[test]
+    fn read_blocked_maps_to_blocked_title() {
+        let (title, detail) = osc52_toast_text(&Osc52ToastEvent::ReadBlocked);
+        assert_eq!(title, "Clipboard read blocked");
+        assert!(detail.is_some());
+    }
 }

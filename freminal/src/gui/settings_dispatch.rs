@@ -298,7 +298,12 @@ impl FreminalGui {
             warn!("{warning}");
             self.push_info_toast("Config deprecation", Some(warning.clone()));
         }
-        self.push_info_toast("Config reloaded", Some(format!("From {}", path.display())));
+        self.route_freminal_toast(
+            freminal_common::config::FreminalToastCategory::ConfigReload,
+            crate::gui::toast::ToastKind::Info,
+            "Config reloaded",
+            Some(format!("From {}", path.display())),
+        );
     }
 
     /// Handle a `SettingsAction` from the standalone settings window.

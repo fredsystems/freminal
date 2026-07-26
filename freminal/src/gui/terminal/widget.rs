@@ -674,6 +674,7 @@ fn render_context_menu(
     input_tx: &Sender<InputEvent>,
     clipboard_rx: &Receiver<String>,
     deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+    copied: &mut bool,
 ) {
     let Some(menu_pos) = view_state.context_menu_pos else {
         return;
@@ -714,6 +715,7 @@ fn render_context_menu(
         input_tx,
         clipboard_rx,
         deferred_actions,
+        copied,
     );
 
     if close {
@@ -866,6 +868,10 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 /// Actions that require full GUI state (e.g. `NewTerminal`) are pushed onto
 /// `deferred_actions` rather than executed directly, because this function
 /// does not have access to `FreminalGui` or `TabManager`.
+// All eight parameters are cohesive context-menu-dispatch state (mirrors the
+// existing `too_many_arguments` allowance on `compute_command_block_hover_rows`
+// above); splitting them into a struct would not meaningfully improve clarity.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_context_menu_action(
     action: Option<ContextMenuAction>,
     ui: &Ui,
@@ -874,6 +880,7 @@ fn dispatch_context_menu_action(
     input_tx: &Sender<InputEvent>,
     clipboard_rx: &Receiver<String>,
     deferred_actions: &mut Vec<freminal_common::keybindings::KeyAction>,
+    copied: &mut bool,
 ) {
     let Some(action) = action else {
         return;
@@ -895,6 +902,7 @@ fn dispatch_context_menu_action(
             {
                 ui.ctx().copy_text(text);
                 view_state.selection.clear();
+                *copied = true;
             }
         }
         ContextMenuAction::Copy => {}
@@ -941,6 +949,7 @@ fn dispatch_context_menu_action(
         }
         ContextMenuAction::CopyUrl(url) => {
             ui.ctx().copy_text(url);
+            *copied = true;
         }
         ContextMenuAction::NewTerminal => {
             deferred_actions.push(freminal_common::keybindings::KeyAction::NewTab);
@@ -964,6 +973,7 @@ fn dispatch_context_menu_action(
                 && !text.is_empty()
             {
                 ui.ctx().copy_text(text);
+                *copied = true;
             }
         }
     }
@@ -1587,6 +1597,10 @@ impl FreminalTerminalWidget {
     /// - `key_broadcast_targets` — input senders of the other panes to mirror
     ///   keyboard input to when broadcast mode is active (Task 74); empty when
     ///   broadcast is off or this is not the active pane.
+    ///
+    /// Returns `(left_mouse_button_pressed, copied_to_clipboard, deferred_actions)`.
+    /// The second `bool`, `copied_to_clipboard`, is `true` iff a non-empty
+    /// local selection was copied to the system clipboard this frame.
     // Inherently large: the main per-frame terminal widget handler — processes input, handles
     // blink/scroll/mouse, and orchestrates layout. Each section is tightly coupled.
     #[allow(clippy::too_many_lines)]
@@ -1617,7 +1631,7 @@ impl FreminalTerminalWidget {
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
         present_is_partial: &Arc<std::sync::atomic::AtomicBool>,
-    ) -> (bool, Vec<freminal_common::keybindings::KeyAction>) {
+    ) -> (bool, bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
         // `sync_pixels_per_point()` has already been called by
@@ -1851,6 +1865,9 @@ impl FreminalTerminalWidget {
         // A gutter click never reaches `write_input_to_terminal` (it is outside
         // `terminal_rect`), so its click-to-focus intent is carried here.
         let mut left_mouse_button_pressed = left_mouse_button_pressed_gutter;
+        // Set to `true` below iff a non-empty local selection is actually
+        // copied to the system clipboard this frame (Subtask D3).
+        let mut copied_to_clipboard = false;
         if suppress_input
             || context_menu_open
             || view_state.search_state.is_open
@@ -1928,6 +1945,7 @@ impl FreminalTerminalWidget {
                 && !text.is_empty()
             {
                 ctx.copy_text(text);
+                copied_to_clipboard = true;
                 // Clear the selection highlight now that the text has been
                 // copied to the clipboard.
                 view_state.selection.clear();
@@ -3381,9 +3399,14 @@ impl FreminalTerminalWidget {
             input_tx,
             clipboard_rx,
             &mut deferred_actions,
+            &mut copied_to_clipboard,
         );
 
-        (left_mouse_button_pressed, deferred_actions)
+        (
+            left_mouse_button_pressed,
+            copied_to_clipboard,
+            deferred_actions,
+        )
     }
 
     /// Apply config changes that can be hot-reloaded at runtime.

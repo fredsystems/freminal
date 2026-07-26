@@ -721,6 +721,12 @@ impl super::FreminalGui {
                         // Refresh the layout library so the new file appears in the menu.
                         self.discovered_layouts =
                             freminal_common::layout::discover_layouts(&layout_dir);
+                        self.route_freminal_toast(
+                            freminal_common::config::FreminalToastCategory::Layout,
+                            crate::gui::toast::ToastKind::Info,
+                            "Layout saved",
+                            Some(format!("{}", path.display())),
+                        );
                     }
                     Err(e) => {
                         error!("SaveLayout: failed to write {}: {e}", path.display());
