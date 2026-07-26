@@ -54,7 +54,17 @@ libc = "0.2.188"
 log = "0.4.32"
 lz4_flex = "0.14.0"
 nix = "0.31.3"
-notify-rust = "4.18.0"
+# `images_no_default_features` enables the inline `image-data` D-Bus hint
+# (`Notification::image_data` / `Image::from_rgba`) so freminal can attach its
+# app icon to desktop notifications as raw bytes -- working even when freminal
+# is not installed into the system icon theme (dev / cargo-run / AppImage),
+# the way Discord & co. do. `z` is notify-rust's default feature (the zbus
+# backend + serde); it is listed only for documentation -- this entry does
+# NOT set `default-features = false`, so the default set is retained
+# regardless. We decode the PNG ourselves via the workspace `image` crate, so
+# notify-rust's heavier `images` feature (its own codecs + rayon) is
+# deliberately NOT used.
+notify-rust = { version = "4.18.0", features = ["images_no_default_features", "z"] }
 open = "5.4.0"
 predicates = "3.1.4"
 proptest = "1.11.0"
