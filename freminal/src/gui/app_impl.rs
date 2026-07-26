@@ -1467,6 +1467,7 @@ impl freminal_windowing::App for FreminalGui {
                     crate::gui::toast::ToastKind::Info,
                     title,
                     detail,
+                    crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
                 );
             }
 
@@ -1672,6 +1673,7 @@ impl freminal_windowing::App for FreminalGui {
                             crate::gui::toast::ToastKind::Warning,
                             "Paste blocked",
                             None,
+                            crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
                         );
                     }
                     super::paste_guard::PasteDialogOutcome::Idle => {}
@@ -2248,6 +2250,7 @@ impl freminal_windowing::App for FreminalGui {
                         crate::gui::toast::ToastKind::Info,
                         "Copied to clipboard",
                         None,
+                        crate::gui::toast::ToastPlacement::pane_centered(window_id, pane_id),
                     );
                 }
 
@@ -3131,31 +3134,39 @@ impl freminal_windowing::App for FreminalGui {
             let content_rect = win
                 .cached_central_rect
                 .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
+            // Pre-resolve the active tab's pane layout into owned locals so
+            // the `resolve_pane_rect` closure below does not borrow `win`
+            // (it only captures `Copy`/owned data) — it needs to coexist
+            // with the `win.terminal_widget.font_manager_mut()` borrow
+            // passed alongside it to `stack.show`.
             let active_tab = win.tabs.active_tab();
-            let active_pane_id = active_tab.active_pane;
-            let active_pane_rect = active_tab.zoomed_pane.map_or_else(
-                || {
-                    active_tab.pane_tree.layout(content_rect).ok().and_then(
-                        |pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)>| {
-                            pane_layout
-                                .into_iter()
-                                .find(|(id, _)| *id == active_pane_id)
-                                .map(|(_, r)| r)
-                        },
-                    )
-                },
-                |zoomed_id| (zoomed_id == active_pane_id).then_some(content_rect),
-            );
-            let geom = super::toast::ToastGeometry {
-                content_rect,
-                active_pane_rect,
+            let zoomed_pane = active_tab.zoomed_pane;
+            let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
+                .pane_tree
+                .layout(content_rect)
+                .unwrap_or_default();
+            let resolve_pane_rect =
+                move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
+                    if let Some(zoomed_id) = zoomed_pane {
+                        return (zoomed_id == pane_id).then_some(content_rect);
+                    }
+                    pane_layout
+                        .iter()
+                        .find(|(id, _)| *id == pane_id)
+                        .map(|(_, r)| *r)
+                };
+            let pixels_per_point = ctx.pixels_per_point();
+            let resources = super::toast::ToastFrameResources {
+                render_state: &win.toast_render_state,
+                font_manager: win.terminal_widget.font_manager_mut(),
             };
             stack.show(
                 ctx,
-                geom,
-                &win.toast_render_state,
-                win.terminal_widget.font_manager_mut(),
-                ctx.pixels_per_point(),
+                content_rect,
+                window_id,
+                resolve_pane_rect,
+                resources,
+                pixels_per_point,
             );
         }
 

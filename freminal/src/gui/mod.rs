@@ -593,6 +593,7 @@ impl FreminalGui {
         kind: toast::ToastKind,
         title: impl Into<String>,
         detail: Option<String>,
+        placement: toast::ToastPlacement,
     ) {
         match self.toasts.try_borrow_mut() {
             Ok(mut stack) => {
@@ -601,6 +602,7 @@ impl FreminalGui {
                     kind,
                     title,
                     detail,
+                    placement,
                     &self.config.notifications,
                     &mut stack,
                 );

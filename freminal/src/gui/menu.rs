@@ -229,6 +229,7 @@ impl super::FreminalGui {
                                 crate::gui::toast::ToastKind::Info,
                                 "Layout loaded",
                                 Some(summary.name.clone()),
+                                crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
                             );
                         }
                         Err(e) => {

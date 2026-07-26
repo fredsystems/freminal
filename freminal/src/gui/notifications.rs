@@ -324,22 +324,21 @@ impl NotificationRouter {
     ///
     /// `kind` selects the toast severity (e.g. [`ToastKind::Warning`] for a
     /// blocked paste, [`ToastKind::Info`] for a normal confirmation).
+    /// `placement` selects the anchor (see [`super::toast::ToastPlacement`]):
+    /// freminal-derived toasts are typically window- or pane-centered.
     pub(super) fn route_freminal_toast(
         category: FreminalToastCategory,
         kind: ToastKind,
         title: impl Into<String>,
         detail: Option<String>,
+        placement: super::toast::ToastPlacement,
         config: &NotificationsConfig,
         toasts: &mut ToastStack,
     ) {
         if !config.routing_for_category(category).wants_toast() {
             return;
         }
-        match kind {
-            ToastKind::Error => toasts.error(title, detail),
-            ToastKind::Warning => toasts.warning(title, detail),
-            ToastKind::Info => toasts.info(title, detail),
-        }
+        toasts.push_positioned(kind, title, detail, placement);
     }
 
     /// Show a desktop notification on a short-lived background thread.
@@ -1263,6 +1262,7 @@ mod tests {
             ToastKind::Info,
             "Layout saved",
             None,
+            crate::gui::toast::ToastPlacement::TOP_RIGHT,
             &config,
             &mut toasts,
         );
@@ -1281,6 +1281,7 @@ mod tests {
             ToastKind::Info,
             "Layout saved",
             None,
+            crate::gui::toast::ToastPlacement::TOP_RIGHT,
             &config,
             &mut toasts,
         );
@@ -1303,6 +1304,7 @@ mod tests {
             ToastKind::Info,
             "Layout saved",
             None,
+            crate::gui::toast::ToastPlacement::TOP_RIGHT,
             &config,
             &mut toasts,
         );
@@ -1318,6 +1320,7 @@ mod tests {
             ToastKind::Warning,
             "Paste blocked",
             None,
+            crate::gui::toast::ToastPlacement::TOP_RIGHT,
             &config,
             &mut toasts,
         );
