@@ -14,10 +14,10 @@
 //! quads on the main thread.
 //!
 //! Each toast is drawn as a single quad (2 triangles = 6 vertices), expanded
-//! beyond the crisp pill rect by [`GLOW_MARGIN_PX`] on every side so the
-//! fragment shader has room to render the outer glow and drop shadow. See
-//! `toast.frag` for the SDF-based layering (shadow -> glow -> gradient fill
-//! + accent bar).
+//! beyond the crisp pill rect by [`SHADOW_MARGIN_PX`] on every side so the
+//! fragment shader has room to render the drop shadow. See `toast.frag` for
+//! the SDF-based layering (shadow -> gradient fill + accent bar -> neutral
+//! border ring). Issue #433 redesign removed the outer glow.
 //!
 //! The CPU-side vertex builder ([`build_toast_verts`]) is a pure function,
 //! fully testable without a GL context; GL calls are confined to
@@ -34,17 +34,18 @@ use super::vertex::VERTS_PER_QUAD;
 
 /// Floats per vertex, summing `a_pos` (2), `a_pill_center` (2),
 /// `a_pill_halfsize` (2), `a_corner` (1), `a_color_top` (4),
-/// `a_color_bottom` (4), `a_glow` (4), `a_accent` (4), and `a_opacity` (1),
-/// for a total of 24. See `toast.vert` for the exact attribute-location
-/// mapping.
-pub(super) const TOAST_VERTEX_FLOATS: usize = 24;
+/// `a_color_bottom` (4), `a_border_color` (4), `a_border_width` (1),
+/// `a_accent` (4), and `a_opacity` (1), for a total of 25. See `toast.vert`
+/// for the exact attribute-location mapping.
+pub(super) const TOAST_VERTEX_FLOATS: usize = 25;
 
 /// Margin, in physical pixels, by which each toast's drawn quad is expanded
 /// beyond its crisp pill rect on every side. Gives the fragment shader room
-/// to render the outer glow (`GLOW_RADIUS` in `toast.frag`) and the
-/// downward-offset drop shadow (`SHADOW_OFFSET` + `SHADOW_BLUR`) without
-/// clipping. Must stay >= the largest of those GLSL constants' reach.
-const GLOW_MARGIN_PX: f32 = 24.0;
+/// to render the downward-offset drop shadow (`SHADOW_OFFSET` +
+/// `SHADOW_BLUR` in `toast.frag`) without clipping. Issue #433 redesign
+/// removed the outer glow, so this only needs to cover the shadow's reach;
+/// it is kept generous so a future shadow-tuning tweak can't clip.
+const SHADOW_MARGIN_PX: f32 = 24.0;
 
 // ---------------------------------------------------------------------------
 //  Public CPU-side data
@@ -67,8 +68,13 @@ pub struct ToastQuad {
     pub color_top: [f32; 4],
     /// Bottom gradient color, straight RGBA, 0..=1.
     pub color_bottom: [f32; 4],
-    /// Glow color (straight RGB) + glow intensity in .a (0..=1).
-    pub glow: [f32; 4],
+    /// Neutral chrome border color, straight RGBA, 0..=1. Set alpha 0 (or
+    /// `border_width` 0) to disable the border. Issue #433 redesign:
+    /// replaces the removed outer glow with a crisp border for separation.
+    pub border_color: [f32; 4],
+    /// Border thickness in physical pixels (drawn as an inner ring inset from
+    /// the pill edge). 0 disables the border.
+    pub border_width: f32,
     /// Left accent-bar color (straight RGBA). Set alpha 0 to disable.
     pub accent: [f32; 4],
     /// Overall opacity multiplier for fade-in/out animation (0..=1).
@@ -257,9 +263,9 @@ impl ToastRenderer {
 /// `location 0 = vec2 a_pos, location 1 = vec2 a_pill_center,
 /// location 2 = vec2 a_pill_halfsize, location 3 = float a_corner,
 /// location 4 = vec4 a_color_top, location 5 = vec4 a_color_bottom,
-/// location 6 = vec4 a_glow, location 7 = vec4 a_accent,
-/// location 8 = float a_opacity`.
-/// Stride = `TOAST_VERTEX_FLOATS * size_of::<f32>()` = 96 bytes.
+/// location 6 = vec4 a_border_color, location 7 = float a_border_width,
+/// location 8 = vec4 a_accent, location 9 = float a_opacity`.
+/// Stride = `TOAST_VERTEX_FLOATS * size_of::<f32>()` = 100 bytes.
 unsafe fn setup_toast_attribs(gl: &glow::Context) {
     let stride = gl_i32(TOAST_VERTEX_FLOATS * size_of::<f32>());
     let f = gl_i32(size_of::<f32>());
@@ -271,9 +277,10 @@ unsafe fn setup_toast_attribs(gl: &glow::Context) {
     let off_corner = 6 * f;
     let off_color_top = 7 * f;
     let off_color_bottom = 11 * f;
-    let off_glow = 15 * f;
-    let off_accent = 19 * f;
-    let off_opacity = 23 * f;
+    let off_border_color = 15 * f;
+    let off_border_width = 19 * f;
+    let off_accent = 20 * f;
+    let off_opacity = 24 * f;
 
     unsafe {
         gl.enable_vertex_attrib_array(0);
@@ -289,11 +296,13 @@ unsafe fn setup_toast_attribs(gl: &glow::Context) {
         gl.enable_vertex_attrib_array(5);
         gl.vertex_attrib_pointer_f32(5, 4, glow::FLOAT, false, stride, off_color_bottom);
         gl.enable_vertex_attrib_array(6);
-        gl.vertex_attrib_pointer_f32(6, 4, glow::FLOAT, false, stride, off_glow);
+        gl.vertex_attrib_pointer_f32(6, 4, glow::FLOAT, false, stride, off_border_color);
         gl.enable_vertex_attrib_array(7);
-        gl.vertex_attrib_pointer_f32(7, 4, glow::FLOAT, false, stride, off_accent);
+        gl.vertex_attrib_pointer_f32(7, 1, glow::FLOAT, false, stride, off_border_width);
         gl.enable_vertex_attrib_array(8);
-        gl.vertex_attrib_pointer_f32(8, 1, glow::FLOAT, false, stride, off_opacity);
+        gl.vertex_attrib_pointer_f32(8, 4, glow::FLOAT, false, stride, off_accent);
+        gl.enable_vertex_attrib_array(9);
+        gl.vertex_attrib_pointer_f32(9, 1, glow::FLOAT, false, stride, off_opacity);
     }
 }
 
@@ -317,11 +326,12 @@ fn build_toast_verts(quads: &[ToastQuad]) -> Vec<f32> {
 /// Append one expanded quad (6 vertices) for `q` to `out`.
 fn push_toast_quad(out: &mut Vec<f32>, q: &ToastQuad) {
     // Expand the drawn quad beyond the crisp pill rect so the fragment
-    // shader has room to render the outer glow and drop shadow.
-    let x0 = q.x - GLOW_MARGIN_PX;
-    let y0 = q.y - GLOW_MARGIN_PX;
-    let x1 = q.x + q.width + GLOW_MARGIN_PX;
-    let y1 = q.y + q.height + GLOW_MARGIN_PX;
+    // shader has room to render the drop shadow (the glow was removed in the
+    // issue #433 redesign).
+    let x0 = q.x - SHADOW_MARGIN_PX;
+    let y0 = q.y - SHADOW_MARGIN_PX;
+    let x1 = q.x + q.width + SHADOW_MARGIN_PX;
+    let y1 = q.y + q.height + SHADOW_MARGIN_PX;
 
     let center = [q.x + q.width / 2.0, q.y + q.height / 2.0];
     let halfsize = [q.width / 2.0, q.height / 2.0];
@@ -337,7 +347,8 @@ fn push_toast_quad(out: &mut Vec<f32>, q: &ToastQuad) {
         out.push(q.corner_radius);
         out.extend_from_slice(&q.color_top);
         out.extend_from_slice(&q.color_bottom);
-        out.extend_from_slice(&q.glow);
+        out.extend_from_slice(&q.border_color);
+        out.push(q.border_width);
         out.extend_from_slice(&q.accent);
         out.push(q.opacity);
     }
@@ -347,7 +358,7 @@ fn push_toast_quad(out: &mut Vec<f32>, q: &ToastQuad) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        GLOW_MARGIN_PX, TOAST_VERTEX_FLOATS, ToastQuad, VERTS_PER_QUAD, build_toast_verts,
+        SHADOW_MARGIN_PX, TOAST_VERTEX_FLOATS, ToastQuad, VERTS_PER_QUAD, build_toast_verts,
     };
 
     fn sample_quad() -> ToastQuad {
@@ -359,7 +370,8 @@ mod tests {
             corner_radius: 10.0,
             color_top: [0.1, 0.2, 0.3, 0.9],
             color_bottom: [0.4, 0.5, 0.6, 0.95],
-            glow: [0.9, 0.1, 0.1, 0.5],
+            border_color: [0.35, 0.36, 0.38, 1.0],
+            border_width: 1.5,
             accent: [0.0, 1.0, 0.0, 1.0],
             opacity: 0.75,
         }
@@ -394,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_quad_extends_beyond_pill_rect_by_glow_margin() {
+    fn expanded_quad_extends_beyond_pill_rect_by_shadow_margin() {
         let q = sample_quad();
         let verts = build_toast_verts(&[q]);
 
@@ -411,10 +423,10 @@ mod tests {
             max_y = max_y.max(y);
         }
 
-        assert!((min_x - (q.x - GLOW_MARGIN_PX)).abs() < f32::EPSILON);
-        assert!((min_y - (q.y - GLOW_MARGIN_PX)).abs() < f32::EPSILON);
-        assert!((max_x - (q.x + q.width + GLOW_MARGIN_PX)).abs() < f32::EPSILON);
-        assert!((max_y - (q.y + q.height + GLOW_MARGIN_PX)).abs() < f32::EPSILON);
+        assert!((min_x - (q.x - SHADOW_MARGIN_PX)).abs() < f32::EPSILON);
+        assert!((min_y - (q.y - SHADOW_MARGIN_PX)).abs() < f32::EPSILON);
+        assert!((max_x - (q.x + q.width + SHADOW_MARGIN_PX)).abs() < f32::EPSILON);
+        assert!((max_y - (q.y + q.height + SHADOW_MARGIN_PX)).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -437,12 +449,14 @@ mod tests {
             assert_eq!(&v[7..11], &q.color_top);
             // color_bottom: floats [11..15)
             assert_eq!(&v[11..15], &q.color_bottom);
-            // glow: floats [15..19)
-            assert_eq!(&v[15..19], &q.glow);
-            // accent: floats [19..23)
-            assert_eq!(&v[19..23], &q.accent);
-            // opacity: float [23]
-            assert!((v[23] - q.opacity).abs() < f32::EPSILON);
+            // border_color: floats [15..19)
+            assert_eq!(&v[15..19], &q.border_color);
+            // border_width: float [19]
+            assert!((v[19] - q.border_width).abs() < f32::EPSILON);
+            // accent: floats [20..24)
+            assert_eq!(&v[20..24], &q.accent);
+            // opacity: float [24]
+            assert!((v[24] - q.opacity).abs() < f32::EPSILON);
         }
     }
 
@@ -460,7 +474,7 @@ mod tests {
         let v0 = &second_quad_verts[0..TOAST_VERTEX_FLOATS];
         // x position of the second quad's first vertex should reflect q2.x,
         // not the first quad's x.
-        assert!((v0[0] - (q2.x - GLOW_MARGIN_PX)).abs() < f32::EPSILON);
-        assert!((v0[23] - q2.opacity).abs() < f32::EPSILON);
+        assert!((v0[0] - (q2.x - SHADOW_MARGIN_PX)).abs() < f32::EPSILON);
+        assert!((v0[24] - q2.opacity).abs() < f32::EPSILON);
     }
 }

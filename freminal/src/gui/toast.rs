@@ -92,11 +92,10 @@ impl ToastKind {
         }
     }
 
-    /// Accent/glow color for this kind, taken directly from the active
+    /// Semantic accent color for this kind, taken directly from the active
     /// theme's palette semantic colors (error/warn/link) rather than a
-    /// hard-coded hue. Used both by [`Self::background`] (the egui-rendered
-    /// bubble fill) and by the owned-renderer layout's glow/accent-bar
-    /// colors ([`layout_toasts`]).
+    /// hard-coded hue. Used by the owned-renderer layout for the left
+    /// accent-bar and icon tint ([`layout_toasts`] / [`toast_colors`]).
     const fn semantic(self, visuals: &egui::Visuals) -> egui::Color32 {
         match self {
             Self::Error => visuals.error_fg_color,
@@ -124,33 +123,24 @@ impl ToastKind {
         }
     }
 
-    /// Background tint for the toast bubble, derived from the active theme.
+    /// Solid background fill for the toast pill, derived from the active
+    /// theme.
     ///
-    /// Each toast kind maps to a palette semantic color (error/warn/link) so
-    /// the bubble follows the theme instead of hard-coded hues. The semantic
-    /// color is darkened toward the panel background and rendered at high
-    /// opacity so it reads as a saturated bubble over any background.
-    fn background(self, visuals: &egui::Visuals) -> egui::Color32 {
-        let accent = self.semantic(visuals);
-        // Blend the accent toward the panel background for a deeper bubble, then
-        // apply a high (but not full) opacity so it sits over the terminal.
-        let base = visuals.panel_fill;
-        let mix = |a: u8, b: u8| -> u8 {
-            use conv2::ConvUtil;
-            // 65% accent, 35% panel background.
-            f32::from(b)
-                .mul_add(0.35, f32::from(a) * 0.65)
-                .round()
-                .clamp(0.0, 255.0)
-                .approx_as::<u8>()
-                .unwrap_or(b)
-        };
-        egui::Color32::from_rgba_unmultiplied(
-            mix(accent.r(), base.r()),
-            mix(accent.g(), base.g()),
-            mix(accent.b(), base.b()),
-            240,
-        )
+    /// Issue #433 visual redesign: the pill fill is the theme's neutral,
+    /// fully-opaque window fill (the same color menus and dialogs use), *not*
+    /// a saturated per-kind tint. The notification kind is expressed by the
+    /// left accent bar and the semantic icon color, not by the whole
+    /// background — so the pill reads as native chrome that sits calmly over
+    /// the terminal rather than a jarring colored bubble. The fill is fully
+    /// opaque (no alpha blending over the terminal) so the message text keeps
+    /// maximum contrast and legibility.
+    ///
+    /// `window_fill` (rather than `panel_fill`) is deliberate: `window_fill`
+    /// is always opaque even when the user has set a translucent
+    /// `background_opacity` (which only affects `panel_fill`), so a toast is
+    /// never see-through.
+    fn background(visuals: &egui::Visuals) -> egui::Color32 {
+        visuals.window_fill.to_opaque()
     }
 
     /// Whether `bg` is light enough that dark text reads better on it.
@@ -822,18 +812,30 @@ struct ToastLayoutMetrics {
     /// The theme's corner radius (see [`corner_radius_pts`]), scaled to
     /// physical pixels.
     corner_radius: f32,
+    /// The neutral chrome border width (from the theme's `window_stroke`,
+    /// Modern 1.0 / Retro 1.5 pt), scaled to physical pixels. Issue #433
+    /// redesign: replaces the removed glow as the pill's separation from the
+    /// terminal, and gives Modern/Retro a subtly different border weight.
+    border_width: f32,
 }
 
-/// The pill/glow/text colors for one toast, derived from its kind's
-/// semantic theme color and its current animation opacity.
+/// The pill/border/text colors for one toast, derived from the active
+/// theme and its current animation opacity.
+///
+/// Issue #433 visual redesign: the pill fill is a neutral, solid theme
+/// color (see [`ToastKind::background`]); the notification kind shows only in
+/// the left accent bar and the icon tint. A neutral chrome border replaces
+/// the old outer glow for separation from the terminal behind it.
 struct ToastColors {
-    /// Pill background gradient, top stop.
+    /// Pill background, top stop (a very subtle vertical gradient is kept for
+    /// depth, but both stops are near the neutral solid fill).
     color_top: [f32; 4],
-    /// Pill background gradient, bottom stop.
+    /// Pill background, bottom stop.
     color_bottom: [f32; 4],
-    /// Outer glow color (rgb) + intensity (a).
-    glow: [f32; 4],
-    /// Left accent-bar color.
+    /// Neutral chrome border color (straight RGBA), from the theme's
+    /// `window_stroke`. Alpha 0 disables the border in the shader.
+    border_color: [f32; 4],
+    /// Left accent-bar color (the notification kind's semantic color).
     accent: [f32; 4],
     /// Label/detail text color, contrast-picked against the pill fill.
     text_color: [f32; 4],
@@ -843,14 +845,26 @@ struct ToastColors {
 
 /// Derive [`ToastColors`] for `kind` from the active theme, at the given
 /// (already-clamped-elsewhere) animation `opacity`.
+///
+/// Issue #433 visual redesign: the fill is the neutral solid theme
+/// background, the border is the neutral `window_stroke` color, and only the
+/// accent bar + icon carry the kind's semantic color.
 fn toast_colors(kind: ToastKind, visuals: &egui::Visuals, opacity: f32) -> ToastColors {
-    let background = kind.background(visuals);
+    let background = ToastKind::background(visuals);
     let base_rgba = color32_to_rgba(background);
-    let color_top = lighten(base_rgba, 0.08);
-    let color_bottom = lighten(base_rgba, -0.06);
+    // A whisper of vertical gradient (±3%) keeps the flat pill from looking
+    // dead without reintroducing the old jarring saturated bubble.
+    let color_top = lighten(base_rgba, 0.03);
+    let color_bottom = lighten(base_rgba, -0.03);
+
     let semantic_rgba = color32_to_rgba(kind.semantic(visuals));
-    let glow = [semantic_rgba[0], semantic_rgba[1], semantic_rgba[2], 0.35];
     let accent = [semantic_rgba[0], semantic_rgba[1], semantic_rgba[2], 1.0];
+
+    // Neutral chrome border for separation from the terminal (replaces the
+    // removed outer glow). The stroke color is already the theme's border
+    // role; its width (Modern 1.0 / Retro 1.5 pt) is applied per-pill by the
+    // layout via `metrics.border_width`.
+    let border_color = color32_to_rgba(visuals.window_stroke.color);
 
     let text_alpha = opacity.clamp(0.0, 1.0);
     let text_rgb = if ToastKind::prefers_dark_text(background) {
@@ -869,7 +883,7 @@ fn toast_colors(kind: ToastKind, visuals: &egui::Visuals, opacity: f32) -> Toast
     ToastColors {
         color_top,
         color_bottom,
-        glow,
+        border_color,
         accent,
         text_color,
         icon_color,
@@ -987,6 +1001,12 @@ fn layout_one_toast(
         .corner_radius
         .min(scaled_width.min(scaled_height) / 2.0)
         .max(0.0);
+    // Clamp the border to half the smaller dimension so a chunky border on a
+    // tiny (mid-scale-in) pill can't cross the pill's center and invert.
+    let border_width = metrics
+        .border_width
+        .min(scaled_width.min(scaled_height) / 2.0)
+        .max(0.0);
     let pill = ToastQuad {
         x,
         y,
@@ -995,7 +1015,8 @@ fn layout_one_toast(
         corner_radius,
         color_top: colors.color_top,
         color_bottom: colors.color_bottom,
-        glow: colors.glow,
+        border_color: colors.border_color,
+        border_width,
         accent: colors.accent,
         opacity: anim.opacity.clamp(0.0, 1.0),
     };
@@ -1047,6 +1068,7 @@ pub(super) fn layout_toasts(
         close_size: CLOSE_SIZE_PTS * ppp,
         detail_gap: DETAIL_GAP_PTS * ppp,
         corner_radius: corner_radius_pts(visuals) * ppp,
+        border_width: visuals.window_stroke.width * ppp,
     };
 
     let sizes: Vec<(f32, f32)> = inputs.iter().map(|i| settled_pill_size(i, ppp)).collect();
@@ -1789,34 +1811,62 @@ mod tests {
     }
 
     #[test]
-    fn background_derives_from_visuals_semantic_colors() {
-        // The bubble fill must be a blend of the kind's palette semantic color
-        // and the panel background — not a hard-coded hue. Use distinct
-        // semantic colors so each kind yields a distinct fill.
+    fn background_is_neutral_opaque_window_fill() {
+        // Issue #433 redesign: the pill fill is the theme's neutral, fully
+        // opaque `window_fill` — the same for every kind (the kind shows in
+        // the accent bar / icon, not the whole background). It must NOT be a
+        // saturated per-kind blend, and it must NOT be translucent even when
+        // `panel_fill` (the terminal-area fill) is translucent.
         let mut v = egui::Visuals::dark();
         v.error_fg_color = egui::Color32::from_rgb(200, 0, 0);
         v.warn_fg_color = egui::Color32::from_rgb(0, 200, 0);
         v.hyperlink_color = egui::Color32::from_rgb(0, 0, 200);
-        v.panel_fill = egui::Color32::from_gray(0);
+        v.window_fill = egui::Color32::from_rgb(30, 32, 36);
+        // A translucent panel fill must not leak into the toast background.
+        v.panel_fill = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 128);
 
-        let err = ToastKind::Error.background(&v);
-        let warn = ToastKind::Warning.background(&v);
-        let info = ToastKind::Info.background(&v);
+        let bg = ToastKind::background(&v);
 
-        // Each is a 65% accent / 35% black blend → dominant channel ~130.
-        assert!(
-            err.r() > err.g() && err.r() > err.b(),
-            "error bubble is red-dominant"
+        assert_eq!(bg.a(), 255, "toast fill must be fully opaque");
+        assert_eq!(
+            (bg.r(), bg.g(), bg.b()),
+            (30, 32, 36),
+            "toast fill is the neutral window_fill, not a per-kind tint"
         );
+    }
+
+    #[test]
+    fn toast_colors_border_from_window_stroke_accent_from_semantic() {
+        // Issue #433 redesign: the border is the neutral window_stroke color;
+        // only the accent bar (and icon) carry the kind's semantic color.
+        let mut v = egui::Visuals::dark();
+        v.error_fg_color = egui::Color32::from_rgb(220, 40, 40);
+        v.window_fill = egui::Color32::from_rgb(30, 32, 36);
+        v.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(90, 92, 96));
+
+        let colors = toast_colors(ToastKind::Error, &v, 1.0);
+
+        // Border is the neutral stroke color, fully opaque.
+        assert!((colors.border_color[0] - 90.0 / 255.0).abs() < 1e-3);
+        assert!((colors.border_color[1] - 92.0 / 255.0).abs() < 1e-3);
+        assert!((colors.border_color[2] - 96.0 / 255.0).abs() < 1e-3);
+        assert!((colors.border_color[3] - 1.0).abs() < 1e-3);
+
+        // Accent is red-dominant (the Error semantic), fully opaque.
         assert!(
-            warn.g() > warn.r() && warn.g() > warn.b(),
-            "warning bubble is green-dominant"
+            colors.accent[0] > colors.accent[1] && colors.accent[0] > colors.accent[2],
+            "accent bar carries the red Error semantic"
         );
-        assert!(
-            info.b() > info.r() && info.b() > info.g(),
-            "info bubble is blue-dominant"
-        );
-        assert_eq!(err.a(), 240, "bubble opacity is 240");
+        assert!((colors.accent[3] - 1.0).abs() < 1e-3);
+
+        // The fill's two gradient stops straddle the neutral window_fill and
+        // are near-neutral (not saturated red).
+        for stop in [colors.color_top, colors.color_bottom] {
+            assert!(
+                (stop[0] - stop[1]).abs() < 0.1 && (stop[1] - stop[2]).abs() < 0.1,
+                "fill stop is near-neutral gray, not a saturated tint"
+            );
+        }
     }
 
     #[test]
@@ -2379,6 +2429,81 @@ mod tests {
         assert!((right0 - right1).abs() < 0.01);
         let expected_right = test_window_rect().max.x - STACK_RIGHT_INSET_PTS;
         assert!((right0 - expected_right).abs() < 0.01);
+    }
+
+    /// Issue #433 redesign: the neutral border width flows end-to-end from
+    /// `visuals.window_stroke.width` (scaled by ppp) into the final
+    /// [`ToastQuad.border_width`], and the border color comes from
+    /// `window_stroke.color`. This is the plumbing the visual redesign adds;
+    /// `toast_colors` alone (unit-tested elsewhere) doesn't prove it reaches
+    /// the quad through `layout_toasts`.
+    #[test]
+    fn border_width_flows_from_window_stroke_into_quad() {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let mut visuals = egui::Visuals::dark();
+        visuals.window_stroke = egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 92, 96));
+
+        let ppp = 2.0;
+        let out = layout_toasts(
+            &[test_input(0, 100.0, false, SETTLED_ANIM)],
+            ToastPosition::TopRightStack,
+            geom,
+            &visuals,
+            ppp,
+        );
+
+        assert_eq!(out.len(), 1);
+        // window_stroke.width (1.5 pt) * ppp (2.0) = 3.0 physical px, and the
+        // settled (scale 1.0) pill is far larger than 2 * 3.0, so the
+        // half-dimension clamp does not bite here.
+        let expected = 1.5 * ppp;
+        assert!(
+            (out[0].pill.border_width - expected).abs() < 0.01,
+            "border_width must be window_stroke.width * ppp, got {}",
+            out[0].pill.border_width
+        );
+        // Border color is the neutral stroke color, fully opaque.
+        assert!((out[0].pill.border_color[0] - 90.0 / 255.0).abs() < 1e-3);
+        assert!((out[0].pill.border_color[3] - 1.0).abs() < 1e-3);
+    }
+
+    /// The border width is clamped to half the pill's smaller (animated)
+    /// dimension so a chunky border on a tiny mid-scale-in pill can't cross
+    /// the pill center and invert. Force the clamp with an absurd stroke
+    /// width and a small-scale entry animation.
+    #[test]
+    fn border_width_clamped_to_half_smaller_dimension() {
+        let geom = ToastGeometry {
+            content_rect: test_window_rect(),
+            active_pane_rect: None,
+        };
+        let mut visuals = egui::Visuals::dark();
+        // Absurdly thick stroke to force the clamp.
+        visuals.window_stroke = egui::Stroke::new(1000.0, egui::Color32::from_rgb(90, 92, 96));
+
+        let out = layout_toasts(
+            &[test_input(0, 100.0, false, ENTRY_ANIM)],
+            ToastPosition::TopRightStack,
+            geom,
+            &visuals,
+            1.0,
+        );
+
+        assert_eq!(out.len(), 1);
+        let pill = out[0].pill;
+        let half_min = pill.width.min(pill.height) / 2.0;
+        assert!(
+            pill.border_width <= half_min + 0.01,
+            "border_width {} must be clamped to <= half the smaller dimension {half_min}",
+            pill.border_width
+        );
+        assert!(
+            pill.border_width >= 0.0,
+            "border_width must be non-negative"
+        );
     }
 
     #[test]
@@ -3054,7 +3179,8 @@ mod tests {
                 corner_radius: 0.0,
                 color_top: [0.0; 4],
                 color_bottom: [0.0; 4],
-                glow: [0.0; 4],
+                border_color: [0.0; 4],
+                border_width: 0.0,
                 accent: [0.0; 4],
                 opacity: 1.0,
             },

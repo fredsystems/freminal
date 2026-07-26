@@ -363,44 +363,23 @@ impl NotificationRouter {
         if cfg!(test) {
             return;
         }
-        let summary = req.summary().to_owned();
-        let body = req.body.clone();
-        // `notify-rust`'s `urgency()` setter exists on Linux/BSD and Windows
-        // but NOT on macOS, so capture whether this is a high-urgency
-        // (error-category) notification here and apply the hint only on the
-        // platforms that support it (see the cfg-gated block below).
-        let critical = matches!(req.kind, NotificationKind::Error);
+        let notification = Self::build_system_notification(req);
         let builder = std::thread::Builder::new().name("freminal-notify".to_owned());
         if let Err(e) = builder.spawn(move || {
-            let mut notification = notify_rust::Notification::new();
-            notification
-                .appname("freminal")
-                .summary(&summary)
-                .body(&body);
-
-            // Error-category notifications use Critical urgency so they persist
-            // and pop as a banner; everything else is Normal. Many Linux
-            // notification daemons only raise a banner (rather than silently
-            // filing the notification in the tray) when an urgency hint is set.
-            //
-            // `notify_rust`'s `urgency()` exists on Linux/BSD and Windows but
-            // NOT on macOS (the `Urgency` type is re-exported there but
-            // deprecated and the method is absent), so gate the call on
-            // `not(target_os = "macos")`.
-            #[cfg(not(target_os = "macos"))]
-            {
-                let urgency = if critical {
-                    notify_rust::Urgency::Critical
-                } else {
-                    notify_rust::Urgency::Normal
-                };
-                notification.urgency(urgency);
+            // Attach the inline `image-data` icon on the background thread, not
+            // the GUI thread: the first call decodes the embedded PNG (~1 MiB
+            // RGBA), which must never block the frame loop (adversarial review
+            // finding 1). `build_system_notification` stays a pure, icon-less
+            // builder so it remains unit-testable without the decode; the
+            // Linux/BSD-only image attachment lives here. The `mut` rebind is
+            // scoped to this cfg so it isn't an unused-mut on macOS/Windows,
+            // where `image_data` does not exist.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let mut notification = notification;
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if let Some(image) = freminal_icon_image() {
+                notification.image_data(image.clone());
             }
-            // Silence the unused-variable warning on macOS, where the urgency
-            // hint is unavailable.
-            #[cfg(target_os = "macos")]
-            let _ = critical;
-
             if let Err(e) = notification.show() {
                 tracing::warn!("failed to show desktop notification: {e}");
             }
@@ -408,6 +387,124 @@ impl NotificationRouter {
             tracing::warn!("failed to spawn notification thread: {e}");
         }
     }
+
+    /// Build the `notify-rust` notification for a freminal-derived / OSC 9 /
+    /// OSC 777 / command-finished desktop notification (the [`show_system`]
+    /// path — *not* the OSC 99 path, which builds its own notification with a
+    /// transmitted icon in [`build_osc99_notification`]).
+    ///
+    /// Attaches the bundled freminal application icon by icon-theme **name**
+    /// (`.icon("freminal")`), matching `assets/freminal.desktop`'s
+    /// `Icon=freminal`. This is the secondary icon hint: it covers
+    /// macOS/Windows and installed setups whose packaging drops
+    /// `freminal.png` into the hicolor theme.
+    ///
+    /// The *primary*, always-works icon — the embedded app icon as inline
+    /// `image-data` bytes (the mechanism Discord & co. use, which shows even
+    /// when freminal is not installed into the system icon theme) — is
+    /// attached separately, on the background notification thread, in
+    /// [`show_system`], because decoding the embedded PNG (~1 MiB RGBA) must
+    /// not run on the GUI thread. Keeping this builder icon-bytes-free is
+    /// deliberate: it stays a pure, cheap, unit-testable function (no decode,
+    /// no `image-data` platform gating) while the heavy Linux/BSD-only image
+    /// work lives off the frame loop. A daemon that honours `image-data` uses
+    /// that; one that only honours `icon` falls back to this name.
+    ///
+    /// The OSC 99 path deliberately builds its own notification with a
+    /// *transmitted* icon (see [`build_osc99_notification`]) and must not be
+    /// routed through here.
+    ///
+    /// Split out as a pure builder (rather than inlined in the spawned thread)
+    /// so the icon/appname/summary/body/urgency wiring is unit-testable
+    /// without invoking the real OS `show()` call (which is skipped under
+    /// `cfg(test)`; see [`show_system`]).
+    ///
+    /// [`show_system`]: Self::show_system
+    /// [`build_osc99_notification`]: Self::build_osc99_notification
+    fn build_system_notification(req: &NotificationRequest) -> notify_rust::Notification {
+        let mut notification = notify_rust::Notification::new();
+        notification
+            .appname("freminal")
+            // Secondary, name-based icon hint (see doc above). `.icon()` is
+            // available on every platform in notify-rust 4.18 (a no-op where
+            // unsupported); it is the same name-based `.icon(name)` call
+            // `build_osc99_notification` uses in its no-transmitted-bytes
+            // branch. The primary inline-bytes icon is attached in
+            // `show_system` on the background thread.
+            .icon("freminal")
+            .summary(req.summary())
+            .body(&req.body);
+
+        // Error-category notifications use Critical urgency so they persist
+        // and pop as a banner; everything else is Normal. Many Linux
+        // notification daemons only raise a banner (rather than silently
+        // filing the notification in the tray) when an urgency hint is set.
+        //
+        // `notify_rust`'s `urgency()` exists on Linux/BSD and Windows but
+        // NOT on macOS (the `Urgency` type is re-exported there but
+        // deprecated and the method is absent), so gate the call on
+        // `not(target_os = "macos")`.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let urgency = if matches!(req.kind, NotificationKind::Error) {
+                notify_rust::Urgency::Critical
+            } else {
+                notify_rust::Urgency::Normal
+            };
+            notification.urgency(urgency);
+        }
+
+        notification
+    }
+}
+
+/// The bundled freminal application icon as a notify-rust [`Image`], decoded
+/// once from the embedded `assets/icon.png` and cached for the process
+/// lifetime.
+///
+/// Returns `None` (and logs a warning once) if the embedded PNG fails to
+/// decode or the pixels don't form a valid RGBA image — a missing
+/// notification icon is non-fatal, so callers simply omit the `image-data`
+/// hint in that case.
+///
+/// Linux/BSD only: notify-rust's [`notify_rust::Image`] /
+/// [`notify_rust::Notification::image_data`] are gated
+/// `#[cfg(all(unix, not(target_os = "macos")))]`.
+///
+/// [`Image`]: notify_rust::Image
+#[cfg(all(unix, not(target_os = "macos")))]
+fn freminal_icon_image() -> Option<&'static notify_rust::Image> {
+    use std::sync::OnceLock;
+
+    static ICON: OnceLock<Option<notify_rust::Image>> = OnceLock::new();
+
+    ICON.get_or_init(|| {
+        use conv2::ValueInto as _;
+
+        // The same embedded PNG used for the OS window icon (see gui::run).
+        const ICON_PNG: &[u8] = include_bytes!("../../../assets/icon.png");
+
+        let rgba = match image::load_from_memory(ICON_PNG) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                tracing::warn!("failed to decode embedded notification icon: {e}");
+                return None;
+            }
+        };
+        let (width, height) = rgba.dimensions();
+        let (Ok(width), Ok(height)) = (width.value_into(), height.value_into()) else {
+            tracing::warn!("embedded notification icon dimensions out of range");
+            return None;
+        };
+        match notify_rust::Image::from_rgba(width, height, rgba.into_raw()) {
+            Ok(image) => Some(image),
+            Err(e) => {
+                tracing::warn!("failed to build notification icon image: {e}");
+                None
+            }
+        }
+    })
+    .as_ref()
 }
 
 /// Record of a live OSC 99 notification (for update/close reconciliation).
@@ -1069,6 +1166,126 @@ mod tests {
             body: "done".to_owned(),
         };
         assert_eq!(req.summary(), "Build");
+    }
+
+    /// Slice 3 (#433): the `show_system` path attaches the bundled freminal
+    /// application icon by name (a secondary hint alongside the inline
+    /// `image-data` bytes on Linux/BSD) so desktop notifications show the app
+    /// icon. The name matches `assets/freminal.desktop`'s `Icon=freminal`.
+    #[test]
+    fn build_system_notification_sets_freminal_icon() {
+        let req = NotificationRequest {
+            kind: NotificationKind::OscText,
+            source: Some(OscNotifySource::Osc9),
+            title: Some("Hello".to_owned()),
+            body: "world".to_owned(),
+        };
+        let notification = NotificationRouter::build_system_notification(&req);
+        assert_eq!(notification.icon, "freminal");
+        assert_eq!(notification.appname, "freminal");
+        assert_eq!(notification.summary, "Hello");
+        assert_eq!(notification.body, "world");
+    }
+
+    /// The embedded `assets/icon.png` must decode into a valid notify-rust
+    /// `Image` so the inline `image-data` icon actually works (this is the
+    /// path that shows the icon even when freminal is not installed into the
+    /// system icon theme). A `None` here means the icon silently vanishes
+    /// from every desktop notification. Linux/BSD only (matches the `cfg` on
+    /// `freminal_icon_image`).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn embedded_notification_icon_decodes() {
+        assert!(
+            super::freminal_icon_image().is_some(),
+            "embedded assets/icon.png must decode into a valid RGBA notification image"
+        );
+    }
+
+    /// The builder still applies the per-kind summary fallback when the
+    /// request carries no explicit title.
+    #[test]
+    fn build_system_notification_uses_summary_fallback() {
+        let req = osc_req("body text");
+        let notification = NotificationRouter::build_system_notification(&req);
+        // `OscText` with no title falls back to the kind-derived default.
+        assert_eq!(notification.summary, "Notification");
+        assert_eq!(notification.icon, "freminal");
+    }
+
+    /// Slice 3 invariant guard: the OSC 99 path must NOT be given the
+    /// `"freminal"` app icon — it carries its own transmitted icon (a named
+    /// freedesktop icon, or transmitted bytes via `image_path`). This locks
+    /// the "slice 3 only touches `show_system`, never the OSC 99 path"
+    /// boundary so a future "make it consistent" edit can't silently override
+    /// a program's transmitted OSC 99 icon with the freminal app icon.
+    #[test]
+    fn build_osc99_notification_uses_transmitted_icon_not_freminal() {
+        // Named-icon branch: the transmitted freedesktop icon name is used.
+        let (named, temp) = NotificationRouter::build_osc99_notification(
+            Some("id-1"),
+            Some("Title"),
+            "body",
+            None,
+            &[],
+            None,
+            None,
+            None,
+            &["weather-clear".to_owned()],
+            None,
+        );
+        assert_eq!(
+            named.icon, "weather-clear",
+            "OSC 99 must use the transmitted icon name, never \"freminal\""
+        );
+        assert!(temp.is_none(), "no temp file when no bytes transmitted");
+
+        // Transmitted-bytes branch: `.icon` stays empty (bytes go to
+        // `image_path` via a temp file), and definitely is not "freminal".
+        let (with_bytes, temp) = NotificationRouter::build_osc99_notification(
+            Some("id-2"),
+            Some("Title"),
+            "body",
+            None,
+            &[],
+            None,
+            None,
+            None,
+            &[],
+            Some(vec![1, 2, 3, 4]),
+        );
+        assert_ne!(
+            with_bytes.icon, "freminal",
+            "OSC 99 transmitted-bytes path must not fall back to the freminal app icon"
+        );
+        // Clean up the temp file the bytes branch created.
+        if let Some(path) = temp {
+            NotificationRouter::remove_icon_temp_file(&path);
+        }
+    }
+
+    /// Error-category notifications carry Critical urgency on the platforms
+    /// that support the hint; everything else is Normal. The urgency lives in
+    /// `notify_rust::Notification::hints`, which the crate itself gates
+    /// `#[cfg(all(unix, not(target_os = "macos")))]` — so this test must use
+    /// the *same* cfg as the field. (macOS lacks the `urgency()` setter;
+    /// Windows stores urgency in a private field with no `.hints`.) The
+    /// production `#[cfg(not(target_os = "macos"))]` urgency call in
+    /// `build_system_notification` still runs on Windows — this test just
+    /// can't observe it there without a public accessor.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn build_system_notification_urgency_by_kind() {
+        use notify_rust::{Hint, Urgency};
+
+        let mut req = osc_req("x");
+        req.kind = NotificationKind::Error;
+        let critical = NotificationRouter::build_system_notification(&req);
+        assert!(critical.hints.contains(&Hint::Urgency(Urgency::Critical)));
+
+        req.kind = NotificationKind::OscText;
+        let normal = NotificationRouter::build_system_notification(&req);
+        assert!(normal.hints.contains(&Hint::Urgency(Urgency::Normal)));
     }
 
     #[test]
