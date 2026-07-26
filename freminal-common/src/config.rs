@@ -1761,14 +1761,43 @@ pub enum ConfigError {
 /// # Errors
 /// Returns `ConfigError` if any config file cannot be read or parsed, or if the final config
 /// is invalid.
+///
+/// Any non-fatal deprecation warnings (e.g. a config still using a renamed
+/// key) are logged via `tracing::warn!`. Callers that need to surface the
+/// warnings through their own channel (a startup warning buffer, a GUI toast)
+/// should use [`load_config_with_warnings`] instead.
 pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> {
+    let (cfg, warnings) = load_config_with_warnings(explicit_path)?;
+    for warning in &warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(cfg)
+}
+
+/// Load the configuration exactly like [`load_config`], but also return any
+/// non-fatal deprecation warnings collected during the load instead of only
+/// logging them.
+///
+/// This exists because config loading happens before the tracing subscriber
+/// is initialised in `main`, so a `tracing::warn!` emitted here would be
+/// swallowed. The binary threads these strings into its early-warning buffer
+/// (replayed once logging is ready) and, on an interactive reload, into a
+/// toast.
+///
+/// # Errors
+/// Returns `ConfigError` if any config file cannot be read or parsed, or if
+/// the final config is invalid.
+pub fn load_config_with_warnings(
+    explicit_path: Option<&Path>,
+) -> Result<(Config, Vec<String>), ConfigError> {
     let mut cfg = Config::default();
+    let mut warnings: Vec<String> = Vec::new();
 
     if let Some(path) = explicit_path {
         // Explicit --config: use ONLY this file on top of defaults.
         // Skip system, user, and env-var layers so the file is fully
         // isolated (no contamination from e.g. a home-manager managed config).
-        let partial = load_partial(path)?;
+        let partial = load_partial(path, &mut warnings)?;
         cfg.apply_partial(partial);
     } else {
         // Normal layered loading: system → user → env var.
@@ -1777,7 +1806,7 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Some(system_path) = system_config_path()
             && system_path.is_file()
         {
-            let partial = load_partial(&system_path)?;
+            let partial = load_partial(&system_path, &mut warnings)?;
             cfg.apply_partial(partial);
         }
 
@@ -1785,7 +1814,7 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Some(user_path) = user_config_path()
             && user_path.is_file()
         {
-            let partial = load_partial(&user_path)?;
+            let partial = load_partial(&user_path, &mut warnings)?;
             cfg.apply_partial(partial);
         }
 
@@ -1793,14 +1822,14 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Ok(env_path) = env::var("FREMINAL_CONFIG") {
             let path = PathBuf::from(env_path);
             if path.is_file() {
-                let partial = load_partial(&path)?;
+                let partial = load_partial(&path, &mut warnings)?;
                 cfg.apply_partial(partial);
             }
         }
     }
 
     cfg.validate()?;
-    Ok(cfg)
+    Ok((cfg, warnings))
 }
 
 /// Saves the configuration to a TOML file.
@@ -1904,13 +1933,13 @@ fn is_dir_writable(dir: &Path) -> bool {
 /// ---------------------------------------------------------------------------------------------
 ///  Helpers
 /// ---------------------------------------------------------------------------------------------
-fn load_partial(path: &Path) -> Result<ConfigPartial, ConfigError> {
+fn load_partial(path: &Path, warnings: &mut Vec<String>) -> Result<ConfigPartial, ConfigError> {
     let contents = fs::read_to_string(path).map_err(|source| ConfigError::Io {
         path: path.to_path_buf(),
         source,
     })?;
 
-    warn_on_deprecated_keys(path, &contents);
+    collect_deprecated_key_warnings(path, &contents, warnings);
 
     toml::from_str(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
@@ -1918,18 +1947,22 @@ fn load_partial(path: &Path) -> Result<ConfigPartial, ConfigError> {
     })
 }
 
-/// Emit a one-time `warn`-level notice for any deprecated config keys present
-/// in a config file, before the file is deserialized.
+/// Append a human-readable warning for any deprecated config keys present in
+/// a config file, before the file is deserialized.
 ///
 /// Deprecated keys still load (via `#[serde(alias = ...)]`), so this warning
 /// is the only signal a user gets that their key name is obsolete and should
 /// be updated. The scan parses the raw TOML into a generic value so a
 /// key-name match inside a comment or string cannot produce a false positive.
 ///
+/// Warnings are collected rather than logged directly because config loading
+/// runs before the tracing subscriber is initialised (see
+/// [`load_config_with_warnings`]).
+///
 /// Currently detects:
 /// - `[notifications] routing_info` — renamed to `routing_osc_text` (issue
 ///   #433).
-fn warn_on_deprecated_keys(path: &Path, contents: &str) {
+fn collect_deprecated_key_warnings(path: &Path, contents: &str, warnings: &mut Vec<String>) {
     // A parse failure here is not fatal: the real deserialize below reports
     // the error with proper context, so a malformed file simply skips the
     // deprecation scan.  Use `toml::from_str` (document parse) rather than
@@ -1940,12 +1973,12 @@ fn warn_on_deprecated_keys(path: &Path, contents: &str) {
     };
 
     if config_uses_deprecated_routing_info(&value) {
-        tracing::warn!(
-            path = %path.display(),
-            "config key `[notifications] routing_info` is deprecated and was \
-             renamed to `routing_osc_text` (issue #433); it still works via a \
-             compatibility alias but you should rename it in your config"
-        );
+        warnings.push(format!(
+            "config key `[notifications] routing_info` in {} is deprecated and \
+             was renamed to `routing_osc_text` (issue #433); it still works via \
+             a compatibility alias but you should rename it in your config",
+            path.display()
+        ));
     }
 }
 
@@ -4165,6 +4198,51 @@ path = "/tmp/my.frag"
 
         let loaded = load_config(Some(&path)).expect("load_config should succeed");
         assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn load_config_with_warnings_reports_deprecated_routing_info() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("deprecated.toml");
+        let mut file = fs::File::create(&path).expect("create temp config");
+        writeln!(file, "[notifications]\nrouting_info = \"system\"").expect("write temp config");
+
+        let (cfg, warnings) = load_config_with_warnings(Some(&path)).expect("load should succeed");
+
+        // The deprecated key still takes effect via the serde alias …
+        assert_eq!(
+            cfg.notifications.routing_osc_text,
+            NotificationRouting::System
+        );
+        // … and a warning is surfaced for the caller to replay/toast.
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected one deprecation warning: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("routing_info") && warnings[0].contains("routing_osc_text"),
+            "warning should name both the old and new key: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_config_with_warnings_is_silent_for_current_keys() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("current.toml");
+        let mut file = fs::File::create(&path).expect("create temp config");
+        writeln!(file, "[notifications]\nrouting_osc_text = \"system\"")
+            .expect("write temp config");
+
+        let (_cfg, warnings) = load_config_with_warnings(Some(&path)).expect("load should succeed");
+        assert!(
+            warnings.is_empty(),
+            "a config using the current key must produce no warnings: {warnings:?}"
+        );
     }
 
     /// RAII guard that sets an env var on creation and restores the previous
