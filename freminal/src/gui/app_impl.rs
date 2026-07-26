@@ -3124,6 +3124,7 @@ impl freminal_windowing::App for FreminalGui {
         // `.show()` a no-op here anyway.
         if chrome_mode == freminal_windowing::ChromeMode::Full
             && let Ok(mut stack) = self.toasts.try_borrow_mut()
+            && !stack.is_empty()
         {
             // Rebuild the same geometry `central_body` used to populate
             // `cached_central_rect`/the pane layout — `win` is a local

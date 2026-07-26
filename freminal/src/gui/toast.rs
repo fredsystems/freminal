@@ -409,9 +409,9 @@ const STACK_TOP_INSET_PTS: f32 = 44.0;
 /// Where the toast stack is anchored within the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum ToastPosition {
-    /// Stacked in the top-right corner of the window — the only placement
-    /// [`ToastStack::show`] currently produces toasts at (`Toast` carries no
-    /// per-toast position yet).
+    /// Stacked in the top-right corner of the window — the default placement
+    /// for toasts pushed without an explicit [`ToastPlacement`] (errors,
+    /// info, and OSC 9/777/99/133D notifications). See [`resolve_anchor`].
     #[default]
     TopRightStack,
     /// The whole stack centered within the window's content rect. Used for
@@ -1235,8 +1235,14 @@ fn group_and_layout(
     }
 
     // Every original index was placed into exactly one group above, so
-    // every slot is `Some` here — `flatten` just unwraps them.
-    outputs.into_iter().flatten().collect()
+    // every slot is `Some` here — `flatten` just unwraps them. The
+    // debug-assert keeps a future invariant break (a group whose
+    // `layout_toasts` returns fewer outputs than its indices) loud rather
+    // than silently shortening `outputs` and desyncing the
+    // `outputs[i] <-> entries[i]` mapping `hit_test`/`topmost_hit` rely on.
+    let laid_out: Vec<ToastLayoutOutput> = outputs.into_iter().flatten().collect();
+    debug_assert_eq!(laid_out.len(), inputs.len());
+    laid_out
 }
 
 /// Ordered stack of active toasts, rendered top-to-bottom from the most
