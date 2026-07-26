@@ -378,9 +378,18 @@ pub const fn raw_mods_to_key_modifiers(
 ///
 /// The caller is responsible for NOT calling this while an overlay owns
 /// keyboard input (global `ui_overlay_open`, or a per-pane search /
-/// command-history / context-menu overlay) — in that case it clears the
-/// queue instead of draining, so intercepted keys cannot bypass the overlay
-/// and reach the PTY. See the drain call site in `app_impl.rs`.
+/// command-history / context-menu overlay), or while a pane-border
+/// drag-to-resize is in progress (`border_drag_active`) — in any of these
+/// cases it clears the queue instead of draining, so intercepted keys
+/// cannot bypass the overlay/resize and reach the PTY. See the drain call
+/// site in `app_impl.rs`.
+///
+/// Unlike the pointer-input suppression in `widget.rs`, the border-drag
+/// gate here needs no one-frame release tail: a raw key is only ever queued
+/// because it was physically pressed, and ending a drag does not synthesize
+/// a key event (whereas a drag-release *does* synthesize a spurious pointer
+/// click, which is why that path carries a tail). Gating on the
+/// current-frame `border_drag_active` is therefore sufficient.
 ///
 /// ## Broadcast (Task 74)
 ///

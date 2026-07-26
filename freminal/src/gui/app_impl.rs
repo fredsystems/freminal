@@ -2316,17 +2316,25 @@ impl freminal_windowing::App for FreminalGui {
                     // right-click context menu) also own keyboard input and
                     // suppress normal terminal input; queued raw keys must be
                     // gated the same way so they cannot bypass those overlays.
+                    // A pane-border drag-to-resize is another suppression
+                    // cause (#456 review): the same "no terminal input while
+                    // a border drag is active" invariant that `show()` is
+                    // handed via `border_drag_active` must also apply here,
+                    // or queued raw keys leak keypad/media keys to the PTY
+                    // mid-resize.
                     let pane_input_suppressed = pane.view_state.search_state.is_open
                         || pane.view_state.command_history.is_open
                         || pane.view_state.context_menu_pos.is_some();
-                    if ui_overlay_open || pane_input_suppressed {
+                    if ui_overlay_open || pane_input_suppressed || border_drag_active {
                         // An overlay (rename/paste/close/broadcast dialog,
                         // menu, welcome/about window, save-layout, or a
                         // per-pane search/history/context menu) owns keyboard
                         // input this frame — the same gate that suppresses
-                        // normal terminal input. Drop the queued raw keys
-                        // instead of forwarding them to the PTY, so
-                        // intercepted keys cannot bypass the overlay.
+                        // normal terminal input. A pane-border drag-to-resize
+                        // in progress is the same case: the divider owns
+                        // input this frame. Drop the queued raw keys instead
+                        // of forwarding them to the PTY, so intercepted keys
+                        // cannot bypass the overlay or leak during a resize.
                         win.pending_raw_keys.clear();
                     } else {
                         let super_pressed = pane.render_cache.super_pressed();
