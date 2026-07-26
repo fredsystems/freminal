@@ -726,6 +726,7 @@ impl super::FreminalGui {
                             crate::gui::toast::ToastKind::Info,
                             "Layout saved",
                             Some(format!("{}", path.display())),
+                            crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
                         );
                     }
                     Err(e) => {

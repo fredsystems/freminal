@@ -189,6 +189,7 @@ impl super::FreminalGui {
                     crate::gui::toast::ToastKind::Info,
                     "Recording started",
                     Some(format!("Saving to {}", path.display())),
+                    crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
                 );
                 self.recording_path = Some(path);
             }
@@ -223,6 +224,7 @@ impl super::FreminalGui {
                 crate::gui::toast::ToastKind::Info,
                 "Recording stopped",
                 Some(format!("Saved to {}", path.display())),
+                crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
             );
         } else {
             tracing::info!("Stopped recording");
@@ -231,6 +233,7 @@ impl super::FreminalGui {
                 crate::gui::toast::ToastKind::Info,
                 "Recording stopped",
                 None,
+                crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
             );
         }
     }

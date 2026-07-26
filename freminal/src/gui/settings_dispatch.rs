@@ -303,6 +303,7 @@ impl FreminalGui {
             crate::gui::toast::ToastKind::Info,
             "Config reloaded",
             Some(format!("From {}", path.display())),
+            crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
         );
     }
 

@@ -33,9 +33,11 @@
 
 use std::time::{Duration, Instant};
 
+use super::WindowId;
 use super::font_manager::FontManager;
 use super::icons::ChromeIcon;
 use super::renderer::ToastRenderState;
+use crate::gui::panes::PaneId;
 
 // ---------------------------------------------------------------------------
 //  Animation constants
@@ -74,7 +76,7 @@ pub(super) enum ToastKind {
     /// Non-fatal error that the user should see.
     Error,
     /// Warning that does not prevent continued operation. Used by the
-    /// paste-blocked toast (see [`ToastStack::warning`]).
+    /// paste-blocked toast (routed via [`ToastStack::push_positioned`]).
     Warning,
     /// Informational message.
     Info,
@@ -187,10 +189,20 @@ pub(super) struct Toast {
     /// When the toast was last hovered.  `None` if never hovered.  Used
     /// to extend the lifetime of a toast the user is reading.
     last_hovered: Option<Instant>,
+    /// Anchor placement (and, for a pane-centered toast, its window+pane
+    /// origin). Defaults to [`ToastPlacement::TOP_RIGHT`] for toasts pushed
+    /// without an explicit placement.
+    placement: ToastPlacement,
 }
 
 impl Toast {
-    fn new(kind: ToastKind, title: String, detail: Option<String>, id: u64) -> Self {
+    fn new(
+        kind: ToastKind,
+        title: String,
+        detail: Option<String>,
+        id: u64,
+        placement: ToastPlacement,
+    ) -> Self {
         Self {
             kind,
             title,
@@ -198,7 +210,18 @@ impl Toast {
             id,
             created: Instant::now(),
             last_hovered: None,
+            placement,
         }
+    }
+
+    /// This toast's anchor placement (see [`ToastPosition`]).
+    pub(super) const fn position(&self) -> ToastPosition {
+        self.placement.position
+    }
+
+    /// This toast's origin `(WindowId, PaneId)`, if any (see the field docs).
+    pub(super) const fn origin(&self) -> Option<(WindowId, PaneId)> {
+        self.placement.origin
     }
 
     /// Returns `true` if the toast should be removed this frame.
@@ -386,30 +409,74 @@ const STACK_TOP_INSET_PTS: f32 = 44.0;
 /// Where the toast stack is anchored within the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum ToastPosition {
-    /// Stacked in the top-right corner of the window — the only placement
-    /// [`ToastStack::show`] currently produces toasts at (`Toast` carries no
-    /// per-toast position yet).
+    /// Stacked in the top-right corner of the window — the default placement
+    /// for toasts pushed without an explicit [`ToastPlacement`] (errors,
+    /// info, and OSC 9/777/99/133D notifications). See [`resolve_anchor`].
     #[default]
     TopRightStack,
-    /// The whole stack centered within the window.
-    #[allow(dead_code)]
-    // Reserved: no caller currently attaches a per-toast position (`Toast`
-    // has no `position` field yet), so only `TopRightStack` is ever
-    // constructed. Kept for a future toast kind that centers itself (e.g. a
-    // blocking-confirmation-style toast).
+    /// The whole stack centered within the window's content rect. Used for
+    /// freminal-derived toasts with no pane origin, or whose pane origin is
+    /// in a window other than the one currently being rendered — see
+    /// [`resolve_anchor`].
     WindowCentered,
-    /// The whole stack centered within the active pane. Falls back to the
-    /// window rect when no active pane rect is known (e.g. no pane focused,
-    /// or a window with no panes yet).
-    #[allow(dead_code)]
-    // Reserved: see `WindowCentered`.
+    /// Centered within the originating pane's rect, resolved in the toast's
+    /// origin window (see [`Toast::origin`]). Falls back to
+    /// [`ToastPosition::WindowCentered`] when the pane is not found in the
+    /// window currently being rendered (foreign window, no origin, or the
+    /// pane has since closed) — see [`resolve_anchor`].
     PaneCentered,
+}
+
+/// Where a toast is anchored plus, for a pane-centered toast, which
+/// window+pane it originates from.
+///
+/// Bundled so the toast push/route APIs that carry a placement stay under
+/// the `too_many_arguments` limit (mirroring [`ToastMeasureSizes`] /
+/// [`ToastLayoutMetrics`]). `origin` is consulted only when `position` is
+/// [`ToastPosition::PaneCentered`]; it is resolved to a pane rect at render
+/// time in the toast's origin window and falls back to window-centered in
+/// any other window (or when `None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct ToastPlacement {
+    /// The anchor placement (top-right stack, window-centered, pane-centered).
+    pub position: ToastPosition,
+    /// The originating `(WindowId, PaneId)`, if any. See the struct docs.
+    pub origin: Option<(WindowId, PaneId)>,
+}
+
+impl ToastPlacement {
+    /// The default top-right stacked placement with no origin — used by the
+    /// severity convenience pushers ([`ToastStack::error`] / [`info`]) and by
+    /// any toast that does not opt into centered positioning.
+    pub(super) const TOP_RIGHT: Self = Self {
+        position: ToastPosition::TopRightStack,
+        origin: None,
+    };
+
+    /// A window-centered placement with no pane origin — used by
+    /// freminal-derived, app/window-level toasts (recording, layout, config
+    /// reload, remote clipboard, paste-blocked) that are not tied to a
+    /// specific pane.
+    pub(super) const WINDOW_CENTERED: Self = Self {
+        position: ToastPosition::WindowCentered,
+        origin: None,
+    };
+
+    /// A pane-centered placement originating from `(window_id, pane_id)` —
+    /// used by pane-specific toasts (e.g. "Copied to clipboard") so they
+    /// center within their originating pane in that window.
+    pub(super) const fn pane_centered(window_id: WindowId, pane_id: PaneId) -> Self {
+        Self {
+            position: ToastPosition::PaneCentered,
+            origin: Some((window_id, pane_id)),
+        }
+    }
 }
 
 /// Geometry inputs to [`layout_toasts`], in LOGICAL points (egui's own
 /// coordinate space — the same space `ctx.content_rect()` and pane layout
 /// rects live in).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ToastGeometry {
     /// The central-panel content rect — the terminal area, i.e. the window
     /// *minus* the menu/tab chrome (it is `win.cached_central_rect`). This is
@@ -997,6 +1064,187 @@ pub(super) fn layout_toasts(
         .collect()
 }
 
+/// Resolve the position + geometry a toast should actually be laid out at
+/// in the window currently rendering it.
+///
+/// `toast_position`/`origin_pane` describe the toast's own declared anchor
+/// and (for [`ToastPosition::PaneCentered`]) its origin pane;
+/// `is_origin_window` is `true` iff the toast's origin window (see
+/// [`Toast::origin`]) is the window currently rendering. Comparing
+/// `WindowId`s themselves is left to the caller
+/// ([`ToastStack::layout_positioned`]): `WindowId` only exposes a
+/// `winit`-backed constructor, so no second, distinct `WindowId` can be
+/// fabricated in a unit test — taking the comparison result as a `bool`
+/// here instead keeps this function unit-testable.
+///
+/// - [`ToastPosition::TopRightStack`] and [`ToastPosition::WindowCentered`]
+///   always resolve against `content_rect` (this window's content area);
+///   `resolve_pane_rect` is not consulted.
+/// - [`ToastPosition::PaneCentered`] resolves the origin pane's rect via
+///   `resolve_pane_rect` only when `is_origin_window` is `true` and
+///   `origin_pane` is `Some`; if `resolve_pane_rect` returns `None` (the
+///   pane is not in this window, e.g. it has since closed) it falls back to
+///   [`ToastPosition::WindowCentered`], same as a foreign window or a
+///   missing origin.
+fn resolve_anchor(
+    toast_position: ToastPosition,
+    is_origin_window: bool,
+    origin_pane: Option<PaneId>,
+    content_rect: egui::Rect,
+    resolve_pane_rect: &impl Fn(PaneId) -> Option<egui::Rect>,
+) -> (ToastPosition, ToastGeometry) {
+    let window_geom = ToastGeometry {
+        content_rect,
+        active_pane_rect: None,
+    };
+    match toast_position {
+        ToastPosition::TopRightStack => (ToastPosition::TopRightStack, window_geom),
+        ToastPosition::WindowCentered => (ToastPosition::WindowCentered, window_geom),
+        ToastPosition::PaneCentered => {
+            if is_origin_window
+                && let Some(pane) = origin_pane
+                && let Some(pane_rect) = resolve_pane_rect(pane)
+            {
+                (
+                    ToastPosition::PaneCentered,
+                    ToastGeometry {
+                        content_rect,
+                        active_pane_rect: Some(pane_rect),
+                    },
+                )
+            } else {
+                (ToastPosition::WindowCentered, window_geom)
+            }
+        }
+    }
+}
+
+/// The concrete rect a resolved anchor lays its stack out against, or `None`
+/// for the top-right stack (which anchors to a corner, not a center).
+///
+/// This is the *grouping identity* used by [`group_and_layout`]: two toasts
+/// belong in the same layout group iff their `layout_key`s are equal. It
+/// deliberately collapses [`ToastPosition::WindowCentered`] and
+/// [`ToastPosition::PaneCentered`] onto the *same* key when they center on
+/// the *same* rect — the common single-pane case, where a pane's rect equals
+/// the window content rect. Without this collapse the two would form separate
+/// groups laid out independently and render exactly on top of each other,
+/// occluding (and, since `topmost_hit` picks the newest at a shared rect,
+/// making un-dismissable) the older toast until it expires.
+fn layout_key(position: ToastPosition, geom: ToastGeometry) -> Option<egui::Rect> {
+    match position {
+        ToastPosition::TopRightStack => None,
+        ToastPosition::WindowCentered => Some(geom.content_rect),
+        ToastPosition::PaneCentered => Some(geom.active_pane_rect.unwrap_or(geom.content_rect)),
+    }
+}
+
+/// The canonical `(position, geometry)` to feed [`layout_toasts`] for a group
+/// identified by `key` (see [`layout_key`]). A `None` key is the top-right
+/// stack; a `Some(rect)` key is a centered stack, always laid out as
+/// [`ToastPosition::WindowCentered`] over that rect (both centered variants
+/// share identical centering math in [`settled_origins`], so collapsing them
+/// onto one representative keeps coincident centered groups stacked rather
+/// than overlapping).
+const fn canonical_anchor(
+    key: Option<egui::Rect>,
+    content_rect: egui::Rect,
+) -> (ToastPosition, ToastGeometry) {
+    // A centered key lays out as `WindowCentered` over the keyed rect (both
+    // centered variants share identical centering math); a `None` key is the
+    // top-right stack over `content_rect`.
+    if let Some(rect) = key {
+        (
+            ToastPosition::WindowCentered,
+            ToastGeometry {
+                content_rect: rect,
+                active_pane_rect: None,
+            },
+        )
+    } else {
+        (
+            ToastPosition::TopRightStack,
+            ToastGeometry {
+                content_rect,
+                active_pane_rect: None,
+            },
+        )
+    }
+}
+
+/// Group `inputs` by the effective anchor each was resolved to (`anchors[i]`
+/// for `inputs[i]`, same length, same order — see [`resolve_anchor`]), run
+/// [`layout_toasts`] once per group of toasts sharing an anchor (so they
+/// still stack against each other), then scatter every group's outputs back
+/// into one `Vec<ToastLayoutOutput>` in the SAME order as `inputs`.
+///
+/// Grouping identity is [`layout_key`], NOT the raw `(position, geometry)`:
+/// two centered toasts that resolve to the same rect (e.g. a pane-centered
+/// toast in a single-pane window, whose pane rect equals the window content
+/// rect, and a window-centered toast) share one group and stack, rather than
+/// forming two independent groups that render on top of each other.
+///
+/// Preserving input order is required: [`ToastStack::hit_test`] and
+/// `topmost_hit` rely on `outputs[i]` corresponding to the toast `inputs[i]`
+/// was built from, and on "newest last in the vec" meaning "drawn on top" —
+/// grouping toasts by anchor must never reorder them relative to each
+/// other.
+///
+/// Deliberately takes no [`Toast`]/[`WindowId`] — only the already-resolved
+/// `anchors` — so this (unlike [`ToastStack::layout_positioned`], its only
+/// caller) is unit-testable without fabricating a `WindowId`.
+///
+/// Groups are found via a linear scan rather than a hash map:
+/// [`layout_key`] carries `f32` rects, which must never be used as a hash
+/// key, and the toast count is capped at [`MAX_TOASTS`] (5), so a linear
+/// scan stays cheap.
+fn group_and_layout(
+    inputs: &[ToastLayoutInput],
+    anchors: &[(ToastPosition, ToastGeometry)],
+    visuals: &egui::Visuals,
+    ppp: f32,
+) -> Vec<ToastLayoutOutput> {
+    debug_assert_eq!(inputs.len(), anchors.len());
+
+    // Bucket each input (by its original index) into the group of toasts
+    // sharing the same layout key, preserving first-seen group order. The
+    // key collapses coincident centered anchors (see `layout_key`); the
+    // per-group `content_rect` is retained so `canonical_anchor` can rebuild
+    // the top-right stack's geometry when the key is `None`.
+    let mut groups: Vec<(Option<egui::Rect>, egui::Rect, Vec<usize>)> = Vec::new();
+    for (idx, &(position, geom)) in anchors.iter().enumerate() {
+        let key = layout_key(position, geom);
+        if let Some(group) = groups.iter_mut().find(|(gk, _, _)| *gk == key) {
+            group.2.push(idx);
+        } else {
+            groups.push((key, geom.content_rect, vec![idx]));
+        }
+    }
+
+    // Lay out each group independently (each stacks internally, per its own
+    // anchor), then scatter the results back into `inputs` order.
+    let mut outputs: Vec<Option<ToastLayoutOutput>> = inputs.iter().map(|_| None).collect();
+    for (key, content_rect, indices) in groups {
+        let (position, geom) = canonical_anchor(key, content_rect);
+        let group_inputs: Vec<ToastLayoutInput> =
+            indices.iter().map(|&i| inputs[i].clone()).collect();
+        let group_outputs = layout_toasts(&group_inputs, position, geom, visuals, ppp);
+        for (i, out) in indices.into_iter().zip(group_outputs) {
+            outputs[i] = Some(out);
+        }
+    }
+
+    // Every original index was placed into exactly one group above, so
+    // every slot is `Some` here — `flatten` just unwraps them. The
+    // debug-assert keeps a future invariant break (a group whose
+    // `layout_toasts` returns fewer outputs than its indices) loud rather
+    // than silently shortening `outputs` and desyncing the
+    // `outputs[i] <-> entries[i]` mapping `hit_test`/`topmost_hit` rely on.
+    let laid_out: Vec<ToastLayoutOutput> = outputs.into_iter().flatten().collect();
+    debug_assert_eq!(laid_out.len(), inputs.len());
+    laid_out
+}
+
 /// Ordered stack of active toasts, rendered top-to-bottom from the most
 /// recent.  Capped at [`MAX_TOASTS`] entries; older entries are evicted
 /// when the cap is exceeded.
@@ -1026,20 +1274,52 @@ struct ToastMeasureSizes {
     ppp: f32,
 }
 
+/// The per-frame GL/text resources [`ToastStack::show`] needs, bundled into
+/// one struct so `show` stays under the `too_many_arguments` limit (mirroring
+/// [`ToastMeasureSizes`]). `render_state` is the window's toast GL state
+/// (per-window, since GL resources belong to one GL context); `font_manager`
+/// is the window's shared [`FontManager`] (obtained via
+/// `FreminalTerminalWidget::font_manager_mut`), used only for
+/// measuring/shaping — never touched from inside the `PaintCallback`.
+pub(super) struct ToastFrameResources<'a> {
+    /// This window's toast GL render state.
+    pub render_state: &'a std::sync::Arc<std::sync::Mutex<ToastRenderState>>,
+    /// This window's shared font manager, for text measure/shape only.
+    pub font_manager: &'a mut FontManager,
+}
+
 impl ToastStack {
-    /// Push a new error toast onto the stack.
+    /// Push a new error toast onto the stack (top-right stacked).
     pub(super) fn error(&mut self, title: impl Into<String>, detail: Option<String>) {
-        self.push(ToastKind::Error, title.into(), detail);
+        self.push(
+            ToastKind::Error,
+            title.into(),
+            detail,
+            ToastPlacement::TOP_RIGHT,
+        );
     }
 
-    /// Push a new informational toast onto the stack.
+    /// Push a new informational toast onto the stack (top-right stacked).
     pub(super) fn info(&mut self, title: impl Into<String>, detail: Option<String>) {
-        self.push(ToastKind::Info, title.into(), detail);
+        self.push(
+            ToastKind::Info,
+            title.into(),
+            detail,
+            ToastPlacement::TOP_RIGHT,
+        );
     }
 
-    /// Push a new warning toast onto the stack.
-    pub(super) fn warning(&mut self, title: impl Into<String>, detail: Option<String>) {
-        self.push(ToastKind::Warning, title.into(), detail);
+    /// Push a toast with an explicit anchor placement (see [`ToastPlacement`]).
+    /// Used by freminal-derived toast routing to center toasts (pane- or
+    /// window-centered) rather than stacking them top-right.
+    pub(super) fn push_positioned(
+        &mut self,
+        kind: ToastKind,
+        title: impl Into<String>,
+        detail: Option<String>,
+        placement: ToastPlacement,
+    ) {
+        self.push(kind, title.into(), detail, placement);
     }
 
     /// Number of toasts currently on the stack. Test-only helper used by the
@@ -1064,10 +1344,17 @@ impl ToastStack {
         self.entries.is_empty()
     }
 
-    fn push(&mut self, kind: ToastKind, title: String, detail: Option<String>) {
+    fn push(
+        &mut self,
+        kind: ToastKind,
+        title: String,
+        detail: Option<String>,
+        placement: ToastPlacement,
+    ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.entries.push(Toast::new(kind, title, detail, id));
+        self.entries
+            .push(Toast::new(kind, title, detail, id, placement));
         // Evict oldest entries beyond the cap.
         while self.entries.len() > MAX_TOASTS {
             self.entries.remove(0);
@@ -1087,11 +1374,17 @@ impl ToastStack {
     /// that draws every pill, then every text run, on top of everything
     /// else in the window.
     ///
-    /// `render_state` is this window's toast GL state (per-window, since GL
-    /// resources belong to one GL context); `font_manager` is this window's
-    /// shared [`FontManager`] (obtained via
-    /// `FreminalTerminalWidget::font_manager_mut`), used only for
-    /// measuring/shaping — never touched from inside the `PaintCallback`.
+    /// `content_rect` is this window's central-panel content rect (the
+    /// window minus chrome). `this_window_id` is the window currently being
+    /// rendered and `resolve_pane_rect` resolves a [`PaneId`] to its rect in
+    /// that window (or `None` if the pane is not there) — all feed
+    /// [`resolve_anchor`] so each toast's [`ToastPosition`] (top-right stack
+    /// / window-centered / pane-centered) is resolved per-window rather than
+    /// hardcoded (see [`Self::layout_positioned`]).
+    ///
+    /// `resources` bundles this window's toast GL state and font manager (see
+    /// [`ToastFrameResources`]), used only for measuring/shaping — never
+    /// touched from inside the `PaintCallback`.
     ///
     /// Clears auto-expired toasts and any the user dismissed by clicking
     /// anywhere within a toast's pill (its `hit_rect_logical`, computed by
@@ -1099,14 +1392,20 @@ impl ToastStack {
     pub(super) fn show(
         &mut self,
         ctx: &egui::Context,
-        geom: ToastGeometry,
-        render_state: &std::sync::Arc<std::sync::Mutex<ToastRenderState>>,
-        font_manager: &mut FontManager,
+        content_rect: egui::Rect,
+        this_window_id: WindowId,
+        resolve_pane_rect: impl Fn(PaneId) -> Option<egui::Rect>,
+        resources: ToastFrameResources<'_>,
         pixels_per_point: f32,
     ) {
         if self.entries.is_empty() {
             return;
         }
+
+        let ToastFrameResources {
+            render_state,
+            font_manager,
+        } = resources;
 
         let now = Instant::now();
         let ppp = pixels_per_point;
@@ -1132,14 +1431,22 @@ impl ToastStack {
         };
 
         // `layout_toasts` emits window-origin-absolute physical-pixel
-        // coordinates (it scales `geom.content_rect` directly, without
-        // subtracting `content_rect.min`) — see its own field docs. The
+        // coordinates (it scales the resolved geometry's rect directly,
+        // without subtracting its `min`) — see its own field docs. The
         // `PaintCallback` registered by `paint_toasts` below uses
         // `rect: ctx.content_rect()` (the full window, origin `(0,0)`), so
         // its GL viewport starts at the window's own origin and these
         // coordinates need no further translation to land in the right
-        // place.
-        let outputs = layout_toasts(&inputs, ToastPosition::TopRightStack, geom, &visuals, ppp);
+        // place. Each toast's actual anchor is resolved per-window by
+        // `layout_positioned` (via `resolve_anchor`) rather than hardcoded.
+        let outputs = self.layout_positioned(
+            &inputs,
+            this_window_id,
+            content_rect,
+            &resolve_pane_rect,
+            &visuals,
+            ppp,
+        );
 
         // Owned hover/dismiss hit-testing via a real interactive egui region
         // per toast (in LOGICAL points, window space). Registering an actual
@@ -1183,6 +1490,49 @@ impl ToastStack {
             };
             ctx.request_repaint_after(delay);
         }
+    }
+
+    /// Resolve every entry's effective anchor in `this_window_id` (via
+    /// [`resolve_anchor`]) and delegate to [`group_and_layout`] to actually
+    /// lay them out.
+    ///
+    /// This method itself takes a real [`WindowId`], which — unlike
+    /// [`resolve_anchor`] and [`group_and_layout`] — cannot be fabricated in
+    /// a unit test (`WindowId` only exposes a `winit`-backed constructor,
+    /// private to `freminal-windowing`). It is therefore intentionally thin:
+    /// all its actual decision logic (anchor resolution, grouping, scatter)
+    /// lives in those two pure, directly-tested functions, leaving nothing
+    /// non-trivial un-exercised here.
+    fn layout_positioned(
+        &self,
+        inputs: &[ToastLayoutInput],
+        this_window_id: WindowId,
+        content_rect: egui::Rect,
+        resolve_pane_rect: &impl Fn(PaneId) -> Option<egui::Rect>,
+        visuals: &egui::Visuals,
+        ppp: f32,
+    ) -> Vec<ToastLayoutOutput> {
+        debug_assert_eq!(inputs.len(), self.entries.len());
+
+        let anchors: Vec<(ToastPosition, ToastGeometry)> = self
+            .entries
+            .iter()
+            .map(|toast| {
+                let (is_origin_window, origin_pane) = match toast.origin() {
+                    Some((window, pane)) => (window == this_window_id, Some(pane)),
+                    None => (false, None),
+                };
+                resolve_anchor(
+                    toast.position(),
+                    is_origin_window,
+                    origin_pane,
+                    content_rect,
+                    resolve_pane_rect,
+                )
+            })
+            .collect();
+
+        group_and_layout(inputs, &anchors, visuals, ppp)
     }
 
     /// Measure and shape every active toast's text, returning the
@@ -1480,15 +1830,51 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    //  ToastStack::warning
+    //  ToastStack::push_positioned — Warning severity
     // -----------------------------------------------------------------
 
     #[test]
-    fn warning_pushes_warning_kind() {
+    fn push_positioned_warning_pushes_warning_kind() {
         let mut s = ToastStack::default();
-        s.warning("paste blocked", None);
+        s.push_positioned(
+            ToastKind::Warning,
+            "paste blocked",
+            None,
+            ToastPlacement::WINDOW_CENTERED,
+        );
         assert_eq!(s.len(), 1);
         assert_eq!(s.last_kind(), Some(ToastKind::Warning));
+    }
+
+    #[test]
+    fn push_positioned_stores_the_given_placement() {
+        // Regression (adversarial review, slice 2): the placement passed to
+        // `push_positioned` must survive `push` -> `Toast::new` onto the
+        // stored `Toast`. Without this assertion, silently dropping the
+        // placement and always storing `TOP_RIGHT` — the exact hardcoded
+        // regression this slice removes — would go undetected.
+        let mut s = ToastStack::default();
+        s.push_positioned(
+            ToastKind::Info,
+            "copied",
+            None,
+            ToastPlacement::WINDOW_CENTERED,
+        );
+        assert_eq!(s.entries[0].position(), ToastPosition::WindowCentered);
+        assert_eq!(s.entries[0].origin(), None);
+    }
+
+    #[test]
+    fn error_and_info_wrappers_default_to_top_right() {
+        // The severity convenience pushers must remain top-right stacked
+        // (unchanged pre-existing behavior for error/info/OSC toasts).
+        let mut s = ToastStack::default();
+        s.error("boom", None);
+        s.info("fyi", None);
+        assert_eq!(s.entries[0].position(), ToastPosition::TopRightStack);
+        assert_eq!(s.entries[0].origin(), None);
+        assert_eq!(s.entries[1].position(), ToastPosition::TopRightStack);
+        assert_eq!(s.entries[1].origin(), None);
     }
 
     #[test]
@@ -1525,6 +1911,7 @@ mod tests {
             id: 0,
             created,
             last_hovered: None,
+            placement: ToastPlacement::TOP_RIGHT,
         };
         let later = created + Duration::from_mins(1);
         assert!(toast.is_expired(later));
@@ -1543,6 +1930,7 @@ mod tests {
             // Hover event coincides with `later` — within the 200 ms
             // keep-alive window.
             last_hovered: Some(later),
+            placement: ToastPlacement::TOP_RIGHT,
         };
         assert!(!toast.is_expired(later));
     }
@@ -1560,6 +1948,7 @@ mod tests {
             created,
             // Hover was 5 s ago — well past HOVER_HOLD + ANIM_OUT.
             last_hovered: Some(stale_hover),
+            placement: ToastPlacement::TOP_RIGHT,
         };
         assert!(toast.is_expired(later));
     }
@@ -1576,6 +1965,7 @@ mod tests {
             id: 0,
             created,
             last_hovered,
+            placement: ToastPlacement::TOP_RIGHT,
         }
     }
 
@@ -2296,6 +2686,317 @@ mod tests {
         };
         let visuals = egui::Visuals::dark();
         assert!(layout_toasts(&[], ToastPosition::TopRightStack, geom, &visuals, 1.0).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    //  resolve_anchor — per-window anchor resolution (issue #433 slice 2)
+    // -----------------------------------------------------------------
+    //
+    // `resolve_anchor` takes the origin-window comparison as a pre-computed
+    // `bool` (`is_origin_window`) rather than a `WindowId` + `this_window_id`
+    // pair: `WindowId` only exposes a `winit`-backed constructor (private to
+    // `freminal-windowing`), so a second, distinct `WindowId` cannot be
+    // fabricated here. See `ToastStack::layout_positioned`, the only caller,
+    // for where the real `WindowId` comparison happens.
+
+    #[test]
+    fn resolve_anchor_top_right_stack_uses_content_rect_and_ignores_pane() {
+        let content_rect = test_window_rect();
+        // A resolver that would panic if ever consulted, proving
+        // `TopRightStack` never calls it.
+        let never_called = |_: PaneId| -> Option<egui::Rect> {
+            panic!("TopRightStack must not consult resolve_pane_rect")
+        };
+        let (position, geom) = resolve_anchor(
+            ToastPosition::TopRightStack,
+            true,
+            Some(PaneId::first()),
+            content_rect,
+            &never_called,
+        );
+        assert_eq!(position, ToastPosition::TopRightStack);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, None);
+    }
+
+    #[test]
+    fn resolve_anchor_window_centered_uses_content_rect_and_ignores_pane() {
+        let content_rect = test_window_rect();
+        let never_called = |_: PaneId| -> Option<egui::Rect> {
+            panic!("WindowCentered must not consult resolve_pane_rect")
+        };
+        let (position, geom) = resolve_anchor(
+            ToastPosition::WindowCentered,
+            true,
+            Some(PaneId::first()),
+            content_rect,
+            &never_called,
+        );
+        assert_eq!(position, ToastPosition::WindowCentered);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, None);
+    }
+
+    #[test]
+    fn resolve_anchor_pane_centered_resolves_in_origin_window() {
+        let content_rect = test_window_rect();
+        let pane = PaneId::first();
+        let pane_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(30.0, 40.0));
+        let resolver = |p: PaneId| (p == pane).then_some(pane_rect);
+
+        let (position, geom) = resolve_anchor(
+            ToastPosition::PaneCentered,
+            true, // is_origin_window
+            Some(pane),
+            content_rect,
+            &resolver,
+        );
+        assert_eq!(position, ToastPosition::PaneCentered);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, Some(pane_rect));
+    }
+
+    #[test]
+    fn resolve_anchor_pane_centered_falls_back_when_not_origin_window() {
+        let content_rect = test_window_rect();
+        let pane = PaneId::first();
+        let pane_rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(30.0, 40.0));
+        let resolver = |p: PaneId| (p == pane).then_some(pane_rect);
+
+        let (position, geom) = resolve_anchor(
+            ToastPosition::PaneCentered,
+            false, // NOT the origin window
+            Some(pane),
+            content_rect,
+            &resolver,
+        );
+        assert_eq!(position, ToastPosition::WindowCentered);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, None);
+    }
+
+    #[test]
+    fn resolve_anchor_pane_centered_falls_back_when_no_origin_pane() {
+        let content_rect = test_window_rect();
+        let never_called =
+            |_: PaneId| -> Option<egui::Rect> { panic!("must not be called with no origin pane") };
+
+        let (position, geom) = resolve_anchor(
+            ToastPosition::PaneCentered,
+            true,
+            None, // no origin pane at all
+            content_rect,
+            &never_called,
+        );
+        assert_eq!(position, ToastPosition::WindowCentered);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, None);
+    }
+
+    #[test]
+    fn resolve_anchor_pane_centered_falls_back_when_pane_rect_unavailable() {
+        let content_rect = test_window_rect();
+        let pane = PaneId::first();
+        // Origin window, origin pane present, but the pane no longer exists
+        // in this window (e.g. it closed).
+        let always_none = |_: PaneId| -> Option<egui::Rect> { None };
+
+        let (position, geom) = resolve_anchor(
+            ToastPosition::PaneCentered,
+            true,
+            Some(pane),
+            content_rect,
+            &always_none,
+        );
+        assert_eq!(position, ToastPosition::WindowCentered);
+        assert_eq!(geom.content_rect, content_rect);
+        assert_eq!(geom.active_pane_rect, None);
+    }
+
+    // -----------------------------------------------------------------
+    //  group_and_layout — per-anchor grouping + order-preserving scatter
+    // -----------------------------------------------------------------
+    //
+    // Deliberately free of `Toast`/`WindowId` (see its own doc comment), so
+    // — unlike `ToastStack::layout_positioned`, its only caller — it is
+    // directly unit-testable.
+
+    #[test]
+    fn group_and_layout_preserves_input_order_across_mixed_anchors() {
+        let content_rect = test_window_rect();
+        let top_right_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: None,
+        };
+        let window_centered_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: None,
+        };
+        let inputs = [
+            test_input(1, 100.0, false, SETTLED_ANIM),
+            test_input(2, 100.0, false, SETTLED_ANIM),
+            test_input(3, 100.0, false, SETTLED_ANIM),
+        ];
+        let anchors = [
+            (ToastPosition::TopRightStack, top_right_geom),
+            (ToastPosition::WindowCentered, window_centered_geom),
+            (ToastPosition::TopRightStack, top_right_geom),
+        ];
+        let visuals = egui::Visuals::dark();
+        let outputs = group_and_layout(&inputs, &anchors, &visuals, 1.0);
+
+        // Same length, and in `inputs`' original order — required by
+        // `hit_test`/`topmost_hit` (entries-order == outputs-order).
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(
+            outputs.iter().map(|o| o.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn group_and_layout_stacks_toasts_sharing_the_same_anchor() {
+        // Two toasts resolved to the same `TopRightStack` anchor must still
+        // stack against EACH OTHER (not just render independently at the
+        // same spot) — i.e. `group_and_layout` must match calling
+        // `layout_toasts` directly on the whole group.
+        let content_rect = test_window_rect();
+        let geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: None,
+        };
+        let inputs = [
+            test_input(10, 100.0, false, SETTLED_ANIM),
+            test_input(11, 100.0, false, SETTLED_ANIM),
+        ];
+        let anchors = [
+            (ToastPosition::TopRightStack, geom),
+            (ToastPosition::TopRightStack, geom),
+        ];
+        let visuals = egui::Visuals::dark();
+        let grouped = group_and_layout(&inputs, &anchors, &visuals, 1.0);
+        let direct = layout_toasts(&inputs, ToastPosition::TopRightStack, geom, &visuals, 1.0);
+
+        assert_eq!(grouped.len(), direct.len());
+        for (g, d) in grouped.iter().zip(direct.iter()) {
+            assert_eq!(g.id, d.id);
+            assert!((g.pill.x - d.pill.x).abs() < 0.01);
+            assert!((g.pill.y - d.pill.y).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn group_and_layout_separates_different_pane_centered_anchors() {
+        // Two toasts both `PaneCentered`, but resolved against DIFFERENT
+        // pane rects, must land in different groups (and therefore not
+        // stack against each other) — grouping keys on the resolved rect,
+        // not just the `ToastPosition` discriminant.
+        let content_rect = test_window_rect();
+        let pane_left_rect =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
+        let pane_right_rect =
+            egui::Rect::from_min_size(egui::pos2(400.0, 0.0), egui::vec2(200.0, 200.0));
+        let geom_left = ToastGeometry {
+            content_rect,
+            active_pane_rect: Some(pane_left_rect),
+        };
+        let geom_right = ToastGeometry {
+            content_rect,
+            active_pane_rect: Some(pane_right_rect),
+        };
+        let inputs = [
+            test_input(1, 100.0, false, SETTLED_ANIM),
+            test_input(2, 100.0, false, SETTLED_ANIM),
+        ];
+        let anchors = [
+            (ToastPosition::PaneCentered, geom_left),
+            (ToastPosition::PaneCentered, geom_right),
+        ];
+        let visuals = egui::Visuals::dark();
+        let outputs = group_and_layout(&inputs, &anchors, &visuals, 1.0);
+
+        // Each toast centers within its OWN pane rect, not a shared stack —
+        // their pill centers must differ (pane A and pane B are disjoint).
+        assert_eq!(outputs.len(), 2);
+        assert!(
+            (outputs[0].pill.x - outputs[1].pill.x).abs() > 1.0,
+            "toasts centered in disjoint panes must not share an x position"
+        );
+    }
+
+    #[test]
+    fn group_and_layout_merges_coincident_centered_anchors() {
+        // Regression (adversarial review, slice 2): a `PaneCentered` toast
+        // whose pane rect equals the window content rect (the common
+        // single-pane case) and a `WindowCentered` toast center on the SAME
+        // rect. They must share one group and STACK (distinct y positions),
+        // not be laid out independently and rendered exactly on top of each
+        // other (which would occlude — and, via `topmost_hit`, make
+        // un-dismissable — the older toast until it expires).
+        let content_rect = test_window_rect();
+        let pane_geom = ToastGeometry {
+            content_rect,
+            // Pane rect == content rect: the single-pane / unsplit case.
+            active_pane_rect: Some(content_rect),
+        };
+        let window_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: None,
+        };
+        let inputs = [
+            test_input(1, 100.0, false, SETTLED_ANIM),
+            test_input(2, 100.0, false, SETTLED_ANIM),
+        ];
+        let anchors = [
+            (ToastPosition::PaneCentered, pane_geom),
+            (ToastPosition::WindowCentered, window_geom),
+        ];
+        let visuals = egui::Visuals::dark();
+        let outputs = group_and_layout(&inputs, &anchors, &visuals, 1.0);
+
+        assert_eq!(outputs.len(), 2);
+        // Same center column (one shared centered stack) ...
+        assert!(
+            (outputs[0].pill.x - outputs[1].pill.x).abs() < 0.01,
+            "coincident centered toasts must share the same center x (one stack)"
+        );
+        // ... but stacked vertically, never overlapping.
+        assert!(
+            (outputs[0].pill.y - outputs[1].pill.y).abs() > 1.0,
+            "coincident centered toasts must stack vertically, not overlap"
+        );
+    }
+
+    #[test]
+    fn layout_key_collapses_coincident_centered_but_keeps_top_right_distinct() {
+        let content_rect = test_window_rect();
+        let window_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: None,
+        };
+        let pane_eq_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: Some(content_rect),
+        };
+        let pane_diff_geom = ToastGeometry {
+            content_rect,
+            active_pane_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(400.0, 0.0),
+                egui::vec2(200.0, 200.0),
+            )),
+        };
+        // Window-centered and pane-centered-on-the-same-rect share a key.
+        assert_eq!(
+            layout_key(ToastPosition::WindowCentered, window_geom),
+            layout_key(ToastPosition::PaneCentered, pane_eq_geom)
+        );
+        // A pane centered on a DIFFERENT rect does not.
+        assert_ne!(
+            layout_key(ToastPosition::WindowCentered, window_geom),
+            layout_key(ToastPosition::PaneCentered, pane_diff_geom)
+        );
+        // Top-right is never a centered key.
+        assert_eq!(layout_key(ToastPosition::TopRightStack, window_geom), None);
     }
 
     // -----------------------------------------------------------------
