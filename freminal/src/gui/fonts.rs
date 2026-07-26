@@ -358,13 +358,13 @@ mod emoji_fonts {
     /// Add a system emoji font as a chrome-text fallback.
     ///
     /// This is the **egui chrome** path (menu bar, settings), NOT the terminal
-    /// grid. It deliberately does NOT reuse the terminal-side capability
-    /// ranking (`font_manager::best_system_emoji_source`, which gates on
-    /// `has_color_glyphs`): egui's grayscale atlas cannot render color
-    /// (COLR/CBDT) glyphs, so for chrome a monochrome-renderable emoji/symbol
-    /// face (e.g. `Symbola`) is actually the *useful* choice, and a color-only
-    /// font would render as tofu. The name-priority list here is correct for
-    /// that goal; the two paths intentionally differ.
+    /// grid. It deliberately does NOT reuse the terminal-side emoji face (the
+    /// bundled Noto Color Emoji, always used since issue #431): egui's
+    /// grayscale atlas cannot render color (COLR/CBDT) glyphs, so for chrome a
+    /// monochrome-renderable emoji/symbol face (e.g. `Symbola`) is actually the
+    /// *useful* choice, and a color-only font would render as tofu. The
+    /// name-priority list here is correct for that goal; the two paths
+    /// intentionally differ.
     pub fn add_emoji_fallback(defs: &mut FontDefinitions) {
         let mut db = Database::new();
         db.load_system_fonts();

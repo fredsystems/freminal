@@ -45,8 +45,9 @@ full upstream license texts are bundled under [`res/fonts/`](res/fonts/).
   [`res/fonts/NotoColorEmoji-LICENSE.txt`](res/fonts/NotoColorEmoji-LICENSE.txt)
 - **Files:** `res/NotoColorEmoji.ttf`
 - **Notes:** Bundled so color emoji render without depending on a system-installed
-  emoji font. When a suitable system color-emoji font is present it is preferred;
-  the bundled face is the guaranteed fallback.
+  emoji font. The bundled face is always used for the terminal grid; system emoji
+  fonts are intentionally not consulted, because a system font's aggregate coverage
+  is not a stable guarantee that it maps any particular codepoint (issue #431).
 
 ## Bundled images
 

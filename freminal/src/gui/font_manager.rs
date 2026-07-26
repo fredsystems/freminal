@@ -45,13 +45,15 @@ static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../res/NotoColorEmoji.ttf
 /// The Unicode blocks that make up the emoji repertoire, as inclusive
 /// `(start, end)` codepoint ranges.
 ///
-/// A candidate emoji face is scored by counting how many codepoints across
-/// these ranges its `cmap` actually maps ([`LoadedFace::emoji_coverage`]) —
-/// a real coverage measurement over the font's own character map, not a
-/// hand-picked sample. Ranges are the emoji-bearing blocks per the Unicode
-/// Standard (the pictographic/emoji blocks; not every codepoint in these
-/// blocks is an emoji, but the count is a faithful relative measure of how
-/// much of the repertoire a font carries).
+/// Test-only: used by [`LoadedFace::emoji_coverage`] to assert the bundled
+/// Noto Color Emoji face carries broad emoji coverage. Production code no
+/// longer ranks candidate faces by coverage (issue #431) — the bundled face
+/// is always used — so this table only backs regression tests. Ranges are
+/// the emoji-bearing blocks per the Unicode Standard (the pictographic/emoji
+/// blocks; not every codepoint in these blocks is an emoji, but the count is
+/// a faithful relative measure of how much of the repertoire a font
+/// carries).
+#[cfg(test)]
 const EMOJI_BLOCKS: &[(u32, u32)] = &[
     (0x2600, 0x26FF),   // Miscellaneous Symbols
     (0x2700, 0x27BF),   // Dingbats
@@ -73,18 +75,6 @@ const EMOJI_BLOCKS: &[(u32, u32)] = &[
 pub(crate) const fn bundled_regular_font_bytes() -> &'static [u8] {
     CASKAYDIA_REGULAR
 }
-
-/// Emoji font family candidates, tried in order.
-const EMOJI_CANDIDATES: &[&str] = &[
-    "Apple Color Emoji",
-    "Noto Color Emoji",
-    "Segoe UI Emoji",
-    "Twemoji",
-    "Emoji One",
-    "OpenMoji",
-    "Emoji",
-    "Symbola",
-];
 
 // ---------------------------------------------------------------------------
 //  Supporting types
@@ -273,6 +263,12 @@ impl LoadedFace {
     /// palettes or `CBDT`/`CBLC`/`sbix` bitmap strikes) — i.e. is a genuine
     /// color emoji font rather than a text font that happens to map an emoji
     /// codepoint to a monochrome outline.
+    ///
+    /// Test-only: production code no longer gates candidate emoji faces on
+    /// this (the bundled face is always used, issue #431); it remains as a
+    /// regression check that the bundled face really is a color font and
+    /// that a plain text font is not mistaken for one.
+    #[cfg(test)]
     fn has_color_glyphs(&self) -> bool {
         self.as_font_ref().is_some_and(|f| {
             f.color_palettes().next().is_some() || f.color_strikes().next().is_some()
@@ -281,8 +277,12 @@ impl LoadedFace {
 
     /// Count how many codepoints across the [`EMOJI_BLOCKS`] this face's `cmap`
     /// actually maps to a glyph — a real coverage measurement over the font's
-    /// character map. Used to rank candidate emoji faces by how much of the
-    /// emoji repertoire they carry.
+    /// character map.
+    ///
+    /// Test-only: production code no longer ranks candidate emoji faces by
+    /// coverage (issue #431); it remains as a regression check that the
+    /// bundled face carries broad emoji coverage.
+    #[cfg(test)]
     fn emoji_coverage(&self) -> u32 {
         self.as_font_ref().map_or(0, |f| {
             let charmap = f.charmap();
@@ -508,8 +508,8 @@ pub struct FontManager {
 impl FontManager {
     /// Create a new `FontManager` with the given configuration.
     ///
-    /// Loads the primary faces (user font or bundled `CaskaydiaCove`), discovers a
-    /// system emoji font, and computes the authoritative cell size.
+    /// Loads the primary faces (user font or bundled `CaskaydiaCove`), resolves the
+    /// bundled emoji face, and computes the authoritative cell size.
     ///
     /// `pixels_per_point` is the display scale factor from
     /// `egui::Context::pixels_per_point()`. It is used together with the
@@ -557,8 +557,8 @@ impl FontManager {
                 (bundled, None, None)
             };
 
-        // Always resolves to at least the bundled Noto Color Emoji face.
-        let emoji_face = discover_emoji_face(&font_db);
+        // Always resolves to the bundled Noto Color Emoji face (issue #431).
+        let emoji_face = discover_emoji_face();
 
         let font_size_ppem = pt_to_ppem(font_size_pt, pixels_per_point);
         let CellMetrics {
@@ -1461,178 +1461,31 @@ fn suggest_similar_families(query: &str, font_db: &Database) -> Vec<String> {
     suggestions
 }
 
-/// Choose the emoji face: the best capable color-emoji font installed on the
-/// system, falling back to the bundled Noto Color Emoji so emoji always render
-/// (Task #402).
+/// Resolve the emoji face used by the terminal grid.
 ///
-/// System faces are ranked by capability, not merely by name:
-///
-/// 1. A candidate must actually be a **color** font ([`LoadedFace::has_color_glyphs`])
-///    — this is what stops a plain text font that maps an emoji codepoint to a
-///    monochrome outline from being chosen.
-/// 2. Among color faces, a **known-good family name** (in [`EMOJI_CANDIDATES`]
-///    order) is a strong prior, and **emoji codepoint coverage**
-///    ([`LoadedFace::emoji_coverage`]) breaks ties and rescues well-covered
-///    fonts with non-standard names (e.g. `JoyPixels`, a distro-renamed Noto).
-///
-/// This fixes the "user has an emoji font installed but we didn't find it
-/// because it isn't named exactly `Noto Color Emoji`" tofu bug, while keeping
-/// the previously-preferred fonts preferred. If no capable system face is
-/// found, the bundled Noto face is used.
-fn discover_emoji_face(font_db: &Database) -> Option<LoadedFace> {
-    load_emoji_face_from_source(&resolve_emoji_source(font_db))
-}
-
-/// Load the [`LoadedFace`] for a resolved [`EmojiSource`], falling back to the
-/// bundled floor if a system source can no longer be read.
-///
-/// Split out from [`discover_emoji_face`] so it can be exercised without the
-/// process-global [`EMOJI_SOURCE_CACHE`] (which would otherwise couple tests to
-/// execution order and the host's installed fonts).
-fn load_emoji_face_from_source(source: &EmojiSource) -> Option<LoadedFace> {
-    match source {
-        EmojiSource::SystemFile { path, index } => {
-            if let Ok(bytes) = std::fs::read(path)
-                && let Some(loaded) = LoadedFace::from_owned(bytes, *index)
-            {
-                info!("Using system emoji font: {}", path.display());
-                return Some(loaded);
-            }
-            // The cached source vanished (font uninstalled between windows) —
-            // fall through to the bundled floor.
-            warn!(
-                "Cached system emoji font no longer loadable ({}); using bundled",
-                path.display()
-            );
-            load_bundled_emoji_floor()
-        }
-        EmojiSource::Bundled => load_bundled_emoji_floor(),
-    }
+/// The bundled Noto Color Emoji face is **always** used; system emoji fonts
+/// are intentionally **not** consulted. Freminal previously tried to rank
+/// installed system emoji fonts by name and by scanning their `cmap` for
+/// emoji-block coverage, but a font's aggregate coverage count is not a
+/// stable guarantee that it maps any *particular* codepoint the terminal
+/// needs to render — a system font could win the ranking and then still
+/// produce tofu for a codepoint it happens not to carry (issue #431). Always
+/// using the bundled face removes that host-dependent guessing entirely: the
+/// set of codepoints that render correctly is fixed and known at build time,
+/// regardless of what is or isn't installed on the system.
+fn discover_emoji_face() -> Option<LoadedFace> {
+    load_bundled_emoji_floor()
 }
 
 /// Load the bundled Noto Color Emoji floor face.
 fn load_bundled_emoji_floor() -> Option<LoadedFace> {
     let bundled = LoadedFace::from_static(NOTO_COLOR_EMOJI);
     if bundled.is_some() {
-        info!("Using bundled Noto Color Emoji (no suitable system emoji font)");
+        info!("Using bundled Noto Color Emoji");
     } else {
         warn!("Bundled Noto Color Emoji failed to load");
     }
     bundled
-}
-
-/// A resolved emoji-font source: either a concrete system font file, or the
-/// bundled floor. Cheap to clone and store in the process-global cache.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum EmojiSource {
-    /// A system font file at `path`, face `index`.
-    SystemFile {
-        path: std::path::PathBuf,
-        index: usize,
-    },
-    /// The bundled Noto Color Emoji floor.
-    Bundled,
-}
-
-/// Process-global cache of the resolved emoji source.
-///
-/// Emoji discovery is host-configuration-invariant within a process run, but
-/// `FontManager::new` runs **once per window**. Without this cache, opening a
-/// window on a system with no known-named emoji font would re-run the full
-/// capability scan — reading and parsing *every* installed font file from disk
-/// — every single time. We resolve the source once and reuse it; only the
-/// (single) winning font file is re-read per window.
-static EMOJI_SOURCE_CACHE: std::sync::OnceLock<EmojiSource> = std::sync::OnceLock::new();
-
-/// Resolve (and memoize process-wide) which emoji source to use.
-fn resolve_emoji_source(font_db: &Database) -> EmojiSource {
-    EMOJI_SOURCE_CACHE
-        .get_or_init(|| best_system_emoji_source(font_db).unwrap_or(EmojiSource::Bundled))
-        .clone()
-}
-
-/// Find the best color emoji face installed on the system, or `None`.
-///
-/// Two passes, so the common case stays cheap:
-///
-/// 1. **Fast path** — try the known emoji family names ([`EMOJI_CANDIDATES`])
-///    in priority order, filtering by `fontdb`'s in-memory family metadata
-///    (no disk I/O) before loading a candidate. The first one that is a real
-///    color font wins. This is what runs on virtually every desktop.
-/// 2. **Capability scan** — only if no known-named emoji font is installed do
-///    we fall back to scanning *all* faces, loading each, gating on the color
-///    tables, and ranking by real emoji-block coverage. This rescues fonts
-///    with non-standard names (e.g. `JoyPixels`, a distro-renamed Noto) at the
-///    cost of a fuller scan, which only happens when the fast path found
-///    nothing.
-///
-/// Returns the resolved [`EmojiSource`] (path + index) rather than a loaded
-/// face, so the result can be cheaply cached process-wide (see
-/// [`resolve_emoji_source`]).
-fn best_system_emoji_source(font_db: &Database) -> Option<EmojiSource> {
-    // Fast path: known names, metadata-filtered, stop at the first color face.
-    // Name match is case-insensitive so e.g. "noto color emoji" also matches.
-    for candidate in EMOJI_CANDIDATES {
-        let candidate_lower = candidate.to_lowercase();
-        for face in font_db.faces() {
-            if !face
-                .families
-                .iter()
-                .any(|(fam, _)| fam.to_lowercase().contains(&candidate_lower))
-            {
-                continue;
-            }
-            let fontdb::Source::File(path) = &face.source else {
-                continue;
-            };
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            let index = usize::value_from(face.index).unwrap_or(0);
-            if let Some(loaded) = LoadedFace::from_owned(bytes, index)
-                && loaded.has_color_glyphs()
-            {
-                return Some(EmojiSource::SystemFile {
-                    path: path.clone(),
-                    index,
-                });
-            }
-        }
-    }
-
-    // Capability scan: no known emoji font installed — rank every color face by
-    // real coverage.
-    let mut best: Option<(u32, EmojiSource)> = None;
-    for face in font_db.faces() {
-        let fontdb::Source::File(path) = &face.source else {
-            continue;
-        };
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        let index = usize::value_from(face.index).unwrap_or(0);
-        let Some(loaded) = LoadedFace::from_owned(bytes, index) else {
-            continue;
-        };
-        if !loaded.has_color_glyphs() {
-            continue;
-        }
-        let coverage = loaded.emoji_coverage();
-        if coverage > 0
-            && best
-                .as_ref()
-                .is_none_or(|(best_cov, _)| coverage > *best_cov)
-        {
-            best = Some((
-                coverage,
-                EmojiSource::SystemFile {
-                    path: path.clone(),
-                    index,
-                },
-            ));
-        }
-    }
-    best.map(|(_, source)| source)
 }
 
 /// Search `fontdb` for any font containing the given codepoint.
@@ -2088,7 +1941,7 @@ mod tests {
         );
     }
 
-    // --- Task 402: bundled Noto Color Emoji + capability-based ranking ---
+    // --- Task 402 / issue #431: bundled Noto Color Emoji, always used ---
 
     #[test]
     fn bundled_noto_is_a_color_emoji_face() {
@@ -2129,22 +1982,35 @@ mod tests {
     }
 
     #[test]
-    fn emoji_face_falls_back_to_bundled_noto() {
-        // An empty font database has no system emoji font, so source resolution
-        // must yield the bundled floor. Exercised via the uncached path
-        // (`best_system_emoji_source` + `load_emoji_face_from_source`) so this
-        // test does not depend on / mutate the process-global source cache.
-        let empty_db = Database::new();
-        let source = best_system_emoji_source(&empty_db).unwrap_or(EmojiSource::Bundled);
-        assert_eq!(
-            source,
-            EmojiSource::Bundled,
-            "an empty db must resolve to the bundled floor"
-        );
-        let face = load_emoji_face_from_source(&source).expect("bundled floor must load");
+    fn emoji_face_is_always_bundled_noto() {
+        // `discover_emoji_face` takes no font database — it must always
+        // resolve to the bundled color face, independent of what is (or
+        // isn't) installed on the host (issue #431).
+        let face = discover_emoji_face().expect("bundled Noto Color Emoji must load");
         assert!(
             face.has_color_glyphs(),
-            "the bundled fallback must be a color emoji face"
+            "the emoji face must always be the bundled color emoji face"
+        );
+    }
+
+    #[test]
+    fn discover_emoji_face_returns_bundled_color_face() {
+        // Regression guard for issue #431: the snowflake emoji (U+2744) must
+        // resolve to a real glyph in the always-used bundled face, not tofu
+        // from a ranked-but-incomplete system font.
+        let face = discover_emoji_face().expect("bundled Noto Color Emoji must load");
+        assert!(
+            face.has_glyph('\u{2744}'),
+            "bundled Noto Color Emoji must map U+2744 (snowflake) to a glyph"
+        );
+        assert_ne!(
+            face.map_char('\u{2744}'),
+            0,
+            "U+2744 must not map to .notdef in the bundled face"
+        );
+        assert!(
+            face.has_color_glyphs(),
+            "the bundled emoji face must carry color glyph tables"
         );
     }
 
