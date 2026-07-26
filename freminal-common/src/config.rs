@@ -900,9 +900,9 @@ impl Default for CommandBlocksConfig {
 /// Where a notification of a given category is delivered.
 ///
 /// Notifications can surface as an in-app toast, a desktop notification via
-/// the system notification daemon, both, or — for the command-finished
-/// category — a desktop notification only when freminal is unfocused
-/// (falling back to a toast when focused).
+/// the system notification daemon, both, neither (suppressed entirely), or —
+/// for the command-finished category — a desktop notification only when
+/// freminal is unfocused (falling back to a toast when focused).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationRouting {
@@ -916,6 +916,8 @@ pub enum NotificationRouting {
     /// it is focused.  Default for command-finished events.
     #[default]
     SystemWhenUnfocused,
+    /// Suppressed entirely: no in-app toast, no desktop notification.
+    Disabled,
 }
 
 impl NotificationRouting {
@@ -924,12 +926,13 @@ impl NotificationRouting {
     ///
     /// [`Self::SystemWhenUnfocused`] produces a toast only when freminal is
     /// focused (the desktop notification is reserved for the unfocused case).
+    /// [`Self::Disabled`] never produces a toast.
     #[must_use]
     pub const fn wants_toast(self, focused: bool) -> bool {
         match self {
             Self::Toast | Self::Both => true,
             Self::SystemWhenUnfocused => focused,
-            Self::System => false,
+            Self::System | Self::Disabled => false,
         }
     }
 
@@ -937,13 +940,38 @@ impl NotificationRouting {
     /// current focus state.
     ///
     /// [`Self::SystemWhenUnfocused`] produces a desktop notification only when
-    /// freminal is unfocused.
+    /// freminal is unfocused. [`Self::Disabled`] never produces a desktop
+    /// notification.
     #[must_use]
     pub const fn wants_system(self, focused: bool) -> bool {
         match self {
             Self::System | Self::Both => true,
             Self::SystemWhenUnfocused => !focused,
-            Self::Toast => false,
+            Self::Toast | Self::Disabled => false,
+        }
+    }
+}
+
+/// Routing for freminal's own toast-only notifications (e.g. "Copied to
+/// clipboard", "resize"). These never have a desktop-notification leg, so
+/// the only choices are an in-app toast or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FreminalToastRouting {
+    /// In-app toast.
+    #[default]
+    Toast,
+    /// Suppressed entirely.
+    Disabled,
+}
+
+impl FreminalToastRouting {
+    /// Whether this routing dispatches an in-app toast.
+    #[must_use]
+    pub const fn wants_toast(self) -> bool {
+        match self {
+            Self::Toast => true,
+            Self::Disabled => false,
         }
     }
 }
@@ -965,7 +993,8 @@ impl NotificationRouting {
 /// on_command_finished = true
 /// command_finished_threshold_secs = 10.0
 /// routing_error = "both"
-/// routing_info = "toast"
+/// routing_osc_text = "toast"
+/// routing_osc99 = "both"
 /// routing_command_finished = "system_when_unfocused"
 /// command_finished_template = "{command} finished in {duration} (exit {exit_code})"
 /// ```
@@ -1007,9 +1036,19 @@ pub struct NotificationsConfig {
     /// [`NotificationRouting::Both`].
     pub routing_error: NotificationRouting,
 
-    /// Routing for informational notifications.  Default:
-    /// [`NotificationRouting::Toast`].
-    pub routing_info: NotificationRouting,
+    /// Routing for OSC 9 (iTerm2/WezTerm) and OSC 777 (`notify;TITLE;BODY`,
+    /// urxvt) text notifications.  Default: [`NotificationRouting::Toast`].
+    ///
+    /// Accepts the deprecated key name `routing_info` as an alias for
+    /// backwards compatibility (issue #433 renamed it); a config still using
+    /// `routing_info` loads correctly and triggers a one-time deprecation
+    /// warning at load time (see `load_partial`).
+    #[serde(alias = "routing_info")]
+    pub routing_osc_text: NotificationRouting,
+
+    /// Routing for OSC 99 (kitty stateful) notifications.  Default:
+    /// [`NotificationRouting::Both`].
+    pub routing_osc99: NotificationRouting,
 
     /// Routing for command-finished notifications.  Default:
     /// [`NotificationRouting::SystemWhenUnfocused`].
@@ -1042,7 +1081,8 @@ impl Default for NotificationsConfig {
             on_command_finished: true,
             command_finished_threshold_secs: 10.0,
             routing_error: NotificationRouting::Both,
-            routing_info: NotificationRouting::Toast,
+            routing_osc_text: NotificationRouting::Toast,
+            routing_osc99: NotificationRouting::Both,
             routing_command_finished: NotificationRouting::SystemWhenUnfocused,
             command_finished_template: String::from(
                 "{command} finished in {duration} (exit {exit_code})",
@@ -1721,14 +1761,43 @@ pub enum ConfigError {
 /// # Errors
 /// Returns `ConfigError` if any config file cannot be read or parsed, or if the final config
 /// is invalid.
+///
+/// Any non-fatal deprecation warnings (e.g. a config still using a renamed
+/// key) are logged via `tracing::warn!`. Callers that need to surface the
+/// warnings through their own channel (a startup warning buffer, a GUI toast)
+/// should use [`load_config_with_warnings`] instead.
 pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> {
+    let (cfg, warnings) = load_config_with_warnings(explicit_path)?;
+    for warning in &warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(cfg)
+}
+
+/// Load the configuration exactly like [`load_config`], but also return any
+/// non-fatal deprecation warnings collected during the load instead of only
+/// logging them.
+///
+/// This exists because config loading happens before the tracing subscriber
+/// is initialised in `main`, so a `tracing::warn!` emitted here would be
+/// swallowed. The binary threads these strings into its early-warning buffer
+/// (replayed once logging is ready) and, on an interactive reload, into a
+/// toast.
+///
+/// # Errors
+/// Returns `ConfigError` if any config file cannot be read or parsed, or if
+/// the final config is invalid.
+pub fn load_config_with_warnings(
+    explicit_path: Option<&Path>,
+) -> Result<(Config, Vec<String>), ConfigError> {
     let mut cfg = Config::default();
+    let mut warnings: Vec<String> = Vec::new();
 
     if let Some(path) = explicit_path {
         // Explicit --config: use ONLY this file on top of defaults.
         // Skip system, user, and env-var layers so the file is fully
         // isolated (no contamination from e.g. a home-manager managed config).
-        let partial = load_partial(path)?;
+        let partial = load_partial(path, &mut warnings)?;
         cfg.apply_partial(partial);
     } else {
         // Normal layered loading: system → user → env var.
@@ -1737,7 +1806,7 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Some(system_path) = system_config_path()
             && system_path.is_file()
         {
-            let partial = load_partial(&system_path)?;
+            let partial = load_partial(&system_path, &mut warnings)?;
             cfg.apply_partial(partial);
         }
 
@@ -1745,7 +1814,7 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Some(user_path) = user_config_path()
             && user_path.is_file()
         {
-            let partial = load_partial(&user_path)?;
+            let partial = load_partial(&user_path, &mut warnings)?;
             cfg.apply_partial(partial);
         }
 
@@ -1753,14 +1822,14 @@ pub fn load_config(explicit_path: Option<&Path>) -> Result<Config, ConfigError> 
         if let Ok(env_path) = env::var("FREMINAL_CONFIG") {
             let path = PathBuf::from(env_path);
             if path.is_file() {
-                let partial = load_partial(&path)?;
+                let partial = load_partial(&path, &mut warnings)?;
                 cfg.apply_partial(partial);
             }
         }
     }
 
     cfg.validate()?;
-    Ok(cfg)
+    Ok((cfg, warnings))
 }
 
 /// Saves the configuration to a TOML file.
@@ -1864,16 +1933,64 @@ fn is_dir_writable(dir: &Path) -> bool {
 /// ---------------------------------------------------------------------------------------------
 ///  Helpers
 /// ---------------------------------------------------------------------------------------------
-fn load_partial(path: &Path) -> Result<ConfigPartial, ConfigError> {
+fn load_partial(path: &Path, warnings: &mut Vec<String>) -> Result<ConfigPartial, ConfigError> {
     let contents = fs::read_to_string(path).map_err(|source| ConfigError::Io {
         path: path.to_path_buf(),
         source,
     })?;
 
+    collect_deprecated_key_warnings(path, &contents, warnings);
+
     toml::from_str(&contents).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Append a human-readable warning for any deprecated config keys present in
+/// a config file, before the file is deserialized.
+///
+/// Deprecated keys still load (via `#[serde(alias = ...)]`), so this warning
+/// is the only signal a user gets that their key name is obsolete and should
+/// be updated. The scan parses the raw TOML into a generic value so a
+/// key-name match inside a comment or string cannot produce a false positive.
+///
+/// Warnings are collected rather than logged directly because config loading
+/// runs before the tracing subscriber is initialised (see
+/// [`load_config_with_warnings`]).
+///
+/// Currently detects:
+/// - `[notifications] routing_info` — renamed to `routing_osc_text` (issue
+///   #433).
+fn collect_deprecated_key_warnings(path: &Path, contents: &str, warnings: &mut Vec<String>) {
+    // A parse failure here is not fatal: the real deserialize below reports
+    // the error with proper context, so a malformed file simply skips the
+    // deprecation scan.  Use `toml::from_str` (document parse) rather than
+    // `str::parse`/`Value::from_str`, which rejects a document containing
+    // table headers in this toml version.
+    let Ok(value) = toml::from_str::<toml::Value>(contents) else {
+        return;
+    };
+
+    if config_uses_deprecated_routing_info(&value) {
+        warnings.push(format!(
+            "config key `[notifications] routing_info` in {} is deprecated and \
+             was renamed to `routing_osc_text` (issue #433); it still works via \
+             a compatibility alias but you should rename it in your config",
+            path.display()
+        ));
+    }
+}
+
+/// Whether a parsed config document contains the deprecated
+/// `[notifications] routing_info` key (renamed to `routing_osc_text` in issue
+/// #433). Extracted as a pure predicate so the detection is unit-testable
+/// without a tracing subscriber.
+fn config_uses_deprecated_routing_info(value: &toml::Value) -> bool {
+    value
+        .get("notifications")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|table| table.contains_key("routing_info"))
 }
 
 /// ---------------------------------------------------------------------------------------------
@@ -2208,7 +2325,8 @@ size = 14.0
         assert!(cfg.on_command_finished);
         assert!((cfg.command_finished_threshold_secs - 10.0_f32).abs() < f32::EPSILON);
         assert_eq!(cfg.routing_error, NotificationRouting::Both);
-        assert_eq!(cfg.routing_info, NotificationRouting::Toast);
+        assert_eq!(cfg.routing_osc_text, NotificationRouting::Toast);
+        assert_eq!(cfg.routing_osc99, NotificationRouting::Both);
         assert_eq!(
             cfg.routing_command_finished,
             NotificationRouting::SystemWhenUnfocused
@@ -2228,8 +2346,9 @@ size = 14.0
         cfg.notifications.osc_99 = false;
         cfg.notifications.on_command_finished = false;
         cfg.notifications.command_finished_threshold_secs = 3.5;
-        cfg.notifications.routing_error = NotificationRouting::System;
-        cfg.notifications.routing_info = NotificationRouting::Both;
+        cfg.notifications.routing_error = NotificationRouting::Disabled;
+        cfg.notifications.routing_osc_text = NotificationRouting::Both;
+        cfg.notifications.routing_osc99 = NotificationRouting::Toast;
         cfg.notifications.routing_command_finished = NotificationRouting::Toast;
         cfg.notifications.command_finished_template = "{command}: {exit_code}".to_owned();
 
@@ -2246,9 +2365,20 @@ size = 14.0
         );
         assert_eq!(
             parsed.notifications.routing_error,
-            NotificationRouting::System
+            NotificationRouting::Disabled
         );
-        assert_eq!(parsed.notifications.routing_info, NotificationRouting::Both);
+        assert!(
+            toml.contains("routing_error = \"disabled\""),
+            "Disabled should serialize as the literal string \"disabled\": {toml}"
+        );
+        assert_eq!(
+            parsed.notifications.routing_osc_text,
+            NotificationRouting::Both
+        );
+        assert_eq!(
+            parsed.notifications.routing_osc99,
+            NotificationRouting::Toast
+        );
         assert_eq!(
             parsed.notifications.routing_command_finished,
             NotificationRouting::Toast
@@ -2257,6 +2387,101 @@ size = 14.0
             parsed.notifications.command_finished_template,
             "{command}: {exit_code}"
         );
+    }
+
+    #[test]
+    fn deprecated_routing_info_key_still_loads_via_alias() {
+        // Issue #433 renamed `routing_info` to `routing_osc_text`. A config
+        // still using the old key must keep working (via the serde alias)
+        // rather than silently reverting to the default.
+        let toml_str = "\
+[notifications]
+routing_info = \"system\"
+";
+        let partial: ConfigPartial = toml::from_str(toml_str).expect("alias should parse");
+        let mut cfg = Config::default();
+        cfg.apply_partial(partial);
+        assert_eq!(
+            cfg.notifications.routing_osc_text,
+            NotificationRouting::System,
+            "deprecated routing_info must load into routing_osc_text"
+        );
+    }
+
+    #[test]
+    fn deprecated_routing_info_is_detected() {
+        // The pure predicate backing the load-time deprecation warning.
+        let with_old: toml::Value =
+            toml::from_str("[notifications]\nrouting_info = \"toast\"\n").expect("valid TOML");
+        assert!(config_uses_deprecated_routing_info(&with_old));
+
+        let with_new: toml::Value =
+            toml::from_str("[notifications]\nrouting_osc_text = \"toast\"\n").expect("valid TOML");
+        assert!(!config_uses_deprecated_routing_info(&with_new));
+
+        let no_section: toml::Value = toml::from_str("[font]\nsize = 14.0\n").expect("valid TOML");
+        assert!(!config_uses_deprecated_routing_info(&no_section));
+    }
+
+    #[test]
+    fn notification_routing_disabled_serializes_as_literal_string() {
+        // TOML documents must be tables, so bare enum values are wrapped in a
+        // single-field helper struct for the round trip.
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            routing: NotificationRouting,
+        }
+
+        let wrapper = Wrapper {
+            routing: NotificationRouting::Disabled,
+        };
+        let toml = toml::to_string_pretty(&wrapper).expect("serialise NotificationRouting");
+        assert!(
+            toml.contains("routing = \"disabled\""),
+            "Disabled should serialize as the literal string \"disabled\": {toml}"
+        );
+
+        let parsed: Wrapper = toml::from_str(&toml).expect("re-parse NotificationRouting");
+        assert_eq!(parsed.routing, NotificationRouting::Disabled);
+    }
+
+    #[test]
+    fn freminal_toast_routing_round_trips_through_toml() {
+        // TOML documents must be tables, so bare enum values are wrapped in a
+        // single-field helper struct for the round trip.
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            routing: FreminalToastRouting,
+        }
+
+        assert!(FreminalToastRouting::Toast.wants_toast());
+        assert!(!FreminalToastRouting::Disabled.wants_toast());
+
+        let toast_toml = toml::to_string_pretty(&Wrapper {
+            routing: FreminalToastRouting::Toast,
+        })
+        .expect("serialise FreminalToastRouting::Toast");
+        assert!(
+            toast_toml.contains("routing = \"toast\""),
+            "Toast should serialize as the literal string \"toast\": {toast_toml}"
+        );
+
+        let disabled_toml = toml::to_string_pretty(&Wrapper {
+            routing: FreminalToastRouting::Disabled,
+        })
+        .expect("serialise FreminalToastRouting::Disabled");
+        assert!(
+            disabled_toml.contains("routing = \"disabled\""),
+            "Disabled should serialize as the literal string \"disabled\": {disabled_toml}"
+        );
+
+        let parsed_toast: Wrapper =
+            toml::from_str(&toast_toml).expect("re-parse FreminalToastRouting::Toast");
+        assert_eq!(parsed_toast.routing, FreminalToastRouting::Toast);
+
+        let parsed_disabled: Wrapper =
+            toml::from_str(&disabled_toml).expect("re-parse FreminalToastRouting::Disabled");
+        assert_eq!(parsed_disabled.routing, FreminalToastRouting::Disabled);
     }
 
     #[test]
@@ -3973,6 +4198,51 @@ path = "/tmp/my.frag"
 
         let loaded = load_config(Some(&path)).expect("load_config should succeed");
         assert!((loaded.font.size - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn load_config_with_warnings_reports_deprecated_routing_info() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("deprecated.toml");
+        let mut file = fs::File::create(&path).expect("create temp config");
+        writeln!(file, "[notifications]\nrouting_info = \"system\"").expect("write temp config");
+
+        let (cfg, warnings) = load_config_with_warnings(Some(&path)).expect("load should succeed");
+
+        // The deprecated key still takes effect via the serde alias …
+        assert_eq!(
+            cfg.notifications.routing_osc_text,
+            NotificationRouting::System
+        );
+        // … and a warning is surfaced for the caller to replay/toast.
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected one deprecation warning: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("routing_info") && warnings[0].contains("routing_osc_text"),
+            "warning should name both the old and new key: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_config_with_warnings_is_silent_for_current_keys() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("current.toml");
+        let mut file = fs::File::create(&path).expect("create temp config");
+        writeln!(file, "[notifications]\nrouting_osc_text = \"system\"")
+            .expect("write temp config");
+
+        let (_cfg, warnings) = load_config_with_warnings(Some(&path)).expect("load should succeed");
+        assert!(
+            warnings.is_empty(),
+            "a config using the current key must produce no warnings: {warnings:?}"
+        );
     }
 
     /// RAII guard that sets an env var on creation and restores the previous

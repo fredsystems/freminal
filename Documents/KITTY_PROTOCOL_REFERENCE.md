@@ -249,13 +249,13 @@ OSC 99 routing landed across Tasks 99.1–99.8:
   `ConfigPartial`/`apply_partial`) is enforced at the `route_osc99` drain site
   (Task 99.8) as a kill-switch alongside the master `enabled` gate.
 
+- OSC 99 routing: as of the issue #433 routing refactor, the toast/system
+  legs are gated per-leg by `[notifications] routing_osc99` (default `both`,
+  preserving the original always-both behaviour) in addition to the
+  `enabled`/`osc_99` gates above.
+
 **Known deferrals (not silently dropped — tracked):**
 
-- **`osc_9`/`osc_777` are still not gated independently** (Task 99.10,
-  scheduled as an independent Task 76 hygiene cleanup, not a v0.11.0
-  blocker). Both currently collapse to the shared `NotificationKind::OscText`
-  and are gated only by `enabled`/`routing_info`; the `osc_9`/`osc_777`
-  config fields have no effect yet.
 - **Alive-map pruning tradeoff:** an OS-observed close on Linux writes the
   close report directly from the notification thread but does not prune
   `live` (a `!Send` map on the GUI thread); the map is pruned only on an

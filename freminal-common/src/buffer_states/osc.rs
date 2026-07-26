@@ -356,11 +356,16 @@ pub enum AnsiOscType {
     ShellInfoHistFile(PathBuf),
     /// OSC 9 / OSC 777 — desktop notification request.
     ///
-    /// `title` is `None` for OSC 9 (which has no title field) and `Some` for
-    /// OSC 777 (`notify;TITLE;BODY`) when a title is present.  `body` holds
-    /// the notification text.  One-way; the GUI routes it to a toast and/or
-    /// the system notification daemon per the `[notifications]` config.
+    /// `source` records which OSC sequence produced this notification, so
+    /// the GUI can honour the per-source `notifications.osc_9` /
+    /// `notifications.osc_777` enable toggles.  `title` is `None` for OSC 9
+    /// (which has no title field) and `Some` for OSC 777
+    /// (`notify;TITLE;BODY`) when a title is present.  `body` holds the
+    /// notification text.  One-way; the GUI routes it to a toast and/or the
+    /// system notification daemon per the `[notifications]` config.
     Notify {
+        /// Which OSC sequence produced this notification.
+        source: OscNotifySource,
         /// The notification title, if any.
         title: Option<String>,
         /// The notification body text.
@@ -370,6 +375,17 @@ pub enum AnsiOscType {
     /// fully-parsed [`crate::buffer_states::osc_notify_99::Osc99Command`].
     /// Chunk reassembly / transport / GUI are handled downstream (Tasks 99.3+).
     Notify99(crate::buffer_states::osc_notify_99::Osc99Command),
+}
+
+/// Which OSC sequence produced a one-way text notification, so the GUI can
+/// honour the per-source `notifications.osc_9` / `notifications.osc_777`
+/// enable toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OscNotifySource {
+    /// OSC 9 (`iTerm2` / `WezTerm` simple-body).
+    Osc9,
+    /// OSC 777 (urxvt `notify;TITLE;BODY`).
+    Osc777,
 }
 
 impl std::fmt::Display for AnsiOscType {
@@ -422,7 +438,14 @@ impl std::fmt::Display for AnsiOscType {
             Self::ResetBackgroundColor => write!(f, "ResetBackgroundColor"),
             Self::SetPointerShape(shape) => write!(f, "SetPointerShape({shape})"),
             Self::ShellInfoHistFile(path) => write!(f, "ShellInfoHistFile({})", path.display()),
-            Self::Notify { title, body } => write!(f, "Notify(title={title:?}, body={body:?})"),
+            Self::Notify {
+                source,
+                title,
+                body,
+            } => write!(
+                f,
+                "Notify(source={source:?}, title={title:?}, body={body:?})"
+            ),
             Self::Notify99(cmd) => write!(f, "Notify99(id={:?})", cmd.id),
         }
     }
@@ -1112,6 +1135,7 @@ mod tests {
     #[test]
     fn display_ansi_osc_notify_with_title() {
         let s = AnsiOscType::Notify {
+            source: OscNotifySource::Osc777,
             title: Some("Build".to_string()),
             body: "done".to_string(),
         }
@@ -1124,6 +1148,7 @@ mod tests {
     #[test]
     fn display_ansi_osc_notify_without_title() {
         let s = AnsiOscType::Notify {
+            source: OscNotifySource::Osc9,
             title: None,
             body: "hello".to_string(),
         }

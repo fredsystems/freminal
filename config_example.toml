@@ -404,10 +404,19 @@ limit = 10000
 #   "both"                   - both a toast and a desktop notification
 #   "system_when_unfocused"  - desktop notification when freminal is
 #                              unfocused, in-app toast when focused
-# Defaults: error = "both", info = "toast",
+#   "disabled"               - suppress this category entirely
+# Defaults: error = "both", osc_text = "toast", osc99 = "both",
 #           command_finished = "system_when_unfocused".
 # routing_error = "both"
-# routing_info = "toast"
+
+# Routing for OSC 9 / OSC 777 text notifications.
+# (Renamed from "routing_info"; the old name still works as a deprecated
+#  alias but emits a warning at startup — update it to "routing_osc_text".)
+# routing_osc_text = "toast"
+
+# Routing for OSC 99 (kitty stateful) notifications.
+# routing_osc99 = "both"
+
 # routing_command_finished = "system_when_unfocused"
 
 # Template for the body of command-finished notifications.  Tokens:

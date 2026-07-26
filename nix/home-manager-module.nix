@@ -163,7 +163,8 @@ let
           on_command_finished
           command_finished_threshold_secs
           routing_error
-          routing_info
+          routing_osc_text
+          routing_osc99
           routing_command_finished
           ;
       };
@@ -879,31 +880,53 @@ in
               "system"
               "both"
               "system_when_unfocused"
+              "disabled"
             ]
           );
           default = null;
           description = ''
             Routing for error-category notifications: "toast" (in-app only),
-            "system" (desktop only), "both", or "system_when_unfocused"
-            (desktop when unfocused, toast when focused).
+            "system" (desktop only), "both", "system_when_unfocused"
+            (desktop when unfocused, toast when focused), or "disabled"
+            (suppress this category entirely).
             Null uses the default ("both").
           '';
         };
 
-        routing_info = mkOption {
+        routing_osc_text = mkOption {
           type = types.nullOr (
             types.enum [
               "toast"
               "system"
               "both"
               "system_when_unfocused"
+              "disabled"
             ]
           );
           default = null;
           description = ''
-            Routing for informational notifications (see routing_error for the
-            value meanings).
+            Routing for OSC 9 (iTerm2/WezTerm) and OSC 777
+            ("notify;TITLE;BODY", urxvt) text notifications (see
+            routing_error for the value meanings).
             Null uses the default ("toast").
+          '';
+        };
+
+        routing_osc99 = mkOption {
+          type = types.nullOr (
+            types.enum [
+              "toast"
+              "system"
+              "both"
+              "system_when_unfocused"
+              "disabled"
+            ]
+          );
+          default = null;
+          description = ''
+            Routing for OSC 99 (kitty stateful) notifications (see
+            routing_error for the value meanings).
+            Null uses the default ("both").
           '';
         };
 
@@ -914,6 +937,7 @@ in
               "system"
               "both"
               "system_when_unfocused"
+              "disabled"
             ]
           );
           default = null;

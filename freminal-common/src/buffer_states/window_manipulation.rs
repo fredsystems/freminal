@@ -17,8 +17,6 @@ pub enum NotificationKind {
     CommandFinished,
     /// An error-category notification.
     Error,
-    /// An informational notification.
-    Info,
 }
 
 /// Errors produced when converting a raw `(Ps1, Ps2, Ps3)` XTWINOPS parameter
@@ -173,11 +171,16 @@ pub enum WindowManipulation {
     ///
     /// Forwarded to the GUI so it can route the notification to an in-app
     /// toast and/or the system notification daemon per the `[notifications]`
-    /// config.  `title` is `None` for OSC 9 and `Some` for OSC 777 when a
-    /// title is present.
+    /// config.  `source` records which OSC sequence produced this
+    /// notification, so the GUI can honour the per-source
+    /// `notifications.osc_9` / `notifications.osc_777` enable toggles.
+    /// `title` is `None` for OSC 9 and `Some` for OSC 777 when a title is
+    /// present.
     Notification {
         /// The notification category, selecting the routing policy.
         kind: NotificationKind,
+        /// Which OSC sequence produced this notification.
+        source: crate::buffer_states::osc::OscNotifySource,
         /// The notification title, if any.
         title: Option<String>,
         /// The notification body text.

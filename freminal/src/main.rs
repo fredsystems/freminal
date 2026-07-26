@@ -59,7 +59,7 @@ use tracing_subscriber::{
 pub mod gui;
 mod shell_integration;
 use anyhow::Result;
-use freminal_common::{args::Args, config, config::load_config};
+use freminal_common::{args::Args, config, config::load_config_with_warnings};
 use freminal_terminal_emulator::recording::{
     RecordingMetadata, RecordingSwap, TopologySnapshot, empty_recording_swap, start_recording,
 };
@@ -139,8 +139,13 @@ fn main() {
     let mut early_warnings: Vec<String> = Vec::new();
 
     // ── 1. Load config and apply CLI overrides ──────────────────────────
-    let mut cfg = match load_config(args.config.as_deref()) {
-        Ok(cfg) => cfg,
+    let mut cfg = match load_config_with_warnings(args.config.as_deref()) {
+        Ok((cfg, config_warnings)) => {
+            // Config loads before the tracing subscriber is ready, so buffer
+            // any deprecation warnings for replay once logging is up.
+            early_warnings.extend(config_warnings);
+            cfg
+        }
         Err(err) => {
             eprintln!("Error: failed to load config: {err:#}");
             std::process::exit(1);

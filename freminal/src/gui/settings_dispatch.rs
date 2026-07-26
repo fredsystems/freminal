@@ -6,7 +6,7 @@
 use freminal_common::config::Config;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
-use tracing::error;
+use tracing::{error, warn};
 
 use super::FreminalGui;
 use super::settings::SettingsAction;
@@ -279,18 +279,25 @@ impl FreminalGui {
             );
             return;
         };
-        let new_cfg = match freminal_common::config::load_config(Some(&path)) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("Reload Config: failed to load '{}': {e}", path.display());
-                self.push_error_toast("Reload Config failed", Some(e.to_string()));
-                return;
-            }
-        };
+        let (new_cfg, config_warnings) =
+            match freminal_common::config::load_config_with_warnings(Some(&path)) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    error!("Reload Config: failed to load '{}': {e}", path.display());
+                    self.push_error_toast("Reload Config failed", Some(e.to_string()));
+                    return;
+                }
+            };
         self.apply_new_config(new_cfg, handle);
         // Re-sync the Settings modal's draft so opening Settings after a
         // reload shows the now-live values, not a stale draft.
         self.settings_modal.sync_from_config(&self.config);
+        // Surface any config deprecation warnings as a toast so an
+        // interactive reload makes them visible (they are also logged).
+        for warning in &config_warnings {
+            warn!("{warning}");
+            self.push_info_toast("Config deprecation", Some(warning.clone()));
+        }
         self.push_info_toast("Config reloaded", Some(format!("From {}", path.display())));
     }
 

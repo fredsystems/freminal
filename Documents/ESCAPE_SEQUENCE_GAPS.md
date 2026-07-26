@@ -1,6 +1,9 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-08 — Task 115 (v0.11.1) closed the DECSCNM
+Last updated: 2026-07-25 — issue #433 — OSC 9/777 per-source notification
+enable toggles now enforced (see ESCAPE_SEQUENCE_COVERAGE.md). No gap
+entries changed: the OSC 9 ConEmu progress-report gap below is unrelated
+and unaffected. Earlier: 2026-07-08 — Task 115 (v0.11.1) closed the DECSCNM
 cell-level fg/bg swap renderer gap: DECSCNM (?5) now performs a per-pane,
 per-cell foreground/background swap at render time in the vertex builders
 (`freminal/src/gui/renderer/vertex.rs`), XOR-composed with per-cell SGR-7

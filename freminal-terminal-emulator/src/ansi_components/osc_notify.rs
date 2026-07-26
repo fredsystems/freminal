@@ -33,7 +33,7 @@
 //! `99;i=x:p=title;Hello world`).
 
 use crate::ansi_components::tracer::SequenceTracer;
-use freminal_common::buffer_states::osc::AnsiOscType;
+use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
 use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -71,6 +71,7 @@ pub(super) fn handle_osc_notify_9(
     }
 
     output.push(TerminalOutput::OscResponse(AnsiOscType::Notify {
+        source: OscNotifySource::Osc9,
         title: None,
         body,
     }));
@@ -116,6 +117,7 @@ pub(super) fn handle_osc_notify_777(
     }
 
     output.push(TerminalOutput::OscResponse(AnsiOscType::Notify {
+        source: OscNotifySource::Osc777,
         title,
         body,
     }));
@@ -223,7 +225,7 @@ fn decode_utf8(bytes: &[u8], seq_trace: &SequenceTracer) -> Option<String> {
 mod tests {
     use super::super::osc::AnsiOscParser;
     use super::super::tracer::SequenceTracer;
-    use freminal_common::buffer_states::osc::AnsiOscType;
+    use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{Osc99Command, Osc99PayloadType};
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
@@ -240,12 +242,14 @@ mod tests {
         SequenceTracer::new()
     }
 
-    fn expect_notify(output: &[TerminalOutput]) -> (&Option<String>, &str) {
+    fn expect_notify(output: &[TerminalOutput]) -> (OscNotifySource, &Option<String>, &str) {
         assert_eq!(output.len(), 1, "expected one output, got: {output:?}");
         match &output[0] {
-            TerminalOutput::OscResponse(AnsiOscType::Notify { title, body }) => {
-                (title, body.as_str())
-            }
+            TerminalOutput::OscResponse(AnsiOscType::Notify {
+                source,
+                title,
+                body,
+            }) => (*source, title, body.as_str()),
             other => panic!("expected Notify, got: {other:?}"),
         }
     }
@@ -255,7 +259,8 @@ mod tests {
     #[test]
     fn osc9_basic_body_bel() {
         let output = feed_osc(b"9;Build finished\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "Build finished");
     }
@@ -263,7 +268,8 @@ mod tests {
     #[test]
     fn osc9_basic_body_st_terminator() {
         let output = feed_osc(b"9;Done\x1b\\");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "Done");
     }
@@ -272,7 +278,8 @@ mod tests {
     fn osc9_body_with_semicolons_preserved() {
         // A body containing semicolons must survive intact (no token split).
         let output = feed_osc(b"9;a;b;c\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "a;b;c");
     }
@@ -296,7 +303,8 @@ mod tests {
     #[test]
     fn osc777_notify_title_body() {
         let output = feed_osc(b"777;notify;Title;Body text\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc777);
         assert_eq!(title.as_deref(), Some("Title"));
         assert_eq!(body, "Body text");
     }
@@ -304,7 +312,8 @@ mod tests {
     #[test]
     fn osc777_notify_title_only() {
         let output = feed_osc(b"777;notify;Just a title\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc777);
         assert_eq!(title.as_deref(), Some("Just a title"));
         assert_eq!(body, "");
     }
@@ -312,7 +321,8 @@ mod tests {
     #[test]
     fn osc777_body_with_semicolons_preserved() {
         let output = feed_osc(b"777;notify;T;a;b;c\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc777);
         assert_eq!(title.as_deref(), Some("T"));
         assert_eq!(body, "a;b;c");
     }
@@ -321,7 +331,8 @@ mod tests {
     fn osc777_without_notify_prefix_is_all_body() {
         // No `notify;` prefix → entire payload is the body, no title.
         let output = feed_osc(b"777;raw message\x07");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc777);
         assert_eq!(*title, None);
         assert_eq!(body, "raw message");
     }
@@ -329,7 +340,8 @@ mod tests {
     #[test]
     fn osc777_st_terminator() {
         let output = feed_osc(b"777;notify;T;B\x1b\\");
-        let (title, body) = expect_notify(&output);
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc777);
         assert_eq!(title.as_deref(), Some("T"));
         assert_eq!(body, "B");
     }
