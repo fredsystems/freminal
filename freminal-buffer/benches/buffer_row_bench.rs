@@ -456,6 +456,79 @@ fn bench_lf_flatten_at_capacity(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: batched LF then flatten at scrollback capacity — amortized
+// re-merge cost under realistic PTY-read batching (issue #457 follow-up).
+//
+// `bench_lf_flatten_at_capacity` above measures the worst case: exactly one
+// LF (which always rotates scrollback and nulls `merge_cache` once already
+// at capacity) immediately followed by one flatten, so the O(window-height)
+// full re-merge is paid on every single line. That is not how
+// `visible_as_tchars_and_tags` (via `build_snapshot`) is actually driven in
+// production: the GUI/PTY thread batches up to 64 read chunks (up to
+// ~256 KiB) before publishing a single snapshot, so many LFs typically
+// happen between two flatten calls. This benchmark isolates that amortized
+// case instead: for a buffer already at scrollback capacity, perform `K`
+// LFs back-to-back, then exactly ONE flatten, as a single timed iteration —
+// for `K` in `[1, 8, 32, 128, 512]`. If PTY-read batching already mitigates
+// the re-merge cost identified by issue #457 in realistic usage, the
+// per-LF amortized cost (total time / K) should fall sharply as `K` grows,
+// since the single full re-merge's cost is spread across all K lines
+// instead of being paid once per line as in the worst-case benchmark above.
+//
+// Only height=100 is measured (per-task scope): it is the more realistic,
+// interesting window size, and crossing every K with both heights adds
+// little beyond what `bench_lf_flatten_at_capacity` already shows about the
+// height dependency.
+// ---------------------------------------------------------------
+fn bench_lf_batch_then_flatten_at_capacity(c: &mut Criterion) {
+    const WIDTH: usize = 200;
+    const SCROLLBACK_LIMIT: usize = 4_000;
+    const HEIGHT: usize = 100;
+
+    let mut group = c.benchmark_group("bench_lf_batch_then_flatten_at_capacity");
+
+    for k in [1usize, 8, 32, 128, 512] {
+        group.bench_with_input(
+            BenchmarkId::new("lf_batch_then_flatten_steady_state", k),
+            &k,
+            |b, &k| {
+                // Same `iter_batched_ref` care as `bench_lf_flatten_at_capacity`:
+                // the routine takes `&mut Buffer`, so the ~`HEIGHT +
+                // SCROLLBACK_LIMIT`-row buffer's destructor runs when the
+                // batch's input `Vec` is dropped — OUTSIDE the timed span —
+                // instead of inside the routine on every iteration. The
+                // buffer stays at capacity across all K LFs within one
+                // iteration: each LF's push+drain nets `rows.len()`
+                // unchanged, so this holds for any K, and every timed
+                // iteration remains in the exact steady state under test.
+                b.iter_batched_ref(
+                    || {
+                        let mut buf =
+                            build_buffer_at_scrollback_capacity(WIDTH, HEIGHT, SCROLLBACK_LIMIT);
+                        // Warm the merge cache once, outside the timed
+                        // section, matching the real steady-state PTY loop
+                        // where the previous frame already warmed it.
+                        let _ = buf.visible_as_tchars_and_tags(0);
+                        buf
+                    },
+                    |buf| {
+                        for _ in 0..k {
+                            buf.insert_text(&[TChar::Ascii(b'x')]);
+                            buf.handle_lf();
+                            buf.handle_cr();
+                        }
+                        std::hint::black_box(buf.visible_as_tchars_and_tags(0));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Benchmark: erase display (ED) on a full buffer
 // ---------------------------------------------------------------
 fn bench_erase_display(c: &mut Criterion) {
@@ -1118,6 +1191,7 @@ criterion_group!(
         bench_move_cursor_relative,
         bench_lf_heavy,
         bench_lf_flatten_at_capacity,
+        bench_lf_batch_then_flatten_at_capacity,
         bench_erase_display,
         bench_scrollback_render,
         bench_alternate_screen_switch,
