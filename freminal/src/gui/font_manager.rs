@@ -19,6 +19,7 @@ use conv2::{ConvUtil, ValueFrom};
 use fontdb::Database;
 use freminal_common::buffer_states::fonts::{FontDecorationFlags, FontDecorations, FontWeight};
 use freminal_common::config::Config;
+use rustc_hash::FxHashMap;
 
 // ---------------------------------------------------------------------------
 //  Bundled font data (compiled into the binary via include_bytes!)
@@ -445,7 +446,7 @@ pub struct FontManager {
     /// `glyph_cache`. `None` means the face has no measurable metrics (or is a
     /// primary face). Interior mutability so the renderer can read metrics
     /// through a shared `&FontManager` while still caching.
-    fallback_metrics_cache: RefCell<HashMap<FaceId, Option<FallbackCellMetrics>>>,
+    fallback_metrics_cache: RefCell<FxHashMap<FaceId, Option<FallbackCellMetrics>>>,
 
     /// Per-face cache of parsed `rustybuzz::Face` instances (Task #430).
     /// Populated lazily by [`Self::build_cached_face`] (invoked from
@@ -454,14 +455,14 @@ pub struct FontManager {
     /// size/DPI change (`set_font_size`, `update_pixels_per_point`), even
     /// though the bytes themselves are unaffected by those. `None` means the
     /// face is not loaded or failed to parse as a rustybuzz `Face`.
-    face_cache: RefCell<HashMap<FaceId, Option<CachedFace>>>,
+    face_cache: RefCell<FxHashMap<FaceId, Option<CachedFace>>>,
 
     /// Per-`(face, ligatures, script, direction)` cache of compiled
     /// `rustybuzz::ShapePlan`s (Task #430). Plan compilation is the
     /// second-most expensive part of cold shaping after face parsing;
     /// caching it avoids recompiling an identical plan on every shape call.
     /// Cleared alongside `face_cache`.
-    plan_cache: RefCell<HashMap<PlanKey, Arc<rustybuzz::ShapePlan>>>,
+    plan_cache: RefCell<FxHashMap<PlanKey, Arc<rustybuzz::ShapePlan>>>,
 
     /// Authoritative cell width in integer pixels.
     cell_width: u32,
@@ -578,9 +579,9 @@ impl FontManager {
             system_fallback_cache: HashMap::new(),
             system_faces: Vec::new(),
             glyph_cache: HashMap::new(),
-            fallback_metrics_cache: RefCell::new(HashMap::new()),
-            face_cache: RefCell::new(HashMap::new()),
-            plan_cache: RefCell::new(HashMap::new()),
+            fallback_metrics_cache: RefCell::new(FxHashMap::default()),
+            face_cache: RefCell::new(FxHashMap::default()),
+            plan_cache: RefCell::new(FxHashMap::default()),
             cell_width,
             cell_height,
             ascent,
