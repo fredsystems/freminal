@@ -524,6 +524,44 @@ pub(super) fn handle_scrollbar(
     new_offset
 }
 
+/// Decide whether the command-block gutter's hover-tint state changed
+/// enough to need a repaint, and what the new cached hover state should be.
+///
+/// This is the pure decision logic factored out of the gutter hover block
+/// so it is unit-testable without a live `egui::Ui`/`Context`.
+///
+/// `hovered` is the raw `Response::hovered()` for this frame's gutter
+/// interact region. `pointer_in_window` is whether the pointer currently
+/// has *any* position in this window
+/// (`PointerState::latest_pos().is_some()`). `was_hovering` is the cached
+/// state from the previous frame (`ViewState::pointer_in_gutter_last_frame`
+/// or equivalent).
+///
+/// `hovered()` is keyed off egui's `interact_pos()`, which lags
+/// `latest_pos()` by one frame specifically when the pointer leaves the OS
+/// window (egui's own documented behavior around `Event::PointerGone`:
+/// `latest_pos` clears to `None` immediately, but `interact_pos` is not
+/// cleared until the next frame). A naive `hovered != was_hovering` edge
+/// check would therefore read stale-`true` on the exact frame the pointer
+/// leaves the window, evaluate `true != true` = no change, and fail to
+/// schedule the very repaint needed to observe the real (cleared) state on
+/// a later frame -- since nothing else is guaranteed to wake a frame,
+/// the hover tint could get stuck indefinitely. Folding in
+/// `pointer_in_window` (cleared same-frame on window-exit) closes that gap:
+/// a pointer that has left the window is treated as "not hovering"
+/// immediately, without waiting for `interact_pos()`'s one-frame lag to
+/// catch up.
+///
+/// Returns `(needs_repaint, new_cached_state)`.
+const fn gutter_hover_repaint_decision(
+    hovered: bool,
+    pointer_in_window: bool,
+    was_hovering: bool,
+) -> (bool, bool) {
+    let effectively_hovered = hovered && pointer_in_window;
+    (effectively_hovered != was_hovering, effectively_hovered)
+}
+
 /// Duration of the visual bell flash overlay.
 const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
 
@@ -1788,13 +1826,24 @@ impl FreminalTerminalWidget {
                 egui::Sense::click(),
             );
             let hovered = gutter_response.hovered();
-            if hovered {
+            // See `gutter_hover_repaint_decision` for why `latest_pos()` is
+            // folded in alongside `hovered()` here: it detects a
+            // pointer-left-the-window exit in the same frame it happens,
+            // instead of one frame late (egui's documented `interact_pos()`
+            // lag around `Event::PointerGone`).
+            let pointer_in_window = ui.ctx().input(|i| i.pointer.latest_pos().is_some());
+            let (needs_repaint, effectively_hovered) = gutter_hover_repaint_decision(
+                hovered,
+                pointer_in_window,
+                cache.pointer_in_gutter_last_frame,
+            );
+            if effectively_hovered {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
-            if hovered || cache.pointer_in_gutter_last_frame {
+            if needs_repaint {
                 ui.ctx().request_repaint();
             }
-            cache.pointer_in_gutter_last_frame = hovered;
+            cache.pointer_in_gutter_last_frame = effectively_hovered;
         } else if cache.pointer_in_gutter_last_frame {
             // Feature toggled off / alt-screen entered while we were hovering:
             // draw one clearing frame.
@@ -3666,6 +3715,76 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
             "Drop files here",
             egui::FontId::proportional(20.0),
             Color32::WHITE,
+        );
+    }
+}
+
+#[cfg(test)]
+mod gutter_hover_repaint_decision_tests {
+    //! Tests for [`gutter_hover_repaint_decision`], the pure decision
+    //! function behind the command-block gutter's hover-tint repaint
+    //! logic. Covers the steady-state / enter / leave-within-window cases
+    //! plus the critical regression case: a same-frame pointer-left-window
+    //! exit must be detected immediately via `pointer_in_window`, without
+    //! waiting for `hovered()`'s one-frame `interact_pos()` lag to catch up
+    //! (see the function doc comment for the full egui behavior citation).
+
+    use super::gutter_hover_repaint_decision;
+
+    #[test]
+    fn steady_hover_no_change() {
+        assert_eq!(
+            gutter_hover_repaint_decision(true, true, true),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn steady_not_hovering_no_change() {
+        assert_eq!(
+            gutter_hover_repaint_decision(false, true, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn enter_transition_fires_and_now_hovering() {
+        assert_eq!(
+            gutter_hover_repaint_decision(true, true, false),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn leave_within_window_transition_fires_and_now_not_hovering() {
+        // Pointer is still inside the window, but has moved off the
+        // gutter's interact rect.
+        assert_eq!(
+            gutter_hover_repaint_decision(false, true, true),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn pointer_left_window_fires_immediately_despite_stale_hovered() {
+        // Regression guard: `hovered` is stale-`true` here (simulating
+        // egui's one-frame `interact_pos()` lag on `Event::PointerGone`),
+        // but `pointer_in_window` correctly reports `false` in the same
+        // frame the cursor left the OS window. The decision must fire the
+        // repaint immediately and clear the cached hover state -- it must
+        // NOT require a follow-up frame to observe the real state, since
+        // nothing else is guaranteed to wake one.
+        assert_eq!(
+            gutter_hover_repaint_decision(true, false, true),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn steady_state_after_window_exit_settled_no_more_repaints() {
+        assert_eq!(
+            gutter_hover_repaint_decision(false, false, false),
+            (false, false)
         );
     }
 }
