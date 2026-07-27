@@ -159,15 +159,20 @@ pub struct Buffer {
     ///      was built from, without marking every affected row dirty or
     ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
     ///      [`Buffer::enter_alternate`], and [`Buffer::leave_alternate`].
-    ///    - **Confined in-place row rotation**, in `scroll.rs`:
-    ///      `scroll_slice_up`, `scroll_slice_down`, and `scroll_up`. These
+    ///    - **Confined in-place row rotation**: `scroll_slice_up`,
+    ///      `scroll_slice_down`, and `scroll_up` (`scroll.rs`), and
+    ///      `enforce_scrollback_limit` (`resize_and_alt.rs`). These
     ///      relocate already-clean, non-`None` cache entries between row
     ///      indices (a moved row keeps its cached representation, only its
     ///      index changes) without marking the moved rows dirty, and
-    ///      without changing `self.rows.len()` (a shift or a
-    ///      `remove`+`push` nets to the same length) — so *neither* `fp`
-    ///      *nor* `first_rebuilt_row` observes that row content moved to a
-    ///      different index. Each of these three functions contains its own
+    ///      without changing `self.rows.len()`: the three `scroll.rs` sites
+    ///      net to the same length via a shift or a `remove`+`push`, and
+    ///      `enforce_scrollback_limit` nets to the same length because its
+    ///      front `drain` of `overflow` rows is paired, in the same line
+    ///      feed, with a `push_row` of one new row at the bottom once
+    ///      scrollback is at capacity — so *neither* `fp` *nor*
+    ///      `first_rebuilt_row` observes that row content moved to a
+    ///      different index. Each of these four functions contains its own
     ///      `self.merge_cache = None;` at the point where the rotation
     ///      happens; that line is load-bearing, **not** a redundant
     ///      leftover safe to delete — removing it would let a cached
@@ -175,7 +180,9 @@ pub struct Buffer {
     ///      rotated indices. See [`flatten::MergeCache`]'s doc comment for
     ///      the debug-only oracle cross-check that backstops this case, and
     ///      `incremental_merge_tests` in `flatten.rs` for the regression
-    ///      tests exercising it directly.
+    ///      tests exercising it directly (including
+    ///      `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
+    ///      for the `enforce_scrollback_limit` site specifically).
     ///
     /// The `_columns` scroll variants (`scroll_slice_up_columns`/
     /// `_down_columns`, used when DECLRMM confines a scroll horizontally)
@@ -185,14 +192,18 @@ pub struct Buffer {
     /// an existing cache entry to a different index, so mechanism (2)
     /// already catches them.
     ///
-    /// Deliberately NOT invalidated here (relying on `fp` instead): the
-    /// row-count-changing sites in `scroll.rs`
-    /// (`enforce_scrollback_limit`'s and `erase_scrollback`'s front
-    /// `drain`s) and the row-append sites in `lines.rs`. Every one of
-    /// those changes `self.rows.len()` without a compensating removal
-    /// elsewhere, which changes the *absolute* `visible_start`/`visible_end`
-    /// bounds `visible_window_bounds` returns, so `fp` mismatches and a
-    /// full merge is forced.
+    /// Deliberately NOT invalidated here (relying on `fp` instead):
+    /// `erase_scrollback`'s front drain (`scroll.rs`) and the row-append
+    /// sites in `lines.rs`. `erase_scrollback` only runs its drain when
+    /// `visible_start > 0` and always collapses `visible_start` to `0`
+    /// (everything above the live view is discarded, not rotated in
+    /// place), so the *absolute* `visible_start`/`visible_end` bounds
+    /// `visible_window_bounds` returns always change — unlike
+    /// `enforce_scrollback_limit`, there is no case where the window
+    /// bounds net out unchanged. The `lines.rs` append sites only ever grow
+    /// `self.rows.len()` with no compensating removal, which likewise
+    /// always changes the window bounds. Both cases make `fp` mismatch, so
+    /// a full merge is forced without an explicit `None`.
     pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
     /// Width and height of the terminal grid.

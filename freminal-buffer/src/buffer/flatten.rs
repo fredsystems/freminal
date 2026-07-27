@@ -3101,6 +3101,98 @@ mod incremental_merge_tests {
         );
     }
 
+    /// Task #405 regression guard: `Buffer::enforce_scrollback_limit`
+    /// (`resize_and_alt.rs`) is a fourth rotation site in the same family as
+    /// `scroll_slice_up`/`_down` and whole-buffer `scroll_up` proven above.
+    /// Once scrollback is at capacity, every LF pushes a new row at the
+    /// bottom and then drains `overflow` rows from the front
+    /// (`self.rows.drain(0..overflow)` + `self.row_cache.drain(0..overflow)`),
+    /// netting `rows.len()` unchanged. Since `visible_window_bounds` derives
+    /// purely from `rows.len()` and `height` (both unchanged), the resulting
+    /// `MergeWindowFp` is numerically IDENTICAL to the fingerprint the
+    /// previous call's `merge_cache` was built against, even though every
+    /// row's identity within that window just rotated down by `overflow` —
+    /// so `enforce_scrollback_limit` now contains its own explicit
+    /// `self.merge_cache = None;` at the rotation point, mirroring the other
+    /// three sites (see `Buffer::merge_cache`'s field doc).
+    ///
+    /// This test warms `merge_cache`, then drives many LFs past the
+    /// scrollback cap, re-flattening after every single one (so the
+    /// fingerprint never gets a chance to visibly change between
+    /// rotations) and checks each result against the independent oracle. It
+    /// is the regression guard for that fix: if the `merge_cache = None;`
+    /// line in `enforce_scrollback_limit` is ever removed or bypassed, this
+    /// test fails.
+    #[test]
+    fn incremental_merge_matches_oracle_after_scrollback_capacity_rotation() {
+        let width = 20;
+        let height = 5;
+        let scrollback_limit = 5;
+        let mut buf = Buffer::new(width, height).with_scrollback_limit(scrollback_limit);
+
+        let total_lines = 60;
+        for i in 0..total_lines {
+            buf.insert_text(&text(&format!("line{i:04}")));
+            buf.handle_lf();
+            buf.handle_cr();
+
+            // Warm + immediately re-read the merge cache after every single
+            // line feed, so the fingerprint check in
+            // `rows_as_tchars_and_tags_incremental` is exercised on every
+            // rotation, not just after several have accumulated.
+            let actual = buf.visible_as_tchars_and_tags(0);
+            let oracle = independent_oracle(&mut buf);
+            assert_eq!(
+                actual, oracle,
+                "iteration {i}: flatten diverged from the full-merge oracle \
+                 after a scrollback-capacity push+drain rotation"
+            );
+        }
+
+        // Belt-and-suspenders: independently verify the visible window's
+        // content directly via `Buffer::extract_text`, which reads
+        // `self.rows` / `row_cells_for_read` directly and goes through
+        // NEITHER `row_cache` NOR `merge_cache` — a completely separate
+        // code path from the one exercised (and cross-checked against the
+        // oracle) above.
+        //
+        // The loop above calls `handle_lf()` after EVERY line, including the
+        // last (`i == total_lines - 1`). That final LF advances the cursor
+        // onto a fresh blank row — exactly as a real terminal does — so the
+        // buffer's tail is `line{total_lines-1}` followed by ONE trailing
+        // blank row. The visible window's bottom row is therefore that blank
+        // row, and each content row `k` above it holds
+        // `line{total_lines - (height - 1) + k}`. Deriving the expectation
+        // from that geometry (rather than a `total_lines - height + k`
+        // formula that ignores the trailing blank) keeps this check an
+        // independent oracle over `extract_text` without baking in an
+        // off-by-one.
+        let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
+        assert_eq!(
+            visible_end - visible_start,
+            height,
+            "sanity: window must be exactly `height` rows"
+        );
+        let content_rows = height - 1;
+        for (k, absolute_row) in (visible_start..visible_end).enumerate() {
+            let actual_row_text = buf.extract_text(absolute_row, 0, absolute_row, width - 1);
+            let expected = if k < content_rows {
+                // Bottom-most content line is `line{total_lines-1}`, sitting
+                // one row above the trailing blank; walk upward from there.
+                let expected_line_index = total_lines - 1 - (content_rows - 1 - k);
+                format!("line{expected_line_index:04}")
+            } else {
+                // Final visible row is the blank row created by the loop's
+                // last `handle_lf()`.
+                String::new()
+            };
+            assert_eq!(
+                actual_row_text, expected,
+                "row {absolute_row} (window position {k}): expected {expected:?} via extract_text"
+            );
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────
     // Property test
     // ────────────────────────────────────────────────────────────────

@@ -363,6 +363,99 @@ fn bench_lf_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmark: steady-state LF at scrollback capacity — `merge_cache`
+// rotation invalidation cost (Task #405).
+//
+// `enforce_scrollback_limit` (`resize_and_alt.rs`) now sets
+// `self.merge_cache = None` every time a line feed's push+drain rotation
+// happens with scrollback already at capacity (see
+// `Buffer::merge_cache`'s field doc and the
+// `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
+// regression test in `flatten.rs`) — this is the correctness fix, but it
+// also means the very next `visible_as_tchars_and_tags` flatten can no
+// longer take the incremental fast path and must fully re-merge the whole
+// visible window instead. This benchmark isolates that worst case: a
+// buffer already sitting at its scrollback cap, then one LF (which always
+// rotates) immediately followed by one flatten, repeated every iteration
+// so the flatten never gets to reuse a warm cache. Two window heights are
+// measured to show the cost scales with `height` (a full-window re-merge),
+// not with `scrollback_limit`.
+// ---------------------------------------------------------------
+fn build_buffer_at_scrollback_capacity(
+    width: usize,
+    height: usize,
+    scrollback_limit: usize,
+) -> Buffer {
+    let mut buf = Buffer::new(width, height).with_scrollback_limit(scrollback_limit);
+    // Fill well past capacity so scrollback is already at its steady-state
+    // cap before any timed iteration runs (pre-fill happens outside the
+    // timed closure via `iter_batched`'s setup callback).
+    let total_lines = height + scrollback_limit + 8;
+    for i in 0..total_lines {
+        let text: Vec<TChar> = format!("line{i:06}")
+            .bytes()
+            .cycle()
+            .take(width)
+            .map(TChar::Ascii)
+            .collect();
+        buf.insert_text(&text);
+        buf.handle_lf();
+        buf.handle_cr();
+    }
+    buf
+}
+
+fn bench_lf_flatten_at_capacity(c: &mut Criterion) {
+    const WIDTH: usize = 200;
+    const SCROLLBACK_LIMIT: usize = 4_000;
+
+    let mut group = c.benchmark_group("bench_lf_flatten_at_capacity");
+
+    for height in [24usize, 100usize] {
+        group.bench_with_input(
+            BenchmarkId::new("lf_then_flatten_steady_state", height),
+            &height,
+            |b, &height| {
+                // `iter_batched_ref` (not `iter_batched`): the routine takes
+                // `&mut Buffer`, so the ~`height + SCROLLBACK_LIMIT`-row
+                // buffer's destructor runs when the batch's input `Vec` is
+                // dropped — OUTSIDE the timed span — instead of inside the
+                // routine on every iteration. With by-value `iter_batched`
+                // the per-iteration buffer drop dominated the measurement
+                // (thousands of `Row` frees), swamping the single LF+flatten
+                // this bench isolates and making the result track
+                // `SCROLLBACK_LIMIT` rather than `height`. The buffer stays at
+                // capacity across the reused iterations (each LF is a
+                // push+drain that nets `rows.len()` unchanged), so every timed
+                // iteration remains in the exact steady state under test.
+                b.iter_batched_ref(
+                    || {
+                        let mut buf =
+                            build_buffer_at_scrollback_capacity(WIDTH, height, SCROLLBACK_LIMIT);
+                        // Warm the merge cache once, outside the timed
+                        // section, so the timed rotation+flatten pair below
+                        // starts from a populated (not merely absent) cache
+                        // — matching the real steady-state PTY loop, where
+                        // the previous frame already warmed it.
+                        let _ = buf.visible_as_tchars_and_tags(0);
+                        buf
+                    },
+                    |buf| {
+                        buf.insert_text(&[TChar::Ascii(b'x')]);
+                        buf.handle_lf();
+                        buf.handle_cr();
+                        std::hint::black_box(buf.visible_as_tchars_and_tags(0));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Benchmark: erase display (ED) on a full buffer
 // ---------------------------------------------------------------
 fn bench_erase_display(c: &mut Criterion) {
@@ -1024,6 +1117,7 @@ criterion_group!(
         bench_cursor_ops,
         bench_move_cursor_relative,
         bench_lf_heavy,
+        bench_lf_flatten_at_capacity,
         bench_erase_display,
         bench_scrollback_render,
         bench_alternate_screen_switch,
