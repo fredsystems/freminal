@@ -342,6 +342,7 @@ fn add_fallback_to_terminal_families(defs: &mut FontDefinitions, name: &str) {
 
 mod emoji_fonts {
     use super::{FontData, FontDefinitions};
+    use conv2::ValueFrom;
     use fontdb::{Database, Source};
 
     const CANDIDATES: &[&str] = &[
@@ -358,13 +359,21 @@ mod emoji_fonts {
     /// Add a system emoji font as a chrome-text fallback.
     ///
     /// This is the **egui chrome** path (menu bar, settings), NOT the terminal
-    /// grid. It deliberately does NOT reuse the terminal-side capability
-    /// ranking (`font_manager::best_system_emoji_source`, which gates on
-    /// `has_color_glyphs`): egui's grayscale atlas cannot render color
-    /// (COLR/CBDT) glyphs, so for chrome a monochrome-renderable emoji/symbol
-    /// face (e.g. `Symbola`) is actually the *useful* choice, and a color-only
-    /// font would render as tofu. The name-priority list here is correct for
-    /// that goal; the two paths intentionally differ.
+    /// grid. It deliberately does NOT reuse the terminal-side emoji face (the
+    /// bundled Noto Color Emoji, always used since issue #431): egui's
+    /// grayscale atlas cannot render color (COLR/CPAL, CBDT/CBLC, sbix) glyphs
+    /// — it locks glyph ownership by cmap and renders a color-only glyph as
+    /// blank — so for chrome a monochrome-renderable emoji/symbol face (e.g.
+    /// `Symbola`) is actually the *useful* choice, while a color-only font
+    /// would render blank. `find_candidate` enforces this: it actively SKIPS
+    /// any face carrying color glyph tables, regardless of where it sits in
+    /// the name-priority list below, so only a face egui can actually
+    /// rasterize is ever returned. The name list is therefore a priority
+    /// order among monochrome-capable candidates; the color-only entries
+    /// (Apple/Noto/Segoe UI Emoji, etc.) are harmless no-ops on this path —
+    /// kept for documentation of intent and in case a monochrome variant of
+    /// one is ever installed under the same family name — and the two paths
+    /// (chrome vs. terminal grid) intentionally differ.
     pub fn add_emoji_fallback(defs: &mut FontDefinitions) {
         let mut db = Database::new();
         db.load_system_fonts();
@@ -380,6 +389,22 @@ mod emoji_fonts {
         }
 
         warn!("Emoji fallback: no suitable emoji font found");
+    }
+
+    /// Whether the face at `index` within `bytes` carries color glyph tables
+    /// (`COLR`/`CPAL` vector palettes or `CBDT`/`CBLC`/`sbix` bitmap strikes).
+    ///
+    /// egui's chrome text atlas is grayscale-only and cannot rasterize these
+    /// glyphs, so a face for which this returns `true` must be skipped by
+    /// `find_candidate` rather than handed to egui. A face that swash cannot
+    /// parse at all is treated as unusable — this returns `true` for it too,
+    /// so `find_candidate` skips it (fail closed).
+    fn is_color_font(bytes: &[u8], index: u32) -> bool {
+        let index = usize::value_from(index).unwrap_or(0);
+        let Some(font_ref) = swash::FontRef::from_index(bytes, index) else {
+            return true;
+        };
+        font_ref.color_palettes().next().is_some() || font_ref.color_strikes().next().is_some()
     }
 
     fn find_candidate(db: &Database, target: &str) -> Option<(String, Vec<u8>)> {
@@ -398,12 +423,48 @@ mod emoji_fonts {
                 && path.exists()
                 && let Ok(bytes) = std::fs::read(path)
             {
+                // egui's chrome atlas can't render color glyphs (COLR/CPAL,
+                // CBDT/CBLC, sbix) — skip a color-only face and keep looking,
+                // even though its name matched, so a color emoji font
+                // installed alongside (or instead of) a monochrome one
+                // doesn't win by name priority and render blank.
+                if is_color_font(&bytes, face.index) {
+                    continue;
+                }
+
                 let key = format!("emoji-{}", target.replace(' ', "_"));
                 return Some((key, bytes));
             }
         }
 
         None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_color_font;
+
+        static NOTO_COLOR_EMOJI: &[u8] = include_bytes!("../../../res/NotoColorEmoji.ttf");
+        static CASKAYDIA_REGULAR: &[u8] =
+            include_bytes!("../../../res/CaskaydiaCoveNerdFont-Regular.ttf");
+
+        #[test]
+        fn color_emoji_font_is_detected_as_color() {
+            assert!(
+                is_color_font(NOTO_COLOR_EMOJI, 0),
+                "bundled Noto Color Emoji carries color glyph tables and must \
+                 be detected as a color font"
+            );
+        }
+
+        #[test]
+        fn monochrome_font_is_not_detected_as_color() {
+            assert!(
+                !is_color_font(CASKAYDIA_REGULAR, 0),
+                "CaskaydiaCove Nerd Font is a monochrome text font and must \
+                 not be misdetected as a color font"
+            );
+        }
     }
 }
 
