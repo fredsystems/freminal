@@ -546,6 +546,98 @@ pub(super) struct FrameStats {
     /// `win.pending_chrome_signals` is finalised for the frame.
     #[cfg(feature = "frame-profiling")]
     pub(super) chrome_signal_fired_counts: [u64; 15],
+
+    // ── Task 121 pointer-motion repaint-gate condition counters (diagnostic;
+    // feature-gated) ────────────────────────────────────────────────────
+    //
+    // `Cell<u64>`, not a plain `u64` like every other counter on this
+    // struct: `App::pointer_motion_needs_repaint` takes `&self` (see the
+    // `freminal_windowing::App` trait) and reaches `PerWindowState` (and
+    // this `FrameStats`) via `self.windows.get(&window_id)` — an
+    // IMMUTABLE borrow — so these counters must be mutable through a
+    // shared reference. The GUI runs single-threaded on the winit/egui
+    // event-loop thread, so `Cell` (not `AtomicU64`/`Mutex`) is the
+    // correct, minimal tool; there is no concurrent access to race.
+    //
+    // Reset every `FLUSH_EVERY`-frame flush window (see
+    // `reset_pointer_condition_window`), UNLIKE `chrome_signal_fired_counts`
+    // above (which is cumulative since window creation): this diagnostic
+    // answers "which repaint-gate condition(s) are firing on pointer motion
+    // RIGHT NOW", which only makes sense windowed — the same reasoning as
+    // `egui_integration.rs`'s settle-gate value diagnostics.
+    /// Total `App::pointer_motion_needs_repaint` calls observed since the
+    /// last flush-window reset — the denominator for reading each
+    /// per-condition count below as a percentage.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_repaint_check_total: std::cell::Cell<u64>,
+    /// `chrome_interactive` fired count (see
+    /// `PointerMotionConditionFlags::chrome_interactive`).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_chrome_interactive: std::cell::Cell<u64>,
+    /// `any_pane_selecting` fired count.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_any_pane_selecting: std::cell::Cell<u64>,
+    /// `overlay_open` fired count.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_overlay_open: std::cell::Cell<u64>,
+    /// `pointer_pane_unresolved` fired count.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_pointer_pane_unresolved: std::cell::Cell<u64>,
+    /// `mouse_tracking_active` fired count (pane-resolved calls only).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_mouse_tracking_active: std::cell::Cell<u64>,
+    /// `has_urls` fired count (pane-resolved calls only) — one of the three
+    /// independent sub-terms of `pane_hover_region_risk`'s disjunction,
+    /// counted separately from `scroll_offset_nonzero`/`gutter_active`
+    /// rather than as one aggregate: distinguishing which of the three is
+    /// actually responsible is the entire point of this diagnostic.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_has_urls: std::cell::Cell<u64>,
+    /// `scroll_offset_nonzero` fired count (pane-resolved calls only).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_scroll_offset_nonzero: std::cell::Cell<u64>,
+    /// `gutter_active` fired count (pane-resolved calls only).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_gutter_active: std::cell::Cell<u64>,
+}
+
+/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated): which of
+/// the eight conditions considered by `App::pointer_motion_needs_repaint`
+/// were true for one call.
+///
+/// Distinct from `app_impl.rs`'s `PointerMotionPaneSignals`: that struct
+/// feeds the actual repaint DECISION for a resolved pane (two aggregated
+/// bools — `mouse_tracking_active` and a single `hover_region_risk`); this
+/// struct is diagnostic-only, exhaustive over every named condition in the
+/// predicate (including the three individual sub-terms
+/// `pane_hover_region_risk` ORs together), and never affects behavior — it
+/// is only ever consumed by `FrameStats::record_pointer_motion_check`.
+///
+/// The last four fields (`mouse_tracking_active` through `gutter_active`)
+/// are meaningful only when a pane resolved under the pointer; when no pane
+/// resolves, all four are simply left `false` (mirrors
+/// `pointer_motion_needs_repaint_decision`'s own "no pane, so no
+/// pane-specific signal applies" semantics for its `pane_signals: None`
+/// case — NOT the same as `pointer_pane_unresolved`, which covers "the pane
+/// could not be determined AT ALL").
+// struct_excessive_bools: each field is an independent yes/no observation
+// of one named condition in `pointer_motion_needs_repaint_decision`'s
+// disjunction (or one of `pane_hover_region_risk`'s three sub-terms) — not
+// a state machine. Combining them would not express any real combined
+// state and would only obscure the one-flag-per-condition mapping this
+// diagnostic exists to preserve.
+#[cfg(feature = "frame-profiling")]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct PointerMotionConditionFlags {
+    pub(super) chrome_interactive: bool,
+    pub(super) any_pane_selecting: bool,
+    pub(super) overlay_open: bool,
+    pub(super) pointer_pane_unresolved: bool,
+    pub(super) mouse_tracking_active: bool,
+    pub(super) has_urls: bool,
+    pub(super) scroll_offset_nonzero: bool,
+    pub(super) gutter_active: bool,
 }
 
 impl FrameStats {
@@ -613,6 +705,89 @@ impl FrameStats {
         } else {
             parts.join(",")
         }
+    }
+
+    /// Task 121 pointer-motion repaint-gate diagnostic: record one
+    /// `App::pointer_motion_needs_repaint` call's condition flags into the
+    /// per-condition counters plus the total, `saturating_add`. Takes
+    /// `&self` (not `&mut self`): every counter it touches is a
+    /// `Cell<u64>` for exactly this reason — see
+    /// `pointer_repaint_check_total`'s field doc.
+    pub(super) fn record_pointer_motion_check(&self, flags: PointerMotionConditionFlags) {
+        self.pointer_repaint_check_total
+            .set(self.pointer_repaint_check_total.get().saturating_add(1));
+        Self::bump_if(
+            &self.pointer_cond_chrome_interactive,
+            flags.chrome_interactive,
+        );
+        Self::bump_if(
+            &self.pointer_cond_any_pane_selecting,
+            flags.any_pane_selecting,
+        );
+        Self::bump_if(&self.pointer_cond_overlay_open, flags.overlay_open);
+        Self::bump_if(
+            &self.pointer_cond_pointer_pane_unresolved,
+            flags.pointer_pane_unresolved,
+        );
+        Self::bump_if(
+            &self.pointer_cond_mouse_tracking_active,
+            flags.mouse_tracking_active,
+        );
+        Self::bump_if(&self.pointer_cond_has_urls, flags.has_urls);
+        Self::bump_if(
+            &self.pointer_cond_scroll_offset_nonzero,
+            flags.scroll_offset_nonzero,
+        );
+        Self::bump_if(&self.pointer_cond_gutter_active, flags.gutter_active);
+    }
+
+    /// `counter.set(counter.get().saturating_add(1))` iff `condition` —
+    /// the shared increment-a-`Cell`-iff-true step every branch of
+    /// `record_pointer_motion_check` needs.
+    fn bump_if(counter: &std::cell::Cell<u64>, condition: bool) {
+        if condition {
+            counter.set(counter.get().saturating_add(1));
+        }
+    }
+
+    /// Format eight named pointer-motion condition counts the same way
+    /// `format_nonzero_signal_counts` formats `chrome_signal_fired_counts`
+    /// (see that method's doc for the full rationale) — `name=count`
+    /// comma-joined, non-zero entries only, `"none"` when all eight are
+    /// zero. A free-standing pure function over parallel `names`/`counts`
+    /// arrays (not `&self`), so it is directly unit-testable without
+    /// constructing a `Cell`-bearing `FrameStats`.
+    pub(super) fn format_nonzero_pointer_condition_counts(
+        names: &[&str; 8],
+        counts: &[u64; 8],
+    ) -> String {
+        let parts: Vec<String> = names
+            .iter()
+            .zip(counts.iter())
+            .filter(|(_, count)| **count > 0)
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect();
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(",")
+        }
+    }
+
+    /// Reset the pointer-motion condition counters and the total call
+    /// counter (see `record_pointer_motion_check`) back to zero at the end
+    /// of a flush window — see `pointer_repaint_check_total`'s field doc
+    /// for why these are windowed rather than cumulative-since-creation.
+    pub(super) fn reset_pointer_condition_window(&self) {
+        self.pointer_repaint_check_total.set(0);
+        self.pointer_cond_chrome_interactive.set(0);
+        self.pointer_cond_any_pane_selecting.set(0);
+        self.pointer_cond_overlay_open.set(0);
+        self.pointer_cond_pointer_pane_unresolved.set(0);
+        self.pointer_cond_mouse_tracking_active.set(0);
+        self.pointer_cond_has_urls.set(0);
+        self.pointer_cond_scroll_offset_nonzero.set(0);
+        self.pointer_cond_gutter_active.set(0);
     }
 }
 
@@ -715,6 +890,140 @@ mod frame_profiling_tests {
             "any_overlay_open=1,foreground_overlay_open=1",
             "order must follow the array's index order, not insertion order"
         );
+    }
+
+    // ── Task 121 pointer-motion repaint-gate condition counters ──────────
+
+    /// The eight Task 121 pointer-motion condition names, in the same
+    /// order `record_pointer_motion_check`/the app-side flush build their
+    /// parallel `counts` array.
+    const POINTER_CONDITION_NAMES: [&str; 8] = [
+        "chrome_interactive",
+        "any_pane_selecting",
+        "overlay_open",
+        "pointer_pane_unresolved",
+        "mouse_tracking_active",
+        "has_urls",
+        "scroll_offset_nonzero",
+        "gutter_active",
+    ];
+
+    #[test]
+    fn format_nonzero_pointer_condition_counts_all_zero_is_none() {
+        let counts = [0u64; 8];
+        assert_eq!(
+            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            "none"
+        );
+    }
+
+    #[test]
+    fn format_nonzero_pointer_condition_counts_shows_only_the_nonzero_entries() {
+        let mut counts = [0u64; 8];
+        counts[4] = 12; // mouse_tracking_active
+        counts[5] = 3; // has_urls
+        assert_eq!(
+            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            "mouse_tracking_active=12,has_urls=3"
+        );
+    }
+
+    #[test]
+    fn format_nonzero_pointer_condition_counts_preserves_declaration_order() {
+        let mut counts = [0u64; 8];
+        counts[7] = 1; // gutter_active
+        counts[0] = 1; // chrome_interactive
+        assert_eq!(
+            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            "chrome_interactive=1,gutter_active=1",
+            "order must follow the array's index order, not insertion order"
+        );
+    }
+
+    #[test]
+    fn record_pointer_motion_check_increments_total_and_only_true_conditions() {
+        use super::PointerMotionConditionFlags;
+
+        let stats = FrameStats::default();
+        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+            chrome_interactive: true,
+            any_pane_selecting: false,
+            overlay_open: false,
+            pointer_pane_unresolved: false,
+            mouse_tracking_active: false,
+            has_urls: true,
+            scroll_offset_nonzero: false,
+            gutter_active: false,
+        });
+
+        assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
+        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
+        assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
+        assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
+        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
+        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
+        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
+        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
+    }
+
+    #[test]
+    fn record_pointer_motion_check_counts_each_condition_independently() {
+        use super::PointerMotionConditionFlags;
+
+        // All eight conditions true at once must all be counted -- the
+        // task's explicit requirement ("several can be true at once --
+        // count each independently, do not stop at the first").
+        let stats = FrameStats::default();
+        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+            chrome_interactive: true,
+            any_pane_selecting: true,
+            overlay_open: true,
+            pointer_pane_unresolved: true,
+            mouse_tracking_active: true,
+            has_urls: true,
+            scroll_offset_nonzero: true,
+            gutter_active: true,
+        });
+
+        assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
+        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 1);
+        assert_eq!(stats.pointer_cond_overlay_open.get(), 1);
+        assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 1);
+        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 1);
+        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
+        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 1);
+        assert_eq!(stats.pointer_cond_gutter_active.get(), 1);
+    }
+
+    #[test]
+    fn reset_pointer_condition_window_clears_every_counter() {
+        use super::PointerMotionConditionFlags;
+
+        let stats = FrameStats::default();
+        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+            chrome_interactive: true,
+            any_pane_selecting: true,
+            overlay_open: true,
+            pointer_pane_unresolved: true,
+            mouse_tracking_active: true,
+            has_urls: true,
+            scroll_offset_nonzero: true,
+            gutter_active: true,
+        });
+
+        stats.reset_pointer_condition_window();
+
+        assert_eq!(stats.pointer_repaint_check_total.get(), 0);
+        assert_eq!(stats.pointer_cond_chrome_interactive.get(), 0);
+        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
+        assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
+        assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
+        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
+        assert_eq!(stats.pointer_cond_has_urls.get(), 0);
+        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
+        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
     }
 }
 
