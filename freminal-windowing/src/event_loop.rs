@@ -173,6 +173,50 @@ const fn is_unconditional_chrome_input(event: &WindowEvent) -> bool {
     )
 }
 
+/// #436.4b §3.2 chrome-input gate decision for the general (non-pointer)
+/// `window_event` path: should `event` force `WindowState::chrome_input_pending`
+/// for the frame it arrives in, given whether `egui-winit`'s
+/// `on_window_event` reported `repaint` for it?
+///
+/// This is `is_unconditional_chrome_input(event) || repaint` — EXCEPT for
+/// `WindowEvent::RedrawRequested`, which always returns `false` here
+/// regardless of `repaint`. That carve-out is load-bearing, not an
+/// oversight — it is the fix for the #436-chrome-cache-inert bug (`Replay`
+/// measured 0/360 frames at idle) and must not be "simplified" away:
+///
+/// - `egui-winit` 0.35.0's `on_window_event` groups `RedrawRequested` into a
+///   match arm commented "Things that may require repaint:" and returns
+///   `EventResponse { repaint: true, .. }` for it *unconditionally*
+///   (`egui-winit-0.35.0/src/lib.rs:492-500`).
+/// - `RedrawRequested` is the event that drives every single frame — see
+///   this module's `window_event`'s `RedrawRequested` arm, which reads the
+///   gate this function feeds via
+///   `std::mem::take(&mut state.chrome_input_pending)`, roughly 110 lines
+///   after the call site that uses this function, in the *same*
+///   `window_event` invocation.
+/// - Without the carve-out, `repaint == true` on `RedrawRequested` would set
+///   `chrome_input_pending` on every frame, which `RedrawRequested`'s own
+///   arm would then immediately read back as `true` — permanently
+///   disqualifying `ChromeMode::Replay` regardless of any real input. This
+///   is exactly the bug: the event that drives the frame set the flag that
+///   disqualifies the frame.
+/// - `RedrawRequested` is not user input, so excluding it from the gate is
+///   correct on its own terms, not just a workaround.
+///
+/// Do NOT broaden this carve-out to other members of egui-winit's grouped
+/// arm: `CursorEntered`/`CursorLeft` are genuine input and already covered
+/// by `is_unconditional_chrome_input`; `Resized`/`Occluded` legitimately
+/// affect chrome; `Destroyed`/`CloseRequested`/`Moved`/`TouchpadPressure`
+/// are rare and harmless if they do force a frame `Full`. `RedrawRequested`
+/// is the only member of that arm that fires every frame, which is what
+/// makes it uniquely disqualifying.
+const fn should_set_chrome_input_pending(event: &WindowEvent, repaint: bool) -> bool {
+    if matches!(event, WindowEvent::RedrawRequested) {
+        return false;
+    }
+    is_unconditional_chrome_input(event) || repaint
+}
+
 /// Convert a winit physical cursor position to egui logical points (lossy
 /// `f64` -> `f32` narrowing via `conv2`'s default approximation, matching the
 /// `window.scale_factor().approx_as::<f32>()` conversion in
@@ -734,7 +778,14 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             // doesn't enumerate) forces `ChromeMode::Full` for the frame this
             // event is delivered in. Pointer events never reach this arm —
             // they're handled, region-tested, in the fast path above (#436.8).
-            if is_unconditional_chrome_input(&event) || response.repaint {
+            //
+            // `RedrawRequested` is carved out of the `repaint` half of this
+            // decision — see `should_set_chrome_input_pending`'s doc for why
+            // this is required (egui-winit reports `repaint: true`
+            // unconditionally for it, and it's the event that drives every
+            // frame, so treating it as chrome input here would permanently
+            // disqualify `ChromeMode::Replay`).
+            if should_set_chrome_input_pending(&event, response.repaint) {
                 state.chrome_input_pending = true;
             }
 
@@ -1176,8 +1227,8 @@ mod tests {
     use super::{
         MIN_REPAINT_INTERVAL, ViewportCommandFlags, clamp_repaint_delay, is_blocked_key,
         is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
-        physical_to_logical_pos, should_force_chrome_full_for_pointer, update_chrome_drag_latch,
-        viewport_command_flags,
+        physical_to_logical_pos, should_force_chrome_full_for_pointer,
+        should_set_chrome_input_pending, update_chrome_drag_latch, viewport_command_flags,
     };
     use winit::event::{DeviceId, WindowEvent};
     use winit::keyboard::KeyCode;
@@ -1418,6 +1469,52 @@ mod tests {
             &WindowEvent::HoveredFileCancelled
         ));
         assert!(!is_unconditional_chrome_input(&WindowEvent::Occluded(true)));
+    }
+
+    /// The bug (0/360 `Replay` frames at idle): `RedrawRequested` drives
+    /// every frame, and egui-winit 0.35.0 reports `repaint: true` for it
+    /// unconditionally, so before the fix `is_unconditional_chrome_input(event)
+    /// || repaint` was always `true` on the exact event whose arm reads the
+    /// gate back a moment later — permanently disqualifying `Replay`.
+    /// `should_set_chrome_input_pending` must return `false` for
+    /// `RedrawRequested` regardless of the `repaint` value egui-winit
+    /// reports.
+    #[test]
+    fn should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint() {
+        assert!(!should_set_chrome_input_pending(
+            &WindowEvent::RedrawRequested,
+            true
+        ));
+        assert!(!should_set_chrome_input_pending(
+            &WindowEvent::RedrawRequested,
+            false
+        ));
+    }
+
+    /// A representative `is_unconditional_chrome_input` event (keyboard
+    /// modifiers) must still set the gate through this wrapper, with or
+    /// without `repaint` — the carve-out is specific to `RedrawRequested`,
+    /// not a general weakening of the gate.
+    #[test]
+    fn should_set_chrome_input_pending_covers_unconditional_chrome_input_events() {
+        let event = WindowEvent::ModifiersChanged(winit::event::Modifiers::default());
+        assert!(should_set_chrome_input_pending(&event, false));
+        assert!(should_set_chrome_input_pending(&event, true));
+    }
+
+    /// Proves the `RedrawRequested` carve-out doesn't silently undermine the
+    /// reason `response.repaint` is consulted at all — an event kind NOT in
+    /// `is_unconditional_chrome_input`'s enumeration (e.g. `Occluded`) must
+    /// still set the gate when egui-winit reports `repaint: true` for it. If
+    /// this regressed to "always false unless enumerated", A12's
+    /// completeness guarantee (`repaint` as a safety net for un-enumerated
+    /// event kinds) would be silently lost.
+    #[test]
+    fn should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events() {
+        let event = WindowEvent::Occluded(true);
+        assert!(!is_unconditional_chrome_input(&event));
+        assert!(should_set_chrome_input_pending(&event, true));
+        assert!(!should_set_chrome_input_pending(&event, false));
     }
 
     // ── #436.8 region-aware pointer gate: pure helpers ───────────────────
