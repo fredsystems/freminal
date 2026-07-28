@@ -19,6 +19,14 @@ pub struct FrameOutput {
     pub commands: Vec<egui::ViewportCommand>,
     /// Requested repaint delay (`Duration::MAX` = no repaint needed).
     pub repaint_delay: std::time::Duration,
+    /// The delay the *app* itself asked for this frame (`App::take_terminal_requested_delay`),
+    /// independent of whatever egui decided it wanted.
+    ///
+    /// SPIKE (Task 121): the event loop uses this to override `repaint_delay`
+    /// when egui asked for an immediate repaint *solely* because of pointer
+    /// events the app already classified as needing no frame. See the
+    /// override at the `RedrawRequested` arm in `event_loop.rs`.
+    pub app_requested_delay: Option<std::time::Duration>,
 }
 
 /// Cached tessellated chrome (head + tail) primitives from the most recent
@@ -238,6 +246,54 @@ struct FrameProfile {
     /// requested a delay at all this frame, counted separately from "the
     /// app requested something, but egui wanted sooner").
     settle_terminal_requested_delay_none_count: u64,
+
+    // ── Repaint-cause aggregation (feature-gated), reset every flush
+    // window like the settle-gate diagnostics above (`reset_repaint_cause_window`)
+    // rather than cumulative-since-creation -- the question this answers
+    // ("what is asking for an immediate repaint on THIS kind of frame,
+    // right now") only makes sense as "in the last `FLUSH_EVERY` frames",
+    // the same reasoning as the settle-value fields.
+    /// Occurrence count per `ctx.repaint_causes()` cause, keyed on the
+    /// formatted `"{trimmed_file}:{line} {reason}"` string (see
+    /// [`trim_cause_file_path`]) — e.g. distinguishing an egui-internal
+    /// cause (`index.crates.io-.../egui-0.35.0/src/context.rs:1234 ...`)
+    /// from a freminal call site
+    /// (`freminal/src/gui/terminal/widget.rs:1936 ...`) is the whole
+    /// point of this map. `BTreeMap`, not `HashMap`: deterministic
+    /// (alphabetical) iteration order for the flush log, and
+    /// `freminal-windowing` has no hash-map dependency to gain for this.
+    ///
+    /// **These are the PREVIOUS pass's causes, not this frame's own** — see
+    /// [`egui::Context::repaint_causes`]'s doc and the call site in
+    /// `run_frame` for why: `Context::begin_pass` (called from inside
+    /// `run_ui`) swaps the just-finished pass's `causes` into `prev_causes`
+    /// at the START of the pass that follows it, so `repaint_causes()`
+    /// always lags by exactly one `run_frame` call. That is fine for
+    /// aggregate counting over a 120-frame window (the lag is invisible in
+    /// the aggregate); it would matter for attributing causes to a SPECIFIC
+    /// single frame, which this harness does not attempt.
+    repaint_cause_counts: std::collections::BTreeMap<String, u64>,
+
+    // ── Task 121 pointer-motion repaint-gate spike (issue: pointer motion
+    // over static terminal content measured at 58fps vs. 1.95fps idle, 95%
+    // of those frames changing zero pixels) ──────────────────────────────
+    //
+    // Cumulative since window creation, like every other plain counter on
+    // this struct. Incremented from `event_loop.rs`'s `CursorMoved` arm
+    // (the only place the scheduling decision is made) via the
+    // `record_pointer_frame_scheduled`/`record_pointer_frame_suppressed`
+    // accessors below, NOT here — these fields stay private to `FrameProfile`
+    // (see those accessors' docs for why a method, not a public field).
+    /// `CursorMoved` events that scheduled a repaint (either the app's
+    /// [`crate::App::pointer_motion_needs_repaint`] said so, the chrome-drag
+    /// latch was set, or this was the one-frame edge-detect transition after
+    /// a needed -> not-needed change).
+    pointer_frames_scheduled: u64,
+    /// `CursorMoved` events suppressed by the Task 121 gate — i.e. events
+    /// that would have scheduled a repaint before this spike (egui-winit
+    /// reports `repaint: true` unconditionally for `CursorMoved`) but did
+    /// not need to, per the app's own state.
+    pointer_frames_suppressed: u64,
 }
 
 #[cfg(feature = "frame-profiling")]
@@ -332,6 +388,30 @@ impl FrameProfile {
         self.settle_terminal_requested_delay_none_count = 0;
     }
 
+    /// Record one `ctx.repaint_causes()` entry into `repaint_cause_counts`.
+    /// Called once per returned cause (a frame that pushed the same cause
+    /// twice -- e.g. two `request_repaint()` calls at the same call site in
+    /// one pass -- increments the count twice, matching what
+    /// `egui::Context` actually recorded: `causes.push(cause)` is
+    /// unconditional, with no dedup, at `context.rs:153`).
+    fn record_repaint_cause(&mut self, cause: &egui::RepaintCause) {
+        let key = format!(
+            "{}:{} {}",
+            trim_cause_file_path(cause.file),
+            cause.line,
+            cause.reason
+        );
+        let counter = self.repaint_cause_counts.entry(key).or_insert(0);
+        *counter = counter.saturating_add(1);
+    }
+
+    /// Clear the repaint-cause aggregation map at the end of a flush window
+    /// -- see the field doc on `repaint_cause_counts` for why this is
+    /// windowed rather than cumulative-since-creation.
+    fn reset_repaint_cause_window(&mut self) {
+        self.repaint_cause_counts.clear();
+    }
+
     /// Format an optional `Duration` for a `tracing` field: `"none"` when
     /// no sample was recorded this window, the literal string `"MAX"` when
     /// the sample IS `Duration::MAX` (egui's "no repaint needed" sentinel --
@@ -362,6 +442,77 @@ fn min_max_duration(
         Some(min.map_or(sample, |m| m.min(sample))),
         Some(max.map_or(sample, |m| m.max(sample))),
     )
+}
+
+/// Trim a [`egui::RepaintCause::file`] path down to its last
+/// `KEEP_COMPONENTS` `/`-or-`\`-separated segments.
+///
+/// Egui-internal causes carry the registry cache's long, absolute-ish path
+/// (e.g. `.../registry/src/index.crates.io-.../egui-0.35.0/src/context.rs`);
+/// keeping the last four segments retains the registry-hash and
+/// crate-name+version directory components (e.g.
+/// `index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs`), which is
+/// exactly what distinguishes an egui-internal cause from a freminal call
+/// site (`freminal/src/gui/terminal/widget.rs`) -- the entire point of this
+/// instrumentation. Paths with `KEEP_COMPONENTS` segments or fewer
+/// (freminal's own workspace-relative `file!()` paths typically are) pass
+/// through unchanged. Pure, so directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn trim_cause_file_path(file: &str) -> String {
+    const KEEP_COMPONENTS: usize = 4;
+    let parts: Vec<&str> = file.split(['/', '\\']).collect();
+    if parts.len() <= KEEP_COMPONENTS {
+        file.to_string()
+    } else {
+        parts[parts.len() - KEEP_COMPONENTS..].join("/")
+    }
+}
+
+/// Sum of all occurrence counts in a repaint-cause aggregation map -- the
+/// total number of `ctx.repaint_causes()` entries recorded this flush
+/// window, for comparison against the window's `frame_counter` (e.g. 120
+/// frames producing 480 causes means ~4 requests/frame). Pure, so directly
+/// unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn total_repaint_cause_count(counts: &std::collections::BTreeMap<String, u64>) -> u64 {
+    counts
+        .values()
+        .fold(0u64, |acc, count| acc.saturating_add(*count))
+}
+
+/// The top `n` entries of a repaint-cause aggregation map, ordered by
+/// occurrence count descending. `BTreeMap::iter` yields keys in ascending
+/// (alphabetical) order; a *stable* sort by count descending therefore
+/// leaves ties ordered by key ascending, deterministically -- no
+/// `HashMap`-style iteration-order nondeterminism to fight. Pure, so
+/// directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn top_repaint_causes(
+    counts: &std::collections::BTreeMap<String, u64>,
+    n: usize,
+) -> Vec<(String, u64)> {
+    let mut entries: Vec<(String, u64)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    entries.truncate(n);
+    entries
+}
+
+/// Format a top-N repaint-cause list (see [`top_repaint_causes`]) as a
+/// single readable `tracing` field: `"{count}x {cause}"` entries joined by
+/// `"; "`, or the literal `"none"` when empty (matching the
+/// `format_duration_field`/`format_nonzero_signal_counts` "none when empty"
+/// idiom already used by this harness and its `freminal`-side counterpart).
+/// Pure, so directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn format_repaint_causes(entries: &[(String, u64)]) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+    entries
+        .iter()
+        .map(|(cause, count)| format!("{count}x {cause}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// #436 §3.1 (amended): a REPLAY is permitted only if nothing OTHER than
@@ -566,6 +717,40 @@ impl EguiState {
         self.winit_state.take_egui_input(window)
     }
 
+    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// `CursorMoved` event scheduled a repaint.
+    ///
+    /// A small accessor rather than a public `frame_profile` field/counter:
+    /// `event_loop.rs` (where the scheduling decision is made) has no other
+    /// reason to reach into `FrameProfile`'s internals, and this keeps the
+    /// counter itself private to this module alongside every other
+    /// `FrameProfile` field. Logged on the existing per-window
+    /// `FLUSH_EVERY`-frame flush line in [`Self::run_frame`] — see the
+    /// `pointer_frames_scheduled`/`pointer_frames_suppressed` field docs on
+    /// [`FrameProfile`] for why these counters live there (rather than on
+    /// `event_loop.rs`'s own `WindowState`): they are logically part of the
+    /// same per-window frame-profiling harness and this reuses its existing
+    /// flush cadence/`window_id` tagging instead of standing up a second one.
+    #[cfg(feature = "frame-profiling")]
+    pub(crate) const fn record_pointer_frame_scheduled(&mut self) {
+        self.frame_profile.pointer_frames_scheduled = self
+            .frame_profile
+            .pointer_frames_scheduled
+            .saturating_add(1);
+    }
+
+    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// `CursorMoved` event was suppressed (did not schedule a repaint) by
+    /// the gate. See [`Self::record_pointer_frame_scheduled`]'s doc for why
+    /// this is an accessor rather than a public field.
+    #[cfg(feature = "frame-profiling")]
+    pub(crate) const fn record_pointer_frame_suppressed(&mut self) {
+        self.frame_profile.pointer_frames_suppressed = self
+            .frame_profile
+            .pointer_frames_suppressed
+            .saturating_add(1);
+    }
+
     /// Run a single egui frame and paint, using pre-collected raw input.
     ///
     /// `chrome_input_this_frame` is the #436.4b §3.2 conservative input gate:
@@ -767,6 +952,32 @@ impl EguiState {
             let d = run_ui_start.elapsed();
             self.frame_profile.run_ui_total += d;
             self.frame_profile.run_ui_max = self.frame_profile.run_ui_max.max(d);
+        }
+
+        // Task 121 defect-5 harness extension: aggregate
+        // `ctx.repaint_causes()` into `repaint_cause_counts` -- answers
+        // "something requested an immediate, zero-delay repaint; what,
+        // exactly?" (egui-internal machinery vs. one of freminal's own
+        // `ctx.request_repaint*` call sites in
+        // `freminal/src/gui/terminal/widget.rs`).
+        //
+        // Called HERE, immediately after `run_ui` returns, because
+        // `repaint_causes()` returns `prev_causes` -- the PREVIOUS pass's
+        // causes (`Context::begin_pass`, invoked from inside `run_ui`,
+        // swaps the just-finished pass's `causes` into `prev_causes` at the
+        // START of the pass that follows it). This is the *earliest* point
+        // in `run_frame` where that swap has already happened for THIS
+        // frame's `run_ui` call, so it captures the freshest available data
+        // (the causes from one frame ago) rather than calling later in
+        // `run_frame` (same data, just read later for no benefit) or before
+        // `run_ui` (this frame's `begin_pass` hasn't swapped yet, so it
+        // would read causes from TWO frames ago instead of one). See the
+        // `repaint_cause_counts` field doc for why a one-pass lag is fine
+        // for this harness's aggregate-over-120-frames use, and would not
+        // be for single-frame attribution.
+        #[cfg(feature = "frame-profiling")]
+        for cause in self.ctx.repaint_causes() {
+            self.frame_profile.record_repaint_cause(&cause);
         }
 
         self.winit_state
@@ -1132,6 +1343,30 @@ impl EguiState {
                     ),
                     settle_terminal_requested_delay_none_count =
                         p.settle_terminal_requested_delay_none_count,
+                    // Repaint-cause aggregation (task 121 defect-5): what,
+                    // exactly, requested an immediate/zero-delay repaint
+                    // this flush window -- egui-internal machinery vs. a
+                    // freminal call site -- and how many requests total,
+                    // for comparison against `frame_counter` (e.g. 120
+                    // frames producing 480 causes means ~4 requests/frame).
+                    // These are the PREVIOUS pass's causes, one frame
+                    // lagged -- see the `repaint_cause_counts` field doc.
+                    repaint_cause_total = total_repaint_cause_count(&p.repaint_cause_counts),
+                    repaint_cause_top8 =
+                        %format_repaint_causes(&top_repaint_causes(&p.repaint_cause_counts, 8)),
+                    // Task 121 pointer-motion repaint-gate spike: how many
+                    // `CursorMoved` events scheduled vs. were suppressed,
+                    // cumulative since window creation (not windowed, like
+                    // `chrome_mode_full`/`chrome_mode_replay`). Incremented
+                    // from `event_loop.rs` via
+                    // `record_pointer_frame_scheduled`/
+                    // `record_pointer_frame_suppressed`.
+                    pointer_frames_scheduled = p.pointer_frames_scheduled,
+                    pointer_frames_suppressed = p.pointer_frames_suppressed,
+                    pointer_suppressed_duty_cycle_pct = FrameProfile::chrome_replay_duty_cycle_pct(
+                        p.pointer_frames_scheduled,
+                        p.pointer_frames_suppressed
+                    ),
                     "windowing frame-profiling stats (task 121 harness): ChromeMode \
                      duty cycle, the windowing-owned phase_total/run_ui/tessellate/\
                      paint/swap wall-clock split over frame_counter drawn frames for \
@@ -1139,24 +1374,33 @@ impl EguiState {
                      swap) is the unmeasured residual -- see \
                      FrameProfile::phase_total_total), which of the four REPLAY gate \
                      predicates blocked Full->Replay this window (gate_blocked_*, \
-                     cumulative, non-exclusive), and -- when the settle gate \
+                     cumulative, non-exclusive), -- when the settle gate \
                      specifically failed -- the min/max prev_repaint_delay and \
                      prev_terminal_requested_delay values behind that failure this \
-                     flush window (settle_*)"
+                     flush window (settle_*), the top 8 ctx.repaint_causes() by \
+                     occurrence count this flush window plus their total \
+                     (repaint_cause_top8/repaint_cause_total), and the Task 121 \
+                     pointer-motion-suppression-spike counters \
+                     (pointer_frames_scheduled/pointer_frames_suppressed/\
+                     pointer_suppressed_duty_cycle_pct, cumulative since window \
+                     creation)"
                 );
 
-                // Settle-gate value diagnostics are windowed, not
-                // cumulative-since-creation (see the field docs) -- clear
-                // them now that this window's line has been logged. The
-                // `gate_blocked_*` counters above are NOT reset; they stay
-                // cumulative like every other `FrameProfile` counter.
+                // Settle-gate value diagnostics and the repaint-cause
+                // aggregation map are windowed, not cumulative-since-creation
+                // (see their field docs) -- clear them now that this
+                // window's line has been logged. The `gate_blocked_*`
+                // counters above are NOT reset; they stay cumulative like
+                // every other `FrameProfile` counter.
                 self.frame_profile.reset_settle_window();
+                self.frame_profile.reset_repaint_cause_window();
             }
         }
 
         FrameOutput {
             commands,
             repaint_delay,
+            app_requested_delay: terminal_requested_delay,
         }
     }
 
@@ -1291,6 +1535,152 @@ mod frame_profiling_tests {
         assert_eq!(
             FrameProfile::format_duration_field(Some(Duration::from_millis(16))),
             "16000us"
+        );
+    }
+
+    // ── `trim_cause_file_path` ───────────────────────────────────────────
+
+    #[test]
+    fn trim_cause_file_path_leaves_a_short_path_unchanged() {
+        // freminal's own `file!()` paths are workspace-relative and
+        // typically well under the 4-segment keep threshold.
+        assert_eq!(
+            super::trim_cause_file_path("freminal/src/main.rs"),
+            "freminal/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_leaves_exactly_four_segments_unchanged() {
+        assert_eq!(
+            super::trim_cause_file_path("freminal/src/gui/widget.rs"),
+            "freminal/src/gui/widget.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_keeps_last_four_segments_of_a_long_registry_path() {
+        // A realistic egui-0.35.0 registry cache path -- the crate
+        // name+version directory component must survive the trim so it
+        // remains distinguishable from a freminal source path.
+        let long_path = "/home/fred/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs";
+        assert_eq!(
+            super::trim_cause_file_path(long_path),
+            "index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_handles_backslash_separated_windows_paths() {
+        let long_path =
+            r"C:\Users\fred\.cargo\registry\src\index.crates.io-abc\egui-0.35.0\src\context.rs";
+        assert_eq!(
+            super::trim_cause_file_path(long_path),
+            "index.crates.io-abc/egui-0.35.0/src/context.rs"
+        );
+    }
+
+    // ── `total_repaint_cause_count` ──────────────────────────────────────
+
+    #[test]
+    fn total_repaint_cause_count_is_zero_for_an_empty_map() {
+        let counts = std::collections::BTreeMap::new();
+        assert_eq!(super::total_repaint_cause_count(&counts), 0);
+    }
+
+    #[test]
+    fn total_repaint_cause_count_sums_all_entries() {
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("a".to_string(), 3u64);
+        counts.insert("b".to_string(), 5u64);
+        counts.insert("c".to_string(), 2u64);
+        assert_eq!(super::total_repaint_cause_count(&counts), 10);
+    }
+
+    // ── `top_repaint_causes` ─────────────────────────────────────────────
+
+    #[test]
+    fn top_repaint_causes_orders_by_count_descending() {
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("rare".to_string(), 1u64);
+        counts.insert("common".to_string(), 100u64);
+        counts.insert("medium".to_string(), 10u64);
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("common".to_string(), 100),
+                ("medium".to_string(), 10),
+                ("rare".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn top_repaint_causes_truncates_to_n() {
+        let mut counts = std::collections::BTreeMap::new();
+        for i in 0..20u64 {
+            counts.insert(format!("cause_{i:02}"), i);
+        }
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(top.len(), 8);
+        // The 8 largest counts (19..=12) must be present, descending.
+        let expected_counts: Vec<u64> = (12..20).rev().collect();
+        let actual_counts: Vec<u64> = top.iter().map(|(_, c)| *c).collect();
+        assert_eq!(actual_counts, expected_counts);
+    }
+
+    #[test]
+    fn top_repaint_causes_breaks_ties_by_key_ascending_deterministically() {
+        // Three entries tied at count 5: BTreeMap::iter yields them
+        // alphabetically ("a" < "b" < "c"), and a stable sort by count
+        // descending must preserve that relative order for the tie.
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("c_cause".to_string(), 5u64);
+        counts.insert("a_cause".to_string(), 5u64);
+        counts.insert("b_cause".to_string(), 5u64);
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("a_cause".to_string(), 5),
+                ("b_cause".to_string(), 5),
+                ("c_cause".to_string(), 5),
+            ],
+            "ties must break by key ascending, deterministically -- re-running \
+             must always produce this exact order"
+        );
+    }
+
+    #[test]
+    fn top_repaint_causes_handles_an_empty_map() {
+        let counts = std::collections::BTreeMap::new();
+        assert_eq!(super::top_repaint_causes(&counts, 8), Vec::new());
+    }
+
+    // ── `format_repaint_causes` ───────────────────────────────────────────
+
+    #[test]
+    fn format_repaint_causes_is_literal_none_when_empty() {
+        assert_eq!(super::format_repaint_causes(&[]), "none");
+    }
+
+    #[test]
+    fn format_repaint_causes_formats_a_realistic_example() {
+        let entries = vec![
+            (
+                "index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:1879 ".to_string(),
+                2846u64,
+            ),
+            (
+                "freminal/src/gui/terminal/widget.rs:1936 ".to_string(),
+                12u64,
+            ),
+        ];
+        assert_eq!(
+            super::format_repaint_causes(&entries),
+            "2846x index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:1879 ; \
+             12x freminal/src/gui/terminal/widget.rs:1936 "
         );
     }
 }
