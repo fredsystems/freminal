@@ -119,6 +119,75 @@ pub(crate) fn forward_command_events(
 /// while bounding worst-case input-handling latency to one batch of parses.
 const MAX_PTY_READ_BATCH: usize = 64;
 
+/// Outcome of processing one [`InputEvent`] on the PTY consumer thread (issue
+/// #459). Distinguishes "this input changed something the GUI must render"
+/// ([`InputOutcome::Repaint`]) from "this input changed nothing visible"
+/// ([`InputOutcome::NoRepaint`] — a pure child-fd write, or a read-only request
+/// whose response the GUI consumes synchronously on a side channel), so the
+/// trailing `post_event` can skip the wasteful GUI wake-up for the latter.
+/// [`InputOutcome::Closed`] means the input channel dropped (pane teardown).
+///
+/// Classification (verified in the #459 design review):
+///
+/// - `NoRepaint`: `Key`, `FocusChange` (child-fd writes only, no emulator state
+///   change — the echo arrives later via `pty_read_rx`, which requests its own
+///   repaint); `ExtractSelection` (read-only; the GUI blocks on `clipboard_rx`
+///   in the SAME frame, so no future wake is needed).
+/// - `Repaint`: `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
+///   `AutoDetectUrls`, `ThemeModeUpdate`, `ClearScrollback` (all mutate
+///   snapshot-visible state), and `RequestSearchBuffer` (read-only, but the GUI
+///   POLLS `search_buffer_rx` on a LATER frame, so it needs a guaranteed wake or
+///   the result can stall while the terminal is idle and the cursor-blink wake
+///   is suppressed).
+enum InputOutcome {
+    Repaint,
+    NoRepaint,
+    Closed,
+}
+
+/// Whether processing this [`InputEvent`] changes something the GUI must
+/// render, and therefore whether the PTY consumer thread should request a GUI
+/// wake-up after handling it (issue #459).
+///
+/// Pure and total (no wildcard arm) so a future `InputEvent` variant forces an
+/// explicit classification decision at compile time, and so the classification
+/// is unit-testable without spinning up a real PTY. Kept in lock-step with the
+/// side-effecting arms of `handle_input` — those arms return
+/// [`InputOutcome::Repaint`]/[`InputOutcome::NoRepaint`] according to exactly
+/// this predicate.
+///
+/// `false` (no repaint needed):
+/// - `Key` / `FocusChange`: pure child-fd writes; they mutate no emulator
+///   state. The visible change (the echo) arrives later via `pty_read_rx`,
+///   which requests its own repaint.
+/// - `ExtractSelection`: read-only; the result is delivered on `clipboard_tx`
+///   and the GUI consumes it with a BLOCKING `clipboard_rx.recv_timeout` in the
+///   SAME frame that requested it, so no future wake is needed.
+///
+/// `true` (repaint needed):
+/// - `Resize`, `ScrollOffset`, `ThemeChange`, `CursorConfigChange`,
+///   `AutoDetectUrls`, `ThemeModeUpdate`, `ClearScrollback`: all mutate
+///   snapshot-visible state.
+/// - `RequestSearchBuffer`: read-only, BUT the GUI POLLS `search_buffer_rx` on
+///   a LATER frame (not a blocking recv), so it needs a guaranteed wake or the
+///   result can stall while the terminal is idle and the cursor-blink wake is
+///   suppressed.
+const fn input_event_needs_repaint(event: &InputEvent) -> bool {
+    match event {
+        InputEvent::Key(_) | InputEvent::FocusChange(_) | InputEvent::ExtractSelection { .. } => {
+            false
+        }
+        InputEvent::Resize(..)
+        | InputEvent::ScrollOffset { .. }
+        | InputEvent::ThemeChange(_)
+        | InputEvent::ThemeModeUpdate(..)
+        | InputEvent::RequestSearchBuffer
+        | InputEvent::AutoDetectUrls(_)
+        | InputEvent::ClearScrollback
+        | InputEvent::CursorConfigChange(_) => true,
+    }
+}
+
 /// Feed a just-received `PtyRead` and every `PtyRead` already queued behind it
 /// (up to [`MAX_PTY_READ_BATCH`]) into `sink`, in arrival order, in a single
 /// batch (issue #439).
@@ -548,14 +617,25 @@ fn spawn_pty_consumer_thread(
 
             // Helper closure: drain window commands and command-finished
             // events, publish snapshot, request repaint.
-            let post_event =
-                |emulator: &mut TerminalEmulator,
-                 window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
-                 arc_swap: &ArcSwap<TerminalSnapshot>,
-                 repaint_handle: &OnceLock<(RepaintProxy, WindowId)>| {
-                    let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
-                    for cmd in cmds {
-                        let wc = match &cmd {
+            // `request_repaint` gates ONLY the GUI wake-up request (issue #459):
+            // the window-command / command-event drains and the snapshot store
+            // ALWAYS run (they are cheap and must never be stranded), but the
+            // `request_repaint_after` call is skipped when the caller knows the
+            // just-processed event changed nothing the GUI would render. This
+            // removes the wasteful per-keystroke / per-mouse-report GUI wake that
+            // fired even though `InputEvent::Key`/`FocusChange` only write to the
+            // child PTY fd (the echo arrives later via `pty_read_rx`, which
+            // requests its own, necessary, repaint). Mirrors the existing
+            // `idle_deadline` arm's "byte-identical snapshot -> no spurious wake"
+            // discipline, applied per-`InputEvent`-variant.
+            let post_event = |emulator: &mut TerminalEmulator,
+                              window_cmd_tx: &crossbeam_channel::Sender<WindowCommand>,
+                              arc_swap: &ArcSwap<TerminalSnapshot>,
+                              repaint_handle: &OnceLock<(RepaintProxy, WindowId)>,
+                              request_repaint: bool| {
+                let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
+                for cmd in cmds {
+                    let wc = match &cmd {
                             WindowManipulation::ReportWindowState
                             | WindowManipulation::ReportWindowPositionWholeWindow
                             | WindowManipulation::ReportWindowPositionTextArea
@@ -575,30 +655,30 @@ fn spawn_pty_consumer_thread(
                             }
                             _ => WindowCommand::Viewport(cmd),
                         };
-                        send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
-                    }
+                    send_or_log!(window_cmd_tx, wc, "Failed to send window command to GUI");
+                }
 
-                    // Drain finished-command events queued by the FTCS OSC 133 D
-                    // handler (Task 72.3) and forward them to the GUI tagged with
-                    // this pane's recording_pane_id (Task 72.9).
-                    let events = emulator.internal.handler.drain_command_events();
-                    forward_command_events(events, recording_pane_id, &command_event_tx);
+                // Drain finished-command events queued by the FTCS OSC 133 D
+                // handler (Task 72.3) and forward them to the GUI tagged with
+                // this pane's recording_pane_id (Task 72.9).
+                let events = emulator.internal.handler.drain_command_events();
+                forward_command_events(events, recording_pane_id, &command_event_tx);
 
-                    let snap = emulator.build_snapshot();
-                    arc_swap.store(Arc::new(snap));
+                let snap = emulator.build_snapshot();
+                arc_swap.store(Arc::new(snap));
 
-                    if let Some((proxy, wid)) = repaint_handle.get() {
-                        // 16ms == the 60fps frame budget and the same floor
-                        // enforced everywhere else (issue #439). The previous
-                        // 8ms value bypassed that floor via the unclamped
-                        // `RequestRepaintAfter` proxy path, letting a bursty
-                        // PTY stream drive the GUI toward ~120fps. The event
-                        // loop now also clamps this path to 16ms, so this is
-                        // belt-and-braces: request the correct delay AND rely
-                        // on the floor as a backstop.
-                        proxy.request_repaint_after(*wid, std::time::Duration::from_millis(16));
-                    }
-                };
+                if request_repaint && let Some((proxy, wid)) = repaint_handle.get() {
+                    // 16ms == the 60fps frame budget and the same floor
+                    // enforced everywhere else (issue #439). The previous
+                    // 8ms value bypassed that floor via the unclamped
+                    // `RequestRepaintAfter` proxy path, letting a bursty
+                    // PTY stream drive the GUI toward ~120fps. The event
+                    // loop now also clamps this path to 16ms, so this is
+                    // belt-and-braces: request the correct delay AND rely
+                    // on the floor as a backstop.
+                    proxy.request_repaint_after(*wid, std::time::Duration::from_millis(16));
+                }
+            };
 
             // Helper closure: process a single InputEvent.
             let handle_input =
@@ -606,9 +686,23 @@ fn spawn_pty_consumer_thread(
                  msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
                  clipboard_tx: &crossbeam_channel::Sender<String>,
                  search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
-                 -> bool {
-                    match msg {
-                        Ok(InputEvent::Resize(w, h, pw, ph)) => {
+                 -> InputOutcome {
+                    let Ok(event) = msg else {
+                        info!("Input channel closed; consumer thread exiting");
+                        return InputOutcome::Closed;
+                    };
+
+                    // Single source of truth for the repaint decision: the pure,
+                    // unit-tested classifier. The side-effecting arms below never
+                    // re-decide it, so they cannot drift from the tested spec.
+                    let outcome = if input_event_needs_repaint(&event) {
+                        InputOutcome::Repaint
+                    } else {
+                        InputOutcome::NoRepaint
+                    };
+
+                    match event {
+                        InputEvent::Resize(w, h, pw, ph) => {
                             if let Some(rec) = recording_swap.load_full() {
                                 rec.emit(EventPayload::PaneResize {
                                     pane_id: recording_pane_id,
@@ -618,7 +712,12 @@ fn spawn_pty_consumer_thread(
                             }
                             emulator.handle_resize_event(w, h, pw, ph);
                         }
-                        Ok(InputEvent::Key(bytes)) => {
+                        InputEvent::Key(bytes) => {
+                            // Pure child-fd write: `write_raw_bytes` only enqueues
+                            // a `PtyWrite::Write` to the writer thread and mutates
+                            // no emulator state. The visible change (the echo)
+                            // arrives later via `pty_read_rx`, which requests its
+                            // own repaint (classified NoRepaint here, #459).
                             if let Err(e) = emulator.write_raw_bytes(&bytes) {
                                 error!("Failed to forward key bytes to PTY: {e}");
                             }
@@ -629,26 +728,29 @@ fn spawn_pty_consumer_thread(
                                 });
                             }
                         }
-                        Ok(InputEvent::FocusChange(focused)) => {
+                        InputEvent::FocusChange(focused) => {
+                            // Conditionally writes a focus escape to the child fd
+                            // (gated on focus-reporting mode); no emulator state
+                            // change, nothing for the GUI to render (NoRepaint).
                             emulator.internal.send_focus_event(focused);
                         }
-                        Ok(InputEvent::ScrollOffset { offset, extra_rows }) => {
+                        InputEvent::ScrollOffset { offset, extra_rows } => {
                             emulator.set_gui_scroll_window(offset, extra_rows);
                         }
-                        Ok(InputEvent::ThemeChange(theme)) => {
+                        InputEvent::ThemeChange(theme) => {
                             emulator.internal.handler.set_theme(theme);
                         }
-                        Ok(InputEvent::CursorConfigChange(style)) => {
+                        InputEvent::CursorConfigChange(style) => {
                             emulator.internal.handler.set_cursor_visual_style(style);
                         }
-                        Ok(InputEvent::AutoDetectUrls(enabled)) => {
+                        InputEvent::AutoDetectUrls(enabled) => {
                             emulator
                                 .internal
                                 .handler
                                 .buffer_mut()
                                 .set_auto_detect_urls(enabled);
                         }
-                        Ok(InputEvent::ThemeModeUpdate(theme_mode, os_is_dark)) => {
+                        InputEvent::ThemeModeUpdate(theme_mode, os_is_dark) => {
                             emulator.internal.modes.theme_mode = theme_mode;
                             // Sync the live theming state to match the OS preference
                             // so that ?2031 queries reflect reality immediately.
@@ -658,19 +760,29 @@ fn spawn_pty_consumer_thread(
                                 emulator.internal.modes.theming = Theming::Light;
                             }
                         }
-                        Ok(InputEvent::ExtractSelection {
+                        InputEvent::ExtractSelection {
                             start_row,
                             start_col,
                             end_row,
                             end_col,
                             is_block,
-                        }) => {
+                        } => {
+                            // Read-only extraction; the result is sent on
+                            // `clipboard_tx` here and the GUI consumes it with a
+                            // BLOCKING `clipboard_rx.recv_timeout` in the SAME
+                            // frame that requested it, so no future GUI wake is
+                            // needed (NoRepaint).
                             let text = emulator.extract_selection_text(
                                 start_row, start_col, end_row, end_col, is_block,
                             );
                             let _ = clipboard_tx.send(text);
                         }
-                        Ok(InputEvent::RequestSearchBuffer) => {
+                        InputEvent::RequestSearchBuffer => {
+                            // Read-only, BUT the GUI POLLS `search_buffer_rx` on a
+                            // LATER frame (not a blocking recv), so a repaint MUST
+                            // be requested or the search result can stall while the
+                            // terminal is otherwise idle and the cursor-blink wake
+                            // is suppressed (classified Repaint, #459 review finding).
                             let (chars, _tags) =
                                 emulator.internal.handler.data_and_format_data_for_gui(0);
                             let mut combined = chars.scrollback;
@@ -678,7 +790,7 @@ fn spawn_pty_consumer_thread(
                             let total_rows = emulator.internal.handler.buffer().rows().len();
                             let _ = search_buffer_tx.send((total_rows, combined));
                         }
-                        Ok(InputEvent::ClearScrollback) => {
+                        InputEvent::ClearScrollback => {
                             // Drop every scrollback row; the visible display
                             // is unaffected. Also reset the PTY-side
                             // gui_scroll_offset so snapshots immediately render
@@ -687,12 +799,9 @@ fn spawn_pty_consumer_thread(
                             emulator.internal.handler.buffer_mut().erase_scrollback();
                             emulator.set_gui_scroll_offset(0);
                         }
-                        Err(_) => {
-                            info!("Input channel closed; consumer thread exiting");
-                            return false;
-                        }
                     }
-                    true
+
+                    outcome
                 };
 
             let mut idle_deadline: crossbeam_channel::Receiver<std::time::Instant> =
@@ -756,7 +865,7 @@ fn spawn_pty_consumer_thread(
                             idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                         } else {
                             info!("PTY read channel closed; signaling tab death");
-                            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
+                            post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle, true);
                             let _ = pty_dead_tx.send(());
                             if let Some((proxy, wid)) = repaint_handle.get() {
                                 proxy.request_repaint(*wid);
@@ -765,17 +874,42 @@ fn spawn_pty_consumer_thread(
                         }
                     }
                     recv(input_rx) -> msg => {
-                        if !handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
-                            // The GUI dropped the pane's input channel — the
-                            // pane/tab/window is being torn down while the
-                            // child shell may still be alive. Signal the PTY
-                            // reader thread so a subsequent failed `send` (the
-                            // receiver we own is about to drop) is treated as
-                            // an expected teardown, not an error.
-                            reader_shutdown.store(true, Ordering::Release);
-                            return;
+                        match handle_input(&mut emulator, msg, &clipboard_tx, &search_buffer_tx) {
+                            InputOutcome::Closed => {
+                                // The GUI dropped the pane's input channel — the
+                                // pane/tab/window is being torn down while the
+                                // child shell may still be alive. Signal the PTY
+                                // reader thread so a subsequent failed `send` (the
+                                // receiver we own is about to drop) is treated as
+                                // an expected teardown, not an error.
+                                reader_shutdown.store(true, Ordering::Release);
+                                return;
+                            }
+                            InputOutcome::NoRepaint => {
+                                // Nothing visible changed (e.g. a key/mouse-report
+                                // byte written to the child fd). Still fall through
+                                // to `post_event` so any window-command/command-event
+                                // drains and the snapshot store run — but tell it NOT
+                                // to request a GUI wake (#459). `request_repaint =
+                                // false` below.
+                                idle_deadline =
+                                    crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                                post_event(
+                                    &mut emulator,
+                                    &window_cmd_tx,
+                                    &arc_swap,
+                                    &repaint_handle,
+                                    false,
+                                );
+                                continue;
+                            }
+                            InputOutcome::Repaint => {
+                                idle_deadline =
+                                    crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                                // Fall through to the trailing `post_event` (with
+                                // `request_repaint = true`).
+                            }
                         }
-                        idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
                     }
                     recv(child_exit) -> _ => {
                         info!("Child process exited; draining remaining PTY output");
@@ -787,7 +921,7 @@ fn spawn_pty_consumer_thread(
                         }
 
                         info!("PTY drain complete; signaling tab death");
-                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
+                        post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle, true);
                         let _ = pty_dead_tx.send(());
                         if let Some((proxy, wid)) = repaint_handle.get() {
                             proxy.request_repaint(*wid);
@@ -840,7 +974,15 @@ fn spawn_pty_consumer_thread(
                     }
                 }
 
-                post_event(&mut emulator, &window_cmd_tx, &arc_swap, &repaint_handle);
+                // Reached by the `pty_read_rx` arm (real screen change) and the
+                // `input_rx` `Repaint` arm — both genuinely need a GUI wake.
+                post_event(
+                    &mut emulator,
+                    &window_cmd_tx,
+                    &arc_swap,
+                    &repaint_handle,
+                    true,
+                );
             }
         })
     {
@@ -1064,5 +1206,58 @@ mod tests {
             handler.cursor_visual_style(),
             CursorVisualStyle::VerticalLineCursorBlink
         );
+    }
+
+    /// Table test locking the #459 repaint classification for EVERY
+    /// `InputEvent` variant. `input_event_needs_repaint` is the single source
+    /// of truth the PTY consumer thread uses to decide whether to wake the GUI
+    /// after handling an input; a regression here (e.g. reclassifying
+    /// `RequestSearchBuffer` as no-repaint, which the design review caught as a
+    /// stall bug, or `ClearScrollback` as no-repaint, which would leave a stale
+    /// scrollbar) would silently drop or add GUI wakes. The classifier is
+    /// exhaustive (no wildcard), so adding an `InputEvent` variant forces a
+    /// compile error until it is classified AND added here.
+    #[test]
+    fn input_event_repaint_classification() {
+        use freminal_common::config::ThemeMode;
+        use freminal_common::cursor::CursorVisualStyle;
+        use freminal_common::themes::DRACULA;
+
+        // NoRepaint: pure child-fd writes (Key/FocusChange) and the
+        // synchronously-consumed ExtractSelection.
+        assert!(!input_event_needs_repaint(&InputEvent::Key(vec![b'a'])));
+        assert!(!input_event_needs_repaint(&InputEvent::FocusChange(true)));
+        assert!(!input_event_needs_repaint(&InputEvent::FocusChange(false)));
+        assert!(!input_event_needs_repaint(&InputEvent::ExtractSelection {
+            start_row: 0,
+            start_col: 0,
+            end_row: 1,
+            end_col: 1,
+            is_block: false,
+        }));
+
+        // Repaint: everything that mutates snapshot-visible state, plus
+        // RequestSearchBuffer (polled on a later frame -> needs a guaranteed
+        // wake).
+        assert!(input_event_needs_repaint(&InputEvent::Resize(
+            80, 24, 8, 16
+        )));
+        assert!(input_event_needs_repaint(&InputEvent::ScrollOffset {
+            offset: 5,
+            extra_rows: 0,
+        }));
+        assert!(input_event_needs_repaint(&InputEvent::ThemeChange(
+            &DRACULA
+        )));
+        assert!(input_event_needs_repaint(&InputEvent::ThemeModeUpdate(
+            ThemeMode::Auto,
+            true,
+        )));
+        assert!(input_event_needs_repaint(&InputEvent::RequestSearchBuffer));
+        assert!(input_event_needs_repaint(&InputEvent::AutoDetectUrls(true)));
+        assert!(input_event_needs_repaint(&InputEvent::ClearScrollback));
+        assert!(input_event_needs_repaint(&InputEvent::CursorConfigChange(
+            CursorVisualStyle::VerticalLineCursorBlink,
+        )));
     }
 }

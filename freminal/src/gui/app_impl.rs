@@ -100,6 +100,18 @@ const fn cursor_blink_wants_repaint(
     is_blink_style && show_cursor && is_active && !is_echo_off
 }
 
+/// #459 item 9: whether pointer motion this frame must force a full present.
+/// Motion only changes plain-egui-painter chrome pixels when over a
+/// chrome-interactive region, or while a pane-border drag is latched (the
+/// pointer may be off the sensor mid-drag). Pure so it is unit-testable.
+const fn pointer_forces_full_present(
+    pointer_moving: bool,
+    pointer_over_chrome: bool,
+    border_drag_active: bool,
+) -> bool {
+    pointer_moving && (pointer_over_chrome || border_drag_active)
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -2576,8 +2588,32 @@ impl freminal_windowing::App for FreminalGui {
             // pointer moves (hover). Presenting only the cursor rect on such a
             // frame would leave that chrome stale, so both force `Full`.
             let pointer_moving = ctx.input(|i| i.pointer.is_moving());
-            let force_full =
-                ui_overlay_open || shader_recomposites || active_pane_changed || pointer_moving;
+            // #459 item 9: pointer motion only changes plain-egui-painter pixels
+            // when it is over a chrome-interactive region (menu/tab-bar hover
+            // tints, pane-border highlight) or an active pane-border drag is in
+            // progress (the drag may have moved the pointer off the ±3px sensor
+            // mid-drag). Motion purely over terminal content changes no
+            // egui-painted chrome — the terminal band tracks its own hover
+            // effects (gutter tint, URL cursor, scrollbar thumb) through explicit
+            // per-pane damage signals. NB: `self.is_chrome_interactive_at` is
+            // UNUSABLE here — `win` was removed from `self.windows` for this frame
+            // (see the `self.windows.remove` at the top of `update`), so it would
+            // always return `true`; hit-test the local `win` rects directly.
+            let pointer_over_chrome = ctx.input(|i| i.pointer.latest_pos()).is_none_or(|pos| {
+                chrome_damage::point_in_chrome_rects(
+                    pos,
+                    win.chrome_head_rects.as_deref(),
+                    &win.chrome_border_rects,
+                )
+            });
+            let force_full = ui_overlay_open
+                || shader_recomposites
+                || active_pane_changed
+                || pointer_forces_full_present(
+                    pointer_moving,
+                    pointer_over_chrome,
+                    border_drag_active,
+                );
             // A toast being visible animates its own region each frame. The
             // resize overlay (issue #433) animates the same way — it fades out
             // over its linger window on the plain painter — so it must force a
@@ -3804,7 +3840,8 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, settings_owner_close_decision,
+        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, pointer_forces_full_present,
+        settings_owner_close_decision,
     };
     use freminal_common::cursor::CursorVisualStyle;
 
@@ -3870,6 +3907,26 @@ mod tests {
                 "blink style {style:?} must request a wake when visible"
             );
         }
+    }
+
+    #[test]
+    fn pointer_forces_full_present_truth_table() {
+        // Moving + over chrome -> force Full (hover tint changed).
+        assert!(pointer_forces_full_present(true, true, false));
+        // Moving + border drag latched -> force Full (drag may have moved the
+        // pointer off the ±3px sensor mid-drag).
+        assert!(pointer_forces_full_present(true, false, true));
+        // Moving over plain terminal content, no drag -> no forced Full; the
+        // terminal band tracks its own hover damage separately.
+        assert!(!pointer_forces_full_present(true, false, false));
+        // Not moving, over chrome -> no forced Full (nothing changed).
+        assert!(!pointer_forces_full_present(false, true, false));
+        // Not moving, border drag latched -> no forced Full (drag state alone
+        // is not motion; `border_drag_active` only matters combined with
+        // actual pointer movement).
+        assert!(!pointer_forces_full_present(false, false, true));
+        // Not moving, neither chrome nor drag -> no forced Full.
+        assert!(!pointer_forces_full_present(false, false, false));
     }
 
     #[test]

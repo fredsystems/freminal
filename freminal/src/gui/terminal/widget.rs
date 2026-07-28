@@ -394,19 +394,44 @@ fn compute_command_block_hover_rows(
     Some((s_screen.min(e_screen), s_screen.max(e_screen)))
 }
 
+/// Outcome of a scrollbar render+interaction pass. `new_offset` is the
+/// scroll offset the user dragged to (if any). `rendered` is whether the
+/// thumb was actually painted this frame. `hovered` is the
+/// window-exit-corrected hover state (`latest_pos().is_some() &&
+/// interact_pos() over the hit rect`) — the SAME signal the thumb's painted
+/// alpha uses, so the paint and the damage decision can never drift a frame
+/// apart on window-exit.
+pub(super) struct ScrollbarOutcome {
+    pub(super) new_offset: Option<usize>,
+    pub(super) rendered: bool,
+    pub(super) hovered: bool,
+}
+
+impl ScrollbarOutcome {
+    /// The outcome for a frame where the thumb was not rendered at all
+    /// (scrolled to the live bottom, or a degenerate zero-height viewport).
+    const fn not_rendered() -> Self {
+        Self {
+            new_offset: None,
+            rendered: false,
+            hovered: false,
+        }
+    }
+}
 ///
 /// The scrollbar is shown when the user is actively scrolled back
 /// (`scroll_offset > 0`).  It disappears at the live bottom.
 ///
-/// Supports click-to-position and drag-to-scroll.  Returns the new
-/// `scroll_offset` if the user interacted with the scrollbar, or `None`
-/// if no scrollbar interaction occurred.
+/// Supports click-to-position and drag-to-scroll.  Returns a
+/// [`ScrollbarOutcome`] describing the new `scroll_offset` (if the user
+/// interacted with the scrollbar), whether the thumb was rendered this
+/// frame, and whether it was hovered.
 pub(super) fn handle_scrollbar(
     scroll_offset: usize,
     max_scroll_offset: usize,
     ui: &Ui,
     dragging: &mut bool,
-) -> Option<usize> {
+) -> ScrollbarOutcome {
     const SCROLLBAR_WIDTH: f32 = 6.0;
     const SCROLLBAR_MARGIN: f32 = 2.0;
     const MIN_THUMB_HEIGHT: f32 = 12.0;
@@ -417,11 +442,11 @@ pub(super) fn handle_scrollbar(
     // while the user is mid-drag so the scrollbar doesn't vanish when
     // they drag to the bottom.
     if !*dragging && (scroll_offset == 0 || max_scroll_offset == 0) {
-        return None;
+        return ScrollbarOutcome::not_rendered();
     }
     if max_scroll_offset == 0 {
         *dragging = false;
-        return None;
+        return ScrollbarOutcome::not_rendered();
     }
 
     let painter = ui.painter();
@@ -432,7 +457,7 @@ pub(super) fn handle_scrollbar(
     let track_bottom = viewport.bottom();
     let track_height = track_bottom - track_top;
     if track_height <= 0.0 {
-        return None;
+        return ScrollbarOutcome::not_rendered();
     }
 
     let track_right = viewport.right() - SCROLLBAR_MARGIN;
@@ -504,14 +529,25 @@ pub(super) fn handle_scrollbar(
     });
 
     // ── Appearance ───────────────────────────────────────────────────────
-    let is_hovered = ui.input(|i| {
-        i.pointer
-            .interact_pos()
-            .is_some_and(|pos| hit_rect.contains(pos))
+    // `interact_pos()` lags `latest_pos()` by one frame on window-exit
+    // (egui's documented `Event::PointerGone` behavior — `latest_pos` clears
+    // immediately, `interact_pos` not until the next frame). Fold in
+    // `pointer_in_window` (`latest_pos().is_some()`) so the PAINTED alpha and
+    // the returned hover state both use the SAME same-frame-corrected signal.
+    // Sourcing the paint and the damage decision (see the call site's
+    // `scrollbar_damage_decision`) from one consistent signal is what keeps
+    // the thumb's hover alpha from getting stuck one frame on window-exit —
+    // mirroring how the command-block gutter (#461) drives both its tint and
+    // its damage from the single non-lagged `view_state.mouse_position`.
+    let effectively_hovered = ui.input(|i| {
+        i.pointer.latest_pos().is_some()
+            && i.pointer
+                .interact_pos()
+                .is_some_and(|pos| hit_rect.contains(pos))
     });
     let alpha = if *dragging {
         220
-    } else if is_hovered {
+    } else if effectively_hovered {
         200
     } else {
         150
@@ -521,7 +557,11 @@ pub(super) fn handle_scrollbar(
 
     painter.rect_filled(thumb_rect, rounding, color);
 
-    new_offset
+    ScrollbarOutcome {
+        new_offset,
+        rendered: true,
+        hovered: effectively_hovered,
+    }
 }
 
 /// Decide whether the command-block gutter's hover-tint state changed
@@ -560,6 +600,45 @@ const fn gutter_hover_repaint_decision(
 ) -> (bool, bool) {
     let effectively_hovered = hovered && pointer_in_window;
     (effectively_hovered != was_hovering, effectively_hovered)
+}
+
+/// Snapshot of the scrollbar's render-visibility + effective-hover state for
+/// a single frame, used by [`scrollbar_damage_decision`].
+///
+/// Bundled into a named struct (rather than passed as loose bool
+/// parameters) both reads more clearly at the two call sites (this frame's
+/// observed state vs. the previous frame's cached state) and keeps
+/// `scrollbar_damage_decision` under clippy's bool-parameter-count limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ScrollbarDamageState {
+    /// Whether the thumb was rendered (shown) this frame.
+    pub(super) rendered: bool,
+    /// Whether the thumb was hovered this frame. MUST already fold in
+    /// `pointer_in_window` (`hovered && latest_pos().is_some()`) to avoid
+    /// the `interact_pos()` one-frame window-exit lag that PR #461
+    /// documents for the gutter.
+    pub(super) effectively_hovered: bool,
+}
+
+/// Decide whether the scrollbar's damage state changed enough to need a
+/// repaint + a forced Full present this frame, given this frame's observed
+/// [`ScrollbarDamageState`] and the previous frame's cached state.
+///
+/// A rendered->not-rendered transition erases the previously-painted thumb
+/// (force Full to clear it). A hover-alpha change while rendered repaints the
+/// thumb at a new alpha (force Full — the thumb is on the plain painter,
+/// outside per-pane VBO damage). Either also needs a repaint scheduled since
+/// nothing else is guaranteed to wake a frame. Returns whether a repaint +
+/// forced Full present is needed — the single bool drives both, matching
+/// the gutter's `request_repaint` + Full pattern.
+const fn scrollbar_damage_decision(
+    current: ScrollbarDamageState,
+    previous: ScrollbarDamageState,
+) -> bool {
+    let visibility_changed = current.rendered != previous.rendered;
+    let hover_changed =
+        current.rendered && (current.effectively_hovered != previous.effectively_hovered);
+    visibility_changed || hover_changed
 }
 
 /// Duration of the visual bell flash overlay.
@@ -1266,6 +1345,17 @@ pub struct PaneRenderCache {
     /// previous frame.  Used to request one extra repaint on the frame the
     /// pointer leaves the gutter so the hover-tint clearing frame is drawn.
     pub(super) pointer_in_gutter_last_frame: bool,
+    /// Whether the scrollbar thumb was hovered on the previous frame (using
+    /// the #461-proven `hovered && pointer_in_window` shape to avoid the
+    /// `interact_pos()` one-frame window-exit lag). Drives a one-frame
+    /// hover-alpha clearing repaint + Full damage, since the thumb is painted
+    /// on the plain egui painter outside the per-pane VBO damage tracking.
+    pub(super) scrollbar_was_hovered_last_frame: bool,
+    /// Whether the scrollbar thumb was rendered at all on the previous frame.
+    /// A rendered->not-rendered transition (e.g. scrolled to bottom) must
+    /// force one Full clear to erase the previously-painted thumb pixels; a
+    /// hover-only latch misses the common visible-but-unhovered vanish case.
+    pub(super) scrollbar_was_rendered_last_frame: bool,
     /// Terminal width (columns) from the last full vertex rebuild.  When this
     /// changes (window resize), the cell-instance VBOs still contain vertices
     /// for the old column count; drawing them into a smaller viewport leaves
@@ -1354,6 +1444,8 @@ impl PaneRenderCache {
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
             scrollbar_dragging: false,
             pointer_in_gutter_last_frame: false,
+            scrollbar_was_hovered_last_frame: false,
+            scrollbar_was_rendered_last_frame: false,
             previous_term_width: 0,
             previous_term_height: 0,
             previous_fold_epoch: 0,
@@ -3102,12 +3194,13 @@ impl FreminalTerminalWidget {
         });
 
         // ── Scrollbar (visual + interactive) ─────────────────────────
-        if let Some(new_offset) = handle_scrollbar(
+        let scrollbar_outcome = handle_scrollbar(
             snap.scroll_offset,
             snap.max_scroll_offset,
             ui,
             &mut cache.scrollbar_dragging,
-        ) {
+        );
+        if let Some(new_offset) = scrollbar_outcome.new_offset {
             view_state.scroll_offset = new_offset;
             let _ = input_tx.try_send(super::input::scroll_event(
                 snap,
@@ -3115,6 +3208,28 @@ impl FreminalTerminalWidget {
                 new_offset,
             ));
         }
+        // #459 item 9 / mirrors #461 gutter: the scrollbar thumb is painted on
+        // the plain egui painter (alpha varies with hover), outside per-pane VBO
+        // damage. A hover-alpha change or a rendered->not-rendered vanish must
+        // force one Full clear or a Partial present (driven by an unrelated
+        // pane's cursor blink) would leave a stale/ghosted thumb.
+        // `scrollbar_outcome.hovered` is already the window-exit-corrected
+        // signal (the same one the thumb's alpha was painted with), so the
+        // paint and this damage decision can never drift a frame apart.
+        let current_scrollbar_state = ScrollbarDamageState {
+            rendered: scrollbar_outcome.rendered,
+            effectively_hovered: scrollbar_outcome.hovered,
+        };
+        let previous_scrollbar_state = ScrollbarDamageState {
+            rendered: cache.scrollbar_was_rendered_last_frame,
+            effectively_hovered: cache.scrollbar_was_hovered_last_frame,
+        };
+        if scrollbar_damage_decision(current_scrollbar_state, previous_scrollbar_state) {
+            ui.ctx().request_repaint();
+            cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Full;
+        }
+        cache.scrollbar_was_rendered_last_frame = scrollbar_outcome.rendered;
+        cache.scrollbar_was_hovered_last_frame = scrollbar_outcome.hovered;
 
         // ── Visual bell flash overlay ────────────────────────────────
         paint_bell_flash(ui, rect, view_state);
@@ -3786,6 +3901,99 @@ mod gutter_hover_repaint_decision_tests {
             gutter_hover_repaint_decision(false, false, false),
             (false, false)
         );
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_damage_decision_tests {
+    //! Tests for [`scrollbar_damage_decision`], the pure decision function
+    //! behind the scrollbar thumb's hover/visibility repaint + Full-present
+    //! forcing (#459 item 9, mirroring #461's gutter fix). Covers the
+    //! rendered<->not-rendered vanish/appear transitions, the hover-alpha
+    //! change while rendered, and the steady-state no-op cases — including
+    //! the case where hover *would* differ but the thumb isn't rendered at
+    //! all, which must be ignored (governed only by visibility).
+
+    use super::{ScrollbarDamageState, scrollbar_damage_decision};
+
+    /// Test-only shorthand for building a [`ScrollbarDamageState`].
+    const fn state(rendered: bool, effectively_hovered: bool) -> ScrollbarDamageState {
+        ScrollbarDamageState {
+            rendered,
+            effectively_hovered,
+        }
+    }
+
+    #[test]
+    fn rendered_to_not_rendered_forces_damage() {
+        // Scrolled to bottom: thumb was visible last frame, gone this frame.
+        assert!(scrollbar_damage_decision(
+            state(false, false),
+            state(true, false)
+        ));
+    }
+
+    #[test]
+    fn not_rendered_to_rendered_forces_damage() {
+        // Scrolled back into history: thumb appears this frame.
+        assert!(scrollbar_damage_decision(
+            state(true, false),
+            state(false, false)
+        ));
+    }
+
+    #[test]
+    fn hover_enter_while_rendered_forces_damage() {
+        assert!(scrollbar_damage_decision(
+            state(true, true),
+            state(true, false)
+        ));
+    }
+
+    #[test]
+    fn hover_leave_while_rendered_forces_damage() {
+        assert!(scrollbar_damage_decision(
+            state(true, false),
+            state(true, true)
+        ));
+    }
+
+    #[test]
+    fn steady_visible_unhovered_no_damage() {
+        assert!(!scrollbar_damage_decision(
+            state(true, false),
+            state(true, false)
+        ));
+    }
+
+    #[test]
+    fn steady_visible_hovered_no_damage() {
+        assert!(!scrollbar_damage_decision(
+            state(true, true),
+            state(true, true)
+        ));
+    }
+
+    #[test]
+    fn steady_hidden_no_damage() {
+        assert!(!scrollbar_damage_decision(
+            state(false, false),
+            state(false, false)
+        ));
+    }
+
+    #[test]
+    fn hover_change_while_not_rendered_is_ignored() {
+        // Not rendered both frames, "hover" bit differs -- irrelevant since
+        // visibility governs when the thumb isn't rendered at all.
+        assert!(!scrollbar_damage_decision(
+            state(false, true),
+            state(false, false)
+        ));
+        assert!(!scrollbar_damage_decision(
+            state(false, false),
+            state(false, true)
+        ));
     }
 }
 
