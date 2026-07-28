@@ -182,6 +182,62 @@ struct FrameProfile {
     swap_total: std::time::Duration,
     /// Largest single-frame swap duration observed.
     swap_max: std::time::Duration,
+
+    // ── Gate-blocker counters (feature-gated): issue #459/#461 follow-up ──
+    //
+    // `decide_chrome_mode` permits REPLAY only when ALL FOUR of
+    // `ChromeGatePredicates`'s fields hold (see that struct and
+    // `evaluate_chrome_gate`, the single source of truth both
+    // `decide_chrome_mode` and this instrumentation call). Every counter
+    // below is incremented independently -- a frame that fails more than one
+    // predicate increments more than one counter -- so overlap between
+    // blockers is visible rather than only ever seeing "the first" reason.
+    /// Frames where `ChromeGatePredicates::cache_matches` was `false`: no
+    /// chrome cache exists yet, or this frame's framebuffer size/`ppp`
+    /// didn't match what the cache was tessellated at.
+    gate_blocked_cache_mismatch: u64,
+    /// Frames where `ChromeGatePredicates::repaint_settled` was `false`:
+    /// [`chrome_repaint_settled`] found something wanted a wake sooner than
+    /// this frame's own request permits. See the `settle_*` fields below
+    /// for the VALUES behind this failure, not just the count.
+    gate_blocked_not_settled: u64,
+    /// Frames where `ChromeGatePredicates::damage_unchanged` was `false`:
+    /// the PREVIOUS frame's `ChromeDamage` was `Changed`, so this frame
+    /// cannot REPLAY regardless of anything else.
+    gate_blocked_damage_changed: u64,
+    /// Frames where `ChromeGatePredicates::no_chrome_input` was `false`:
+    /// `chrome_input_this_frame` was `true` (a window input event this
+    /// frame could plausibly have affected chrome).
+    gate_blocked_chrome_input: u64,
+
+    // ── Settle-gate value diagnostics (feature-gated), reset every flush
+    // window (`reset_settle_window`) rather than cumulative-since-creation
+    // like every other field above. A lifetime min/max would not be useful
+    // here: the lifetime min collapses to whatever the very first settle
+    // failure happened to be (often frame 0-ish transients) and the
+    // lifetime max trivially saturates at `Duration::MAX` the first time
+    // egui or the app ever reports "no repaint needed" on a losing frame --
+    // neither tells you what is happening in THIS flush window, which is
+    // the question ("did the app ask for 500ms and egui want 500ms too, or
+    // did something ask for 16ms behind our back").
+    /// Smallest `prev_repaint_delay` observed on a frame where the settle
+    /// predicate failed, this flush window. `None` until the first such
+    /// frame in this window.
+    settle_repaint_delay_min: Option<std::time::Duration>,
+    /// Largest `prev_repaint_delay` observed on a frame where the settle
+    /// predicate failed, this flush window.
+    settle_repaint_delay_max: Option<std::time::Duration>,
+    /// Smallest `prev_terminal_requested_delay` (when `Some`) observed on a
+    /// frame where the settle predicate failed, this flush window.
+    settle_terminal_requested_delay_min: Option<std::time::Duration>,
+    /// Largest `prev_terminal_requested_delay` (when `Some`) observed on a
+    /// frame where the settle predicate failed, this flush window.
+    settle_terminal_requested_delay_max: Option<std::time::Duration>,
+    /// Count of settle-predicate failures this flush window where
+    /// `prev_terminal_requested_delay` was `None` (nothing app-side had
+    /// requested a delay at all this frame, counted separately from "the
+    /// app requested something, but egui wanted sooner").
+    settle_terminal_requested_delay_none_count: u64,
 }
 
 #[cfg(feature = "frame-profiling")]
@@ -226,6 +282,86 @@ impl FrameProfile {
         let count_f: f64 = conv2::ConvUtil::approx_as(count).unwrap_or(1.0);
         total.div_f64(count_f.max(1.0))
     }
+
+    /// Record one settle-gate failure's values into this flush window's
+    /// min/max/none-count tracking. Called only when
+    /// `ChromeGatePredicates::repaint_settled` is `false` for the frame
+    /// (see the call site in `run_frame`) -- these fields answer "what were
+    /// the actual delays on the frames that failed", not just "how many
+    /// failed".
+    fn record_settle_failure(
+        &mut self,
+        repaint_delay: std::time::Duration,
+        terminal_requested_delay: Option<std::time::Duration>,
+    ) {
+        let (min, max) = min_max_duration(
+            (self.settle_repaint_delay_min, self.settle_repaint_delay_max),
+            repaint_delay,
+        );
+        self.settle_repaint_delay_min = min;
+        self.settle_repaint_delay_max = max;
+
+        match terminal_requested_delay {
+            Some(d) => {
+                let (min, max) = min_max_duration(
+                    (
+                        self.settle_terminal_requested_delay_min,
+                        self.settle_terminal_requested_delay_max,
+                    ),
+                    d,
+                );
+                self.settle_terminal_requested_delay_min = min;
+                self.settle_terminal_requested_delay_max = max;
+            }
+            None => {
+                self.settle_terminal_requested_delay_none_count = self
+                    .settle_terminal_requested_delay_none_count
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    /// Clear the settle-gate value diagnostics at the end of a flush window
+    /// -- see the field docs on `settle_repaint_delay_min` etc. for why
+    /// these are windowed rather than cumulative-since-creation.
+    const fn reset_settle_window(&mut self) {
+        self.settle_repaint_delay_min = None;
+        self.settle_repaint_delay_max = None;
+        self.settle_terminal_requested_delay_min = None;
+        self.settle_terminal_requested_delay_max = None;
+        self.settle_terminal_requested_delay_none_count = 0;
+    }
+
+    /// Format an optional `Duration` for a `tracing` field: `"none"` when
+    /// no sample was recorded this window, the literal string `"MAX"` when
+    /// the sample IS `Duration::MAX` (egui's "no repaint needed" sentinel --
+    /// printing it as a microsecond count would show an absurd
+    /// ~584,942,417,355-year figure), or the microsecond count otherwise.
+    /// Pure, so directly unit-testable.
+    fn format_duration_field(d: Option<std::time::Duration>) -> String {
+        match d {
+            None => "none".to_string(),
+            Some(d) if d == std::time::Duration::MAX => "MAX".to_string(),
+            Some(d) => format!("{}us", d.as_micros()),
+        }
+    }
+}
+
+/// Update a running `(min, max)` pair with one new `Duration` sample.
+/// `current` starts `(None, None)` before the first sample. Pure, so
+/// directly unit-testable; shared by [`FrameProfile::record_settle_failure`]
+/// for both the `prev_repaint_delay` and `prev_terminal_requested_delay`
+/// tracking (avoiding writing the same min/max-or-first-sample logic twice).
+#[cfg(feature = "frame-profiling")]
+fn min_max_duration(
+    current: (Option<std::time::Duration>, Option<std::time::Duration>),
+    sample: std::time::Duration,
+) -> (Option<std::time::Duration>, Option<std::time::Duration>) {
+    let (min, max) = current;
+    (
+        Some(min.map_or(sample, |m| m.min(sample))),
+        Some(max.map_or(sample, |m| m.max(sample))),
+    )
 }
 
 /// #436 §3.1 (amended): a REPLAY is permitted only if nothing OTHER than
@@ -275,29 +411,93 @@ fn atlas_grew(textures_delta: &egui::TexturesDelta) -> bool {
         .any(|(id, delta)| *id == egui::TextureId::default() && delta.is_whole())
 }
 
-/// #436.4b: decide this frame's [`crate::ChromeMode`].
+/// The four independent REPLAY gate predicates from [`decide_chrome_mode`]'s
+/// doc, bundled so `decide_chrome_mode` and the (feature-gated) gate-blocker
+/// instrumentation in `run_frame` evaluate them via the SAME function
+/// ([`evaluate_chrome_gate`]) rather than two hand-maintained copies of the
+/// same boolean logic drifting apart. See `evaluate_chrome_gate`'s doc for
+/// what each field means.
+// struct_excessive_bools: these are four independent, unrelated gate
+// observations (mirrors the existing allow on `ChromeSignals`/
+// `DismissiblePresence` in `freminal::gui::chrome_damage`) -- not a state
+// machine, and each field is consumed both individually (the gate-blocker
+// counters) and via `all_pass` (the actual decision), so collapsing them
+// into an enum would make the individual-predicate consumer harder, not
+// easier.
+#[allow(clippy::struct_excessive_bools)]
+struct ChromeGatePredicates {
+    cache_matches: bool,
+    repaint_settled: bool,
+    damage_unchanged: bool,
+    no_chrome_input: bool,
+}
+
+impl ChromeGatePredicates {
+    /// A REPLAY is permitted only when every predicate holds.
+    const fn all_pass(&self) -> bool {
+        self.cache_matches && self.repaint_settled && self.damage_unchanged && self.no_chrome_input
+    }
+}
+
+/// #436.4b: evaluate the four independent REPLAY gate predicates. This is
+/// the single source of truth [`decide_chrome_mode`] consumes to make its
+/// decision, and (feature-gated only) the frame-profiling gate-blocker
+/// counters in `run_frame` call this SAME function a second time with the
+/// SAME arguments to see WHICH predicate(s) failed -- see the `run_frame`
+/// call site. If this function's logic ever changes, both consumers change
+/// with it; there is no second copy of the boolean expressions to forget.
 ///
-/// A REPLAY is permitted only when ALL of the following hold:
-///   - `cache_valid` — a chrome cache exists from a prior FULL frame.
-///   - `cache_size`/`cache_ppp` match `cur_size`/`cur_ppp` — the cached
-///     primitives were tessellated at this frame's framebuffer size and
-///     scale factor (a mismatch, e.g. a resize or DPI change, invalidates
-///     the whole cache rather than attempting a partial re-tessellation).
-///   - [`chrome_repaint_settled`] — nothing egui-internal wants a wake
-///     sooner than the app's own scheduling this frame (§3.1 amendment).
-///   - `prev_chrome_damage` is [`crate::ChromeDamage::Unchanged`] — the
-///     PREVIOUS frame proved static chrome did not change (§3.3/§3.5).
-///   - `!chrome_input_this_frame` — no window input event this frame could
-///     plausibly have affected chrome (§3.2, conservative: any qualifying
-///     input forces `Full`, refined region-aware in #436.8).
+///   - `cache_matches` — a chrome cache exists from a prior FULL frame
+///     (`cache_valid`), AND `cache_size`/`cache_ppp` match
+///     `cur_size`/`cur_ppp` — the cached primitives were tessellated at
+///     this frame's framebuffer size and scale factor (a mismatch, e.g. a
+///     resize or DPI change, invalidates the whole cache rather than
+///     attempting a partial re-tessellation).
+///   - `repaint_settled` — [`chrome_repaint_settled`]: nothing egui-internal
+///     wants a wake sooner than the app's own scheduling this frame (§3.1
+///     amendment).
+///   - `damage_unchanged` — `prev_chrome_damage` is
+///     [`crate::ChromeDamage::Unchanged`] — the PREVIOUS frame proved
+///     static chrome did not change (§3.3/§3.5).
+///   - `no_chrome_input` — `!chrome_input_this_frame`: no window input
+///     event this frame could plausibly have affected chrome (§3.2,
+///     conservative: any qualifying input forces `Full`, refined
+///     region-aware in #436.8).
 ///
-/// Any failure forces `ChromeMode::Full` — the always-correct, conservative
-/// default. Pure (no `self`/`egui` state), so directly unit-testable.
+/// Pure (no `self`/`egui` state), so directly unit-testable.
 // Nine independent, unrelated gate inputs (cache validity/size/ppp, this
 // frame's size/ppp, the two settle-rule delays, prior chrome damage, and the
 // input gate) -- bundling them into a struct would just relocate the same
 // fields without adding clarity, and this function exists specifically so
 // tests can drive each one independently.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_chrome_gate(
+    cache_valid: bool,
+    cache_size: [u32; 2],
+    cache_ppp: f32,
+    cur_size: [u32; 2],
+    cur_ppp: f32,
+    prev_repaint_delay: std::time::Duration,
+    prev_terminal_requested_delay: Option<std::time::Duration>,
+    prev_chrome_damage: crate::ChromeDamage,
+    chrome_input_this_frame: bool,
+) -> ChromeGatePredicates {
+    ChromeGatePredicates {
+        cache_matches: cache_valid
+            && cache_size == cur_size
+            && (cache_ppp - cur_ppp).abs() < f32::EPSILON,
+        repaint_settled: chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay),
+        damage_unchanged: prev_chrome_damage == crate::ChromeDamage::Unchanged,
+        no_chrome_input: !chrome_input_this_frame,
+    }
+}
+
+/// #436.4b: decide this frame's [`crate::ChromeMode`].
+///
+/// A REPLAY is permitted only when ALL of [`evaluate_chrome_gate`]'s four
+/// predicates hold. Any failure forces `ChromeMode::Full` — the
+/// always-correct, conservative default. Pure (no `self`/`egui` state), so
+/// directly unit-testable.
 #[allow(clippy::too_many_arguments)]
 fn decide_chrome_mode(
     cache_valid: bool,
@@ -310,15 +510,19 @@ fn decide_chrome_mode(
     prev_chrome_damage: crate::ChromeDamage,
     chrome_input_this_frame: bool,
 ) -> crate::ChromeMode {
-    let cache_matches =
-        cache_valid && cache_size == cur_size && (cache_ppp - cur_ppp).abs() < f32::EPSILON;
+    let gate = evaluate_chrome_gate(
+        cache_valid,
+        cache_size,
+        cache_ppp,
+        cur_size,
+        cur_ppp,
+        prev_repaint_delay,
+        prev_terminal_requested_delay,
+        prev_chrome_damage,
+        chrome_input_this_frame,
+    );
 
-    let replay_allowed = cache_matches
-        && chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay)
-        && prev_chrome_damage == crate::ChromeDamage::Unchanged
-        && !chrome_input_this_frame;
-
-    if replay_allowed {
+    if gate.all_pass() {
         crate::ChromeMode::Replay
     } else {
         crate::ChromeMode::Full
@@ -473,6 +677,59 @@ impl EguiState {
             crate::ChromeMode::Replay => {
                 self.frame_profile.chrome_mode_replay =
                     self.frame_profile.chrome_mode_replay.saturating_add(1);
+            }
+        }
+
+        // Gate-blocker instrumentation (feature-gated only): re-evaluate the
+        // SAME four predicates `decide_chrome_mode` just consumed, via the
+        // SAME `evaluate_chrome_gate` function and the SAME arguments, so
+        // this can never drift from what actually gated the decision above
+        // (see `evaluate_chrome_gate`'s doc). Every failing predicate
+        // increments its own counter -- not just the first -- so overlap
+        // between blockers (e.g. cache mismatch AND not-settled on the same
+        // frame) is visible rather than only ever attributing to one cause.
+        #[cfg(feature = "frame-profiling")]
+        {
+            let gate = evaluate_chrome_gate(
+                cache_valid,
+                cache_size,
+                cache_ppp,
+                size_arr,
+                ppp_before_run_ui,
+                self.prev_repaint_delay,
+                self.prev_terminal_requested_delay,
+                self.prev_chrome_damage,
+                chrome_input_this_frame,
+            );
+            if !gate.cache_matches {
+                self.frame_profile.gate_blocked_cache_mismatch = self
+                    .frame_profile
+                    .gate_blocked_cache_mismatch
+                    .saturating_add(1);
+            }
+            if !gate.repaint_settled {
+                self.frame_profile.gate_blocked_not_settled = self
+                    .frame_profile
+                    .gate_blocked_not_settled
+                    .saturating_add(1);
+                // Settle-gate value diagnostics: only recorded when this
+                // predicate specifically failed -- see `record_settle_failure`.
+                self.frame_profile.record_settle_failure(
+                    self.prev_repaint_delay,
+                    self.prev_terminal_requested_delay,
+                );
+            }
+            if !gate.damage_unchanged {
+                self.frame_profile.gate_blocked_damage_changed = self
+                    .frame_profile
+                    .gate_blocked_damage_changed
+                    .saturating_add(1);
+            }
+            if !gate.no_chrome_input {
+                self.frame_profile.gate_blocked_chrome_input = self
+                    .frame_profile
+                    .gate_blocked_chrome_input
+                    .saturating_add(1);
             }
         }
 
@@ -843,12 +1100,57 @@ impl EguiState {
                     swap_max_us = p.swap_max.as_micros(),
                     swap_mean_us =
                         FrameProfile::mean_duration(p.swap_total, p.frame_counter).as_micros(),
+                    // Gate-blocker counters: which of the four REPLAY gate
+                    // predicates (see `evaluate_chrome_gate`) blocked a Full
+                    // decision this window, cumulative since window
+                    // creation. More than one may be nonzero for the same
+                    // set of frames -- that overlap is itself a finding.
+                    gate_blocked_cache_mismatch = p.gate_blocked_cache_mismatch,
+                    gate_blocked_not_settled = p.gate_blocked_not_settled,
+                    gate_blocked_damage_changed = p.gate_blocked_damage_changed,
+                    gate_blocked_chrome_input = p.gate_blocked_chrome_input,
+                    // Settle-gate value diagnostics: only populated on
+                    // frames where `gate_blocked_not_settled` fired this
+                    // flush window (see `record_settle_failure`); "none"
+                    // means the settle gate never failed this window, "MAX"
+                    // means a failing frame's `prev_repaint_delay` was
+                    // itself `Duration::MAX` (egui wanted no repaint yet the
+                    // gate still failed -- only possible via the
+                    // `prev_terminal_requested_delay` arm, since `MAX >=
+                    // app_delay` is only false when `app_delay` is also
+                    // `MAX`, which cannot itself fail the gate -- so seeing
+                    // this would itself be a notable finding).
+                    settle_repaint_delay_min_us =
+                        %FrameProfile::format_duration_field(p.settle_repaint_delay_min),
+                    settle_repaint_delay_max_us =
+                        %FrameProfile::format_duration_field(p.settle_repaint_delay_max),
+                    settle_terminal_requested_delay_min_us = %FrameProfile::format_duration_field(
+                        p.settle_terminal_requested_delay_min
+                    ),
+                    settle_terminal_requested_delay_max_us = %FrameProfile::format_duration_field(
+                        p.settle_terminal_requested_delay_max
+                    ),
+                    settle_terminal_requested_delay_none_count =
+                        p.settle_terminal_requested_delay_none_count,
                     "windowing frame-profiling stats (task 121 harness): ChromeMode \
-                     duty cycle and the windowing-owned phase_total/run_ui/tessellate/\
+                     duty cycle, the windowing-owned phase_total/run_ui/tessellate/\
                      paint/swap wall-clock split over frame_counter drawn frames for \
-                     this window_id; phase_total minus (run_ui + tessellate + paint + \
-                     swap) is the unmeasured residual -- see FrameProfile::phase_total_total"
+                     this window_id (phase_total minus (run_ui + tessellate + paint + \
+                     swap) is the unmeasured residual -- see \
+                     FrameProfile::phase_total_total), which of the four REPLAY gate \
+                     predicates blocked Full->Replay this window (gate_blocked_*, \
+                     cumulative, non-exclusive), and -- when the settle gate \
+                     specifically failed -- the min/max prev_repaint_delay and \
+                     prev_terminal_requested_delay values behind that failure this \
+                     flush window (settle_*)"
                 );
+
+                // Settle-gate value diagnostics are windowed, not
+                // cumulative-since-creation (see the field docs) -- clear
+                // them now that this window's line has been logged. The
+                // `gate_blocked_*` counters above are NOT reset; they stay
+                // cumulative like every other `FrameProfile` counter.
+                self.frame_profile.reset_settle_window();
             }
         }
 
@@ -943,11 +1245,59 @@ mod frame_profiling_tests {
         let mean = FrameProfile::mean_duration(Duration::from_micros(42), 1);
         assert_eq!(mean, Duration::from_micros(42));
     }
+
+    // ── `min_max_duration` ──────────────────────────────────────────────
+
+    #[test]
+    fn min_max_duration_first_sample_sets_both() {
+        let (min, max) = super::min_max_duration((None, None), Duration::from_millis(16));
+        assert_eq!(min, Some(Duration::from_millis(16)));
+        assert_eq!(max, Some(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn min_max_duration_tracks_a_smaller_second_sample() {
+        let first = super::min_max_duration((None, None), Duration::from_millis(16));
+        let second = super::min_max_duration(first, Duration::from_millis(4));
+        assert_eq!(second.0, Some(Duration::from_millis(4)));
+        assert_eq!(second.1, Some(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn min_max_duration_tracks_a_larger_second_sample() {
+        let first = super::min_max_duration((None, None), Duration::from_millis(16));
+        let second = super::min_max_duration(first, Duration::from_millis(500));
+        assert_eq!(second.0, Some(Duration::from_millis(16)));
+        assert_eq!(second.1, Some(Duration::from_millis(500)));
+    }
+
+    // ── `FrameProfile::format_duration_field` ────────────────────────────
+
+    #[test]
+    fn format_duration_field_none_is_literal_none() {
+        assert_eq!(FrameProfile::format_duration_field(None), "none");
+    }
+
+    #[test]
+    fn format_duration_field_max_is_literal_max_not_an_absurd_number() {
+        assert_eq!(
+            FrameProfile::format_duration_field(Some(Duration::MAX)),
+            "MAX"
+        );
+    }
+
+    #[test]
+    fn format_duration_field_formats_a_real_duration_as_micros() {
+        assert_eq!(
+            FrameProfile::format_duration_field(Some(Duration::from_millis(16))),
+            "16000us"
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{atlas_grew, chrome_repaint_settled, decide_chrome_mode};
+    use super::{atlas_grew, chrome_repaint_settled, decide_chrome_mode, evaluate_chrome_gate};
     use egui::ImageData;
     use egui::epaint::{ImageDelta, Primitive};
     use egui::{Color32, ColorImage, Rect, TextureId, TextureOptions, TexturesDelta, pos2, vec2};
@@ -1052,11 +1402,118 @@ mod tests {
                 self.chrome_input_this_frame,
             )
         }
+
+        /// The four raw gate predicates -- used by the tests below to prove
+        /// `evaluate_chrome_gate` (the gate-blocker instrumentation's data
+        /// source) fails exactly the expected predicate(s), independent of
+        /// `decide_chrome_mode`'s Full/Replay collapse.
+        fn gate(&self) -> super::ChromeGatePredicates {
+            evaluate_chrome_gate(
+                self.cache_valid,
+                self.cache_size,
+                self.cache_ppp,
+                self.cur_size,
+                self.cur_ppp,
+                self.prev_repaint_delay,
+                self.prev_terminal_requested_delay,
+                self.prev_chrome_damage,
+                self.chrome_input_this_frame,
+            )
+        }
     }
 
     #[test]
     fn all_clear_decides_replay() {
         assert_eq!(Inputs::all_clear().decide(), crate::ChromeMode::Replay);
+    }
+
+    // ── `evaluate_chrome_gate` (gate-blocker instrumentation's data source) ──
+    // These mirror the `decide_chrome_mode` per-predicate tests below, but
+    // assert on the individual `ChromeGatePredicates` fields rather than the
+    // collapsed `ChromeMode`, proving the instrumentation can distinguish
+    // WHICH predicate(s) failed -- including more than one at once.
+
+    #[test]
+    fn gate_all_clear_passes_every_predicate() {
+        let gate = Inputs::all_clear().gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+        assert!(gate.all_pass());
+    }
+
+    #[test]
+    fn gate_invalid_cache_fails_only_cache_matches() {
+        let gate = Inputs {
+            cache_valid: false,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(!gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_not_settled_fails_only_repaint_settled() {
+        let gate = Inputs {
+            prev_repaint_delay: Duration::from_millis(16),
+            prev_terminal_requested_delay: Some(Duration::from_millis(500)),
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(!gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_chrome_damage_changed_fails_only_damage_unchanged() {
+        let gate = Inputs {
+            prev_chrome_damage: crate::ChromeDamage::Changed,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(!gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_chrome_input_fails_only_no_chrome_input() {
+        let gate = Inputs {
+            chrome_input_this_frame: true,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(!gate.no_chrome_input);
+    }
+
+    /// Proves overlap is visible: a frame that fails BOTH the cache-match
+    /// AND the chrome-input predicates simultaneously reports both as
+    /// failed, not just one -- this is exactly what lets the (feature-gated)
+    /// `run_frame` instrumentation increment more than one gate-blocker
+    /// counter on the same frame.
+    #[test]
+    fn gate_multiple_simultaneous_failures_are_all_visible() {
+        let gate = Inputs {
+            cache_valid: false,
+            chrome_input_this_frame: true,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(!gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(!gate.no_chrome_input);
+        assert!(!gate.all_pass());
     }
 
     #[test]

@@ -156,6 +156,57 @@ impl ChromeSignals {
     }
 }
 
+#[cfg(feature = "frame-profiling")]
+impl ChromeSignals {
+    /// Task 121 frame-profiling harness follow-up (gate-blocker
+    /// instrumentation): name/value pairs for all 15 §3.3 signal fields, in
+    /// declaration order, used solely by the (feature-gated) per-signal
+    /// frame-profiling counters in `app_impl.rs`.
+    ///
+    /// Destructures `self` with **no `..`** — if a future field is added to
+    /// `ChromeSignals`, this will fail to compile ("pattern does not
+    /// mention field `whatever`") until updated here, which is exactly the
+    /// exhaustiveness guarantee the harness needs: a silently-uncounted
+    /// 16th signal would make "which signal fired" investigations wrong
+    /// forever, and this makes that impossible to forget.
+    pub(crate) const fn named_fields(self) -> [(&'static str, bool); 15] {
+        let Self {
+            any_overlay_open,
+            style_changed,
+            active_pane_changed,
+            tab_set_changed,
+            tab_title_changed,
+            pane_layout_changed,
+            broadcast_state_changed,
+            shader_active,
+            bell_active,
+            toast_active,
+            size_changed,
+            ppp_changed,
+            focus_changed,
+            warming_up,
+            foreground_overlay_open,
+        } = self;
+        [
+            ("any_overlay_open", any_overlay_open),
+            ("style_changed", style_changed),
+            ("active_pane_changed", active_pane_changed),
+            ("tab_set_changed", tab_set_changed),
+            ("tab_title_changed", tab_title_changed),
+            ("pane_layout_changed", pane_layout_changed),
+            ("broadcast_state_changed", broadcast_state_changed),
+            ("shader_active", shader_active),
+            ("bell_active", bell_active),
+            ("toast_active", toast_active),
+            ("size_changed", size_changed),
+            ("ppp_changed", ppp_changed),
+            ("focus_changed", focus_changed),
+            ("warming_up", warming_up),
+            ("foreground_overlay_open", foreground_overlay_open),
+        ]
+    }
+}
+
 /// Presence of each dismissible chrome element, sampled once per frame.
 ///
 /// Field order/identity is stable frame-to-frame (it is a fixed struct, not
@@ -878,5 +929,88 @@ mod tests {
 
         // Known window, head rects not yet captured (None) -> conservative true.
         assert!(decide(Some((None, &[])), egui::pos2(50.0, 10.0)));
+    }
+}
+
+#[cfg(all(test, feature = "frame-profiling"))]
+mod named_fields_tests {
+    use super::ChromeSignals;
+
+    /// The 15 names `named_fields` must produce, in declaration order --
+    /// pinned so a reordering (harmless for correctness, since consumers
+    /// zip name with value pairwise) is at least a visible test diff.
+    const EXPECTED_NAMES: [&str; 15] = [
+        "any_overlay_open",
+        "style_changed",
+        "active_pane_changed",
+        "tab_set_changed",
+        "tab_title_changed",
+        "pane_layout_changed",
+        "broadcast_state_changed",
+        "shader_active",
+        "bell_active",
+        "toast_active",
+        "size_changed",
+        "ppp_changed",
+        "focus_changed",
+        "warming_up",
+        "foreground_overlay_open",
+    ];
+
+    #[test]
+    fn named_fields_all_false_on_default() {
+        let fields = ChromeSignals::default().named_fields();
+        for (name, fired) in fields {
+            assert!(!fired, "expected `{name}` false on Default::default()");
+        }
+    }
+
+    #[test]
+    fn named_fields_names_match_declaration_order() {
+        let fields = ChromeSignals::default().named_fields();
+        let names: Vec<&str> = fields.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, EXPECTED_NAMES);
+    }
+
+    /// Table test mirroring `each_signal_field_alone_forces_changed`: every
+    /// individual field, set alone, is reported `true` at exactly its own
+    /// position and `false` everywhere else.
+    #[test]
+    fn named_fields_reports_exactly_the_field_that_fired() {
+        type Setter = fn(&mut ChromeSignals);
+        let setters: [(&str, Setter); 15] = [
+            ("any_overlay_open", |s| s.any_overlay_open = true),
+            ("style_changed", |s| s.style_changed = true),
+            ("active_pane_changed", |s| s.active_pane_changed = true),
+            ("tab_set_changed", |s| s.tab_set_changed = true),
+            ("tab_title_changed", |s| s.tab_title_changed = true),
+            ("pane_layout_changed", |s| s.pane_layout_changed = true),
+            ("broadcast_state_changed", |s| {
+                s.broadcast_state_changed = true;
+            }),
+            ("shader_active", |s| s.shader_active = true),
+            ("bell_active", |s| s.bell_active = true),
+            ("toast_active", |s| s.toast_active = true),
+            ("size_changed", |s| s.size_changed = true),
+            ("ppp_changed", |s| s.ppp_changed = true),
+            ("focus_changed", |s| s.focus_changed = true),
+            ("warming_up", |s| s.warming_up = true),
+            ("foreground_overlay_open", |s| {
+                s.foreground_overlay_open = true;
+            }),
+        ];
+
+        for (name, set) in setters {
+            let mut signals = ChromeSignals::default();
+            set(&mut signals);
+            for (field_name, fired) in signals.named_fields() {
+                assert_eq!(
+                    fired,
+                    field_name == name,
+                    "with only `{name}` set, expected `{field_name}` fired == {}",
+                    field_name == name
+                );
+            }
+        }
     }
 }

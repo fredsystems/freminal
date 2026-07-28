@@ -537,6 +537,15 @@ pub(super) struct FrameStats {
     /// this session (a mean hides the tail).
     #[cfg(feature = "frame-profiling")]
     pub(super) phase_app_update_max: std::time::Duration,
+    /// Task 121 frame-profiling harness follow-up (issue #459/#461
+    /// gate-blocker investigation): cumulative per-frame fired count for
+    /// each of the 15 `chrome_damage::ChromeSignals` §3.3 fields, indexed
+    /// the SAME as `ChromeSignals::named_fields()`'s array order (see that
+    /// method's doc for the exhaustiveness guarantee this indexing relies
+    /// on). Incremented in `app_impl.rs` right after
+    /// `win.pending_chrome_signals` is finalised for the frame.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) chrome_signal_fired_counts: [u64; 15],
 }
 
 impl FrameStats {
@@ -581,6 +590,29 @@ impl FrameStats {
         }
         let count_f: f64 = conv2::ConvUtil::approx_as(count).unwrap_or(1.0);
         total.div_f64(count_f.max(1.0))
+    }
+
+    /// Format the non-zero entries of `chrome_signal_fired_counts` as a
+    /// single `name=count` comma-joined string for one `tracing` field,
+    /// rather than 15 separate structured fields (which would make the
+    /// already-busy frame-profiling line unreadable on the vast majority of
+    /// frames where only 1-2 signals ever fire). `names` and `counts` are
+    /// parallel arrays, indexed identically to
+    /// `chrome_damage::ChromeSignals::named_fields()`'s order. Returns the
+    /// literal string `"none"` when every count is zero. Pure, so directly
+    /// unit-testable.
+    pub(super) fn format_nonzero_signal_counts(names: &[&str; 15], counts: &[u64; 15]) -> String {
+        let parts: Vec<String> = names
+            .iter()
+            .zip(counts.iter())
+            .filter(|(_, count)| **count > 0)
+            .map(|(name, count)| format!("{name}={count}"))
+            .collect();
+        if parts.is_empty() {
+            "none".to_string()
+        } else {
+            parts.join(",")
+        }
     }
 }
 
@@ -629,6 +661,60 @@ mod frame_profiling_tests {
     fn mean_duration_handles_a_single_sample() {
         let mean = FrameStats::mean_duration(Duration::from_micros(250), 1);
         assert_eq!(mean, Duration::from_micros(250));
+    }
+
+    // ── `FrameStats::format_nonzero_signal_counts` ───────────────────────
+
+    /// A representative 15-name array; the actual names don't matter to
+    /// this pure formatting helper, only that names/counts are parallel.
+    const NAMES: [&str; 15] = [
+        "any_overlay_open",
+        "style_changed",
+        "active_pane_changed",
+        "tab_set_changed",
+        "tab_title_changed",
+        "pane_layout_changed",
+        "broadcast_state_changed",
+        "shader_active",
+        "bell_active",
+        "toast_active",
+        "size_changed",
+        "ppp_changed",
+        "focus_changed",
+        "warming_up",
+        "foreground_overlay_open",
+    ];
+
+    #[test]
+    fn format_nonzero_signal_counts_all_zero_is_none() {
+        let counts = [0u64; 15];
+        assert_eq!(
+            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            "none"
+        );
+    }
+
+    #[test]
+    fn format_nonzero_signal_counts_shows_only_the_nonzero_entries() {
+        let mut counts = [0u64; 15];
+        counts[1] = 3; // style_changed
+        counts[13] = 120; // warming_up
+        assert_eq!(
+            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            "style_changed=3,warming_up=120"
+        );
+    }
+
+    #[test]
+    fn format_nonzero_signal_counts_preserves_declaration_order() {
+        let mut counts = [0u64; 15];
+        counts[14] = 1; // foreground_overlay_open
+        counts[0] = 1; // any_overlay_open
+        assert_eq!(
+            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            "any_overlay_open=1,foreground_overlay_open=1",
+            "order must follow the array's index order, not insertion order"
+        );
     }
 }
 

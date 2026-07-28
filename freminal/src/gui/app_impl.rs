@@ -2894,6 +2894,26 @@ impl freminal_windowing::App for FreminalGui {
                 foreground_overlay_open,
             };
 
+            // Task 121 frame-profiling harness follow-up (issue #459/#461
+            // gate-blocker investigation): count which individual §3.3
+            // signal(s) fired this frame, indexed identically to
+            // `ChromeSignals::named_fields()`'s exhaustive destructure (see
+            // that method's doc for why a future 16th field cannot be
+            // silently missed here). More than one signal can fire the same
+            // frame; every one that did gets counted, not just the first.
+            #[cfg(feature = "frame-profiling")]
+            for (i, (_, fired)) in win
+                .pending_chrome_signals
+                .named_fields()
+                .into_iter()
+                .enumerate()
+            {
+                if fired {
+                    win.frame_stats.chrome_signal_fired_counts[i] =
+                        win.frame_stats.chrome_signal_fired_counts[i].saturating_add(1);
+                }
+            }
+
             // ── Window-level post-processing pass ────────────────────
             //
             // When a user GLSL shader is active, the window FBO now contains
@@ -3552,13 +3572,30 @@ impl freminal_windowing::App for FreminalGui {
                         stats.frames_drawn
                     )
                     .as_micros(),
+                    // Gate-blocker investigation (issue #459/#461 follow-up):
+                    // which individual §3.3 `ChromeSignals` field(s) fired,
+                    // cumulative since window creation, name=count joined --
+                    // only the non-zero entries (see
+                    // `format_nonzero_signal_counts`'s doc for why: 15
+                    // separate structured fields would be unreadable on the
+                    // common case where only 1-2 signals ever fire, e.g. an
+                    // idle blinking cursor should show "none" here every
+                    // flush once past warm-up).
+                    chrome_signals_fired = %super::window::FrameStats::format_nonzero_signal_counts(
+                        &chrome_damage::ChromeSignals::default()
+                            .named_fields()
+                            .map(|(name, _)| name),
+                        &stats.chrome_signal_fired_counts
+                    ),
                     "app-side frame-profiling stats (task 121 harness): chrome-mode \
-                     duty cycle, zero-pixel-change-but-presented frames, and the \
+                     duty cycle, zero-pixel-change-but-presented frames, the \
                      freminal-owned phase_app_update/phase_orchestration/phase_panes \
                      wall-clock split (phase_app_update = the whole productive body of \
                      update(); phase_orchestration = central_body total minus the \
-                     per-pane show() contribution) over frames_drawn drawn frames for \
-                     this window_id"
+                     per-pane show() contribution), and which individual §3.3 \
+                     ChromeSignals field(s) fired (chrome_signals_fired, cumulative, \
+                     non-zero entries only) over frames_drawn drawn frames for this \
+                     window_id"
                 );
             }
         }
