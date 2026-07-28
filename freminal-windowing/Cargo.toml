@@ -23,6 +23,16 @@ thiserror.workspace = true
 tracing.workspace = true
 winit.workspace = true
 
+[features]
+default = []
+# Frame-profiling instrumentation (Task 121): adds `Instant`-based phase
+# timers and counters to `EguiState::run_frame` (chrome-mode duty cycle,
+# per-phase wall-clock breakdown for run_ui/tessellate/paint/swap), flushed
+# as its own `tracing::debug!` line every `FrameProfile::FLUSH_EVERY` drawn
+# frames per window. NOT enabled by default -- see the identical rationale
+# on the `freminal` crate's `frame-profiling` feature, which enables this one.
+frame-profiling = []
+
 [[example]]
 name = "hello"
 path = "examples/hello.rs"

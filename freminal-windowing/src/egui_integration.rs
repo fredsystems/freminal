@@ -77,6 +77,155 @@ pub struct EguiState {
     /// Consulted, via [`chrome_repaint_settled`], alongside
     /// `prev_repaint_delay` to decide this frame's [`crate::ChromeMode`].
     prev_terminal_requested_delay: Option<std::time::Duration>,
+    /// Task 121 frame-profiling harness (feature-gated): per-window
+    /// accumulated phase timings and `ChromeMode` counters, flushed as a
+    /// `tracing::debug!` line every [`FrameProfile::FLUSH_EVERY`] frames.
+    /// See the module-level rationale on [`FrameProfile`] itself.
+    #[cfg(feature = "frame-profiling")]
+    frame_profile: FrameProfile,
+}
+
+/// Task 121 frame-profiling harness (feature-gated only -- see the
+/// `frame-profiling` Cargo feature on this crate and on `freminal`, which
+/// enables it here).
+///
+/// Accumulates, per window, wall-clock phase timings for the windowing
+/// layer's own share of `run_frame` (deciding `chrome_mode`, running
+/// `ctx.run_ui`, tessellating, painting, swapping buffers, and the whole
+/// frame as `phase_total`) plus a count of how often each `ChromeMode` was
+/// actually chosen this session. Flushed as its own `tracing::debug!` line
+/// (target `freminal_windowing::frame_profiling`) every
+/// [`Self::FLUSH_EVERY`] frames, tagged with this window's `window_id` (see
+/// the flush call site) so a multi-window session's interleaved log lines
+/// can be told apart, and correlated with `freminal`'s own frame-profiling
+/// line for the SAME `window_id`.
+///
+/// **The two crates' counters do NOT always march in lockstep** (an earlier
+/// version of this doc claimed they did -- that was false). `frame_counter`
+/// here increments once per `run_frame` call, unconditionally. `freminal`'s
+/// own `frames_drawn` increments once per `App::update` call, but
+/// `App::update` has THREE early-return paths that record nothing and skip
+/// that increment: the settings-window dispatch branch (the settings window
+/// has a windowing-side [`EguiState`]/`FrameProfile` but no app-side
+/// `PerWindowState`, so it can never have a `frames_drawn` counter at all),
+/// the dead-window/no-`PerWindowState` cleanup branch, and the
+/// no-active-pane branch. Every one of those still runs inside a
+/// `run_frame` call, so `frame_counter` increments regardless. Once any of
+/// these paths fires for a window, `frame_counter` and `frames_drawn` for
+/// that `window_id` permanently drift apart -- there is no resync -- and a
+/// drift observed between the two for the same `window_id` means later
+/// cross-crate phase comparisons for that window (e.g. the `phase_total -
+/// (run_ui + tessellate + paint + swap)` residual against `freminal`'s
+/// `phase_app_update`) are unreliable, since the two `FLUSH_EVERY`-frame
+/// windows no longer cover the same set of frames.
+///
+/// All sums/counters are cumulative since window creation (never reset),
+/// matching the existing `freminal::gui::window::FrameStats` idiom this
+/// harness was modeled on -- `frame_counter` doubles as "the frame count
+/// this flush's sums/maxima cover" for a running mean.
+#[cfg(feature = "frame-profiling")]
+#[derive(Debug, Default)]
+struct FrameProfile {
+    /// Frames rendered for this window since creation. One `run_frame` call
+    /// == one drawn frame.
+    frame_counter: u64,
+    /// Frames where [`decide_chrome_mode`] chose [`crate::ChromeMode::Full`].
+    chrome_mode_full: u64,
+    /// Frames where [`decide_chrome_mode`] chose [`crate::ChromeMode::Replay`].
+    /// Cross-checkable against `freminal`'s own `chrome_mode_replay` counter
+    /// (sourced from the SAME `chrome_mode` value, passed into `App::update`)
+    /// -- if the two crates' counts ever disagree, that disagreement is
+    /// itself a finding (a `chrome_mode` mismatch between what `run_frame`
+    /// decided and what the app observed).
+    chrome_mode_replay: u64,
+    /// Cumulative time inside `self.ctx.run_ui(...)` (which itself calls
+    /// into `App::update`, so this is an upper bound on freminal's own
+    /// `update()` cost as measured from the windowing side).
+    run_ui_total: std::time::Duration,
+    /// Largest single-frame `run_ui` duration observed.
+    run_ui_max: std::time::Duration,
+    /// Cumulative wall-clock time across the WHOLE of `run_frame` (Task 121
+    /// defect-4 fix): from entry to just before this struct's own flush
+    /// check.
+    ///
+    /// `phase_total` minus the sum of `run_ui_total`, `tessellate_total`,
+    /// `paint_total`, and `swap_total` (for the same window over the same
+    /// frame window) is the unmeasured residual -- do NOT instrument each
+    /// gap individually; the point of this field is to make that residual
+    /// computable (and therefore visible) rather than silently absorbed
+    /// into "everything else". The main contributors to that residual, all
+    /// in this file and none separately measured:
+    ///
+    /// - `handle_platform_output` (feeding egui's output back to `egui-winit`)
+    /// - the band-shape slice-to-owned-`Vec` clone (a full allocation + copy
+    ///   every frame)
+    /// - `atlas_grew`'s texture-delta scan
+    /// - `gl_state.clear(clear_color)` (the actual GPU framebuffer clear)
+    /// - the texture set/free loops (texture upload/free housekeeping
+    ///   around the paint calls)
+    phase_total_total: std::time::Duration,
+    /// Largest single-frame `phase_total` duration observed.
+    phase_total_max: std::time::Duration,
+    /// Cumulative tessellation time: the band tessellation (always run) plus
+    /// head/tail tessellation (FULL frames, and REPLAY frames that hit the
+    /// atlas-grew self-heal path), summed as ONE total rather than split
+    /// band-vs-head/tail -- see the call site comment for why.
+    tessellate_total: std::time::Duration,
+    /// Largest single-frame tessellation duration observed.
+    tessellate_max: std::time::Duration,
+    /// Cumulative time across the three `paint_primitives` calls
+    /// (head, band, tail), summed.
+    paint_total: std::time::Duration,
+    /// Largest single-frame paint duration observed.
+    paint_max: std::time::Duration,
+    /// Cumulative time in `swap_buffers`/`swap_buffers_with_damage`.
+    swap_total: std::time::Duration,
+    /// Largest single-frame swap duration observed.
+    swap_max: std::time::Duration,
+}
+
+#[cfg(feature = "frame-profiling")]
+impl FrameProfile {
+    /// Emit a `debug` summary once every this many drawn frames -- same
+    /// cadence as `freminal::gui::window::FrameStats::FLUSH_EVERY` so the
+    /// two crates' log lines are easy to correlate by eye.
+    const FLUSH_EVERY: u64 = 120;
+
+    /// Percentage of `(chrome_mode_full + chrome_mode_replay)` frames that
+    /// were `Replay`. Pure so it's unit-testable in isolation. `0.0` when no
+    /// frames have been counted yet (rather than dividing by zero).
+    ///
+    /// Deliberately duplicated in `freminal::gui::window::FrameStats` rather
+    /// than shared (reviewed and accepted) -- keep the two in sync by eye if
+    /// either changes.
+    fn chrome_replay_duty_cycle_pct(full: u64, replay: u64) -> f64 {
+        let total = full.saturating_add(replay);
+        if total == 0 {
+            return 0.0;
+        }
+        // `u64 -> f64` is lossy for very large counts (beyond 2^53), but a
+        // live session's frame counters never approach that range;
+        // `approx_as` is the established lossy-conversion idiom in this
+        // file (see `scale_factor().approx_as::<f32>()` in `new()` above).
+        let replay_f: f64 = conv2::ConvUtil::approx_as(replay).unwrap_or(0.0);
+        let total_f: f64 = conv2::ConvUtil::approx_as(total).unwrap_or(1.0);
+        (replay_f / total_f) * 100.0
+    }
+
+    /// Mean of a cumulative `Duration` sum over `count` samples, as a
+    /// `Duration`. Returns `Duration::ZERO` for `count == 0` rather than
+    /// dividing by zero. Pure so it's unit-testable in isolation.
+    ///
+    /// Deliberately duplicated in `freminal::gui::window::FrameStats` rather
+    /// than shared (reviewed and accepted) -- keep the two in sync by eye if
+    /// either changes.
+    fn mean_duration(total: std::time::Duration, count: u64) -> std::time::Duration {
+        if count == 0 {
+            return std::time::Duration::ZERO;
+        }
+        let count_f: f64 = conv2::ConvUtil::approx_as(count).unwrap_or(1.0);
+        total.div_f64(count_f.max(1.0))
+    }
 }
 
 /// #436 §3.1 (amended): a REPLAY is permitted only if nothing OTHER than
@@ -203,6 +352,8 @@ impl EguiState {
             prev_repaint_delay: std::time::Duration::MAX,
             prev_chrome_damage: crate::ChromeDamage::Changed,
             prev_terminal_requested_delay: None,
+            #[cfg(feature = "frame-profiling")]
+            frame_profile: FrameProfile::default(),
         })
     }
 
@@ -248,6 +399,15 @@ impl EguiState {
         F: FnMut(&egui::Context, &glow::Context, crate::ChromeMode) -> crate::FrameSignals,
     {
         let mut ui_fn = ui_fn;
+
+        // Task 121 frame-profiling harness (defect-4 fix): wall-clock start
+        // of the WHOLE frame, captured before anything else in `run_frame`
+        // runs. Its `.elapsed()` (taken just before this window's flush
+        // check, near the end of this function) is `phase_total` -- see the
+        // `FrameProfile::phase_total_total` doc for what its residual
+        // against `run_ui + tessellate + paint + swap` exposes.
+        #[cfg(feature = "frame-profiling")]
+        let total_start = std::time::Instant::now();
 
         // ── #436.4b: decide this frame's `ChromeMode` BEFORE `run_ui` ──────
         //
@@ -298,6 +458,24 @@ impl EguiState {
             chrome_input_this_frame,
         );
 
+        // Task 121 frame-profiling harness: count which `ChromeMode` was
+        // just decided. Cross-checkable against `freminal`'s own
+        // `chrome_mode_full`/`chrome_mode_replay` counters, which are
+        // sourced from this exact same `chrome_mode` value (passed into
+        // `App::update` inside `ui_fn` below) -- if the two ever disagree,
+        // that disagreement is itself a finding.
+        #[cfg(feature = "frame-profiling")]
+        match chrome_mode {
+            crate::ChromeMode::Full => {
+                self.frame_profile.chrome_mode_full =
+                    self.frame_profile.chrome_mode_full.saturating_add(1);
+            }
+            crate::ChromeMode::Replay => {
+                self.frame_profile.chrome_mode_replay =
+                    self.frame_profile.chrome_mode_replay.saturating_add(1);
+            }
+        }
+
         // egui 0.35 replaced `Context::run` (closure took `&Context`) with
         // `Context::run_ui` (closure takes the root `&mut Ui`).  Our `App`
         // trait still works in terms of `&Context`; `Ui` derefs to `Context`,
@@ -314,6 +492,12 @@ impl EguiState {
         let mut band_range: std::ops::Range<usize> = 0..0;
         let mut chrome_damage = crate::ChromeDamage::Changed;
         let mut terminal_requested_delay: Option<std::time::Duration> = None;
+        // Task 121 frame-profiling harness: `run_ui` itself calls into
+        // `ui_fn` (and therefore `App::update`), so this timing is an upper
+        // bound on freminal's own per-frame `update()` cost as observed from
+        // the windowing side.
+        #[cfg(feature = "frame-profiling")]
+        let run_ui_start = std::time::Instant::now();
         let full_output = self.ctx.run_ui(raw_input, |root_ui| {
             let signals = ui_fn(&*root_ui, &gl_state.glow_context, chrome_mode);
             frame_damage = signals.frame_damage;
@@ -321,6 +505,12 @@ impl EguiState {
             chrome_damage = signals.chrome_damage;
             terminal_requested_delay = signals.terminal_requested_delay;
         });
+        #[cfg(feature = "frame-profiling")]
+        {
+            let d = run_ui_start.elapsed();
+            self.frame_profile.run_ui_total += d;
+            self.frame_profile.run_ui_max = self.frame_profile.run_ui_max.max(d);
+        }
 
         self.winit_state
             .handle_platform_output(window, full_output.platform_output);
@@ -362,6 +552,21 @@ impl EguiState {
         let start = band_range.start.min(shapes.len());
         let end = band_range.end.clamp(start, shapes.len());
         let band_shapes: Vec<egui::epaint::ClippedShape> = shapes[start..end].to_vec();
+
+        // Task 121 frame-profiling harness: time the ENTIRE tessellation
+        // phase as one span (band tessellation below, plus whatever
+        // head/tail tessellation the `match chrome_mode` block further down
+        // performs) rather than splitting band vs. head/tail into separate
+        // counters. The two are not cleanly separable into independent
+        // costs worth reporting apart: the band tessellate always runs, but
+        // head/tail tessellation is conditional (FULL frames, and REPLAY
+        // frames that hit the atlas-grew self-heal path skip it entirely
+        // otherwise), so a fixed split would mean "band" sometimes includes
+        // the whole phase and sometimes a third of it depending on
+        // `chrome_mode` -- one total, sampled per-frame, is the more
+        // meaningful number to threshold/alert on.
+        #[cfg(feature = "frame-profiling")]
+        let tessellate_start = std::time::Instant::now();
 
         // The band is ALWAYS fresh — tessellated from this frame's own
         // shapes regardless of `chrome_mode` — since the terminal band is
@@ -459,6 +664,12 @@ impl EguiState {
                 )
             }
         };
+        #[cfg(feature = "frame-profiling")]
+        {
+            let d = tessellate_start.elapsed();
+            self.frame_profile.tessellate_total += d;
+            self.frame_profile.tessellate_max = self.frame_profile.tessellate_max.max(d);
+        }
 
         // Decide whether this frame may skip the full clear and present only
         // its damaged region. This is a two-part gate:
@@ -508,12 +719,23 @@ impl EguiState {
         for (id, image_delta) in &full_output.textures_delta.set {
             self.painter.set_texture(*id, image_delta);
         }
+        // Task 121 frame-profiling harness: time the three `paint_primitives`
+        // calls, summed (a contiguous span across all three, since nothing
+        // else runs between them, is equal to summing each individually).
+        #[cfg(feature = "frame-profiling")]
+        let paint_start = std::time::Instant::now();
         self.painter
             .paint_primitives(size_px, pixels_per_point, &head_primitives);
         self.painter
             .paint_primitives(size_px, pixels_per_point, &band_primitives);
         self.painter
             .paint_primitives(size_px, pixels_per_point, &tail_primitives);
+        #[cfg(feature = "frame-profiling")]
+        {
+            let d = paint_start.elapsed();
+            self.frame_profile.paint_total += d;
+            self.frame_profile.paint_max = self.frame_profile.paint_max.max(d);
+        }
         for id in &full_output.textures_delta.free {
             self.painter.free_texture(*id);
         }
@@ -521,10 +743,18 @@ impl EguiState {
         // Pre-present notify for Wayland frame pacing
         window.pre_present_notify();
 
+        #[cfg(feature = "frame-profiling")]
+        let swap_start = std::time::Instant::now();
         let swap_result = partial.as_ref().map_or_else(
             || gl_state.swap_buffers(),
             |rects| gl_state.swap_buffers_with_damage(rects),
         );
+        #[cfg(feature = "frame-profiling")]
+        {
+            let d = swap_start.elapsed();
+            self.frame_profile.swap_total += d;
+            self.frame_profile.swap_max = self.frame_profile.swap_max.max(d);
+        }
         if let Err(e) = swap_result {
             tracing::error!("swap_buffers failed: {e}");
         }
@@ -547,6 +777,80 @@ impl EguiState {
         self.prev_repaint_delay = repaint_delay;
         self.prev_chrome_damage = chrome_damage;
         self.prev_terminal_requested_delay = terminal_requested_delay;
+
+        // Task 121 frame-profiling harness: flush this window's own
+        // `tracing::debug!` line every `FrameProfile::FLUSH_EVERY` frames,
+        // tagged with `window_id` (defect-3 fix) so a multi-window session's
+        // interleaved lines can be told apart and matched against
+        // `freminal`'s own per-window line for the same `window_id`. See the
+        // `FrameProfile` doc for why `frame_counter` and `freminal`'s
+        // `frames_drawn` are NOT guaranteed to stay in lockstep for a given
+        // window (they can drift on `App::update`'s early-return paths).
+        #[cfg(feature = "frame-profiling")]
+        {
+            // Defect 4: `phase_total` covers the WHOLE of `run_frame`,
+            // taken as late as possible (just before this flush check) so it
+            // includes every gap named on `FrameProfile::phase_total_total`'s
+            // doc: `handle_platform_output`, the band-shape clone,
+            // `atlas_grew`, the GL clear, and the texture set/free loops.
+            let phase_total_this_frame = total_start.elapsed();
+            self.frame_profile.phase_total_total += phase_total_this_frame;
+            self.frame_profile.phase_total_max = self
+                .frame_profile
+                .phase_total_max
+                .max(phase_total_this_frame);
+
+            self.frame_profile.frame_counter = self.frame_profile.frame_counter.saturating_add(1);
+            if self
+                .frame_profile
+                .frame_counter
+                .is_multiple_of(FrameProfile::FLUSH_EVERY)
+            {
+                let p = &self.frame_profile;
+                // Defect 3: `window_id`, `{:?}` -- the same representation
+                // `freminal`'s own `frame_profiling` line uses for its
+                // `window_id` field, so the two crates' lines for the same
+                // OS window can be matched by eye or by log tooling.
+                tracing::debug!(
+                    target: "freminal_windowing::frame_profiling",
+                    window_id = ?crate::WindowId(window.id()),
+                    frame_counter = p.frame_counter,
+                    chrome_mode_full = p.chrome_mode_full,
+                    chrome_mode_replay = p.chrome_mode_replay,
+                    chrome_replay_duty_cycle_pct = FrameProfile::chrome_replay_duty_cycle_pct(
+                        p.chrome_mode_full,
+                        p.chrome_mode_replay
+                    ),
+                    phase_total_total_us = p.phase_total_total.as_micros(),
+                    phase_total_max_us = p.phase_total_max.as_micros(),
+                    phase_total_mean_us =
+                        FrameProfile::mean_duration(p.phase_total_total, p.frame_counter)
+                            .as_micros(),
+                    run_ui_total_us = p.run_ui_total.as_micros(),
+                    run_ui_max_us = p.run_ui_max.as_micros(),
+                    run_ui_mean_us =
+                        FrameProfile::mean_duration(p.run_ui_total, p.frame_counter).as_micros(),
+                    tessellate_total_us = p.tessellate_total.as_micros(),
+                    tessellate_max_us = p.tessellate_max.as_micros(),
+                    tessellate_mean_us =
+                        FrameProfile::mean_duration(p.tessellate_total, p.frame_counter)
+                            .as_micros(),
+                    paint_total_us = p.paint_total.as_micros(),
+                    paint_max_us = p.paint_max.as_micros(),
+                    paint_mean_us =
+                        FrameProfile::mean_duration(p.paint_total, p.frame_counter).as_micros(),
+                    swap_total_us = p.swap_total.as_micros(),
+                    swap_max_us = p.swap_max.as_micros(),
+                    swap_mean_us =
+                        FrameProfile::mean_duration(p.swap_total, p.frame_counter).as_micros(),
+                    "windowing frame-profiling stats (task 121 harness): ChromeMode \
+                     duty cycle and the windowing-owned phase_total/run_ui/tessellate/\
+                     paint/swap wall-clock split over frame_counter drawn frames for \
+                     this window_id; phase_total minus (run_ui + tessellate + paint + \
+                     swap) is the unmeasured residual -- see FrameProfile::phase_total_total"
+                );
+            }
+        }
 
         FrameOutput {
             commands,
@@ -590,6 +894,54 @@ impl EguiState {
     /// by an internal `destroyed` flag), so calling it more than once is safe.
     pub(crate) fn destroy_painter(&mut self) {
         self.painter.destroy();
+    }
+}
+
+#[cfg(all(test, feature = "frame-profiling"))]
+mod frame_profiling_tests {
+    use super::FrameProfile;
+    use std::time::Duration;
+
+    #[test]
+    fn duty_cycle_is_zero_with_no_frames() {
+        assert!((FrameProfile::chrome_replay_duty_cycle_pct(0, 0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duty_cycle_is_zero_when_replay_never_engages() {
+        assert!((FrameProfile::chrome_replay_duty_cycle_pct(120, 0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duty_cycle_is_100_when_always_replay() {
+        let pct = FrameProfile::chrome_replay_duty_cycle_pct(0, 120);
+        assert!((pct - 100.0).abs() < 0.001, "pct was {pct}");
+    }
+
+    #[test]
+    fn duty_cycle_is_25_for_3_full_1_replay() {
+        let pct = FrameProfile::chrome_replay_duty_cycle_pct(90, 30);
+        assert!((pct - 25.0).abs() < 0.001, "pct was {pct}");
+    }
+
+    #[test]
+    fn mean_duration_is_zero_with_no_samples() {
+        assert_eq!(
+            FrameProfile::mean_duration(Duration::from_millis(500), 0),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn mean_duration_divides_evenly() {
+        let mean = FrameProfile::mean_duration(Duration::from_micros(2400), 120);
+        assert_eq!(mean, Duration::from_micros(20));
+    }
+
+    #[test]
+    fn mean_duration_handles_a_single_sample() {
+        let mean = FrameProfile::mean_duration(Duration::from_micros(42), 1);
+        assert_eq!(mean, Duration::from_micros(42));
     }
 }
 

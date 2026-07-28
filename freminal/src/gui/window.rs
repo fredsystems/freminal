@@ -457,11 +457,179 @@ pub(super) struct FrameStats {
     pub(super) cursor_only: u64,
     pub(super) full: u64,
     pub(super) blink_wake_suppressed: u64,
+
+    // ── Task 121 frame-profiling harness (feature-gated) ──────────────────
+    //
+    // Every field below is `#[cfg(feature = "frame-profiling")]`: a default
+    // build must not carry so much as an extra counter increment in the
+    // frame path, since timing calls there would perturb the very thing
+    // being measured. See `agents.md` / the `freminal-bench-table` skill.
+    /// Frames where `App::update` received `ChromeMode::Full`.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) chrome_mode_full: u64,
+    /// Frames where `App::update` received `ChromeMode::Replay`. Answers
+    /// "does Replay ever actually engage in a live session, and at what
+    /// duty cycle" — no counter for this existed anywhere before Task 121.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) chrome_mode_replay: u64,
+    /// Frames where every rendered pane reported `PaneFrameDamage::Unchanged`
+    /// (and no bell/toast/force-full override applied) yet the frame was
+    /// still presented. `decide_frame_damage` has no representation for "no
+    /// pane changed anything" distinct from "some pane needs a full
+    /// rebuild" -- both fall through to `FrameDamage::Full` when the damage
+    /// rect list ends up empty -- so this counts how often that happens.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) zero_change_presented: u64,
+    /// Frames whose final `win.pending_frame_damage` was `FrameDamage::Full`.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) frame_damage_full: u64,
+    /// Frames whose final `win.pending_frame_damage` was
+    /// `FrameDamage::Partial(_)`.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) frame_damage_partial: u64,
+    /// Cumulative wall-clock time spent in `central_body`'s own bookkeeping
+    /// this session -- everything in the closure EXCEPT the per-pane
+    /// `terminal_widget.show()` calls themselves (window-manipulation
+    /// drain, OSC 9/52/99 routing, border drag-sensor rebuild, the
+    /// resize-debounce/scroll-sync bookkeeping interleaved in the per-pane
+    /// loop, and the post-loop focus-follows-mouse hit-testing / title /
+    /// repaint-scheduling tail). Computed as `central_body`'s total elapsed
+    /// time minus `phase_panes_total`'s contribution for that same frame,
+    /// rather than instrumenting every individual sub-block, since the
+    /// bookkeeping is interleaved with (not cleanly separable from) the
+    /// per-pane loop -- see the comment at the `central_body` call site.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_orchestration_total: std::time::Duration,
+    /// The single largest per-frame `phase_orchestration` contribution observed
+    /// this session (a mean hides the tail).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_orchestration_max: std::time::Duration,
+    /// Cumulative wall-clock time spent inside the per-pane
+    /// `terminal_widget.show()` calls this session (summed across every
+    /// pane rendered every frame).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_panes_total: std::time::Duration,
+    /// The single largest per-frame `phase_panes` contribution (summed
+    /// across that frame's panes) observed this session.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_panes_max: std::time::Duration,
+    /// Cumulative wall-clock time spent inside the whole productive body of
+    /// `App::update` this session (Task 121 defect-1 fix): captured from an
+    /// `update_start = Instant::now()` at the very top of `update`, through
+    /// `.elapsed()` taken after `compose_with_chrome_damage` -- i.e. AFTER
+    /// `central_body` returns, so it also covers the menu/tab bar
+    /// construction, dead-pane cleanup / snapshot bootstrap /
+    /// `poll_session_autosave` / settings-window dispatch, the toast stack's
+    /// `.show()`, and the chrome-damage "after" sample + decision +
+    /// composition -- all of which used to be misattributed to "egui
+    /// overhead" because the old `central_body_start` timer only started
+    /// once the `central_body` closure was invoked.
+    ///
+    /// With this field, the analyst can compute freminal's own total cost as
+    /// `phase_app_update`; freminal's chrome-construction cost as
+    /// `phase_app_update` minus `phase_orchestration` minus `phase_panes`;
+    /// and egui's own overhead as the windowing crate's own `run_ui_total`
+    /// minus this field, plus its `tessellate_total` and `paint_total`
+    /// (since `run_ui` wraps the `App::update` call this field measures).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_app_update_total: std::time::Duration,
+    /// The single largest per-frame `phase_app_update` contribution observed
+    /// this session (a mean hides the tail).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) phase_app_update_max: std::time::Duration,
 }
 
 impl FrameStats {
     /// Emit a `debug` summary once every this many drawn frames.
     pub(super) const FLUSH_EVERY: u64 = 120;
+}
+
+#[cfg(feature = "frame-profiling")]
+impl FrameStats {
+    /// Percentage of `(chrome_mode_full + chrome_mode_replay)` frames that
+    /// were `Replay`. Pure so it's unit-testable without constructing a
+    /// window or an egui frame. `0.0` when no frames have been counted yet
+    /// (rather than dividing by zero).
+    ///
+    /// Deliberately duplicated in `freminal_windowing::egui_integration::FrameProfile`
+    /// rather than shared (reviewed and accepted) -- keep the two in sync by
+    /// eye if either changes.
+    pub(super) fn chrome_replay_duty_cycle_pct(full: u64, replay: u64) -> f64 {
+        let total = full.saturating_add(replay);
+        if total == 0 {
+            return 0.0;
+        }
+        // `u64 -> f64` is lossy for very large counts (beyond 2^53), but a
+        // live session's frame counters never approach that range; `approx_as`
+        // is the established lossy-conversion idiom in this codebase (see
+        // e.g. `egui_integration.rs`'s `scale_factor().approx_as::<f32>()`).
+        let replay_f: f64 = conv2::ConvUtil::approx_as(replay).unwrap_or(0.0);
+        let total_f: f64 = conv2::ConvUtil::approx_as(total).unwrap_or(1.0);
+        (replay_f / total_f) * 100.0
+    }
+
+    /// Mean of a cumulative `Duration` sum over `count` samples, as a
+    /// `Duration`. Returns `Duration::ZERO` for `count == 0` rather than
+    /// dividing by zero. Pure so it's unit-testable in isolation.
+    ///
+    /// Deliberately duplicated in `freminal_windowing::egui_integration::FrameProfile`
+    /// rather than shared (reviewed and accepted) -- keep the two in sync by
+    /// eye if either changes.
+    pub(super) fn mean_duration(total: std::time::Duration, count: u64) -> std::time::Duration {
+        if count == 0 {
+            return std::time::Duration::ZERO;
+        }
+        let count_f: f64 = conv2::ConvUtil::approx_as(count).unwrap_or(1.0);
+        total.div_f64(count_f.max(1.0))
+    }
+}
+
+#[cfg(all(test, feature = "frame-profiling"))]
+mod frame_profiling_tests {
+    use super::FrameStats;
+    use std::time::Duration;
+
+    #[test]
+    fn duty_cycle_is_zero_with_no_frames() {
+        assert!((FrameStats::chrome_replay_duty_cycle_pct(0, 0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duty_cycle_is_zero_when_replay_never_engages() {
+        assert!((FrameStats::chrome_replay_duty_cycle_pct(120, 0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn duty_cycle_is_100_when_always_replay() {
+        let pct = FrameStats::chrome_replay_duty_cycle_pct(0, 120);
+        assert!((pct - 100.0).abs() < 0.001, "pct was {pct}");
+    }
+
+    #[test]
+    fn duty_cycle_is_75_for_1_full_3_replay() {
+        let pct = FrameStats::chrome_replay_duty_cycle_pct(30, 90);
+        assert!((pct - 75.0).abs() < 0.001, "pct was {pct}");
+    }
+
+    #[test]
+    fn mean_duration_is_zero_with_no_samples() {
+        assert_eq!(
+            FrameStats::mean_duration(Duration::from_millis(500), 0),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn mean_duration_divides_evenly() {
+        let mean = FrameStats::mean_duration(Duration::from_millis(1200), 120);
+        assert_eq!(mean, Duration::from_millis(10));
+    }
+
+    #[test]
+    fn mean_duration_handles_a_single_sample() {
+        let mean = FrameStats::mean_duration(Duration::from_micros(250), 1);
+        assert_eq!(mean, Duration::from_micros(250));
+    }
 }
 
 #[cfg(test)]

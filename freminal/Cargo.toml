@@ -185,3 +185,13 @@ sysinfo.workspace = true
 [features]
 default = []
 validation = []
+# Frame-profiling instrumentation (Task 121): adds `Instant`-based phase
+# timers and counters to the render path (chrome-mode duty cycle, per-phase
+# wall-clock breakdown, zero-change-presented detection), flushed as
+# `tracing::debug!` lines every `FrameStats::FLUSH_EVERY` drawn frames. NOT
+# enabled by default -- a default build must be byte-identical to a build
+# with this feature entirely absent from the crate graph, since timing calls
+# in the frame path would otherwise perturb the very thing being measured.
+# Enables `freminal-windowing/frame-profiling` so one flag turns on both
+# crates' instrumentation.
+frame-profiling = ["freminal-windowing/frame-profiling"]

@@ -610,6 +610,17 @@ impl freminal_windowing::App for FreminalGui {
     ) {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
+        // Task 121 frame-profiling harness (defect-1 fix): captured at the
+        // VERY top of `update`, before either early-return branch below, so
+        // its eventual `.elapsed()` (taken after `compose_with_chrome_damage`,
+        // near the end of this function) covers the whole productive body of
+        // `App::update` -- not just the `central_body` closure. The three
+        // early-return paths below (settings-window dispatch, dead-window
+        // cleanup, no-active-pane) intentionally never reach that `.elapsed()`
+        // call and record nothing, consistent with `frame_stats.frames_drawn`
+        // also not incrementing on those paths.
+        #[cfg(feature = "frame-profiling")]
+        let update_start = std::time::Instant::now();
 
         // ── Settings window rendering ────────────────────────────────────────
         // If this update is for the settings window, render settings directly
@@ -1307,6 +1318,27 @@ impl freminal_windowing::App for FreminalGui {
             .cached_central_rect
             .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
 
+        // Task 121 frame-profiling harness: `central_body` (below) hands its
+        // two measured phase durations OUT through these captured locals
+        // rather than writing straight into `win.frame_stats` and flushing
+        // itself. This is the defect-2 fix's other half: the
+        // `frame_damage_full`/`frame_damage_partial` counters need to be
+        // recorded from the FINAL, post-`compose_with_chrome_damage` value
+        // of `win.pending_frame_damage`, which is not known until after
+        // `central_body` returns (on EITHER the FULL or REPLAY branch below)
+        // -- so the accumulation-into-`FrameStats` and the `tracing::debug!`
+        // flush both moved to a single recording point after that
+        // composition, near the end of this function. `central_body` is
+        // `FnMut`, invoked exactly once per frame (on whichever branch is
+        // taken), so a plain `Duration` local -- mutably captured, written
+        // once inside the closure, read once after it returns -- is
+        // sufficient; no `Cell`/`RefCell`/extra `PerWindowState` field is
+        // needed.
+        #[cfg(feature = "frame-profiling")]
+        let mut phase_orchestration_out = std::time::Duration::ZERO;
+        #[cfg(feature = "frame-profiling")]
+        let mut phase_panes_out = std::time::Duration::ZERO;
+
         // The terminal band + (on Full only) chrome dialogs/overlays. Shared
         // between the FULL path (called via `CentralPanel::show`, below) and
         // the REPLAY path (called directly against a `Ui` built at the
@@ -1314,6 +1346,21 @@ impl freminal_windowing::App for FreminalGui {
         // loop, borders, broadcast label, band-range capture, chrome-damage
         // signal staging, and repaint scheduling — is defined exactly once.
         let mut central_body = |ui: &mut egui::Ui| {
+            // Task 121 frame-profiling harness: wall-clock start of this
+            // whole closure. At the end of the closure this is used, minus
+            // the accumulated per-pane `phase_panes_this_frame`, to derive
+            // `phase_orchestration` -- freminal's own orchestration overhead as
+            // distinct from time spent inside `terminal_widget.show()`.
+            // Not split into narrower named sub-phases because the
+            // bookkeeping this measures (window-manipulation drain, OSC
+            // routing, border drag-sensor rebuild, the per-pane
+            // resize-debounce/scroll-sync checks interleaved in the loop
+            // below, and the post-loop focus-follows-mouse hit-testing) is
+            // itself interleaved with the per-pane loop, not a single
+            // contiguous block that could be timed in isolation.
+            #[cfg(feature = "frame-profiling")]
+            let central_body_start = std::time::Instant::now();
+
             // Synchronise font metrics with the current display scale *before*
             // reading `cell_size()`.  Without this, the first frame after a DPI
             // change would use stale pixel metrics for the resize calculation.
@@ -2067,6 +2114,12 @@ impl freminal_windowing::App for FreminalGui {
             // borrows `win.tabs`.
             let mut grid_size_changed = false;
 
+            // Task 121 frame-profiling harness: cumulative time spent this
+            // frame inside `terminal_widget.show()` across every pane in
+            // `pane_layout` (accumulated inside the loop below).
+            #[cfg(feature = "frame-profiling")]
+            let mut phase_panes_this_frame = std::time::Duration::ZERO;
+
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
                 // Each pane edge that is interior (shared with another pane)
@@ -2275,6 +2328,12 @@ impl freminal_windowing::App for FreminalGui {
                 // this pane's rect — used below for click-to-focus. copied_to_clipboard
                 // is true when a non-empty local selection was copied this frame
                 // (Subtask D3), used below to route a "Copied to clipboard" toast.
+                // Task 121 frame-profiling harness: time only this pane's
+                // `terminal_widget.show()` call (via the `scope_builder`
+                // wrapper), summed across every pane into
+                // `phase_panes_this_frame`.
+                #[cfg(feature = "frame-profiling")]
+                let pane_show_start = std::time::Instant::now();
                 let show_result =
                     ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |pane_ui| {
                         win.terminal_widget.show(
@@ -2303,6 +2362,10 @@ impl freminal_windowing::App for FreminalGui {
                             &present_is_partial_for_panes,
                         )
                     });
+                #[cfg(feature = "frame-profiling")]
+                {
+                    phase_panes_this_frame += pane_show_start.elapsed();
+                }
                 let (left_clicked, copied_to_clipboard, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
 
@@ -2684,6 +2747,57 @@ impl freminal_windowing::App for FreminalGui {
                 toast_active,
                 &per_pane_damage,
             );
+
+            // Task 121 frame-profiling harness (feature-gated): chrome-mode
+            // duty cycle and zero-pixel-change-but-presented counters.
+            //
+            // `chrome_mode` answers "does `ChromeMode::Replay` ever actually
+            // engage in a live session, and at what duty cycle" -- no
+            // counter for this existed anywhere before this harness.
+            //
+            // `zero_change_presented` counts frames where every pane in
+            // `per_pane_damage` reported `Unchanged` (no bell) and neither
+            // `force_full`/`unresolved_pane` nor `toast_active` applied --
+            // exactly the case `decide_frame_damage` has no representation
+            // for "nothing changed" distinct from "something needs a full
+            // rebuild": both fall through to `FrameDamage::Full` once the
+            // collected damage-rect list is empty (see that function's
+            // step 4). This is measurement only -- the fallback-to-Full
+            // behavior is NOT changed here.
+            #[cfg(feature = "frame-profiling")]
+            {
+                let stats = &mut win.frame_stats;
+                match chrome_mode {
+                    freminal_windowing::ChromeMode::Full => {
+                        stats.chrome_mode_full = stats.chrome_mode_full.saturating_add(1);
+                    }
+                    freminal_windowing::ChromeMode::Replay => {
+                        stats.chrome_mode_replay = stats.chrome_mode_replay.saturating_add(1);
+                    }
+                }
+                let all_panes_unchanged = !force_full
+                    && !unresolved_pane
+                    && !toast_active
+                    && per_pane_damage.iter().all(|p| {
+                        !p.bell_active
+                            && matches!(
+                                p.cursor_damage,
+                                crate::gui::renderer::PaneFrameDamage::Unchanged
+                            )
+                    });
+                if all_panes_unchanged {
+                    stats.zero_change_presented = stats.zero_change_presented.saturating_add(1);
+                }
+                // `frame_damage_full`/`frame_damage_partial` are NOT counted
+                // here (Task 121 defect-2 fix): `win.pending_frame_damage` at
+                // this point is still the PRE-composition value --
+                // `compose_with_chrome_damage` (near the end of `update()`,
+                // after this closure returns) can upgrade a `Partial` here to
+                // `Full`, which would otherwise undercount `Full` and
+                // overcount `Partial`. Counted instead from the final,
+                // post-composition value at the recording point after that
+                // composition -- see the block near `compose_with_chrome_damage`.
+            }
 
             // Diagnostic frame-attribution stats (reuses the #435 damage
             // signal). One `update()` == one drawn frame; classify the active
@@ -3172,6 +3286,28 @@ impl freminal_windowing::App for FreminalGui {
             if let Some(delay) = shortest_repaint_delay {
                 ctx.request_repaint_after(delay);
             }
+
+            // Task 121 frame-profiling harness (defect-1/defect-2 fix):
+            // derive this frame's `phase_orchestration` as `central_body`'s
+            // total elapsed time minus `phase_panes_this_frame` (the
+            // per-pane `show()` contribution accumulated above), and hand
+            // both durations OUT via the captured `phase_orchestration_out`/
+            // `phase_panes_out` locals declared before this closure. NO
+            // accumulation into `win.frame_stats` and NO `tracing::debug!`
+            // flush happens here anymore -- both moved to a single recording
+            // point after `compose_with_chrome_damage`, near the end of
+            // `update()`, because the `frame_damage_full`/`frame_damage_partial`
+            // counters can only be correctly attributed from the FINAL,
+            // post-composition `win.pending_frame_damage` value, which does
+            // not exist until after this closure returns (on either the FULL
+            // or REPLAY branch below).
+            #[cfg(feature = "frame-profiling")]
+            {
+                let central_body_elapsed = central_body_start.elapsed();
+                phase_orchestration_out =
+                    central_body_elapsed.saturating_sub(phase_panes_this_frame);
+                phase_panes_out = phase_panes_this_frame;
+            }
         };
 
         if let Some(mut root_ui) = chrome_root_ui {
@@ -3325,6 +3461,107 @@ impl freminal_windowing::App for FreminalGui {
             ),
             win.pending_chrome_damage,
         );
+
+        // Task 121 frame-profiling harness: single recording point covering
+        // the defect-1 (`phase_app_update`), defect-2 (`frame_damage_full`/
+        // `frame_damage_partial` counted from the FINAL value), and
+        // defect-3 (`window_id` on the tracing line) fixes.
+        //
+        // Placed here -- after `compose_with_chrome_damage` and before `win`
+        // is reinserted into `self.windows` -- rather than inside
+        // `central_body`, for two reasons: (1) `win.pending_frame_damage` is
+        // only final as of the composition just above (`central_body` only
+        // ever sees the PRE-composition value); (2) `update_start.elapsed()`
+        // must be taken as late as possible in the function's productive
+        // body to actually cover the menu/tab-bar construction, dead-pane
+        // cleanup / session-autosave / settings dispatch, the toast stack's
+        // `.show()`, and the chrome-damage after-sample + decide + compose
+        // steps -- all of which run OUTSIDE `central_body` but were
+        // previously (wrongly) excluded from every app-side phase
+        // measurement and therefore misattributed to "egui overhead".
+        #[cfg(feature = "frame-profiling")]
+        {
+            // Defect 2: count the FINAL, post-composition frame damage kind.
+            match &win.pending_frame_damage {
+                freminal_windowing::FrameDamage::Full => {
+                    win.frame_stats.frame_damage_full =
+                        win.frame_stats.frame_damage_full.saturating_add(1);
+                }
+                freminal_windowing::FrameDamage::Partial(_) => {
+                    win.frame_stats.frame_damage_partial =
+                        win.frame_stats.frame_damage_partial.saturating_add(1);
+                }
+            }
+
+            // Defect 1: `phase_app_update` covers the whole productive body
+            // of `update()`, from `update_start` (captured at the very top
+            // of this function) through this point.
+            let phase_app_update_this_frame = update_start.elapsed();
+
+            let stats = &mut win.frame_stats;
+            stats.phase_orchestration_total += phase_orchestration_out;
+            stats.phase_orchestration_max =
+                stats.phase_orchestration_max.max(phase_orchestration_out);
+            stats.phase_panes_total += phase_panes_out;
+            stats.phase_panes_max = stats.phase_panes_max.max(phase_panes_out);
+            stats.phase_app_update_total += phase_app_update_this_frame;
+            stats.phase_app_update_max =
+                stats.phase_app_update_max.max(phase_app_update_this_frame);
+
+            if stats
+                .frames_drawn
+                .is_multiple_of(super::window::FrameStats::FLUSH_EVERY)
+            {
+                // Defect 3: `window_id` on the tracing line, `{:?}` -- the
+                // same representation the windowing crate's own
+                // `frame_profiling` line uses for its `window_id` field, so
+                // the two crates' lines for the same OS window can be
+                // matched by eye or by log-processing tooling.
+                tracing::debug!(
+                    target: "freminal::frame_profiling",
+                    window_id = ?window_id,
+                    frames_drawn = stats.frames_drawn,
+                    chrome_mode_full = stats.chrome_mode_full,
+                    chrome_mode_replay = stats.chrome_mode_replay,
+                    chrome_replay_duty_cycle_pct =
+                        super::window::FrameStats::chrome_replay_duty_cycle_pct(
+                            stats.chrome_mode_full,
+                            stats.chrome_mode_replay
+                        ),
+                    zero_change_presented = stats.zero_change_presented,
+                    frame_damage_full = stats.frame_damage_full,
+                    frame_damage_partial = stats.frame_damage_partial,
+                    phase_app_update_total_us = stats.phase_app_update_total.as_micros(),
+                    phase_app_update_max_us = stats.phase_app_update_max.as_micros(),
+                    phase_app_update_mean_us = super::window::FrameStats::mean_duration(
+                        stats.phase_app_update_total,
+                        stats.frames_drawn
+                    )
+                    .as_micros(),
+                    phase_orchestration_total_us = stats.phase_orchestration_total.as_micros(),
+                    phase_orchestration_max_us = stats.phase_orchestration_max.as_micros(),
+                    phase_orchestration_mean_us = super::window::FrameStats::mean_duration(
+                        stats.phase_orchestration_total,
+                        stats.frames_drawn
+                    )
+                    .as_micros(),
+                    phase_panes_total_us = stats.phase_panes_total.as_micros(),
+                    phase_panes_max_us = stats.phase_panes_max.as_micros(),
+                    phase_panes_mean_us = super::window::FrameStats::mean_duration(
+                        stats.phase_panes_total,
+                        stats.frames_drawn
+                    )
+                    .as_micros(),
+                    "app-side frame-profiling stats (task 121 harness): chrome-mode \
+                     duty cycle, zero-pixel-change-but-presented frames, and the \
+                     freminal-owned phase_app_update/phase_orchestration/phase_panes \
+                     wall-clock split (phase_app_update = the whole productive body of \
+                     update(); phase_orchestration = central_body total minus the \
+                     per-pane show() contribution) over frames_drawn drawn frames for \
+                     this window_id"
+                );
+            }
+        }
 
         let elapsed = now.elapsed();
         let frame_time = if elapsed.as_millis() > 0 {
