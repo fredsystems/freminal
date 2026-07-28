@@ -213,11 +213,101 @@ frame was suppressed pointer motion breaks the loop: **61fps → 2.05fps**,
 matching the ~2Hz blink rate exactly (which is what shows the window is live,
 not stalled). ~2% of a core → ~0.08%.
 
-**PROVISIONAL.** That run was confounded — the tester accidentally
-clicked/dragged and left the window partway — and could not be re-run. The
-suppressed-event rate (478/s versus 425/s unsuppressed) argues the confound is
-small, but **a clean before/after is required before this number is cited as
-validated.**
+The original bench run was confounded (the tester accidentally clicked/dragged
+and left the window partway). **It was subsequently corroborated by an
+independent A/B on different hardware** — a laptop, different observer, no
+accidental input — which is stronger evidence than a clean re-run of the same
+test would have been:
+
+| Workload   | Before        | After                  |
+| ---------- | ------------- | ---------------------- |
+| idle       | 0.0-0.3% CPU  | flat 0.0%              |
+| mouse move | up to 0.6%    | occasional 0.1% spikes |
+
+Same machine, wezterm for comparison: 0.0% at both idle and mouse move.
+**Caveat on that comparison: wezterm is not blinking a cursor at 2 Hz.**
+Freminal's floor is ~2 fps of blink frames by construction, so the honest
+apples-to-apples test is freminal with `cursor.blink = false` — untested, and
+likely to close most of the remaining gap.
+
+Verdict: the mechanism is real and the magnitude is corroborated. Remaining
+work on this axis is closing the gaps below, not re-litigating whether it
+works.
+
+### Finding 3's known gaps
+
+- **`has_urls` and `scroll_offset > 0` are pane-wide.** Any pane containing a
+  hyperlink, or scrolled back at all, reverts to full-rate scheduling for
+  motion anywhere in it. Conservative direction (costs benefit, not
+  correctness). **This is the biggest remaining win** — see "cell-granular
+  suppression" below.
+- **`animation_in_flight` tests presence, not motion.** It is
+  `resize_overlay.is_some() || !toasts.is_empty()`, but a toast only requests
+  16 ms while actually fading (entry/exit); during its steady hold it requests
+  250 ms, and the resize HUD is fully opaque for 650 ms of its 900 ms life. So
+  any visible toast or HUD disables suppression for its whole ~1-3 s life, not
+  just its animating portion. Superset of correct, so safe, but wasteful. The
+  fix is to surface `toast.rs`'s existing `any_animating` local as a real
+  signal.
+- **The gutter strip's safety rests on `pixels_per_point >= 1.0`.** The bound
+  uses `width_px` directly as a logical width, which over-estimates only while
+  `ppp >= 1.0`. On a display reporting fractional scale below 1.0 the
+  guarantee **inverts** to a possible under-estimate, i.e. a stale gutter
+  hover tint until the next frame. Low likelihood, cosmetic, bounded. Exact
+  fix: cache `pixels_per_point` on `PerWindowState` during `update()` and
+  compute `width_px / ppp`. Deliberately not done — it needs per-frame
+  caching machinery this spike did not justify.
+- **The spike is default-on with no kill switch.** It changes scheduling for
+  every build; `frame-profiling` gates only the diagnostics. If any of the
+  above proves troublesome in the field, the only remedy today is a revert.
+  Consider a config toggle before this is relied upon.
+
+### The unifying next step: cell-granular suppression
+
+The `has_urls` and selection-drag coarseness have the **same** root cause and
+the same fix. Nearly all of the terminal's interactive state changes at **cell**
+granularity, not pixel granularity: URL hover, gutter hover, selection extent,
+and mouse-tracking reports are all per-cell. Pointer motion within a single
+cell therefore cannot change any of them.
+
+So: cache the pane's terminal-rect origin and logical cell size during
+`update()`, track the pointer's **cell** rather than its position, and suppress
+any `CursorMoved` that does not cross a cell boundary. That single mechanism:
+
+- removes the `has_urls` pane-wide veto (only wake when the hovered cell
+  changes, so a pane full of hyperlinks still suppresses),
+- lets **selection drags suppress too** (the selection's end cell is what
+  matters, so a drag only needs a frame when it crosses into a new cell),
+- subsumes the gutter test (the gutter is per-row),
+- and is correct for mouse-tracking mode (reports are per-cell).
+
+The scrollbar must stay excluded — thumb dragging is genuinely pixel-granular.
+
+This is the highest-value follow-up on the scheduling axis and is strictly
+freminal-owned logic with no egui dependence.
+
+### Beyond scheduling: per-frame cost
+
+With scheduling largely handled, the remaining cost is per-frame work, and
+issue #459's unactioned candidate list is the roadmap. Highest-value first, per
+the maintainer:
+
+1. **Font/text pipeline** — unicode width, rustybuzz shaping (#459 item 4's
+   ASCII/simple-text fast path), and `build_foreground_instances`. Judged the
+   most logical next target.
+2. **Non-incremental vertex-instance build** (#459 item 3) — both
+   `build_background_instances` and `build_foreground_instances` clear and walk
+   every visible row unconditionally; there is no per-row incremental vertex
+   path. `instanced_bg_partial_dirty` / `instanced_fg_partial_dirty` already
+   quantify the recoverable headroom.
+3. GPU buffer-orphaning for `deco_verts` (#459 item 5), compute-shader clear
+   scope (item 6), `wayland_client_handle` call frequency (item 7).
+
+Note the idle work generalises: the same per-frame savings apply on the active
+path (new PTY data, scrolling), so this is not idle-only tuning.
+
+Already done and not to be redone: `FaceId` caches to `FxHashMap` (#459 item 1,
+PR #460) — the largest single CPU win before this session's work.
 
 ### Where that leaves the decision
 

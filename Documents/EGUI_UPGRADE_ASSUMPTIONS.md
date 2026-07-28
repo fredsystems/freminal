@@ -270,10 +270,14 @@ event.
 
 **Carve-out (found post-#436, fixed after #436 landed): `RedrawRequested` must
 be excluded from the `response.repaint` half of this gate.** `egui-winit`
-0.35.0 groups `WindowEvent::RedrawRequested` into the same "things that may
-require repaint" match arm as `ScaleFactorChanged` and returns
-`EventResponse { repaint: true, .. }` for it _unconditionally_
-(`egui-winit-0.35.0/src/lib.rs:492-500`). But `RedrawRequested` is also the
+0.35.0 returns `EventResponse { repaint: true, .. }` for
+`WindowEvent::RedrawRequested` _unconditionally_, via a grouped match arm
+commented "Things that may require repaint:" that also covers
+`CursorEntered`/`Destroyed`/`Occluded`/`Resized`/`Moved`/`TouchpadPressure`/
+`CloseRequested` (`egui-winit-0.35.0/src/lib.rs:489-500`). Note this is a
+_different_ arm from `ScaleFactorChanged`'s, which is its own separate arm
+(`~310-324`) that happens to return `repaint: true` too — the two are not
+grouped together, they merely share the outcome this gate relies on. But `RedrawRequested` is also the
 event that drives every single frame, and `window_event`'s `RedrawRequested`
 arm reads this gate back (via `std::mem::take(&mut
 state.chrome_input_pending)`) in the same call that just set it. Before the
@@ -296,10 +300,14 @@ it would need the same carve-out or the bug returns under a new name.
   `RedrawRequested` carve-out), and the general event arm's call to it in
   place of the old inline `|| response.repaint` OR.
 - **Upstream (0.35.0):** `egui-winit/src/lib.rs` —
-  `WindowEvent::ScaleFactorChanged { .. }` and `WindowEvent::RedrawRequested`
-  both fall into the same "things that may require repaint" arm returning
-  `EventResponse { repaint: true, .. }` (`~311-324` and `~492-500`
-  respectively).
+  `WindowEvent::ScaleFactorChanged { .. }` (`~310-324`) and
+  `WindowEvent::RedrawRequested` (`~489-500`, in the grouped "Things that may
+  require repaint:" arm) each return `EventResponse { repaint: true, .. }`
+  unconditionally, from **separate** match arms. On a bump, re-verify both
+  that `ScaleFactorChanged` still flags a repaint (the gate's completeness
+  depends on it) and that `RedrawRequested` still does (the carve-out exists
+  because it does, and would become unnecessary — though harmless — if it
+  ever stopped).
 - **Symptom if broken:**
   - If the `ScaleFactorChanged` half regresses: a DPI / scale-factor change is
     not forced FULL — the chrome renders at the wrong scale on a REPLAY frame
