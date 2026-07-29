@@ -26,9 +26,10 @@ hot, so it ships together):
 **Theme 2 — CPU performance remediation:**
 
 - **Task 121 — Performance Remediation** (in progress): the umbrella for all work arising
-  from issue #459's real-workload CPU profiling. Eleven subtasks have merged; the bugs that
-  work surfaced and issue #459's unactioned candidate list are outstanding. Summarised
-  below; the full breakdown is in `PLAN_121_PERF_REMEDIATION.md`.
+  from issue #459's real-workload CPU profiling. Eleven subtasks have merged and three more
+  (121.12–121.14) are pending merge; the remaining bugs, issue #459's unactioned candidate
+  list, and two items the Group B fixes surfaced are outstanding. Summarised below; the full
+  breakdown is in `PLAN_121_PERF_REMEDIATION.md`.
 
 **Theme 3 — structural cleanup:**
 
@@ -834,12 +835,14 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 
 | Group                                 | Subtasks      | Status      | Covers                                                                    |
 | ------------------------------------- | ------------- | ----------- | ------------------------------------------------------------------------- |
-| A — Completed work                    | 121.1–121.11  | Complete    | PRs #458, #460, #461, #464, #465                                          |
-| B — Bugs found but unfixed            | 121.12–121.15 | Not started | blink-off fallback, chrome cache off during motion, animation signal, pane-wide vetoes |
-| B — Withdrawn                         | 121.16        | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy               |
-| C — Unifying improvement              | 121.17        | Not started | cell-granular pointer suppression (depends on Task 122)                   |
-| D — Unactioned issue #459 items       | 121.18–121.24 | Not started | items 3–8 plus per-`CursorMoved` allocations                              |
-| E — Measurement debt                  | 121.25–121.28 | Not started | typing/btop, blink-off A/B, `DESIGN_DECISIONS.md` entry, issue #440 harness |
+| A — Completed work                    | 121.1–121.11  | Complete      | PRs #458, #460, #461, #464, #465                                        |
+| B — Bugs found and fixed              | 121.12–121.14 | Pending merge | blink-off fallback, chrome cache off during motion, animation signal    |
+| B — Bug blocked behind Task 122       | 121.15        | Not started   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17            |
+| B — Withdrawn                         | 121.16        | Withdrawn     | config kill switch — rejected; revert-and-fix is the remedy             |
+| C — Unifying improvement              | 121.17        | Not started   | cell-granular pointer suppression (depends on Task 122)                 |
+| D — Unactioned issue #459 items       | 121.18–121.24 | Not started   | items 3–8 plus per-`CursorMoved` allocations                            |
+| E — Measurement debt                  | 121.25–121.28 | Not started   | typing/btop, blink-off A/B, `DESIGN_DECISIONS.md` entry, issue #440 harness |
+| F — Surfaced by the Group B work      | 121.29–121.30 | Not started   | `repaint_causes()` unbounded fallback; chrome not built on `Replay`      |
 
 ### 121 Headline result
 

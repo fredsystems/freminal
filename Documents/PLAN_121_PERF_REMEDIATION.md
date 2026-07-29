@@ -1,9 +1,10 @@
 # PLAN_121_PERF_REMEDIATION.md — Task 121 "Performance Remediation"
 
 > **STATUS: IN PROGRESS.** Eleven subtasks have merged to `main` across five pull
-> requests (#458, #460, #461, #464, #465). The remainder — five known bugs, one
-> unifying improvement, seven unactioned issue #459 items, and four pieces of
-> measurement debt — are outstanding and unscheduled.
+> requests (#458, #460, #461, #464, #465). Three more (121.12–121.14) are complete
+> and pending merge. The remainder — one bug blocked behind Task 122, one unifying
+> improvement, seven unactioned issue #459 items, four pieces of measurement debt,
+> and two items surfaced by the Group B work — are outstanding and unscheduled.
 
 Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
@@ -70,14 +71,16 @@ creates — see that subtask.
 
 ## Subtask summary
 
-| Group                                   | Subtasks      | Status      |
-| --------------------------------------- | ------------- | ----------- |
-| A — Completed work (merged to `main`)   | 121.1–121.11  | Complete    |
-| B — Bugs found but unfixed              | 121.12–121.15 | Not started |
-| B — Withdrawn                           | 121.16        | Withdrawn   |
-| C — Unifying improvement                | 121.17        | Not started |
-| D — Unactioned issue #459 items         | 121.18–121.24 | Not started |
-| E — Measurement debt                    | 121.25–121.28 | Not started |
+| Group                                   | Subtasks      | Status        |
+| --------------------------------------- | ------------- | ------------- |
+| A — Completed work (merged to `main`)   | 121.1–121.11  | Complete      |
+| B — Bugs found and fixed                | 121.12–121.14 | Pending merge |
+| B — Bug blocked behind Task 122         | 121.15        | Not started   |
+| B — Withdrawn                           | 121.16        | Withdrawn     |
+| C — Unifying improvement                | 121.17        | Not started   |
+| D — Unactioned issue #459 items         | 121.18–121.24 | Not started   |
+| E — Measurement debt                    | 121.25–121.28 | Not started   |
+| F — Surfaced by the Group B work        | 121.29–121.30 | Not started   |
 
 Subtask numbers are stable once assigned. A withdrawn or dissolved subtask keeps its
 number and records why (the convention Task 118 used for 118.10), so the decision is
@@ -228,10 +231,12 @@ Commit `f762ca02`. One real bug plus cleanups, from automated review of PR #465.
 
 ---
 
-## Group B — Bugs found but unfixed
+## Group B — Bugs found by Group A
 
-These were surfaced by Group A and are known-broken or known-coarse today. None is
-scheduled.
+These were surfaced by Group A. 121.12, 121.13 and 121.14 are **fixed and pending
+merge** (branch `task-121/group-b`, one atomic commit each). 121.15 remains unfixed
+and is deliberately left to 121.17, which is blocked behind Task 122. 121.16 is
+withdrawn.
 
 ### 121.12 — The 250 ms fallback makes blink-off slower than blink-on
 
@@ -247,25 +252,54 @@ suppressed floor is 2 fps. With blinking **off**, the app requests nothing, the
 250 ms fallback applies, and the floor becomes **4 fps** — turning the blink off
 makes freminal schedule twice as many frames.
 
-**Fix:** three call sites bypass `App::update`'s `shortest_repaint_delay`
-aggregation and call `ui.ctx().request_repaint()` directly, so the delay they need
-never reaches `app_requested_delay`:
-
-- `freminal/src/gui/terminal/widget.rs:1936` — gutter hover needs-repaint
-- `freminal/src/gui/terminal/widget.rs:1942` — gutter clearing frame
-- `freminal/src/gui/terminal/widget.rs:3228` — scrollbar damage decision
-
-Route all three through `shortest_repaint_delay` (as `app_impl.rs:3023` and
-`app_impl.rs:3436` already do for their own sources). Once every real repaint need
-is represented in `app_requested_delay`, `SUPPRESSED_POINTER_FALLBACK_DELAY` can
-become `Duration::MAX` and the liveness argument for the bounded fallback goes away.
-
 Note these are **not** the two call sites `DECOUPLING_FRAMEWORK.md` §8 subtask 0.1
 ruled benign — 0.1 was about those sites forcing `not_settled` at idle, which they
 do not do after warm-up. This is a different defect on the same lines.
 
 **Also unblocks 121.26**: the honest apples-to-apples comparison against wezterm
-requires `cursor.blink = false`, which today lands on the worse of the two floors.
+requires `cursor.blink = false`, which previously landed on the worse of the two
+floors.
+
+### 121.12 outcome (DONE, pending merge)
+
+**This entry originally named three bypassing call sites. That was wrong — there are
+eight**, and the miscount changed what the fix buys. Recon found, in addition to the
+three gutter/scrollbar sites: `widget.rs`'s bell-flash fade, cursor-trail animation
+and animated-image tick; `app_impl.rs`'s resize-overlay HUD (inside `central_body`,
+with the aggregate local in scope); and `toast.rs`'s toast cadence (outside
+`central_body`, after the aggregate is published).
+
+That miscount concealed a **live visual bug this entry never described**: because
+those animations' 16ms requests never reached `app_requested_delay`, and egui's raw
+delay is zero during pointer motion regardless, the substitution fired, found
+`None`, and returned the fallback. The bell flash, cursor trail and animated images
+were animating at **4fps instead of 60fps whenever the mouse was moving** over
+terminal content. Routing them is a correctness fix in its own right, independent of
+the fallback constant.
+
+All eight now fold into the aggregate: six via a new
+`PaneRenderCache::pending_repaint_delay` drained after `show()` returns
+(`paint_bell_flash` returns `Option<Duration>` rather than requesting a repaint
+itself), one directly, and `ToastStack::show` returning its delay for a second
+aggregation point. The three formerly-bare `request_repaint()` sites fold **16ms,
+not `Duration::ZERO`** — scheduling is identical because `clamp_repaint_delay`
+already floored at `MIN_REPAINT_INTERVAL`, but a zero app-side ask would make
+`chrome_repaint_settled`'s `repaint_delay >= app_delay` test permanently vacuous.
+
+**`Duration::MAX` was considered and rejected.** This entry's closing claim — that
+once every real repaint need is represented the liveness argument goes away — does
+not hold: `app_requested_delay` can only ever represent *freminal's* needs, and
+**egui's own chrome animations are unrepresentable in it** and are masked by egui's
+events-driven zero. Unbounded would freeze such an animation at partial alpha until
+an unrelated event arrived. `SUPPRESSED_POINTER_FALLBACK_DELAY` is therefore
+**250ms → 500ms**, chosen to equal the cursor-blink period so blink-off can never
+schedule more frames than blink-on, which is the perversity this entry is about. A
+regression test pins `>= 500ms` so it cannot be reintroduced.
+
+A mechanism *does* exist to make unbounded safe — `Context::repaint_causes()` — but
+consuming it costs five egui-internals dependencies, two of which are present-day
+holes. See **121.29**, which records the full analysis so it is not re-litigated.
+The measured prize over 500ms is ~0.075% of a core.
 
 ### 121.13 — Chrome cache is disabled during pointer motion
 
@@ -276,6 +310,35 @@ egui's raw `0` on every suppressed-pointer frame and concludes the chrome has no
 settled. Consequence: `ChromeMode::Replay` sits at roughly 0.5% duty cycle while the
 mouse is moving, against 100% at idle. The 121.8 win is silently switched off for
 exactly as long as the pointer moves.
+
+### 121.13 outcome (DONE, pending merge)
+
+Fixed with a narrow `EguiState::stash_effective_repaint_delay` called from the
+`RedrawRequested` arm once `effective_delay` is known. `run_frame` still performs
+the raw write, so the field is never left unwritten on a path that does not reach
+the override; the deliberate double-write is documented at both ends.
+
+**The stashed value is not the scheduled one, and that distinction is the fix.** One
+value cannot answer both "what do we schedule?" (bounded — we cannot prove nothing
+needs drawing) and "did anything actually *want* a repaint?" (no — the absence of an
+app request is itself the proof). Stashing the scheduled value would have left the
+`app_requested_delay == None` case exactly as broken: the synthetic 500ms liveness
+poll would be stashed, `chrome_repaint_settled`'s `None` arm would compare it
+against `Duration::MAX`, and the gate would still decide `Full`. **That case is
+precisely the btop / `DECTCEM`-hidden-cursor workload named in 121.25.** Scheduling
+therefore uses `effective_repaint_delay`; the gate is fed a sibling,
+`effective_chrome_gate_delay`, differing in exactly one branch (`None` yields
+`Duration::MAX`).
+
+Replay stays independently gated on `cache_matches`, `damage_unchanged` and
+`no_chrome_input`, and both `toast_active` and `any_overlay_open` force
+`ChromeDamage::Changed` every frame they hold, so a genuinely changed chrome still
+cannot be replayed.
+
+Residual, documented in code and tracked as **121.30**: chrome widgets are not
+constructed at all on `Replay`, so an egui-internal chrome animation would not
+merely be scheduled less often — its advancing logic would not run. Latent, not
+live. The wiring itself has no automated coverage (see 121.28).
 
 ### 121.14 — `animation_in_flight` tests presence, not motion
 
@@ -290,11 +353,58 @@ superset of correct, therefore safe, but wasteful.
 returned from `measure_inputs` at `toast.rs:1662`) as a real signal instead of
 testing for presence.
 
+### 121.14 outcome (DONE, pending merge)
+
+**Both halves fixed**, not just the toast half this entry's Fix bullet named — the
+resize-HUD half is cited in the bug text above and was trivially fixable.
+
+Resize HUD: a pure `resize_overlay_is_animating` replaces `is_some()`. It reports
+`true` past `linger` as well as during the fade, because the overlay is only cleared
+by a rendered frame; going false there would strand the HUD on screen at partial
+alpha. **Narrowing the predicate alone would have achieved nothing** — after 121.12
+the HUD folds a delay into the aggregate every frame it is alive, so
+`app_requested_delay` would have stayed 16ms and scheduling would have stayed at
+60fps. It now requests the time remaining until the fade begins while opaque. A
+property test pins the coupling between the two functions (the originally proposed
+`is_animating == (delay <= 16ms)` invariant is **false** — in the opaque phase the
+countdown is transiently `<= 16ms` while `is_animating` is still false; the real
+coupling is: `animating` implies exactly 16ms, and `!animating` implies exactly
+`fade_start - elapsed`).
+
+Toasts: cached on `ToastStack`, read via `is_animating()`, because the predicate runs
+outside any frame. `push()` sets the flag eagerly — exact rather than merely
+conservative, since a new toast is always mid-entry-animation — closing the priming
+gap between a push and the next render. `try_borrow`-fails-means-`true` preserved.
+
+**A hover regression had to be fixed to make the toast half safe at all.**
+`is_chrome_interactive_at` tested only head and border rects; toast rects were not in
+the pointer-interactive set, and it was toast *presence* that had been keeping hover
+alive. Suppressing during the steady hold would have left the close-button highlight
+and hover-to-pause resolving only at the 250ms cadence. `ToastStack::show` now also
+returns its laid-out rects, cached in a dedicated `chrome_toast_rects` and tested by
+a widened `point_in_chrome_rects`. This also correctly forces `ChromeMode::Full`
+while the pointer is over a toast.
+
+Accepted residuals, documented in code: the cached rects are one frame stale, so a
+hover can be missed for a frame while the stack reflows; and `chrome_toast_rects`
+goes stale on `App::update`'s `CLEANUP-436-A` early return, symmetrically with
+`chrome_head_rects` and `chrome_border_rects` (pre-existing, a documented
+should-never-happen branch). The toast's 16ms/250ms cadence is deliberately
+unchanged — unlike the HUD it has hover-extension and expiry logic driven per frame.
+The presence-based `toast_active` chrome-damage signal is untouched; it is
+presence-based by design.
+
 ### 121.15 — `has_urls` and `scroll_offset > 0` are pane-wide vetoes
 
 Any pane containing a hyperlink, or scrolled back at all, reverts to full-rate
 scheduling for pointer motion anywhere in it. Conservative direction: it costs
 benefit, not correctness. Subsumed by 121.17, which is the preferred fix.
+
+**Deliberately excluded from the Group B fix (maintainer decision).** 121.12–121.14
+shipped without it. An interim narrowing here would mean adding a fifth round to the
+suppression predicate in its current shape — exactly what 121.17 warns is how the
+maintainability argument for the egui rewrite gets stronger for no good reason. It
+stays blocked behind Task 122 → 121.17.
 
 ### 121.16 — Config kill switch for the suppression (WITHDRAWN)
 
@@ -460,6 +570,77 @@ landed. Everything in Groups A through D is validated by counters, `perf` sample
 and human observation — never by pixels. Any regression in the suppression or
 chrome-cache paths that changes what is drawn rather than how often is currently
 undetectable in CI.
+
+Group B added two concrete instances. (1) 121.13's tests exercise the pure
+`chrome_repaint_settled` / `evaluate_chrome_gate` functions, which that subtask did
+not modify — they pin the reasoning, not the wiring, and would pass against
+pre-121.13 code. The wiring (that `event_loop.rs` calls the stash at the right point
+with the right value on every reachable path) needs a live winit window and GL
+context and has none. (2) 121.29 cannot be attempted safely without this harness.
+
+---
+
+## Group F — Surfaced by the Group B work
+
+### 121.29 — Unbounded suppressed-pointer fallback via `repaint_causes()`
+
+`SUPPRESSED_POINTER_FALLBACK_DELAY` is bounded (500ms after 121.12) because
+`app_requested_delay` represents only freminal's repaint needs. egui's own chrome
+animations are unrepresentable in it and are masked by egui's events-driven zero, so
+`Duration::MAX` would freeze such an animation at partial alpha until an unrelated
+event arrived.
+
+A mechanism exists to discriminate. `egui-0.35.0/src/context.rs:524-525` pushes the
+events-driven zero as a `RepaintCause`, and `ContextImpl::request_repaint_after`
+pushes `causes` **unconditionally**, before the `delay < repaint_delay` early-out, so
+the list survives even though the delay value is flattened to zero.
+`Context::repaint_causes()` exposes it. If the only cause is the `begin_pass` events
+cause, nothing but suppressed pointer motion wants a frame and unbounded is safe.
+
+**This was investigated and rejected for now.** Consuming it depends on five egui
+internals, two of which are present-day holes rather than future-bump risks:
+
+1. The events-driven zero is recorded as a cause at all, identifiable by `file`+`line`
+   — making an egui *source line number* load-bearing runtime data, in a repo whose
+   own upgrade checklist says line numbers drift and must not be trusted.
+2. `causes.push` happening unconditionally (`context.rs:157-159`).
+3. `repaint_causes()` returning `prev_causes` — exactly one pass stale
+   (`context.rs:102-105`).
+4. **`outstanding`-driven repaints push no cause at all** (`context.rs:110-118`).
+   Every zero-delay `request_repaint()` sets `outstanding = 1` ("Each request results
+   in two repaints, just to give some things time to settle"); the following pass is
+   forced to `ZERO` down a path that never touches `causes`. A cause-based test is
+   structurally blind to egui's own settling mechanism.
+5. **`run_dyn` is a multi-pass loop** (`context.rs:822-860`); `request_discard`
+   reruns `begin_pass`/`end_pass`, swapping `causes` again, so after a discarded pass
+   `repaint_causes()` is the second-to-last pass's causes.
+
+`set_request_repaint_callback` looked like the documented escape hatch but is not: it
+fires only when `delay < repaint_delay`, so once the events-zero lands at
+`begin_pass` every later request is silent.
+
+The correctness argument therefore requires reasoning about three interacting
+internal mechanisms and is unfalsifiable without **121.28**. The measured prize over
+the 500ms fallback is ~**0.075% of a core** (2 wakes/s × the 376µs idle frame cost
+from 121.8), which 121.24 independently corroborates. Blocked on 121.28; would also
+need a new `EGUI_UPGRADE_ASSUMPTIONS.md` entry. **Do not re-derive this analysis.**
+
+### 121.30 — Chrome widgets are not constructed at all on `Replay`
+
+`SUPPRESSED_POINTER_FALLBACK_DELAY`'s original doc framed the residual risk purely as
+scheduling cadence. There is a second, distinct mechanism: freminal's chrome widgets
+(menu bar, tab bar) are not constructed on `ChromeMode::Replay`, so while continuous
+pointer motion keeps the gate settled, an egui-internal chrome animation would not
+merely be scheduled less often — its own advancing logic would not run, and it would
+freeze rather than degrade.
+
+**Latent, not live.** freminal uses no `ctx.animate_bool` / `ctx.animate_value`
+anywhere in chrome (verified by search), and an open menu forces `Full` through
+`any_overlay_open` via an unrelated gate. 121.13 widened the latent window to the
+"app requested nothing" case as a deliberate, accepted trade.
+
+The trigger to action this is the introduction of **any** `ctx.animate_*`-driven
+chrome widget. Both mechanisms are now documented at the constant.
 
 ---
 
