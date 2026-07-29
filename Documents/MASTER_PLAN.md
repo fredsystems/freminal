@@ -476,9 +476,9 @@ Task 121 lives in the GUI and windowing frame path) and are fully parallelizable
 **Task 121 (v0.12.0, performance remediation):** the umbrella for all CPU work arising from
 issue #459's real-workload profiling. It ran for five merged pull requests
 (#458, #460, #461, #464 and #465) under a task number that existed only in branch names;
-creating it closes that tracking gap rather than starting new work. Eleven subtasks
-(121.1–121.11) are merged, and three of the bugs that work surfaced (121.12–121.14) are
-fixed and pending merge. Outstanding: 121.15 (left to 121.17, blocked behind Task 122),
+creating it closes that tracking gap rather than starting new work. Fourteen subtasks are
+merged: 121.1–121.11 from that original run, plus the Group B bug fixes 121.12–121.14
+(PR #467). Outstanding: 121.15 (left to 121.17, blocked behind Task 122),
 121.16 (withdrawn), 121.17, issue #459's unactioned candidate list (121.18–121.24),
 measurement debt (121.25–121.28), and two items the Group B fixes themselves surfaced
 (121.29–121.30). The
@@ -712,7 +712,7 @@ Update this section as tasks complete:
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
-| 121  | 2026-07-27 |            | 121.1-121.11 merged; 121.12-121.14 pending merge; 121.15/121.17-121.30 open     |
+| 121  | 2026-07-27 |            | 121.1-121.14 merged (121.12-121.14 via PR #467); 121.15/121.17-121.30 open       |
 | 122  |            |            | v0.12.0. Not started; needs an activation pass (`DECOUPLING_FRAMEWORK.md` §8)    |
 
 ---
