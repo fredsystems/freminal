@@ -260,6 +260,21 @@ const fn pointer_in_gutter_strip(
     pos_x >= pane_rect_min_x && pos_x < pane_rect_min_x + gutter_width_upper_bound_logical
 }
 
+/// Subtask 121.14: pure composition of the "some animation is in flight
+/// somewhere in this window, independent of pointer position" term used by
+/// `pointer_motion_needs_repaint`. Extracted so it is unit-testable without
+/// a live `FreminalGui`/`PerWindowState` (see
+/// `pointer_motion_needs_repaint_decision`'s doc for why the wrapping
+/// method cannot be constructed headlessly). Trivial (an OR of two already-
+/// computed booleans), but named and tested on its own so the composition
+/// itself — as distinct from how each term is computed — is pinned.
+const fn animation_in_flight_composed(
+    resize_overlay_animating: bool,
+    toast_animating: bool,
+) -> bool {
+    resize_overlay_animating || toast_animating
+}
+
 /// Task 121 pointer-motion repaint-gate spike: the composed decision behind
 /// `App::pointer_motion_needs_repaint`'s freminal-side implementation.
 /// Extracted as a pure function over already-computed signals so it is
@@ -543,6 +558,7 @@ impl freminal_windowing::App for FreminalGui {
                         cached_gutter_inset_logical: 0.0,
                         chrome_head_rects: None,
                         chrome_border_rects: Vec::new(),
+                        chrome_toast_rects: Vec::new(),
                         frame_stats: super::window::FrameStats::default(),
                     };
                     self.windows.insert(window_id, win);
@@ -738,6 +754,16 @@ impl freminal_windowing::App for FreminalGui {
                 pos,
                 win.chrome_head_rects.as_deref(),
                 &win.chrome_border_rects,
+                // Subtask 121.14 (review item 2 follow-up): the most
+                // recently laid-out toast pill rects, in their own field —
+                // see that field's doc in `window.rs` for the staleness
+                // discipline. Hovering a toast DOES change chrome pixels
+                // (close-button highlight, hover-pauses-expiry), so this
+                // correctly, as a consequence, also makes
+                // `should_force_chrome_full_for_pointer` (in
+                // `freminal-windowing`, which calls this method) force
+                // `ChromeMode::Full` while the pointer is over a toast.
+                &win.chrome_toast_rects,
             )
         })
     }
@@ -805,21 +831,38 @@ impl freminal_windowing::App for FreminalGui {
         // ("does the pointer's current position matter?"), which is structurally
         // blind to "something is mid-animation somewhere in this window,
         // regardless of where the pointer is". Toasts and the resize-overlay HUD
-        // both animate every frame independent of pointer position and drive
-        // their own ~16ms repaint requests; without these terms, wandering the
-        // pointer over plain terminal content during a toast fade would let the
-        // `RedrawRequested` override substitute the app's much longer delay for
-        // the animation's cadence, making the fade visibly step instead of
-        // animate. Bounded (<=500ms) rather than a freeze, but a real visual
-        // regression reachable from an already-shipped feature.
+        // are the two things that can animate independent of pointer position;
+        // without these terms, wandering the pointer over plain terminal content
+        // during one of their fades would let the `RedrawRequested` override
+        // substitute the app's much longer delay for the animation's cadence,
+        // making the fade visibly step instead of animate. Bounded (<=500ms)
+        // rather than a freeze, but a real visual regression reachable from an
+        // already-shipped feature.
         //
+        // Subtask 121.14: both terms below test ANIMATION, not PRESENCE — the
+        // superset-but-wasteful bug this subtask fixes. A toast spends most of
+        // its life fully settled in its steady hold; the resize HUD is fully
+        // opaque for the first `RESIZE_OVERLAY_LINGER - RESIZE_OVERLAY_FADE` of
+        // its life. Presence alone (the old `win.resize_overlay.is_some()` /
+        // `!stack.is_empty()`) disabled suppression for their entire lives
+        // instead of just the genuinely-animating tail.
+        let resize_overlay_animating = win.resize_overlay.is_some_and(|overlay| {
+            let elapsed = std::time::Instant::now().saturating_duration_since(overlay.last_update);
+            super::window::resize_overlay_is_animating(
+                elapsed,
+                super::window::RESIZE_OVERLAY_LINGER,
+                super::window::RESIZE_OVERLAY_FADE,
+            )
+        });
         // `try_borrow` failing means someone up-stack holds the `RefCell`; treat
-        // that as "toasts may be active" (conservative), never as "no toasts".
-        let animation_in_flight = win.resize_overlay.is_some()
-            || self
-                .toasts
-                .try_borrow()
-                .map_or(true, |stack| !stack.is_empty());
+        // that as "toasts may be animating" (conservative), never as "no
+        // toasts"/"not animating".
+        let toast_animating = self
+            .toasts
+            .try_borrow()
+            .map_or(true, |stack| !stack.is_empty() && stack.is_animating());
+        let animation_in_flight =
+            animation_in_flight_composed(resize_overlay_animating, toast_animating);
         let overlay_open = win.pending_chrome_signals.any_overlay_open
             || win.pending_chrome_signals.foreground_overlay_open
             || animation_in_flight;
@@ -3118,6 +3161,7 @@ impl freminal_windowing::App for FreminalGui {
                     pos,
                     win.chrome_head_rects.as_deref(),
                     &win.chrome_border_rects,
+                    &win.chrome_toast_rects,
                 )
             });
             let force_full = ui_overlay_open
@@ -3657,7 +3701,28 @@ impl freminal_windowing::App for FreminalGui {
                     // moving over terminal content. Only the delivery
                     // mechanism changes; the overlay's own timing/alpha is
                     // untouched.
-                    let hud_delay = std::time::Duration::from_millis(16);
+                    //
+                    // Subtask 121.14: request only the delay actually
+                    // needed rather than an unconditional 16ms every frame
+                    // the HUD is alive — a wake timed to land exactly at
+                    // fade-start while still opaque, then 16ms once
+                    // genuinely animating. This MUST stay consistent with
+                    // `resize_overlay_is_animating` (the suppression
+                    // predicate `pointer_motion_needs_repaint` uses): if the
+                    // two disagree, the HUD either janks (suppression
+                    // engages while this still requested a fast wake) or
+                    // never sleeps (this keeps requesting 16ms while
+                    // suppression was already judged safe). Without this
+                    // step, Part A's suppression fix would be worthless: the
+                    // unconditional 16ms request folded into
+                    // `shortest_repaint_delay` every frame would still
+                    // schedule the window at 60fps regardless of what the
+                    // suppression predicate allowed.
+                    let hud_delay = super::window::resize_overlay_repaint_delay(
+                        elapsed,
+                        super::window::RESIZE_OVERLAY_LINGER,
+                        super::window::RESIZE_OVERLAY_FADE,
+                    );
                     shortest_repaint_delay =
                         Some(shortest_repaint_delay.map_or(hud_delay, |prev| prev.min(hud_delay)));
                 }
@@ -3839,71 +3904,89 @@ impl freminal_windowing::App for FreminalGui {
         // frame it is (`ChromeSignals::toast_active`), so a REPLAY frame can
         // only ever be entered while the stack is provably empty, making
         // `.show()` a no-op here anyway.
-        if chrome_mode == freminal_windowing::ChromeMode::Full
-            && let Ok(mut stack) = self.toasts.try_borrow_mut()
-            && !stack.is_empty()
-        {
-            // Rebuild the same geometry `central_body` used to populate
-            // `cached_central_rect`/the pane layout — `win` is a local
-            // variable here (removed from `self.windows` above, reinserted
-            // below), so this cannot reuse `central_body`'s own locals
-            // (`pane_layout`, `available_rect`), which are scoped to that
-            // closure.
-            let content_rect = win
-                .cached_central_rect
-                .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
-            // Pre-resolve the active tab's pane layout into owned locals so
-            // the `resolve_pane_rect` closure below does not borrow `win`
-            // (it only captures `Copy`/owned data) — it needs to coexist
-            // with the `win.terminal_widget.font_manager_mut()` borrow
-            // passed alongside it to `stack.show`.
-            let active_tab = win.tabs.active_tab();
-            let zoomed_pane = active_tab.zoomed_pane;
-            let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
-                .pane_tree
-                .layout(content_rect)
-                .unwrap_or_default();
-            let resolve_pane_rect =
-                move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
-                    if let Some(zoomed_id) = zoomed_pane {
-                        return (zoomed_id == pane_id).then_some(content_rect);
-                    }
-                    pane_layout
-                        .iter()
-                        .find(|(id, _)| *id == pane_id)
-                        .map(|(_, r)| *r)
-                };
-            let pixels_per_point = ctx.pixels_per_point();
-            let resources = super::toast::ToastFrameResources {
-                render_state: &win.toast_render_state,
-                font_manager: win.terminal_widget.font_manager_mut(),
-            };
-            let repaint_delay = stack.show(
-                ctx,
-                content_rect,
-                window_id,
-                resolve_pane_rect,
-                resources,
-                pixels_per_point,
-            );
+        if chrome_mode == freminal_windowing::ChromeMode::Full {
+            // Review item 2 follow-up to 121.14: `win.chrome_toast_rects`
+            // must be written on EVERY `Full` frame reaching this point, not
+            // only when the block below actually runs `stack.show()` — see
+            // that field's doc in `window.rs` for why (an emptied stack
+            // would otherwise leave stale rects behind forever). Default to
+            // cleared; the inner block below overwrites with fresh rects
+            // when it runs.
+            win.chrome_toast_rects.clear();
 
-            // Subtask 121.12: `ToastStack::show` returns its wanted delay
-            // rather than calling `ctx.request_repaint_after()` itself. This
-            // runs AFTER `central_body` already published
-            // `win.pending_terminal_requested_delay` (~3768 above), so it is
-            // a second aggregation point — the toast stack renders outside
-            // `central_body`, once per window, after the per-window local
-            // aggregate has already been folded and published. Fold it into
-            // that published field too (so `chrome_repaint_settled`'s
-            // suppressed-pointer / next-frame comparisons see it) and
-            // schedule it directly, since `central_body`'s own scheduling
-            // call has already run and will not run again this frame.
-            if let Some(delay) = repaint_delay {
-                win.pending_terminal_requested_delay = Some(
-                    win.pending_terminal_requested_delay
-                        .map_or(delay, |prev| prev.min(delay)),
+            if let Ok(mut stack) = self.toasts.try_borrow_mut()
+                && !stack.is_empty()
+            {
+                // Rebuild the same geometry `central_body` used to populate
+                // `cached_central_rect`/the pane layout — `win` is a local
+                // variable here (removed from `self.windows` above, reinserted
+                // below), so this cannot reuse `central_body`'s own locals
+                // (`pane_layout`, `available_rect`), which are scoped to that
+                // closure.
+                let content_rect = win
+                    .cached_central_rect
+                    .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
+                // Pre-resolve the active tab's pane layout into owned locals so
+                // the `resolve_pane_rect` closure below does not borrow `win`
+                // (it only captures `Copy`/owned data) — it needs to coexist
+                // with the `win.terminal_widget.font_manager_mut()` borrow
+                // passed alongside it to `stack.show`.
+                let active_tab = win.tabs.active_tab();
+                let zoomed_pane = active_tab.zoomed_pane;
+                let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
+                    .pane_tree
+                    .layout(content_rect)
+                    .unwrap_or_default();
+                let resolve_pane_rect =
+                    move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
+                        if let Some(zoomed_id) = zoomed_pane {
+                            return (zoomed_id == pane_id).then_some(content_rect);
+                        }
+                        pane_layout
+                            .iter()
+                            .find(|(id, _)| *id == pane_id)
+                            .map(|(_, r)| *r)
+                    };
+                let pixels_per_point = ctx.pixels_per_point();
+                let resources = super::toast::ToastFrameResources {
+                    render_state: &win.toast_render_state,
+                    font_manager: win.terminal_widget.font_manager_mut(),
+                };
+                let outcome = stack.show(
+                    ctx,
+                    content_rect,
+                    window_id,
+                    resolve_pane_rect,
+                    resources,
+                    pixels_per_point,
                 );
-                ctx.request_repaint_after(delay);
+
+                // Subtask 121.14 (review item 2 follow-up): the laid-out
+                // toast pill rects go into their own `chrome_toast_rects`
+                // field, not `chrome_border_rects` — see that field's doc
+                // in `window.rs` for the full staleness-discipline
+                // reasoning and why a dedicated field replaced the
+                // original append-to-border-rects approach.
+                win.chrome_toast_rects = outcome.rects;
+
+                // Subtask 121.12: `ToastStack::show` returns its wanted delay
+                // rather than calling `ctx.request_repaint_after()` itself. This
+                // runs AFTER `central_body` already published
+                // `win.pending_terminal_requested_delay` (~3768 above), so it is
+                // a second aggregation point — the toast stack renders outside
+                // `central_body`, once per window, after the per-window local
+                // aggregate has already been folded and published. Fold it into
+                // that published field too (so `chrome_repaint_settled`'s
+                // suppressed-pointer / next-frame comparisons see it) and
+                // schedule it directly, since `central_body`'s own scheduling
+                // call has already run and will not run again this frame.
+                if let Some(delay) = outcome.repaint_delay {
+                    win.pending_terminal_requested_delay = Some(
+                        win.pending_terminal_requested_delay
+                            .map_or(delay, |prev| prev.min(delay)),
+                    );
+                    ctx.request_repaint_after(delay);
+                }
             }
         }
 
@@ -4412,6 +4495,7 @@ impl FreminalGui {
             cached_gutter_inset_logical: 0.0,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
+            chrome_toast_rects: Vec::new(),
             frame_stats: super::window::FrameStats::default(),
         }
     }
@@ -4624,10 +4708,10 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        PointerMotionPaneSignals, SettingsOwnerCloseDecision, cursor_blink_wants_repaint,
-        pane_hover_region_risk, pane_hover_region_terms, pointer_forces_full_present,
-        pointer_in_gutter_strip, pointer_motion_needs_repaint_decision,
-        settings_owner_close_decision,
+        PointerMotionPaneSignals, SettingsOwnerCloseDecision, animation_in_flight_composed,
+        cursor_blink_wants_repaint, pane_hover_region_risk, pane_hover_region_terms,
+        pointer_forces_full_present, pointer_in_gutter_strip,
+        pointer_motion_needs_repaint_decision, settings_owner_close_decision,
     };
     use freminal_common::cursor::CursorVisualStyle;
 
@@ -4713,6 +4797,28 @@ mod tests {
         assert!(!pointer_forces_full_present(false, false, true));
         // Not moving, neither chrome nor drag -> no forced Full.
         assert!(!pointer_forces_full_present(false, false, false));
+    }
+
+    // ── Subtask 121.14: `animation_in_flight_composed` ───────────────────
+
+    #[test]
+    fn animation_in_flight_composed_both_false_is_false() {
+        assert!(!animation_in_flight_composed(false, false));
+    }
+
+    #[test]
+    fn animation_in_flight_composed_resize_overlay_alone_forces_true() {
+        assert!(animation_in_flight_composed(true, false));
+    }
+
+    #[test]
+    fn animation_in_flight_composed_toast_alone_forces_true() {
+        assert!(animation_in_flight_composed(false, true));
+    }
+
+    #[test]
+    fn animation_in_flight_composed_both_true_is_true() {
+        assert!(animation_in_flight_composed(true, true));
     }
 
     // ── Task 121 pointer-motion repaint-gate spike ───────────────────────

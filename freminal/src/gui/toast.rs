@@ -1274,6 +1274,14 @@ fn group_and_layout(
 pub(super) struct ToastStack {
     entries: Vec<Toast>,
     next_id: u64,
+    /// Cached "is any toast currently mid-animation" signal (subtask
+    /// 121.14), recomputed at the end of every [`Self::show`] call and
+    /// consulted by [`Self::is_animating`]. `App::pointer_motion_needs_repaint`
+    /// runs OUTSIDE any frame (from `event_loop`'s `CursorMoved` handling),
+    /// where [`Self::measure_inputs`] cannot be called — this field is what
+    /// lets that method see the answer without re-running the per-frame
+    /// measurement. `false` on a fresh/default stack (nothing to animate).
+    cached_is_animating: bool,
 }
 
 /// Maximum simultaneous toasts.  Older ones are evicted.
@@ -1308,6 +1316,30 @@ pub(super) struct ToastFrameResources<'a> {
     pub render_state: &'a std::sync::Arc<std::sync::Mutex<ToastRenderState>>,
     /// This window's shared font manager, for text measure/shape only.
     pub font_manager: &'a mut FontManager,
+}
+
+/// [`ToastStack::show`]'s return value (subtask 121.14): bundles the
+/// repaint delay it needs (subtask 121.12) with the laid-out pill hit-rects,
+/// so the caller can cache both without a second pass over the stack.
+pub(super) struct ToastShowOutcome {
+    /// The delay `App::update` should schedule for this window this frame
+    /// (subtask 121.12) — see [`ToastStack::show`]'s doc.
+    pub(super) repaint_delay: Option<Duration>,
+    /// Every toast's `hit_rect_logical`, converted to `egui::Rect` (logical
+    /// points, window space) — see [`ToastStack::show`]'s doc for why the
+    /// caller needs these.
+    pub(super) rects: Vec<egui::Rect>,
+}
+
+impl ToastShowOutcome {
+    /// The outcome for a stack with nothing to show: no delay requested, no
+    /// rects to cache.
+    const fn empty() -> Self {
+        Self {
+            repaint_delay: None,
+            rects: Vec::new(),
+        }
+    }
 }
 
 impl ToastStack {
@@ -1366,6 +1398,23 @@ impl ToastStack {
         self.entries.is_empty()
     }
 
+    /// Whether any toast on the stack is currently mid-animation (entry/exit
+    /// fade+slide+scale), as of the most recent [`Self::show`] call or
+    /// [`Self::push`] (subtask 121.14).
+    ///
+    /// Mere presence (`!is_empty()`) is NOT sufficient grounds to treat a
+    /// toast as needing continuous repaints — a toast spends most of its
+    /// 1-3s (up to 15s) life fully settled in its steady hold, animating
+    /// only during its 300ms entry fade and 400ms exit fade. Callers that
+    /// need "is a repaint needed to keep this toast's animation smooth"
+    /// (as opposed to "is a toast visible at all", which has its own,
+    /// deliberately presence-based, use at `app_impl.rs`'s
+    /// `toast_active` — see that field's doc) must combine this with
+    /// `!is_empty()` themselves.
+    pub(super) const fn is_animating(&self) -> bool {
+        self.cached_is_animating
+    }
+
     fn push(
         &mut self,
         kind: ToastKind,
@@ -1381,6 +1430,16 @@ impl ToastStack {
         while self.entries.len() > MAX_TOASTS {
             self.entries.remove(0);
         }
+        // Subtask 121.14: eagerly mark the stack as animating. A freshly
+        // pushed toast is always at the start of its entry animation (age
+        // 0 < `ANIM_IN`), so this is exact, not merely conservative. It
+        // closes the priming gap between this `push()` and the next
+        // `show()` call (the only other place `cached_is_animating` is
+        // set): without it, a pointer-motion check landing in that window
+        // would read whatever the field held before the push -- `false` if
+        // the stack had been empty -- and wrongly suppress a repaint the
+        // entry animation's first frames need.
+        self.cached_is_animating = true;
     }
 
     /// Font size (physical pixels, pre-`pixels_per_point` scaling) the toast
@@ -1412,15 +1471,20 @@ impl ToastStack {
     /// anywhere within a toast's pill (its `hit_rect_logical`, computed by
     /// `layout_toasts`).
     ///
-    /// Returns the repaint delay this call needs to keep expiry/animation
-    /// going without further input (subtask 121.12: `Some(16ms)` while any
-    /// toast is animating, `Some(250ms)` if the stack is non-empty but
-    /// settled, `None` when empty). THE CALLER MUST SCHEDULE THE RETURNED
-    /// DELAY — this method deliberately does NOT call
-    /// `ctx.request_repaint_after()` itself, because that would be invisible
-    /// to `effective_repaint_delay`'s suppressed-pointer substitution (in
-    /// `freminal-windowing`) and would be silently downgraded to the
-    /// fallback interval while the mouse is moving over terminal content.
+    /// Returns a [`ToastShowOutcome`] bundling the repaint delay this call
+    /// needs to keep expiry/animation going without further input (subtask
+    /// 121.12: `Some(16ms)` while any toast is animating, `Some(250ms)` if
+    /// the stack is non-empty but settled, `None` when empty) and the laid-
+    /// out pill hit-rects (subtask 121.14, logical points, window space —
+    /// same rects [`Self::hit_test`] hit-tests against). THE CALLER MUST
+    /// SCHEDULE THE RETURNED DELAY AND CACHE THE RETURNED RECTS — this
+    /// method deliberately does NOT call `ctx.request_repaint_after()`
+    /// itself, because that would be invisible to `effective_repaint_delay`'s
+    /// suppressed-pointer substitution (in `freminal-windowing`) and would be
+    /// silently downgraded to the fallback interval while the mouse is
+    /// moving over terminal content; and the rects are needed by
+    /// `App::pointer_motion_needs_repaint`, which runs outside any frame and
+    /// so cannot call this method itself.
     pub(super) fn show(
         &mut self,
         ctx: &egui::Context,
@@ -1429,9 +1493,10 @@ impl ToastStack {
         resolve_pane_rect: impl Fn(PaneId) -> Option<egui::Rect>,
         resources: ToastFrameResources<'_>,
         pixels_per_point: f32,
-    ) -> Option<Duration> {
+    ) -> ToastShowOutcome {
         if self.entries.is_empty() {
-            return None;
+            self.cached_is_animating = false;
+            return ToastShowOutcome::empty();
         }
 
         let ToastFrameResources {
@@ -1501,6 +1566,20 @@ impl ToastStack {
             rs.text.build_instances(&runs, font_manager)
         };
         let pills: Vec<ToastQuad> = outputs.iter().map(|o| o.pill).collect();
+        // Subtask 121.14: the same hit rects `hit_test` above just tested the
+        // pointer against, in the same logical-point/window-space coordinates
+        // `chrome_head_rects`/`chrome_border_rects` use — cached by the
+        // caller for `App::pointer_motion_needs_repaint` (see this method's
+        // doc). Computed from `outputs`, which describes what was ACTUALLY
+        // rendered this frame (before the dismiss/expire retains below), so
+        // it matches the pills just painted rather than what remains after.
+        let rects: Vec<egui::Rect> = outputs
+            .iter()
+            .map(|o| {
+                let [min_x, min_y, max_x, max_y] = o.hit_rect_logical;
+                egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
+            })
+            .collect();
         Self::paint_toasts(ctx, render_state, pills, text_instances);
 
         // Remove dismissed toasts.
@@ -1515,12 +1594,23 @@ impl ToastStack {
         // (entry/exit fade+slide+scale), otherwise a slow (250ms) cadence
         // just to catch expiry. The caller schedules this (subtask 121.12) —
         // see this method's doc comment for why.
-        if self.entries.is_empty() {
+        //
+        // Also caches `is_animating` (subtask 121.14) from the SAME
+        // `entries.is_empty()` / `any_animating` decision, so the two never
+        // disagree.
+        let repaint_delay = if self.entries.is_empty() {
+            self.cached_is_animating = false;
             None
         } else if any_animating {
+            self.cached_is_animating = true;
             Some(Duration::from_millis(16))
         } else {
+            self.cached_is_animating = false;
             Some(Duration::from_millis(250))
+        };
+        ToastShowOutcome {
+            repaint_delay,
+            rects,
         }
     }
 
@@ -1811,6 +1901,49 @@ mod tests {
     fn stack_starts_empty() {
         let s = ToastStack::default();
         assert!(s.entries.is_empty());
+    }
+
+    // ── Subtask 121.14: `ToastStack::is_animating` / `cached_is_animating` ──
+    //
+    // `ToastStack::show` needs a live `WindowId` (no public constructor
+    // outside the real winit event loop — see `layout_positioned`'s doc), so
+    // it cannot be driven headlessly here. These tests instead cover the
+    // reachable half: the cached flag's default and `push`'s eager-`true`
+    // write. The `show()`-side half (recomputing the flag from
+    // `any_animating`) is covered instead at the `measure_inputs` level by
+    // `measure_inputs_leaves_a_short_toast_unchanged` /
+    // `measure_inputs_truncates_long_detail_and_pill_stays_within_max_width`
+    // above, which assert `any_animating` directly.
+
+    #[test]
+    fn cached_is_animating_starts_false_on_a_default_stack() {
+        let s = ToastStack::default();
+        assert!(!s.is_animating());
+    }
+
+    #[test]
+    fn push_sets_cached_is_animating_true() {
+        let mut s = ToastStack::default();
+        assert!(!s.is_animating());
+        s.error("something failed", None);
+        // Subtask 121.14: exact, not conservative — a freshly pushed toast
+        // is always at the start of its entry animation.
+        assert!(s.is_animating());
+    }
+
+    #[test]
+    fn push_sets_cached_is_animating_true_even_when_stack_was_already_non_empty() {
+        let mut s = ToastStack::default();
+        s.info("first", None);
+        // Simulate a `show()` having already settled the flag back to
+        // `false` (the first toast finished its entry fade).
+        s.cached_is_animating = false;
+        s.error("second", None);
+        assert!(
+            s.is_animating(),
+            "a second push must re-arm the flag even if the stack was \
+             already non-empty and settled"
+        );
     }
 
     #[test]
@@ -2295,9 +2428,16 @@ mod tests {
     #[test]
     fn measure_inputs_leaves_a_short_toast_unchanged() {
         let mut stack = ToastStack::default();
-        stack.error("short", None);
         let rs = ToastRenderState::default();
+        // `test_font_manager()` does real font loading and can take
+        // meaningfully long (well over `ANIM_IN`'s 300ms) on a cold cache or
+        // loaded CI runner — see the `flaky-tests-are-bugs` skill. Do it
+        // BEFORE pushing the toast, so no real wall-clock time elapses
+        // between `push` (which stamps `created = Instant::now()`) and the
+        // `Instant::now()` passed to `measure_inputs` below, and the
+        // any-animating assertion cannot flake on setup being slow.
         let mut fm = test_font_manager();
+        stack.error("short", None);
         let ppp = 1.0;
         let sizes = ToastMeasureSizes {
             label_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
@@ -2305,10 +2445,16 @@ mod tests {
             icon_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
             ppp,
         };
-        let (inputs, _any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
+        let (inputs, any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].label_text, "Error: short");
         assert!(!inputs[0].label_text.ends_with('…'));
+        // Subtask 121.14: measured immediately after `push`, so the toast is
+        // still within its entry-animation window (age 0 < `ANIM_IN`).
+        assert!(
+            any_animating,
+            "a just-pushed toast must report as animating (entry fade in progress)"
+        );
     }
 
     #[test]
@@ -2318,9 +2464,12 @@ mod tests {
         // (`push_error_toast("Shader error", Some(msg))`) that produced the
         // overflow this fixes.
         let long_detail = "ERROR: 0:12: 'foo' : undeclared identifier\n".repeat(20);
-        stack.error("Shader error", Some(long_detail));
         let rs = ToastRenderState::default();
+        // See the comment in `measure_inputs_leaves_a_short_toast_unchanged`:
+        // font-manager construction happens BEFORE the push so no real time
+        // elapses between `push` and the `any_animating` measurement below.
         let mut fm = test_font_manager();
+        stack.error("Shader error", Some(long_detail));
         let ppp = 1.0;
         let sizes = ToastMeasureSizes {
             label_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
@@ -2328,7 +2477,7 @@ mod tests {
             icon_size_px: ToastStack::LABEL_SIZE_PTS * ppp,
             ppp,
         };
-        let (inputs, _any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
+        let (inputs, any_animating) = stack.measure_inputs(&rs, &mut fm, sizes, Instant::now());
         assert_eq!(inputs.len(), 1);
         let input = &inputs[0];
         assert!(
@@ -2337,6 +2486,11 @@ mod tests {
             input.detail_text
         );
         assert!(input.detail_text.ends_with('…'));
+        // Subtask 121.14: same reasoning as the short-toast test above.
+        assert!(
+            any_animating,
+            "a just-pushed toast must report as animating (entry fade in progress)"
+        );
 
         let (width, _height) = settled_pill_size(input, ppp);
         assert!(
