@@ -341,13 +341,25 @@ pub const fn decide_chrome_damage(
 /// #436.8: is `pos` over any chrome-interactive rect? `head_rects == None`
 /// means no FULL frame has captured them yet -> conservative `true`.
 #[must_use]
+///
+/// `toast_rects` (review item 2 follow-up to subtask 121.14) is the most
+/// recently laid-out toast pill hit-rects, tested the same way as
+/// `border_rects` — hovering a toast changes chrome pixels (close-button
+/// highlight, hover-pauses-expiry) even though toasts are neither
+/// menu/tab-bar chrome nor split-border drag sensors. Kept as an explicit
+/// third parameter (rather than pre-merging into `border_rects` at the call
+/// site, or duplicating this function's `rect.contains(pos)` scan at each
+/// caller) so both consumers share one tested implementation.
 pub fn point_in_chrome_rects(
     pos: egui::Pos2,
     head_rects: Option<&[egui::Rect]>,
     border_rects: &[egui::Rect],
+    toast_rects: &[egui::Rect],
 ) -> bool {
     let Some(head) = head_rects else { return true };
-    head.iter().any(|r| r.contains(pos)) || border_rects.iter().any(|r| r.contains(pos))
+    head.iter().any(|r| r.contains(pos))
+        || border_rects.iter().any(|r| r.contains(pos))
+        || toast_rects.iter().any(|r| r.contains(pos))
 }
 
 #[cfg(test)]
@@ -805,16 +817,23 @@ mod tests {
     #[test]
     fn point_in_chrome_rects_none_head_is_conservative_true() {
         // No FULL frame has captured head rects yet -> unknown -> true.
-        assert!(point_in_chrome_rects(egui::pos2(10.0, 10.0), None, &[],));
+        assert!(point_in_chrome_rects(
+            egui::pos2(10.0, 10.0),
+            None,
+            &[],
+            &[],
+        ));
     }
 
     #[test]
     fn point_in_chrome_rects_empty_rects_is_false() {
         // A FULL frame captured (empty) head rects (e.g. hidden menu bar, no
-        // tab bar) and there are no border sensors: nothing is chrome.
+        // tab bar) and there are no border sensors or toast rects: nothing
+        // is chrome.
         assert!(!point_in_chrome_rects(
             egui::pos2(10.0, 10.0),
             Some(&[]),
+            &[],
             &[],
         ));
     }
@@ -829,6 +848,7 @@ mod tests {
             egui::pos2(50.0, 10.0),
             Some(&head),
             &[],
+            &[],
         ));
     }
 
@@ -841,6 +861,7 @@ mod tests {
         assert!(!point_in_chrome_rects(
             egui::pos2(50.0, 100.0),
             Some(&head),
+            &[],
             &[],
         ));
     }
@@ -855,6 +876,7 @@ mod tests {
             egui::pos2(100.0, 50.0),
             Some(&[]),
             &border,
+            &[],
         ));
     }
 
@@ -868,6 +890,7 @@ mod tests {
             egui::pos2(300.0, 50.0),
             Some(&[]),
             &border,
+            &[],
         ));
     }
 
@@ -885,6 +908,62 @@ mod tests {
             egui::pos2(500.0, 500.0),
             Some(&head),
             &border,
+            &[],
+        ));
+    }
+
+    // ── Review item 2 follow-up to 121.14: the dedicated `toast_rects` param ──
+
+    #[test]
+    fn point_in_chrome_rects_inside_toast_rect_is_true() {
+        // A toast rect alone (no head/border overlap) must still register as
+        // chrome-interactive -- this is the whole point of giving toasts
+        // their own parameter instead of silently dropping them.
+        let toast = [egui::Rect::from_min_max(
+            egui::pos2(200.0, 200.0),
+            egui::pos2(300.0, 240.0),
+        )];
+        assert!(point_in_chrome_rects(
+            egui::pos2(250.0, 220.0),
+            Some(&[]),
+            &[],
+            &toast,
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_outside_toast_rect_is_false() {
+        let toast = [egui::Rect::from_min_max(
+            egui::pos2(200.0, 200.0),
+            egui::pos2(300.0, 240.0),
+        )];
+        assert!(!point_in_chrome_rects(
+            egui::pos2(10.0, 10.0),
+            Some(&[]),
+            &[],
+            &toast,
+        ));
+    }
+
+    #[test]
+    fn point_in_chrome_rects_inside_none_of_head_border_toast_is_false() {
+        let head = [egui::Rect::from_min_max(
+            egui::pos2(0.0, 0.0),
+            egui::pos2(100.0, 20.0),
+        )];
+        let border = [egui::Rect::from_min_max(
+            egui::pos2(97.0, 0.0),
+            egui::pos2(103.0, 200.0),
+        )];
+        let toast = [egui::Rect::from_min_max(
+            egui::pos2(200.0, 200.0),
+            egui::pos2(300.0, 240.0),
+        )];
+        assert!(!point_in_chrome_rects(
+            egui::pos2(500.0, 500.0),
+            Some(&head),
+            &border,
+            &toast,
         ));
     }
 
@@ -892,7 +971,8 @@ mod tests {
     //
     // `FreminalGui::is_chrome_interactive_at` (app_impl.rs) is
     //   `self.windows.get(&window_id).is_none_or(|win|
-    //        point_in_chrome_rects(pos, win.chrome_head_rects, win.chrome_border_rects))`
+    //        point_in_chrome_rects(pos, win.chrome_head_rects,
+    //            win.chrome_border_rects, win.chrome_toast_rects))`
     // The point-in-rects half is pinned exhaustively above. The distinct
     // behavior the wrapper adds is the `is_none_or` fallback: an UNKNOWN
     // `window_id` (no `PerWindowState` entry) is conservatively chrome-
@@ -904,13 +984,18 @@ mod tests {
     // composition (e.g. flipping the unknown-window default to `false`, which
     // would silently starve a chrome interaction of repaints on a window whose
     // state is mid-teardown).
+    /// Test-only alias for the mirrored `is_chrome_interactive_at` closure's
+    /// "known window" state below: `(head_rects, border_rects, toast_rects)`.
+    /// Named purely to satisfy `clippy::type_complexity` -- has no
+    /// production counterpart.
+    type WindowRectsFixture<'a> = (Option<&'a [egui::Rect]>, &'a [egui::Rect], &'a [egui::Rect]);
+
     #[test]
     fn is_chrome_interactive_at_unknown_window_is_conservative_true() {
         // Mirror of the wrapper: `None` window => true, else delegate.
-        let decide = |window_present: Option<(Option<&[egui::Rect]>, &[egui::Rect])>,
-                      pos: egui::Pos2|
-         -> bool {
-            window_present.is_none_or(|(head, border)| point_in_chrome_rects(pos, head, border))
+        let decide = |window_present: Option<WindowRectsFixture<'_>>, pos: egui::Pos2| -> bool {
+            window_present
+                .is_none_or(|(head, border, toast)| point_in_chrome_rects(pos, head, border, toast))
         };
 
         // Unknown window (None) -> true regardless of position.
@@ -918,17 +1003,35 @@ mod tests {
 
         // Known window, point over terminal content, captured (empty) rects
         // -> false (delegates to point_in_chrome_rects, which is false).
-        assert!(!decide(Some((Some(&[]), &[])), egui::pos2(500.0, 500.0)));
+        assert!(!decide(
+            Some((Some(&[]), &[], &[])),
+            egui::pos2(500.0, 500.0)
+        ));
 
         // Known window, point inside a captured head rect -> true.
         let head = [egui::Rect::from_min_max(
             egui::pos2(0.0, 0.0),
             egui::pos2(100.0, 20.0),
         )];
-        assert!(decide(Some((Some(&head), &[])), egui::pos2(50.0, 10.0)));
+        assert!(decide(
+            Some((Some(&head), &[], &[])),
+            egui::pos2(50.0, 10.0)
+        ));
 
         // Known window, head rects not yet captured (None) -> conservative true.
-        assert!(decide(Some((None, &[])), egui::pos2(50.0, 10.0)));
+        assert!(decide(Some((None, &[], &[])), egui::pos2(50.0, 10.0)));
+
+        // Known window, point inside a captured toast rect -> true (review
+        // item 2: toasts have their own field/param now, not folded into
+        // `border_rects`).
+        let toast = [egui::Rect::from_min_max(
+            egui::pos2(200.0, 200.0),
+            egui::pos2(300.0, 240.0),
+        )];
+        assert!(decide(
+            Some((Some(&[]), &[], &toast)),
+            egui::pos2(250.0, 220.0)
+        ));
     }
 }
 

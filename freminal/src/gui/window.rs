@@ -65,6 +65,73 @@ pub(super) fn resize_overlay_alpha(
     }
 }
 
+/// Whether the resize overlay is currently mid-fade (or past `linger`) at
+/// `elapsed` since the last genuine resize event (subtask 121.14).
+///
+/// `false` only during the fully-opaque phase (`elapsed < linger - fade`),
+/// where the overlay's painted pixels are not changing frame-to-frame, so a
+/// caller may safely treat "no animation is in flight" as true for it —
+/// this is the predicate `pointer_motion_needs_repaint` consults instead of
+/// the old `resize_overlay.is_some()` presence test, which disabled
+/// suppression for the overlay's ENTIRE 900ms life instead of just the
+/// final 250ms fade.
+///
+/// **Returns `true` for `elapsed >= linger`, NOT `false`.** This is the
+/// non-obvious part: the overlay is only ever cleared to `None` by a
+/// rendered frame reaching the `win.resize_overlay = None` branch in
+/// `app_impl.rs`'s resize-overlay block — nothing else clears it. If this
+/// predicate went `false` again past `linger` (before that clearing frame
+/// had actually run), a caller using it to gate "may I suppress waking this
+/// window" would stop scheduling frames while the overlay was still
+/// `Some`, and the HUD would be stranded on screen at whatever it was last
+/// painted with — never reaching the frame that removes it. Treating "at or
+/// past `linger`" as still-animating guarantees at least one more wake
+/// reaches that clearing frame.
+///
+/// Pure function so the timing math is unit-testable without an egui frame,
+/// mirroring [`resize_overlay_alpha`].
+pub(super) fn resize_overlay_is_animating(
+    elapsed: std::time::Duration,
+    linger: std::time::Duration,
+    fade: std::time::Duration,
+) -> bool {
+    elapsed >= linger.saturating_sub(fade)
+}
+
+/// The repaint delay the resize-overlay HUD should request at `elapsed`
+/// since the last genuine resize event (subtask 121.14, Part A step 3).
+///
+/// While still fully opaque (`elapsed < linger - fade`), the overlay's
+/// pixels are not changing, so requesting an unconditional 16ms cadence
+/// every frame it is alive is wasted work — a wake timed to land exactly at
+/// fade-start is sufficient (and gives an equally smooth start to the fade
+/// once it begins). Once fading — or at/past `linger`, mirroring
+/// [`resize_overlay_is_animating`]'s boundary and its "still needs a wake"
+/// reasoning — request the fast 16ms cadence so the fade (or the final
+/// frame that clears the overlay) proceeds smoothly.
+///
+/// **MUST stay consistent with [`resize_overlay_is_animating`]'s boundary.**
+/// The two are read together at two different call sites (this decides what
+/// the HUD itself asks for; that decides whether pointer-motion suppression
+/// may engage) — if they disagree, the HUD either janks (suppression
+/// engages while this still asks for 16ms, evidence of "still animating"
+/// otherwise ignored) or never sleeps (this keeps asking for 16ms while
+/// suppression has already been judged safe to allow).
+///
+/// Pure function so the schedule is unit-testable without an egui frame.
+pub(super) fn resize_overlay_repaint_delay(
+    elapsed: std::time::Duration,
+    linger: std::time::Duration,
+    fade: std::time::Duration,
+) -> std::time::Duration {
+    let fade_start = linger.saturating_sub(fade);
+    if elapsed < fade_start {
+        fade_start.saturating_sub(elapsed)
+    } else {
+        std::time::Duration::from_millis(16)
+    }
+}
+
 /// Whether an observed char-grid size change is a GENUINE OS-window resize,
 /// rather than the spurious `last_sent_size` churn caused by new
 /// window/tab/split/pane-close/zoom transitions (which reset `last_sent_size`
@@ -445,10 +512,73 @@ pub(super) struct PerWindowState {
     /// frames (REPLAY skips building the panels). `None` until the first FULL
     /// frame => `is_chrome_interactive_at` returns the conservative `true`.
     pub(super) chrome_head_rects: Option<Vec<egui::Rect>>,
-    /// #436.8 split-border drag-sensor rects (egui logical points), rebuilt every
-    /// frame; explicitly cleared on frames that build no sensors (single pane /
-    /// zoomed / overlay open).
+    /// #436.8 split-border drag-sensor rects (egui logical points), rebuilt
+    /// every frame; explicitly cleared on frames that build no sensors
+    /// (single pane / zoomed / overlay open).
     pub(super) chrome_border_rects: Vec<egui::Rect>,
+
+    /// Subtask 121.14 (review item 2 follow-up): the most recently laid-out
+    /// toast pill hit-rects, appended by the app-level toast-rendering block
+    /// (in `app_impl.rs`, after `central_body` returns) whenever it actually
+    /// runs `ToastStack::show()`. `App::pointer_motion_needs_repaint` runs
+    /// OUTSIDE any frame (from `event_loop`'s `CursorMoved` handling) and
+    /// needs a cached rect list to test whether the pointer is over a
+    /// toast — hovering one changes chrome pixels (close-button highlight,
+    /// hover-pauses-expiry) even though toasts are not menu/tab-bar/split-
+    /// border chrome.
+    ///
+    /// A dedicated field rather than appending to [`Self::chrome_border_rects`]
+    /// (121.14's original approach, corrected by review): that field's name
+    /// and doc describe split-border drag sensors specifically, and any
+    /// future consumer correlating `chrome_border_rects[i]` with
+    /// `pane_tree.split_borders()[i]` by index would silently get corrupted
+    /// indices whenever a toast is showing. See
+    /// `crate::gui::chrome_damage::point_in_chrome_rects`, which both
+    /// consumers now call with this field as an explicit extra parameter
+    /// rather than duplicating a `rect.contains(pos)` scan at each call site.
+    ///
+    /// **Staleness discipline — this field is NOT rebuilt in `central_body`
+    /// the way [`Self::chrome_border_rects`] is, so it must be written
+    /// explicitly on every reachable path:**
+    ///
+    ///   - On every `ChromeMode::Full` frame, write this field — new rects
+    ///     when the toast block actually runs (`chrome_mode == Full &&
+    ///     !stack.is_empty()`), or an emptied `Vec` when it does not (stack
+    ///     empty, or toast rendering otherwise skipped). Writing
+    ///     unconditionally on `Full` (rather than only inside the toast
+    ///     block) is what prevents an emptied stack from leaving stale rects
+    ///     behind forever, which would otherwise permanently force
+    ///     `ChromeMode::Full`/hover-interactive over that now-vacated screen
+    ///     region.
+    ///   - On every `ChromeMode::Replay` frame, leave this field untouched.
+    ///     A `Replay` frame can only be entered while the toast stack is
+    ///     provably empty: the `toast_active` local (`app_impl.rs`'s
+    ///     `App::update`, ~3180) is threaded into the
+    ///     `ChromeSignals { .. toast_active, .. }` literal assigned to
+    ///     `win.pending_chrome_signals` (`app_impl.rs`, ~3374-3390, field at
+    ///     ~3384), which `ChromeSignals::any_fired` (`chrome_damage.rs`,
+    ///     ~140-156) checks — forcing `ChromeDamage::Changed` — and
+    ///     therefore `ChromeMode::Full` — for as long as any toast exists, so
+    ///     by the time a `Replay` frame is reached this field is already
+    ///     correctly empty (or, before then, already reflects the
+    ///     truly-last `Full` frame's rects, which is what a `Replay` frame
+    ///     reuses for everything else it does not rebuild). One frame stale
+    ///     by construction (like `chrome_head_rects`): while the stack
+    ///     reflows (e.g. a dismissed toast shifts its neighbours), a hover
+    ///     can be missed for a single frame. (Citations are name-first so
+    ///     they stay useful if the line numbers drift again.)
+    ///
+    ///   - There is a third, pre-existing path where this field goes stale
+    ///     that the two bullets above don't cover: `App::update`'s
+    ///     "active tab has no active pane" bail-out (the `CLEANUP-436-A`
+    ///     branch, `app_impl.rs`, ~1615-1627) reinserts `win` into
+    ///     `self.windows` and returns without tearing the window down or
+    ///     writing this field. That is a documented should-never-happen
+    ///     defensive branch (guarded by a `warn!`, not expected in normal
+    ///     operation), and the resulting staleness is shared symmetrically
+    ///     with [`Self::chrome_head_rects`] and [`Self::chrome_border_rects`]
+    ///     — this field does not introduce it.
+    pub(super) chrome_toast_rects: Vec<egui::Rect>,
 
     /// Per-frame render attribution counters (diagnostic), flushed to a
     /// `debug` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
@@ -1081,6 +1211,7 @@ mod frame_profiling_tests {
 mod resize_overlay_tests {
     use super::{
         RESIZE_OVERLAY_FADE, RESIZE_OVERLAY_LINGER, resize_is_genuine, resize_overlay_alpha,
+        resize_overlay_is_animating, resize_overlay_repaint_delay,
     };
     use std::time::Duration;
 
@@ -1144,5 +1275,258 @@ mod resize_overlay_tests {
         // The only genuine case: a real OS-window resize alongside a char-grid
         // change.
         assert!(resize_is_genuine(true, true));
+    }
+
+    // ── Subtask 121.14: `resize_overlay_is_animating` ────────────────────
+
+    #[test]
+    fn is_animating_false_in_the_opaque_phase() {
+        // linger=900ms, fade=250ms -> fade starts at elapsed=650ms.
+        let elapsed = RESIZE_OVERLAY_LINGER
+            .saturating_sub(RESIZE_OVERLAY_FADE)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or(Duration::ZERO);
+        assert!(!resize_overlay_is_animating(
+            elapsed,
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE
+        ));
+    }
+
+    #[test]
+    fn is_animating_true_at_the_exact_fade_start_boundary() {
+        let fade_start = RESIZE_OVERLAY_LINGER.saturating_sub(RESIZE_OVERLAY_FADE);
+        assert!(resize_overlay_is_animating(
+            fade_start,
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE
+        ));
+    }
+
+    #[test]
+    fn is_animating_true_through_the_fade() {
+        let elapsed = RESIZE_OVERLAY_LINGER.saturating_sub(RESIZE_OVERLAY_FADE / 2);
+        assert!(resize_overlay_is_animating(
+            elapsed,
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE
+        ));
+    }
+
+    #[test]
+    fn is_animating_true_past_linger() {
+        // The load-bearing case: the overlay is only cleared by a rendered
+        // frame, so this must stay `true` past `linger`, not fall back to
+        // `false` — see this function's doc for what would be stranded if
+        // it did not.
+        assert!(resize_overlay_is_animating(
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE
+        ));
+        assert!(resize_overlay_is_animating(
+            RESIZE_OVERLAY_LINGER + Duration::from_secs(5),
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_FADE
+        ));
+    }
+
+    #[test]
+    fn is_animating_with_zero_fade_flips_exactly_at_linger() {
+        // fade=0 -> fade_start == linger: opaque for the entire linger
+        // window, then immediately "animating" (the instantaneous snap to
+        // invisible) at/after linger.
+        assert!(!resize_overlay_is_animating(
+            RESIZE_OVERLAY_LINGER
+                .checked_sub(Duration::from_millis(1))
+                .unwrap_or(Duration::ZERO),
+            RESIZE_OVERLAY_LINGER,
+            Duration::ZERO
+        ));
+        assert!(resize_overlay_is_animating(
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_LINGER,
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn is_animating_with_fade_longer_than_linger_is_always_animating() {
+        // fade > linger -> `linger.saturating_sub(fade)` saturates to ZERO,
+        // so every `elapsed >= 0` (i.e. always) reads as animating.
+        let fade = RESIZE_OVERLAY_LINGER + Duration::from_secs(1);
+        assert!(resize_overlay_is_animating(
+            Duration::ZERO,
+            RESIZE_OVERLAY_LINGER,
+            fade
+        ));
+        assert!(resize_overlay_is_animating(
+            RESIZE_OVERLAY_LINGER,
+            RESIZE_OVERLAY_LINGER,
+            fade
+        ));
+    }
+
+    // ── Subtask 121.14: `resize_overlay_repaint_delay` ───────────────────
+
+    #[test]
+    fn repaint_delay_in_the_opaque_phase_wakes_exactly_at_fade_start() {
+        let elapsed = Duration::ZERO;
+        let fade_start = RESIZE_OVERLAY_LINGER.saturating_sub(RESIZE_OVERLAY_FADE);
+        assert_eq!(
+            resize_overlay_repaint_delay(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE),
+            fade_start
+        );
+
+        // Partway through the opaque phase: delay is the remaining time to
+        // fade-start, not the whole window.
+        let elapsed = Duration::from_millis(100);
+        assert_eq!(
+            resize_overlay_repaint_delay(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE),
+            fade_start.saturating_sub(elapsed)
+        );
+    }
+
+    #[test]
+    fn repaint_delay_once_animating_is_16ms() {
+        let fade_start = RESIZE_OVERLAY_LINGER.saturating_sub(RESIZE_OVERLAY_FADE);
+        assert_eq!(
+            resize_overlay_repaint_delay(fade_start, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            resize_overlay_repaint_delay(
+                RESIZE_OVERLAY_LINGER,
+                RESIZE_OVERLAY_LINGER,
+                RESIZE_OVERLAY_FADE
+            ),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            resize_overlay_repaint_delay(
+                RESIZE_OVERLAY_LINGER + Duration::from_secs(5),
+                RESIZE_OVERLAY_LINGER,
+                RESIZE_OVERLAY_FADE
+            ),
+            Duration::from_millis(16)
+        );
+    }
+
+    #[test]
+    fn repaint_delay_boundary_matches_is_animating_boundary() {
+        // The two functions must agree at every boundary they share -- this
+        // is the "MUST stay consistent" invariant from both docs, pinned
+        // directly: wherever `resize_overlay_is_animating` is `true`, the
+        // delay must be exactly 16ms; wherever it is `false` (the opaque
+        // phase), the delay must be exactly the time remaining until
+        // fade-start -- which can itself be arbitrarily small (e.g. 1ms
+        // just before the boundary), so the two functions are compared
+        // against the same formula rather than an inequality against 16ms.
+        let fade_start = RESIZE_OVERLAY_LINGER.saturating_sub(RESIZE_OVERLAY_FADE);
+        for millis in [0, 1, 100, 649, 650, 651, 899, 900, 901, 5000] {
+            let elapsed = Duration::from_millis(millis);
+            let animating =
+                resize_overlay_is_animating(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE);
+            let delay =
+                resize_overlay_repaint_delay(elapsed, RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE);
+            if animating {
+                assert_eq!(delay, Duration::from_millis(16), "elapsed={elapsed:?}");
+            } else {
+                assert_eq!(
+                    delay,
+                    fade_start.saturating_sub(elapsed),
+                    "elapsed={elapsed:?} delay={delay:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repaint_delay_with_fade_longer_than_linger_is_always_16ms() {
+        let fade = RESIZE_OVERLAY_LINGER + Duration::from_secs(1);
+        assert_eq!(
+            resize_overlay_repaint_delay(Duration::ZERO, RESIZE_OVERLAY_LINGER, fade),
+            Duration::from_millis(16)
+        );
+    }
+
+    // ── Item 4 (review CONSIDER #4): pin the HUD consistency invariant ────
+
+    #[test]
+    fn resize_overlay_is_animating_and_repaint_delay_stay_consistent_across_ranges() {
+        // The two functions' docs call their mutual consistency
+        // "load-bearing" (disagreement either janks the HUD or never lets it
+        // sleep) but share the `fade_start = linger.saturating_sub(fade)`
+        // formula only by duplication -- nothing previously caught a future
+        // edit to one without the other across anything but the production
+        // LINGER/FADE constants (`repaint_delay_boundary_matches_is_animating_boundary`
+        // above). This generalizes that check across several linger/fade
+        // combinations, including the edge cases the review explicitly
+        // called out: `fade == 0` and `fade > linger`.
+        //
+        // CORRECTNESS NOTE on the invariant actually pinned here: the task
+        // that produced this test described the invariant as
+        // `is_animating(e, l, f) == (repaint_delay(e, l, f) <= 16ms)`. That
+        // formulation is subtly wrong and is deliberately NOT what is
+        // asserted below. Counterexample: with `linger = 900ms`,
+        // `fade = 250ms` (`fade_start = 650ms`), at `elapsed = 640ms`,
+        // `resize_overlay_is_animating` is `false` (still opaque, `640 <
+        // 650`) but `resize_overlay_repaint_delay` returns `10ms`, which
+        // is `<= 16ms` -- the opaque-phase delay counts down toward
+        // `fade_start` and is transiently small in the last <=16ms before
+        // that boundary, with `is_animating` still `false` the whole time.
+        // A literal `<= 16ms` comparison would therefore fail on that
+        // legitimate, correctly-behaving case. The REAL, load-bearing
+        // coupling -- confirmed against both functions' bodies -- is the
+        // exact formula each doc already claims:
+        //   - `animating`  => `repaint_delay == 16ms` (exactly, the fast
+        //     cadence)
+        //   - `!animating` => `repaint_delay == fade_start.saturating_sub(elapsed)`
+        //     (the countdown to fade-start, which may itself be smaller
+        //     than 16ms near the boundary)
+        // That is what is pinned below, per-combination and per-sample.
+        let combos = [
+            (RESIZE_OVERLAY_LINGER, RESIZE_OVERLAY_FADE), // production defaults
+            (Duration::from_millis(900), Duration::ZERO), // fade == 0
+            (Duration::from_millis(900), Duration::from_millis(900)), // fade == linger
+            (Duration::from_millis(500), Duration::from_millis(900)), // fade > linger
+            (Duration::ZERO, Duration::ZERO),             // degenerate: both zero
+        ];
+
+        for (linger, fade) in combos {
+            let fade_start = linger.saturating_sub(fade);
+            let mut samples = vec![
+                Duration::ZERO,
+                fade_start.saturating_sub(Duration::from_millis(1)),
+                fade_start,
+                fade_start + Duration::from_millis(1),
+                linger.saturating_sub(Duration::from_millis(1)),
+                linger,
+                linger + Duration::from_millis(1),
+                linger + Duration::from_secs(5),
+            ];
+            samples.sort();
+            samples.dedup();
+
+            for elapsed in samples {
+                let animating = resize_overlay_is_animating(elapsed, linger, fade);
+                let delay = resize_overlay_repaint_delay(elapsed, linger, fade);
+                if animating {
+                    assert_eq!(
+                        delay,
+                        Duration::from_millis(16),
+                        "linger={linger:?} fade={fade:?} elapsed={elapsed:?}: \
+                         animating must always request exactly 16ms"
+                    );
+                } else {
+                    assert_eq!(
+                        delay,
+                        fade_start.saturating_sub(elapsed),
+                        "linger={linger:?} fade={fade:?} elapsed={elapsed:?}: \
+                         opaque phase must request exactly the countdown to fade-start"
+                    );
+                }
+            }
+        }
     }
 }

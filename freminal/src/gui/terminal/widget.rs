@@ -668,6 +668,18 @@ enum BellFlashOutcome {
     Cleared,
 }
 
+/// Pure mapping from a [`BellFlashOutcome`] to the repaint delay
+/// [`paint_bell_flash`] needs (subtask 121.12), factored out so the
+/// delay-selection logic is unit-testable without a live `egui::Ui` — see
+/// [`paint_bell_flash`]'s doc for why the delay is returned rather than
+/// requested on the `Context` directly.
+const fn bell_flash_repaint_delay(outcome: BellFlashOutcome) -> Option<std::time::Duration> {
+    match outcome {
+        BellFlashOutcome::Fading { .. } => Some(std::time::Duration::from_millis(16)),
+        BellFlashOutcome::Persistent { .. } | BellFlashOutcome::Cleared => None,
+    }
+}
+
 /// Pure decision logic for [`paint_bell_flash`], factored out so it is
 /// unit-testable without a live `egui::Ui`/`Context`.
 ///
@@ -716,13 +728,27 @@ fn bell_flash_outcome(window_focused: bool, elapsed: Duration) -> BellFlashOutco
 /// below (regression fixed here: a bell firing in a background/inactive
 /// pane, or a newly created split/tab that never itself received a real
 /// focus transition, would flash once and then never clear).
-fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
-    let Some(since) = view_state.bell_since else {
-        return;
-    };
+///
+/// Returns the repaint delay this call needs (subtask 121.12): `Some(16ms)`
+/// while a fade is in progress (so the fade continues smoothly next frame),
+/// `None` for the static persistent overlay and the cleared case. THE
+/// CALLER MUST FOLD THE RETURNED DELAY INTO THE PANE'S [`PaneRenderCache`]
+/// via `PaneRenderCache::request_repaint_after` — this function deliberately
+/// does NOT call `ui.ctx().request_repaint_after()` itself, because that
+/// would be invisible to `effective_repaint_delay`'s suppressed-pointer
+/// substitution (in `freminal-windowing`) and would be silently downgraded
+/// to the much longer fallback interval while the mouse is moving over
+/// terminal content.
+fn paint_bell_flash(
+    ui: &Ui,
+    terminal_rect: Rect,
+    view_state: &mut ViewState,
+) -> Option<std::time::Duration> {
+    let since = view_state.bell_since?;
 
     let window_focused = ui.ctx().input(|i| i.focused);
-    match bell_flash_outcome(window_focused, since.elapsed()) {
+    let outcome = bell_flash_outcome(window_focused, since.elapsed());
+    match outcome {
         BellFlashOutcome::Persistent { alpha } => {
             // No repaint request — the overlay is static and doesn't need
             // continuous redraws while the window is in the background.
@@ -732,15 +758,12 @@ fn paint_bell_flash(ui: &Ui, terminal_rect: Rect, view_state: &mut ViewState) {
         BellFlashOutcome::Fading { alpha } => {
             let overlay_color = Color32::from_rgba_premultiplied(alpha, alpha, alpha, alpha);
             ui.painter().rect_filled(terminal_rect, 0.0, overlay_color);
-
-            // Request a repaint so the fade-out continues next frame (~60 fps cap).
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(16));
         }
         BellFlashOutcome::Cleared => {
             view_state.bell_since = None;
         }
     }
+    bell_flash_repaint_delay(outcome)
 }
 
 /// Context menu action produced by the right-click popup.
@@ -1411,6 +1434,14 @@ pub struct PaneRenderCache {
     /// [`PaneFrameDamage`]: crate::gui::renderer::PaneFrameDamage
     /// [`PaneFrameDamage::Unchanged`]: crate::gui::renderer::PaneFrameDamage::Unchanged
     pub(crate) last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage,
+    /// Repaint delay this pane's `show()` needs, folded to the shortest across
+    /// every in-frame requester. Drained by `central_body` after `show()`
+    /// returns and folded into `shortest_repaint_delay`, so the need is visible
+    /// in `App::take_terminal_requested_delay` (subtask 121.12). Requesting a
+    /// repaint directly on the `Context` here would be invisible to
+    /// `effective_repaint_delay`'s suppressed-pointer substitution and would be
+    /// silently downgraded to the fallback interval.
+    pub(crate) pending_repaint_delay: Option<std::time::Duration>,
 }
 
 impl PaneRenderCache {
@@ -1452,6 +1483,7 @@ impl PaneRenderCache {
             placeholder_hit_rects: Vec::new(),
             last_rendered_image_pixel_ptrs: std::collections::HashMap::new(),
             last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage::Unchanged,
+            pending_repaint_delay: None,
         }
     }
 
@@ -1518,6 +1550,32 @@ impl PaneRenderCache {
         self.last_rendered_line_widths = None;
         self.shaping_cache.clear();
         self.last_rendered_image_pixel_ptrs.clear();
+    }
+
+    /// Record that some in-frame animation (bell flash, cursor trail,
+    /// animated image, gutter hover clear, scrollbar damage) needs another
+    /// repaint after `delay`, folding to the shortest delay requested so far
+    /// this frame (subtask 121.12).
+    ///
+    /// Every in-frame repaint need must be routed through this method rather
+    /// than calling `ui.ctx().request_repaint_after()` directly — see the
+    /// doc comment on [`Self::pending_repaint_delay`] for why a direct
+    /// `Context` call is invisible to `effective_repaint_delay`'s
+    /// suppressed-pointer substitution.
+    pub(crate) fn request_repaint_after(&mut self, delay: std::time::Duration) {
+        self.pending_repaint_delay = Some(
+            self.pending_repaint_delay
+                .map_or(delay, |prev| prev.min(delay)),
+        );
+    }
+
+    /// Drain and return the repaint delay accumulated this frame via
+    /// [`Self::request_repaint_after`], if any. Called once per frame by
+    /// `app_impl`'s `central_body` after `show()` returns, so a stale delay
+    /// from a previous frame is never re-folded into the next frame's
+    /// aggregate.
+    pub(crate) const fn take_pending_repaint_delay(&mut self) -> Option<std::time::Duration> {
+        self.pending_repaint_delay.take()
     }
 }
 
@@ -1933,13 +1991,32 @@ impl FreminalTerminalWidget {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if needs_repaint {
-                ui.ctx().request_repaint();
+                // 16ms, not `Duration::ZERO` (subtask 121.12, comment
+                // corrected per review NIT #10): scheduling is unchanged
+                // (`clamp_repaint_delay` already floors any delay, including
+                // a bare `request_repaint()`, at `MIN_REPAINT_INTERVAL` =
+                // 16ms). The reason it must not be `Duration::ZERO` is NOT
+                // that zero would flip `chrome_repaint_settled`'s outcome on
+                // THIS frame — `repaint_delay >= terminal_requested_delay`
+                // is trivially true for equal values regardless of which one
+                // is used. The real reason: an app-side ask of EXACTLY
+                // `Duration::ZERO` makes that settle check permanently
+                // vacuous — nothing can ever be detected as wanting a
+                // repaint sooner than "immediate", so the gate loses its
+                // ability to notice a coincidental concurrent egui-internal
+                // want on any LATER frame where this need recurs. 16ms
+                // preserves that discriminating power, and is
+                // scheduling-equivalent because `clamp_repaint_delay` floors
+                // everything at `MIN_REPAINT_INTERVAL` = 16ms anyway.
+                cache.request_repaint_after(std::time::Duration::from_millis(16));
             }
             cache.pointer_in_gutter_last_frame = effectively_hovered;
         } else if cache.pointer_in_gutter_last_frame {
             // Feature toggled off / alt-screen entered while we were hovering:
-            // draw one clearing frame.
-            ui.ctx().request_repaint();
+            // draw one clearing frame. See the comment above for why 16ms,
+            // not zero, is used here (settle-check discriminating power, not
+            // this frame's outcome).
+            cache.request_repaint_after(std::time::Duration::from_millis(16));
             cache.pointer_in_gutter_last_frame = false;
         }
 
@@ -2971,15 +3048,16 @@ impl FreminalTerminalWidget {
 
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
+            // Folded into `cache` (subtask 121.12), not requested on the
+            // `Context` directly — see `PaneRenderCache::request_repaint_after`.
             if cursor_animating {
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(16));
+                cache.request_repaint_after(std::time::Duration::from_millis(16));
             }
 
             // Drive animated image playback: request a repaint when the next
             // frame is due so animations keep advancing while otherwise idle.
             if let Some(due) = anim_tick.next_due {
-                ui.ctx().request_repaint_after(due);
+                cache.request_repaint_after(due);
             }
         }
 
@@ -3225,14 +3303,25 @@ impl FreminalTerminalWidget {
             effectively_hovered: cache.scrollbar_was_hovered_last_frame,
         };
         if scrollbar_damage_decision(current_scrollbar_state, previous_scrollbar_state) {
-            ui.ctx().request_repaint();
+            // 16ms, not `Duration::ZERO` (subtask 121.12) — see the
+            // gutter-hover comment above for the corrected reasoning:
+            // scheduling is unchanged (already floored at 16ms by
+            // `clamp_repaint_delay`), but a zero app-side ask would make
+            // `chrome_repaint_settled`'s check permanently vacuous rather
+            // than merely changing this frame's outcome.
+            cache.request_repaint_after(std::time::Duration::from_millis(16));
             cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Full;
         }
         cache.scrollbar_was_rendered_last_frame = scrollbar_outcome.rendered;
         cache.scrollbar_was_hovered_last_frame = scrollbar_outcome.hovered;
 
         // ── Visual bell flash overlay ────────────────────────────────
-        paint_bell_flash(ui, rect, view_state);
+        // Fold the returned delay into `cache` (subtask 121.12) — see
+        // `paint_bell_flash`'s doc comment for why it does not request the
+        // repaint on the `Context` directly.
+        if let Some(delay) = paint_bell_flash(ui, rect, view_state) {
+            cache.request_repaint_after(delay);
+        }
 
         // ── Password-prompt lock indicator ───────────────────────────
         // When echo-off is detected (password prompt), paint a lock icon
@@ -4010,7 +4099,7 @@ mod bell_flash_tests {
 
     use super::{
         BELL_FLASH_DURATION, BELL_FLASH_MAX_ALPHA, BELL_PERSISTENT_ALPHA, BellFlashOutcome,
-        bell_flash_outcome,
+        bell_flash_outcome, bell_flash_repaint_delay,
     };
     use std::time::Duration;
 
@@ -4077,6 +4166,36 @@ mod bell_flash_tests {
                 alpha: BELL_PERSISTENT_ALPHA
             }
         );
+    }
+
+    // ── Subtask 121.12: `bell_flash_repaint_delay` ────────────────────────
+    // `paint_bell_flash` itself needs a live `egui::Ui` and cannot be driven
+    // headlessly, so its delay-selection logic is factored into this pure
+    // function and pinned directly here.
+
+    #[test]
+    fn fading_outcome_wants_a_16ms_repaint() {
+        assert_eq!(
+            bell_flash_repaint_delay(BellFlashOutcome::Fading {
+                alpha: BELL_FLASH_MAX_ALPHA
+            }),
+            Some(Duration::from_millis(16))
+        );
+    }
+
+    #[test]
+    fn persistent_outcome_wants_no_repaint() {
+        assert_eq!(
+            bell_flash_repaint_delay(BellFlashOutcome::Persistent {
+                alpha: BELL_PERSISTENT_ALPHA
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn cleared_outcome_wants_no_repaint() {
+        assert_eq!(bell_flash_repaint_delay(BellFlashOutcome::Cleared), None);
     }
 }
 
@@ -4952,5 +5071,66 @@ mod placeholder_tests {
         ];
         assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 50.0)), Some(id_b));
         assert_eq!(hit_test_placeholder(&rects, pos2(50.0, 10.0)), Some(id_a));
+    }
+}
+
+#[cfg(test)]
+mod pane_render_cache_repaint_delay_tests {
+    //! Subtask 121.12: [`PaneRenderCache::request_repaint_after`] /
+    //! [`PaneRenderCache::take_pending_repaint_delay`] — the per-pane
+    //! aggregation seam every in-frame repaint requester now folds through,
+    //! instead of calling `ui.ctx().request_repaint_after()` directly.
+
+    use super::PaneRenderCache;
+    use std::time::Duration;
+
+    #[test]
+    fn no_request_drains_to_none() {
+        let mut cache = PaneRenderCache::new();
+        assert_eq!(cache.take_pending_repaint_delay(), None);
+    }
+
+    #[test]
+    fn single_request_is_returned_unchanged() {
+        let mut cache = PaneRenderCache::new();
+        cache.request_repaint_after(Duration::from_millis(16));
+        assert_eq!(
+            cache.take_pending_repaint_delay(),
+            Some(Duration::from_millis(16))
+        );
+    }
+
+    #[test]
+    fn repeated_requests_fold_to_the_minimum_regardless_of_order() {
+        let mut cache = PaneRenderCache::new();
+        cache.request_repaint_after(Duration::from_millis(250));
+        cache.request_repaint_after(Duration::from_millis(16));
+        cache.request_repaint_after(Duration::from_millis(100));
+        assert_eq!(
+            cache.take_pending_repaint_delay(),
+            Some(Duration::from_millis(16))
+        );
+
+        // Order must not matter — smallest-wins either way.
+        let mut cache = PaneRenderCache::new();
+        cache.request_repaint_after(Duration::from_millis(16));
+        cache.request_repaint_after(Duration::from_millis(250));
+        assert_eq!(
+            cache.take_pending_repaint_delay(),
+            Some(Duration::from_millis(16))
+        );
+    }
+
+    #[test]
+    fn take_drains_the_cache_so_a_stale_delay_never_survives_into_the_next_frame() {
+        let mut cache = PaneRenderCache::new();
+        cache.request_repaint_after(Duration::from_millis(16));
+        assert_eq!(
+            cache.take_pending_repaint_delay(),
+            Some(Duration::from_millis(16))
+        );
+        // Second drain (as if a new frame started with no new requests):
+        // must be `None`, not the previous frame's value.
+        assert_eq!(cache.take_pending_repaint_delay(), None);
     }
 }
