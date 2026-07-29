@@ -2809,6 +2809,17 @@ impl freminal_windowing::App for FreminalGui {
                 let (left_clicked, copied_to_clipboard, deferred_actions) = show_result.inner;
                 all_deferred_actions.extend(deferred_actions);
 
+                // Subtask 121.12: drain this pane's in-frame repaint needs
+                // (bell flash, cursor trail, animated image, gutter hover,
+                // scrollbar damage — folded into `pane.render_cache` by
+                // `show()` rather than requested on the `Context` directly)
+                // and fold the shortest into the frame-wide aggregate so the
+                // need is visible to `App::take_terminal_requested_delay`.
+                if let Some(delay) = pane.render_cache.take_pending_repaint_delay() {
+                    shortest_repaint_delay =
+                        Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
+                }
+
                 if copied_to_clipboard {
                     self.route_freminal_toast(
                         freminal_common::config::FreminalToastCategory::ClipboardCopy,
@@ -3637,7 +3648,18 @@ impl freminal_windowing::App for FreminalGui {
                     painter.rect_filled(text_rect, 6.0, egui::Color32::from_black_alpha(bg_alpha));
                     painter.galley(text_rect.min + egui::vec2(12.0, 12.0), galley, text_color);
                     // Keep animating/timing-out even without further input.
-                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                    // Subtask 121.12: fold into `shortest_repaint_delay`
+                    // (same closure, in scope here) instead of calling
+                    // `ctx.request_repaint_after()` directly — a direct call
+                    // would be invisible to `effective_repaint_delay`'s
+                    // suppressed-pointer substitution and would be silently
+                    // downgraded to the fallback interval while the mouse is
+                    // moving over terminal content. Only the delivery
+                    // mechanism changes; the overlay's own timing/alpha is
+                    // untouched.
+                    let hud_delay = std::time::Duration::from_millis(16);
+                    shortest_repaint_delay =
+                        Some(shortest_repaint_delay.map_or(hud_delay, |prev| prev.min(hud_delay)));
                 }
             }
 
@@ -3856,7 +3878,7 @@ impl freminal_windowing::App for FreminalGui {
                 render_state: &win.toast_render_state,
                 font_manager: win.terminal_widget.font_manager_mut(),
             };
-            stack.show(
+            let repaint_delay = stack.show(
                 ctx,
                 content_rect,
                 window_id,
@@ -3864,6 +3886,25 @@ impl freminal_windowing::App for FreminalGui {
                 resources,
                 pixels_per_point,
             );
+
+            // Subtask 121.12: `ToastStack::show` returns its wanted delay
+            // rather than calling `ctx.request_repaint_after()` itself. This
+            // runs AFTER `central_body` already published
+            // `win.pending_terminal_requested_delay` (~3768 above), so it is
+            // a second aggregation point — the toast stack renders outside
+            // `central_body`, once per window, after the per-window local
+            // aggregate has already been folded and published. Fold it into
+            // that published field too (so `chrome_repaint_settled`'s
+            // suppressed-pointer / next-frame comparisons see it) and
+            // schedule it directly, since `central_body`'s own scheduling
+            // call has already run and will not run again this frame.
+            if let Some(delay) = repaint_delay {
+                win.pending_terminal_requested_delay = Some(
+                    win.pending_terminal_requested_delay
+                        .map_or(delay, |prev| prev.min(delay)),
+                );
+                ctx.request_repaint_after(delay);
+            }
         }
 
         // ── Chrome-damage (#436.3): §3.5 "after" sample + final decision ─────

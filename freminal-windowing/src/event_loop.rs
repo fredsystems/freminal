@@ -93,10 +93,56 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
 /// Deliberately bounded rather than "never repaint": the app requests nothing
 /// when there is no blink schedule to honour (e.g. `DECTCEM` has hidden the
 /// cursor under btop/vim), and in that state an unbounded wait would stall the
-/// window until an unrelated event happened to arrive. ~4fps is far below the
-/// ~60fps this spike exists to eliminate, while still guaranteeing liveness.
+/// window until an unrelated event happened to arrive.
+///
+/// Subtask 121.12 routed every in-frame freminal repaint need (bell flash,
+/// cursor trail, animated images, gutter hover, scrollbar damage) through
+/// `app_requested_delay`, so the only remaining unrepresented need here is
+/// egui's OWN chrome animation — e.g. a hover/tooltip fade still settling
+/// after the pointer moved off chrome onto terminal content. egui's raw
+/// delay is `ZERO` from the suppressed events regardless, so that need is
+/// indistinguishable from "nothing needs a repaint" and the fallback must
+/// stay bounded — `Duration::MAX` would freeze such a fade at partial alpha
+/// until an unrelated event arrived.
+///
+/// 500ms (not the previous 250ms) is chosen to equal the cursor-blink period
+/// requested at `app_impl.rs`'s per-pane scheduling, so that turning the
+/// cursor blink OFF can never schedule MORE frames than leaving it on. The
+/// old 250ms produced exactly that perversity: blink-on floored at a 2fps
+/// wake, blink-off (no `app_requested_delay` at all) fell back to 4fps —
+/// disabling the blink made the idle GUI repaint *more* often, not less.
+///
+/// ## Two distinct, honest gaps (review SHOULD-FIX #2/#3)
+///
+/// The "egui-internal chrome animation" risk above is actually TWO separate
+/// mechanisms, and conflating them understates the second:
+///
+///   1. **Scheduling cadence.** Even when something egui-internal legitimately
+///      wants a wake, this fallback only guarantees a wake every 500ms rather
+///      than every frame — a bounded but coarser cadence than an unsuppressed
+///      frame would give it. This is the risk the paragraph above describes.
+///   2. **Non-construction, not just under-scheduling.** freminal's own chrome
+///      widgets (menu bar, tab bar) are not merely repainted less often on a
+///      settled/`Replay` frame — see `app_impl.rs`'s "FULL vs REPLAY chrome
+///      construction" comment — they are not CONSTRUCTED at all. An
+///      egui-internal animation living inside one of those widgets (e.g. a
+///      hover-fade `Response` that needs `ctx.request_repaint` called again
+///      next frame to keep advancing) would not just be scheduled less often
+///      under continuous suppressed pointer motion; its own advancing logic
+///      would simply not run, because the widget that would have driven it is
+///      not built on `Replay` frames.
+///
+/// **This is latent, not live.** A repo-wide search confirms freminal's chrome
+/// uses no `ctx.animate_bool` / `ctx.animate_value` anywhere (egui's own
+/// per-frame animation-state helpers) — nothing in this codebase currently
+/// relies on mechanism 2 actually recurring frame-over-frame while chrome is
+/// unconstructed. Separately, opening a menu forces `ChromeMode::Full` via
+/// `any_overlay_open` through an unrelated gate (menus are chrome input, and
+/// chrome input forces Full), so the one interactive widget most likely to
+/// carry egui-internal animation state cannot itself be open during a
+/// `Replay` frame.
 const SUPPRESSED_POINTER_FALLBACK_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
+    std::time::Duration::from_millis(500);
 
 /// Task 121 spike: decide the repaint delay to actually schedule, given what
 /// egui asked for and whether the only thing that happened since the previous
@@ -1856,6 +1902,22 @@ mod tests {
         assert!(
             got < std::time::Duration::from_secs(1),
             "fallback must be a bounded wake, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn effective_repaint_delay_fallback_is_never_faster_than_the_blink_period() {
+        // 121.12 perversity pin: the fallback must be `>= 500ms`, the
+        // cursor-blink period `app_impl.rs` schedules per-pane. Before this
+        // subtask the fallback was 250ms, so turning the cursor blink OFF
+        // (no `app_requested_delay` at all -> this fallback) scheduled MORE
+        // frames (4fps) than leaving the blink ON (2fps at the 500ms floor).
+        // A future edit that shrinks this constant back below the blink
+        // period would silently reintroduce that "blink-off is worse than
+        // blink-on" perversity — this test exists so that regresses loudly.
+        assert!(
+            SUPPRESSED_POINTER_FALLBACK_DELAY >= std::time::Duration::from_millis(500),
+            "fallback ({SUPPRESSED_POINTER_FALLBACK_DELAY:?}) must be >= the 500ms blink period"
         );
     }
 

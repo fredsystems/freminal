@@ -1411,6 +1411,16 @@ impl ToastStack {
     /// Clears auto-expired toasts and any the user dismissed by clicking
     /// anywhere within a toast's pill (its `hit_rect_logical`, computed by
     /// `layout_toasts`).
+    ///
+    /// Returns the repaint delay this call needs to keep expiry/animation
+    /// going without further input (subtask 121.12: `Some(16ms)` while any
+    /// toast is animating, `Some(250ms)` if the stack is non-empty but
+    /// settled, `None` when empty). THE CALLER MUST SCHEDULE THE RETURNED
+    /// DELAY — this method deliberately does NOT call
+    /// `ctx.request_repaint_after()` itself, because that would be invisible
+    /// to `effective_repaint_delay`'s suppressed-pointer substitution (in
+    /// `freminal-windowing`) and would be silently downgraded to the
+    /// fallback interval while the mouse is moving over terminal content.
     pub(super) fn show(
         &mut self,
         ctx: &egui::Context,
@@ -1419,9 +1429,9 @@ impl ToastStack {
         resolve_pane_rect: impl Fn(PaneId) -> Option<egui::Rect>,
         resources: ToastFrameResources<'_>,
         pixels_per_point: f32,
-    ) {
+    ) -> Option<Duration> {
         if self.entries.is_empty() {
-            return;
+            return None;
         }
 
         let ToastFrameResources {
@@ -1500,17 +1510,17 @@ impl ToastStack {
         // Remove expired toasts.
         self.entries.retain(|t| !t.is_expired(now));
 
-        // Request a repaint soon so expiry/animation happens even without
+        // Report the delay needed so expiry/animation happens even without
         // input: a fast (16ms, ~60fps) cadence while any toast is animating
         // (entry/exit fade+slide+scale), otherwise a slow (250ms) cadence
-        // just to catch expiry.
-        if !self.entries.is_empty() {
-            let delay = if any_animating {
-                Duration::from_millis(16)
-            } else {
-                Duration::from_millis(250)
-            };
-            ctx.request_repaint_after(delay);
+        // just to catch expiry. The caller schedules this (subtask 121.12) —
+        // see this method's doc comment for why.
+        if self.entries.is_empty() {
+            None
+        } else if any_animating {
+            Some(Duration::from_millis(16))
+        } else {
+            Some(Duration::from_millis(250))
         }
     }
 
