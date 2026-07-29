@@ -588,6 +588,19 @@ impl ChromeGatePredicates {
     const fn all_pass(&self) -> bool {
         self.cache_matches && self.repaint_settled && self.damage_unchanged && self.no_chrome_input
     }
+
+    /// The `ChromeMode` these predicates imply.
+    ///
+    /// Lets a caller that already evaluated the gate (e.g. to also count which
+    /// predicates failed) derive the mode without re-evaluating, so the
+    /// nine-argument list appears exactly once per frame.
+    const fn chrome_mode(&self) -> crate::ChromeMode {
+        if self.all_pass() {
+            crate::ChromeMode::Replay
+        } else {
+            crate::ChromeMode::Full
+        }
+    }
 }
 
 /// #436.4b: evaluate the four independent REPLAY gate predicates. This is
@@ -640,43 +653,6 @@ fn evaluate_chrome_gate(
         repaint_settled: chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay),
         damage_unchanged: prev_chrome_damage == crate::ChromeDamage::Unchanged,
         no_chrome_input: !chrome_input_this_frame,
-    }
-}
-
-/// #436.4b: decide this frame's [`crate::ChromeMode`].
-///
-/// A REPLAY is permitted only when ALL of [`evaluate_chrome_gate`]'s four
-/// predicates hold. Any failure forces `ChromeMode::Full` — the
-/// always-correct, conservative default. Pure (no `self`/`egui` state), so
-/// directly unit-testable.
-#[allow(clippy::too_many_arguments)]
-fn decide_chrome_mode(
-    cache_valid: bool,
-    cache_size: [u32; 2],
-    cache_ppp: f32,
-    cur_size: [u32; 2],
-    cur_ppp: f32,
-    prev_repaint_delay: std::time::Duration,
-    prev_terminal_requested_delay: Option<std::time::Duration>,
-    prev_chrome_damage: crate::ChromeDamage,
-    chrome_input_this_frame: bool,
-) -> crate::ChromeMode {
-    let gate = evaluate_chrome_gate(
-        cache_valid,
-        cache_size,
-        cache_ppp,
-        cur_size,
-        cur_ppp,
-        prev_repaint_delay,
-        prev_terminal_requested_delay,
-        prev_chrome_damage,
-        chrome_input_this_frame,
-    );
-
-    if gate.all_pass() {
-        crate::ChromeMode::Replay
-    } else {
-        crate::ChromeMode::Full
     }
 }
 
@@ -835,7 +811,13 @@ impl EguiState {
             .chrome_cache
             .as_ref()
             .map_or((false, [0, 0], 0.0), |cache| (true, cache.size, cache.ppp));
-        let chrome_mode = decide_chrome_mode(
+        // Evaluated ONCE per frame; the mode is derived from the same
+        // `ChromeGatePredicates` the feature-gated blocker counters below
+        // consume. Previously this argument list appeared twice (once here via
+        // `decide_chrome_mode`, once in the instrumentation), which was the
+        // real drift risk -- the predicates were already shared, the arguments
+        // were not.
+        let gate = evaluate_chrome_gate(
             cache_valid,
             cache_size,
             cache_ppp,
@@ -846,6 +828,7 @@ impl EguiState {
             self.prev_chrome_damage,
             chrome_input_this_frame,
         );
+        let chrome_mode = gate.chrome_mode();
 
         // Task 121 frame-profiling harness: count which `ChromeMode` was
         // just decided. Cross-checkable against `freminal`'s own
@@ -875,17 +858,6 @@ impl EguiState {
         // frame) is visible rather than only ever attributing to one cause.
         #[cfg(feature = "frame-profiling")]
         {
-            let gate = evaluate_chrome_gate(
-                cache_valid,
-                cache_size,
-                cache_ppp,
-                size_arr,
-                ppp_before_run_ui,
-                self.prev_repaint_delay,
-                self.prev_terminal_requested_delay,
-                self.prev_chrome_damage,
-                chrome_input_this_frame,
-            );
             if !gate.cache_matches {
                 self.frame_profile.gate_blocked_cache_mismatch = self
                     .frame_profile
@@ -1687,7 +1659,7 @@ mod frame_profiling_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{atlas_grew, chrome_repaint_settled, decide_chrome_mode, evaluate_chrome_gate};
+    use super::{atlas_grew, chrome_repaint_settled, evaluate_chrome_gate};
     use egui::ImageData;
     use egui::epaint::{ImageDelta, Primitive};
     use egui::{Color32, ColorImage, Rect, TextureId, TextureOptions, TexturesDelta, pos2, vec2};
@@ -1780,7 +1752,7 @@ mod tests {
         }
 
         fn decide(&self) -> crate::ChromeMode {
-            decide_chrome_mode(
+            evaluate_chrome_gate(
                 self.cache_valid,
                 self.cache_size,
                 self.cache_ppp,
@@ -1791,12 +1763,13 @@ mod tests {
                 self.prev_chrome_damage,
                 self.chrome_input_this_frame,
             )
+            .chrome_mode()
         }
 
         /// The four raw gate predicates -- used by the tests below to prove
         /// `evaluate_chrome_gate` (the gate-blocker instrumentation's data
         /// source) fails exactly the expected predicate(s), independent of
-        /// `decide_chrome_mode`'s Full/Replay collapse.
+        /// `ChromeGatePredicates::chrome_mode`'s Full/Replay collapse.
         fn gate(&self) -> super::ChromeGatePredicates {
             evaluate_chrome_gate(
                 self.cache_valid,
@@ -1970,7 +1943,7 @@ mod tests {
     #[test]
     fn blinking_cursor_idle_frame_decides_replay() {
         assert_eq!(
-            decide_chrome_mode(
+            evaluate_chrome_gate(
                 true,
                 [800, 600],
                 1.0,
@@ -1980,7 +1953,8 @@ mod tests {
                 Some(Duration::from_millis(500)),
                 crate::ChromeDamage::Unchanged,
                 false,
-            ),
+            )
+            .chrome_mode(),
             crate::ChromeMode::Replay
         );
     }

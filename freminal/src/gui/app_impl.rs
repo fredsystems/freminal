@@ -236,15 +236,16 @@ const fn pane_hover_region_terms(
 ///
 /// The strip runs from `pane_rect_min_x` (the pane's left edge) to
 /// `pane_rect_min_x + gutter_width_upper_bound_logical`, using `<` (NOT
-/// `<=`) at the far edge: the boundary pixel itself counts as OUTSIDE the
-/// strip. This matters only when `pixels_per_point == 1.0` exactly, the one
-/// case where `gutter_width_upper_bound_logical` (a physical-pixel value
-/// used directly, see `App::pointer_motion_needs_repaint`'s doc) equals the
-/// real logical strip width rather than over-estimating it; at any other
-/// `ppp`, the real strip's own right edge falls strictly inside this
-/// (wider) bound, so the exact `<` vs `<=` choice at `ppp == 1.0`'s single
-/// boundary pixel is a one-pixel edge case with no practical effect on the
-/// suppression this fix restores.
+/// `<=`) at the far edge: the boundary point itself counts as OUTSIDE.
+///
+/// `gutter_width_upper_bound_logical` is the gutter's *total inset* in
+/// logical points (`PerWindowState::cached_gutter_inset_logical`), which is
+/// strictly wider than the painted strip because the inset includes the
+/// padding gap. The real strip's right edge therefore always falls strictly
+/// inside this bound, making the `<` vs `<=` choice at the outer boundary
+/// immaterial. Being a genuine logical measurement, it holds at any
+/// `pixels_per_point` — including fractional scale below 1.0, which broke
+/// the earlier physical-pixels-as-logical approximation.
 ///
 /// Also `false` when `pos_x` is left of the pane entirely (`pos_x <
 /// pane_rect_min_x`) — relevant for multi-pane layouts where a pane's left
@@ -539,6 +540,7 @@ impl freminal_windowing::App for FreminalGui {
                         chrome_frames_rendered: 0,
                         pending_terminal_requested_delay: None,
                         cached_central_rect: None,
+                        cached_gutter_inset_logical: 0.0,
                         chrome_head_rects: None,
                         chrome_border_rects: Vec::new(),
                         frame_stats: super::window::FrameStats::default(),
@@ -848,11 +850,14 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(feature = "frame-profiling")]
         let mut pane_diag_terms: Option<(bool, bool, bool, bool)> = None;
 
-        // Physical-pixel gutter strip width used directly as a conservative
-        // upper bound on the logical strip width (`width_px / ppp`) — see
-        // this method's doc for why `ppp` is unavailable here and why the
-        // over-estimate is safe.
-        let gutter_width_upper_bound_logical = self.config.command_blocks.gutter.width_px();
+        // The gutter's total inset in LOGICAL points, cached by `update()`
+        // (this method runs outside a frame and has no `ppp`). The inset is
+        // strictly wider than the painted strip, so it is a conservative
+        // bound by construction — and unlike the previous
+        // physical-pixels-as-logical approximation it does not depend on
+        // `ppp >= 1.0`, whose safety direction inverts on sub-1.0 fractional
+        // scale. See `PerWindowState::cached_gutter_inset_logical`.
+        let gutter_width_upper_bound_logical = win.cached_gutter_inset_logical;
 
         let pane_signals = win
             .cached_central_rect
@@ -1840,6 +1845,11 @@ impl freminal_windowing::App for FreminalGui {
             } else {
                 0.0
             };
+            // Task 121 spike: publish the LOGICAL inset for
+            // `App::pointer_motion_needs_repaint`, which runs outside a frame
+            // and so has no `ppp` of its own. See the field's doc for why this
+            // beats assuming `ppp >= 1.0`.
+            win.cached_gutter_inset_logical = gutter_inset_logical;
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
@@ -4006,16 +4016,18 @@ impl freminal_windowing::App for FreminalGui {
                     // which individual §3.3 `ChromeSignals` field(s) fired,
                     // cumulative since window creation, name=count joined --
                     // only the non-zero entries (see
-                    // `format_nonzero_signal_counts`'s doc for why: 15
+                    // `format_nonzero_counts`'s doc for why: 15
                     // separate structured fields would be unreadable on the
                     // common case where only 1-2 signals ever fire, e.g. an
                     // idle blinking cursor should show "none" here every
                     // flush once past warm-up).
-                    chrome_signals_fired = %super::window::FrameStats::format_nonzero_signal_counts(
-                        &chrome_damage::ChromeSignals::default()
-                            .named_fields()
-                            .map(|(name, _)| name),
-                        &stats.chrome_signal_fired_counts
+                    chrome_signals_fired = %super::window::FrameStats::format_nonzero_counts(
+                        &std::array::from_fn::<_, 15, _>(|i| {
+                            (
+                                chrome_damage::ChromeSignals::default().named_fields()[i].0,
+                                stats.chrome_signal_fired_counts[i],
+                            )
+                        })
                     ),
                     // Task 121 pointer-motion repaint-gate spike follow-up:
                     // of the `pointer_motion_needs_repaint` calls this flush
@@ -4028,27 +4040,8 @@ impl freminal_windowing::App for FreminalGui {
                     // in `window.rs` for why.
                     pointer_repaint_checks_total = stats.pointer_repaint_check_total.get(),
                     pointer_repaint_conditions_fired =
-                        %super::window::FrameStats::format_nonzero_pointer_condition_counts(
-                            &[
-                                "chrome_interactive",
-                                "any_pane_selecting",
-                                "overlay_open",
-                                "pointer_pane_unresolved",
-                                "mouse_tracking_active",
-                                "has_urls",
-                                "scroll_offset_nonzero",
-                                "gutter_active",
-                            ],
-                            &[
-                                stats.pointer_cond_chrome_interactive.get(),
-                                stats.pointer_cond_any_pane_selecting.get(),
-                                stats.pointer_cond_overlay_open.get(),
-                                stats.pointer_cond_pointer_pane_unresolved.get(),
-                                stats.pointer_cond_mouse_tracking_active.get(),
-                                stats.pointer_cond_has_urls.get(),
-                                stats.pointer_cond_scroll_offset_nonzero.get(),
-                                stats.pointer_cond_gutter_active.get(),
-                            ]
+                        %super::window::FrameStats::format_nonzero_counts(
+                            &stats.pointer_condition_counts()
                         ),
                     "app-side frame-profiling stats (task 121 harness): chrome-mode \
                      duty cycle, zero-pixel-change-but-presented frames, the \
@@ -4375,6 +4368,7 @@ impl FreminalGui {
             chrome_frames_rendered: 0,
             pending_terminal_requested_delay: None,
             cached_central_rect: None,
+            cached_gutter_inset_logical: 0.0,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
             frame_stats: super::window::FrameStats::default(),

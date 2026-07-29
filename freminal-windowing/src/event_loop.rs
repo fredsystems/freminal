@@ -739,14 +739,6 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             app_says_needed,
                         );
 
-                        // Task 121 spike: remember that we suppressed, so the
-                        // next frame can tell egui's "immediate repaint"
-                        // (which it derives purely from its non-empty event
-                        // queue) apart from a genuine egui-side need.
-                        if !schedule_repaint {
-                            state.suppressed_pointer_since_last_frame = true;
-                        }
-
                         #[cfg(feature = "frame-profiling")]
                         if schedule_repaint {
                             state.egui.record_pointer_frame_scheduled();
@@ -804,6 +796,21 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         "matches! guard above restricts event to the five pointer variants"
                     ),
                 }
+
+                // Task 121 spike: `suppressed_pointer_since_last_frame` must
+                // mean "the ONLY input since the last frame was pointer
+                // motion we classified as needing no frame". So ANY event
+                // that genuinely schedules — a click, a wheel tick, a
+                // pointer enter/leave, or a `CursorMoved` the app said
+                // mattered — invalidates that premise and clears the flag.
+                //
+                // Without this, a suppressed motion followed by a click
+                // would leave the flag set when the click's own frame runs,
+                // and the `RedrawRequested` override would then substitute
+                // the app's long delay for the immediate follow-up frame the
+                // click legitimately needed.
+                state.suppressed_pointer_since_last_frame = !schedule_repaint;
+
                 if schedule_repaint {
                     let deadline = Instant::now() + MIN_REPAINT_INTERVAL;
                     state.repaint_at = Some(
@@ -860,6 +867,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     {
                         state.egui.inject_paste(text);
                         state.repaint_at = Some(Instant::now());
+                        // Real input scheduled a frame — see the pointer fast
+                        // path for why this invalidates the suppression premise.
+                        state.suppressed_pointer_since_last_frame = false;
                         // A keyboard event, and it just mutated pane content
                         // via a paste — a potential-chrome-input (#436.4b §3.2).
                         state.chrome_input_pending = true;
@@ -905,6 +915,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 self.app
                     .on_raw_key_event(WindowId(winit_id), raw_event, raw_mods);
                 state.repaint_at = Some(Instant::now());
+                // Real input scheduled a frame — see the pointer fast path for
+                // why this invalidates the suppression premise.
+                state.suppressed_pointer_since_last_frame = false;
                 // A keyboard event, routed straight to the app — a
                 // potential-chrome-input (#436.4b §3.2).
                 state.chrome_input_pending = true;
@@ -934,6 +947,20 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             // disqualify `ChromeMode::Replay`).
             if should_set_chrome_input_pending(&event, response.repaint) {
                 state.chrome_input_pending = true;
+            }
+
+            // Real input that schedules a frame invalidates the suppression
+            // premise — see the pointer fast path for why.
+            //
+            // `RedrawRequested` MUST be excluded, for the same structural
+            // reason it is excluded from the chrome-input gate
+            // (`should_set_chrome_input_pending`): this general path runs
+            // BEFORE the `match` below, and `egui-winit` reports
+            // `repaint: true` for `RedrawRequested`. Clearing the flag here
+            // would therefore wipe it moments before the `RedrawRequested`
+            // arm `mem::take`s it, so the override could never fire at all.
+            if !matches!(event, WindowEvent::RedrawRequested) {
+                state.suppressed_pointer_since_last_frame = false;
             }
 
             if response.repaint {

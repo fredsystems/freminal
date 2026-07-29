@@ -423,6 +423,24 @@ pub(super) struct PerWindowState {
     /// `chrome_cache` is also `None` at that point).
     pub(super) cached_central_rect: Option<egui::Rect>,
 
+    /// Task 121 spike: the command-block gutter's total inset in egui **logical
+    /// points**, cached from `update()` each frame.
+    ///
+    /// `App::pointer_motion_needs_repaint` runs outside a frame, where
+    /// `pixels_per_point` is not available, so it cannot compute
+    /// `inset_px / ppp` itself. Caching the already-computed logical value here
+    /// lets the gutter hit-test use real geometry instead of assuming
+    /// `ppp >= 1.0` to justify treating a physical-pixel width as a logical
+    /// upper bound — an assumption whose safety direction inverts on displays
+    /// reporting fractional scale below 1.0.
+    ///
+    /// This is the total inset (strip + padding gap), which is strictly wider
+    /// than the painted strip, so using it as the hit-test bound stays
+    /// conservative by construction. `0.0` before the first frame, which is
+    /// harmless: `cached_central_rect` is `None` then, and that independently
+    /// forces "needs repaint".
+    pub(super) cached_gutter_inset_logical: f32,
+
     /// #436.8 menu-bar + tab-bar rects (egui logical points), captured on FULL
     /// frames (REPLAY skips building the panels). `None` until the first FULL
     /// frame => `is_chrome_interactive_at` returns the conservative `true`.
@@ -684,20 +702,24 @@ impl FrameStats {
         total.div_f64(count_f.max(1.0))
     }
 
-    /// Format the non-zero entries of `chrome_signal_fired_counts` as a
-    /// single `name=count` comma-joined string for one `tracing` field,
-    /// rather than 15 separate structured fields (which would make the
-    /// already-busy frame-profiling line unreadable on the vast majority of
-    /// frames where only 1-2 signals ever fire). `names` and `counts` are
-    /// parallel arrays, indexed identically to
-    /// `chrome_damage::ChromeSignals::named_fields()`'s order. Returns the
-    /// literal string `"none"` when every count is zero. Pure, so directly
-    /// unit-testable.
-    pub(super) fn format_nonzero_signal_counts(names: &[&str; 15], counts: &[u64; 15]) -> String {
-        let parts: Vec<String> = names
+    /// Format the non-zero `(name, count)` entries as a single `name=count`
+    /// comma-joined string for one `tracing` field, rather than one structured
+    /// field per counter (which would make the already-busy frame-profiling
+    /// line unreadable on the vast majority of frames where only one or two
+    /// counters are ever non-zero).
+    ///
+    /// Takes pre-paired entries rather than parallel `names`/`counts` slices:
+    /// with parallel arrays, reordering one without the other silently
+    /// mislabels every value, and nothing in the type system catches it.
+    /// Callers build the pairs from a single source of truth
+    /// (`ChromeSignals::named_fields`, `Self::pointer_condition_counts`).
+    ///
+    /// Returns the literal string `"none"` when every count is zero. Pure, so
+    /// directly unit-testable.
+    pub(super) fn format_nonzero_counts(entries: &[(&str, u64)]) -> String {
+        let parts: Vec<String> = entries
             .iter()
-            .zip(counts.iter())
-            .filter(|(_, count)| **count > 0)
+            .filter(|(_, count)| *count > 0)
             .map(|(name, count)| format!("{name}={count}"))
             .collect();
         if parts.is_empty() {
@@ -757,27 +779,47 @@ impl FrameStats {
     /// zero. A free-standing pure function over parallel `names`/`counts`
     /// arrays (not `&self`), so it is directly unit-testable without
     /// constructing a `Cell`-bearing `FrameStats`.
-    pub(super) fn format_nonzero_pointer_condition_counts(
-        names: &[&str; 8],
-        counts: &[u64; 8],
-    ) -> String {
-        let parts: Vec<String> = names
-            .iter()
-            .zip(counts.iter())
-            .filter(|(_, count)| **count > 0)
-            .map(|(name, count)| format!("{name}={count}"))
-            .collect();
-        if parts.is_empty() {
-            "none".to_string()
-        } else {
-            parts.join(",")
-        }
-    }
-
     /// Reset the pointer-motion condition counters and the total call
     /// counter (see `record_pointer_motion_check`) back to zero at the end
     /// of a flush window — see `pointer_repaint_check_total`'s field doc
     /// for why these are windowed rather than cumulative-since-creation.
+    /// The eight pointer-motion condition counters paired with their names, in
+    /// declaration order.
+    ///
+    /// Exists so the names and the counter reads cannot drift apart: keeping
+    /// them as two hand-maintained parallel lists at the `tracing` call site
+    /// means reordering one silently mislabels every value, with nothing in the
+    /// type system to catch it. Mirrors
+    /// `chrome_damage::ChromeSignals::named_fields()`, which solves the same
+    /// problem for the chrome signals.
+    pub(super) const fn pointer_condition_counts(&self) -> [(&'static str, u64); 8] {
+        [
+            (
+                "chrome_interactive",
+                self.pointer_cond_chrome_interactive.get(),
+            ),
+            (
+                "any_pane_selecting",
+                self.pointer_cond_any_pane_selecting.get(),
+            ),
+            ("overlay_open", self.pointer_cond_overlay_open.get()),
+            (
+                "pointer_pane_unresolved",
+                self.pointer_cond_pointer_pane_unresolved.get(),
+            ),
+            (
+                "mouse_tracking_active",
+                self.pointer_cond_mouse_tracking_active.get(),
+            ),
+            ("has_urls", self.pointer_cond_has_urls.get()),
+            (
+                "scroll_offset_nonzero",
+                self.pointer_cond_scroll_offset_nonzero.get(),
+            ),
+            ("gutter_active", self.pointer_cond_gutter_active.get()),
+        ]
+    }
+
     pub(super) fn reset_pointer_condition_window(&self) {
         self.pointer_repaint_check_total.set(0);
         self.pointer_cond_chrome_interactive.set(0);
@@ -795,6 +837,14 @@ impl FrameStats {
 mod frame_profiling_tests {
     use super::FrameStats;
     use std::time::Duration;
+
+    /// Zip parallel name/count fixtures into the `(name, count)` pairs
+    /// `format_nonzero_counts` now takes. Test-only: production callers build
+    /// their pairs from a single source of truth (`named_fields`,
+    /// `pointer_condition_counts`) precisely so no parallel arrays exist there.
+    fn pairs<'a, const N: usize>(names: &[&'a str; N], counts: &[u64; N]) -> [(&'a str, u64); N] {
+        std::array::from_fn(|i| (names[i], counts[i]))
+    }
 
     #[test]
     fn duty_cycle_is_zero_with_no_frames() {
@@ -861,32 +911,32 @@ mod frame_profiling_tests {
     ];
 
     #[test]
-    fn format_nonzero_signal_counts_all_zero_is_none() {
+    fn format_nonzero_counts_all_zero_is_none() {
         let counts = [0u64; 15];
         assert_eq!(
-            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&NAMES, &counts)),
             "none"
         );
     }
 
     #[test]
-    fn format_nonzero_signal_counts_shows_only_the_nonzero_entries() {
+    fn format_nonzero_counts_shows_only_the_nonzero_entries() {
         let mut counts = [0u64; 15];
         counts[1] = 3; // style_changed
         counts[13] = 120; // warming_up
         assert_eq!(
-            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&NAMES, &counts)),
             "style_changed=3,warming_up=120"
         );
     }
 
     #[test]
-    fn format_nonzero_signal_counts_preserves_declaration_order() {
+    fn format_nonzero_counts_preserves_declaration_order() {
         let mut counts = [0u64; 15];
         counts[14] = 1; // foreground_overlay_open
         counts[0] = 1; // any_overlay_open
         assert_eq!(
-            FrameStats::format_nonzero_signal_counts(&NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&NAMES, &counts)),
             "any_overlay_open=1,foreground_overlay_open=1",
             "order must follow the array's index order, not insertion order"
         );
@@ -912,7 +962,7 @@ mod frame_profiling_tests {
     fn format_nonzero_pointer_condition_counts_all_zero_is_none() {
         let counts = [0u64; 8];
         assert_eq!(
-            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
             "none"
         );
     }
@@ -923,7 +973,7 @@ mod frame_profiling_tests {
         counts[4] = 12; // mouse_tracking_active
         counts[5] = 3; // has_urls
         assert_eq!(
-            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
             "mouse_tracking_active=12,has_urls=3"
         );
     }
@@ -934,7 +984,7 @@ mod frame_profiling_tests {
         counts[7] = 1; // gutter_active
         counts[0] = 1; // chrome_interactive
         assert_eq!(
-            FrameStats::format_nonzero_pointer_condition_counts(&POINTER_CONDITION_NAMES, &counts),
+            FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
             "chrome_interactive=1,gutter_active=1",
             "order must follow the array's index order, not insertion order"
         );

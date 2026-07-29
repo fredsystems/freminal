@@ -287,13 +287,17 @@ Replay frames at idle) — the entire chrome-cache subsystem was inert since
 issue #436 landed. The gate condition is therefore not simply
 `is_unconditional_chrome_input(event) || response.repaint`; it is
 `should_set_chrome_input_pending(event, response.repaint)`, which forces
-`false` for `RedrawRequested` regardless of `repaint`. **A future egui bump
-must re-verify that `RedrawRequested` is still in this same grouped arm (and
-that no other event which fires unconditionally every frame has joined it)**
-— if egui-winit ever stops reporting `repaint: true` unconditionally for
-`RedrawRequested`, this carve-out becomes a no-op rather than wrong, but if a
-_different_ every-frame event starts reporting unconditional `repaint: true`,
-it would need the same carve-out or the bug returns under a new name.
+`false` for `RedrawRequested` regardless of `repaint`.
+
+**What a future egui bump must re-verify is the _behaviour_, not the source
+layout:** does `on_window_event` still report `repaint: true` for
+`RedrawRequested` (so the carve-out is still needed), and does any _other_
+event that fires unconditionally every frame now report it too (so it would
+need the same carve-out)? How upstream happens to group its match arms is an
+implementation detail that can change freely without affecting this invariant
+— don't check the grouping, check the returned `repaint` value. If egui-winit
+ever stops reporting `repaint: true` for `RedrawRequested`, the carve-out
+becomes a harmless no-op rather than wrong.
 
 - **Our code:** `freminal-windowing/src/event_loop.rs` —
   `is_unconditional_chrome_input`, `should_set_chrome_input_pending` (the
@@ -313,13 +317,17 @@ it would need the same carve-out or the bug returns under a new name.
     not forced FULL — the chrome renders at the wrong scale on a REPLAY frame
     until an unrelated FULL frame fixes it.
   - If the `RedrawRequested` carve-out is removed or "simplified away": no
-    visible pixel symptom, but `ChromeMode::Replay` silently stops firing at
-    idle — the chrome-cache subsystem goes inert again with no compile error
-    and no failing pixel test (only the frame-profiling instrumentation's
-    Replay/Full duty-cycle counters would show it, and only if someone looks).
-    Regression tests: `should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint`
-    and `should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events`
-    in `event_loop.rs`'s test module pin both halves of this behaviour.
+    visible pixel symptom, and `ChromeMode::Replay` silently stops firing at
+    idle — the chrome-cache subsystem goes inert again, as it was for the whole
+    life of #436 before this was found. **This is caught by a unit test, not
+    only by observation:**
+    `should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint`
+    in `event_loop.rs`'s test module fails immediately if the carve-out is
+    dropped, and
+    `should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events`
+    fails if it is over-broadened. The frame-profiling Replay/Full duty-cycle
+    counters are supplementary confirmation in a live session, not the primary
+    detection mechanism.
 
 ### A13 — egui `pixels_per_point` equals winit `scale_factor` (zoom is off)
 

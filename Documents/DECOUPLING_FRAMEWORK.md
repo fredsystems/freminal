@@ -21,9 +21,11 @@ returns `repaint: true` unconditionally for nearly every window event, and
 upstream has declined to change this for three years.
 
 **That thesis is correct about egui's design and wrong about the consequences
-being unavoidable.** Phase 0 found three defects — two ours, one a workable
-override — that together took idle frame cost down 13.4% and pointer-motion
-frame rate from ~61fps to ~2fps. See §2A.
+being unavoidable.** Phase 0 produced three findings — one bug of our own in
+the chrome-cache gate, one confirmation that egui's repaint behaviour is
+exactly as described, and one workaround that suppresses it from outside egui —
+which together took idle frame cost down 13.4% and pointer-motion frame rate
+from ~61fps to ~2fps. See §2A.
 
 What survives as an argument for the rewrite is **not performance**. It is:
 
@@ -261,6 +263,16 @@ works.
   every build; `frame-profiling` gates only the diagnostics. If any of the
   above proves troublesome in the field, the only remedy today is a revert.
   Consider a config toggle before this is relied upon.
+- **Two heap allocations per `CursorMoved`, on the path built to be cheap.**
+  `pane_tree.layout(central_rect)` and `iter_panes()` each allocate a `Vec`
+  inside `pointer_motion_needs_repaint`, which runs at the mouse's full report
+  rate — measured at 425-478 events/s. At ~1000 small allocations/s that is
+  plausibly on the same order as the ~0.077% of a core the suppression leaves
+  behind, i.e. it could be a material fraction of what remains. **Measure
+  before fixing**: add a counter or profile the predicate specifically, then
+  decide between a `layout_into(&mut buf)` variant and a scratch buffer on
+  `PerWindowState`. Do not build the buffers speculatively — every hypothesis
+  in Phase 0 that was acted on without measurement turned out to be wrong.
 
 ### The unifying next step: cell-granular suppression
 
