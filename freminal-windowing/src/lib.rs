@@ -333,6 +333,29 @@ pub trait App {
         true
     }
 
+    /// Task 121 spike (issue: pointer motion over static terminal content
+    /// measured at 58fps vs. 1.95fps idle, 95% of those frames changing zero
+    /// pixels): should THIS `CursorMoved` event schedule a repaint?
+    ///
+    /// `egui-winit` 0.35's `on_window_event` reports `repaint: true`
+    /// unconditionally for `WindowEvent::CursorMoved` — the windowing layer
+    /// cannot distinguish "pointer moved, something might have changed" from
+    /// "pointer moved, nothing on screen changed" using egui's own signal
+    /// alone. This hook lets the app answer that question using state only
+    /// the app has (pane geometry, selection state, mouse-tracking mode,
+    /// open overlays).
+    ///
+    /// Default `true` — conservative: an app that has not wired this up
+    /// keeps the pre-Task-121 "every pointer motion schedules a repaint"
+    /// behavior exactly. This is purely a repaint-SCHEDULING gate (whether
+    /// `event_loop` calls `window.request_redraw()` for this event at all);
+    /// it does not affect `is_chrome_interactive_at`'s separate
+    /// chrome-damage axis, and `MouseInput`/`MouseWheel`/`CursorEntered`/
+    /// `CursorLeft` are deliberately NOT gated by this — only `CursorMoved`.
+    fn pointer_motion_needs_repaint(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+        true
+    }
+
     /// Hook to modify raw input before egui processes it.
     ///
     /// Default implementation does nothing.

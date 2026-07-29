@@ -1,38 +1,43 @@
 # Decoupling Framework — Owning the Frame Schedule
 
-> **Status: RATIFIED DIRECTION + IMPLEMENTATION PLAN.** The "should we do
-> this?" question is closed. The maintainer has ruled: freminal will stop
-> using egui for the main terminal window and own its own frame schedule and
-> chrome drawing. This document is the working plan an agent executes from.
-> It supersedes the earlier framing/iteration version of this file.
+> **Status: DIRECTION REOPENED — leaning AGAINST the rewrite.** An earlier
+> revision of this file declared the rewrite ratified. **Phase 0 overtook that
+> ruling.** Measurement found three cheap fixes inside egui that between them
+> recovered most of the benefit the rewrite was meant to deliver, so the
+> maintainer's position is now *leaning no* — explicitly undecided, not closed.
 >
-> This is **not** yet a `PLAN_VERSION_*.md` and the tasks below are **not**
-> yet in `MASTER_PLAN.md`. Version assignment happens once Phase 1 lands and
-> the roadmap is re-sequenced (deliberately deferred — see "Roadmap" below).
+> Read §2A before acting on anything below. Phases 1-5 are retained as the
+> plan-of-record **if** the rewrite is chosen, and Phase 1 is worth doing
+> regardless, but do **not** treat the rewrite as agreed.
+>
+> This is **not** a `PLAN_VERSION_*.md` and these tasks are **not** in
+> `MASTER_PLAN.md`.
 
 ## 0. TL;DR
 
-egui cannot give freminal a demand-driven render model. Its contract is "an
-input event runs a frame", `egui-winit` returns `repaint: true` unconditionally
-for nearly every window event, and upstream has declined to change this for
-three years. Every workaround freminal has built to fight this pins correctness
-to undocumented egui internals.
+The original thesis was: egui cannot give freminal a demand-driven render
+model, because its contract is "an input event runs a frame", `egui-winit`
+returns `repaint: true` unconditionally for nearly every window event, and
+upstream has declined to change this for three years.
 
-Measurement (see §2) found something worse than expected: the largest such
-workaround — the `#436` chrome cache — **never engages at all**. So freminal
-carries 13 undocumented-internal assumptions, an exact `=0.35.0` pin, a
-Renovate no-auto-merge rule and a dedicated upgrade skill in exchange for an
-optimisation that measurably does nothing.
+**That thesis is correct about egui's design and wrong about the consequences
+being unavoidable.** Phase 0 produced three findings — one bug of our own in
+the chrome-cache gate, one confirmation that egui's repaint behaviour is
+exactly as described, and one workaround that suppresses it from outside egui —
+which together took idle frame cost down 13.4% and pointer-motion frame rate
+from ~61fps to ~2fps. See §2A.
 
-The plan: extract the orchestration layer, build a small purpose-built UI layer
-on top of the **existing** winit + glutin + custom-GL stack, cut the main
-window over, and delete the entire damage/scheduling workaround category.
-Auxiliary OS windows (settings) keep egui, possibly forever.
+What survives as an argument for the rewrite is **not performance**. It is:
 
-**The performance win is modest and that is accepted.** The justification is
-architectural: deleting a category of undocumented-internals debt and owning
-the frame schedule. Anyone reading this later should not expect the numbers in
-§2 to justify a rewrite on CPU grounds alone — they do not.
+1. Reliance on undocumented egui internals (13 catalogued assumptions, two
+   flagged untested by their own authors).
+2. Edge cases that keep surfacing in the damage-tracking machinery.
+3. How ugly that machinery becomes as those edge cases accumulate.
+
+Those are real and unresolved, but they are a maintainability judgement, not a
+measurement. **Nobody should read this document as evidence that the numbers
+justify a rewrite. They do not, and after Phase 0 they justify it less than
+when this file was first written.**
 
 ## 1. How we got here (evidence trail)
 
@@ -56,9 +61,9 @@ found a **new** egui-internal dependency:
 
 - **Event-queue accumulation.** Calling `on_window_event` without running a
   frame accumulates `egui::Event`s (drained only at `take_egui_input`), so a
-  later frame double-forwards. _Note: this obstacle turned out to be
+  later frame double-forwards. *Note: this obstacle turned out to be
   overstated — `State::egui_input_mut()` is public, so the queue can be
-  drained manually. It does not rescue the overall position._
+  drained manually. It does not rescue the overall position.*
 - **`interact_pos` vs `latest_pos` one-frame lag** on window exit (PR #461).
 - **`on_keyboard_input`'s `is_cmd` / `is_printable_char` gating** determines
   whether egui emits `Event::Text`; a fast path must mirror it exactly.
@@ -79,8 +84,8 @@ re-derives a piece of egui's private frame/input model.
 `WindowEvent` variant except three (`ActivationTokenDone`, `AxisMotion`,
 `DoubleTapGesture`). There is no gating on pointer position or hit-test.
 
-- Issue #3017 (2023), emilk: _"there is no way to turn if off at the moment,
-  but feel free to open a PR."_
+- Issue #3017 (2023), emilk: *"there is no way to turn if off at the moment,
+  but feel free to open a PR."*
 - Restated in #5387 (2024, proposal never implemented — `raw_input_hook` still
   returns `()`), #7371 (2025), #8326 (2026). Never fixed.
 - **0.35.0 is the latest release.** No upgrade path helps.
@@ -155,14 +160,198 @@ Two findings here: **21% of frames presented with nothing changed at all**
 
 - They **do not** justify removing egui on CPU grounds. egui is 21% of an idle
   frame; `swap` alone is 52% and no UI toolkit change touches it.
-- They **do** justify it on maintenance grounds: the workaround subsystem is
-  large, risky, pinned to private egui behaviour, and delivers nothing.
 - Partial present works and **must survive** any rewrite.
-- Still unmeasured: **mouse-move**, **typing** and **btop** workloads. Mouse-move
-  is the important gap — it is the frequency axis where egui's unconditional
-  `repaint: true` actually bites. Requires a human at the machine.
 
-## 3. Target end state
+## 2A. Phase 0 results — why the direction reopened
+
+Three findings, in the order they landed. All are on
+`task-121/repaint-gate-fixes`.
+
+### Finding 1 — `ChromeMode::Replay` had never once engaged (FIXED)
+
+Measured 0 Replay frames out of 360 at idle. Root cause: every frame is driven
+by `WindowEvent::RedrawRequested`; `egui-winit` returns `repaint: true` for it
+(it sits in a grouped arm commented *"Things that may require repaint"*); the
+chrome-input gate consumed that as evidence of input; and the same event's
+handler then read the flag back via `std::mem::take` ~110 lines later in the
+same call. **The event that drove the frame disqualified the frame.**
+
+A one-line carve-out fixed it. Steady-state Replay went 0% → 100%:
+
+| Metric               | Before | After   | Change |
+| -------------------- | ------ | ------- | ------ |
+| chrome construction  | 69 us  | 10 us   | -86%   |
+| freminal's own       | 96 us  | 42 us   | -56%   |
+| total per idle frame | 434 us | 376 us  | -13.4% |
+| partial present      | 115/120 | 120/120 | —     |
+
+**This destroyed the strongest maintenance argument in this document.** The
+claim was "we carry 13 undocumented assumptions for an optimisation that never
+fires". It fires now, and it delivers.
+
+### Finding 2 — the frequency axis is real (QUANTIFIED)
+
+Pointer motion over static terminal content: **58-61fps versus 1.95fps idle**
+(~2% of a core), with **95% of frames changing zero pixels**. The
+repaint-cause harness named the culprit exactly — `egui-0.35.0/src/context.rs`
+`begin_pass` → `InputState::wants_repaint_after()`, which returns
+`Duration::ZERO` whenever `!self.events.is_empty()`. Any input event, and egui
+demands an immediate repaint of itself. Not gated on hit-testing, not on
+whether a pixel changed.
+
+Zero freminal call sites appeared in the causes, which excluded the gutter,
+scrollbar and cursor-trail hypotheses by measurement rather than argument.
+
+### Finding 3 — it can be suppressed from outside egui (SPIKE, PROVISIONAL)
+
+Suppressing the input side alone achieves **nothing**: suppressed events still
+must go to `on_window_event` (egui's pointer state has to stay fresh), so they
+queue in `RawInput.events`, so egui re-arms a 16ms frame from *inside* the
+frame. Measured: 99.99% of pointer events suppressed, frame rate unchanged at
+61fps. egui owns the schedule from both ends.
+
+Overriding `frame_output.repaint_delay` when the only thing since the last
+frame was suppressed pointer motion breaks the loop: **61fps → 2.05fps**,
+matching the ~2Hz blink rate exactly (which is what shows the window is live,
+not stalled). ~2% of a core → ~0.08%.
+
+The original bench run was confounded (the tester accidentally clicked/dragged
+and left the window partway). **It was subsequently corroborated by an
+independent A/B on different hardware** — a laptop, different observer, no
+accidental input — which is stronger evidence than a clean re-run of the same
+test would have been:
+
+| Workload   | Before        | After                  |
+| ---------- | ------------- | ---------------------- |
+| idle       | 0.0-0.3% CPU  | flat 0.0%              |
+| mouse move | up to 0.6%    | occasional 0.1% spikes |
+
+Same machine, wezterm for comparison: 0.0% at both idle and mouse move.
+**Caveat on that comparison: wezterm is not blinking a cursor at 2 Hz.**
+Freminal's floor is ~2 fps of blink frames by construction, so the honest
+apples-to-apples test is freminal with `cursor.blink = false` — untested, and
+likely to close most of the remaining gap.
+
+Verdict: the mechanism is real and the magnitude is corroborated. Remaining
+work on this axis is closing the gaps below, not re-litigating whether it
+works.
+
+### Finding 3's known gaps
+
+- **`has_urls` and `scroll_offset > 0` are pane-wide.** Any pane containing a
+  hyperlink, or scrolled back at all, reverts to full-rate scheduling for
+  motion anywhere in it. Conservative direction (costs benefit, not
+  correctness). **This is the biggest remaining win** — see "cell-granular
+  suppression" below.
+- **`animation_in_flight` tests presence, not motion.** It is
+  `resize_overlay.is_some() || !toasts.is_empty()`, but a toast only requests
+  16 ms while actually fading (entry/exit); during its steady hold it requests
+  250 ms, and the resize HUD is fully opaque for 650 ms of its 900 ms life. So
+  any visible toast or HUD disables suppression for its whole ~1-3 s life, not
+  just its animating portion. Superset of correct, so safe, but wasteful. The
+  fix is to surface `toast.rs`'s existing `any_animating` local as a real
+  signal.
+- **The gutter strip's safety rests on `pixels_per_point >= 1.0`.** The bound
+  uses `width_px` directly as a logical width, which over-estimates only while
+  `ppp >= 1.0`. On a display reporting fractional scale below 1.0 the
+  guarantee **inverts** to a possible under-estimate, i.e. a stale gutter
+  hover tint until the next frame. Low likelihood, cosmetic, bounded. Exact
+  fix: cache `pixels_per_point` on `PerWindowState` during `update()` and
+  compute `width_px / ppp`. Deliberately not done — it needs per-frame
+  caching machinery this spike did not justify.
+- **The spike is default-on with no kill switch.** It changes scheduling for
+  every build; `frame-profiling` gates only the diagnostics. If any of the
+  above proves troublesome in the field, the only remedy today is a revert.
+  Consider a config toggle before this is relied upon.
+- **Two heap allocations per `CursorMoved`, on the path built to be cheap.**
+  `pane_tree.layout(central_rect)` and `iter_panes()` each allocate a `Vec`
+  inside `pointer_motion_needs_repaint`, which runs at the mouse's full report
+  rate — measured at 425-478 events/s. At ~1000 small allocations/s that is
+  plausibly on the same order as the ~0.077% of a core the suppression leaves
+  behind, i.e. it could be a material fraction of what remains. **Measure
+  before fixing**: add a counter or profile the predicate specifically, then
+  decide between a `layout_into(&mut buf)` variant and a scratch buffer on
+  `PerWindowState`. Do not build the buffers speculatively — every hypothesis
+  in Phase 0 that was acted on without measurement turned out to be wrong.
+
+### The unifying next step: cell-granular suppression
+
+The `has_urls` and selection-drag coarseness have the **same** root cause and
+the same fix. Nearly all of the terminal's interactive state changes at **cell**
+granularity, not pixel granularity: URL hover, gutter hover, selection extent,
+and mouse-tracking reports are all per-cell. Pointer motion within a single
+cell therefore cannot change any of them.
+
+So: cache the pane's terminal-rect origin and logical cell size during
+`update()`, track the pointer's **cell** rather than its position, and suppress
+any `CursorMoved` that does not cross a cell boundary. That single mechanism:
+
+- removes the `has_urls` pane-wide veto (only wake when the hovered cell
+  changes, so a pane full of hyperlinks still suppresses),
+- lets **selection drags suppress too** (the selection's end cell is what
+  matters, so a drag only needs a frame when it crosses into a new cell),
+- subsumes the gutter test (the gutter is per-row),
+- and is correct for mouse-tracking mode (reports are per-cell).
+
+The scrollbar must stay excluded — thumb dragging is genuinely pixel-granular.
+
+This is the highest-value follow-up on the scheduling axis and is strictly
+freminal-owned logic with no egui dependence.
+
+### Beyond scheduling: per-frame cost
+
+With scheduling largely handled, the remaining cost is per-frame work, and
+issue #459's unactioned candidate list is the roadmap. Highest-value first, per
+the maintainer:
+
+1. **Font/text pipeline** — unicode width, rustybuzz shaping (#459 item 4's
+   ASCII/simple-text fast path), and `build_foreground_instances`. Judged the
+   most logical next target.
+2. **Non-incremental vertex-instance build** (#459 item 3) — both
+   `build_background_instances` and `build_foreground_instances` clear and walk
+   every visible row unconditionally; there is no per-row incremental vertex
+   path. `instanced_bg_partial_dirty` / `instanced_fg_partial_dirty` already
+   quantify the recoverable headroom.
+3. GPU buffer-orphaning for `deco_verts` (#459 item 5), compute-shader clear
+   scope (item 6), `wayland_client_handle` call frequency (item 7).
+
+Note the idle work generalises: the same per-frame savings apply on the active
+path (new PTY data, scrolling), so this is not idle-only tuning.
+
+Already done and not to be redone: `FaceId` caches to `FxHashMap` (#459 item 1,
+PR #460) — the largest single CPU win before this session's work.
+
+### Where that leaves the decision
+
+The performance case is spent. Idle was already 0.073% of a core; mouse-move
+went from ~2% to ~0.08%. Nothing in the measured data justifies a multi-version
+rewrite on CPU grounds.
+
+What remains, and what the decision now rests on entirely:
+
+- **Undocumented-internals reliance.** Finding 3's override is freminal
+  overriding egui's judgement. It keys off *our* classification rather than
+  egui source-line matching, so it should survive version bumps better than
+  the 13 existing assumptions — but it is one more thing that has to be
+  re-verified on every bump.
+- **Edge cases.** The suppression predicate already needed four rounds:
+  pane-wide gutter (too coarse, fixed), `has_urls` and `scroll_offset`
+  (still coarse, accepted), and animation-in-flight (toasts / resize-HUD,
+  structurally invisible to a positional predicate, folded in explicitly).
+  Every future always-animating chrome element needs the same treatment.
+- **Ugliness.** Judge `pointer_motion_needs_repaint` and
+  `effective_repaint_delay` on the branch and decide whether that is a shape
+  worth maintaining indefinitely.
+
+**Maintainer position as of the end of Phase 0: leaning against the rewrite,
+explicitly undecided.**
+
+### Still unmeasured
+
+**Typing** and **btop** (hidden-cursor / `DECTCEM`) workloads, plus the clean
+re-run of Finding 3. All need a human at the machine.
+
+## 3. Target end state (only if the rewrite is chosen)
 
 ```text
 freminal (binary: GUI)
@@ -326,20 +515,33 @@ Wayland + IBus works.
 Each phase must leave `cargo test --all` green and the app usable. No
 big-bang cutover.
 
-### Phase 0 — finish measuring
+### Phase 0 — measure (mostly DONE, see §2A)
 
-- **0.1** Fix the two `ctx.request_repaint_after` call sites in
-  `terminal/widget.rs` (cursor-trail animation, animated-image tick) that
-  bypass `shortest_repaint_delay` and therefore defeat `chrome_repaint_settled`.
-  These are the prime suspect for the 0.0% `Replay` duty cycle. Re-run the idle
-  capture and record whether the duty cycle moves.
-- **0.2** Capture mouse-move, typing and btop workloads (needs a human).
-  Mouse-move is the frequency axis and the most important remaining unknown.
-- **0.3** Cross-validate with `perf record --call-graph dwarf,65528 --no-inline`
-  per the #459 methodology.
-- **0.4** Rule on whether `#436` is salvageable or dies with egui.
-- **0.5** Write the `DESIGN_DECISIONS.md` entry, recording the direction **and**
-  the inconvenient numbers from §2.
+- **0.1** ~~Fix the two `ctx.request_repaint_after` call sites in
+  `terminal/widget.rs`~~ — **DONE differently.** The hypothesis was wrong:
+  those two sites surface as `not_settled`, which stops firing after warm-up.
+  Instrumenting the gate instead identified `RedrawRequested` as the real and
+  total blocker (Finding 1). The two call sites remain unfixed and are now
+  known to be benign at idle. **Lesson: this hypothesis cost nothing only
+  because it was instrumented rather than acted on.**
+- **0.2** Capture mouse-move — **DONE** (Finding 2). **Typing and btop still
+  outstanding**; both need a human at the machine.
+- **0.3** Cross-validate with `perf record --call-graph dwarf,65528
+  --no-inline` per the #459 methodology — **NOT DONE.** The in-app harness
+  proved sufficient to root-cause all three findings, so this was never
+  needed; keep it in reserve if a finding is ever disputed.
+- **0.4** Rule on whether `#436` is salvageable — **DONE: yes, it works.**
+  It was inert due to a one-line bug, now fixed. This inverts the earlier
+  conclusion; see Finding 1.
+- **0.5** Write the `DESIGN_DECISIONS.md` entry — **OUTSTANDING.** Must record
+  the direction *and* the inconvenient numbers, including that Phase 0
+  weakened the case for the rewrite rather than strengthening it.
+- **0.6** **NEW, required before the spike is trusted:** clean, unconfounded
+  before/after run of Finding 3.
+- **0.7** **NEW:** decide whether the spike's animation-in-flight term is
+  sufficient or needs a general "something is animating" signal, and whether
+  the `has_urls` / `scroll_offset` pane-wide approximations are acceptable
+  permanently or need per-span geometry.
 
 ### Phase 1 — orchestration extraction (no behaviour change)
 
@@ -398,9 +600,14 @@ freminal binary. Keeps winit + glutin.
 - **3.3** Port HOT chrome: tab bar, scrollbar, gutter, bell, resize HUD, lock
   icon, context menu, search, command-history, tab rename. Toasts already done.
 - **3.4** Ship with `hide_menu_bar` forced on.
-- **3.5** Delete the `#435`/`#436` three-axis machinery and assumptions A5–A13.
-  **Preserve the partial-present path** — it demonstrably works (115 of 120
-  idle frames).
+- **3.5** Retire the `#435`/`#436` three-axis machinery and assumptions A5–A13.
+  **Two things must be REPLACED, not merely deleted** — both are now measured
+  to work and removing them without an equivalent is a regression:
+  - **Partial present** — 120/120 idle frames present as `Partial`.
+  - **Chrome caching** — since the Finding 1 fix, `Replay` engages on 100% of
+    steady-state idle frames and saves 69 us → 10 us of chrome construction
+    per frame (-86%). An earlier revision of this document said "delete"; that
+    was written when the subsystem was inert and is wrong now.
 - **3.6** Keep egui alive for auxiliary windows only.
 
 ### Phase 4 — menu bar
@@ -467,6 +674,16 @@ should be closed when the roadmap is next touched.
 - PR #464 — the two landed fixes; the `post_event` classifier is a clean
   example of orchestration logic wanting a home.
 - Commit `0620cc60` — the frame-profiling harness and the §2 numbers.
+- Commit `436a54f1` — gate-blocker + per-signal instrumentation; how Finding 1
+  was isolated rather than guessed.
+- Commit `7d483998` — **the `RedrawRequested` fix (Finding 1).** Worth reading
+  even if the rewrite is abandoned; it is the single highest-value change of
+  the whole investigation.
+- Commit `ab88d0f5` — repaint-cause instrumentation; how Finding 2 named egui's
+  `context.rs` as the culprit and excluded freminal's own call sites.
+- Commit `19780e16` — **the suppression spike (Finding 3).** Read
+  `pointer_motion_needs_repaint` and `effective_repaint_delay` here to judge
+  the "how ugly does this get" question directly.
 - `Documents/EGUI_UPGRADE_ASSUMPTIONS.md` — assumptions A1–A13; A6 and A13 are
   flagged by their own authors as untested.
 - `.opencode/skills/freminal-architecture` — invariants in §10.

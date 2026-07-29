@@ -112,6 +112,201 @@ const fn pointer_forces_full_present(
     pointer_moving && (pointer_over_chrome || border_drag_active)
 }
 
+/// Task 121 pointer-motion repaint-gate spike: per-pane signals feeding
+/// [`pointer_motion_needs_repaint_decision`], for whichever pane (if any) is
+/// under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PointerMotionPaneSignals {
+    /// The pane's terminal application has requested mouse reporting
+    /// (`TerminalSnapshot::mouse_tracking != MouseTrack::NoTracking`) — if
+    /// it is receiving mouse reports, motion must always be forwarded, so a
+    /// repaint is always needed.
+    mouse_tracking_active: bool,
+    /// See [`pane_hover_region_risk`]'s doc: a coarse, pane-level (not
+    /// pixel-precise) approximation of "this pane may have a hover-sensitive
+    /// band region (URL, command-block gutter, or scrollbar) this frame".
+    hover_region_risk: bool,
+}
+
+/// Task 121 spike (residual-risk approximation — see the doc on
+/// `App::pointer_motion_needs_repaint`'s freminal-side implementation for
+/// the full writeup): may this pane have a hover-sensitive band region that
+/// pointer motion anywhere in the pane could affect?
+///
+/// This is deliberately **pane-level, not pixel/cell-precise**: the exact
+/// strip/thumb geometry (gutter width, scrollbar track rect, per-cell
+/// hyperlink spans) is computed inside the per-frame render pass using
+/// `pixels_per_point` and the live `terminal_rect`/`gutter_rect` split
+/// (`terminal/widget.rs`), neither of which is available at the
+/// `pointer_motion_needs_repaint` call site (outside a frame, before
+/// `pixels_per_point` for a possible new frame is known). Rather than
+/// guess at that geometry, this function treats each of the three
+/// hover-sensitive band regions as risking the WHOLE pane whenever its
+/// cheap, always-available precondition holds:
+///   - `has_urls`: the pane's visible content contains at least one
+///     hyperlink anywhere (`TerminalSnapshot::has_urls`) — approximates
+///     "pointer motion might enter/leave a URL span" as "pointer motion
+///     anywhere in this pane", since the precise cell-to-hyperlink hit test
+///     (`flat_index_for_cell` + `url_tag_indices` lookup in
+///     `terminal/widget.rs`) is render-pass-only state.
+///   - `scroll_offset > 0`: the scrollbar is only rendered/interactive when
+///     scrolled back (`handle_scrollbar`'s own gate) — approximates "over
+///     the scrollbar track" as "anywhere in this pane while scrolled back".
+///   - `gutter_config_active && !is_alternate_screen && command_blocks_non_empty
+///     && pointer_in_gutter_strip`:
+///     the command-block gutter strip is only meaningful when the feature is
+///     on, the pane has at least one block, and the alternate screen (which
+///     never shows the gutter) is not active — AND, unlike the other two
+///     terms, this one IS pixel-precise: `pointer_in_gutter_strip` is a real
+///     `pos.x` test against the pane's left-edge gutter strip (see the doc
+///     on `App::pointer_motion_needs_repaint`'s `gutter_width_upper_bound_logical`
+///     for how that test is computed without needing `pixels_per_point` at
+///     this call site). This term was measured (Task 121 spike) to fire on
+///     100% of pointer-motion checks in any session with auto-detected
+///     command blocks before the positional test was added — the whole pane
+///     was being treated as gutter-hover-sensitive.
+///
+/// Pure, so directly unit-testable without constructing a `Pane`/snapshot.
+// Each bool is an independent, unrelated precondition for one of the three
+// hover-sensitive band regions (URL, scrollbar, gutter) -- not a state
+// machine; bundling them into an enum would not express any real combined
+// state and would only obscure the call site (mirrors the existing allow on
+// `terminal/widget.rs`'s `show`).
+#[allow(clippy::fn_params_excessive_bools)]
+const fn pane_hover_region_risk(
+    has_urls: bool,
+    scroll_offset: usize,
+    is_alternate_screen: bool,
+    command_blocks_non_empty: bool,
+    gutter_config_active: bool,
+    pointer_in_gutter_strip: bool,
+) -> bool {
+    let (has_urls, scroll_offset_nonzero, gutter_active) = pane_hover_region_terms(
+        has_urls,
+        scroll_offset,
+        is_alternate_screen,
+        command_blocks_non_empty,
+        gutter_config_active,
+        pointer_in_gutter_strip,
+    );
+    has_urls || scroll_offset_nonzero || gutter_active
+}
+
+/// Task 121 diagnostic: the three independent preconditions
+/// [`pane_hover_region_risk`] ORs together, exposed separately so a caller
+/// can count which one(s) actually fired rather than only the aggregate
+/// (see `FreminalGui::pointer_motion_needs_repaint`'s
+/// `#[cfg(feature = "frame-profiling")]` recording block). `pane_hover_region_risk`
+/// itself calls this and ORs the three results, so the two functions can
+/// never disagree about what "hover region risk" means — this is a pure
+/// refactor of that function's body, not a second, independently-maintained
+/// copy of its logic.
+///
+/// Returns `(has_urls, scroll_offset_nonzero, gutter_active)`. See
+/// `pane_hover_region_risk`'s doc for what each term approximates. Pure, so
+/// directly unit-testable.
+///
+/// `pointer_in_gutter_strip` is the positional term (Task 121 fix): `true`
+/// when the pointer's x-coordinate falls within the gutter's left-edge
+/// strip for this pane. Passing `true` unconditionally reproduces the
+/// pre-fix pane-wide approximation; real callers pass a real rect test —
+/// see `App::pointer_motion_needs_repaint`.
+// Same rationale as `pane_hover_region_risk`'s matching allow: six
+// independent, unrelated preconditions, not a state machine.
+#[allow(clippy::fn_params_excessive_bools)]
+const fn pane_hover_region_terms(
+    has_urls: bool,
+    scroll_offset: usize,
+    is_alternate_screen: bool,
+    command_blocks_non_empty: bool,
+    gutter_config_active: bool,
+    pointer_in_gutter_strip: bool,
+) -> (bool, bool, bool) {
+    (
+        has_urls,
+        scroll_offset > 0,
+        gutter_config_active
+            && !is_alternate_screen
+            && command_blocks_non_empty
+            && pointer_in_gutter_strip,
+    )
+}
+
+/// Task 121 fix: is `pos_x` within the pane's left-edge gutter strip?
+///
+/// The strip runs from `pane_rect_min_x` (the pane's left edge) to
+/// `pane_rect_min_x + gutter_width_upper_bound_logical`, using `<` (NOT
+/// `<=`) at the far edge: the boundary point itself counts as OUTSIDE.
+///
+/// `gutter_width_upper_bound_logical` is the gutter's *total inset* in
+/// logical points (`PerWindowState::cached_gutter_inset_logical`), which is
+/// strictly wider than the painted strip because the inset includes the
+/// padding gap. The real strip's right edge therefore always falls strictly
+/// inside this bound, making the `<` vs `<=` choice at the outer boundary
+/// immaterial. Being a genuine logical measurement, it holds at any
+/// `pixels_per_point` — including fractional scale below 1.0, which broke
+/// the earlier physical-pixels-as-logical approximation.
+///
+/// Also `false` when `pos_x` is left of the pane entirely (`pos_x <
+/// pane_rect_min_x`) — relevant for multi-pane layouts where a pane's left
+/// edge is not at window x=0.
+///
+/// Pure, so directly unit-testable without a live pane/rect.
+const fn pointer_in_gutter_strip(
+    pos_x: f32,
+    pane_rect_min_x: f32,
+    gutter_width_upper_bound_logical: f32,
+) -> bool {
+    pos_x >= pane_rect_min_x && pos_x < pane_rect_min_x + gutter_width_upper_bound_logical
+}
+
+/// Task 121 pointer-motion repaint-gate spike: the composed decision behind
+/// `App::pointer_motion_needs_repaint`'s freminal-side implementation.
+/// Extracted as a pure function over already-computed signals so it is
+/// unit-testable without a live `FreminalGui`/windowing stack (a full
+/// `FreminalGui`/`PerWindowState` cannot be constructed headlessly —
+/// `freminal_windowing::WindowId` has no public constructor outside the real
+/// winit event loop).
+///
+/// Returns `true` (a repaint is needed) if ANY of:
+///   - `chrome_interactive`: `App::is_chrome_interactive_at` said so (menu
+///     bar, tab bar, split-border drag sensor).
+///   - `any_pane_selecting`: some pane in the active tab has an
+///     in-progress selection drag (`ViewState::selection.is_selecting`).
+///   - `overlay_open`: some UI overlay/popup/tooltip/context menu is open
+///     this window.
+///   - `pointer_pane_unresolved`: the pane under the pointer could not be
+///     determined at all (no FULL frame has rendered yet, so there is no
+///     cached pane layout to hit-test against) — conservative "unknown".
+///   - `pane_signals` resolved to `Some` (a specific pane is under the
+///     pointer) AND that pane's `mouse_tracking_active` or
+///     `hover_region_risk` (see [`pane_hover_region_risk`]) is `true`.
+///
+/// When `pane_signals` is `None` because the pointer is simply not over any
+/// pane (e.g. over inter-pane padding not covered by a chrome-border
+/// sensor), that is NOT `pointer_pane_unresolved` — it is a legitimate "no
+/// pane, so no pane-specific signal applies" case, contributing `false`.
+// Each bool is an independent, unrelated forcing condition (chrome
+// interactivity, selection drag, overlay presence, pane-resolution
+// failure) -- not a state machine; see `pane_hover_region_risk`'s matching
+// allow for the same rationale.
+#[allow(clippy::fn_params_excessive_bools)]
+const fn pointer_motion_needs_repaint_decision(
+    chrome_interactive: bool,
+    any_pane_selecting: bool,
+    overlay_open: bool,
+    pointer_pane_unresolved: bool,
+    pane_signals: Option<PointerMotionPaneSignals>,
+) -> bool {
+    if chrome_interactive || any_pane_selecting || overlay_open || pointer_pane_unresolved {
+        return true;
+    }
+    match pane_signals {
+        Some(s) => s.mouse_tracking_active || s.hover_region_risk,
+        None => false,
+    }
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -345,6 +540,7 @@ impl freminal_windowing::App for FreminalGui {
                         chrome_frames_rendered: 0,
                         pending_terminal_requested_delay: None,
                         cached_central_rect: None,
+                        cached_gutter_inset_logical: 0.0,
                         chrome_head_rects: None,
                         chrome_border_rects: Vec::new(),
                         frame_stats: super::window::FrameStats::default(),
@@ -544,6 +740,245 @@ impl freminal_windowing::App for FreminalGui {
                 &win.chrome_border_rects,
             )
         })
+    }
+
+    /// Task 121 pointer-motion repaint-gate spike: wires real per-window/
+    /// per-pane state into [`pointer_motion_needs_repaint_decision`]. See
+    /// that function's doc for the exact forcing conditions, and
+    /// [`pane_hover_region_risk`]'s doc for the residual-risk approximation
+    /// used for URL/gutter/scrollbar hover regions.
+    ///
+    /// Reuses `win.pending_chrome_signals.any_overlay_open`/
+    /// `foreground_overlay_open` — the persisted #436 §3.3 signals from the
+    /// most recently rendered frame — for the "any overlay/popup/tooltip/
+    /// context menu is open" bullet, rather than recomputing the
+    /// `ui_overlay_open`/`foreground_overlay_open` scans (`update()`'s
+    /// `CentralPanel` closure, around `app_impl.rs` lines 1841 and
+    /// 2708-2733): this method runs OUTSIDE any frame (from `event_loop`'s
+    /// `CursorMoved` handling), where that scan's inputs (menu state,
+    /// dialog `Ui`s, etc.) are not in scope.
+    ///
+    /// ## Gutter positional test (Task 121 fix)
+    ///
+    /// The pane-level `gutter_active` term used to be pane-wide
+    /// (`gutter_config_active && !alt_screen && !command_blocks.is_empty()`),
+    /// which measured at 100% fired on every pointer-motion check in any
+    /// session with auto-detected command blocks (Task 121 spike), making
+    /// suppression a no-op. The gutter is actually a narrow strip on the
+    /// pane's LEFT edge (`terminal/widget.rs`'s `gutter_rect`, built from
+    /// `pane_rect.min.x .. pane_rect.min.x + gutter.width_px() / ppp`), so
+    /// this method now also tests `pos.x` against that strip using the
+    /// SAME pane rect this method already resolves for pane hit-testing
+    /// (`layout`, below) — no separate rect computation.
+    ///
+    /// `pixels_per_point` (`ppp`) is not available at this call site (it is
+    /// only known once egui begins a frame; this method runs from
+    /// `event_loop`'s `CursorMoved` handling, outside any frame), and
+    /// `PerWindowState` does not cache it — adding that cache purely for
+    /// this one comparison would be new per-frame machinery for a single
+    /// read. Instead this uses `gutter.width_px()` (physical pixels)
+    /// DIRECTLY as an upper bound on the logical strip width
+    /// `width_px / ppp`: since `ppp >= 1.0` on every realistic display,
+    /// `width_px / ppp <= width_px`, so testing `pos.x < pane_rect.min.x +
+    /// width_px` only ever widens the strip relative to the real
+    /// (smaller-or-equal) one — it can cause the gutter term to fire when
+    /// the real strip would not have (false positive => an unnecessary
+    /// repaint, never a missed one), which is the safe direction for a
+    /// repaint gate.
+    // The pane-resolution chain (layout -> hit-test -> snapshot load ->
+    // signal computation), the `#[cfg(feature = "frame-profiling")]`
+    // diagnostic recording interleaved with it (so the diagnostic can
+    // never drift from the real computation, see the comments inline),
+    // and the gutter positional test together exceed the line budget;
+    // splitting the diagnostic block out would either duplicate the
+    // pane-resolution logic or require threading its intermediate values
+    // back out through a wider return type, both worse than the length.
+    #[allow(clippy::too_many_lines)]
+    fn pointer_motion_needs_repaint(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
+        let Some(win) = self.windows.get(&window_id) else {
+            // Unknown window -> conservative (mirrors `is_chrome_interactive_at`).
+            return true;
+        };
+
+        let chrome_interactive = self.is_chrome_interactive_at(window_id, pos);
+        // Animation-in-flight terms. The rest of this predicate is *positional*
+        // ("does the pointer's current position matter?"), which is structurally
+        // blind to "something is mid-animation somewhere in this window,
+        // regardless of where the pointer is". Toasts and the resize-overlay HUD
+        // both animate every frame independent of pointer position and drive
+        // their own ~16ms repaint requests; without these terms, wandering the
+        // pointer over plain terminal content during a toast fade would let the
+        // `RedrawRequested` override substitute the app's much longer delay for
+        // the animation's cadence, making the fade visibly step instead of
+        // animate. Bounded (<=500ms) rather than a freeze, but a real visual
+        // regression reachable from an already-shipped feature.
+        //
+        // `try_borrow` failing means someone up-stack holds the `RefCell`; treat
+        // that as "toasts may be active" (conservative), never as "no toasts".
+        let animation_in_flight = win.resize_overlay.is_some()
+            || self
+                .toasts
+                .try_borrow()
+                .map_or(true, |stack| !stack.is_empty());
+        let overlay_open = win.pending_chrome_signals.any_overlay_open
+            || win.pending_chrome_signals.foreground_overlay_open
+            || animation_in_flight;
+
+        let active_tab = win.tabs.active_tab();
+        // `PaneError::InvalidState` (empty tree) is a bug state that should
+        // never happen in normal operation -- conservative true on `Err`.
+        let any_selecting = active_tab.pane_tree.iter_panes().map_or(true, |panes| {
+            panes
+                .iter()
+                .any(|pane| pane.view_state.selection.is_selecting)
+        });
+
+        let pointer_pane_unresolved = win.cached_central_rect.is_none();
+
+        let gutter_config_active = self.config.command_blocks.enabled
+            && self.config.command_blocks.gutter != freminal_common::config::GutterPosition::Off;
+
+        // Task 121 diagnostic (defect: which repaint-gate condition(s)
+        // fire, and how often -- see `super::window::PointerMotionConditionFlags`'s
+        // doc): the pane-level sub-terms recorded below, filled in from
+        // inside the `.map()` closure just below (the only place `snap`,
+        // and therefore the individual `pane_hover_region_terms` inputs,
+        // are in scope) when a pane resolves under the pointer. Stays
+        // `None` when no pane resolves -- diagnostically equivalent to
+        // `pane_signals: None`, i.e. all four pane-level counters simply
+        // don't fire for this call.
+        #[cfg(feature = "frame-profiling")]
+        let mut pane_diag_terms: Option<(bool, bool, bool, bool)> = None;
+
+        // The gutter's total inset in LOGICAL points, cached by `update()`
+        // (this method runs outside a frame and has no `ppp`). The inset is
+        // strictly wider than the painted strip, so it is a conservative
+        // bound by construction — and unlike the previous
+        // physical-pixels-as-logical approximation it does not depend on
+        // `ppp >= 1.0`, whose safety direction inverts on sub-1.0 fractional
+        // scale. See `PerWindowState::cached_gutter_inset_logical`.
+        let gutter_width_upper_bound_logical = win.cached_gutter_inset_logical;
+
+        let pane_signals = win
+            .cached_central_rect
+            .and_then(|central_rect| {
+                // Mirror `update()`'s own zoomed-vs-split layout choice
+                // (app_impl.rs:1678) exactly: when a pane is zoomed, it
+                // alone fills `central_rect`; otherwise the tree's normal
+                // split layout applies. Getting this wrong would silently
+                // mis-hit-test the pointer against panes that are not
+                // actually the one currently rendered full-size.
+                let layout = active_tab.zoomed_pane.map_or_else(
+                    || {
+                        active_tab
+                            .pane_tree
+                            .layout(central_rect)
+                            .unwrap_or_default()
+                    },
+                    |zoomed_id| vec![(zoomed_id, central_rect)],
+                );
+                // Resolve BOTH the pane id and its rect from the same
+                // `layout` lookup `panes::pane_at_pos` would otherwise
+                // perform internally (Task 121 fix): the gutter positional
+                // test below needs the pane's rect, not just its id, and
+                // recomputing/re-deriving that rect separately would risk
+                // it drifting out of sync with the rect actually used for
+                // hit-testing.
+                layout
+                    .iter()
+                    .find(|(_, rect)| rect.contains(pos))
+                    .map(|(id, rect)| (*id, *rect))
+            })
+            .and_then(|(pane_id, pane_rect)| {
+                active_tab
+                    .pane_tree
+                    .find(pane_id)
+                    .map(|pane| (pane, pane_rect))
+            })
+            .map(|(pane, pane_rect)| {
+                let snap = pane.arc_swap.load();
+                let mouse_tracking_active = snap.mouse_tracking
+                    != freminal_common::buffer_states::modes::mouse::MouseTrack::NoTracking;
+                // Task 121 fix: real positional test against the pane's
+                // left-edge gutter strip, using the SAME `pane_rect` just
+                // resolved for pane hit-testing above (see this method's
+                // doc for the `ppp`-unavailable / conservative-bound
+                // rationale).
+                let pointer_in_gutter_strip_now = pointer_in_gutter_strip(
+                    pos.x,
+                    pane_rect.min.x,
+                    gutter_width_upper_bound_logical,
+                );
+                let hover_region_risk = pane_hover_region_risk(
+                    snap.has_urls,
+                    snap.scroll_offset,
+                    snap.is_alternate_screen,
+                    !snap.command_blocks.is_empty(),
+                    gutter_config_active,
+                    pointer_in_gutter_strip_now,
+                );
+
+                // Task 121 diagnostic: the same inputs, broken out into
+                // their three individual terms (see `pane_hover_region_terms`'s
+                // doc) purely for per-condition counting -- does not
+                // affect `hover_region_risk`/the real decision above.
+                #[cfg(feature = "frame-profiling")]
+                {
+                    let (has_urls, scroll_offset_nonzero, gutter_active) = pane_hover_region_terms(
+                        snap.has_urls,
+                        snap.scroll_offset,
+                        snap.is_alternate_screen,
+                        !snap.command_blocks.is_empty(),
+                        gutter_config_active,
+                        pointer_in_gutter_strip_now,
+                    );
+                    pane_diag_terms = Some((
+                        mouse_tracking_active,
+                        has_urls,
+                        scroll_offset_nonzero,
+                        gutter_active,
+                    ));
+                }
+
+                PointerMotionPaneSignals {
+                    mouse_tracking_active,
+                    hover_region_risk,
+                }
+            });
+
+        // Task 121 diagnostic: count which condition(s) fired for this
+        // call, `saturating_add`'d into `win.frame_stats`'s Task 121
+        // counters (see `FrameStats::record_pointer_motion_check`'s doc for
+        // why `Cell` makes this possible through `win`'s immutable
+        // borrow). Read out, logged, and reset every `FLUSH_EVERY` drawn
+        // frames from the app-side flush further down in `update()`.
+        // Counting only -- does not read from or influence
+        // `pointer_motion_needs_repaint_decision`'s return value below.
+        #[cfg(feature = "frame-profiling")]
+        {
+            let (mouse_tracking_active, has_urls, scroll_offset_nonzero, gutter_active) =
+                pane_diag_terms.unwrap_or_default();
+            win.frame_stats.record_pointer_motion_check(
+                super::window::PointerMotionConditionFlags {
+                    chrome_interactive,
+                    any_pane_selecting: any_selecting,
+                    overlay_open,
+                    pointer_pane_unresolved,
+                    mouse_tracking_active,
+                    has_urls,
+                    scroll_offset_nonzero,
+                    gutter_active,
+                },
+            );
+        }
+
+        pointer_motion_needs_repaint_decision(
+            chrome_interactive,
+            any_selecting,
+            overlay_open,
+            pointer_pane_unresolved,
+            pane_signals,
+        )
     }
 
     fn take_frame_damage(&mut self, window_id: WindowId) -> freminal_windowing::FrameDamage {
@@ -1410,6 +1845,11 @@ impl freminal_windowing::App for FreminalGui {
             } else {
                 0.0
             };
+            // Task 121 spike: publish the LOGICAL inset for
+            // `App::pointer_motion_needs_repaint`, which runs outside a frame
+            // and so has no `ppp` of its own. See the field's doc for why this
+            // beats assuming `ppp >= 1.0`.
+            win.cached_gutter_inset_logical = gutter_inset_logical;
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
@@ -2894,6 +3334,26 @@ impl freminal_windowing::App for FreminalGui {
                 foreground_overlay_open,
             };
 
+            // Task 121 frame-profiling harness follow-up (issue #459/#461
+            // gate-blocker investigation): count which individual §3.3
+            // signal(s) fired this frame, indexed identically to
+            // `ChromeSignals::named_fields()`'s exhaustive destructure (see
+            // that method's doc for why a future 16th field cannot be
+            // silently missed here). More than one signal can fire the same
+            // frame; every one that did gets counted, not just the first.
+            #[cfg(feature = "frame-profiling")]
+            for (i, (_, fired)) in win
+                .pending_chrome_signals
+                .named_fields()
+                .into_iter()
+                .enumerate()
+            {
+                if fired {
+                    win.frame_stats.chrome_signal_fired_counts[i] =
+                        win.frame_stats.chrome_signal_fired_counts[i].saturating_add(1);
+                }
+            }
+
             // ── Window-level post-processing pass ────────────────────
             //
             // When a user GLSL shader is active, the window FBO now contains
@@ -3552,14 +4012,59 @@ impl freminal_windowing::App for FreminalGui {
                         stats.frames_drawn
                     )
                     .as_micros(),
+                    // Gate-blocker investigation (issue #459/#461 follow-up):
+                    // which individual §3.3 `ChromeSignals` field(s) fired,
+                    // cumulative since window creation, name=count joined --
+                    // only the non-zero entries (see
+                    // `format_nonzero_counts`'s doc for why: 15
+                    // separate structured fields would be unreadable on the
+                    // common case where only 1-2 signals ever fire, e.g. an
+                    // idle blinking cursor should show "none" here every
+                    // flush once past warm-up).
+                    chrome_signals_fired = %super::window::FrameStats::format_nonzero_counts(
+                        &std::array::from_fn::<_, 15, _>(|i| {
+                            (
+                                chrome_damage::ChromeSignals::default().named_fields()[i].0,
+                                stats.chrome_signal_fired_counts[i],
+                            )
+                        })
+                    ),
+                    // Task 121 pointer-motion repaint-gate spike follow-up:
+                    // of the `pointer_motion_needs_repaint` calls this flush
+                    // window, how many total, and which of the eight named
+                    // conditions fired on how many of them (non-exclusive --
+                    // several can fire on the same call; each counted
+                    // independently, see `record_pointer_motion_check`).
+                    // WINDOWED (reset below), unlike `chrome_signals_fired`
+                    // above -- see `pointer_repaint_check_total`'s field doc
+                    // in `window.rs` for why.
+                    pointer_repaint_checks_total = stats.pointer_repaint_check_total.get(),
+                    pointer_repaint_conditions_fired =
+                        %super::window::FrameStats::format_nonzero_counts(
+                            &stats.pointer_condition_counts()
+                        ),
                     "app-side frame-profiling stats (task 121 harness): chrome-mode \
-                     duty cycle, zero-pixel-change-but-presented frames, and the \
+                     duty cycle, zero-pixel-change-but-presented frames, the \
                      freminal-owned phase_app_update/phase_orchestration/phase_panes \
                      wall-clock split (phase_app_update = the whole productive body of \
                      update(); phase_orchestration = central_body total minus the \
-                     per-pane show() contribution) over frames_drawn drawn frames for \
-                     this window_id"
+                     per-pane show() contribution), which individual §3.3 \
+                     ChromeSignals field(s) fired (chrome_signals_fired, cumulative, \
+                     non-zero entries only) over frames_drawn drawn frames for this \
+                     window_id, and -- the pointer-motion repaint-gate spike \
+                     follow-up -- how many of the last pointer_repaint_checks_total \
+                     `pointer_motion_needs_repaint` calls each of the eight named \
+                     gate conditions fired on this flush window \
+                     (pointer_repaint_conditions_fired, non-zero entries only, \
+                     reset every flush window)"
                 );
+
+                // Windowed, not cumulative-since-creation (see the field
+                // doc) -- clear now that this window's line has been
+                // logged. `chrome_signal_fired_counts` above is NOT reset;
+                // it stays cumulative like every other plain `FrameStats`
+                // counter.
+                stats.reset_pointer_condition_window();
             }
         }
 
@@ -3863,6 +4368,7 @@ impl FreminalGui {
             chrome_frames_rendered: 0,
             pending_terminal_requested_delay: None,
             cached_central_rect: None,
+            cached_gutter_inset_logical: 0.0,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
             frame_stats: super::window::FrameStats::default(),
@@ -4077,7 +4583,9 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        SettingsOwnerCloseDecision, cursor_blink_wants_repaint, pointer_forces_full_present,
+        PointerMotionPaneSignals, SettingsOwnerCloseDecision, cursor_blink_wants_repaint,
+        pane_hover_region_risk, pane_hover_region_terms, pointer_forces_full_present,
+        pointer_in_gutter_strip, pointer_motion_needs_repaint_decision,
         settings_owner_close_decision,
     };
     use freminal_common::cursor::CursorVisualStyle;
@@ -4164,6 +4672,199 @@ mod tests {
         assert!(!pointer_forces_full_present(false, false, true));
         // Not moving, neither chrome nor drag -> no forced Full.
         assert!(!pointer_forces_full_present(false, false, false));
+    }
+
+    // ── Task 121 pointer-motion repaint-gate spike ───────────────────────
+
+    #[test]
+    fn pane_hover_region_risk_all_clear_is_false() {
+        assert!(!pane_hover_region_risk(false, 0, false, false, true, true));
+    }
+
+    #[test]
+    fn pane_hover_region_risk_has_urls_is_true_regardless_of_everything_else() {
+        assert!(pane_hover_region_risk(true, 0, true, false, false, false));
+    }
+
+    #[test]
+    fn pane_hover_region_risk_scrolled_back_is_true() {
+        assert!(pane_hover_region_risk(false, 1, false, false, false, false));
+    }
+
+    #[test]
+    fn pane_hover_region_risk_at_live_bottom_is_not_risky_from_scroll_alone() {
+        assert!(!pane_hover_region_risk(
+            false, 0, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn pane_hover_region_risk_gutter_needs_all_four_conditions() {
+        // Feature enabled + blocks present + not alt screen + pointer in the
+        // strip -> risky.
+        assert!(pane_hover_region_risk(false, 0, false, true, true, true));
+        // Any one of the four missing -> not risky (from gutter alone).
+        assert!(!pane_hover_region_risk(false, 0, false, true, false, true)); // feature off
+        assert!(!pane_hover_region_risk(false, 0, false, false, true, true)); // no blocks
+        assert!(!pane_hover_region_risk(false, 0, true, true, true, true)); // alt screen
+        assert!(!pane_hover_region_risk(false, 0, false, true, true, false)); // pointer outside strip
+    }
+
+    // ── Task 121 fix: gutter positional term (pane_hover_region_terms) ───
+    //
+    // These exercise `pane_hover_region_terms`'s `gutter_active` output
+    // directly (rather than through `pane_hover_region_risk`'s aggregate
+    // OR) so the positional term's truth table is visible on its own,
+    // matching the diagnostic counter that reads this same tuple.
+
+    #[test]
+    fn pane_hover_region_terms_gutter_active_true_when_pointer_in_strip() {
+        let (_, _, gutter_active) = pane_hover_region_terms(false, 0, false, true, true, true);
+        assert!(gutter_active);
+    }
+
+    #[test]
+    fn pane_hover_region_terms_gutter_active_false_when_pointer_right_of_strip() {
+        // The headline case this fix addresses: previously the pane-wide
+        // approximation made this `true` unconditionally whenever blocks
+        // were present; it must now be `false` once the pointer is past the
+        // strip.
+        let (_, _, gutter_active) = pane_hover_region_terms(false, 0, false, true, true, false);
+        assert!(!gutter_active);
+    }
+
+    #[test]
+    fn pane_hover_region_terms_gutter_active_false_when_disabled_or_off_or_alt_or_no_blocks() {
+        // Pointer inside the strip in all four cases -- only the named
+        // precondition is what makes each `false`.
+        let (_, _, disabled) = pane_hover_region_terms(false, 0, false, true, false, true);
+        assert!(!disabled, "feature disabled must suppress gutter_active");
+
+        let (_, _, alt_screen) = pane_hover_region_terms(false, 0, true, true, true, true);
+        assert!(!alt_screen, "alt screen must suppress gutter_active");
+
+        let (_, _, no_blocks) = pane_hover_region_terms(false, 0, false, false, true, true);
+        assert!(!no_blocks, "no command blocks must suppress gutter_active");
+    }
+
+    // ── Task 121 fix: `pointer_in_gutter_strip` rect test ────────────────
+
+    #[test]
+    fn pointer_in_gutter_strip_true_inside_the_strip() {
+        // Pane's left edge at x=10, strip width 4 -> strip is [10, 14).
+        assert!(pointer_in_gutter_strip(11.0, 10.0, 4.0));
+    }
+
+    #[test]
+    fn pointer_in_gutter_strip_false_right_of_the_strip() {
+        // The headline case: pointer well past the strip.
+        assert!(!pointer_in_gutter_strip(50.0, 10.0, 4.0));
+    }
+
+    #[test]
+    fn pointer_in_gutter_strip_boundary_at_exact_far_edge_is_false() {
+        // Chosen convention: the far edge (`pane_rect_min_x + width`) is
+        // exclusive, matching a half-open `[min, min+width)` strip -- see
+        // this function's doc for why the `ppp == 1.0` edge case is the
+        // only one where this choice is observable at all.
+        assert!(!pointer_in_gutter_strip(14.0, 10.0, 4.0));
+        // Just inside is still true.
+        assert!(pointer_in_gutter_strip(13.999, 10.0, 4.0));
+    }
+
+    #[test]
+    fn pointer_in_gutter_strip_false_left_of_pane_rect() {
+        // Multi-pane layouts can place a pane's left edge away from x=0;
+        // a pointer left of THIS pane's left edge is not in THIS pane's
+        // gutter strip (it is presumably over a different pane or a
+        // border/padding region).
+        assert!(!pointer_in_gutter_strip(5.0, 10.0, 4.0));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_all_clear_is_false() {
+        assert!(!pointer_motion_needs_repaint_decision(
+            false, false, false, false, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_chrome_interactive_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            true, false, false, false, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_any_pane_selecting_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            false, true, false, false, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_overlay_open_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            false, false, true, false, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_unresolved_pane_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            false, false, false, true, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_no_pane_under_pointer_is_false() {
+        // Pointer resolved to "no pane here" (e.g. inter-pane padding) --
+        // NOT the same as unresolved; contributes false on its own.
+        assert!(!pointer_motion_needs_repaint_decision(
+            false, false, false, false, None
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_mouse_tracking_active_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            false,
+            false,
+            false,
+            false,
+            Some(PointerMotionPaneSignals {
+                mouse_tracking_active: true,
+                hover_region_risk: false,
+            })
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_hover_region_risk_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            false,
+            false,
+            false,
+            false,
+            Some(PointerMotionPaneSignals {
+                mouse_tracking_active: false,
+                hover_region_risk: true,
+            })
+        ));
+    }
+
+    #[test]
+    fn pointer_motion_needs_repaint_decision_pane_signals_both_false_is_false() {
+        assert!(!pointer_motion_needs_repaint_decision(
+            false,
+            false,
+            false,
+            false,
+            Some(PointerMotionPaneSignals {
+                mouse_tracking_active: false,
+                hover_region_risk: false,
+            })
+        ));
     }
 
     #[test]

@@ -86,6 +86,50 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
     delay.max(MIN_REPAINT_INTERVAL)
 }
 
+/// Task 121 spike: fallback wake interval used when pointer motion was
+/// suppressed, egui asked for an immediate repaint purely because of those
+/// suppressed events, and the app itself requested no delay at all.
+///
+/// Deliberately bounded rather than "never repaint": the app requests nothing
+/// when there is no blink schedule to honour (e.g. `DECTCEM` has hidden the
+/// cursor under btop/vim), and in that state an unbounded wait would stall the
+/// window until an unrelated event happened to arrive. ~4fps is far below the
+/// ~60fps this spike exists to eliminate, while still guaranteeing liveness.
+const SUPPRESSED_POINTER_FALLBACK_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Task 121 spike: decide the repaint delay to actually schedule, given what
+/// egui asked for and whether the only thing that happened since the previous
+/// frame was pointer motion the app classified as needing no frame.
+///
+/// egui's `InputState::wants_repaint_after` returns `Duration::ZERO` whenever
+/// its event queue is non-empty. Suppressed pointer events are still handed to
+/// `on_window_event` (egui's pointer state must stay fresh), so they sit in
+/// that queue and egui re-arms an immediate frame from *inside* the frame —
+/// a self-sustaining ~60fps loop that input-side suppression alone cannot
+/// break. When `suppressed_only` holds, that zero is attributable to those
+/// events and is overridden with whatever the app itself asked for.
+///
+/// The fallback is deliberately bounded, NOT `Duration::MAX`: the app requests
+/// nothing when it has no blink schedule to honour (e.g. `DECTCEM` hid the
+/// cursor under btop/vim), and an unbounded wait there would stall the window
+/// until an unrelated event arrived. A stalled terminal is far worse than an
+/// occasional redundant frame.
+///
+/// Pure so the liveness-critical substitution is unit-testable without a live
+/// event loop — this is the highest-risk logic in the spike.
+fn effective_repaint_delay(
+    suppressed_only: bool,
+    repaint_delay: std::time::Duration,
+    app_requested_delay: Option<std::time::Duration>,
+) -> std::time::Duration {
+    if suppressed_only && repaint_delay.is_zero() {
+        app_requested_delay.unwrap_or(SUPPRESSED_POINTER_FALLBACK_DELAY)
+    } else {
+        repaint_delay
+    }
+}
+
 /// Returns `true` for the narrow set of physical keys that egui 0.35 cannot
 /// deliver: print/pause/menu keys, keypad operators and digits, and the
 /// media keys winit's `KeyCode` exposes (Task 114). These are intercepted
@@ -173,6 +217,50 @@ const fn is_unconditional_chrome_input(event: &WindowEvent) -> bool {
     )
 }
 
+/// #436.4b §3.2 chrome-input gate decision for the general (non-pointer)
+/// `window_event` path: should `event` force `WindowState::chrome_input_pending`
+/// for the frame it arrives in, given whether `egui-winit`'s
+/// `on_window_event` reported `repaint` for it?
+///
+/// This is `is_unconditional_chrome_input(event) || repaint` — EXCEPT for
+/// `WindowEvent::RedrawRequested`, which always returns `false` here
+/// regardless of `repaint`. That carve-out is load-bearing, not an
+/// oversight — it is the fix for the #436-chrome-cache-inert bug (`Replay`
+/// measured 0/360 frames at idle) and must not be "simplified" away:
+///
+/// - `egui-winit` 0.35.0's `on_window_event` groups `RedrawRequested` into a
+///   match arm commented "Things that may require repaint:" and returns
+///   `EventResponse { repaint: true, .. }` for it *unconditionally*
+///   (`egui-winit-0.35.0/src/lib.rs:492-500`).
+/// - `RedrawRequested` is the event that drives every single frame — see
+///   this module's `window_event`'s `RedrawRequested` arm, which reads the
+///   gate this function feeds via
+///   `std::mem::take(&mut state.chrome_input_pending)`, roughly 110 lines
+///   after the call site that uses this function, in the *same*
+///   `window_event` invocation.
+/// - Without the carve-out, `repaint == true` on `RedrawRequested` would set
+///   `chrome_input_pending` on every frame, which `RedrawRequested`'s own
+///   arm would then immediately read back as `true` — permanently
+///   disqualifying `ChromeMode::Replay` regardless of any real input. This
+///   is exactly the bug: the event that drives the frame set the flag that
+///   disqualifies the frame.
+/// - `RedrawRequested` is not user input, so excluding it from the gate is
+///   correct on its own terms, not just a workaround.
+///
+/// Do NOT broaden this carve-out to other members of egui-winit's grouped
+/// arm: `CursorEntered`/`CursorLeft` are genuine input and already covered
+/// by `is_unconditional_chrome_input`; `Resized`/`Occluded` legitimately
+/// affect chrome; `Destroyed`/`CloseRequested`/`Moved`/`TouchpadPressure`
+/// are rare and harmless if they do force a frame `Full`. `RedrawRequested`
+/// is the only member of that arm that fires every frame, which is what
+/// makes it uniquely disqualifying.
+const fn should_set_chrome_input_pending(event: &WindowEvent, repaint: bool) -> bool {
+    if matches!(event, WindowEvent::RedrawRequested) {
+        return false;
+    }
+    is_unconditional_chrome_input(event) || repaint
+}
+
 /// Convert a winit physical cursor position to egui logical points (lossy
 /// `f64` -> `f32` narrowing via `conv2`'s default approximation, matching the
 /// `window.scale_factor().approx_as::<f32>()` conversion in
@@ -239,6 +327,36 @@ fn update_chrome_drag_latch(
     }
 }
 
+/// Task 121 spike: should THIS `CursorMoved` event actually schedule a
+/// repaint (i.e. set `WindowState::repaint_at`)?
+///
+/// `chrome_drag_latched` (`chrome_drag_pressed_count > 0`) always forces
+/// `true` — a chrome-border drag in progress must keep repainting regardless
+/// of the app's opinion, mirroring [`should_force_chrome_full_for_pointer`]'s
+/// same latch on the separate chrome-damage axis.
+///
+/// Otherwise: `previous_needed || current_needed`. `current_needed` is
+/// `App::pointer_motion_needs_repaint`'s answer for THIS event's position;
+/// `previous_needed` is that same answer for the PRIOR `CursorMoved` event.
+/// The `previous_needed` half is the edge-detect: on a needed -> not-needed
+/// transition (`previous_needed == true`, `current_needed == false`), this
+/// still evaluates `true` — i.e. the transition frame itself is repainted —
+/// so chrome the pointer just left (e.g. a hover tint) is redrawn one final
+/// time before suppression begins on the FOLLOWING event (where
+/// `previous_needed` has by then been updated to `false`). A
+/// not-needed -> needed transition schedules via `current_needed` alone, and
+/// two consecutive not-needed events correctly suppress
+/// (`false || false == false`).
+///
+/// Pure, so directly unit-testable without a live event loop.
+const fn should_schedule_cursor_moved(
+    chrome_drag_latched: bool,
+    previous_needed: bool,
+    current_needed: bool,
+) -> bool {
+    chrome_drag_latched || previous_needed || current_needed
+}
+
 /// Per-window state.
 struct WindowState {
     window: Window,
@@ -268,6 +386,28 @@ struct WindowState {
     /// position, so a drag that moves off the sensor mid-drag is not
     /// mistaken for terminal-content motion.
     chrome_drag_pressed_count: u32,
+    /// Task 121 spike: whether the PREVIOUS `CursorMoved` event decided a
+    /// repaint was needed (before the chrome-drag-latch override). Consulted
+    /// by [`should_schedule_cursor_moved`] to edge-detect a needed ->
+    /// not-needed transition, so the frame where the pointer stops mattering
+    /// (e.g. leaves a hover-sensitive region) is still repainted exactly
+    /// once before suppression begins — otherwise stale chrome (e.g. a hover
+    /// tint the pointer just left) would linger until the next unrelated
+    /// repaint (up to the ~500ms blink interval). `true` before the first
+    /// `CursorMoved`, matching this trait method's conservative default.
+    pointer_motion_needed_last: bool,
+    /// Task 121 spike: set when a `CursorMoved` was suppressed; cleared when
+    /// the next frame consumes it.
+    ///
+    /// Suppressed events are still handed to `on_window_event` (egui's pointer
+    /// state must stay fresh), so they queue in egui's `RawInput.events` until
+    /// the next `take_egui_input`. `InputState::wants_repaint_after` returns
+    /// `Duration::ZERO` whenever that queue is non-empty, so egui re-arms a
+    /// 16ms frame from *inside* the frame no matter how thoroughly we
+    /// suppressed the input-side scheduling — a self-sustaining ~60fps loop.
+    /// This flag lets the `RedrawRequested` arm recognise that specific case
+    /// and substitute the app's own requested delay for egui's zero.
+    suppressed_pointer_since_last_frame: bool,
 }
 
 impl WindowState {
@@ -377,6 +517,8 @@ impl<A: App> Handler<A> {
             chrome_input_pending: false,
             last_cursor_pos: None,
             chrome_drag_pressed_count: 0,
+            pointer_motion_needed_last: true,
+            suppressed_pointer_since_last_frame: false,
         };
 
         self.windows.insert(winit_id, state);
@@ -558,6 +700,16 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
         ) {
             if let Some(state) = self.windows.get_mut(&winit_id) {
                 let response = state.egui.on_window_event(&state.window, &event);
+                // Task 121 spike: whether THIS pointer event should schedule
+                // a repaint. Defaults to egui-winit's own opinion (always
+                // `true` for all five event kinds handled in this fast path
+                // — see `should_schedule_cursor_moved`'s doc) and is
+                // narrowed ONLY inside the `CursorMoved` arm below, the sole
+                // event kind `App::pointer_motion_needs_repaint` gates
+                // (`MouseInput`/`MouseWheel`/`CursorEntered`/`CursorLeft`
+                // are discrete, rare, and stay unconditional — deliberate
+                // scope limit).
+                let mut schedule_repaint = response.repaint;
                 match event {
                     WindowEvent::CursorMoved { position, .. } => {
                         let scale = state.window.scale_factor();
@@ -569,6 +721,32 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             is_over_chrome,
                             state.chrome_drag_pressed_count > 0,
                         );
+
+                        // Task 121 spike: independent of the chrome-input
+                        // gate above (which drives `ChromeMode`), decide
+                        // whether this pointer-motion event needs a repaint
+                        // AT ALL. `last_cursor_pos.is_none()` (position
+                        // could not be converted to logical points — a
+                        // non-finite/non-positive scale factor) is
+                        // conservative: treated as needed.
+                        let app_says_needed = state.last_cursor_pos.is_none_or(|pos| {
+                            self.app
+                                .pointer_motion_needs_repaint(WindowId(winit_id), pos)
+                        });
+                        schedule_repaint = should_schedule_cursor_moved(
+                            state.chrome_drag_pressed_count > 0,
+                            state.pointer_motion_needed_last,
+                            app_says_needed,
+                        );
+
+                        #[cfg(feature = "frame-profiling")]
+                        if schedule_repaint {
+                            state.egui.record_pointer_frame_scheduled();
+                        } else {
+                            state.egui.record_pointer_frame_suppressed();
+                        }
+
+                        state.pointer_motion_needed_last = app_says_needed;
                     }
                     WindowEvent::CursorEntered { .. } => {
                         // Unconditional (matches `is_unconditional_chrome_input`).
@@ -578,6 +756,11 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         // The pointer is gone — a stale position must not be
                         // used to wrongly classify a later event.
                         state.last_cursor_pos = None;
+                        // Task 121 spike: reset the edge-detect latch too —
+                        // a stale "not needed" from before the pointer left
+                        // must not suppress the first `CursorMoved` after it
+                        // re-enters (at a possibly unrelated position).
+                        state.pointer_motion_needed_last = true;
                         // Unconditional (matches `is_unconditional_chrome_input`).
                         state.chrome_input_pending = true;
                     }
@@ -613,7 +796,22 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         "matches! guard above restricts event to the five pointer variants"
                     ),
                 }
-                if response.repaint {
+
+                // Task 121 spike: `suppressed_pointer_since_last_frame` must
+                // mean "the ONLY input since the last frame was pointer
+                // motion we classified as needing no frame". So ANY event
+                // that genuinely schedules — a click, a wheel tick, a
+                // pointer enter/leave, or a `CursorMoved` the app said
+                // mattered — invalidates that premise and clears the flag.
+                //
+                // Without this, a suppressed motion followed by a click
+                // would leave the flag set when the click's own frame runs,
+                // and the `RedrawRequested` override would then substitute
+                // the app's long delay for the immediate follow-up frame the
+                // click legitimately needed.
+                state.suppressed_pointer_since_last_frame = !schedule_repaint;
+
+                if schedule_repaint {
                     let deadline = Instant::now() + MIN_REPAINT_INTERVAL;
                     state.repaint_at = Some(
                         state
@@ -669,6 +867,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     {
                         state.egui.inject_paste(text);
                         state.repaint_at = Some(Instant::now());
+                        // Real input scheduled a frame — see the pointer fast
+                        // path for why this invalidates the suppression premise.
+                        state.suppressed_pointer_since_last_frame = false;
                         // A keyboard event, and it just mutated pane content
                         // via a paste — a potential-chrome-input (#436.4b §3.2).
                         state.chrome_input_pending = true;
@@ -714,6 +915,9 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 self.app
                     .on_raw_key_event(WindowId(winit_id), raw_event, raw_mods);
                 state.repaint_at = Some(Instant::now());
+                // Real input scheduled a frame — see the pointer fast path for
+                // why this invalidates the suppression premise.
+                state.suppressed_pointer_since_last_frame = false;
                 // A keyboard event, routed straight to the app — a
                 // potential-chrome-input (#436.4b §3.2).
                 state.chrome_input_pending = true;
@@ -734,8 +938,29 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
             // doesn't enumerate) forces `ChromeMode::Full` for the frame this
             // event is delivered in. Pointer events never reach this arm —
             // they're handled, region-tested, in the fast path above (#436.8).
-            if is_unconditional_chrome_input(&event) || response.repaint {
+            //
+            // `RedrawRequested` is carved out of the `repaint` half of this
+            // decision — see `should_set_chrome_input_pending`'s doc for why
+            // this is required (egui-winit reports `repaint: true`
+            // unconditionally for it, and it's the event that drives every
+            // frame, so treating it as chrome input here would permanently
+            // disqualify `ChromeMode::Replay`).
+            if should_set_chrome_input_pending(&event, response.repaint) {
                 state.chrome_input_pending = true;
+            }
+
+            // Real input that schedules a frame invalidates the suppression
+            // premise — see the pointer fast path for why.
+            //
+            // `RedrawRequested` MUST be excluded, for the same structural
+            // reason it is excluded from the chrome-input gate
+            // (`should_set_chrome_input_pending`): this general path runs
+            // BEFORE the `match` below, and `egui-winit` reports
+            // `repaint: true` for `RedrawRequested`. Clearing the flag here
+            // would therefore wipe it moments before the `RedrawRequested`
+            // arm `mem::take`s it, so the override could never fire at all.
+            if !matches!(event, WindowEvent::RedrawRequested) {
+                state.suppressed_pointer_since_last_frame = false;
             }
 
             if response.repaint {
@@ -911,8 +1136,36 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 // from zero-delay requests (hover state, tooltip updates).
                 // This ensures layout-settling frames still fire while keeping
                 // idle CPU near zero.
-                if frame_output.repaint_delay < std::time::Duration::from_hours(1) {
-                    let deadline = Instant::now() + clamp_repaint_delay(frame_output.repaint_delay);
+                // Task 121 SPIKE: egui re-arms the frame schedule from inside
+                // the frame. `InputState::wants_repaint_after` returns
+                // `Duration::ZERO` whenever `!events.is_empty()`, and the
+                // pointer events we deliberately suppressed are still in that
+                // queue (they must be — egui's pointer state has to stay
+                // fresh). So egui asks for an immediate repaint, we floor it
+                // to 16ms, and the loop sustains ~60fps even though every one
+                // of those events was classified as needing no frame.
+                //
+                // When the ONLY thing that happened since the last frame was
+                // suppressed pointer motion, substitute the app's own
+                // requested delay (e.g. the 500ms cursor blink) for egui's
+                // zero. This overrides egui's judgement, but on OUR evidence
+                // (we classified the events) rather than by pattern-matching
+                // egui internals.
+                // NOTE for future refactors: this `mem::take` deliberately sits
+                // AFTER the `make_current` and window-lookup early-returns
+                // above. If we bail before this point the flag is simply left
+                // set for the next successful pass, which is correct — do not
+                // move it earlier without re-checking that.
+                let suppressed_only =
+                    std::mem::take(&mut state.suppressed_pointer_since_last_frame);
+                let effective_delay = effective_repaint_delay(
+                    suppressed_only,
+                    frame_output.repaint_delay,
+                    frame_output.app_requested_delay,
+                );
+
+                if effective_delay < std::time::Duration::from_hours(1) {
+                    let deadline = Instant::now() + clamp_repaint_delay(effective_delay);
                     state.repaint_at = Some(deadline);
                 }
 
@@ -1174,9 +1427,11 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        MIN_REPAINT_INTERVAL, ViewportCommandFlags, clamp_repaint_delay, is_blocked_key,
+        MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
+        clamp_repaint_delay, effective_repaint_delay, is_blocked_key,
         is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
-        physical_to_logical_pos, should_force_chrome_full_for_pointer, update_chrome_drag_latch,
+        physical_to_logical_pos, should_force_chrome_full_for_pointer,
+        should_schedule_cursor_moved, should_set_chrome_input_pending, update_chrome_drag_latch,
         viewport_command_flags,
     };
     use winit::event::{DeviceId, WindowEvent};
@@ -1420,6 +1675,52 @@ mod tests {
         assert!(!is_unconditional_chrome_input(&WindowEvent::Occluded(true)));
     }
 
+    /// The bug (0/360 `Replay` frames at idle): `RedrawRequested` drives
+    /// every frame, and egui-winit 0.35.0 reports `repaint: true` for it
+    /// unconditionally, so before the fix `is_unconditional_chrome_input(event)
+    /// || repaint` was always `true` on the exact event whose arm reads the
+    /// gate back a moment later — permanently disqualifying `Replay`.
+    /// `should_set_chrome_input_pending` must return `false` for
+    /// `RedrawRequested` regardless of the `repaint` value egui-winit
+    /// reports.
+    #[test]
+    fn should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint() {
+        assert!(!should_set_chrome_input_pending(
+            &WindowEvent::RedrawRequested,
+            true
+        ));
+        assert!(!should_set_chrome_input_pending(
+            &WindowEvent::RedrawRequested,
+            false
+        ));
+    }
+
+    /// A representative `is_unconditional_chrome_input` event (keyboard
+    /// modifiers) must still set the gate through this wrapper, with or
+    /// without `repaint` — the carve-out is specific to `RedrawRequested`,
+    /// not a general weakening of the gate.
+    #[test]
+    fn should_set_chrome_input_pending_covers_unconditional_chrome_input_events() {
+        let event = WindowEvent::ModifiersChanged(winit::event::Modifiers::default());
+        assert!(should_set_chrome_input_pending(&event, false));
+        assert!(should_set_chrome_input_pending(&event, true));
+    }
+
+    /// Proves the `RedrawRequested` carve-out doesn't silently undermine the
+    /// reason `response.repaint` is consulted at all — an event kind NOT in
+    /// `is_unconditional_chrome_input`'s enumeration (e.g. `Occluded`) must
+    /// still set the gate when egui-winit reports `repaint: true` for it. If
+    /// this regressed to "always false unless enumerated", A12's
+    /// completeness guarantee (`repaint` as a safety net for un-enumerated
+    /// event kinds) would be silently lost.
+    #[test]
+    fn should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events() {
+        let event = WindowEvent::Occluded(true);
+        assert!(!is_unconditional_chrome_input(&event));
+        assert!(should_set_chrome_input_pending(&event, true));
+        assert!(!should_set_chrome_input_pending(&event, false));
+    }
+
     // ── #436.8 region-aware pointer gate: pure helpers ───────────────────
 
     #[test]
@@ -1480,6 +1781,112 @@ mod tests {
         assert_eq!(
             update_chrome_drag_latch(0, winit::event::ElementState::Released, Some(true)),
             0
+        );
+    }
+
+    // ── Task 121 spike: `should_schedule_cursor_moved` ───────────────────
+
+    #[test]
+    fn should_schedule_cursor_moved_latched_forces_true_regardless_of_app_opinion() {
+        // A chrome-border drag in progress must keep repainting even if the
+        // app says this position no longer needs one, and even if the
+        // previous event also said "not needed".
+        assert!(should_schedule_cursor_moved(true, false, false));
+        assert!(should_schedule_cursor_moved(true, true, true));
+    }
+
+    #[test]
+    fn should_schedule_cursor_moved_steady_needed_schedules() {
+        // Both this event and the last agree a repaint is needed (e.g.
+        // hovering over chrome, or an active selection drag) -> schedule.
+        assert!(should_schedule_cursor_moved(false, true, true));
+    }
+
+    #[test]
+    fn should_schedule_cursor_moved_steady_not_needed_suppresses() {
+        // Two consecutive "not needed" events (steady motion over static
+        // terminal content) -> suppress. This is the headline Task 121 case.
+        assert!(!should_schedule_cursor_moved(false, false, false));
+    }
+
+    #[test]
+    fn should_schedule_cursor_moved_needed_to_not_needed_transition_still_schedules_once() {
+        // Edge detect: the LAST event needed a repaint, THIS event does not
+        // (e.g. the pointer just left a hover-sensitive region) -> this
+        // transition frame still schedules, so stale chrome (a hover tint)
+        // is repainted one final time before suppression begins.
+        assert!(should_schedule_cursor_moved(false, true, false));
+    }
+
+    #[test]
+    fn should_schedule_cursor_moved_not_needed_to_needed_transition_schedules() {
+        // The reverse transition schedules via `current_needed` alone.
+        assert!(should_schedule_cursor_moved(false, false, true));
+    }
+
+    // ── Task 121 spike: `effective_repaint_delay` (liveness-critical) ────
+    //
+    // This is the substitution that breaks egui's self-sustaining ~60fps
+    // re-arm loop. It is the highest-risk logic in the spike, so every branch
+    // is pinned here — especially the fallback, because getting that wrong
+    // stalls the window instead of merely wasting a frame.
+
+    const MS16: std::time::Duration = std::time::Duration::from_millis(16);
+    const MS500: std::time::Duration = std::time::Duration::from_millis(500);
+
+    #[test]
+    fn effective_repaint_delay_substitutes_app_delay_when_suppressed_and_egui_wants_immediate() {
+        // The headline case: egui asked for an immediate repaint purely because
+        // suppressed pointer events sit in its queue; the app only wants a
+        // 500ms blink wake. Without the substitution this is a 16ms-floored
+        // frame, i.e. ~60fps for zero visible change.
+        assert_eq!(
+            effective_repaint_delay(true, std::time::Duration::ZERO, Some(MS500)),
+            MS500
+        );
+    }
+
+    #[test]
+    fn effective_repaint_delay_falls_back_to_bounded_delay_when_app_wants_nothing() {
+        // Cursor hidden via DECTCEM (btop/vim): the app requests no delay at
+        // all. Must NOT become `Duration::MAX`/no-schedule — that stalls the
+        // window until an unrelated event arrives.
+        let got = effective_repaint_delay(true, std::time::Duration::ZERO, None);
+        assert_eq!(got, SUPPRESSED_POINTER_FALLBACK_DELAY);
+        assert!(
+            got < std::time::Duration::from_secs(1),
+            "fallback must be a bounded wake, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn effective_repaint_delay_passes_egui_delay_through_when_not_suppressed() {
+        // Nothing was suppressed, so egui's request is authoritative even when
+        // it is zero — a real interaction needs the immediate frame.
+        assert_eq!(
+            effective_repaint_delay(false, std::time::Duration::ZERO, Some(MS500)),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(effective_repaint_delay(false, MS16, Some(MS500)), MS16);
+    }
+
+    #[test]
+    fn effective_repaint_delay_never_overrides_a_nonzero_egui_request() {
+        // Suppression only ever reinterprets a ZERO delay. A non-zero egui
+        // request is a genuine animation/timer cadence and must survive, or we
+        // would stutter egui-driven animations.
+        assert_eq!(effective_repaint_delay(true, MS16, Some(MS500)), MS16);
+        assert_eq!(effective_repaint_delay(true, MS16, None), MS16);
+    }
+
+    #[test]
+    fn effective_repaint_delay_preserves_max_when_not_suppressed() {
+        // `Duration::MAX` means "egui needs no further frame". It must pass
+        // through untouched so the caller's `< 1 hour` check still parks the
+        // window correctly.
+        assert_eq!(
+            effective_repaint_delay(false, std::time::Duration::MAX, None),
+            std::time::Duration::MAX
         );
     }
 

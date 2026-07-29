@@ -735,6 +735,7 @@ impl FreminalGui {
             chrome_frames_rendered: 0,
             pending_terminal_requested_delay: None,
             cached_central_rect: None,
+            cached_gutter_inset_logical: 0.0,
             chrome_head_rects: None,
             chrome_border_rects: Vec::new(),
             frame_stats: super::window::FrameStats::default(),

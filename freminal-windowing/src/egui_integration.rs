@@ -19,6 +19,14 @@ pub struct FrameOutput {
     pub commands: Vec<egui::ViewportCommand>,
     /// Requested repaint delay (`Duration::MAX` = no repaint needed).
     pub repaint_delay: std::time::Duration,
+    /// The delay the *app* itself asked for this frame (`App::take_terminal_requested_delay`),
+    /// independent of whatever egui decided it wanted.
+    ///
+    /// SPIKE (Task 121): the event loop uses this to override `repaint_delay`
+    /// when egui asked for an immediate repaint *solely* because of pointer
+    /// events the app already classified as needing no frame. See the
+    /// override at the `RedrawRequested` arm in `event_loop.rs`.
+    pub app_requested_delay: Option<std::time::Duration>,
 }
 
 /// Cached tessellated chrome (head + tail) primitives from the most recent
@@ -182,6 +190,110 @@ struct FrameProfile {
     swap_total: std::time::Duration,
     /// Largest single-frame swap duration observed.
     swap_max: std::time::Duration,
+
+    // ── Gate-blocker counters (feature-gated): issue #459/#461 follow-up ──
+    //
+    // `decide_chrome_mode` permits REPLAY only when ALL FOUR of
+    // `ChromeGatePredicates`'s fields hold (see that struct and
+    // `evaluate_chrome_gate`, the single source of truth both
+    // `decide_chrome_mode` and this instrumentation call). Every counter
+    // below is incremented independently -- a frame that fails more than one
+    // predicate increments more than one counter -- so overlap between
+    // blockers is visible rather than only ever seeing "the first" reason.
+    /// Frames where `ChromeGatePredicates::cache_matches` was `false`: no
+    /// chrome cache exists yet, or this frame's framebuffer size/`ppp`
+    /// didn't match what the cache was tessellated at.
+    gate_blocked_cache_mismatch: u64,
+    /// Frames where `ChromeGatePredicates::repaint_settled` was `false`:
+    /// [`chrome_repaint_settled`] found something wanted a wake sooner than
+    /// this frame's own request permits. See the `settle_*` fields below
+    /// for the VALUES behind this failure, not just the count.
+    gate_blocked_not_settled: u64,
+    /// Frames where `ChromeGatePredicates::damage_unchanged` was `false`:
+    /// the PREVIOUS frame's `ChromeDamage` was `Changed`, so this frame
+    /// cannot REPLAY regardless of anything else.
+    gate_blocked_damage_changed: u64,
+    /// Frames where `ChromeGatePredicates::no_chrome_input` was `false`:
+    /// `chrome_input_this_frame` was `true` (a window input event this
+    /// frame could plausibly have affected chrome).
+    gate_blocked_chrome_input: u64,
+
+    // ── Settle-gate value diagnostics (feature-gated), reset every flush
+    // window (`reset_settle_window`) rather than cumulative-since-creation
+    // like every other field above. A lifetime min/max would not be useful
+    // here: the lifetime min collapses to whatever the very first settle
+    // failure happened to be (often frame 0-ish transients) and the
+    // lifetime max trivially saturates at `Duration::MAX` the first time
+    // egui or the app ever reports "no repaint needed" on a losing frame --
+    // neither tells you what is happening in THIS flush window, which is
+    // the question ("did the app ask for 500ms and egui want 500ms too, or
+    // did something ask for 16ms behind our back").
+    /// Smallest `prev_repaint_delay` observed on a frame where the settle
+    /// predicate failed, this flush window. `None` until the first such
+    /// frame in this window.
+    settle_repaint_delay_min: Option<std::time::Duration>,
+    /// Largest `prev_repaint_delay` observed on a frame where the settle
+    /// predicate failed, this flush window.
+    settle_repaint_delay_max: Option<std::time::Duration>,
+    /// Smallest `prev_terminal_requested_delay` (when `Some`) observed on a
+    /// frame where the settle predicate failed, this flush window.
+    settle_terminal_requested_delay_min: Option<std::time::Duration>,
+    /// Largest `prev_terminal_requested_delay` (when `Some`) observed on a
+    /// frame where the settle predicate failed, this flush window.
+    settle_terminal_requested_delay_max: Option<std::time::Duration>,
+    /// Count of settle-predicate failures this flush window where
+    /// `prev_terminal_requested_delay` was `None` (nothing app-side had
+    /// requested a delay at all this frame, counted separately from "the
+    /// app requested something, but egui wanted sooner").
+    settle_terminal_requested_delay_none_count: u64,
+
+    // ── Repaint-cause aggregation (feature-gated), reset every flush
+    // window like the settle-gate diagnostics above (`reset_repaint_cause_window`)
+    // rather than cumulative-since-creation -- the question this answers
+    // ("what is asking for an immediate repaint on THIS kind of frame,
+    // right now") only makes sense as "in the last `FLUSH_EVERY` frames",
+    // the same reasoning as the settle-value fields.
+    /// Occurrence count per `ctx.repaint_causes()` cause, keyed on the
+    /// formatted `"{trimmed_file}:{line} {reason}"` string (see
+    /// [`trim_cause_file_path`]) — e.g. distinguishing an egui-internal
+    /// cause (`index.crates.io-.../egui-0.35.0/src/context.rs:1234 ...`)
+    /// from a freminal call site
+    /// (`freminal/src/gui/terminal/widget.rs:1936 ...`) is the whole
+    /// point of this map. `BTreeMap`, not `HashMap`: deterministic
+    /// (alphabetical) iteration order for the flush log, and
+    /// `freminal-windowing` has no hash-map dependency to gain for this.
+    ///
+    /// **These are the PREVIOUS pass's causes, not this frame's own** — see
+    /// [`egui::Context::repaint_causes`]'s doc and the call site in
+    /// `run_frame` for why: `Context::begin_pass` (called from inside
+    /// `run_ui`) swaps the just-finished pass's `causes` into `prev_causes`
+    /// at the START of the pass that follows it, so `repaint_causes()`
+    /// always lags by exactly one `run_frame` call. That is fine for
+    /// aggregate counting over a 120-frame window (the lag is invisible in
+    /// the aggregate); it would matter for attributing causes to a SPECIFIC
+    /// single frame, which this harness does not attempt.
+    repaint_cause_counts: std::collections::BTreeMap<String, u64>,
+
+    // ── Task 121 pointer-motion repaint-gate spike (issue: pointer motion
+    // over static terminal content measured at 58fps vs. 1.95fps idle, 95%
+    // of those frames changing zero pixels) ──────────────────────────────
+    //
+    // Cumulative since window creation, like every other plain counter on
+    // this struct. Incremented from `event_loop.rs`'s `CursorMoved` arm
+    // (the only place the scheduling decision is made) via the
+    // `record_pointer_frame_scheduled`/`record_pointer_frame_suppressed`
+    // accessors below, NOT here — these fields stay private to `FrameProfile`
+    // (see those accessors' docs for why a method, not a public field).
+    /// `CursorMoved` events that scheduled a repaint (either the app's
+    /// [`crate::App::pointer_motion_needs_repaint`] said so, the chrome-drag
+    /// latch was set, or this was the one-frame edge-detect transition after
+    /// a needed -> not-needed change).
+    pointer_frames_scheduled: u64,
+    /// `CursorMoved` events suppressed by the Task 121 gate — i.e. events
+    /// that would have scheduled a repaint before this spike (egui-winit
+    /// reports `repaint: true` unconditionally for `CursorMoved`) but did
+    /// not need to, per the app's own state.
+    pointer_frames_suppressed: u64,
 }
 
 #[cfg(feature = "frame-profiling")]
@@ -226,6 +338,181 @@ impl FrameProfile {
         let count_f: f64 = conv2::ConvUtil::approx_as(count).unwrap_or(1.0);
         total.div_f64(count_f.max(1.0))
     }
+
+    /// Record one settle-gate failure's values into this flush window's
+    /// min/max/none-count tracking. Called only when
+    /// `ChromeGatePredicates::repaint_settled` is `false` for the frame
+    /// (see the call site in `run_frame`) -- these fields answer "what were
+    /// the actual delays on the frames that failed", not just "how many
+    /// failed".
+    fn record_settle_failure(
+        &mut self,
+        repaint_delay: std::time::Duration,
+        terminal_requested_delay: Option<std::time::Duration>,
+    ) {
+        let (min, max) = min_max_duration(
+            (self.settle_repaint_delay_min, self.settle_repaint_delay_max),
+            repaint_delay,
+        );
+        self.settle_repaint_delay_min = min;
+        self.settle_repaint_delay_max = max;
+
+        match terminal_requested_delay {
+            Some(d) => {
+                let (min, max) = min_max_duration(
+                    (
+                        self.settle_terminal_requested_delay_min,
+                        self.settle_terminal_requested_delay_max,
+                    ),
+                    d,
+                );
+                self.settle_terminal_requested_delay_min = min;
+                self.settle_terminal_requested_delay_max = max;
+            }
+            None => {
+                self.settle_terminal_requested_delay_none_count = self
+                    .settle_terminal_requested_delay_none_count
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    /// Clear the settle-gate value diagnostics at the end of a flush window
+    /// -- see the field docs on `settle_repaint_delay_min` etc. for why
+    /// these are windowed rather than cumulative-since-creation.
+    const fn reset_settle_window(&mut self) {
+        self.settle_repaint_delay_min = None;
+        self.settle_repaint_delay_max = None;
+        self.settle_terminal_requested_delay_min = None;
+        self.settle_terminal_requested_delay_max = None;
+        self.settle_terminal_requested_delay_none_count = 0;
+    }
+
+    /// Record one `ctx.repaint_causes()` entry into `repaint_cause_counts`.
+    /// Called once per returned cause (a frame that pushed the same cause
+    /// twice -- e.g. two `request_repaint()` calls at the same call site in
+    /// one pass -- increments the count twice, matching what
+    /// `egui::Context` actually recorded: `causes.push(cause)` is
+    /// unconditional, with no dedup, at `context.rs:153`).
+    fn record_repaint_cause(&mut self, cause: &egui::RepaintCause) {
+        let key = format!(
+            "{}:{} {}",
+            trim_cause_file_path(cause.file),
+            cause.line,
+            cause.reason
+        );
+        let counter = self.repaint_cause_counts.entry(key).or_insert(0);
+        *counter = counter.saturating_add(1);
+    }
+
+    /// Clear the repaint-cause aggregation map at the end of a flush window
+    /// -- see the field doc on `repaint_cause_counts` for why this is
+    /// windowed rather than cumulative-since-creation.
+    fn reset_repaint_cause_window(&mut self) {
+        self.repaint_cause_counts.clear();
+    }
+
+    /// Format an optional `Duration` for a `tracing` field: `"none"` when
+    /// no sample was recorded this window, the literal string `"MAX"` when
+    /// the sample IS `Duration::MAX` (egui's "no repaint needed" sentinel --
+    /// printing it as a microsecond count would show an absurd
+    /// ~584,942,417,355-year figure), or the microsecond count otherwise.
+    /// Pure, so directly unit-testable.
+    fn format_duration_field(d: Option<std::time::Duration>) -> String {
+        match d {
+            None => "none".to_string(),
+            Some(d) if d == std::time::Duration::MAX => "MAX".to_string(),
+            Some(d) => format!("{}us", d.as_micros()),
+        }
+    }
+}
+
+/// Update a running `(min, max)` pair with one new `Duration` sample.
+/// `current` starts `(None, None)` before the first sample. Pure, so
+/// directly unit-testable; shared by [`FrameProfile::record_settle_failure`]
+/// for both the `prev_repaint_delay` and `prev_terminal_requested_delay`
+/// tracking (avoiding writing the same min/max-or-first-sample logic twice).
+#[cfg(feature = "frame-profiling")]
+fn min_max_duration(
+    current: (Option<std::time::Duration>, Option<std::time::Duration>),
+    sample: std::time::Duration,
+) -> (Option<std::time::Duration>, Option<std::time::Duration>) {
+    let (min, max) = current;
+    (
+        Some(min.map_or(sample, |m| m.min(sample))),
+        Some(max.map_or(sample, |m| m.max(sample))),
+    )
+}
+
+/// Trim a [`egui::RepaintCause::file`] path down to its last
+/// `KEEP_COMPONENTS` `/`-or-`\`-separated segments.
+///
+/// Egui-internal causes carry the registry cache's long, absolute-ish path
+/// (e.g. `.../registry/src/index.crates.io-.../egui-0.35.0/src/context.rs`);
+/// keeping the last four segments retains the registry-hash and
+/// crate-name+version directory components (e.g.
+/// `index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs`), which is
+/// exactly what distinguishes an egui-internal cause from a freminal call
+/// site (`freminal/src/gui/terminal/widget.rs`) -- the entire point of this
+/// instrumentation. Paths with `KEEP_COMPONENTS` segments or fewer
+/// (freminal's own workspace-relative `file!()` paths typically are) pass
+/// through unchanged. Pure, so directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn trim_cause_file_path(file: &str) -> String {
+    const KEEP_COMPONENTS: usize = 4;
+    let parts: Vec<&str> = file.split(['/', '\\']).collect();
+    if parts.len() <= KEEP_COMPONENTS {
+        file.to_string()
+    } else {
+        parts[parts.len() - KEEP_COMPONENTS..].join("/")
+    }
+}
+
+/// Sum of all occurrence counts in a repaint-cause aggregation map -- the
+/// total number of `ctx.repaint_causes()` entries recorded this flush
+/// window, for comparison against the window's `frame_counter` (e.g. 120
+/// frames producing 480 causes means ~4 requests/frame). Pure, so directly
+/// unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn total_repaint_cause_count(counts: &std::collections::BTreeMap<String, u64>) -> u64 {
+    counts
+        .values()
+        .fold(0u64, |acc, count| acc.saturating_add(*count))
+}
+
+/// The top `n` entries of a repaint-cause aggregation map, ordered by
+/// occurrence count descending. `BTreeMap::iter` yields keys in ascending
+/// (alphabetical) order; a *stable* sort by count descending therefore
+/// leaves ties ordered by key ascending, deterministically -- no
+/// `HashMap`-style iteration-order nondeterminism to fight. Pure, so
+/// directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn top_repaint_causes(
+    counts: &std::collections::BTreeMap<String, u64>,
+    n: usize,
+) -> Vec<(String, u64)> {
+    let mut entries: Vec<(String, u64)> = counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+    entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    entries.truncate(n);
+    entries
+}
+
+/// Format a top-N repaint-cause list (see [`top_repaint_causes`]) as a
+/// single readable `tracing` field: `"{count}x {cause}"` entries joined by
+/// `"; "`, or the literal `"none"` when empty (matching the
+/// `format_duration_field`/`format_nonzero_signal_counts` "none when empty"
+/// idiom already used by this harness and its `freminal`-side counterpart).
+/// Pure, so directly unit-testable.
+#[cfg(feature = "frame-profiling")]
+fn format_repaint_causes(entries: &[(String, u64)]) -> String {
+    if entries.is_empty() {
+        return "none".to_string();
+    }
+    entries
+        .iter()
+        .map(|(cause, count)| format!("{count}x {cause}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// #436 §3.1 (amended): a REPLAY is permitted only if nothing OTHER than
@@ -275,31 +562,80 @@ fn atlas_grew(textures_delta: &egui::TexturesDelta) -> bool {
         .any(|(id, delta)| *id == egui::TextureId::default() && delta.is_whole())
 }
 
-/// #436.4b: decide this frame's [`crate::ChromeMode`].
+/// The four independent REPLAY gate predicates from [`decide_chrome_mode`]'s
+/// doc, bundled so `decide_chrome_mode` and the (feature-gated) gate-blocker
+/// instrumentation in `run_frame` evaluate them via the SAME function
+/// ([`evaluate_chrome_gate`]) rather than two hand-maintained copies of the
+/// same boolean logic drifting apart. See `evaluate_chrome_gate`'s doc for
+/// what each field means.
+// struct_excessive_bools: these are four independent, unrelated gate
+// observations (mirrors the existing allow on `ChromeSignals`/
+// `DismissiblePresence` in `freminal::gui::chrome_damage`) -- not a state
+// machine, and each field is consumed both individually (the gate-blocker
+// counters) and via `all_pass` (the actual decision), so collapsing them
+// into an enum would make the individual-predicate consumer harder, not
+// easier.
+#[allow(clippy::struct_excessive_bools)]
+struct ChromeGatePredicates {
+    cache_matches: bool,
+    repaint_settled: bool,
+    damage_unchanged: bool,
+    no_chrome_input: bool,
+}
+
+impl ChromeGatePredicates {
+    /// A REPLAY is permitted only when every predicate holds.
+    const fn all_pass(&self) -> bool {
+        self.cache_matches && self.repaint_settled && self.damage_unchanged && self.no_chrome_input
+    }
+
+    /// The `ChromeMode` these predicates imply.
+    ///
+    /// Lets a caller that already evaluated the gate (e.g. to also count which
+    /// predicates failed) derive the mode without re-evaluating, so the
+    /// nine-argument list appears exactly once per frame.
+    const fn chrome_mode(&self) -> crate::ChromeMode {
+        if self.all_pass() {
+            crate::ChromeMode::Replay
+        } else {
+            crate::ChromeMode::Full
+        }
+    }
+}
+
+/// #436.4b: evaluate the four independent REPLAY gate predicates. This is
+/// the single source of truth [`decide_chrome_mode`] consumes to make its
+/// decision, and (feature-gated only) the frame-profiling gate-blocker
+/// counters in `run_frame` call this SAME function a second time with the
+/// SAME arguments to see WHICH predicate(s) failed -- see the `run_frame`
+/// call site. If this function's logic ever changes, both consumers change
+/// with it; there is no second copy of the boolean expressions to forget.
 ///
-/// A REPLAY is permitted only when ALL of the following hold:
-///   - `cache_valid` — a chrome cache exists from a prior FULL frame.
-///   - `cache_size`/`cache_ppp` match `cur_size`/`cur_ppp` — the cached
-///     primitives were tessellated at this frame's framebuffer size and
-///     scale factor (a mismatch, e.g. a resize or DPI change, invalidates
-///     the whole cache rather than attempting a partial re-tessellation).
-///   - [`chrome_repaint_settled`] — nothing egui-internal wants a wake
-///     sooner than the app's own scheduling this frame (§3.1 amendment).
-///   - `prev_chrome_damage` is [`crate::ChromeDamage::Unchanged`] — the
-///     PREVIOUS frame proved static chrome did not change (§3.3/§3.5).
-///   - `!chrome_input_this_frame` — no window input event this frame could
-///     plausibly have affected chrome (§3.2, conservative: any qualifying
-///     input forces `Full`, refined region-aware in #436.8).
+///   - `cache_matches` — a chrome cache exists from a prior FULL frame
+///     (`cache_valid`), AND `cache_size`/`cache_ppp` match
+///     `cur_size`/`cur_ppp` — the cached primitives were tessellated at
+///     this frame's framebuffer size and scale factor (a mismatch, e.g. a
+///     resize or DPI change, invalidates the whole cache rather than
+///     attempting a partial re-tessellation).
+///   - `repaint_settled` — [`chrome_repaint_settled`]: nothing egui-internal
+///     wants a wake sooner than the app's own scheduling this frame (§3.1
+///     amendment).
+///   - `damage_unchanged` — `prev_chrome_damage` is
+///     [`crate::ChromeDamage::Unchanged`] — the PREVIOUS frame proved
+///     static chrome did not change (§3.3/§3.5).
+///   - `no_chrome_input` — `!chrome_input_this_frame`: no window input
+///     event this frame could plausibly have affected chrome (§3.2,
+///     conservative: any qualifying input forces `Full`, refined
+///     region-aware in #436.8).
 ///
-/// Any failure forces `ChromeMode::Full` — the always-correct, conservative
-/// default. Pure (no `self`/`egui` state), so directly unit-testable.
+/// Pure (no `self`/`egui` state), so directly unit-testable.
 // Nine independent, unrelated gate inputs (cache validity/size/ppp, this
 // frame's size/ppp, the two settle-rule delays, prior chrome damage, and the
 // input gate) -- bundling them into a struct would just relocate the same
 // fields without adding clarity, and this function exists specifically so
 // tests can drive each one independently.
 #[allow(clippy::too_many_arguments)]
-fn decide_chrome_mode(
+fn evaluate_chrome_gate(
     cache_valid: bool,
     cache_size: [u32; 2],
     cache_ppp: f32,
@@ -309,19 +645,14 @@ fn decide_chrome_mode(
     prev_terminal_requested_delay: Option<std::time::Duration>,
     prev_chrome_damage: crate::ChromeDamage,
     chrome_input_this_frame: bool,
-) -> crate::ChromeMode {
-    let cache_matches =
-        cache_valid && cache_size == cur_size && (cache_ppp - cur_ppp).abs() < f32::EPSILON;
-
-    let replay_allowed = cache_matches
-        && chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay)
-        && prev_chrome_damage == crate::ChromeDamage::Unchanged
-        && !chrome_input_this_frame;
-
-    if replay_allowed {
-        crate::ChromeMode::Replay
-    } else {
-        crate::ChromeMode::Full
+) -> ChromeGatePredicates {
+    ChromeGatePredicates {
+        cache_matches: cache_valid
+            && cache_size == cur_size
+            && (cache_ppp - cur_ppp).abs() < f32::EPSILON,
+        repaint_settled: chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay),
+        damage_unchanged: prev_chrome_damage == crate::ChromeDamage::Unchanged,
+        no_chrome_input: !chrome_input_this_frame,
     }
 }
 
@@ -360,6 +691,40 @@ impl EguiState {
     /// Collect raw input from winit for the current frame.
     pub(crate) fn take_egui_input(&mut self, window: &Window) -> egui::RawInput {
         self.winit_state.take_egui_input(window)
+    }
+
+    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// `CursorMoved` event scheduled a repaint.
+    ///
+    /// A small accessor rather than a public `frame_profile` field/counter:
+    /// `event_loop.rs` (where the scheduling decision is made) has no other
+    /// reason to reach into `FrameProfile`'s internals, and this keeps the
+    /// counter itself private to this module alongside every other
+    /// `FrameProfile` field. Logged on the existing per-window
+    /// `FLUSH_EVERY`-frame flush line in [`Self::run_frame`] — see the
+    /// `pointer_frames_scheduled`/`pointer_frames_suppressed` field docs on
+    /// [`FrameProfile`] for why these counters live there (rather than on
+    /// `event_loop.rs`'s own `WindowState`): they are logically part of the
+    /// same per-window frame-profiling harness and this reuses its existing
+    /// flush cadence/`window_id` tagging instead of standing up a second one.
+    #[cfg(feature = "frame-profiling")]
+    pub(crate) const fn record_pointer_frame_scheduled(&mut self) {
+        self.frame_profile.pointer_frames_scheduled = self
+            .frame_profile
+            .pointer_frames_scheduled
+            .saturating_add(1);
+    }
+
+    /// Task 121 pointer-motion repaint-gate spike: record that a
+    /// `CursorMoved` event was suppressed (did not schedule a repaint) by
+    /// the gate. See [`Self::record_pointer_frame_scheduled`]'s doc for why
+    /// this is an accessor rather than a public field.
+    #[cfg(feature = "frame-profiling")]
+    pub(crate) const fn record_pointer_frame_suppressed(&mut self) {
+        self.frame_profile.pointer_frames_suppressed = self
+            .frame_profile
+            .pointer_frames_suppressed
+            .saturating_add(1);
     }
 
     /// Run a single egui frame and paint, using pre-collected raw input.
@@ -446,7 +811,13 @@ impl EguiState {
             .chrome_cache
             .as_ref()
             .map_or((false, [0, 0], 0.0), |cache| (true, cache.size, cache.ppp));
-        let chrome_mode = decide_chrome_mode(
+        // Evaluated ONCE per frame; the mode is derived from the same
+        // `ChromeGatePredicates` the feature-gated blocker counters below
+        // consume. Previously this argument list appeared twice (once here via
+        // `decide_chrome_mode`, once in the instrumentation), which was the
+        // real drift risk -- the predicates were already shared, the arguments
+        // were not.
+        let gate = evaluate_chrome_gate(
             cache_valid,
             cache_size,
             cache_ppp,
@@ -457,6 +828,7 @@ impl EguiState {
             self.prev_chrome_damage,
             chrome_input_this_frame,
         );
+        let chrome_mode = gate.chrome_mode();
 
         // Task 121 frame-profiling harness: count which `ChromeMode` was
         // just decided. Cross-checkable against `freminal`'s own
@@ -473,6 +845,48 @@ impl EguiState {
             crate::ChromeMode::Replay => {
                 self.frame_profile.chrome_mode_replay =
                     self.frame_profile.chrome_mode_replay.saturating_add(1);
+            }
+        }
+
+        // Gate-blocker instrumentation (feature-gated only): re-evaluate the
+        // SAME four predicates `decide_chrome_mode` just consumed, via the
+        // SAME `evaluate_chrome_gate` function and the SAME arguments, so
+        // this can never drift from what actually gated the decision above
+        // (see `evaluate_chrome_gate`'s doc). Every failing predicate
+        // increments its own counter -- not just the first -- so overlap
+        // between blockers (e.g. cache mismatch AND not-settled on the same
+        // frame) is visible rather than only ever attributing to one cause.
+        #[cfg(feature = "frame-profiling")]
+        {
+            if !gate.cache_matches {
+                self.frame_profile.gate_blocked_cache_mismatch = self
+                    .frame_profile
+                    .gate_blocked_cache_mismatch
+                    .saturating_add(1);
+            }
+            if !gate.repaint_settled {
+                self.frame_profile.gate_blocked_not_settled = self
+                    .frame_profile
+                    .gate_blocked_not_settled
+                    .saturating_add(1);
+                // Settle-gate value diagnostics: only recorded when this
+                // predicate specifically failed -- see `record_settle_failure`.
+                self.frame_profile.record_settle_failure(
+                    self.prev_repaint_delay,
+                    self.prev_terminal_requested_delay,
+                );
+            }
+            if !gate.damage_unchanged {
+                self.frame_profile.gate_blocked_damage_changed = self
+                    .frame_profile
+                    .gate_blocked_damage_changed
+                    .saturating_add(1);
+            }
+            if !gate.no_chrome_input {
+                self.frame_profile.gate_blocked_chrome_input = self
+                    .frame_profile
+                    .gate_blocked_chrome_input
+                    .saturating_add(1);
             }
         }
 
@@ -510,6 +924,32 @@ impl EguiState {
             let d = run_ui_start.elapsed();
             self.frame_profile.run_ui_total += d;
             self.frame_profile.run_ui_max = self.frame_profile.run_ui_max.max(d);
+        }
+
+        // Task 121 defect-5 harness extension: aggregate
+        // `ctx.repaint_causes()` into `repaint_cause_counts` -- answers
+        // "something requested an immediate, zero-delay repaint; what,
+        // exactly?" (egui-internal machinery vs. one of freminal's own
+        // `ctx.request_repaint*` call sites in
+        // `freminal/src/gui/terminal/widget.rs`).
+        //
+        // Called HERE, immediately after `run_ui` returns, because
+        // `repaint_causes()` returns `prev_causes` -- the PREVIOUS pass's
+        // causes (`Context::begin_pass`, invoked from inside `run_ui`,
+        // swaps the just-finished pass's `causes` into `prev_causes` at the
+        // START of the pass that follows it). This is the *earliest* point
+        // in `run_frame` where that swap has already happened for THIS
+        // frame's `run_ui` call, so it captures the freshest available data
+        // (the causes from one frame ago) rather than calling later in
+        // `run_frame` (same data, just read later for no benefit) or before
+        // `run_ui` (this frame's `begin_pass` hasn't swapped yet, so it
+        // would read causes from TWO frames ago instead of one). See the
+        // `repaint_cause_counts` field doc for why a one-pass lag is fine
+        // for this harness's aggregate-over-120-frames use, and would not
+        // be for single-frame attribution.
+        #[cfg(feature = "frame-profiling")]
+        for cause in self.ctx.repaint_causes() {
+            self.frame_profile.record_repaint_cause(&cause);
         }
 
         self.winit_state
@@ -843,18 +1283,96 @@ impl EguiState {
                     swap_max_us = p.swap_max.as_micros(),
                     swap_mean_us =
                         FrameProfile::mean_duration(p.swap_total, p.frame_counter).as_micros(),
+                    // Gate-blocker counters: which of the four REPLAY gate
+                    // predicates (see `evaluate_chrome_gate`) blocked a Full
+                    // decision this window, cumulative since window
+                    // creation. More than one may be nonzero for the same
+                    // set of frames -- that overlap is itself a finding.
+                    gate_blocked_cache_mismatch = p.gate_blocked_cache_mismatch,
+                    gate_blocked_not_settled = p.gate_blocked_not_settled,
+                    gate_blocked_damage_changed = p.gate_blocked_damage_changed,
+                    gate_blocked_chrome_input = p.gate_blocked_chrome_input,
+                    // Settle-gate value diagnostics: only populated on
+                    // frames where `gate_blocked_not_settled` fired this
+                    // flush window (see `record_settle_failure`); "none"
+                    // means the settle gate never failed this window, "MAX"
+                    // means a failing frame's `prev_repaint_delay` was
+                    // itself `Duration::MAX` (egui wanted no repaint yet the
+                    // gate still failed -- only possible via the
+                    // `prev_terminal_requested_delay` arm, since `MAX >=
+                    // app_delay` is only false when `app_delay` is also
+                    // `MAX`, which cannot itself fail the gate -- so seeing
+                    // this would itself be a notable finding).
+                    settle_repaint_delay_min_us =
+                        %FrameProfile::format_duration_field(p.settle_repaint_delay_min),
+                    settle_repaint_delay_max_us =
+                        %FrameProfile::format_duration_field(p.settle_repaint_delay_max),
+                    settle_terminal_requested_delay_min_us = %FrameProfile::format_duration_field(
+                        p.settle_terminal_requested_delay_min
+                    ),
+                    settle_terminal_requested_delay_max_us = %FrameProfile::format_duration_field(
+                        p.settle_terminal_requested_delay_max
+                    ),
+                    settle_terminal_requested_delay_none_count =
+                        p.settle_terminal_requested_delay_none_count,
+                    // Repaint-cause aggregation (task 121 defect-5): what,
+                    // exactly, requested an immediate/zero-delay repaint
+                    // this flush window -- egui-internal machinery vs. a
+                    // freminal call site -- and how many requests total,
+                    // for comparison against `frame_counter` (e.g. 120
+                    // frames producing 480 causes means ~4 requests/frame).
+                    // These are the PREVIOUS pass's causes, one frame
+                    // lagged -- see the `repaint_cause_counts` field doc.
+                    repaint_cause_total = total_repaint_cause_count(&p.repaint_cause_counts),
+                    repaint_cause_top8 =
+                        %format_repaint_causes(&top_repaint_causes(&p.repaint_cause_counts, 8)),
+                    // Task 121 pointer-motion repaint-gate spike: how many
+                    // `CursorMoved` events scheduled vs. were suppressed,
+                    // cumulative since window creation (not windowed, like
+                    // `chrome_mode_full`/`chrome_mode_replay`). Incremented
+                    // from `event_loop.rs` via
+                    // `record_pointer_frame_scheduled`/
+                    // `record_pointer_frame_suppressed`.
+                    pointer_frames_scheduled = p.pointer_frames_scheduled,
+                    pointer_frames_suppressed = p.pointer_frames_suppressed,
+                    pointer_suppressed_duty_cycle_pct = FrameProfile::chrome_replay_duty_cycle_pct(
+                        p.pointer_frames_scheduled,
+                        p.pointer_frames_suppressed
+                    ),
                     "windowing frame-profiling stats (task 121 harness): ChromeMode \
-                     duty cycle and the windowing-owned phase_total/run_ui/tessellate/\
+                     duty cycle, the windowing-owned phase_total/run_ui/tessellate/\
                      paint/swap wall-clock split over frame_counter drawn frames for \
-                     this window_id; phase_total minus (run_ui + tessellate + paint + \
-                     swap) is the unmeasured residual -- see FrameProfile::phase_total_total"
+                     this window_id (phase_total minus (run_ui + tessellate + paint + \
+                     swap) is the unmeasured residual -- see \
+                     FrameProfile::phase_total_total), which of the four REPLAY gate \
+                     predicates blocked Full->Replay this window (gate_blocked_*, \
+                     cumulative, non-exclusive), -- when the settle gate \
+                     specifically failed -- the min/max prev_repaint_delay and \
+                     prev_terminal_requested_delay values behind that failure this \
+                     flush window (settle_*), the top 8 ctx.repaint_causes() by \
+                     occurrence count this flush window plus their total \
+                     (repaint_cause_top8/repaint_cause_total), and the Task 121 \
+                     pointer-motion-suppression-spike counters \
+                     (pointer_frames_scheduled/pointer_frames_suppressed/\
+                     pointer_suppressed_duty_cycle_pct, cumulative since window \
+                     creation)"
                 );
+
+                // Settle-gate value diagnostics and the repaint-cause
+                // aggregation map are windowed, not cumulative-since-creation
+                // (see their field docs) -- clear them now that this
+                // window's line has been logged. The `gate_blocked_*`
+                // counters above are NOT reset; they stay cumulative like
+                // every other `FrameProfile` counter.
+                self.frame_profile.reset_settle_window();
+                self.frame_profile.reset_repaint_cause_window();
             }
         }
 
         FrameOutput {
             commands,
             repaint_delay,
+            app_requested_delay: terminal_requested_delay,
         }
     }
 
@@ -943,11 +1461,205 @@ mod frame_profiling_tests {
         let mean = FrameProfile::mean_duration(Duration::from_micros(42), 1);
         assert_eq!(mean, Duration::from_micros(42));
     }
+
+    // ── `min_max_duration` ──────────────────────────────────────────────
+
+    #[test]
+    fn min_max_duration_first_sample_sets_both() {
+        let (min, max) = super::min_max_duration((None, None), Duration::from_millis(16));
+        assert_eq!(min, Some(Duration::from_millis(16)));
+        assert_eq!(max, Some(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn min_max_duration_tracks_a_smaller_second_sample() {
+        let first = super::min_max_duration((None, None), Duration::from_millis(16));
+        let second = super::min_max_duration(first, Duration::from_millis(4));
+        assert_eq!(second.0, Some(Duration::from_millis(4)));
+        assert_eq!(second.1, Some(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn min_max_duration_tracks_a_larger_second_sample() {
+        let first = super::min_max_duration((None, None), Duration::from_millis(16));
+        let second = super::min_max_duration(first, Duration::from_millis(500));
+        assert_eq!(second.0, Some(Duration::from_millis(16)));
+        assert_eq!(second.1, Some(Duration::from_millis(500)));
+    }
+
+    // ── `FrameProfile::format_duration_field` ────────────────────────────
+
+    #[test]
+    fn format_duration_field_none_is_literal_none() {
+        assert_eq!(FrameProfile::format_duration_field(None), "none");
+    }
+
+    #[test]
+    fn format_duration_field_max_is_literal_max_not_an_absurd_number() {
+        assert_eq!(
+            FrameProfile::format_duration_field(Some(Duration::MAX)),
+            "MAX"
+        );
+    }
+
+    #[test]
+    fn format_duration_field_formats_a_real_duration_as_micros() {
+        assert_eq!(
+            FrameProfile::format_duration_field(Some(Duration::from_millis(16))),
+            "16000us"
+        );
+    }
+
+    // ── `trim_cause_file_path` ───────────────────────────────────────────
+
+    #[test]
+    fn trim_cause_file_path_leaves_a_short_path_unchanged() {
+        // freminal's own `file!()` paths are workspace-relative and
+        // typically well under the 4-segment keep threshold.
+        assert_eq!(
+            super::trim_cause_file_path("freminal/src/main.rs"),
+            "freminal/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_leaves_exactly_four_segments_unchanged() {
+        assert_eq!(
+            super::trim_cause_file_path("freminal/src/gui/widget.rs"),
+            "freminal/src/gui/widget.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_keeps_last_four_segments_of_a_long_registry_path() {
+        // A realistic egui-0.35.0 registry cache path -- the crate
+        // name+version directory component must survive the trim so it
+        // remains distinguishable from a freminal source path.
+        let long_path = "/home/fred/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs";
+        assert_eq!(
+            super::trim_cause_file_path(long_path),
+            "index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs"
+        );
+    }
+
+    #[test]
+    fn trim_cause_file_path_handles_backslash_separated_windows_paths() {
+        let long_path =
+            r"C:\Users\fred\.cargo\registry\src\index.crates.io-abc\egui-0.35.0\src\context.rs";
+        assert_eq!(
+            super::trim_cause_file_path(long_path),
+            "index.crates.io-abc/egui-0.35.0/src/context.rs"
+        );
+    }
+
+    // ── `total_repaint_cause_count` ──────────────────────────────────────
+
+    #[test]
+    fn total_repaint_cause_count_is_zero_for_an_empty_map() {
+        let counts = std::collections::BTreeMap::new();
+        assert_eq!(super::total_repaint_cause_count(&counts), 0);
+    }
+
+    #[test]
+    fn total_repaint_cause_count_sums_all_entries() {
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("a".to_string(), 3u64);
+        counts.insert("b".to_string(), 5u64);
+        counts.insert("c".to_string(), 2u64);
+        assert_eq!(super::total_repaint_cause_count(&counts), 10);
+    }
+
+    // ── `top_repaint_causes` ─────────────────────────────────────────────
+
+    #[test]
+    fn top_repaint_causes_orders_by_count_descending() {
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("rare".to_string(), 1u64);
+        counts.insert("common".to_string(), 100u64);
+        counts.insert("medium".to_string(), 10u64);
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("common".to_string(), 100),
+                ("medium".to_string(), 10),
+                ("rare".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn top_repaint_causes_truncates_to_n() {
+        let mut counts = std::collections::BTreeMap::new();
+        for i in 0..20u64 {
+            counts.insert(format!("cause_{i:02}"), i);
+        }
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(top.len(), 8);
+        // The 8 largest counts (19..=12) must be present, descending.
+        let expected_counts: Vec<u64> = (12..20).rev().collect();
+        let actual_counts: Vec<u64> = top.iter().map(|(_, c)| *c).collect();
+        assert_eq!(actual_counts, expected_counts);
+    }
+
+    #[test]
+    fn top_repaint_causes_breaks_ties_by_key_ascending_deterministically() {
+        // Three entries tied at count 5: BTreeMap::iter yields them
+        // alphabetically ("a" < "b" < "c"), and a stable sort by count
+        // descending must preserve that relative order for the tie.
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("c_cause".to_string(), 5u64);
+        counts.insert("a_cause".to_string(), 5u64);
+        counts.insert("b_cause".to_string(), 5u64);
+        let top = super::top_repaint_causes(&counts, 8);
+        assert_eq!(
+            top,
+            vec![
+                ("a_cause".to_string(), 5),
+                ("b_cause".to_string(), 5),
+                ("c_cause".to_string(), 5),
+            ],
+            "ties must break by key ascending, deterministically -- re-running \
+             must always produce this exact order"
+        );
+    }
+
+    #[test]
+    fn top_repaint_causes_handles_an_empty_map() {
+        let counts = std::collections::BTreeMap::new();
+        assert_eq!(super::top_repaint_causes(&counts, 8), Vec::new());
+    }
+
+    // ── `format_repaint_causes` ───────────────────────────────────────────
+
+    #[test]
+    fn format_repaint_causes_is_literal_none_when_empty() {
+        assert_eq!(super::format_repaint_causes(&[]), "none");
+    }
+
+    #[test]
+    fn format_repaint_causes_formats_a_realistic_example() {
+        let entries = vec![
+            (
+                "index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:1879 ".to_string(),
+                2846u64,
+            ),
+            (
+                "freminal/src/gui/terminal/widget.rs:1936 ".to_string(),
+                12u64,
+            ),
+        ];
+        assert_eq!(
+            super::format_repaint_causes(&entries),
+            "2846x index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:1879 ; \
+             12x freminal/src/gui/terminal/widget.rs:1936 "
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{atlas_grew, chrome_repaint_settled, decide_chrome_mode};
+    use super::{atlas_grew, chrome_repaint_settled, evaluate_chrome_gate};
     use egui::ImageData;
     use egui::epaint::{ImageDelta, Primitive};
     use egui::{Color32, ColorImage, Rect, TextureId, TextureOptions, TexturesDelta, pos2, vec2};
@@ -1040,7 +1752,26 @@ mod tests {
         }
 
         fn decide(&self) -> crate::ChromeMode {
-            decide_chrome_mode(
+            evaluate_chrome_gate(
+                self.cache_valid,
+                self.cache_size,
+                self.cache_ppp,
+                self.cur_size,
+                self.cur_ppp,
+                self.prev_repaint_delay,
+                self.prev_terminal_requested_delay,
+                self.prev_chrome_damage,
+                self.chrome_input_this_frame,
+            )
+            .chrome_mode()
+        }
+
+        /// The four raw gate predicates -- used by the tests below to prove
+        /// `evaluate_chrome_gate` (the gate-blocker instrumentation's data
+        /// source) fails exactly the expected predicate(s), independent of
+        /// `ChromeGatePredicates::chrome_mode`'s Full/Replay collapse.
+        fn gate(&self) -> super::ChromeGatePredicates {
+            evaluate_chrome_gate(
                 self.cache_valid,
                 self.cache_size,
                 self.cache_ppp,
@@ -1057,6 +1788,95 @@ mod tests {
     #[test]
     fn all_clear_decides_replay() {
         assert_eq!(Inputs::all_clear().decide(), crate::ChromeMode::Replay);
+    }
+
+    // ── `evaluate_chrome_gate` (gate-blocker instrumentation's data source) ──
+    // These mirror the `decide_chrome_mode` per-predicate tests below, but
+    // assert on the individual `ChromeGatePredicates` fields rather than the
+    // collapsed `ChromeMode`, proving the instrumentation can distinguish
+    // WHICH predicate(s) failed -- including more than one at once.
+
+    #[test]
+    fn gate_all_clear_passes_every_predicate() {
+        let gate = Inputs::all_clear().gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+        assert!(gate.all_pass());
+    }
+
+    #[test]
+    fn gate_invalid_cache_fails_only_cache_matches() {
+        let gate = Inputs {
+            cache_valid: false,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(!gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_not_settled_fails_only_repaint_settled() {
+        let gate = Inputs {
+            prev_repaint_delay: Duration::from_millis(16),
+            prev_terminal_requested_delay: Some(Duration::from_millis(500)),
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(!gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_chrome_damage_changed_fails_only_damage_unchanged() {
+        let gate = Inputs {
+            prev_chrome_damage: crate::ChromeDamage::Changed,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(!gate.damage_unchanged);
+        assert!(gate.no_chrome_input);
+    }
+
+    #[test]
+    fn gate_chrome_input_fails_only_no_chrome_input() {
+        let gate = Inputs {
+            chrome_input_this_frame: true,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(!gate.no_chrome_input);
+    }
+
+    /// Proves overlap is visible: a frame that fails BOTH the cache-match
+    /// AND the chrome-input predicates simultaneously reports both as
+    /// failed, not just one -- this is exactly what lets the (feature-gated)
+    /// `run_frame` instrumentation increment more than one gate-blocker
+    /// counter on the same frame.
+    #[test]
+    fn gate_multiple_simultaneous_failures_are_all_visible() {
+        let gate = Inputs {
+            cache_valid: false,
+            chrome_input_this_frame: true,
+            ..Inputs::all_clear()
+        }
+        .gate();
+        assert!(!gate.cache_matches);
+        assert!(gate.repaint_settled);
+        assert!(gate.damage_unchanged);
+        assert!(!gate.no_chrome_input);
+        assert!(!gate.all_pass());
     }
 
     #[test]
@@ -1123,7 +1943,7 @@ mod tests {
     #[test]
     fn blinking_cursor_idle_frame_decides_replay() {
         assert_eq!(
-            decide_chrome_mode(
+            evaluate_chrome_gate(
                 true,
                 [800, 600],
                 1.0,
@@ -1133,7 +1953,8 @@ mod tests {
                 Some(Duration::from_millis(500)),
                 crate::ChromeDamage::Unchanged,
                 false,
-            ),
+            )
+            .chrome_mode(),
             crate::ChromeMode::Replay
         );
     }

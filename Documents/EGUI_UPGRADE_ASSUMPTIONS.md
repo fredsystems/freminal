@@ -268,15 +268,66 @@ part on `egui-winit` returning `EventResponse { repaint: true }` for events like
 branch even though `is_unconditional_chrome_input` does not enumerate every such
 event.
 
+**Carve-out (found post-#436, fixed after #436 landed): `RedrawRequested` must
+be excluded from the `response.repaint` half of this gate.** `egui-winit`
+0.35.0 returns `EventResponse { repaint: true, .. }` for
+`WindowEvent::RedrawRequested` _unconditionally_, via a grouped match arm
+commented "Things that may require repaint:" that also covers
+`CursorEntered`/`Destroyed`/`Occluded`/`Resized`/`Moved`/`TouchpadPressure`/
+`CloseRequested` (`egui-winit-0.35.0/src/lib.rs:489-500`). Note this is a
+_different_ arm from `ScaleFactorChanged`'s, which is its own separate arm
+(`~310-324`) that happens to return `repaint: true` too — the two are not
+grouped together, they merely share the outcome this gate relies on. But `RedrawRequested` is also the
+event that drives every single frame, and `window_event`'s `RedrawRequested`
+arm reads this gate back (via `std::mem::take(&mut
+state.chrome_input_pending)`) in the same call that just set it. Before the
+fix this made `chrome_input_pending` `true` on every frame with no exception,
+which made `ChromeMode::Replay` permanently unreachable (measured: 0/360
+Replay frames at idle) — the entire chrome-cache subsystem was inert since
+issue #436 landed. The gate condition is therefore not simply
+`is_unconditional_chrome_input(event) || response.repaint`; it is
+`should_set_chrome_input_pending(event, response.repaint)`, which forces
+`false` for `RedrawRequested` regardless of `repaint`.
+
+**What a future egui bump must re-verify is the _behaviour_, not the source
+layout:** does `on_window_event` still report `repaint: true` for
+`RedrawRequested` (so the carve-out is still needed), and does any _other_
+event that fires unconditionally every frame now report it too (so it would
+need the same carve-out)? How upstream happens to group its match arms is an
+implementation detail that can change freely without affecting this invariant
+— don't check the grouping, check the returned `repaint` value. If egui-winit
+ever stops reporting `repaint: true` for `RedrawRequested`, the carve-out
+becomes a harmless no-op rather than wrong.
+
 - **Our code:** `freminal-windowing/src/event_loop.rs` —
-  `is_unconditional_chrome_input` plus the `|| response.repaint` OR at the
-  general event arm.
+  `is_unconditional_chrome_input`, `should_set_chrome_input_pending` (the
+  `RedrawRequested` carve-out), and the general event arm's call to it in
+  place of the old inline `|| response.repaint` OR.
 - **Upstream (0.35.0):** `egui-winit/src/lib.rs` —
-  `WindowEvent::ScaleFactorChanged { .. }` arm returning `EventResponse {
-  repaint: true, .. }` (`~311-324`).
-- **Symptom if broken:** a DPI / scale-factor change is not forced FULL — the
-  chrome renders at the wrong scale on a REPLAY frame until an unrelated FULL
-  frame fixes it.
+  `WindowEvent::ScaleFactorChanged { .. }` (`~310-324`) and
+  `WindowEvent::RedrawRequested` (`~489-500`, in the grouped "Things that may
+  require repaint:" arm) each return `EventResponse { repaint: true, .. }`
+  unconditionally, from **separate** match arms. On a bump, re-verify both
+  that `ScaleFactorChanged` still flags a repaint (the gate's completeness
+  depends on it) and that `RedrawRequested` still does (the carve-out exists
+  because it does, and would become unnecessary — though harmless — if it
+  ever stopped).
+- **Symptom if broken:**
+  - If the `ScaleFactorChanged` half regresses: a DPI / scale-factor change is
+    not forced FULL — the chrome renders at the wrong scale on a REPLAY frame
+    until an unrelated FULL frame fixes it.
+  - If the `RedrawRequested` carve-out is removed or "simplified away": no
+    visible pixel symptom, and `ChromeMode::Replay` silently stops firing at
+    idle — the chrome-cache subsystem goes inert again, as it was for the whole
+    life of #436 before this was found. **This is caught by a unit test, not
+    only by observation:**
+    `should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint`
+    in `event_loop.rs`'s test module fails immediately if the carve-out is
+    dropped, and
+    `should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events`
+    fails if it is over-broadened. The frame-profiling Replay/Full duty-cycle
+    counters are supplementary confirmation in a live session, not the primary
+    detection mechanism.
 
 ### A13 — egui `pixels_per_point` equals winit `scale_factor` (zoom is off)
 
