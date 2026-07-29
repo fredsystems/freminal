@@ -1,10 +1,11 @@
 # PLAN_121_PERF_REMEDIATION.md — Task 121 "Performance Remediation"
 
 > **STATUS: IN PROGRESS.** Fourteen subtasks have merged to `main` across six pull
-> requests (#458, #460, #461, #464, #465, #467). The remainder — one bug blocked
-> behind Task 122, one unifying improvement, seven unactioned issue #459 items, four
-> pieces of measurement debt, and two items surfaced by the Group B work — are
-> outstanding and unscheduled.
+> requests (#458, #460, #461, #464, #465, #467), plus 121.23 and 121.26 landed
+> directly. The remainder — one bug blocked behind Task 122, one unifying improvement,
+> six unactioned issue #459 items, two-and-a-half pieces of measurement debt (121.25
+> is partly captured), and three items surfaced by the Group B work and its
+> measurement — are outstanding and unscheduled.
 
 Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
@@ -78,9 +79,12 @@ creates — see that subtask.
 | B — Bug blocked behind Task 122         | 121.15        | Not started   |
 | B — Withdrawn                           | 121.16        | Withdrawn     |
 | C — Unifying improvement                | 121.17        | Not started   |
-| D — Unactioned issue #459 items         | 121.18–121.24 | Not started   |
-| E — Measurement debt                    | 121.25–121.28 | Not started   |
-| F — Surfaced by the Group B work        | 121.29–121.30 | Not started   |
+| D — Unactioned issue #459 items         | 121.18–121.22, 121.24 | Not started |
+| D — Profiling methodology               | 121.23        | Complete      |
+| E — Measurement debt                    | 121.27–121.28 | Not started   |
+| E — Measurement debt (partly captured)  | 121.25        | In progress   |
+| E — Blink-off comparison                | 121.26        | Complete      |
+| F — Surfaced by the Group B work        | 121.29–121.31 | Not started   |
 
 Subtask numbers are stable once assigned. A withdrawn or dissolved subtask keeps its
 number and records why (the convention Task 118 used for 118.10), so the decision is
@@ -400,6 +404,11 @@ Any pane containing a hyperlink, or scrolled back at all, reverts to full-rate
 scheduling for pointer motion anywhere in it. Conservative direction: it costs
 benefit, not correctness. Subsumed by 121.17, which is the preferred fix.
 
+**Measured 2026-07-29: `has_urls` alone vetoes 100% of pointer-motion checks** (792 of
+792), taking suppression from 99.16% to 1.68% and the motion path to ~20× the CPU. See
+121.17's measured-prize table. "It costs benefit, not correctness" remains true, but
+the benefit it costs is nearly all of it.
+
 **Deliberately excluded from the Group B fix (maintainer decision).** 121.12–121.14
 shipped without it. An interim narrowing here would mean adding a fifth round to the
 suppression predicate in its current shape — exactly what 121.17 warns is how the
@@ -458,6 +467,45 @@ exactly what Task 122 builds a home for. §2A records that the suppression predi
 "already needed four rounds"; adding a fifth to its current shape is how the
 maintainability argument for the egui rewrite gets stronger for no good reason. Do
 Task 122 first.
+
+### 121.17 measured prize (harness, 2026-07-29)
+
+No longer an argument. Captured with `--features frame-profiling`, wiggling the
+pointer over terminal content in three scenarios, flushes differenced:
+
+| Scenario | checks | suppressed | veto firing | `Replay` % | µs/frame |
+| --- | --- | --- | --- | --- | --- |
+| Clean pane | 15,265 | **99.16%** | `overlay_open` 126 (0.8%) | 58.3% | 729¹ |
+| One OSC 8 URL on screen | 792 | **1.68%** | `has_urls` **792 (100%)** | 5.8% | 185 |
+| btop | 217 | **0%** | `mouse_tracking_active` **216 (99.5%)** | 40.4% | 521 |
+
+¹ single flush, so warm-up is included; the others are differenced.
+
+**A single hyperlink on screen takes suppression from 99.16% to 1.68%.** `has_urls`
+fired on 792 of 792 checks — total defeat. btop confirms `mouse_tracking_active` does
+the same (216 of 217, zero suppressed), so any mouse-reporting TUI is affected.
+
+Cost of the vetoed path: the URL run's flushes are 1.955 s apart for 120 frames =
+**61.4 fps sustained**, at 185 µs/frame = **~1.1% of a core**, against ~0.06% for the
+clean pane at its 2–3 fps blink floor. **Roughly 20×.**
+
+**A CPU meter cannot see this** — a ~1.1% burst lasting a few hundred ms averages to
+0.1–0.2% over a typical sampling window, which is why informal observation (121.25)
+read the vetoed and unvetoed paths as identical. Use the counters, not a meter.
+
+### 121.17 also un-gates 121.13 (found while measuring)
+
+`Replay` duty cycle collapses 58.3% → 5.8% in the vetoed case, with
+`gate_blocked_not_settled` accounting for essentially every `Full` frame
+(`settle_repaint_delay = 0µs`, `settle_terminal_requested_delay = 500000µs`).
+
+This is correct by design: `effective_chrome_gate_delay` substitutes only when
+`suppressed_only`, and in the vetoed case egui's zero is genuine information rather
+than an artifact of suppressed events. But the consequence is that **121.13's win is
+gated on suppression actually engaging**, so the vetoed path loses both axes at once —
+full frame rate *and* full chrome-rebuild cost per frame. 121.17 therefore does not
+just cut frame count; it retroactively switches the 121.13 win on for that path. The
+two compound, which is a stronger case for 121.17 than the code alone supports.
 
 ---
 
@@ -525,6 +573,35 @@ is still the fallback if a finding is ever disputed, and the dangling `Cargo.tom
 reference is a defect regardless. Creating a new document requires maintainer
 approval per `no-summary-documents`.
 
+### 121.23 outcome (DONE)
+
+`Documents/PROFILING.md` written (maintainer-approved) and the `Cargo.toml` comment
+repointed at it. Both halves of the claim above were verified before writing: there
+is no `CONTRIBUTING.md` anywhere in the repo, and no profiling notes existed outside
+`DECOUPLING_FRAMEWORK.md` §8 0.3 and this entry.
+
+**This entry's own `perf` invocation is wrong, and the document corrects it.**
+`perf record` does **not** accept `--no-inline` — only `perf report` and `perf script`
+do, verified against `perf --help`. As written here it would fail. It is two commands,
+and the two flags do different jobs:
+
+- `perf record --call-graph dwarf,65528` — the stack-snapshot size. The default 8192
+  bytes is too small for freminal's call depth and `perf` truncates **silently**,
+  which is the false-negative flamegraph this entry warns about.
+- `perf report --no-inline` — inline-frame resolution against a full-debuginfo binary
+  this size is pathologically slow; without it `perf report` appears to hang. Nothing
+  to do with truncation.
+
+Also settled while writing it: `perf`, `cargo-flamegraph` and `cargo-profiler` are
+already in the **`default`** dev shell, so no `flake.nix` change is needed (`hotspot`
+is absent if a GUI is ever wanted). `perf` is Linux-gated, so Tier 2 is Linux-only.
+
+The document additionally records the **reporting discipline** that motivated doing
+this subtask first: always report frame rate and per-frame cost as a pair, never a
+single CPU figure, because total CPU is their product and one number cannot separate
+"fewer frames" from "cheaper frames". Work on per-frame cost can otherwise mask a
+scheduling regression, and vice versa.
+
 ### 121.24 — Two heap allocations per `CursorMoved` — measure before fixing
 
 `pane_tree.layout(central_rect)` and `iter_panes()` each allocate a `Vec` inside
@@ -548,6 +625,44 @@ and **btop** (hidden-cursor / `DECTCEM`) are unmeasured, and the clean, unconfou
 before/after run of Finding 3 has not been done. All need a human at the machine.
 This is `DECOUPLING_FRAMEWORK.md` §8 subtasks 0.2 (outstanding half) and 0.6.
 
+### 121.25 partial capture (IN PROGRESS)
+
+The **clean Finding 3 re-run is done.** Re-measured post-Group-B on second hardware
+(a laptop, slower than the original machine), no accidental input, which is what this
+entry asked for. Informal tooling readings, not instrumented captures:
+
+| Scenario | freminal |
+| --- | --- |
+| Genuine idle, `cursor.blink = false` | 0.0%, occasionally 0.1% |
+| Genuine idle, blink on | same |
+| Pointer motion over static, unvetoed content | 0.1–0.2% |
+
+Consistent with the arithmetic: a 2 fps floor at ~400–600 µs/frame is 0.08–0.12% of a
+core, at or below the reporting resolution. Roughly level with the pre-Group-B
+reading, which is **expected** — none of 121.12–121.14 is on that path. 121.12's
+routing needs an animation live; its 250→500 ms change only bites when the app
+requests nothing (blink off); 121.13's `Replay` win is ~59 µs on 2 frames/s ≈ 0.012%;
+121.14 needs a toast or resize HUD present.
+
+Note the residual 0.1–0.2% under motion is **not frames** — at a 2 fps floor, drawing
+at pointer rate would cost ~2–3% of a core. It is per-event work outside the frame
+path: `pointer_motion_needs_repaint` running at 425–478 events/s doing `iter_panes()`,
+`pane_tree.layout()` and an `arc_swap.load()` per event. That brackets 121.24's own
+0.077% estimate and is corroborating evidence for it.
+
+**The vetoed path has since been measured with the harness** — see 121.17's
+measured-prize table. It reads 0.1–0.2% on a CPU meter, identical to the unvetoed
+path, while actually sustaining 61.4 fps at ~1.1% of a core. **The meter readings above
+therefore do not discriminate between the two paths and must not be cited as evidence
+that the vetoed path is cheap.** That is the concrete case for `PROFILING.md`'s
+reporting discipline: use `pointer_frames_scheduled` / `pointer_frames_suppressed` and
+`pointer_repaint_conditions_fired`, not an averaged percentage.
+
+**Still outstanding: typing.** btop is now covered for the veto mechanism
+(`mouse_tracking_active` 216 of 217) but **not** for sustained cost — that run logged
+217 checks over 26.9 s, i.e. ~8 events/s, so the pointer was barely moving. A
+sustained-motion btop capture is still worth having.
+
 ### 121.26 — Blink-off comparison against wezterm
 
 The wezterm A/B in `DECOUPLING_FRAMEWORK.md` §2A Finding 3 is not apples-to-apples:
@@ -556,6 +671,29 @@ blink frames by construction. The honest test is freminal with
 `cursor.blink = false`, which is likely to close most of the remaining gap. Blocked
 on 121.12 — today, blink-off lands on the 4 fps fallback and would measure worse
 than blink-on.
+
+### 121.26 outcome (DONE — but not as specified)
+
+Measured against wezterm on second hardware. At genuine idle, freminal with
+`cursor.blink = false` reads **0.0%, occasionally 0.1%**, level with blink on. The gap
+the original A/B implied is closed.
+
+**The lever this entry is built on no longer works, and did not need to.** 121.12 set
+`SUPPRESSED_POINTER_FALLBACK_DELAY` to 500 ms precisely so blink-off could never be
+worse than blink-on — which means blink-off now falls back to the *same* 500 ms and
+**does not remove the 2 Hz floor** this entry wanted to eliminate. Had 121.12 gone
+unbounded (see 121.29) blink-off would have dropped to zero scheduled frames and the
+comparison would have been clean by construction. That trade was not flagged when
+121.12 landed.
+
+It does not reopen the decision; it dissolves the question. The floor this entry set
+out to control for measures ~0.08% of a core. A confound below reporting resolution
+does not need removing.
+
+**Wording discipline — do not upgrade this.** The equality is
+**resolution-limited, not measured**: both figures sit at or under the tooling's one
+decimal place. Do not restate it as "freminal matches wezterm exactly", and mirror
+`DECOUPLING_FRAMEWORK.md` §2A's caution rather than exceeding it.
 
 ### 121.27 — `DESIGN_DECISIONS.md` entry for Phase 0
 
@@ -625,6 +763,12 @@ the 500ms fallback is ~**0.075% of a core** (2 wakes/s × the 376µs idle frame 
 from 121.8), which 121.24 independently corroborates. Blocked on 121.28; would also
 need a new `EGUI_UPGRADE_ASSUMPTIONS.md` entry. **Do not re-derive this analysis.**
 
+**Confirmed live (harness, 2026-07-29):** `repaint_cause_top8` shows
+`95x .../egui-0.35.0/src/context.rs:525` during pointer motion — that is exactly the
+events-driven `begin_pass` cause this analysis rests on, so the mechanism is real and
+observable. It also means the discriminating test is *implementable*; the objection
+remains the five internals it depends on, not whether the signal exists.
+
 ### 121.30 — Chrome widgets are not constructed at all on `Replay`
 
 `SUPPRESSED_POINTER_FALLBACK_DELAY`'s original doc framed the residual risk purely as
@@ -634,13 +778,39 @@ pointer motion keeps the gate settled, an egui-internal chrome animation would n
 merely be scheduled less often — its own advancing logic would not run, and it would
 freeze rather than degrade.
 
-**Latent, not live.** freminal uses no `ctx.animate_bool` / `ctx.animate_value`
-anywhere in chrome (verified by search), and an open menu forces `Full` through
-`any_overlay_open` via an unrelated gate. 121.13 widened the latent window to the
-"app requested nothing" case as a deliberate, accepted trade.
+**Latent, not live** in freminal's own code: it uses no `ctx.animate_bool` /
+`ctx.animate_value` anywhere in chrome (verified by search), and an open menu forces
+`Full` through `any_overlay_open` via an unrelated gate. 121.13 widened the latent
+window to the "app requested nothing" case as a deliberate, accepted trade.
 
-The trigger to action this is the introduction of **any** `ctx.animate_*`-driven
-chrome widget. Both mechanisms are now documented at the constant.
+**But egui itself raises repaint causes we do not control (harness, 2026-07-29).**
+`repaint_cause_top8` logged `12x .../egui-0.35.0/src/containers/area.rs:640`, plus
+`:552` and `:684`, during a pointer-motion run. The earlier "no `ctx.animate_*`"
+check covered **freminal's** code, not egui's `Area`. That does not make this live —
+those frames were not suppressed — but it removes the comfort that egui is quiescent,
+and it is independent support for keeping 121.12's fallback bounded rather than
+unbounded (121.29).
+
+The trigger to action this is the introduction of any `ctx.animate_*`-driven chrome
+widget, or evidence of an `area.rs` cause arriving on a frame that *was* suppressed.
+Both mechanisms are documented at the constant.
+
+### 121.31 — Every frame is a full present during pointer motion
+
+Observed while capturing 121.17's numbers, not yet diagnosed.
+`frame_damage_full=120, frame_damage_partial=0` in both the clean-pane and URL runs —
+i.e. **every** frame during pointer motion was a full present, where 121.8 recorded
+120/120 *partial* at idle. `swap_mean_us=210` is 29% of the clean run's 729 µs frame.
+
+Subtask 121.5 region-gated `pointer_forces_full_present` specifically so motion over
+terminal content would not force a full present. Either that gate is over-firing, or
+something else is forcing `Full` — note `toast_active=48` fired in every run, and
+`chrome_signals_fired` also shows `warming_up=3`, so a startup toast is a plausible
+confound rather than a bug.
+
+**Diagnose before fixing**, and re-run without the startup toast present. Second-order
+against 121.17 (which cuts the frame count on the path where this costs most), so
+schedule it after. Cheap read-only recon; do not change the damage logic speculatively.
 
 ---
 

@@ -28,7 +28,7 @@ hot, so it ships together):
 - **Task 121 — Performance Remediation** (in progress): the umbrella for all work arising
   from issue #459's real-workload CPU profiling. Fourteen subtasks have merged, most recently
   the Group B bug fixes 121.12–121.14 (PR #467); the remaining bug, issue #459's unactioned
-  candidate list, and two items the Group B fixes surfaced are outstanding. Summarised below;
+  candidate list, and three items the Group B fixes and their measurement surfaced are outstanding. Summarised below;
   the full breakdown is in `PLAN_121_PERF_REMEDIATION.md`.
 
 **Theme 3 — structural cleanup:**
@@ -840,9 +840,12 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 | B — Bug blocked behind Task 122       | 121.15        | Not started   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17            |
 | B — Withdrawn                         | 121.16        | Withdrawn     | config kill switch — rejected; revert-and-fix is the remedy             |
 | C — Unifying improvement              | 121.17        | Not started   | cell-granular pointer suppression (depends on Task 122)                 |
-| D — Unactioned issue #459 items       | 121.18–121.24 | Not started   | items 3–8 plus per-`CursorMoved` allocations                            |
-| E — Measurement debt                  | 121.25–121.28 | Not started   | typing/btop, blink-off A/B, `DESIGN_DECISIONS.md` entry, issue #440 harness |
-| F — Surfaced by the Group B work      | 121.29–121.30 | Not started   | `repaint_causes()` unbounded fallback; chrome not built on `Replay`      |
+| D — Unactioned issue #459 items       | 121.18–121.22, 121.24 | Not started | items 3–7 plus per-`CursorMoved` allocations                    |
+| D — Profiling methodology             | 121.23        | Complete      | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file |
+| E — Measurement debt                  | 121.27–121.28 | Not started   | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                   |
+| E — Measurement debt (partly done)    | 121.25        | In progress   | clean Finding 3 re-run done; typing and btop outstanding                |
+| E — Blink-off comparison              | 121.26        | Complete      | blink-off ≈ blink-on ≈ 0.0–0.1% at idle; resolution-limited             |
+| F — Surfaced by the Group B work      | 121.29–121.31 | Not started   | `repaint_causes()`; chrome not built on `Replay`; full present on motion |
 
 ### 121 Headline result
 

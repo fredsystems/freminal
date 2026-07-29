@@ -478,10 +478,12 @@ issue #459's real-workload profiling. It ran for five merged pull requests
 (#458, #460, #461, #464 and #465) under a task number that existed only in branch names;
 creating it closes that tracking gap rather than starting new work. Fourteen subtasks are
 merged: 121.1–121.11 from that original run, plus the Group B bug fixes 121.12–121.14
-(PR #467). Outstanding: 121.15 (left to 121.17, blocked behind Task 122),
-121.16 (withdrawn), 121.17, issue #459's unactioned candidate list (121.18–121.24),
-measurement debt (121.25–121.28), and two items the Group B fixes themselves surfaced
-(121.29–121.30). The
+(PR #467), and 121.23 (the profiling methodology reference,
+`Documents/PROFILING.md`) and 121.26 landed directly. Outstanding: 121.15 (left to
+121.17, blocked behind Task 122), 121.16 (withdrawn), 121.17, issue #459's unactioned
+candidate list (121.18–121.22, 121.24), measurement debt (121.25, partly captured, plus
+121.27–121.28), and two items the Group B fixes themselves surfaced
+(121.29–121.31). The
 task is an umbrella, so several subtasks will outlive v0.12.0; the version does not gate on
 Task 121 reaching Complete. **Task 121 is not the egui-decoupling decision** —
 `Documents/DECOUPLING_FRAMEWORK.md` is the decision record for whether freminal should stop
@@ -712,7 +714,7 @@ Update this section as tasks complete:
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
-| 121  | 2026-07-27 |            | 121.1-121.14 merged (121.12-121.14 via PR #467); 121.15/121.17-121.30 open       |
+| 121  | 2026-07-27 |            | 121.1-121.14 (PR #467), 121.23, 121.26 done; 121.25 partial; rest open           |
 | 122  |            |            | v0.12.0. Not started; needs an activation pass (`DECOUPLING_FRAMEWORK.md` §8)    |
 
 ---
@@ -730,7 +732,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
 - `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–122; 118–119 decomposed and complete, 120 and 122 stubs, 121 summary)
-- `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation" full breakdown (121.1–121.30)
+- `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation" full breakdown (121.1–121.31)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)

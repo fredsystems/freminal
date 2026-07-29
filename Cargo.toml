@@ -107,8 +107,10 @@ ignored = ["vergen"]
 # without stripping, so `perf` / `cargo flamegraph` produce symbol-rich,
 # inline-aware stacks. Build with `cargo build --profile profiling` (or
 # `cargo flamegraph --profile profiling ...`). No effect on the normal
-# `release` / `dev` builds. See CONTRIBUTING / the profiling notes for the
-# btop idle-CPU investigation (issue #405).
+# `release` / `dev` builds. See `Documents/PROFILING.md` for the full
+# methodology -- in particular the `--call-graph dwarf,65528` stack-size flag,
+# without which `perf` silently truncates freminal's deep stacks and yields a
+# false-negative flamegraph.
 [profile.profiling]
 inherits = "release"
 debug = "full"
