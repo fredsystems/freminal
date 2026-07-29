@@ -1,10 +1,10 @@
 # PLAN_121_PERF_REMEDIATION.md — Task 121 "Performance Remediation"
 
-> **STATUS: IN PROGRESS.** Eleven subtasks have merged to `main` across five pull
-> requests (#458, #460, #461, #464, #465). Three more (121.12–121.14) are complete
-> and pending merge. The remainder — one bug blocked behind Task 122, one unifying
-> improvement, seven unactioned issue #459 items, four pieces of measurement debt,
-> and two items surfaced by the Group B work — are outstanding and unscheduled.
+> **STATUS: IN PROGRESS.** Fourteen subtasks have merged to `main` across six pull
+> requests (#458, #460, #461, #464, #465, #467). The remainder — one bug blocked
+> behind Task 122, one unifying improvement, seven unactioned issue #459 items, four
+> pieces of measurement debt, and two items surfaced by the Group B work — are
+> outstanding and unscheduled.
 
 Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
@@ -74,7 +74,7 @@ creates — see that subtask.
 | Group                                   | Subtasks      | Status        |
 | --------------------------------------- | ------------- | ------------- |
 | A — Completed work (merged to `main`)   | 121.1–121.11  | Complete      |
-| B — Bugs found and fixed                | 121.12–121.14 | Pending merge |
+| B — Bugs found and fixed                | 121.12–121.14 | Complete      |
 | B — Bug blocked behind Task 122         | 121.15        | Not started   |
 | B — Withdrawn                           | 121.16        | Withdrawn     |
 | C — Unifying improvement                | 121.17        | Not started   |
@@ -233,10 +233,10 @@ Commit `f762ca02`. One real bug plus cleanups, from automated review of PR #465.
 
 ## Group B — Bugs found by Group A
 
-These were surfaced by Group A. 121.12, 121.13 and 121.14 are **fixed and pending
-merge** (branch `task-121/group-b`, one atomic commit each). 121.15 remains unfixed
-and is deliberately left to 121.17, which is blocked behind Task 122. 121.16 is
-withdrawn.
+These were surfaced by Group A. 121.12, 121.13 and 121.14 are **fixed and merged to
+`main`** via PR #467 (merge commit `f7dac216`, one atomic commit per subtask on
+`task-121/group-b`). 121.15 remains unfixed and is deliberately left to 121.17, which
+is blocked behind Task 122. 121.16 is withdrawn.
 
 ### 121.12 — The 250 ms fallback makes blink-off slower than blink-on
 
@@ -260,7 +260,7 @@ do not do after warm-up. This is a different defect on the same lines.
 requires `cursor.blink = false`, which previously landed on the worse of the two
 floors.
 
-### 121.12 outcome (DONE, pending merge)
+### 121.12 outcome (DONE — merged, PR #467)
 
 **This entry originally named three bypassing call sites. That was wrong — there are
 eight**, and the miscount changed what the fix buys. Recon found, in addition to the
@@ -311,7 +311,7 @@ settled. Consequence: `ChromeMode::Replay` sits at roughly 0.5% duty cycle while
 mouse is moving, against 100% at idle. The 121.8 win is silently switched off for
 exactly as long as the pointer moves.
 
-### 121.13 outcome (DONE, pending merge)
+### 121.13 outcome (DONE — merged, PR #467)
 
 Fixed with a narrow `EguiState::stash_effective_repaint_delay` called from the
 `RedrawRequested` arm once `effective_delay` is known. `run_frame` still performs
@@ -353,7 +353,7 @@ superset of correct, therefore safe, but wasteful.
 returned from `measure_inputs` at `toast.rs:1662`) as a real signal instead of
 testing for presence.
 
-### 121.14 outcome (DONE, pending merge)
+### 121.14 outcome (DONE — merged, PR #467)
 
 **Both halves fixed**, not just the toast half this entry's Fix bullet named — the
 resize-HUD half is cited in the bug text above and was trivially fixable.
