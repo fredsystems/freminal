@@ -23,8 +23,8 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete |
-| v0.12.0 | Kitty T&C + Scrollback Memory   | `PLAN_VERSION_120.md`                                                 | 102–103, 118–120 | Planned  |
-| v0.13.0 | Kitty: Text Sizing              | `PLAN_VERSION_130.md`                                                 | 104              | Planned  |
+| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–122          | In progress |
+| v0.13.0 | Kitty: Transfer, Cursors & Text | `PLAN_VERSION_130.md`                                                 | 102–104          | Planned  |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub     |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub     |
 | v0.16.0 | Reach & Credibility             | `PLAN_VERSION_160.md`                                                 | 88, 89, 91, 93   | Stub     |
@@ -57,8 +57,15 @@ more modals and overlays, and every new modal inherits whatever visual baseline 
 down the visual debt first means later work is styled by construction rather than retrofitted.
 See `PLAN_VERSION_100.md`.
 
-**Full kitty protocol coverage (v0.11.0–v0.13.0 + deferred DnD).** Freminal already ships the
-kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These three versions
+**v0.12.0 is a bug-fix, performance and structural-cleanup release.** It ships no new protocol
+support and no new user-facing features: the scrollback-memory effort (Tasks 118–120), the CPU
+performance remediation umbrella (Task 121), and the orchestration extraction (Task 122), which
+is a no-behaviour-change refactor rather than a fix or an optimisation. Tasks 102 (Kitty File
+Transfer) and 103 (Multiple Cursors) were planned for v0.12.0 and **moved to v0.13.0** when it
+was redefined; their plan content moved unchanged. See `PLAN_VERSION_120.md`.
+
+**Full kitty protocol coverage (v0.11.0 and v0.13.0 + deferred DnD).** Freminal already ships
+the kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These two versions
 finish the remaining kitty protocol-extension surface: desktop notifications (OSC 99),
 graphics protocol completion (animation, unicode placeholders, relative placements, storage
 quotas), a keyboard-protocol completeness audit, file transfer over the TTY (OSC 5113),
@@ -172,8 +179,8 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 99  | Kitty Desktop Notifications (OSC 99)      | `PLAN_VERSION_110.md` (Task 99)               | Complete  | v0.9.0 (Task 76)       |
 | 100 | Kitty Graphics Protocol Completion        | `PLAN_VERSION_110.md` (Task 100)              | Complete  | Task 13                |
 | 101 | Kitty Keyboard Compliance (encoding-only) | `PLAN_VERSION_110.md` (Task 101)              | Complete  | Task 35                |
-| 102 | Kitty File Transfer (OSC 5113)            | `PLAN_VERSION_120.md` (Task 102)              | Planned   | Task 99                |
-| 103 | Multiple Cursors (CSI)                    | `PLAN_VERSION_120.md` (Task 103)              | Planned   | None                   |
+| 102 | Kitty File Transfer (OSC 5113)            | `PLAN_VERSION_130.md` (Task 102)              | Planned   | Task 99                |
+| 103 | Multiple Cursors (CSI)                    | `PLAN_VERSION_130.md` (Task 103)              | Planned   | None                   |
 | 104 | Kitty Text Sizing (OSC 66)                | `PLAN_VERSION_130.md` (Task 104)              | Planned   | Task 13                |
 | 105 | Kitty Drag & Drop (OSC 72)                | `PLAN_VERSION_DND.md` (Task 105)              | Deferred  | Task 102 (consent UX)  |
 | 106 | Pre-0.9.0 Bug Closure (Release Gate)      | `PLAN_VERSION_090.md` (Task 106)              | Stub      | v0.9.0 features        |
@@ -188,8 +195,10 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 116 | Text Selection Release/Stuck Fix          | `PLAN_VERSION_111.md` (Task 116)              | Complete  | None                   |
 | 117 | DECDWL/DECDHL/DECSLRM Buffer Completeness | `PLAN_VERSION_111.md` (Task 117)              | Complete  | None                   |
 | 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Complete  | None                   |
-| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Pending merge | Task 118           |
+| 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Complete  | Task 118               |
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
+| 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | In progress | None                 |
+| 122 | Orchestration Extraction                  | `PLAN_VERSION_120.md` (Task 122)              | Stub      | None                   |
 
 ---
 
@@ -443,11 +452,13 @@ media, ISO-level shifts, print/pause/menu keys) via a raw-winit intercept; the l
 was reverted and is tracked separately. All target stable kitty specs; v0.11.0 keyboard ships
 "substantially compliant, remainder tracked (Task 114)".
 
-**Tasks 102–103 (v0.12.0, file transfer & cursors):** Task 102 (OSC 5113) is a stateful
+**Tasks 102–103 (v0.13.0, file transfer & cursors):** Task 102 (OSC 5113) is a stateful
 bidirectional session machine with a mandatory user-consent prompt; it reuses the reverse-write
 path Task 99 establishes. Task 103 (multiple cursors) is a renderer-light addition
 (`TerminalSnapshot` gains a cursor list; `build_cursor_verts_only()` iterates). Both target
-stable specs. Cursors is the small safe win balancing the heavier transfer work.
+stable specs. Cursors is the small safe win balancing the heavier transfer work. **Both were
+planned for v0.12.0 and moved to v0.13.0** when v0.12.0 was redefined as a
+bug-fix-and-performance-only release; their plan content moved unchanged.
 
 **Tasks 118–120 (v0.12.0, scrollback memory):** the whole three-phase scrollback-memory
 effort now lands in v0.12.0 (originally 118 here + 119 in a separate v0.13.1, since deleted).
@@ -459,13 +470,43 @@ compact form, driven by the same idle tick — LZ4-only, no zstd tier. Task 120
 (compression-aware windowed reflow) **absorbs the former 118.10 lazy-reflow stub and the
 reflow half of the original Task 119**, because band-decompression and lazy reflow are one
 control flow; it stays an enriched stub (decomposed at its own activation) while 118–119 are
-decomposed. The memory tasks share no seams with the kitty tasks and are fully parallelizable.
+decomposed. The memory tasks share no seams with Task 121 (they live in `freminal-buffer`;
+Task 121 lives in the GUI and windowing frame path) and are fully parallelizable.
+
+**Task 121 (v0.12.0, performance remediation):** the umbrella for all CPU work arising from
+issue #459's real-workload profiling. It ran for five merged pull requests
+(#458, #460, #461, #464 and #465) under a task number that existed only in branch names;
+creating it closes that tracking gap rather than starting new work. Eleven subtasks
+(121.1–121.11) are merged; the bugs and improvements that work surfaced
+(121.12–121.17, of which 121.16 is withdrawn) and issue #459's unactioned candidate
+list (121.18–121.24) plus measurement debt
+(121.25–121.28) are outstanding and unscheduled. The
+task is an umbrella, so several subtasks will outlive v0.12.0; the version does not gate on
+Task 121 reaching Complete. **Task 121 is not the egui-decoupling decision** —
+`Documents/DECOUPLING_FRAMEWORK.md` is the decision record for whether freminal should stop
+using egui for the main window, and its status is reopened and leaning against the rewrite.
+Task 121 is the performance work, and it stands either way.
+
+**Task 122 (v0.12.0, orchestration extraction):** decompose the GUI binary's god functions
+and give orchestration logic (event triage, view window, input encoding, frame decisions) a
+home. Its plan content is `DECOUPLING_FRAMEWORK.md` §8 Phase 1, summarised in
+`PLAN_VERSION_120.md`; it has no plan document of its own. It is on the roadmap because it
+is **required whichever way the egui decision falls** — Phase 0 measurement showed the
+rewrite case is a maintainability judgement, not a performance necessity, which makes
+Task 122 the deliverable that lets that judgement be made honestly rather than a
+prerequisite for a rewrite. Note it retires none of the 13 assumptions in
+`EGUI_UPGRADE_ASSUMPTIONS.md` (those need Phase 3). It is **not** a blocker for most of
+Task 121 — Groups D and E live in the shaping/renderer/GL/windowing layers Task 122 does
+not touch — but subtask 121.17 (cell-granular suppression) does depend on it, so 122
+precedes 121.17 within the version. It stays `Stub` until an activation pass re-measures
+§8's line counts, which are point-in-time and have already drifted.
 
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
-blocks, fractional scaling, custom width algorithm). It is isolated in its own version. **A
-collision audit is the mandatory first subtask:** freminal currently treats OSC 66 as the
-Contour "ColorScheme Notification" (recognised, silently consumed) — the audit resolves the
-kitty-vs-Contour ambiguity before any implementation.
+blocks, fractional scaling, custom width algorithm). It shares no seams with Tasks 102 and
+103, so it can slip without dragging them with it. **A collision audit is the mandatory first
+subtask:** freminal currently treats OSC 66 as the Contour "ColorScheme Notification"
+(recognised, silently consumed) — the audit resolves the kitty-vs-Contour ambiguity before any
+implementation.
 
 **Task 105 (deferred, drag & drop):** OSC 72 is "extremely high" complexity and its spec is
 still under active development upstream (kitty 0.47, issue #9984). Per the
@@ -669,7 +710,9 @@ Update this section as tasks complete:
 | 116  | 2026-07-08 | 2026-07-08 | 116.1-116.4 selection release/stuck (tracked-end, commit-flag, interrupted drag) |
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
-| 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; PR pending    |
+| 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
+| 121  | 2026-07-27 |            | 121.1-121.11 merged (PRs #458/#460/#461/#464/#465); 121.12-121.28 outstanding    |
+| 122  |            |            | v0.12.0. Not started; needs an activation pass (`DECOUPLING_FRAMEWORK.md` §8)    |
 
 ---
 
@@ -685,8 +728,10 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Kitty T&C + Scrollback Memory" (Tasks 102–103, 118–120; 118–119 decomposed, 120 stub)
-- `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Text Sizing" (Task 104, decomposed)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–122; 118–119 decomposed and complete, 120 and 122 stubs, 121 summary)
+- `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation" full breakdown (121.1–121.28)
+- `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
+- `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
 - `Documents/PLAN_VERSION_150.md` — v0.15.0 "Remote" (stub, Task 86)
 - `Documents/PLAN_VERSION_160.md` — v0.16.0 "Reach & Credibility" (stubs, Tasks 88, 89, 91, 93)

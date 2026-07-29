@@ -45,8 +45,8 @@ achievable and verifiable.
 | Desktop notifications (OSC 99)    | v0.11.0  | 99      | Filled in            |
 | Graphics protocol completion      | v0.11.0  | 100     | Filled in            |
 | Keyboard protocol compliance      | v0.11.0  | 101     | Filled in            |
-| File transfer over TTY (OSC 5113) | v0.12.0  | 102     | Stub                 |
-| Multiple cursors (CSI)            | v0.12.0  | 103     | Stub                 |
+| File transfer over TTY (OSC 5113) | v0.13.0  | 102     | Stub                 |
+| Multiple cursors (CSI)            | v0.13.0  | 103     | Stub                 |
 | Text sizing (OSC 66)              | v0.13.0  | 104     | Stub                 |
 | Drag and drop (OSC 72)            | deferred | 105     | Stub (spec unstable) |
 
@@ -800,12 +800,12 @@ across platforms. Remaining gaps: lock-state (reverted), ISO_Level3/5_Shift
 These are decomposed at their own version's activation, against the code as it
 then exists. Durable pointers only.
 
-### File transfer over TTY — OSC 5113 (v0.12.0, Task 102)
+### File transfer over TTY — OSC 5113 (v0.13.0, Task 102)
 
 Stateful bidirectional transfer with a mandatory user-consent prompt; reuses the
 reverse-write path. Spec: <https://sw.kovidgoyal.net/kitty/file-transfer-protocol/>.
 
-### Multiple cursors — CSI (v0.12.0, Task 103)
+### Multiple cursors — CSI (v0.13.0, Task 103)
 
 Renderer-light: snapshot gains a cursor list. Spec:
 <https://sw.kovidgoyal.net/kitty/multiple-cursors-protocol/>.

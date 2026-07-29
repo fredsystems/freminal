@@ -9,7 +9,8 @@
 //! loop and has no business being inside the `TerminalEmulator` or `Buffer`.
 //! It is never shared with the PTY thread.
 //!
-//! See `Documents/PERFORMANCE_PLAN.md`, Section 4.5 for the architecture context.
+//! See the `freminal-architecture` skill for the lock-free architecture
+//! invariants this struct exists to satisfy.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -405,7 +406,7 @@ pub struct PendingPaste {
 ///
 /// All fields that were previously on `TerminalEmulator` / `TerminalState` have
 /// been migrated here as part of the lock-free architecture refactor
-/// (see `Documents/PERFORMANCE_PLAN.md`, Section 4.5).
+/// (see the `freminal-architecture` skill).
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)] // GUI-local per-feature state flags (window focus, per-blink visibility, per-frame selection-commit edge flag) — each is independent and short-lived; a state machine would couple unrelated concerns and obscure intent.
 pub struct ViewState {

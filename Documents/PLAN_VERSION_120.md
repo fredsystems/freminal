@@ -1,23 +1,20 @@
-# PLAN_VERSION_120.md — v0.12.0 "Kitty: Transfer & Cursors + Scrollback Memory"
+# PLAN_VERSION_120.md — v0.12.0 "Scrollback Memory & Performance"
 
 ## Goal
 
-Ship two stable-spec kitty protocols: file transfer over the TTY (OSC 5113) — a stateful
-bidirectional session machine with a mandatory user-consent prompt — and multiple cursors
-(CSI), a renderer-light addition. The heavy, consent-gated transfer work is balanced by
-the small, safe cursor win.
+**v0.12.0 is a bug-fix, performance and structural-cleanup release.** It ships no new
+protocol support and no new user-facing features. Three themes:
 
-This version also carries the **entire scrollback-memory effort** as a second theme,
-deliberately pulled forward and completed in one place rather than spread across later point
-releases (a conscious bending of the one-theme-per-version convention — the memory work is
-cohesive and the context is hot, so it ships together):
+**Theme 1 — the entire scrollback-memory effort**, deliberately pulled forward and
+completed in one place rather than spread across later point releases (a conscious bending
+of the one-theme-per-version convention — the memory work is cohesive and the context is
+hot, so it ships together):
 
-- **Task 118 — Compact Cell Representation** (done): a buffer-layer memory optimisation that
-  shrinks stored scrollback rows ~8–12× by sharing formatting across runs and dropping the
-  always-null image pointer, plus idle-driven compaction off the hot path. Merged on this
-  branch.
-- **Task 119 — Scrollback Compression (LZ4)**: an incremental memory multiplier layered on
-  the Task-118 compact form — block-granular LZ4 compression of idle scrollback,
+- **Task 118 — Compact Cell Representation** (complete): a buffer-layer memory optimisation
+  that shrinks stored scrollback rows ~8–12× by sharing formatting across runs and dropping
+  the always-null image pointer, plus idle-driven compaction off the hot path.
+- **Task 119 — Scrollback Compression (LZ4)** (complete): an incremental memory multiplier
+  layered on the Task-118 compact form — block-granular LZ4 compression of idle scrollback,
   decompress-on-scroll with an LRU block cache, driven by the same idle tick Task 118
   established. LZ4-only (no zstd tier).
 - **Task 120 — Compression-Aware Windowed Reflow** (enriched stub): once a very large
@@ -26,362 +23,74 @@ cohesive and the context is hot, so it ships together):
   because band-decompression and lazy reflow are one control flow. Decomposed at its own
   activation session, not now.
 
-The kitty tasks (102, 103) and the memory tasks (118, 119, 120) are independent and
-parallelizable — different sub-agents, no shared seams.
+**Theme 2 — CPU performance remediation:**
 
-Depends on v0.11.0 (Task 99 establishes the reverse-PTY-write notification path that file
-transfer reuses) and the existing lock-free architecture.
+- **Task 121 — Performance Remediation** (in progress): the umbrella for all work arising
+  from issue #459's real-workload CPU profiling. Eleven subtasks have merged; the bugs that
+  work surfaced and issue #459's unactioned candidate list are outstanding. Summarised
+  below; the full breakdown is in `PLAN_121_PERF_REMEDIATION.md`.
 
-**Decomposed** per the `freminal-version-activation` skill (next-up, stable specs), except
-Task 120, which stays an enriched stub per the just-in-time planning policy. Re-confirm the
-seams at activation before executing.
+**Theme 3 — structural cleanup:**
+
+- **Task 122 — Orchestration Extraction** (stub): decompose the GUI binary's god functions
+  and give orchestration logic (event triage, view window, input encoding, frame decisions)
+  a home. A no-behaviour-change refactor. Required whichever way the egui decision falls;
+  see the Task 122 section below.
+
+The memory tasks and Task 121 touch different layers (`freminal-buffer` versus the GUI and
+windowing frame path) and are independent and parallelizable. Task 122 overlaps Task 121
+in one place only: subtask 121.17 depends on it, so 122 precedes 121.17.
+
+**Tasks 102 (Kitty File Transfer) and 103 (Multiple Cursors) moved out of this version**
+to `PLAN_VERSION_130.md` when v0.12.0 was redefined as bug-fix-and-performance-only. Their
+content moved unchanged.
+
+Depends on the existing lock-free architecture.
+
+**Decomposed** per the `freminal-version-activation` skill, except Task 120, which stays an
+enriched stub per the just-in-time planning policy. Re-confirm the seams at activation
+before executing.
 
 ---
 
 ## Task Summary
 
-| #   | Feature                           | Scope     | Status   | Depends On     |
-| --- | --------------------------------- | --------- | -------- | -------------- |
-| 102 | Kitty File Transfer (OSC 5113)    | Very high | Planned  | Task 99        |
-| 103 | Multiple Cursors (CSI)            | Medium    | Planned  | None           |
-| 118 | Compact Cell Representation       | Medium    | Complete | None           |
-| 119 | Scrollback Compression (LZ4)      | Large     | Pending merge | Task 118  |
-| 120 | Compression-Aware Windowed Reflow | Large     | Stub     | Tasks 118, 119 |
-
----
-
-## Reference specs
-
-- File transfer — <https://sw.kovidgoyal.net/kitty/file-transfer-protocol/>
-- Multiple cursors — <https://sw.kovidgoyal.net/kitty/multiple-cursors-protocol/>
-
-Every escape-sequence change triggers the dual-document update
-(`ESCAPE_SEQUENCE_COVERAGE.md` + `ESCAPE_SEQUENCE_GAPS.md`) per
-`freminal-escape-sequence-docs`.
-
----
-
-## Current-state map (from activation recon)
-
-- **OSC dispatch / reverse-write:** same seams as v0.11.0 — `dispatch_osc_target()`,
-  the 5-step OSC pattern, `write_to_pty` (PTY thread) and `Pane::pty_write_tx` (GUI
-  thread). File transfer's bidirectional acks reuse the path Task 99 exercised.
-- **Cursor rendering:** `freminal/src/gui/renderer/vertex.rs` `build_cursor_verts_only()`
-  emits a single quad from `TerminalSnapshot::cursor_pos` / `cursor_visual_style`.
-  Multiple cursors = the snapshot gains a cursor list and this function iterates.
-- **Consent modals:** any user-authorization dialog must follow the
-  `freminal-modal-input-suppression` skill (register in `ui_overlay_open`,
-  `lock_focus(true)`, per-frame `request_focus`) or it cannot be interacted with.
-
----
-
-## Task 102 — Kitty File Transfer (OSC 5113)
-
-### 102 Summary
-
-A stateful, bidirectional file-transfer session protocol over the TTY. Send/receive
-files (and directories, symlinks, hardlinks), with optional zlib compression, rsync-style
-binary deltas (signatures + deltas), quiet modes, and — critically — a **mandatory
-user-consent prompt** before any transfer proceeds. The terminal writes status/ack/error
-back to the application at every step (reverse path). Authorization bypass via
-`bypass=sha256:<hash>` is supported but off by default.
-
-This is the highest-complexity item in this version: a full session state machine plus
-filesystem I/O on the terminal side plus a consent UX. Decompose conservatively; isolate
-the state machine from the I/O from the UI.
-
-### 102 Escape-sequence shape (from spec)
-
-`ESC ] 5113 ; key=value ; ... ESC \` with short wire keys (`ac=` action, `id=` session,
-`n=` base64 name, `d=` base64 data, etc.). Flow: client `ac=send|receive id=<sid>` →
-terminal `ac=status id=<sid> status=OK|EPERM` → `ac=file` metadata → acks → `ac=data` /
-`ac=end_data` chunks with `PROGRESS`/`OK` → `ac=finish`/`ac=cancel`. Quiet: `quiet=1`
-(suppress OK), `quiet=2` (suppress all). Compression: `compression=zlib` per file.
-
-### 102 Subtasks
-
-#### 102.1 — READ-ONLY design audit: session model + I/O boundary + consent placement
-
-Scope: read-only across the OSC dispatch seams, the reverse-write path, the GUI overlay
-infrastructure (`freminal-modal-input-suppression` targets), and the pane/PTY ownership
-model (`freminal-architecture`).
-
-What: produce the concrete design for: where the session state machine lives (PTY-thread
-`TerminalHandler` vs a dedicated type), how filesystem I/O is kept off any hot path and
-off the GUI thread, how the consent prompt is surfaced (GUI overlay) and how its result
-flows back to authorize/deny the session, and how status/ack/error bytes are written via
-the reverse path. Identify every file each later subtask will touch.
-
-Deliverable: design report + the file-scoping for 102.2–102.7. No code.
-
-Verification: none (read-only).
-
-Prohibitions: do NOT edit files; do NOT begin implementation; do NOT proceed without
-maintainer review of the design (this is the riskiest task in the version).
-
-Stop: report design; await explicit sign-off before 102.2.
-
-#### 102.2 — OSC 5113 wire parser + typed command model
-
-Scope: `freminal-common/src/buffer_states/` (new `osc_file_transfer.rs` or similar),
-`freminal-common` tests.
-
-What: parse the `ac=`/`id=`/`n=`/`d=`/… wire format into a typed `FileTransferCommand`
-enum (send/receive/file/data/end_data/finish/cancel/status), with base64 decode and the
-quiet/compression flags. Pure parser, no state, no I/O.
-
-Deliverable: parser + exhaustive unit tests (each action, base64, quiet modes, malformed).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no dispatch, no state machine, no I/O; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.3 — Dispatch wiring (parse path only)
-
-Scope: `OscTarget` (`freminal-common`), `dispatch_osc_target` / `AnsiOscType`
-(`freminal-terminal-emulator`), a new handler module stub.
-
-What: route OSC 5113 through the 5-step pattern to a new `TerminalOutput`/`AnsiOscType`
-variant carrying the parsed command. No session logic yet.
-
-Deliverable: dispatch wiring + integration test (a `send` start reaches the handler
-boundary).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no state machine, no consent, no I/O; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.4 — Session state machine (no I/O, no UI)
-
-Scope: the file-transfer handler module (`freminal-terminal-emulator`), session state on
-`TerminalHandler`.
-
-What: implement the session lifecycle as a pure state machine: track sessions by `id=`,
-sequence the send/receive handshake, decide what status/ack/error each incoming command
-produces, gate everything behind an `Authorized`/`Pending`/`Denied` state. I/O is
-represented as effects/requests, not performed here. Reverse-write of status/ack/error
-goes through the existing path.
-
-Deliverable: state machine + tests driving full send and receive handshakes with a
-stubbed authorization=granted and =denied, asserting the exact response bytes.
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: do NOT perform filesystem I/O; do NOT build the consent UI; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.5 — Consent prompt (GUI overlay)
-
-Scope: `freminal/src/gui/` (new overlay), wiring from the session's `Pending` state to
-the overlay and the user's decision back to the state machine.
-
-What: a modal overlay that names the session (direction, file count/names, size) and
-offers Allow / Deny. MUST follow `freminal-modal-input-suppression` (register in
-`ui_overlay_open`, `lock_focus(true)`, per-frame `request_focus`) so it is actually
-interactable. The decision authorizes/denies the session via the reverse path.
-
-Deliverable: overlay + the authorize/deny round-trip; unit-testable decision logic
-separated from egui where practical.
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: do NOT auto-authorize; do NOT skip the modal-input-suppression
-registration; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.6 — Filesystem I/O (off the hot path / off the GUI thread)
-
-Scope: the file-transfer I/O layer (new module), invoked by the state machine's effects.
-
-What: perform the actual reads/writes for authorized sessions on an appropriate thread
-(never the GUI frame thread, never a parser hot path). Honour POSIX-style error replies
-(EPERM/ENOENT/EFBIG/etc.) mapped to the protocol's status responses. Symlink/hardlink
-handling per spec.
-
-Deliverable: I/O layer + tests against a temp directory (round-trip a small file both
-directions; permission-error path).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: do NOT block the GUI or PTY-parse threads; do NOT proceed.
-
-Stop: report + await review.
-
-#### 102.7 — Compression, deltas, bypass-auth; config + escape-sequence docs
-
-Scope: the I/O + session modules; `freminal-common/src/config.rs` (transfer config, full
-`freminal-config-options` wiring); `Documents/ESCAPE_SEQUENCE_COVERAGE.md` /
-`ESCAPE_SEQUENCE_GAPS.md`; `config_example.toml`.
-
-What: zlib compression per file; rsync signature/delta transfer; `bypass=sha256:<hash>`
-authorization bypass (default off, documented as a security tradeoff); any config keys
-fully wired (no `apply_partial` omission); dual-doc update.
-
-Deliverable: features + tests (compressed round-trip, delta round-trip, bypass accepted
-when configured and rejected otherwise); docs.
-
-Verification: `cargo test --all`; clippy; markdownlint clean.
-
-Prohibitions: do NOT default bypass on; do NOT skip config wiring; do NOT proceed.
-
-Stop: report + await review.
-
-### 102 Open questions (resolve at activation)
-
-- Thread model for I/O: a dedicated transfer thread per session, a shared worker, or
-  async on an existing runtime? (Decide in 102.1; must respect the lock-free
-  architecture.)
-- "Don't ask again" for a trusted peer: in scope, or always-prompt v1? (Lean:
-  always-prompt v1; the `bypass` mechanism is the escape hatch.)
-- Directory transfers: full recursive support v1, or files-only v1 with directories
-  deferred? (Decide in 102.1 based on state-machine complexity.)
-
----
-
-## Task 103 — Multiple Cursors (CSI)
-
-### 103 Summary
-
-Render extra cursors set by the application via `CSI > … SP q`. Stateful (the terminal
-persists the cursor set until cleared) but renderer-light: the snapshot gains a list of
-extra cursors, and `build_cursor_verts_only()` iterates. Supports shapes, per-set
-colours (cursor + text-under-cursor, with reverse-video modes), clear, and query.
-
-### 103 Escape-sequence shape (from spec)
-
-`CSI > SHAPE ; COORD_TYPE : COORDS ; … SP q`. Shapes: 0 none, 1 block, 2 beam,
-3 underline, 29 follow-main, 30 text-under-cursor colour, 40 cursor colour, 100 query
-cursors, 101 query colours. Coord types: 0 main, 2 point list `y:x`, 4 rect list
-`top:left:bottom:right`. Support query `CSI > SP q` → `CSI > 1;2;3;29;30;40;100;101 SP q`.
-Extra cursors clear on ED 2/3/22, reset, alt-screen switch; do NOT scroll with content.
-
-### 103 Subtasks
-
-#### 103.1 — Parser: CSI `> … SP q` multi-cursor commands
-
-Scope: `freminal-terminal-emulator/src/ansi_components/csi_commands/` (the CSI dispatch
-for the `SP q` final with `>` prefix), `freminal-common` types for the cursor set.
-
-What: parse set/clear/colour/query forms into typed commands (`MultiCursorCommand`),
-including point-list and rect-list coordinate types and the colour-space sub-forms.
-
-Deliverable: parser + unit tests (each shape, each coord type, colour spaces, query
-forms, support query).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no state, no render, no reverse-write; do NOT proceed.
-
-Stop: report + await review.
-
-#### 103.2 — State: extra-cursor set on the terminal, with clear semantics
-
-Scope: `freminal-terminal-emulator/src/terminal_handler/` (cursor-set field), the
-existing clear sites (ED 2/3/22, RIS, alt-screen switch).
-
-What: store the extra-cursor set + their colours; apply the clear rules at the right
-sites; expand rect lists to cell positions. Extra cursors do not scroll.
-
-Deliverable: state + tests (set then clear via each trigger; rect expansion).
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: no render, no reverse-write; do NOT proceed.
-
-Stop: report + await review.
-
-#### 103.3 — Snapshot transport + renderer iteration
-
-Scope: `TerminalSnapshot` (add the extra-cursor list + colours),
-`build_snapshot()`, `freminal/src/gui/renderer/vertex.rs` `build_cursor_verts_only()`.
-
-What: carry the extra-cursor list through the snapshot; iterate it in
-`build_cursor_verts_only()`, emitting a quad per extra cursor with its shape/colour,
-sharing blink state/opacity with the main cursor. Follow `freminal-architecture`
-(snapshot is the only transport; `ViewState` not involved).
-
-Deliverable: transport + render + a snapshot round-trip test and a vertex-count
-assertion for N extra cursors. If the snapshot-build path is benchmarked, a before/after
-capture per `performance-benchmarks` + `freminal-bench-table`.
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: do NOT route through `ViewState`; do NOT proceed.
-
-Stop: report + await review.
-
-#### 103.4 — Query responses + support handshake
-
-Scope: the multi-cursor handler + reverse-write helper.
-
-What: answer `CSI > 100 SP q` (set cursors), `CSI > 101 SP q` (colours), and the support
-query `CSI > SP q` with exactly the supported shape list. FIFO ordering for multiplexer
-correctness. Truthful capability advertisement.
-
-Deliverable: query/handshake handlers + tests asserting exact response bytes.
-
-Verification: `cargo test --all`; clippy.
-
-Prohibitions: do NOT advertise unsupported shapes; do NOT proceed.
-
-Stop: report + await review.
-
-#### 103.5 — Escape-sequence docs
-
-Scope: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`, `Documents/ESCAPE_SEQUENCE_GAPS.md`.
-
-What: add the multiple-cursors rows; refresh the "Last updated" header.
-
-Deliverable: dual-doc update.
-
-Verification: markdownlint clean.
-
-Prohibitions: none beyond scope.
-
-Stop: report + await review.
-
-### 103 Open questions (resolve at activation)
-
-- Whether extra cursors blink in lockstep with the main cursor or independently. (Spec:
-  share blink state — confirm against the renderer's blink timer.)
-- Reverse-video / partial-reverse colour modes: full support v1 or sRGB+indexed first?
-  (Lean: full, the colour model is the bulk of the work and is small.)
+| #   | Feature                           | Scope     | Status      | Depends On     |
+| --- | --------------------------------- | --------- | ----------- | -------------- |
+| 118 | Compact Cell Representation       | Medium    | Complete    | None           |
+| 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
+| 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
+| 121 | Performance Remediation           | Large     | In progress | None           |
+| 122 | Orchestration Extraction          | Large     | Stub        | None           |
 
 ---
 
 ## Design Decisions (provisional, confirm at activation)
 
+- **v0.12.0 ships no new features.** It was redefined as a bug-fix, performance and
+  structural-cleanup release after the issue #459 profiling work surfaced more than it
+  fixed. Tasks 102 and 103 moved to v0.13.0 rather than being descoped; nothing about
+  their design changed. "Structural cleanup" is in the charter specifically to admit
+  Task 122, which is neither a fix nor an optimisation.
 - **The entire scrollback-memory effort lands in this version.** Tasks 118 (compact), 119
   (LZ4 compression), and 120 (compression-aware windowed reflow) were originally spread
   across v0.12.0 and a later v0.13.1 (`PLAN_VERSION_131.md`, now deleted). They are pulled
   together here deliberately — the work is cohesive, the infrastructure Task 118 built (compact
   form, idle driver, decompact-on-read seam, RSS reclaim) is exactly what 119 and 120 reuse,
   and doing it in one place while that context is fresh is worth bending the
-  one-theme-per-version convention for. The memory tasks and the kitty tasks share no seams
-  and are fully parallelizable.
+  one-theme-per-version convention for.
 - **Task 120 is an enriched stub; 119 is fully decomposed.** Per `freminal-version-activation`,
   the large, subtle reflow task is decomposed at its own activation, not now; the compression
   core (119) is decomposed because its prerequisites (Task 118) are already merged.
-- **File transfer and multiple cursors are deliberately mismatched in size.** The medium
-  cursor task is the safe win that lets the version ship something even if file transfer
-  expands. They are independent and parallelizable (different sub-agents).
-- **File transfer consent is never bypassed by default.** The `bypass=sha256` mechanism
-  exists per spec but defaults off and is documented as a security tradeoff. The default
-  path is always the user-consent overlay.
-- **The consent overlay is a real modal.** It MUST register under
-  `freminal-modal-input-suppression`; a transfer prompt the user cannot interact with is
-  a release blocker.
-- **Reverse-write reuses Task 99's path.** No new channel.
-- **Drag-and-drop (OSC 72) is NOT in this version.** It is deferred (Task 105,
-  `PLAN_VERSION_DND.md`) because its spec is still under active development upstream
-  (kitty 0.47, issue #9984). Building it against a moving target violates the
-  build-against-a-frozen-spec rule.
+- **Task 121 is an umbrella, not a single deliverable.** Its subtasks are scheduled
+  individually and several will outlive v0.12.0. The version does not gate on Task 121
+  reaching Complete; it gates on the completed subtasks being merged and the outstanding
+  ones being tracked.
+- **Task 121 is not the egui-decoupling decision.** `Documents/DECOUPLING_FRAMEWORK.md` is
+  the decision record for "should freminal stop using egui for the main window", and its
+  Phases 1–5 are the rewrite-if-chosen plan. That question is reopened and leaning against
+  the rewrite. Task 121 is the performance work, and it stands regardless of how that
+  decision falls.
 
 ---
 
@@ -1096,3 +805,134 @@ Open design questions to resolve at activation:
 Depends on Task 118 (compact representation + idle driver) and Task 119 (block compression +
 band-decompression primitive). Decompose in a dedicated session against the code as it then
 exists, per `freminal-version-activation`.
+
+---
+
+## Task 121 — Performance Remediation
+
+> **STATUS: IN PROGRESS.** Summary only. The full per-subtask breakdown lives in
+> `Documents/PLAN_121_PERF_REMEDIATION.md` — edit that document, not this section, when
+> subtask status changes.
+
+### 121 Summary
+
+Task 121 is the umbrella for **all** performance remediation arising from GitHub issue #459
+(real-workload CPU profiling findings, still open): the work that has already landed, the
+bugs that work surfaced but did not fix, and the issue #459 candidate items nobody has
+actioned.
+
+It ran for five merged pull requests (#458, #460, #461, #464, #465) under a task number that
+existed only in branch names — there was no Task 121 in `MASTER_PLAN.md` at all. Creating it
+here closes that tracking gap.
+
+### 121 Goal
+
+Reduce freminal's real-workload CPU cost — idle, pointer motion, typing, and full-screen TUI
+redraw — to the level set by wezterm and ghostty on the same hardware.
+
+### 121 Subtask summary
+
+| Group                                 | Subtasks      | Status      | Covers                                                                    |
+| ------------------------------------- | ------------- | ----------- | ------------------------------------------------------------------------- |
+| A — Completed work                    | 121.1–121.11  | Complete    | PRs #458, #460, #461, #464, #465                                          |
+| B — Bugs found but unfixed            | 121.12–121.15 | Not started | blink-off fallback, chrome cache off during motion, animation signal, pane-wide vetoes |
+| B — Withdrawn                         | 121.16        | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy               |
+| C — Unifying improvement              | 121.17        | Not started | cell-granular pointer suppression (depends on Task 122)                   |
+| D — Unactioned issue #459 items       | 121.18–121.24 | Not started | items 3–8 plus per-`CursorMoved` allocations                              |
+| E — Measurement debt                  | 121.25–121.28 | Not started | typing/btop, blink-off A/B, `DESIGN_DECISIONS.md` entry, issue #440 harness |
+
+### 121 Headline result
+
+The single highest-value change was `7d483998` (subtask 121.8): `WindowEvent::RedrawRequested`
+had been permanently disqualifying `ChromeMode::Replay`, so the entire issue #436 chrome-cache
+subsystem had been inert since the day it landed. A one-line carve-out took steady-state idle
+`Replay` duty cycle from 0% to 100%, chrome construction from 69 us to 10 us per frame (-86%),
+and total idle frame cost from 434 us to 376 us (-13.4%).
+
+The pointer-frame suppression in `19780e16` (subtask 121.10) is a **spike**, default-on with
+no kill switch — and it stays that way; a config toggle was proposed and rejected (121.16,
+withdrawn), because it would ship two code paths and test neither. If the suppression
+misbehaves it is a bug, and the remedy is a fix or a revert. Its headline number — 61fps to
+2.05fps under pointer motion
+over static content — came from a confounded bench run but was **subsequently corroborated by
+an independent A/B on different hardware**. The wezterm comparison in that A/B is not
+apples-to-apples (wezterm is not blinking a cursor at 2 Hz). Do not restate these results more
+strongly than `DECOUPLING_FRAMEWORK.md` §2A does.
+
+### 121 Relationship to `DECOUPLING_FRAMEWORK.md`
+
+`Documents/DECOUPLING_FRAMEWORK.md` is the **decision record** for "should freminal stop
+using egui for the main window?", plus the rewrite-if-chosen plan (its Phases 1–5). Its
+status is **reopened, leaning against the rewrite, explicitly undecided** — Phase 0
+measurement found three cheap fixes inside egui that recovered most of the benefit the
+rewrite was meant to deliver. It is not a `PLAN_VERSION_*.md` and its phases are not tasks in
+`MASTER_PLAN.md`.
+
+Task 121 is the **performance remediation work itself**, and it stands regardless of how that
+decision falls. `DECOUPLING_FRAMEWORK.md` §2A is the source of truth for the Phase 0
+measurements, the three findings, and the known gaps in the Finding 3 spike; do not re-derive
+those numbers and do not contradict them.
+
+---
+
+## Task 122 — Orchestration Extraction
+
+> **STATUS: STUB.** Summary only, and **not yet activated**. The plan content is
+> `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1 (subtasks 1.1–1.6). Those subtasks carry
+> point-in-time line counts that have **already drifted** — re-measure before executing,
+> per `freminal-version-activation`. Do not treat §8's list as an activated breakdown.
+
+### 122 Summary
+
+Decompose the GUI binary's god functions and give orchestration logic — event triage, view
+window, input encoding, frame decisions — a home. No behaviour change; `cargo test --all`
+must be green at every step and the app usable throughout.
+
+Scope, per §8 Phase 1: `App::update` and the `central_body` closure, `terminal/widget.rs::show`,
+`terminal/input.rs::write_input_to_terminal`, toolkit-neutral `Rect` / `Point` in
+`freminal-common` to get `panes/mod.rs` layout and hit-test math off `egui::Rect` / `Pos2`,
+the `gui_scroll_offset` / `gui_extra_rows` naming leak, and designing the layer as if it were
+a crate while landing it as a module first.
+
+### 122 Why it is on the roadmap at all
+
+It is the **one** phase of `DECOUPLING_FRAMEWORK.md` that is required whichever way the egui
+rewrite decision falls, so it is a roadmap task rather than a rewrite phase. Phase 0
+measurement showed the rewrite case is a maintainability judgement, not a performance
+necessity — which reframes this work: it is the deliverable that makes that judgement
+answerable, by separating "the damage-tracking machinery is inherently ugly" from "the
+machinery has nowhere to live". Those are different findings with different verdicts, and
+today they cannot be told apart.
+
+Task 121's own work kept producing evidence for it. `DECOUPLING_FRAMEWORK.md` §12 describes
+PR #464's `post_event` classifier as "a clean example of orchestration logic wanting a home",
+and §2A records that the pointer-suppression predicate "already needed four rounds".
+
+**What it does not buy:** Task 122 retires **none** of the 13 assumptions in
+`EGUI_UPGRADE_ASSUMPTIONS.md`. Per §3 those only die when chrome leaves the main window's
+`Context`, which is Phase 3 of the rewrite. Task 122 addresses the "ugliness" argument and
+part of the "edge cases" argument, and nothing of the undocumented-internals argument. It is
+not a substitute for the rewrite on the maintainability axis; it is what lets the rewrite be
+priced accurately.
+
+### 122 Sequencing within the version
+
+Independent of Tasks 118–120 entirely (different crates). Against Task 121 it is a blocker
+for exactly one subtask:
+
+- **121.17 (cell-granular suppression) depends on Task 122.** It needs per-pane render-time
+  geometry captured during `update()` and read from the event layer, which is the seam this
+  task builds. Adding a fifth round to the suppression predicate in its current shape is how
+  the maintainability argument for the rewrite gets stronger for no good reason.
+- **Everything else in Task 121 is independent.** Groups D and E live in `shaping.rs`,
+  `vertex.rs`, `atlas.rs`, the GL layer and `freminal-windowing`, none of which Task 122
+  touches; 121.12–121.15 sit in already-extracted predicates. Do not gate the live bug fixes
+  behind this refactor.
+
+### 122 First step
+
+An activation pass, not implementation: re-measure §8's targets against current code and
+write real subtasks. Measured at the time this task was created — `App::update` **3,051**
+lines (§8 says 2,743), the `central_body` closure **1,989** (§8 says 1,859),
+`terminal/widget.rs::show` 1,851 (matches), `write_input_to_terminal` 1,226 (matches), and
+`panes/mod.rs` **58** `Rect` / `Pos2` occurrences (§8 says 44).

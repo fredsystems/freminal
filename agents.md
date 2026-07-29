@@ -39,8 +39,9 @@ lives entirely on the GUI side and is never shared. Crate dependencies
 point one direction: `freminal` -> `freminal-terminal-emulator` ->
 `freminal-buffer` -> `freminal-common`. **Full invariants and the
 "don't accidentally regress this" rules are in the
-`freminal-architecture` skill.** See also `Documents/PERFORMANCE_PLAN.md`
-sections 4-6 for the historical context.
+`freminal-architecture` skill.** See also `Documents/DESIGN_DECISIONS.md`
+("Multi-Window Architecture", "Render Loop Optimization", "Built-in
+Multiplexer / PaneTree") for the durable rationale.
 
 ---
 

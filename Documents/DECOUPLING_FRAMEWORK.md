@@ -10,8 +10,19 @@
 > plan-of-record **if** the rewrite is chosen, and Phase 1 is worth doing
 > regardless, but do **not** treat the rewrite as agreed.
 >
-> This is **not** a `PLAN_VERSION_*.md` and these tasks are **not** in
-> `MASTER_PLAN.md`.
+> This is **not** a `PLAN_VERSION_*.md` and these phases are **not** in
+> `MASTER_PLAN.md`. This document is the **decision record** for the
+> egui-rewrite question plus the rewrite-if-chosen plan (Phases 1-5). The
+> **performance remediation work itself** is tracked separately as **Task 121**
+> in `Documents/PLAN_121_PERF_REMEDIATION.md` (summarised in
+> `PLAN_VERSION_120.md`), and it stands regardless of how this decision falls.
+> §2A below is the source of truth for the Phase 0 measurements that Task 121's
+> subtasks are derived from.
+>
+> **One exception: Phase 1 (orchestration extraction) is Task 122 in
+> `MASTER_PLAN.md`, carried by v0.12.0.** It is required whichever way the
+> rewrite decision goes, so it is a roadmap task rather than a rewrite phase.
+> Phases 2-5 stay out of the roadmap until the decision is made.
 
 ## 0. TL;DR
 
@@ -262,7 +273,11 @@ works.
 - **The spike is default-on with no kill switch.** It changes scheduling for
   every build; `frame-profiling` gates only the diagnostics. If any of the
   above proves troublesome in the field, the only remedy today is a revert.
-  Consider a config toggle before this is relied upon.
+  ~~Consider a config toggle before this is relied upon.~~ **A config toggle was
+  proposed and rejected** (Task 121.16, WITHDRAWN): it would ship two code paths
+  and test neither, and turn a bug into a supported configuration. Revert-and-fix
+  is the accepted remedy. The gap statement above stands; the suggested remedy
+  does not.
 - **Two heap allocations per `CursorMoved`, on the path built to be cheap.**
   `pane_tree.layout(central_rect)` and `iter_panes()` each allocate a `Vec`
   inside `pointer_motion_needs_repaint`, which runs at the mouse's full report
@@ -545,9 +560,34 @@ big-bang cutover.
 
 ### Phase 1 — orchestration extraction (no behaviour change)
 
-Required under any outcome, including abandoning the rewrite. This is the
-prerequisite that makes Phase 3 possible: a toolkit cannot be swapped under a
-2,743-line function welded to egui's calling convention.
+> **This phase is tracked as Task 122 ("Orchestration Extraction") in
+> `MASTER_PLAN.md`, carried by v0.12.0** — status `Stub`, summarised in
+> `PLAN_VERSION_120.md`. It is the one phase in this document that is a roadmap
+> task, because it is required under any outcome of the rewrite decision. The
+> subtask list below is its plan content, but it has **not** been activated:
+> re-measure and write real subtasks before executing.
+>
+> **The line counts below are point-in-time and have already drifted.** Measured
+> on `main` at the time Task 122 was created: `App::update` is **3,051** lines
+> (not 2,743), `central_body` is **1,989** (not 1,859), and `panes/mod.rs` carries
+> **58** `Rect` / `Pos2` occurrences (not 44). `show` (1,851) and
+> `write_input_to_terminal` (1,226) still match. Re-measure at activation per
+> `freminal-version-activation`; do not quote these numbers as current.
+
+Required under any outcome, including abandoning the rewrite. Since Phase 0 showed
+the rewrite case is a maintainability judgement rather than a performance
+necessity, this phase is better read as **the deliverable that makes that
+judgement answerable** than as a prerequisite for Phase 3: it separates "the
+damage-tracking machinery is inherently ugly" from "the machinery has nowhere to
+live", which are different findings with different verdicts. It remains a genuine
+prerequisite for Phase 3 as well — a toolkit cannot be swapped under a
+3,000-line function welded to egui's calling convention.
+
+Note what it does **not** buy: Phase 1 retires none of the 13 assumptions in
+`EGUI_UPGRADE_ASSUMPTIONS.md`. Per §3 those only die when chrome leaves the main
+window's `Context`, which is Phase 3. Phase 1 addresses the "ugliness" argument and
+part of the "edge cases" argument, and nothing of the undocumented-internals
+argument.
 
 - **1.1** Decompose `App::update` (2,743 lines) and `central_body` (1,859).
 - **1.2** Decompose `terminal/widget.rs::show` (1,851 lines).
@@ -650,18 +690,44 @@ From the `freminal-architecture` skill. A rewrite is not a licence to break thes
 
 ## 11. Roadmap interaction
 
-Deliberately **not** resolved here, by maintainer instruction: do not spend
-effort now reordering future versions around this work. Re-sequence once
-Phase 1 lands.
+**Partially resolved.** Phase 1 is sequenced: it is Task 122, carried by v0.12.0.
+That was the only phase that could be sequenced honestly, because it is the only
+one required whichever way the rewrite decision falls.
+
+**Phases 2-5 remain deliberately unsequenced**, by maintainer instruction: do not
+spend effort reordering future versions around a rewrite that has not been agreed,
+and do not add those phases to `MASTER_PLAN.md`. Re-sequence once Task 122 lands —
+which is now a reachable trigger, where "re-sequence once Phase 1 lands" previously
+was not, since nothing scheduled Phase 1.
 
 For whoever does that later, the relevant pressure is that Tasks 96 (per-pane
 title bar), 97 (dynamic tab width and overflow) and 85 (powerline status bar)
 are all always-visible chrome, and the v0.18/v0.19 AI-assist versions add
 modals. Anything built on egui before Phase 3 inherits the port.
 
-Also note: **Task 121 is not in `MASTER_PLAN.md`** despite four merged commits
-under that name (PRs #460, #461, #464 and commit `0620cc60`). That tracking gap
-should be closed when the roadmap is next touched.
+Also note: **Task 121 now exists in `MASTER_PLAN.md`.** The tracking gap this
+section previously flagged — five merged pull requests (#458, #460, #461, #464
+and #465) under a task number that lived only in branch names — is closed. Task
+121 "Performance Remediation" is carried by v0.12.0, summarised in
+`PLAN_VERSION_120.md`, and broken down in full in
+`Documents/PLAN_121_PERF_REMEDIATION.md`.
+
+That document is the work tracker; this document is the decision record. The
+gaps catalogued in §2A ("Finding 3's known gaps", "The unifying next step",
+"Beyond scheduling: per-frame cost", "Still unmeasured") are tracked there as
+subtasks 121.12 through 121.28. §8's Phase 0.5 and the outstanding half of Phase
+0.2 are tracked as 121.27 and 121.25.
+
+**Phase 1 is tracked as Task 122 ("Orchestration Extraction") in
+`MASTER_PLAN.md`, carried by v0.12.0** — `Stub`, with §8 Phase 1 as its plan
+content and a summary in `PLAN_VERSION_120.md`. It was previously in no plan
+document at all despite being declared required under any outcome, which made this
+section's "re-sequence once Phase 1 lands" circular: nothing scheduled Phase 1, so
+nothing could land, so the re-sequence never triggered. Task 122 breaks that loop.
+
+Phases 2-5 remain unsequenced and untracked by design: they are the rewrite, and
+the rewrite is undecided. Do not add them to `MASTER_PLAN.md` before the decision
+is made.
 
 ## 12. Pointers
 
