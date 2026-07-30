@@ -33,10 +33,11 @@ hot, so it ships together):
 
 **Theme 3 — structural cleanup:**
 
-- **Task 122 — Orchestration Extraction** (stub): decompose the GUI binary's god functions
-  and give orchestration logic (event triage, view window, input encoding, frame decisions)
-  a home. A no-behaviour-change refactor. Required whichever way the egui decision falls;
-  see the Task 122 section below.
+- **Task 122 — Orchestration Extraction** (planned, activated 2026-07-30): decompose the
+  GUI binary's god functions and give orchestration logic (event triage, view window, input
+  encoding, frame decisions) a home. A no-behaviour-change refactor. Required whichever way
+  the egui decision falls. Broken down in
+  `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`; summarised in the Task 122 section below.
 
 The memory tasks and Task 121 touch different layers (`freminal-buffer` versus the GUI and
 windowing frame path) and are independent and parallelizable. Task 122 overlaps Task 121
@@ -62,7 +63,7 @@ before executing.
 | 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
 | 121 | Performance Remediation           | Large     | In progress | None           |
-| 122 | Orchestration Extraction          | Large     | Stub        | None           |
+| 122 | Orchestration Extraction          | Large     | Planned     | None           |
 
 ---
 
@@ -883,10 +884,10 @@ those numbers and do not contradict them.
 
 ## Task 122 — Orchestration Extraction
 
-> **STATUS: STUB.** Summary only, and **not yet activated**. The plan content is
-> `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1 (subtasks 1.1–1.6). Those subtasks carry
-> point-in-time line counts that have **already drifted** — re-measure before executing,
-> per `freminal-version-activation`. Do not treat §8's list as an activated breakdown.
+> **STATUS: PLANNED (activated 2026-07-30), awaiting sign-off.** The full per-subtask
+> breakdown is `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (16 subtasks in four
+> groups). That document **supersedes** `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1,
+> whose subtasks 1.1–1.6 and line counts are stale. This section is a summary only.
 
 ### 122 Summary
 
@@ -935,10 +936,25 @@ for exactly one subtask:
   touches; 121.12–121.15 sit in already-extracted predicates. Do not gate the live bug fixes
   behind this refactor.
 
-### 122 First step
+### 122 Activation outcome (2026-07-30)
 
-An activation pass, not implementation: re-measure §8's targets against current code and
-write real subtasks. Measured at the time this task was created — `App::update` **3,051**
-lines (§8 says 2,743), the `central_body` closure **1,989** (§8 says 1,859),
-`terminal/widget.rs::show` 1,851 (matches), `write_input_to_terminal` 1,226 (matches), and
-`panes/mod.rs` **58** `Rect` / `Pos2` occurrences (§8 says 44).
+The activation pass is **done**; see `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` for
+the breakdown. Re-measured on `main` at `f8ebd17a`: `App::update` **3,132** lines (§8 says
+2,743; 3,051 at this task's creation), the `central_body` closure **2,033** (§8 says 1,859),
+`terminal/widget.rs::show` **1,882**, `write_input_to_terminal` **1,226** (static across
+three measurements), and `panes/mod.rs` **58** `Rect` / `Pos2` occurrences (static).
+
+Three findings changed the shape, and are recorded in full in the plan document:
+
+- **The drift is entirely in the frame path.** Two of §8's five targets
+  (`write_input_to_terminal`, `panes/mod.rs`) have not moved at all, so §8's flat
+  equal-priority list is the wrong weighting. The breakdown demotes both to cleanup.
+- **The growth has a nameable cause**: render-time state written during a frame purely so
+  an out-of-frame consumer can read it, with no name, type or enforced invariant — the
+  ~7 `PerWindowState` fields that `pointer_motion_needs_repaint` and
+  `is_chrome_interactive_at` read from `freminal-windowing`'s `CursorMoved` fast path.
+  That seam is the deliverable; god-function decomposition is the mechanism, not the goal.
+- **`write_input_to_terminal` has 17 parameters, not 16** (this document and §8 both said
+  16; the 17th is `super_state`, from 101.2). It is **not** decomposed by Task 122 — its
+  concerns are interleaved rather than separable by line range, and the apparent
+  de-duplication win is a semantic trap (see cleanup entry 122.C1).
