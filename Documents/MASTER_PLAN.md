@@ -198,7 +198,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Complete  | Task 118               |
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 | 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | In progress | None                 |
-| 122 | Orchestration Extraction                  | `PLAN_VERSION_120.md` (Task 122)              | Stub      | None                   |
+| 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Planned   | None                   |
 
 ---
 
@@ -492,8 +492,9 @@ Task 121 is the performance work, and it stands either way.
 
 **Task 122 (v0.12.0, orchestration extraction):** decompose the GUI binary's god functions
 and give orchestration logic (event triage, view window, input encoding, frame decisions) a
-home. Its plan content is `DECOUPLING_FRAMEWORK.md` §8 Phase 1, summarised in
-`PLAN_VERSION_120.md`; it has no plan document of its own. It is on the roadmap because it
+home. **Activated 2026-07-30**; its plan content is now
+`Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (17 subtasks in five groups), which
+**supersedes** `DECOUPLING_FRAMEWORK.md` §8 Phase 1. It is on the roadmap because it
 is **required whichever way the egui decision falls** — Phase 0 measurement showed the
 rewrite case is a maintainability judgement, not a performance necessity, which makes
 Task 122 the deliverable that lets that judgement be made honestly rather than a
@@ -501,8 +502,15 @@ prerequisite for a rewrite. Note it retires none of the 13 assumptions in
 `EGUI_UPGRADE_ASSUMPTIONS.md` (those need Phase 3). It is **not** a blocker for most of
 Task 121 — Groups D and E live in the shaping/renderer/GL/windowing layers Task 122 does
 not touch — but subtask 121.17 (cell-granular suppression) does depend on it, so 122
-precedes 121.17 within the version. It stays `Stub` until an activation pass re-measures
-§8's line counts, which are point-in-time and have already drifted.
+precedes 121.17 within the version.
+
+The activation pass found that §8's decomposition was the **wrong shape**: the drift is
+entirely in the frame path, two of its five targets are static, and the growth has a single
+nameable cause — render-time state published during a frame purely for out-of-frame
+consumers, with no name, type or invariant. The breakdown therefore targets that seam,
+demotes the two static targets to cleanup, declines to decompose
+`write_input_to_terminal` at all, and adds two gates §8 omitted (a benchmark for a hot path
+that has none, and `--features frame-profiling` verification).
 
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
 blocks, fractional scaling, custom width algorithm). It shares no seams with Tasks 102 and
@@ -715,7 +723,7 @@ Update this section as tasks complete:
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
 | 121  | 2026-07-27 |            | 121.1-121.14 (PR #467), 121.23, 121.26 done; 121.25 partial; rest open           |
-| 122  |            |            | v0.12.0. Not started; needs an activation pass (`DECOUPLING_FRAMEWORK.md` §8)    |
+| 122  |            |            | v0.12.0. Activated 2026-07-30: 17 subtasks in `PLAN_122_…`; 122.0 (skills) done  |
 
 ---
 
@@ -731,7 +739,8 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–122; 118–119 decomposed and complete, 120 and 122 stubs, 121 summary)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–122; 118–119 decomposed and complete, 120 a stub, 121 and 122 summaries)
+- `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation" full breakdown (121.1–121.31)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)

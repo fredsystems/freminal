@@ -102,7 +102,12 @@ GUI Thread (eframe update() -- pure render, NO mutation)
   Applies to `TerminalHandler`, `Buffer`, `FreminalAnsiParser`,
   `SnapshotModeFields`, `TerminalSnapshot`, and function signatures
   like `to_payload()` / `send_terminal_inputs()`. Raw `bool` is OK
-  only when no enum exists.
+  only when no enum exists **and the value is never transported** --
+  if it crosses a crate, thread, frame or public-API boundary
+  (which every mode reaching the GUI does, via `TerminalSnapshot`),
+  create the enum instead of taking this hatch. See
+  `freminal-state-representation`, which takes precedence here; the
+  hatch is the unfinished half of Task 26, not a standing exemption.
 
 - **Keybindings**: every feature that adds or modifies a keyboard
   shortcut MUST:
@@ -120,6 +125,21 @@ GUI Thread (eframe update() -- pure render, NO mutation)
   Hardcoded shortcuts outside the `BindingMap` system are forbidden.
   Every shortcut must be discoverable and configurable.
 
+## Where new logic lives
+
+The invariants above govern which way dependencies point. They say
+nothing about **where new logic should live** -- and that omission is
+its own source of drift, because with no scope to propose a new home
+agents extend whatever is already in scope.
+
+That is a separate skill: **`freminal-extend-or-extract`**. Load it
+whenever you are about to add a field so something outside its owner
+can read it, extend an already-long function, add a parameter to an
+already-wide signature, or work around a `too_many_lines` /
+`too_many_arguments` allow. This skill still governs the *constraints*
+on any new home (the dependency graph, crate responsibilities); that
+one governs *whether to create one at all*.
+
 ## When to stop and ask
 
 - A change would re-introduce a shared lock between PTY and GUI
@@ -132,5 +152,8 @@ GUI Thread (eframe update() -- pure render, NO mutation)
   downward.
 - A new crate dependency would be upward. Stop -- restructure so the
   arrow points down.
+- You are adding state to a struct only so an out-of-frame or
+  cross-layer consumer can read it. Stop -- see "Where new logic
+  lives". Propose the home; do not extend in place by default.
 - A keybinding needs to be hardcoded "just this once". Don't. Wire
   it through `BindingMap` like everything else.
