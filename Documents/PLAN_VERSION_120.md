@@ -885,7 +885,7 @@ those numbers and do not contradict them.
 ## Task 122 — Orchestration Extraction
 
 > **STATUS: PLANNED (activated 2026-07-30), awaiting sign-off.** The full per-subtask
-> breakdown is `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (16 subtasks in four
+> breakdown is `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (17 subtasks in five
 > groups). That document **supersedes** `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1,
 > whose subtasks 1.1–1.6 and line counts are stale. This section is a summary only.
 

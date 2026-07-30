@@ -493,7 +493,7 @@ Task 121 is the performance work, and it stands either way.
 **Task 122 (v0.12.0, orchestration extraction):** decompose the GUI binary's god functions
 and give orchestration logic (event triage, view window, input encoding, frame decisions) a
 home. **Activated 2026-07-30**; its plan content is now
-`Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (16 subtasks in four groups), which
+`Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (17 subtasks in five groups), which
 **supersedes** `DECOUPLING_FRAMEWORK.md` §8 Phase 1. It is on the roadmap because it
 is **required whichever way the egui decision falls** — Phase 0 measurement showed the
 rewrite case is a maintainability judgement, not a performance necessity, which makes
@@ -723,7 +723,7 @@ Update this section as tasks complete:
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
 | 121  | 2026-07-27 |            | 121.1-121.14 (PR #467), 121.23, 121.26 done; 121.25 partial; rest open           |
-| 122  |            |            | v0.12.0. Activated 2026-07-30: 16 subtasks in `PLAN_122_…`; awaiting sign-off    |
+| 122  |            |            | v0.12.0. Activated 2026-07-30: 17 subtasks in `PLAN_122_…`; 122.0 (skills) done  |
 
 ---
 

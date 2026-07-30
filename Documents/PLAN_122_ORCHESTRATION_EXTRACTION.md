@@ -3,9 +3,13 @@
 > **STATUS: ACTIVATED, AWAITING SIGN-OFF.** This document is the output of the
 > Task 122 activation pass (2026-07-30, on `main` at `f8ebd17a`). It replaces
 > `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1 as Task 122's plan content.
-> No implementation has begun. Per `freminal-version-activation`, decomposition
-> and execution are separate sessions: the subtasks below need maintainer
-> sign-off before any of them is spawned.
+> Per `freminal-version-activation`, decomposition and execution are separate
+> sessions: the subtasks below need maintainer sign-off before any is spawned.
+>
+> **Exception: 122.0 is done.** The maintainer moved the agent-skill change to
+> the front and approved it on 2026-07-30, on the grounds that running it last
+> would mean every other subtask executes under the skills that caused the
+> drift. No production code has been touched.
 
 Task 122 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
@@ -216,14 +220,16 @@ maintainer is describing:
 
 ## Subtasks
 
-**16 subtasks in four groups.** Ordering constraints are stated per group; where
+**17 subtasks in five groups.** Ordering constraints are stated per group; where
 none is stated, subtasks within a group are independent.
 
-**Ordering across groups:** 122.14 (benchmark) runs **first** — it is the
-before-capture for everything else. Group A and Group C are independent of each
-other. Group B's 122.9 collides with Group A's 122.4 (both touch
-`pending_frame_damage` / `pending_chrome_signals`) and must land after it.
-122.15 is last, then 122.16 closes.
+**Ordering across groups:** **122.0 runs before everything else** — it is the
+skill change that gives later subtasks the mandate they need, and running it last
+would mean every other subtask executes under the skills that caused the drift.
+Then 122.14 (benchmark), the before-capture for the rest. Group A and Group C are
+independent of each other. Group B's 122.9 collides with Group A's 122.4 (both
+touch `pending_frame_damage` / `pending_chrome_signals`) and must land after it.
+122.15 is the last implementation subtask, then 122.16 closes.
 
 Every subtask's verification includes, at minimum:
 
@@ -245,6 +251,59 @@ cargo test --all --features frame-profiling
 `freminal-windows-crosscheck`. None of the five primary files contains
 `cfg(windows)` / `cfg(target_os)` code, so the risk is low, but the gate still
 applies.
+
+---
+
+### Group Z — mandate (runs first)
+
+#### 122.0 — New skill: scope to propose a new home rather than extend in place
+
+Scope: `.opencode/skills/freminal-extend-or-extract/SKILL.md` (new),
+`.opencode/skills/freminal-architecture/SKILL.md`, `agents.md`.
+
+**Runs before every other subtask**, by maintainer decision (2026-07-30). This
+was originally one third of 122.16 and was moved forward: the whole point is to
+give later subtasks a mandate they currently lack, and running it last would mean
+all sixteen others execute under exactly the skills that produced the drift.
+
+What: nothing in the skill set gave agents scope to propose a new module or
+crate, so the default answer was "extend in place" by omission. That is the
+maintainer's own diagnosis of how `App::update` reached 3,132 lines and how
+render-time state ended up cached ad hoc across ~10 `PerWindowState` fields.
+
+**This is a dedicated skill, deliberately not a section inside
+`freminal-architecture`.** The reason is trigger matching, and it matters:
+`freminal-architecture`'s description fires on "the GUI/PTY split, the ArcSwap
+snapshot transport, the channel-based input system, crate dependency boundaries,
+or `TerminalEmulator` / `TerminalSnapshot` / `ViewState`". An agent about to add
+one more cached rect to `PerWindowState` would not match any of those — adding a
+field to a GUI struct does not read as architecture work. **Guidance buried in
+that skill would not load at the moment it is needed**, which is precisely how
+the drift happened. The new skill's description is therefore written in the
+language of the moment: adding a field only an outside reader needs, extending an
+already-long function, adding a parameter to an already-wide signature, relying
+on a `too_many_lines` / `too_many_arguments` allow, copying an unreachable
+computation, or writing a test that re-implements production logic to pin it.
+
+`freminal-architecture` keeps a short pointer to it and retains ownership of the
+*constraints* on any new home (dependency graph, crate responsibilities); the new
+skill owns the *whether to create one at all* decision. `agents.md`'s skill table
+gains a row.
+
+Deliverable: the new skill, the pointer, the `agents.md` row.
+
+Verification: markdown lint via pre-commit. No code change, so `cargo test --all`
+is unaffected. `opencode.json` already globs `.opencode/skills`, so no config
+change is needed.
+
+Prohibitions: do NOT edit the shared skills under
+`~/.config/opencode/skills/shared/` — they are nix-store read-only, sourced from
+`~/GitHub/nixos`, and by maintainer decision (2026-07-30) this rule stays
+**freminal-local rather than shared**. Do NOT weaken any existing invariant. Do
+NOT duplicate the guidance in both skills — `freminal-architecture` gets a
+pointer only. Do NOT proceed to 122.14.
+
+Stop: report the skill added; await review.
 
 ---
 
@@ -741,29 +800,25 @@ it goes through the 122.4 type. Do NOT change any suppression behaviour.
 Stop: report the published value and its test; await review. Note in the report
 that 121.17 is now unblocked.
 
-#### 122.16 — Reconcile the documents and widen agent-skill scope
+#### 122.16 — Reconcile the documents
 
 Scope: `Documents/DECOUPLING_FRAMEWORK.md`, `Documents/PLAN_VERSION_120.md`,
-`Documents/MASTER_PLAN.md`, `Documents/PLAN_121_PERF_REMEDIATION.md`, and the
-skill file named below.
+`Documents/MASTER_PLAN.md`, `Documents/PLAN_121_PERF_REMEDIATION.md`.
 
-What: three things.
+The agent-skill half of this subtask **moved to 122.0** and runs first.
 
-1. Correct the stale facts: §8 Phase 1's line counts and its "16 parameters"
-   claim (it is 17); `PLAN_VERSION_120.md`'s Task 122 section; and mark §8
-   Phase 1 as superseded by this document.
-2. Advance Task 122's status per `freminal-plan-status-lifecycle`, and mark
-   121.15 / 121.17 as unblocked in `PLAN_121_PERF_REMEDIATION.md`.
-3. **Widen agent-skill scope so agents may propose new crates.** The maintainer
-   attributes part of this drift to skills giving agents no scope to propose a
-   new crate, so they extend in place. `freminal-architecture` currently tells
-   agents to stop when a dependency would point upward but never tells them
-   that "this logic wants its own crate or module" is a legitimate thing to
-   surface. Add that, together with the §8 rule this task followed: design the
-   layer as if it were a crate, land it as a module first, extract the crate
-   only as a final mechanical step.
+What: two things.
 
-Deliverable: the document edits and the skill change.
+1. Edit `DECOUPLING_FRAMEWORK.md` §8 Phase 1 itself to mark it superseded by
+   this document, and correct its stale line counts and its "16 parameters"
+   claim (it is 17). The activation commit updated `PLAN_VERSION_120.md` and
+   `MASTER_PLAN.md` but deliberately left §8's own text untouched.
+2. Advance Task 122's status per `freminal-plan-status-lifecycle` (two tables
+   must agree: the Task Summary Status column and the Completion Tracking
+   dates), and mark 121.15 / 121.17 as unblocked in
+   `PLAN_121_PERF_REMEDIATION.md`.
+
+Deliverable: the document edits.
 
 Verification: markdown lint via pre-commit; `cargo test --all` unaffected.
 

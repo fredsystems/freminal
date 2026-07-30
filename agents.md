@@ -86,7 +86,8 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-orchestrator-protocol`   | About to spawn sub-agents. The action-class / scope / stop-condition discipline is mandatory.                                                     |
 | `freminal-bench-table`             | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`).     |
 | `freminal-frec-decoder`            | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                        |
-| `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                   |
+| `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                    |
+| `freminal-extend-or-extract`       | About to make something bigger rather than give it a home: a field only an outside reader needs, a branch on an already-long function, an extra parameter, a `too_many_lines` allow. Gives scope to propose a module or crate. |
 | `freminal-numeric-conversions`     | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                               |
 | `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
 | `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
