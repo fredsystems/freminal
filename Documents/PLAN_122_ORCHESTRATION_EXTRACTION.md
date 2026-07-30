@@ -185,13 +185,20 @@ pane-resolution chain is headlessly testable.**
 The pure decision cores are **already well covered** — this plan's first draft
 claimed "zero tests" and was wrong:
 
-| Function                               | Tests | Location                |
-| -------------------------------------- | ----- | ----------------------- |
-| `pointer_motion_needs_repaint_decision` | 8     | `app_impl.rs:4932-5011` |
+| Function                                | Tests | Location                |
+| --------------------------------------- | ----- | ----------------------- |
+| `pointer_motion_needs_repaint_decision` | 9     | `app_impl.rs:4932-5015` |
 | `pane_hover_region_risk`                | 5     | `app_impl.rs:4827-4849` |
 | `animation_in_flight_composed`          | 4     | `app_impl.rs:4805-4821` |
 | `pointer_in_gutter_strip`               | 4     | `app_impl.rs:4900-4923` |
 | `pane_hover_region_terms`               | 3     | `app_impl.rs:4868-4884` |
+
+**Count corrected 2026-07-30 (122.14 adversarial review).** The activation
+pass recorded 8 for `pointer_motion_needs_repaint_decision` and an end line of
+5011; the real figures are **9** tests ending at **5015** — the ninth is
+`pointer_motion_needs_repaint_decision_pane_signals_both_false_is_false`
+(`app_impl.rs:5004`), whose body extends past the previously-cited range. The
+four excluded predicate cores therefore carry **22** tests in total, not 21.
 
 What is genuinely untested is the **glue**:
 
@@ -392,7 +399,21 @@ Stop: report the module's public API and test results; await review.
 
 #### 122.3 — Move `panes/mod.rs` production geometry onto the neutral types
 
-Scope: `freminal/src/gui/panes/mod.rs` only.
+Scope: `freminal/src/gui/panes/mod.rs`, plus
+`freminal/benches/pane_resolution_bench.rs`.
+
+**Scope widened 2026-07-30 (122.14 adversarial review).** It was
+`panes/mod.rs` only, which was unsatisfiable: 122.14 added
+`freminal/benches/pane_resolution_bench.rs`, which benchmarks
+`PaneTree::layout`, `PaneTree::split_borders`, `pane_at_pos` and
+`active_highlight_segment` through their current `egui::Rect` / `Pos2`
+signatures. Re-typing those four onto the neutral geometry breaks that file's
+compilation, so `cargo bench --no-run --all` would fail and 122.3 could not
+reach a green verification suite without touching it. Note the bench builds
+rects with `egui::Rect::from_min_size` and `egui::vec2`, and the 122.2 neutral
+type deliberately provides **neither** — the bench's constructions convert to
+`from_min_max` form. That is an adaptation of bench fixtures only; **do not add
+`from_min_size` to the neutral type** to avoid it.
 
 What: migrate the 58 `Rect` / `Pos2` occurrences. Every **production** use in
 this file is pure geometry — `from_min_max`, field reads, `width`/`height`/
@@ -416,6 +437,12 @@ Verification: standard suite. **Float behaviour must be identical** — `split_r
 uses `mul_add` and `.round()`, and the existing tests assert exact widths and
 heights. Any test needing a tolerance change is a red flag, not a fix: stop and
 report.
+
+Additionally, **re-run the 122.14 benchmark and compare against its recorded
+baseline.** Per the 122.14 amendment, that benchmark covers exactly the
+functions this subtask re-types (`PaneTree::layout`, `PaneTree::split_borders`,
+`pane_at_pos`, `active_highlight_segment`), so 122.3 has a real performance gate
+and is held to the 15% regression threshold in `performance-benchmarks`.
 
 Prohibitions: do NOT change any layout, resize or hit-test **semantics**. Do NOT
 alter rounding. Do NOT touch `window.rs`'s `chrome_*_rects` or
@@ -781,17 +808,71 @@ What: **no existing benchmark covers this code.** The suite is
 `performance-benchmarks`, a change to a measured hot path with no benchmark
 requires adding one first.
 
-Benchmark **only what exists today**: the pure predicate cores
+**AMENDED 2026-07-30 (maintainer decision), before any code was written.** The
+original text asked for a benchmark of the four pure predicate cores
 (`pointer_motion_needs_repaint_decision`, `pane_hover_region_risk`,
-`animation_in_flight_composed`, `pointer_in_gutter_strip`). Record a baseline in
-this document.
+`animation_in_flight_composed`, `pointer_in_gutter_strip`) *and* prohibited
+changing production code. Recon established those two requirements are mutually
+exclusive, and that satisfying the first would produce a benchmark with no
+regression-detection power:
 
-**122.14 does not benchmark the pane-resolution chain**, because 122.5 is what
-makes that chain callable. Extending the benchmark to cover it is a requirement
-*of 122.5*, not of this subtask — an earlier revision of this plan asked 122.14
-to benchmark something that does not exist when it runs, which was
-self-contradictory. One subtask, one concern: this one establishes the baseline
-for the code as it stands.
+- All four are **private** module-level `const fn`s, and
+  `freminal/src/gui/mod.rs:39` is `mod app_impl;` — not `pub`. A Criterion bench
+  compiles as an **external crate** against the `freminal` lib, so reaching them
+  requires making the 5,319-line `app_impl` module `pub`, plus `pub` on five
+  functions, plus making `PointerMotionPaneSignals` `pub` with `pub` fields.
+  That is a production-code change, and one that widens visibility on the
+  binary's largest internal module purely to serve a bench — which
+  `freminal-module-cohesion` says to decline.
+- All four are **O(1) boolean compositions over already-computed inputs**
+  (`animation_in_flight_composed` is `a || b`). Criterion would report
+  sub-nanosecond figures dominated by its own harness overhead. There is no
+  regression such a benchmark can detect, and they already carry 22 unit tests
+  — 9 + 5 + 4 + 4 (`app_impl.rs:4805-5015`; see the corrected count above).
+  Benchmarking them would be a gate in name only.
+
+**What is benchmarked instead: the pane-resolution chain's constituents, which
+are already `pub` and require no production-code change at all.** The four
+predicates are the cheap tail of the `CursorMoved` path. Reading
+`app_impl.rs:905-990`, the dominant per-event cost is:
+
+| Step | Call                                          | Work                                    |
+| ---- | --------------------------------------------- | --------------------------------------- |
+| 1    | `PaneTree::layout` (`panes/mod.rs:1087`)      | recursive tree walk + `Vec` alloc, O(n) |
+| 2    | inline rect-containment `find` (`930-933`)    | linear scan; same work as `pane_at_pos` |
+| 3    | `PaneTree::find` (`panes/mod.rs:1042`)        | tree search, O(n)                       |
+| 4    | `pane.arc_swap.load()` (`942`)                | `ArcSwap` guard acquire                 |
+| 5    | the four predicates                           | O(1) boolean composition                |
+
+Steps 1-4 are all `pub`, and `PaneTree` is constructible headlessly through the
+public `Pane::from_channels` (`panes/mod.rs:301`) plus a hand-assembled
+`pty::TabChannels` (`pty.rs:248`, all fields `pub`) plus
+`WindowPostRenderer::new()` (`renderer/gpu.rs:1866`, a `pub const fn`
+documented as creating GPU resources lazily on first `init`). No window, no GL
+context, no PTY process.
+
+Benchmark, parameterised over 1/2/4/8/16 panes where pane count is an input:
+
+- `PaneTree::layout`
+- `PaneTree::split_borders`
+- `PaneTree::find`
+- `panes::pane_at_pos` (over a synthetic `Vec<(PaneId, Rect)>` — no `PaneTree`
+  needed)
+- `panes::active_highlight_segment` (`panes/mod.rs:507`)
+
+This framing also **gives 122.3 a performance gate it otherwise lacks**:
+`PaneTree::layout`, `split_borders`, `pane_at_pos` and
+`active_highlight_segment` are precisely the functions 122.3 re-types onto the
+neutral geometry, and 122.3's verification was otherwise only "no test
+tolerance changed".
+
+**122.14 still does not benchmark the extracted pane-resolution chain itself**,
+because 122.5 is what makes that chain callable as a unit. Extending the
+benchmark to cover it remains a requirement *of 122.5* — but 122.5 now extends
+a benchmark whose constituent parts are already measured, rather than starting
+from nothing.
+
+Record the baseline in this document.
 
 Deliverable: the benchmark plus a recorded baseline.
 
@@ -799,10 +880,110 @@ Verification: `cargo bench --no-run --all` compiles; standard suite unaffected.
 
 Prohibitions: do NOT attempt to benchmark `App::update` end to end — it needs a
 live window and that harness does not exist (see 121.28 / issue #440). Do NOT
-change production code. Do NOT benchmark the pane-resolution chain — it is not
+change production code — in particular do NOT widen the visibility of
+`mod app_impl`, `mod chrome_damage` or `mod frame_damage`, and do NOT add `pub`
+to any function or field to make it benchmarkable. If a candidate is not
+reachable today, it is out of scope. Do NOT benchmark the four O(1) predicate
+cores. Do NOT benchmark the extracted pane-resolution chain — it is not
 extractable yet; that belongs to 122.5. Do NOT proceed to any other subtask.
 
 Stop: report the benchmark IDs and baseline numbers; await review.
+
+##### 122.14 recorded baseline
+
+Bench file: `freminal/benches/pane_resolution_bench.rs`. Captured 2026-07-30 on
+`task-122/orchestration-extraction`, Criterion `sample_size(50)`,
+`measurement_time(2s)`. Figures are the **median** of Criterion's
+`[low median high]` triple. 34 benchmark IDs.
+
+`PaneTree::layout` — the pointer-motion chain's step 1, and the frame path's
+layout call. `chain/16` is the degenerate right-leaning shape.
+
+| Bench ID            | Median    |
+| ------------------- | --------- |
+| `layout/balanced/1`  | 32.816 ns |
+| `layout/balanced/2`  | 45.409 ns |
+| `layout/balanced/4`  | 80.883 ns |
+| `layout/balanced/8`  | 167.15 ns |
+| `layout/balanced/16` | 348.70 ns |
+| `layout/chain/16`    | 412.52 ns |
+
+`PaneTree::split_borders` — frame-path divider geometry. `active_first` is the
+cheapest possible input (pane 0 sits on the all-`first` spine, so every
+ancestor's `first.contains` hits immediately); `active_last` is the
+representative case (a `second` child, so at least one ancestor pays a failed
+exhaustive subtree scan). At 16 panes the difference is ~43%, which is why both
+are recorded — measuring only `active_first` would have understated the
+baseline.
+
+| Bench ID                       | Median    |
+| ------------------------------ | --------- |
+| `split_borders/active_first/1`  | 15.393 ns |
+| `split_borders/active_last/1`   | 15.559 ns |
+| `split_borders/active_first/2`  | 67.040 ns |
+| `split_borders/active_last/2`   | 51.677 ns |
+| `split_borders/active_first/4`  | 116.45 ns |
+| `split_borders/active_last/4`   | 101.00 ns |
+| `split_borders/active_first/8`  | 392.74 ns |
+| `split_borders/active_last/8`   | 352.62 ns |
+| `split_borders/active_first/16` | 718.11 ns |
+| `split_borders/active_last/16`  | 1.0302 µs |
+
+At 2, 4 and 8 panes `active_last` measured marginally *faster* than
+`active_first`; the run-to-run spread at those sizes (e.g. `active_first/8`
+spans 362-425 ns) exceeds the gap, so those pairs are within noise. Only the
+16-pane pair separates cleanly.
+
+`PaneTree::find` — the pointer-motion chain's step 3, worst case (last-inserted
+id). Balanced and chain land within noise of each other, as predicted: a full
+depth-first search visits the same node count under either shape.
+
+| Bench ID          | Median    |
+| ----------------- | --------- |
+| `find/balanced/1`  | 4.4778 ns |
+| `find/balanced/2`  | 6.5536 ns |
+| `find/balanced/4`  | 14.703 ns |
+| `find/balanced/8`  | 26.036 ns |
+| `find/balanced/16` | 58.346 ns |
+| `find/chain/16`    | 57.853 ns |
+
+`pane_at_pos` — the same linear rect-containment scan the chain inlines at
+`app_impl.rs:930-933`. `first_hit` is flat in pane count (matches immediately);
+`last_hit` and `miss` scale, as a linear scan must.
+
+| Bench ID                    | Median    |
+| --------------------------- | --------- |
+| `pane_at_pos/first_hit/1`    | 4.9338 ns |
+| `pane_at_pos/last_hit/1`     | 4.5014 ns |
+| `pane_at_pos/miss/1`         | 4.1744 ns |
+| `pane_at_pos/first_hit/2`    | 6.1305 ns |
+| `pane_at_pos/last_hit/2`     | 7.6166 ns |
+| `pane_at_pos/miss/2`         | 5.8324 ns |
+| `pane_at_pos/first_hit/4`    | 6.2849 ns |
+| `pane_at_pos/last_hit/4`     | 6.1088 ns |
+| `pane_at_pos/miss/4`         | 6.3946 ns |
+| `pane_at_pos/first_hit/8`    | 5.2452 ns |
+| `pane_at_pos/last_hit/8`     | 12.538 ns |
+| `pane_at_pos/miss/8`         | 7.5946 ns |
+| `pane_at_pos/first_hit/16`   | 5.5787 ns |
+| `pane_at_pos/last_hit/16`    | 24.230 ns |
+| `pane_at_pos/miss/16`        | 11.306 ns |
+
+`active_highlight_segment` — frame-path divider highlight, not pane-count
+parameterised.
+
+| Bench ID                              | Median    |
+| ------------------------------------- | --------- |
+| `active_highlight_segment/bordering`     | 6.8619 ns |
+| `active_highlight_segment/non_bordering` | 5.4369 ns |
+
+**How to compare after 122.3.** These are absolute wall-clock figures from one
+machine, so the reproducible gate is a same-machine before/after, not these
+numbers as constants. Re-run with `cargo bench --bench pane_resolution_bench`
+and apply the 15% regression threshold from `performance-benchmarks`. At the
+nanosecond scale several IDs have run-to-run spread approaching that threshold
+on their own; treat a single ID crossing 15% as a prompt to re-run, and a
+consistent shift across a whole group as the real signal.
 
 #### 122.15 — Publish per-pane terminal-rect origin (unblocks 121.17)
 

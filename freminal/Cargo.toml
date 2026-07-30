@@ -134,6 +134,10 @@ update-desktop-database --quiet /usr/share/applications || :
 
 [[bench]]
 harness = false
+name = "pane_resolution_bench"
+
+[[bench]]
+harness = false
 name = "paste_guard_bench"
 
 [[bench]]
