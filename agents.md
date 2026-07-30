@@ -93,6 +93,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
 | `freminal-state-representation`     | About to add a `bool` field or `bool` parameter, or lean on an `excessive_bools` allow. Named domain enums (`BlinkState::Enabled`); and the three cases where a bool is correct. |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
+| `freminal-module-cohesion`         | About to add a type to an existing file, or a second unrelated test module. One *concept* per module; path should name the concept; decline splits that widen visibility. |
 | `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally. |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
 | `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |

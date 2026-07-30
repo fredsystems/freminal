@@ -70,6 +70,12 @@ Stop and consider a new home when any of these is true:
    A named struct beats a module. A better-named existing type beats
    a new one.
 
+Two neighbouring skills answer the follow-on questions once you have
+decided the logic does need a home here: **`freminal-module-cohesion`**
+(which file — one concept per module) and
+**`freminal-state-representation`** (what type the state should be — a
+named domain enum, not a bare `bool`).
+
 ## Surface it -- do not silently take either option
 
 This is the actual rule, and it cuts both ways:
