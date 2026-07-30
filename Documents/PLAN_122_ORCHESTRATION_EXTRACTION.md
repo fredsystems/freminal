@@ -226,10 +226,13 @@ none is stated, subtasks within a group are independent.
 **Ordering across groups:** **122.0 runs before everything else** — it is the
 skill change that gives later subtasks the mandate they need, and running it last
 would mean every other subtask executes under the skills that caused the drift.
-Then 122.14 (benchmark), the before-capture for the rest. Group A and Group C are
-independent of each other. Group B's 122.9 collides with Group A's 122.4 (both
-touch `pending_frame_damage` / `pending_chrome_signals`) and must land after it.
-122.15 is the last implementation subtask, then 122.16 closes.
+Then 122.14 (benchmark), the before-capture for the rest — scoped to the code as
+it stands, since the pane-resolution chain it would most like to measure does not
+become callable until 122.5, which therefore carries the requirement to extend
+that benchmark. Group A and Group C are independent of each other. Group B's
+122.9 collides with Group A's 122.4 (both touch `pending_frame_damage` /
+`pending_chrome_signals`) and must land after it. 122.15 is the last
+implementation subtask, then 122.16 closes.
 
 Every subtask's verification includes, at minimum:
 
@@ -463,32 +466,61 @@ What: two changes.
 1. `is_chrome_interactive_at` (`751-769`) and `pointer_motion_needs_repaint`
    (`823-1025`) read Type B state **only** through the 122.4 type.
 2. Extract the pane-resolution chain (`905-990`) — layout → hit-test → snapshot
-   load → signal computation — as a **pure function** taking the resolved
-   inputs and returning `Option<PointerMotionPaneSignals>`, so it is headlessly
+   load → signal computation — as a **pure function**, so it is headlessly
    testable. Convert `egui::Pos2` to the neutral `Point` on entry per decision 2.
 
 This is the success criterion from the top of this document. The chain must keep
 mirroring `update()`'s zoomed-vs-split layout choice; the existing comment at
 `app_impl.rs:908-913` explains why getting that wrong mis-hit-tests silently.
 
+**The return contract, decided here so the implementer does not have to.** The
+naive reading — "pure function returning `Option<PointerMotionPaneSignals>`" —
+collides with the feature-gated diagnostic, because `pane_diag_terms`
+(`app_impl.rs:893-894`, set inside the `.map()` closure at `968-984`) is computed
+*within* the chain being extracted. A pure function cannot also write it, and
+recomputing it in the caller is exactly the drift the comment at `964-967`
+warns against. Therefore:
+
+- The extracted function returns a struct — call it `PaneResolution` — carrying
+  **both** `PointerMotionPaneSignals` **and** the four term bools
+  (`mouse_tracking_active`, `has_urls`, `scroll_offset_nonzero`,
+  `gutter_active`).
+- Those four terms are computed **unconditionally**, not under
+  `#[cfg(feature = "frame-profiling")]`. They are four bools derived from values
+  already in hand; there is no cost worth a cfg for, and computing them always
+  is what makes drift structurally impossible rather than impossible-by-comment.
+- Only the **recording** stays feature-gated, in the caller: the
+  `win.frame_stats.record_pointer_motion_check(...)` call at `1000-1016`.
+- Net effect: the extracted function contains **no `#[cfg]` at all**, and
+  `pane_hover_region_terms` is no longer a diagnostic-only helper.
+
+This is a strict improvement on the status quo, which keeps the diagnostic
+honest by interleaving it and relying on a comment to keep it that way.
+
 Deliverable: the extraction plus unit tests for the chain — zoomed vs split,
 pointer outside every pane, pointer in the gutter strip, and the
 `PaneError::InvalidState` conservative-`true` path (`app_impl.rs:871-877`).
+Also **extend 122.14's benchmark** to cover the newly-callable chain, and record
+the number against that baseline; 122.14 could not do this because the chain was
+not extractable when it ran.
 
-Verification: standard suite, plus `--features frame-profiling` — the diagnostic
-block at `app_impl.rs:893-894, 968-984, 1000-1016` is interleaved with the
-chain, and `FrameStats::record_pointer_motion_check` mutates through a `Cell`
-under an immutable borrow (`window.rs:868`, fields `701-730`, all
-feature-gated). That interleaving is deliberate, so the diagnostic cannot drift
-from the real computation — preserve it.
+Verification: standard suite, plus `--features frame-profiling` — the recording
+call must still fire with the same values for the same inputs as before, and
+`FrameStats::record_pointer_motion_check` still mutates through a `Cell` under
+an immutable borrow (`window.rs:868`, fields `701-730`, all feature-gated). Add
+a test that the four terms returned by `PaneResolution` match what the
+pre-extraction diagnostic would have recorded.
 
 Prohibitions: do NOT change any predicate's return value for any input. Do NOT
+put a `#[cfg]` inside the extracted function — that is the thing this contract
+exists to remove. Do NOT recompute the diagnostic terms in the caller. Do NOT
 remove the `#[allow(clippy::too_many_lines)]` at `app_impl.rs:822` unless the
 function genuinely fits without it. Do NOT alter the conservative directions
 (unknown window → `true`, `try_borrow` failure → `true`,
 `PaneError` → `true`). Do NOT proceed to 122.6.
 
-Stop: report the extracted signature and test results; await review.
+Stop: report the extracted signature, the benchmark number, and test results;
+await review.
 
 #### 122.6 — `DummyApp` override so the dispatch path is testable
 
@@ -749,9 +781,17 @@ What: **no existing benchmark covers this code.** The suite is
 `performance-benchmarks`, a change to a measured hot path with no benchmark
 requires adding one first.
 
-Benchmark the parts that are reachable headlessly: the pure predicate cores, and
-after 122.5 the extracted pane-resolution chain. Record a baseline in this
-document.
+Benchmark **only what exists today**: the pure predicate cores
+(`pointer_motion_needs_repaint_decision`, `pane_hover_region_risk`,
+`animation_in_flight_composed`, `pointer_in_gutter_strip`). Record a baseline in
+this document.
+
+**122.14 does not benchmark the pane-resolution chain**, because 122.5 is what
+makes that chain callable. Extending the benchmark to cover it is a requirement
+*of 122.5*, not of this subtask — an earlier revision of this plan asked 122.14
+to benchmark something that does not exist when it runs, which was
+self-contradictory. One subtask, one concern: this one establishes the baseline
+for the code as it stands.
 
 Deliverable: the benchmark plus a recorded baseline.
 
@@ -759,7 +799,8 @@ Verification: `cargo bench --no-run --all` compiles; standard suite unaffected.
 
 Prohibitions: do NOT attempt to benchmark `App::update` end to end — it needs a
 live window and that harness does not exist (see 121.28 / issue #440). Do NOT
-change production code. Do NOT proceed to any other subtask.
+change production code. Do NOT benchmark the pane-resolution chain — it is not
+extractable yet; that belongs to 122.5. Do NOT proceed to any other subtask.
 
 Stop: report the benchmark IDs and baseline numbers; await review.
 

@@ -102,7 +102,12 @@ GUI Thread (eframe update() -- pure render, NO mutation)
   Applies to `TerminalHandler`, `Buffer`, `FreminalAnsiParser`,
   `SnapshotModeFields`, `TerminalSnapshot`, and function signatures
   like `to_payload()` / `send_terminal_inputs()`. Raw `bool` is OK
-  only when no enum exists.
+  only when no enum exists **and the value is never transported** --
+  if it crosses a crate, thread, frame or public-API boundary
+  (which every mode reaching the GUI does, via `TerminalSnapshot`),
+  create the enum instead of taking this hatch. See
+  `freminal-state-representation`, which takes precedence here; the
+  hatch is the unfinished half of Task 26, not a standing exemption.
 
 - **Keybindings**: every feature that adds or modifies a keyboard
   shortcut MUST:

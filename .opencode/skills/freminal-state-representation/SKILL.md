@@ -11,7 +11,8 @@ bool fields**. Some of those are correct (see "Where bools stay"), but
 the default is wrong, and the suppressions have become permission
 rather than a record of a decision.
 
-**The measured cost of the fix is zero.** Verified with `rustc -O`:
+**The measured cost of the fix is zero.** Measured with
+`rustc 1.97.1 -O` on `x86_64-unknown-linux-gnu`:
 
 ```text
 bool = 1 byte      fieldless enum = 1 byte
@@ -21,13 +22,26 @@ struct { six bools }        = 6 bytes
 struct { two enums }        = 2 bytes
 ```
 
-A fieldless enum with <= 256 variants **is** a `u8`. Replacing six
-bools with two enums makes the struct *smaller* and improves cache
-density; matching compiles to the same comparison or jump table. The
-real cost is boilerplate (`Display`, `FromStr`, serde), and by
+Two honest caveats on those numbers, so nobody cites this skill as a
+language guarantee:
+
+- **Rust does not specify enum layout without an explicit `repr`.** The
+  one-byte result is what rustc does for a fieldless enum on every
+  target freminal supports, not something the language promises. If you
+  need a guaranteed width — FFI, a serialised format, a wire protocol —
+  say so with `#[repr(u8)]` rather than relying on the default.
+- **`Option<enum>` is only niche-packed while the enum leaves a niche.**
+  A two-variant enum leaves 254 spare values in a byte, so it packs. A
+  fieldless enum with 256 variants leaves none, and `Option` of it
+  grows.
+
+**Neither caveat weakens the rule**, and that is the point: even if an
+enum cost four bytes it would be irrelevant for a struct field or a
+function parameter. Performance is not a reason to prefer `bool` here.
+The real cost is boilerplate (`Display`, `FromStr`, serde), and by
 maintainer decision **boilerplate and extra LOC are explicitly
-accepted** in exchange for readability. Do not cite verbosity as a
-reason to keep a bool.
+accepted** in exchange for readability. Do not cite verbosity — or
+layout — as a reason to keep a bool.
 
 ## The exemplar already in the repo
 
@@ -103,6 +117,27 @@ API** boundary becomes a named enum. Inside one function's body a local
 `let is_first = true;` is fine; the moment the value is transported it
 needs to be self-describing at the far end, where the local context
 that made the bool obvious is gone.
+
+#### Precedence over the terminal-mode escape hatch
+
+`freminal-architecture` says of terminal modes: "Raw `bool` is OK only
+when no enum exists." **This rule takes precedence over that hatch.**
+Read together:
+
+- Mode **has** an enum in `freminal-common/src/buffer_states/modes/` →
+  use it. Never a raw `bool`. (Unchanged.)
+- Mode has **no** enum yet, and the value is **transported** — through
+  `TerminalSnapshot`, `SnapshotModeFields`, `InputEvent`, a channel, or
+  any public signature → **create the enum.** Do not take the hatch.
+  Every mode reaching the GUI crosses the snapshot boundary, so in
+  practice this is nearly all of them.
+- Mode has **no** enum and the value never leaves the function that
+  computes it → a local `bool` is fine.
+
+This is what Task 26 ("Bool-to-Enum Mode Refactor") did, and the hatch
+is the unfinished half of it, not a standing exemption. Adding a new
+transported mode as a raw `bool` because "no enum exists yet" is
+circular: you are the one who would be creating it.
 
 ## Where bools stay (do NOT convert these)
 

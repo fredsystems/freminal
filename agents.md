@@ -87,13 +87,13 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-bench-table`             | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`).     |
 | `freminal-frec-decoder`            | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                        |
 | `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                    |
-| `freminal-extend-or-extract`       | About to make something bigger rather than give it a home: a field only an outside reader needs, a branch on an already-long function, an extra parameter, a `too_many_lines` allow. Gives scope to propose a module or crate. |
+| `freminal-extend-or-extract`       | About to make something bigger rather than give it a home: a field only an outside reader needs, a branch on an already-long function, an extra parameter, a copied computation, a helper extracted only to make a test possible, a test re-implementing production logic, a `too_many_lines` / `too_many_arguments` allow. Also "should this be a new module/crate". |
 | `freminal-numeric-conversions`     | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                               |
 | `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
 | `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
-| `freminal-state-representation`     | About to add a `bool` field or `bool` parameter, or lean on an `excessive_bools` allow. Named domain enums (`BlinkState::Enabled`); and the three cases where a bool is correct. |
+| `freminal-state-representation`     | About to add a `bool` field or `bool` parameter, pass a bare `true` / `false`, add a bool pair that can't both be true, transport a bool across a crate/thread/frame boundary, or lean on an `excessive_bools` allow. Named domain enums (`BlinkState::Enabled`); and the three cases where a bool is correct. |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
-| `freminal-module-cohesion`         | About to add a type to an existing file, or a second unrelated test module. One *concept* per module; path should name the concept; decline splits that widen visibility. |
+| `freminal-module-cohesion`         | About to add a type to an existing file whose name describes a different concept, add a second unrelated test module, or add to a file you had to scroll to the end of. One *concept* per module; path should name the concept; decline splits that widen visibility. |
 | `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally. |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
 | `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |
@@ -132,6 +132,15 @@ The full architecture invariants and what-not-to-leak rules live in the
 If a mode has an enum in `freminal-common/src/buffer_states/modes/`,
 that enum is the type used everywhere -- never a raw `bool`. See
 `freminal-architecture` for the full surface.
+
+`freminal-architecture` adds that raw `bool` is OK "only when no enum
+exists". **That hatch is narrower than it reads**, and
+`freminal-state-representation` takes precedence: if the value is
+transported -- through `TerminalSnapshot`, a channel, or any public
+signature -- create the enum rather than taking the hatch. Every mode
+reaching the GUI crosses the snapshot boundary, so that is nearly all
+of them. A raw `bool` is fine only for a value that never leaves the
+function computing it.
 
 That rule generalises beyond modes: state is a **named domain enum**
 (`BlinkState::Enabled`), never a bare `bool` and never a shared generic
