@@ -91,6 +91,7 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-numeric-conversions`     | Numeric type conversions. `conv2` crate; no raw `as` in production.                                                                               |
 | `freminal-config-options`          | Adding / renaming / removing a config option (`Config` field in `config.rs`). Mandatory `ConfigPartial` / `apply_partial` wiring checklist.       |
 | `freminal-plan-status-lifecycle`   | Changing task / version status in `MASTER_PLAN.md` (esp. when a PR merges). Two-tables-agree invariant; merge is the `Complete` trigger.          |
+| `freminal-state-representation`     | About to add a `bool` field or `bool` parameter, or lean on an `excessive_bools` allow. Named domain enums (`BlinkState::Enabled`); and the three cases where a bool is correct. |
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
 | `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally. |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
@@ -130,6 +131,14 @@ The full architecture invariants and what-not-to-leak rules live in the
 If a mode has an enum in `freminal-common/src/buffer_states/modes/`,
 that enum is the type used everywhere -- never a raw `bool`. See
 `freminal-architecture` for the full surface.
+
+That rule generalises beyond modes: state is a **named domain enum**
+(`BlinkState::Enabled`), never a bare `bool` and never a shared generic
+`Enabled` / `Disabled`. Bool *parameters* are forbidden outright. The
+three cases where a `bool` is still correct -- independent simultaneous
+signals, modifier sets, and TOML config toggles -- are enumerated in
+`freminal-state-representation`, which also records that the runtime
+cost of the fix is measured at zero.
 
 ### Keybindings
 
