@@ -971,8 +971,11 @@ mod tests {
     //
     // `FreminalGui::is_chrome_interactive_at` (app_impl.rs) is
     //   `self.windows.get(&window_id).is_none_or(|win|
-    //        point_in_chrome_rects(pos, win.chrome_head_rects,
-    //            win.chrome_border_rects, win.chrome_toast_rects))`
+    //        point_in_chrome_rects(pos, win.published.chrome_head_rects(),
+    //            win.published.chrome_border_rects(),
+    //            win.published.chrome_toast_rects()))`
+    // (Group A #122.4: the three rect fields moved onto `PublishedFrameState`,
+    // reached via `win.published`; the composed decision below is unchanged.)
     // The point-in-rects half is pinned exhaustively above. The distinct
     // behavior the wrapper adds is the `is_none_or` fallback: an UNKNOWN
     // `window_id` (no `PerWindowState` entry) is conservatively chrome-

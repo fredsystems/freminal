@@ -708,8 +708,21 @@ review.
 
 #### 122.4 — Introduce the named published-state type
 
-Scope: new module under `freminal/src/gui/`, plus `freminal/src/gui/window.rs`
-and `freminal/src/gui/app_impl.rs`.
+Scope: new module under `freminal/src/gui/`, plus `freminal/src/gui/window.rs`,
+`freminal/src/gui/app_impl.rs` and `freminal/src/gui/layout_ops.rs`.
+
+**Scope corrected 2026-07-30, before implementation.** The stated scope missed a
+`PerWindowState` construction site. There are **three**, all of which initialise
+all seven fields and so must be migrated together:
+`freminal/src/gui/layout_ops.rs:706-741`, `app_impl.rs:~524-559`, and
+`app_impl.rs:~4499-4534`. Two further files mention the fields only in prose —
+`toast.rs:472, 1571` and `chrome_damage.rs:974-975` (a commented-out example) —
+and should have those references retargeted at the new type, but need no code
+change. `settings.rs:1887`'s `show_resize_overlay` is an unrelated config field;
+do not touch it. `window.rs`'s `resize_overlay_alpha` /
+`resize_overlay_is_animating` / `resize_overlay_repaint_delay` helpers take
+`Duration` arguments rather than the field, so they and their ~30 tests are
+unaffected.
 
 What: introduce a named type owning the **seven Type B fields** from the
 inventory, designed as if it were a crate (decision 1). It is a **wrapper**: the

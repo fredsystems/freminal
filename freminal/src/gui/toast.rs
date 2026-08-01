@@ -469,8 +469,9 @@ impl ToastPlacement {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ToastGeometry {
     /// The central-panel content rect — the terminal area, i.e. the window
-    /// *minus* the menu/tab chrome (it is `win.cached_central_rect`). This is
-    /// deliberately not the full OS-window rect: toasts anchor within the
+    /// *minus* the menu/tab chrome (it is
+    /// `win.published.cached_central_rect()`). This is deliberately not the
+    /// full OS-window rect: toasts anchor within the
     /// content area so they never overlap chrome, and a future
     /// [`ToastPosition::WindowCentered`] caller centers within this content
     /// rect, not the whole window.
@@ -1568,11 +1569,12 @@ impl ToastStack {
         let pills: Vec<ToastQuad> = outputs.iter().map(|o| o.pill).collect();
         // Subtask 121.14: the same hit rects `hit_test` above just tested the
         // pointer against, in the same logical-point/window-space coordinates
-        // `chrome_head_rects`/`chrome_border_rects` use — cached by the
-        // caller for `App::pointer_motion_needs_repaint` (see this method's
-        // doc). Computed from `outputs`, which describes what was ACTUALLY
-        // rendered this frame (before the dismiss/expire retains below), so
-        // it matches the pills just painted rather than what remains after.
+        // `PublishedFrameState`'s `chrome_head_rects`/`chrome_border_rects`
+        // use — cached by the caller for `App::pointer_motion_needs_repaint`
+        // (see this method's doc). Computed from `outputs`, which describes
+        // what was ACTUALLY rendered this frame (before the dismiss/expire
+        // retains below), so it matches the pills just painted rather than
+        // what remains after.
         let rects: Vec<egui::Rect> = outputs
             .iter()
             .map(|o| {

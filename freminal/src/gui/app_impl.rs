@@ -240,8 +240,8 @@ const fn pane_hover_region_terms(
 /// `<=`) at the far edge: the boundary point itself counts as OUTSIDE.
 ///
 /// `gutter_width_upper_bound_logical` is the gutter's *total inset* in
-/// logical points (`PerWindowState::cached_gutter_inset_logical`), which is
-/// strictly wider than the painted strip because the inset includes the
+/// logical points (`PublishedFrameState::cached_gutter_inset_logical`),
+/// which is strictly wider than the painted strip because the inset includes the
 /// padding gap. The real strip's right edge therefore always falls strictly
 /// inside this bound, making the `<` vs `<=` choice at the outer boundary
 /// immaterial. Being a genuine logical measurement, it holds at any
@@ -522,7 +522,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_close_pane: false,
                         pending_focus_direction: None,
                         border_drag: None,
-                        resize_overlay: None,
+                        published: super::published_frame_state::PublishedFrameState::new(),
                         shader_last_mtime: None,
                         window_post,
                         toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
@@ -548,18 +548,12 @@ impl freminal_windowing::App for FreminalGui {
                         ),
                         previous_active_pane_key: None,
                         pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
-                        pending_chrome_signals: chrome_damage::ChromeSignals::default(),
                         chrome_settle_pending: false,
                         prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
                         prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
                         prev_window_focused: false,
                         chrome_frames_rendered: 0,
                         pending_terminal_requested_delay: None,
-                        cached_central_rect: None,
-                        cached_gutter_inset_logical: 0.0,
-                        chrome_head_rects: None,
-                        chrome_border_rects: Vec::new(),
-                        chrome_toast_rects: Vec::new(),
                         frame_stats: super::window::FrameStats::default(),
                     };
                     self.windows.insert(window_id, win);
@@ -753,18 +747,17 @@ impl freminal_windowing::App for FreminalGui {
         self.windows.get(&window_id).is_none_or(|win| {
             crate::gui::chrome_damage::point_in_chrome_rects(
                 pos,
-                win.chrome_head_rects.as_deref(),
-                &win.chrome_border_rects,
+                win.published.chrome_head_rects(),
+                win.published.chrome_border_rects(),
                 // Subtask 121.14 (review item 2 follow-up): the most
-                // recently laid-out toast pill rects, in their own field —
-                // see that field's doc in `window.rs` for the staleness
-                // discipline. Hovering a toast DOES change chrome pixels
-                // (close-button highlight, hover-pauses-expiry), so this
-                // correctly, as a consequence, also makes
-                // `should_force_chrome_full_for_pointer` (in
-                // `freminal-windowing`, which calls this method) force
+                // recently laid-out toast pill rects — see
+                // `PublishedFrameState`'s doc for the staleness discipline.
+                // Hovering a toast DOES change chrome pixels (close-button
+                // highlight, hover-pauses-expiry), so this correctly, as a
+                // consequence, also makes `should_force_chrome_full_for_pointer`
+                // (in `freminal-windowing`, which calls this method) force
                 // `ChromeMode::Full` while the pointer is over a toast.
-                &win.chrome_toast_rects,
+                win.published.chrome_toast_rects(),
             )
         })
     }
@@ -775,7 +768,7 @@ impl freminal_windowing::App for FreminalGui {
     /// [`pane_hover_region_risk`]'s doc for the residual-risk approximation
     /// used for URL/gutter/scrollbar hover regions.
     ///
-    /// Reuses `win.pending_chrome_signals.any_overlay_open`/
+    /// Reuses `win.published`'s `pending_chrome_signals().any_overlay_open`/
     /// `foreground_overlay_open` — the persisted #436 §3.3 signals from the
     /// most recently rendered frame — for the "any overlay/popup/tooltip/
     /// context menu is open" bullet, rather than recomputing the
@@ -844,10 +837,10 @@ impl freminal_windowing::App for FreminalGui {
         // superset-but-wasteful bug this subtask fixes. A toast spends most of
         // its life fully settled in its steady hold; the resize HUD is fully
         // opaque for the first `RESIZE_OVERLAY_LINGER - RESIZE_OVERLAY_FADE` of
-        // its life. Presence alone (the old `win.resize_overlay.is_some()` /
+        // its life. Presence alone (the old `win.published.resize_overlay().is_some()` /
         // `!stack.is_empty()`) disabled suppression for their entire lives
         // instead of just the genuinely-animating tail.
-        let resize_overlay_animating = win.resize_overlay.is_some_and(|overlay| {
+        let resize_overlay_animating = win.published.resize_overlay().is_some_and(|overlay| {
             let elapsed = std::time::Instant::now().saturating_duration_since(overlay.last_update);
             super::window::resize_overlay_is_animating(
                 elapsed,
@@ -864,8 +857,11 @@ impl freminal_windowing::App for FreminalGui {
             .map_or(true, |stack| !stack.is_empty() && stack.is_animating());
         let animation_in_flight =
             animation_in_flight_composed(resize_overlay_animating, toast_animating);
-        let overlay_open = win.pending_chrome_signals.any_overlay_open
-            || win.pending_chrome_signals.foreground_overlay_open
+        let overlay_open = win.published.pending_chrome_signals().any_overlay_open
+            || win
+                .published
+                .pending_chrome_signals()
+                .foreground_overlay_open
             || animation_in_flight;
 
         let active_tab = win.tabs.active_tab();
@@ -877,7 +873,7 @@ impl freminal_windowing::App for FreminalGui {
                 .any(|pane| pane.view_state.selection.is_selecting)
         });
 
-        let pointer_pane_unresolved = win.cached_central_rect.is_none();
+        let pointer_pane_unresolved = win.published.cached_central_rect().is_none();
 
         let gutter_config_active = self.config.command_blocks.enabled
             && self.config.command_blocks.gutter != freminal_common::config::GutterPosition::Off;
@@ -900,11 +896,12 @@ impl freminal_windowing::App for FreminalGui {
         // bound by construction — and unlike the previous
         // physical-pixels-as-logical approximation it does not depend on
         // `ppp >= 1.0`, whose safety direction inverts on sub-1.0 fractional
-        // scale. See `PerWindowState::cached_gutter_inset_logical`.
-        let gutter_width_upper_bound_logical = win.cached_gutter_inset_logical;
+        // scale. See `PublishedFrameState::cached_gutter_inset_logical`.
+        let gutter_width_upper_bound_logical = win.published.cached_gutter_inset_logical();
 
         let pane_signals = win
-            .cached_central_rect
+            .published
+            .cached_central_rect()
             .and_then(|central_rect| {
                 // Mirror `update()`'s own zoomed-vs-split layout choice
                 // (app_impl.rs:1678) exactly: when a pane is zoomed, it
@@ -1725,9 +1722,9 @@ impl freminal_windowing::App for FreminalGui {
             // #436.8: menu-bar / tab-bar rects, captured for the
             // region-aware pointer chrome-gate (`is_chrome_interactive_at`).
             // Only ever populated on a FULL frame — a REPLAY frame builds
-            // neither panel, so `win.chrome_head_rects` is left untouched
-            // (stale-but-still-correct: chrome hasn't moved since the
-            // FULL frame that last set it, by the same invariant that
+            // neither panel, so `win.published`'s head rects are left
+            // untouched (stale-but-still-correct: chrome hasn't moved since
+            // the FULL frame that last set them, by the same invariant that
             // makes REPLAY safe at all).
             let mut head_rects: Vec<egui::Rect> = Vec::new();
 
@@ -1759,7 +1756,7 @@ impl freminal_windowing::App for FreminalGui {
                 self.dispatch_tab_bar_action(tab_action, &mut win);
             }
 
-            win.chrome_head_rects = Some(head_rects);
+            win.published.publish_chrome_head_rects(head_rects);
 
             (menu_open, Some(root_ui))
         } else {
@@ -1796,13 +1793,15 @@ impl freminal_windowing::App for FreminalGui {
 
         // Copy the cached content rect (`egui::Rect` is `Copy`) out of `win`
         // BEFORE `central_body` captures `win` by mutable reference below —
-        // reading `win.cached_central_rect` after that point (e.g. inside
-        // the REPLAY arm further down) would conflict with the closure's
-        // borrow. Only actually used on a REPLAY frame; harmless (and cheap)
-        // to compute unconditionally otherwise. Falls back to egui's own
-        // content rect in the unreachable case described where it is used.
+        // reading `win.published`'s cached central rect after that point
+        // (e.g. inside the REPLAY arm further down) would conflict with the
+        // closure's borrow. Only actually used on a REPLAY frame; harmless
+        // (and cheap) to compute unconditionally otherwise. Falls back to
+        // egui's own content rect in the unreachable case described where it
+        // is used.
         let cached_central_rect_for_replay = win
-            .cached_central_rect
+            .published
+            .cached_central_rect()
             .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
 
         // Task 121 frame-profiling harness: `central_body` (below) hands its
@@ -1901,7 +1900,8 @@ impl freminal_windowing::App for FreminalGui {
             // `App::pointer_motion_needs_repaint`, which runs outside a frame
             // and so has no `ppp` of its own. See the field's doc for why this
             // beats assuming `ppp >= 1.0`.
-            win.cached_gutter_inset_logical = gutter_inset_logical;
+            win.published
+                .publish_cached_gutter_inset_logical(gutter_inset_logical);
 
             let window_width = ui.input(|i: &egui::InputState| i.content_rect());
 
@@ -2120,7 +2120,7 @@ impl freminal_windowing::App for FreminalGui {
             // bar / tab bar / `CentralPanel` chrome that produced it.
             // Idempotent on a REPLAY frame itself (`available_rect` is then
             // already exactly the cached value).
-            win.cached_central_rect = Some(available_rect);
+            win.published.publish_cached_central_rect(available_rect);
 
             let active_pane_id = win.tabs.active_tab().active_pane;
             let zoomed_pane = win.tabs.active_tab().zoomed_pane;
@@ -2483,13 +2483,13 @@ impl freminal_windowing::App for FreminalGui {
                     }
                 }
 
-                win.chrome_border_rects = border_rects;
+                win.published.publish_chrome_border_rects(border_rects);
             } else {
                 // No sensors built this frame (single pane / zoomed / overlay
                 // open): clear any stale rects from a since-changed layout so
                 // they can't keep classifying terminal content as chrome
                 // (#436.8).
-                win.chrome_border_rects.clear();
+                win.published.clear_chrome_border_rects();
             }
 
             // Defensive: a border drag can only be in progress while the primary
@@ -2618,8 +2618,8 @@ impl freminal_windowing::App for FreminalGui {
             // trigger — the displayed dimensions are recomputed from the
             // whole window content area after the loop, where `win.tabs` is
             // no longer borrowed. Captured here rather than written straight
-            // to `win.resize_overlay` because the per-pane loop mutably
-            // borrows `win.tabs`.
+            // to `win.published`'s resize-overlay state because the
+            // per-pane loop mutably borrows `win.tabs`.
             let mut grid_size_changed = false;
 
             // Task 121 frame-profiling harness: cumulative time spent this
@@ -3135,10 +3135,11 @@ impl freminal_windowing::App for FreminalGui {
                     .approx_as::<usize>()
                     .unwrap_or(0)
                     .max(1);
-                win.resize_overlay = Some(super::window::ResizeOverlayState {
-                    size: (window_cols, window_rows),
-                    last_update: now,
-                });
+                win.published
+                    .start_resize_overlay(super::window::ResizeOverlayState {
+                        size: (window_cols, window_rows),
+                        last_update: now,
+                    });
             }
 
             // ── Frame-damage aggregation (#435) ───────────────────────
@@ -3184,9 +3185,9 @@ impl freminal_windowing::App for FreminalGui {
             let pointer_over_chrome = ctx.input(|i| i.pointer.latest_pos()).is_none_or(|pos| {
                 chrome_damage::point_in_chrome_rects(
                     pos,
-                    win.chrome_head_rects.as_deref(),
-                    &win.chrome_border_rects,
-                    &win.chrome_toast_rects,
+                    win.published.chrome_head_rects(),
+                    win.published.chrome_border_rects(),
+                    win.published.chrome_toast_rects(),
                 )
             });
             let force_full = ui_overlay_open
@@ -3202,7 +3203,7 @@ impl freminal_windowing::App for FreminalGui {
             // over its linger window on the plain painter — so it must force a
             // `Full` present too, or a cursor-only `Partial` frame would leave
             // the fading overlay outside the damage rect stale/ghosted.
-            let toast_active = win.resize_overlay.is_some()
+            let toast_active = win.published.resize_overlay().is_some()
                 || self
                     .toasts
                     .try_borrow()
@@ -3369,9 +3370,9 @@ impl freminal_windowing::App for FreminalGui {
             // this `CentralPanel` closure). The final `ChromeDamage` decision
             // additionally needs the after-toast-render dismissible-presence
             // sample, which can only be taken once this closure returns (the
-            // toast overlay renders after it) — so `win.pending_chrome_signals`
-            // is a staging value, combined into `win.pending_chrome_damage`
-            // near the end of `update()`.
+            // toast overlay renders after it) — so `win.published`'s staged
+            // chrome signals are a staging value, combined into
+            // `win.pending_chrome_damage` near the end of `update()`.
             let chrome_tab_snapshot = chrome_damage::ChromeTabSnapshot {
                 tab_ids: win.tabs.iter().map(|t| t.id).collect(),
                 active_tab_id: Some(win.tabs.active_tab().id),
@@ -3396,23 +3397,24 @@ impl freminal_windowing::App for FreminalGui {
             );
             win.prev_chrome_tab_snapshot = chrome_tab_snapshot;
 
-            win.pending_chrome_signals = chrome_damage::ChromeSignals {
-                any_overlay_open: ui_overlay_open,
-                style_changed: chrome_style_changed,
-                active_pane_changed,
-                tab_set_changed: chrome_tab_diff.tab_set_changed,
-                tab_title_changed: chrome_tab_diff.tab_title_changed,
-                pane_layout_changed: chrome_tab_diff.pane_layout_changed,
-                broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
-                shader_active: shader_recomposites,
-                bell_active: per_pane_damage.iter().any(|p| p.bell_active),
-                toast_active,
-                size_changed: chrome_size_changed,
-                ppp_changed,
-                focus_changed: chrome_focus_changed,
-                warming_up: chrome_warming_up,
-                foreground_overlay_open,
-            };
+            win.published
+                .publish_pending_chrome_signals(chrome_damage::ChromeSignals {
+                    any_overlay_open: ui_overlay_open,
+                    style_changed: chrome_style_changed,
+                    active_pane_changed,
+                    tab_set_changed: chrome_tab_diff.tab_set_changed,
+                    tab_title_changed: chrome_tab_diff.tab_title_changed,
+                    pane_layout_changed: chrome_tab_diff.pane_layout_changed,
+                    broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
+                    shader_active: shader_recomposites,
+                    bell_active: per_pane_damage.iter().any(|p| p.bell_active),
+                    toast_active,
+                    size_changed: chrome_size_changed,
+                    ppp_changed,
+                    focus_changed: chrome_focus_changed,
+                    warming_up: chrome_warming_up,
+                    foreground_overlay_open,
+                });
 
             // Task 121 frame-profiling harness follow-up (issue #459/#461
             // gate-blocker investigation): count which individual §3.3
@@ -3423,7 +3425,8 @@ impl freminal_windowing::App for FreminalGui {
             // frame; every one that did gets counted, not just the first.
             #[cfg(feature = "frame-profiling")]
             for (i, (_, fired)) in win
-                .pending_chrome_signals
+                .published
+                .pending_chrome_signals()
                 .named_fields()
                 .into_iter()
                 .enumerate()
@@ -3690,13 +3693,13 @@ impl freminal_windowing::App for FreminalGui {
             // "cols × rows" readout, drawn on the plain painter like the
             // broadcast label above — no input, no `ui_overlay_open`
             // registration needed. Bind the `Copy` state up front so the
-            // subsequent `win.resize_overlay = None` on timeout (below)
-            // doesn't conflict with the `ui.painter()` borrow used to draw it.
-            let resize_overlay_state = win.resize_overlay;
+            // subsequent clear-on-timeout (below) doesn't conflict with the
+            // `ui.painter()` borrow used to draw it.
+            let resize_overlay_state = win.published.resize_overlay();
             if let Some(overlay) = resize_overlay_state {
                 let elapsed = now.saturating_duration_since(overlay.last_update);
                 if elapsed >= super::window::RESIZE_OVERLAY_LINGER {
-                    win.resize_overlay = None;
+                    win.published.clear_resize_overlay();
                 } else {
                     let alpha = super::window::resize_overlay_alpha(
                         elapsed,
@@ -3917,11 +3920,11 @@ impl freminal_windowing::App for FreminalGui {
             // found to rely on cross-mode id stability.
             // `decide_chrome_mode` only chooses `Replay` when the chrome
             // cache is valid at this frame's size/ppp, which is only ever
-            // populated on a FULL frame — and every FULL frame sets
-            // `cached_central_rect` (via `central_body`) before that cache is
-            // populated — so falling back to egui's own content rect
-            // (`cached_central_rect_for_replay`'s fallback, computed above)
-            // should be unreachable in practice.
+            // populated on a FULL frame — and every FULL frame publishes
+            // `win.published`'s cached central rect (via `central_body`)
+            // before that cache is populated — so falling back to egui's
+            // own content rect (`cached_central_rect_for_replay`'s
+            // fallback, computed above) should be unreachable in practice.
             let mut band_ui = egui::Ui::new(
                 ctx.clone(),
                 egui::Id::new("freminal_root"),
@@ -3941,26 +3944,27 @@ impl freminal_windowing::App for FreminalGui {
         // only ever be entered while the stack is provably empty, making
         // `.show()` a no-op here anyway.
         if chrome_mode == freminal_windowing::ChromeMode::Full {
-            // Review item 2 follow-up to 121.14: `win.chrome_toast_rects`
-            // must be written on EVERY `Full` frame reaching this point, not
-            // only when the block below actually runs `stack.show()` — see
-            // that field's doc in `window.rs` for why (an emptied stack
-            // would otherwise leave stale rects behind forever). Default to
-            // cleared; the inner block below overwrites with fresh rects
-            // when it runs.
-            win.chrome_toast_rects.clear();
+            // Review item 2 follow-up to 121.14: `win.published`'s toast
+            // rects must be written on EVERY `Full` frame reaching this
+            // point, not only when the block below actually runs
+            // `stack.show()` — see `PublishedFrameState`'s doc for why (an
+            // emptied stack would otherwise leave stale rects behind
+            // forever). Default to cleared; the inner block below
+            // overwrites with fresh rects when it runs.
+            win.published.clear_chrome_toast_rects();
 
             if let Ok(mut stack) = self.toasts.try_borrow_mut()
                 && !stack.is_empty()
             {
                 // Rebuild the same geometry `central_body` used to populate
-                // `cached_central_rect`/the pane layout — `win` is a local
-                // variable here (removed from `self.windows` above, reinserted
-                // below), so this cannot reuse `central_body`'s own locals
-                // (`pane_layout`, `available_rect`), which are scoped to that
-                // closure.
+                // `win.published`'s cached central rect / the pane layout —
+                // `win` is a local variable here (removed from
+                // `self.windows` above, reinserted below), so this cannot
+                // reuse `central_body`'s own locals (`pane_layout`,
+                // `available_rect`), which are scoped to that closure.
                 let content_rect = win
-                    .cached_central_rect
+                    .published
+                    .cached_central_rect()
                     .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
                 // Pre-resolve the active tab's pane layout into owned locals so
                 // the `resolve_pane_rect` closure below does not borrow `win`
@@ -4001,12 +4005,12 @@ impl freminal_windowing::App for FreminalGui {
                 );
 
                 // Subtask 121.14 (review item 2 follow-up): the laid-out
-                // toast pill rects go into their own `chrome_toast_rects`
-                // field, not `chrome_border_rects` — see that field's doc
-                // in `window.rs` for the full staleness-discipline
-                // reasoning and why a dedicated field replaced the
-                // original append-to-border-rects approach.
-                win.chrome_toast_rects = outcome.rects;
+                // toast pill rects go into their own dedicated slot, not
+                // `chrome_border_rects` — see `PublishedFrameState`'s doc
+                // for the full staleness-discipline reasoning and why a
+                // dedicated field replaced the original
+                // append-to-border-rects approach.
+                win.published.publish_chrome_toast_rects(outcome.rects);
 
                 // Subtask 121.12: `ToastStack::show` returns its wanted delay
                 // rather than calling `ctx.request_repaint_after()` itself. This
@@ -4061,8 +4065,9 @@ impl freminal_windowing::App for FreminalGui {
         let chrome_settle_frame_pending = win.chrome_settle_pending;
         win.chrome_settle_pending = chrome_presence_transitioned;
 
+        let staged_chrome_signals = win.published.pending_chrome_signals();
         win.pending_chrome_damage = chrome_damage::decide_chrome_damage(
-            &win.pending_chrome_signals,
+            &staged_chrome_signals,
             chrome_presence_transitioned,
             chrome_settle_frame_pending,
         );
@@ -4499,7 +4504,7 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
-            resize_overlay: None,
+            published: super::published_frame_state::PublishedFrameState::new(),
             shader_last_mtime: None,
             window_post,
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
@@ -4523,18 +4528,12 @@ impl FreminalGui {
             present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             previous_active_pane_key: None,
             pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
-            pending_chrome_signals: chrome_damage::ChromeSignals::default(),
             chrome_settle_pending: false,
             prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
             prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
             prev_window_focused: false,
             chrome_frames_rendered: 0,
             pending_terminal_requested_delay: None,
-            cached_central_rect: None,
-            cached_gutter_inset_logical: 0.0,
-            chrome_head_rects: None,
-            chrome_border_rects: Vec::new(),
-            chrome_toast_rects: Vec::new(),
             frame_stats: super::window::FrameStats::default(),
         }
     }
