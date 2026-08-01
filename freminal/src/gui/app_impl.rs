@@ -10,6 +10,7 @@ use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
 use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
 use freminal_common::config::ThemeMode;
+use freminal_common::geometry::{Point, Rect};
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
@@ -320,6 +321,179 @@ const fn pointer_motion_needs_repaint_decision(
     match pane_signals {
         Some(s) => s.mouse_tracking_active || s.hover_region_risk,
         None => false,
+    }
+}
+
+/// Subtask 122.5: the per-pane values [`resolve_pane_under_pointer`] needs
+/// for whichever pane (if any) resolves under the pointer — a stand-in for
+/// the fields read off `pane.arc_swap.load()`'s `TerminalSnapshot`, passed
+/// through a lookup closure so the resolution chain itself needs no
+/// `&PaneTree`/`&Pane` and is headlessly unit-testable.
+// struct_excessive_bools: each field is an independent observation read
+// straight off a `TerminalSnapshot` (mirrors the same rationale as
+// `window.rs`'s `PointerMotionConditionFlags`) — not a state machine.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneSnapshotInputs {
+    /// `TerminalSnapshot::mouse_tracking != MouseTrack::NoTracking`.
+    mouse_tracking_active: bool,
+    /// `TerminalSnapshot::has_urls`.
+    has_urls: bool,
+    /// `TerminalSnapshot::scroll_offset`.
+    scroll_offset: usize,
+    /// `TerminalSnapshot::is_alternate_screen`.
+    is_alternate_screen: bool,
+    /// `!TerminalSnapshot::command_blocks.is_empty()`.
+    command_blocks_non_empty: bool,
+}
+
+/// The result of [`resolve_pane_under_pointer`]: the resolved pane's Task
+/// 121 repaint-gate signals, plus (subtask 122.5) the four diagnostic term
+/// bools those signals are composed from.
+///
+/// The four term bools are computed **unconditionally** — not only under
+/// `#[cfg(feature = "frame-profiling")]` — specifically so the diagnostic
+/// recording at the call site (`FreminalGui::pointer_motion_needs_repaint`)
+/// can never drift from the real computation: before this subtask the
+/// terms were computed a second time inside a `#[cfg(...)]` block
+/// interleaved with the real decision, relying on a comment to keep the two
+/// copies in sync. Recomputing the diagnostic in the caller from this
+/// struct's fields would reintroduce exactly that drift risk, so callers
+/// MUST read them from here rather than recompute them.
+// struct_excessive_bools: each of the four bool fields is an independent
+// yes/no observation (same rationale as `window.rs`'s
+// `PointerMotionConditionFlags`, which these terms feed) — not a state
+// machine.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneResolution {
+    /// `Some` when a pane resolved under the pointer AND `pane_inputs`
+    /// returned a value for it; `None` when no pane resolved (the pointer
+    /// is over inter-pane padding, or a zoomed/split layout simply has no
+    /// pane there) or the lookup returned `None` (the resolved id no
+    /// longer exists in the tree).
+    signals: Option<PointerMotionPaneSignals>,
+    /// See [`pane_hover_region_terms`]'s doc for what this approximates.
+    /// `false` when `signals` is `None`.
+    mouse_tracking_active: bool,
+    /// See [`pane_hover_region_terms`]'s doc. `false` when `signals` is
+    /// `None`.
+    has_urls: bool,
+    /// See [`pane_hover_region_terms`]'s doc. `false` when `signals` is
+    /// `None`.
+    scroll_offset_nonzero: bool,
+    /// See [`pane_hover_region_terms`]'s doc. `false` when `signals` is
+    /// `None`.
+    gutter_active: bool,
+}
+
+impl PaneResolution {
+    /// The "no pane resolved" result: every field `false`/`None`, matching
+    /// what the pre-extraction diagnostic recorded via
+    /// `pane_diag_terms.unwrap_or_default()` when `pane_signals` was
+    /// `None`.
+    const fn unresolved() -> Self {
+        Self {
+            signals: None,
+            mouse_tracking_active: false,
+            has_urls: false,
+            scroll_offset_nonzero: false,
+            gutter_active: false,
+        }
+    }
+}
+
+/// Subtask 122.5: the pane-resolution chain behind
+/// `FreminalGui::pointer_motion_needs_repaint` — layout -> hit-test ->
+/// snapshot lookup -> signal computation — extracted as a pure function so
+/// it is headlessly unit-testable without a live
+/// `FreminalGui`/`PerWindowState`/`PaneTree`/`Pane`/`TerminalSnapshot` (see
+/// that method's doc for why none of those can be constructed outside the
+/// real winit event loop).
+///
+/// # Zoomed vs split — mirrors `update()`'s own choice, do not get this wrong
+///
+/// When `zoomed_pane` is `Some`, that pane alone is treated as filling
+/// `central_rect` and `split_layout` is ignored entirely. Otherwise
+/// `split_layout` — the tree's ordinary split layout, exactly what
+/// `PaneTree::layout` returns, supplied as data so this function needs no
+/// `&PaneTree` — is hit-tested. This mirrors `update()`'s own
+/// zoomed-vs-split rendering choice (`central_body`); getting it wrong
+/// would silently hit-test the pointer against panes that are not actually
+/// the one rendered full-size this frame.
+///
+/// Either way `pos` must still fall inside the candidate rect to resolve:
+/// the zoomed branch is NOT an unconditional hit on `zoomed_pane` — a
+/// pointer outside `central_rect` entirely (e.g. still over chrome) resolves
+/// to no pane even while zoomed, exactly as the pre-extraction code did by
+/// hit-testing a single-entry `vec![(zoomed_id, central_rect)]` through the
+/// same `.contains(pos)` check the split branch uses.
+///
+/// `pane_inputs` stands in for `active_tab.pane_tree.find(pane_id)` +
+/// `pane.arc_swap.load()`: a lookup from a resolved [`panes::PaneId`] to
+/// that pane's current [`PaneSnapshotInputs`]. Returning `None` models
+/// `PaneTree::find` returning `None` (the resolved id no longer exists),
+/// which the real caller also treats as "no pane" rather than a bug.
+fn resolve_pane_under_pointer(
+    pos: Point,
+    central_rect: Rect,
+    zoomed_pane: Option<panes::PaneId>,
+    split_layout: &[(panes::PaneId, Rect)],
+    gutter_config_active: bool,
+    gutter_width_upper_bound_logical: f32,
+    pane_inputs: impl Fn(panes::PaneId) -> Option<PaneSnapshotInputs>,
+) -> PaneResolution {
+    let hit = zoomed_pane.map_or_else(
+        || {
+            split_layout
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+                .copied()
+        },
+        |zoomed_id| {
+            central_rect
+                .contains(pos)
+                .then_some((zoomed_id, central_rect))
+        },
+    );
+    let Some((pane_id, pane_rect)) = hit else {
+        return PaneResolution::unresolved();
+    };
+
+    let Some(inputs) = pane_inputs(pane_id) else {
+        return PaneResolution::unresolved();
+    };
+
+    let pointer_in_gutter_strip_now =
+        pointer_in_gutter_strip(pos.x, pane_rect.min.x, gutter_width_upper_bound_logical);
+
+    let hover_region_risk = pane_hover_region_risk(
+        inputs.has_urls,
+        inputs.scroll_offset,
+        inputs.is_alternate_screen,
+        inputs.command_blocks_non_empty,
+        gutter_config_active,
+        pointer_in_gutter_strip_now,
+    );
+
+    let (has_urls, scroll_offset_nonzero, gutter_active) = pane_hover_region_terms(
+        inputs.has_urls,
+        inputs.scroll_offset,
+        inputs.is_alternate_screen,
+        inputs.command_blocks_non_empty,
+        gutter_config_active,
+        pointer_in_gutter_strip_now,
+    );
+
+    PaneResolution {
+        signals: Some(PointerMotionPaneSignals {
+            mouse_tracking_active: inputs.mouse_tracking_active,
+            hover_region_risk,
+        }),
+        mouse_tracking_active: inputs.mouse_tracking_active,
+        has_urls,
+        scroll_offset_nonzero,
+        gutter_active,
     }
 }
 
@@ -805,15 +979,12 @@ impl freminal_windowing::App for FreminalGui {
     /// the real strip would not have (false positive => an unnecessary
     /// repaint, never a missed one), which is the safe direction for a
     /// repaint gate.
-    // The pane-resolution chain (layout -> hit-test -> snapshot load ->
-    // signal computation), the `#[cfg(feature = "frame-profiling")]`
-    // diagnostic recording interleaved with it (so the diagnostic can
-    // never drift from the real computation, see the comments inline),
-    // and the gutter positional test together exceed the line budget;
-    // splitting the diagnostic block out would either duplicate the
-    // pane-resolution logic or require threading its intermediate values
-    // back out through a wider return type, both worse than the length.
-    #[allow(clippy::too_many_lines)]
+    ///
+    /// Subtask 122.5: the pane-resolution chain itself (layout -> hit-test
+    /// -> snapshot lookup -> signal computation) now lives in the pure,
+    /// headlessly-testable [`resolve_pane_under_pointer`] — see that
+    /// function's doc for the zoomed-vs-split mirroring requirement this
+    /// paragraph used to describe inline.
     fn pointer_motion_needs_repaint(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
         let Some(win) = self.windows.get(&window_id) else {
             // Unknown window -> conservative (mirrors `is_chrome_interactive_at`).
@@ -878,18 +1049,6 @@ impl freminal_windowing::App for FreminalGui {
         let gutter_config_active = self.config.command_blocks.enabled
             && self.config.command_blocks.gutter != freminal_common::config::GutterPosition::Off;
 
-        // Task 121 diagnostic (defect: which repaint-gate condition(s)
-        // fire, and how often -- see `super::window::PointerMotionConditionFlags`'s
-        // doc): the pane-level sub-terms recorded below, filled in from
-        // inside the `.map()` closure just below (the only place `snap`,
-        // and therefore the individual `pane_hover_region_terms` inputs,
-        // are in scope) when a pane resolves under the pointer. Stays
-        // `None` when no pane resolves -- diagnostically equivalent to
-        // `pane_signals: None`, i.e. all four pane-level counters simply
-        // don't fire for this call.
-        #[cfg(feature = "frame-profiling")]
-        let mut pane_diag_terms: Option<(bool, bool, bool, bool)> = None;
-
         // The gutter's total inset in LOGICAL points, cached by `update()`
         // (this method runs outside a frame and has no `ppp`). The inset is
         // strictly wider than the painted strip, so it is a conservative
@@ -899,101 +1058,58 @@ impl freminal_windowing::App for FreminalGui {
         // scale. See `PublishedFrameState::cached_gutter_inset_logical`.
         let gutter_width_upper_bound_logical = win.published.cached_gutter_inset_logical();
 
-        let pane_signals = win
-            .published
-            .cached_central_rect()
-            .and_then(|central_rect| {
+        // Subtask 122.5: the pane-resolution chain (layout -> hit-test ->
+        // snapshot lookup -> signal computation) is now the pure,
+        // headlessly-testable `resolve_pane_under_pointer`. It also
+        // computes the four diagnostic term bools unconditionally -- see
+        // `PaneResolution`'s doc for why that, rather than the previous
+        // `#[cfg(feature = "frame-profiling")]` block interleaved with the
+        // computation, is what makes the recording below structurally
+        // unable to drift from the real decision.
+        let pane_resolution = win.published.cached_central_rect().map_or_else(
+            PaneResolution::unresolved,
+            |central_rect| {
                 // Mirror `update()`'s own zoomed-vs-split layout choice
-                // (app_impl.rs:1678) exactly: when a pane is zoomed, it
-                // alone fills `central_rect`; otherwise the tree's normal
-                // split layout applies. Getting this wrong would silently
-                // mis-hit-test the pointer against panes that are not
-                // actually the one currently rendered full-size.
-                let layout = active_tab.zoomed_pane.map_or_else(
-                    || {
-                        // `PaneTree::layout` takes/returns the toolkit-neutral
-                        // `geometry::Rect`; convert at this boundary and map
-                        // the result straight back since the rest of this
-                        // closure (`.contains(pos)` with `pos: egui::Pos2`,
-                        // and the sibling `zoomed_id` branch) is egui-typed.
+                // exactly: when a pane is zoomed, the split layout below is
+                // never built (matching `update()`, which also skips it in
+                // that case) and `resolve_pane_under_pointer` treats the
+                // zoomed pane as filling `central_rect` instead. The actual
+                // zoomed-vs-split CHOICE lives inside that pure function;
+                // this closure only supplies the data for the non-zoomed
+                // case.
+                let split_layout: Vec<(panes::PaneId, Rect)> =
+                    if active_tab.zoomed_pane.is_none() {
                         active_tab
                             .pane_tree
                             .layout(geometry_interop::rect_from_egui(central_rect))
                             .unwrap_or_default()
-                            .into_iter()
-                            .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
-                            .collect()
-                    },
-                    |zoomed_id| vec![(zoomed_id, central_rect)],
-                );
-                // Resolve BOTH the pane id and its rect from the same
-                // `layout` lookup `panes::pane_at_pos` would otherwise
-                // perform internally (Task 121 fix): the gutter positional
-                // test below needs the pane's rect, not just its id, and
-                // recomputing/re-deriving that rect separately would risk
-                // it drifting out of sync with the rect actually used for
-                // hit-testing.
-                layout
-                    .iter()
-                    .find(|(_, rect)| rect.contains(pos))
-                    .map(|(id, rect)| (*id, *rect))
-            })
-            .and_then(|(pane_id, pane_rect)| {
-                active_tab
-                    .pane_tree
-                    .find(pane_id)
-                    .map(|pane| (pane, pane_rect))
-            })
-            .map(|(pane, pane_rect)| {
-                let snap = pane.arc_swap.load();
-                let mouse_tracking_active = snap.mouse_tracking
-                    != freminal_common::buffer_states::modes::mouse::MouseTrack::NoTracking;
-                // Task 121 fix: real positional test against the pane's
-                // left-edge gutter strip, using the SAME `pane_rect` just
-                // resolved for pane hit-testing above (see this method's
-                // doc for the `ppp`-unavailable / conservative-bound
-                // rationale).
-                let pointer_in_gutter_strip_now = pointer_in_gutter_strip(
-                    pos.x,
-                    pane_rect.min.x,
-                    gutter_width_upper_bound_logical,
-                );
-                let hover_region_risk = pane_hover_region_risk(
-                    snap.has_urls,
-                    snap.scroll_offset,
-                    snap.is_alternate_screen,
-                    !snap.command_blocks.is_empty(),
+                    } else {
+                        Vec::new()
+                    };
+
+                resolve_pane_under_pointer(
+                    geometry_interop::point_from_egui(pos),
+                    geometry_interop::rect_from_egui(central_rect),
+                    active_tab.zoomed_pane,
+                    &split_layout,
                     gutter_config_active,
-                    pointer_in_gutter_strip_now,
-                );
-
-                // Task 121 diagnostic: the same inputs, broken out into
-                // their three individual terms (see `pane_hover_region_terms`'s
-                // doc) purely for per-condition counting -- does not
-                // affect `hover_region_risk`/the real decision above.
-                #[cfg(feature = "frame-profiling")]
-                {
-                    let (has_urls, scroll_offset_nonzero, gutter_active) = pane_hover_region_terms(
-                        snap.has_urls,
-                        snap.scroll_offset,
-                        snap.is_alternate_screen,
-                        !snap.command_blocks.is_empty(),
-                        gutter_config_active,
-                        pointer_in_gutter_strip_now,
-                    );
-                    pane_diag_terms = Some((
-                        mouse_tracking_active,
-                        has_urls,
-                        scroll_offset_nonzero,
-                        gutter_active,
-                    ));
-                }
-
-                PointerMotionPaneSignals {
-                    mouse_tracking_active,
-                    hover_region_risk,
-                }
-            });
+                    gutter_width_upper_bound_logical,
+                    |pane_id| {
+                        active_tab.pane_tree.find(pane_id).map(|pane| {
+                            let snap = pane.arc_swap.load();
+                            PaneSnapshotInputs {
+                                mouse_tracking_active: snap.mouse_tracking
+                                    != freminal_common::buffer_states::modes::mouse::MouseTrack::NoTracking,
+                                has_urls: snap.has_urls,
+                                scroll_offset: snap.scroll_offset,
+                                is_alternate_screen: snap.is_alternate_screen,
+                                command_blocks_non_empty: !snap.command_blocks.is_empty(),
+                            }
+                        })
+                    },
+                )
+            },
+        );
 
         // Task 121 diagnostic: count which condition(s) fired for this
         // call, `saturating_add`'d into `win.frame_stats`'s Task 121
@@ -1003,20 +1119,21 @@ impl freminal_windowing::App for FreminalGui {
         // frames from the app-side flush further down in `update()`.
         // Counting only -- does not read from or influence
         // `pointer_motion_needs_repaint_decision`'s return value below.
+        // Subtask 122.5: only the RECORDING stays feature-gated -- the four
+        // terms it reads were computed unconditionally by
+        // `resolve_pane_under_pointer`, above.
         #[cfg(feature = "frame-profiling")]
         {
-            let (mouse_tracking_active, has_urls, scroll_offset_nonzero, gutter_active) =
-                pane_diag_terms.unwrap_or_default();
             win.frame_stats.record_pointer_motion_check(
                 super::window::PointerMotionConditionFlags {
                     chrome_interactive,
                     any_pane_selecting: any_selecting,
                     overlay_open,
                     pointer_pane_unresolved,
-                    mouse_tracking_active,
-                    has_urls,
-                    scroll_offset_nonzero,
-                    gutter_active,
+                    mouse_tracking_active: pane_resolution.mouse_tracking_active,
+                    has_urls: pane_resolution.has_urls,
+                    scroll_offset_nonzero: pane_resolution.scroll_offset_nonzero,
+                    gutter_active: pane_resolution.gutter_active,
                 },
             );
         }
@@ -1026,7 +1143,7 @@ impl freminal_windowing::App for FreminalGui {
             any_selecting,
             overlay_open,
             pointer_pane_unresolved,
-            pane_signals,
+            pane_resolution.signals,
         )
     }
 
@@ -4746,12 +4863,15 @@ impl FreminalGui {
 #[cfg(test)]
 mod tests {
     use super::{
-        PointerMotionPaneSignals, SettingsOwnerCloseDecision, animation_in_flight_composed,
-        cursor_blink_wants_repaint, pane_hover_region_risk, pane_hover_region_terms,
-        pointer_forces_full_present, pointer_in_gutter_strip,
-        pointer_motion_needs_repaint_decision, settings_owner_close_decision,
+        PaneResolution, PaneSnapshotInputs, PointerMotionPaneSignals, SettingsOwnerCloseDecision,
+        animation_in_flight_composed, cursor_blink_wants_repaint, pane_hover_region_risk,
+        pane_hover_region_terms, pointer_forces_full_present, pointer_in_gutter_strip,
+        pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
+        settings_owner_close_decision,
     };
+    use crate::gui::panes::PaneIdGenerator;
     use freminal_common::cursor::CursorVisualStyle;
+    use freminal_common::geometry::{Rect, point};
 
     #[test]
     fn blink_cursor_wants_repaint_only_when_actually_visible() {
@@ -5050,6 +5170,313 @@ mod tests {
                 hover_region_risk: false,
             })
         ));
+    }
+
+    // ── resolve_pane_under_pointer (subtask 122.5) ──────────────────
+    //
+    // These construct NO `FreminalGui`, `PerWindowState`, `PaneTree`,
+    // `Pane`, or `TerminalSnapshot` -- only `PaneId` (via the public
+    // `PaneIdGenerator`), the toolkit-neutral `Rect`/`Point`, and a stub
+    // `pane_inputs` closure over a hand-built `PaneSnapshotInputs`. This is
+    // the success criterion this subtask exists to satisfy.
+
+    /// A `PaneSnapshotInputs` with every field at its "quiet" (non-forcing)
+    /// value: not mouse-tracking, no URLs, not scrolled back, primary
+    /// screen, no command blocks.
+    fn quiet_inputs() -> PaneSnapshotInputs {
+        PaneSnapshotInputs {
+            mouse_tracking_active: false,
+            has_urls: false,
+            scroll_offset: 0,
+            is_alternate_screen: false,
+            command_blocks_non_empty: false,
+        }
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_zoomed_hit_tests_the_zoomed_pane_not_the_split_layout() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let split_pane = id_gen.next_id();
+        let zoomed_pane = id_gen.next_id();
+
+        let central_rect = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        // The split layout's rect for `split_pane` ALSO contains the test
+        // point -- if the zoomed branch incorrectly consulted
+        // `split_layout` instead of ignoring it, the lookup closure below
+        // would be called with `split_pane` and the assertion inside it
+        // would fail.
+        let split_layout = [(split_pane, central_rect)];
+        let pos = point(50.0, 50.0);
+
+        let resolution = resolve_pane_under_pointer(
+            pos,
+            central_rect,
+            Some(zoomed_pane),
+            &split_layout,
+            false,
+            0.0,
+            |id| {
+                assert_eq!(
+                    id, zoomed_pane,
+                    "zoomed branch must resolve the zoomed pane, not a pane from split_layout"
+                );
+                Some(quiet_inputs())
+            },
+        );
+
+        assert!(resolution.signals.is_some());
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_split_hit_tests_the_supplied_tree_layout() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let pane_b = id_gen.next_id();
+
+        let rect_a = Rect::from_min_max(point(0.0, 0.0), point(50.0, 100.0));
+        let rect_b = Rect::from_min_max(point(50.0, 0.0), point(100.0, 100.0));
+        let split_layout = [(pane_a, rect_a), (pane_b, rect_b)];
+        let central_rect = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+
+        // Inside rect_b only.
+        let pos = point(75.0, 50.0);
+
+        let resolution =
+            resolve_pane_under_pointer(pos, central_rect, None, &split_layout, false, 0.0, |id| {
+                assert_eq!(id, pane_b, "must resolve the pane whose rect contains pos");
+                Some(quiet_inputs())
+            });
+
+        assert!(resolution.signals.is_some());
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_zoomed_pointer_outside_central_rect_resolves_to_no_pane() {
+        // Pins that the zoomed branch is NOT an unconditional hit on
+        // `zoomed_pane`: `pos` must still fall inside `central_rect`,
+        // mirroring the pre-extraction code's shared `.contains(pos)` check
+        // (both branches fed the same hit-test, over a one-entry
+        // `vec![(zoomed_id, central_rect)]` in the zoomed case).
+        let mut id_gen = PaneIdGenerator::new(0);
+        let zoomed_pane = id_gen.next_id();
+        let central_rect = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        let pos = point(500.0, 500.0);
+
+        let resolution = resolve_pane_under_pointer(
+            pos,
+            central_rect,
+            Some(zoomed_pane),
+            &[],
+            false,
+            0.0,
+            |_| unreachable!("lookup must not run when no pane resolves"),
+        );
+
+        assert_eq!(resolution, PaneResolution::unresolved());
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_outside_every_pane_is_legitimately_no_pane() {
+        // Pointer over inter-pane padding: no pane resolves, contributing
+        // `false` for every term. This is deliberately NOT the same case as
+        // "pane resolution altogether unavailable"
+        // (`pointer_pane_unresolved`, computed by the caller from
+        // `cached_central_rect().is_none()` BEFORE this function is even
+        // invoked) -- it is a legitimate "no pane here" outcome.
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let rect_a = Rect::from_min_max(point(0.0, 0.0), point(50.0, 100.0));
+        let split_layout = [(pane_a, rect_a)];
+        let central_rect = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+
+        // Right of rect_a, not covered by any pane in the layout.
+        let pos = point(75.0, 50.0);
+
+        let resolution =
+            resolve_pane_under_pointer(pos, central_rect, None, &split_layout, false, 0.0, |_| {
+                unreachable!("lookup must not run when no pane resolves")
+            });
+
+        assert_eq!(resolution, PaneResolution::unresolved());
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_gutter_strip_fires_inside_not_just_outside() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let rect_a = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        let split_layout = [(pane_a, rect_a)];
+        let central_rect = rect_a;
+        let gutter_config_active = true;
+        let gutter_width = 10.0;
+        let inputs_with_a_block = PaneSnapshotInputs {
+            command_blocks_non_empty: true,
+            ..quiet_inputs()
+        };
+
+        // Inside the strip: pane's left edge (0.0) + gutter width (10.0).
+        let inside = point(5.0, 50.0);
+        let resolution = resolve_pane_under_pointer(
+            inside,
+            central_rect,
+            None,
+            &split_layout,
+            gutter_config_active,
+            gutter_width,
+            |_| Some(inputs_with_a_block),
+        );
+        assert!(
+            resolution.gutter_active,
+            "pointer inside the gutter strip must fire the gutter term"
+        );
+        match resolution.signals {
+            Some(sig) => assert!(sig.hover_region_risk),
+            None => panic!("a pane must have resolved under the pointer"),
+        }
+
+        // Just outside the strip.
+        let outside = point(15.0, 50.0);
+        let resolution = resolve_pane_under_pointer(
+            outside,
+            central_rect,
+            None,
+            &split_layout,
+            gutter_config_active,
+            gutter_width,
+            |_| Some(inputs_with_a_block),
+        );
+        assert!(
+            !resolution.gutter_active,
+            "pointer just outside the gutter strip must not fire the gutter term"
+        );
+        match resolution.signals {
+            Some(sig) => assert!(!sig.hover_region_risk),
+            None => panic!("a pane must have resolved under the pointer"),
+        }
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_broken_split_layout_resolves_to_no_pane_not_forced_true() {
+        // Pins the conservative direction for a `PaneError::InvalidState`
+        // (empty/broken tree) at the ONE place that error can reach this
+        // function: the real caller's
+        // `active_tab.pane_tree.layout(...).unwrap_or_default()`, which
+        // turns a `PaneError::Err` into an empty `split_layout` -- exactly
+        // what `&[]` simulates here. This function then legitimately
+        // resolves to no pane (`PaneResolution::unresolved()`), which is
+        // NOT itself a forced-`true` outcome.
+        //
+        // The overall conservative-true guarantee for a genuinely broken
+        // tree does not come from here: it comes from the SEPARATE
+        // `any_selecting` term the real caller computes independently via
+        // `active_tab.pane_tree.iter_panes().map_or(true, ...)` (see
+        // `pointer_motion_needs_repaint`'s body) -- untouched by this
+        // subtask's extraction, and already exercised by
+        // `pointer_motion_needs_repaint_decision_any_pane_selecting_forces_true`
+        // above. This test pins that THIS function's own contribution on a
+        // broken/empty layout is a plain "no pane", not a second,
+        // independently-forced `true`.
+        let central_rect = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        let pos = point(50.0, 50.0);
+
+        let resolution =
+            resolve_pane_under_pointer(pos, central_rect, None, &[], false, 0.0, |_| {
+                unreachable!("lookup must not run when no pane resolves")
+            });
+
+        assert_eq!(resolution, PaneResolution::unresolved());
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_diagnostic_terms_match_pre_extraction_computation() {
+        // Pins that `PaneResolution`'s four term bools equal exactly what
+        // the pre-extraction `#[cfg(feature = "frame-profiling")]` block
+        // used to compute inline, for the same inputs.
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let rect_a = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        let split_layout = [(pane_a, rect_a)];
+        let central_rect = rect_a;
+        let gutter_config_active = true;
+        let gutter_width = 10.0;
+        // Inside the gutter strip.
+        let pos = point(5.0, 50.0);
+
+        let inputs = PaneSnapshotInputs {
+            mouse_tracking_active: true,
+            has_urls: true,
+            scroll_offset: 3,
+            is_alternate_screen: false,
+            command_blocks_non_empty: true,
+        };
+
+        let resolution = resolve_pane_under_pointer(
+            pos,
+            central_rect,
+            None,
+            &split_layout,
+            gutter_config_active,
+            gutter_width,
+            |_| Some(inputs),
+        );
+
+        let pointer_in_gutter_strip_now =
+            pointer_in_gutter_strip(pos.x, rect_a.min.x, gutter_width);
+        let (expected_has_urls, expected_scroll_offset_nonzero, expected_gutter_active) =
+            pane_hover_region_terms(
+                inputs.has_urls,
+                inputs.scroll_offset,
+                inputs.is_alternate_screen,
+                inputs.command_blocks_non_empty,
+                gutter_config_active,
+                pointer_in_gutter_strip_now,
+            );
+        let expected_hover_region_risk = pane_hover_region_risk(
+            inputs.has_urls,
+            inputs.scroll_offset,
+            inputs.is_alternate_screen,
+            inputs.command_blocks_non_empty,
+            gutter_config_active,
+            pointer_in_gutter_strip_now,
+        );
+
+        assert_eq!(
+            resolution.mouse_tracking_active,
+            inputs.mouse_tracking_active
+        );
+        assert_eq!(resolution.has_urls, expected_has_urls);
+        assert_eq!(
+            resolution.scroll_offset_nonzero,
+            expected_scroll_offset_nonzero
+        );
+        assert_eq!(resolution.gutter_active, expected_gutter_active);
+        assert_eq!(
+            resolution.signals,
+            Some(PointerMotionPaneSignals {
+                mouse_tracking_active: inputs.mouse_tracking_active,
+                hover_region_risk: expected_hover_region_risk,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_pane_under_pointer_lookup_miss_resolves_to_no_pane() {
+        // `pane_inputs` returning `None` models `PaneTree::find` returning
+        // `None` for an id that hit-tested successfully but no longer
+        // exists in the tree -- treated as "no pane", not a panic.
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let rect_a = Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0));
+        let split_layout = [(pane_a, rect_a)];
+        let central_rect = rect_a;
+        let pos = point(50.0, 50.0);
+
+        let resolution =
+            resolve_pane_under_pointer(pos, central_rect, None, &split_layout, false, 0.0, |_| {
+                None
+            });
+
+        assert_eq!(resolution, PaneResolution::unresolved());
     }
 
     #[test]
