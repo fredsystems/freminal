@@ -120,15 +120,15 @@ and only one class is genuinely unowned:
 
 Type B — read from outside any frame. **This is Group A's scope.**
 
-| Field                          | Def (`window.rs`) | Written (`app_impl.rs`)      | Read out-of-frame        |
-| ------------------------------ | ----------------- | ---------------------------- | ------------------------ |
-| `cached_central_rect`          | 491               | 2114 (in `central_body`)     | 879, 906                 |
-| `cached_gutter_inset_logical`  | 509               | 1895 (in `central_body`)     | 903                      |
-| `chrome_head_rects`            | 514               | 1753 (`Full` only)           | 755                      |
-| `chrome_border_rects`          | 518               | 2461, cleared 2467           | 756                      |
-| `chrome_toast_rects`           | 581               | 3970, cleared 3915           | 766                      |
-| `pending_chrome_signals`       | 422               | 3374-3390                    | 866-867                  |
-| `resize_overlay`               | 204               | feature state                | 849-856                  |
+| Field                         | Def (`window.rs`) | Type                       | Written (`app_impl.rs`)          | Read out-of-frame |
+| ----------------------------- | ----------------- | -------------------------- | -------------------------------- | ----------------- |
+| `cached_central_rect`         | 491               | `Option<egui::Rect>`       | 2114 (in `central_body`)         | 879, 906          |
+| `cached_gutter_inset_logical` | 509               | `f32`                      | 1895 (in `central_body`)         | 903               |
+| `chrome_head_rects`           | 514               | `Option<Vec<egui::Rect>>`  | 1753 (`Full` only)               | 755               |
+| `chrome_border_rects`         | 518               | `Vec<egui::Rect>`          | 2461, cleared 2467               | 756               |
+| `chrome_toast_rects`          | 581               | `Vec<egui::Rect>`          | 3970, cleared 3915               | 766               |
+| `pending_chrome_signals`      | 422               | `ChromeSignals` (14 bools) | 3374-3390                        | 866-867           |
+| `resize_overlay`              | 204               | `Option<ResizeOverlayState>` | 3113 set, 3663 cleared; 524 init | 849-856         |
 
 Type A — drained same tick, already contracted. **Not restructured.**
 
@@ -146,6 +146,128 @@ Type C — cross-module, on `PaneRenderCache`. **Noted, not restructured.**
 | `pending_repaint_delay`    | 1444              | `app_impl.rs:2861` after `show()`       |
 | `last_frame_cursor_damage` | 1436              | `app_impl.rs:3188, 3233, 3237`          |
 | `placeholder_hit_rects`    | 1406              | `input.rs` `write_input_to_terminal`    |
+
+### 122.1 audit result (2026-07-30, `task-122/orchestration-extraction`)
+
+**All 14 rows of all three tables verified line-for-line against current code.
+Nothing moved.** Every definition line, write site, drain site and read site
+above is exact, as are `is_chrome_interactive_at` (`app_impl.rs:751-769`),
+`pointer_motion_needs_repaint` (`823-1025`), the `CursorMoved` fast-path call
+sites (`event_loop.rs:815, 828-831, 868, 885`), and the same-tick Type A drain
+(`event_loop.rs:1182-1185`, immediately after `app.update()` at `1180`). The
+`resize_overlay` row's "feature state" gloss has been replaced with its real
+write sites. Field types are added because 122.4 needs them.
+
+`last_observed_visible` (`widget.rs:1362`, init `1474`, used `1527-1536`) was
+re-checked and is still `widget.rs`-internal — correctly excluded from Type C.
+
+#### The Type B set is complete — with two exclusions now stated explicitly
+
+Every `win.<field>` read inside the two out-of-frame predicates was enumerated.
+The read set is the seven fields above plus `win.tabs` (`app_impl.rs:870`) and
+`win.frame_stats` (`1004`). Neither belongs in 122.4's type:
+
+- **`win.tabs`** is live structural domain state (the pane tree), mutated
+  synchronously by input handling. It reflects current truth at any instant —
+  it is not a render-time snapshot cached for later reuse, which is the whole
+  category 122.4 exists to name.
+- **`win.frame_stats`** is a write-only diagnostic accumulator behind
+  `#[cfg(feature = "frame-profiling")]`, using `Cell` so it can be mutated
+  through `&self`. `app_impl.rs:998` already documents that it does not
+  influence the predicate's return value.
+
+**Correction to 122.1's own brief.** It asked to "confirm there are no others"
+beyond `is_chrome_interactive_at`, `pointer_motion_needs_repaint` and the four
+`take_*` drains. As literally worded that is not satisfiable: the `App` trait
+has 13 methods (`freminal-windowing/src/lib.rs:194-372`) and six more are
+called from outside `update()` — `on_window_created` (`event_loop.rs:659`),
+`on_close_requested` (`1074, 1311`), `on_raw_key_event` (`1011-1012`),
+`clear_color` (`1143`), `raw_input_hook` (`1159`), `present_partial_flag`
+(`1165`). Walking each body, only two touch `PerWindowState` at all, and
+**neither is Type B**:
+
+- **`clear_color` reads `win.os_dark_mode`** (`app_impl.rs:731`), a field
+  `update()` writes (`1323`). Structurally the same shape as a Type B read, but
+  a materially different timing discipline: it is called exactly once per
+  frame, deterministically immediately *before* `update()` for that same window
+  in the same `RedrawRequested` pass (`event_loop.rs:1143` vs `1180`). It cannot
+  accumulate multi-frame staleness the way a `CursorMoved`-driven read can.
+- **`present_partial_flag` reads `win.present_is_partial`**
+  (`app_impl.rs:748`) but clones an `Arc<AtomicBool>` rather than copying a
+  value. It is a shared-mutation handle, exempt by construction.
+
+**Both stay out of 122.4's type**, deliberately: folding them in would put two
+different timing disciplines under one name and weaken the invariant the type
+exists to carry. `on_window_created`, `on_close_requested`, `on_raw_key_event`
+and `raw_input_hook` read no `PerWindowState` field at all (`on_raw_key_event`
+only *writes*, pushing to `win.pending_raw_keys` at `4254`).
+
+#### Early-return behaviour
+
+All four claims in 122.1's brief **confirmed**: `app_impl.rs:1179` (settings
+window, branch at `1106`) has no `PerWindowState` at all; `1225`
+(`windows.remove` returned `None`) has nothing to reinsert; `1591` and `1626`
+are byte-identical in effect, both `insert(window_id, win); return;`; and
+`window.rs:540-580` already documents the discipline and names the `1626`
+bail-out.
+
+The decisive fact for 122.4: **both `1591` and `1626` occur before line 1704**,
+which opens the `Full`-vs-`Replay` branch containing the earliest Type B write
+(`chrome_head_rects` at `1753`). Every other Type B write site is later still
+(`1895`, `2114`, `2461`/`2467`, `3113`/`3663`, `3374-3390`, `3915`/`3970`). So
+on both paths `win` is reinserted untouched and **all seven fields retain the
+value left by the last fully-completing `update()`** — an early-return
+staleness layered on top of the ordinary one-frame staleness. `1179` and `1225`
+are vacuous (no `PerWindowState` instance in play).
+
+Minor pre-existing doc gap, recorded not fixed: the comment at
+`app_impl.rs:1096-1098` enumerates *three* early-return paths, but there are
+four return sites — `1591` ("last tab closes the whole window") and `1626`
+("no active pane") are distinct scenarios the comment merges. Behaviourally the
+plan groups them correctly; only the code comment undercounts.
+
+#### The invariant 122.4 must preserve
+
+Each of the seven fields is written **at most once per successfully-completing
+`App::update`**, at a fixed point in that function — `chrome_head_rects` only
+on a `Full` frame (`1753`), the other six unconditionally once reached — and
+from nowhere else. None of the four early-return paths writes any of them, so
+each holds whatever the last fully-reaching `update()` left. Reads happen
+exclusively from `is_chrome_interactive_at` and `pointer_motion_needs_repaint`,
+called on `freminal-windowing`'s pointer fast path
+(`event_loop.rs:815, 828-831, 868, 885`), a control path fully decoupled from
+`update()`: a read may therefore observe the same snapshot across arbitrarily
+many pointer events between two frames, and is **one frame stale by
+construction even in the best case**. Write *ordering* among the three rect
+fields is itself load-bearing and must not be collapsed: `chrome_head_rects`
+early and `Full`-only (`1753`), `chrome_border_rects` inside `central_body`
+(`2461`, cleared `2467` when no border sensors were built), `chrome_toast_rects`
+after `central_body` returns (`3970`, pre-cleared `3915`). A wrapper that let a
+caller read `chrome_toast_rects` mid-`central_body` would surface a value the
+current frame has not yet had the chance to overwrite — reintroducing exactly
+the staleness class `window.rs:540-580` was written to bound.
+
+#### State-representation verdict (per `freminal-state-representation`)
+
+**No bool-to-enum conversion is warranted among the seven Type B fields.** Six
+are not bool-related (rects, an `f32`, and two `Option<T>`s — note
+`resize_overlay` already uses `Option<T>` rather than a bool-plus-value pair,
+which is the correct presence encoding). The seventh,
+`pending_chrome_signals: ChromeSignals`, is 14 independent simultaneous signals
+and is one of the four types the skill **names explicitly as a legitimate bool
+bag that must not be converted**. No field admits an illegal state: no
+`Option<bool>`, and no pair among the seven that cannot both be set.
+
+One shape decision 122.4 must make, flagged here rather than left to be
+discovered: **`chrome_head_rects` is `Option<Vec<Rect>>` while its two
+structural siblings are plain `Vec<Rect>`** (empty-vec-as-absent). The three
+disagree today. 122.4 wraps all three and will have to either preserve the
+disagreement or unify it — and unifying is a **semantic** change for
+`chrome_head_rects`, whose `None` means "no `Full` frame has rendered yet",
+which is distinguishable from "a `Full` frame rendered and produced no head
+rects". Preserving the types as-is is the default per 122.4's "do NOT change
+any field's type" prohibition; this note exists so that prohibition is
+understood as deliberate rather than an oversight.
 
 ---
 
@@ -352,6 +474,20 @@ subtask — that work is transcription of `window.rs:540-580` and belongs here.
 Do NOT proceed to 122.2.
 
 Stop: report the corrected tables; await review.
+
+**DONE.** See "122.1 audit result" above. All 14 rows of all three tables
+verified line-for-line; nothing had moved. Field types added for 122.4's
+benefit, and `resize_overlay`'s "feature state" gloss replaced with real write
+sites. The Type B set is confirmed complete, with `win.tabs` and
+`win.frame_stats` excluded for stated reasons; the brief's "confirm there are no
+others" was corrected (six further `App` methods run outside `update()`, of
+which only `clear_color` and `present_partial_flag` touch `PerWindowState`, and
+neither is Type B). Early-return behaviour recorded per field — the decisive
+fact being that both `1591` and `1626` precede the earliest Type B write at
+`1753`. The invariant statement 122.4 must preserve is recorded. Per the
+`freminal-state-representation` skill, no bool-to-enum conversion is warranted
+among the seven; the one bool-bearing field is an explicitly exempt signal bag.
+One shape decision (`Option<Vec<Rect>>` vs `Vec<Rect>`) is flagged for 122.4.
 
 #### 122.2 — Toolkit-neutral `Rect` / `Point` in `freminal-common`
 
