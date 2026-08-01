@@ -606,6 +606,22 @@ layout calls. Affected items:
 
 Callers outside this file convert at the boundary; that conversion is part of
 this subtask's scope only where it is a one-line adaptation at the call site.
+There are **nine** such sites, in two files: `gui/actions.rs:153` and
+`gui/app_impl.rs:918, 2170, 2344, 2433, 3552, 3575, 3611, 3938`.
+
+**A conversion seam is required, and the plan did not anticipate it (added
+2026-07-30, before implementation).** Those call sites pass `egui::Rect` in
+(from `ui.available_rect_before_wrap()`) and paint with what comes out, so both
+directions are needed. Neither direction can be a `From` impl: `freminal-common`
+must not depend on egui, and in the `freminal` binary both `egui::Rect` and
+`geometry::Rect` are foreign types, so the orphan rule forbids it. The seam is
+therefore **free functions in a new small module,
+`freminal/src/gui/geometry_interop.rs`**, named for exactly that one concept
+per `freminal-module-cohesion`: converting between egui's geometry types and
+the neutral ones. It is placed in the `freminal` binary because that is the
+only crate that legally sees both. Do **not** put these helpers on
+`panes/mod.rs` — the conversion is not a pane concept, and two of the nine call
+sites are not pane-tree calls.
 
 Deliverable: migrated file, existing tests (`panes/mod.rs:1573`+) passing
 unchanged in intent.
@@ -615,11 +631,32 @@ uses `mul_add` and `.round()`, and the existing tests assert exact widths and
 heights. Any test needing a tolerance change is a red flag, not a fix: stop and
 report.
 
-Additionally, **re-run the 122.14 benchmark and compare against its recorded
-baseline.** Per the 122.14 amendment, that benchmark covers exactly the
-functions this subtask re-types (`PaneTree::layout`, `PaneTree::split_borders`,
-`pane_at_pos`, `active_highlight_segment`), so 122.3 has a real performance gate
-and is held to the 15% regression threshold in `performance-benchmarks`.
+Additionally, **re-run the 122.14 benchmark** — it covers exactly the functions
+this subtask re-types. Per the measured noise floor recorded under the 122.14
+baseline, check it for **algorithmic-shape change within a run**, not for a
+per-ID 15% wall-clock delta, which this hardware cannot resolve.
+
+**DONE.** `freminal-common::geometry::{Rect, Point, point}` now carries
+`SplitBorder.rect`, `active_highlight_segment`, `PaneNode`/`PaneTree::layout`,
+`PaneNode`/`PaneTree::split_borders`, `split_rect` and `pane_at_pos`. The
+`panes/mod.rs` diff is mechanical — `egui::pos2(` to `point(`, one import — and
+`split_rect`'s `mul_add(...).round()` expressions are byte-identical, so the
+float behaviour is unchanged by construction. `split_rect` additionally became
+`const fn`, forced by `clippy::missing_const_for_fn` now that the neutral
+type's methods are `const` where egui's are not; that is compile-time only.
+
+Conversion seam added as planned: `freminal/src/gui/geometry_interop.rs`, four
+`pub const fn` free functions. Nine boundary call sites converted in
+`app_impl.rs` (8) and `actions.rs` (1). No test assertion or tolerance was
+altered.
+
+**On performance:** the change is neutral by construction, and that is the
+claim being made — `geometry::Rect` has the same layout as `egui::Rect` (two
+pairs of `f32`), performs the same arithmetic in the same operand order, and
+the only delta is compile-time `const`-ness. The benchmark corroborates: the
+algorithmic shape is unchanged across pane counts in every group. Per-ID
+wall-clock deltas were **not** used to support this, because the same-code
+noise floor measured here (12 of 39 IDs above 15%) exceeds them.
 
 Prohibitions: do NOT change any layout, resize or hit-test **semantics**. Do NOT
 alter rounding. Do NOT touch `window.rs`'s `chrome_*_rects` or
@@ -627,6 +664,47 @@ alter rounding. Do NOT touch `window.rs`'s `chrome_*_rects` or
 122.4.
 
 Stop: report files changed and that no test tolerance was altered; await review.
+
+#### 122.3a — `SplitBorder::active_in_first` becomes a named enum
+
+Scope: `freminal/src/gui/panes/mod.rs`, `freminal/src/gui/app_impl.rs` (the
+single match at `3575`), `freminal/benches/pane_resolution_bench.rs` (fixture).
+
+**Added 2026-07-30**, at maintainer instruction to take the
+`freminal-state-representation` opportunities that this task's extractions
+surface, rather than only moving code.
+
+What: `SplitBorder.active_in_first` is `Option<bool>` (`panes/mod.rs:474`)
+carrying **three** meanings its own doc comment has to spell out in prose —
+`Some(true)` = the active pane is in the first (top/left) subtree,
+`Some(false)` = it is in the second, `None` = it is in neither. That is a
+named-domain-enum case under `freminal-state-representation`: the value crosses
+a module boundary on a `pub` struct, and `Some(false)` is exactly the kind of
+double-negative a reader has to decode at the far end. Its only consumer is a
+three-arm `match` at `app_impl.rs:3575` choosing which half of a divider gets
+the active colour, so the conversion is mechanical.
+
+Replace it with a named enum in the domain's own vocabulary — e.g.
+`ActiveSubtree { First, Second, Neither }` — and drop the `Option`. Name the
+enum for the concept, not generically; do not introduce a shared
+two-state/three-state helper type (that is the anti-pattern the skill names).
+
+Deliverable: the enum, the migrated producer in `PaneNode::split_borders`, the
+migrated `match`, and the bench fixture updated.
+
+Verification: standard suite, plus `--features frame-profiling`. Existing
+`active_highlight_segment` and `split_borders` tests must pass unchanged —
+note `active_highlight_segment` does not read this field at all, so its tests
+should be entirely unaffected.
+
+Prohibitions: do NOT change which half of a divider is highlighted for any
+input. Do NOT fold this into 122.3 — the geometry migration is the riskiest
+diff in Group A and must stay independently reviewable. Do NOT convert any
+other bool in this file; `SplitDirection` is already an enum and nothing else
+here qualifies.
+
+Stop: report the enum and that the highlight behaviour is unchanged; await
+review.
 
 #### 122.4 — Introduce the named published-state type
 
@@ -1154,13 +1232,45 @@ parameterised.
 | `active_highlight_segment/bordering`     | 6.8619 ns |
 | `active_highlight_segment/non_bordering` | 5.4369 ns |
 
-**How to compare after 122.3.** These are absolute wall-clock figures from one
-machine, so the reproducible gate is a same-machine before/after, not these
-numbers as constants. Re-run with `cargo bench --bench pane_resolution_bench`
-and apply the 15% regression threshold from `performance-benchmarks`. At the
-nanosecond scale several IDs have run-to-run spread approaching that threshold
-on their own; treat a single ID crossing 15% as a prompt to re-run, and a
-consistent shift across a whole group as the real signal.
+#### Measured noise floor — this is NOT a 15% wall-clock gate
+
+**Revised 2026-07-30 during 122.3, with measurement.** The baseline above was
+recorded expecting the standard 15% threshold from `performance-benchmarks` to
+apply per ID. **It cannot, on this hardware.** The development machine is a
+laptop; `opencode` alone holds a core at ~90% and freminal itself takes ~12%,
+so a quiet machine is not achievable and should not be waited for.
+
+Two full runs of the **identical binary**, pinned (`taskset -c 12,13,14,15
+nice -n -5`), give this run-to-run spread:
+
+| Spread on identical code | IDs | Examples                                        |
+| ------------------------ | --- | ----------------------------------------------- |
+| > 15%                    | 12  | `split_borders/active_first/4` **54%**, `/16` 22% |
+| 5-15%                    | 12  | `layout/balanced/16` 5.5%, `find/balanced/8` 7.8% |
+| < 5%                     | 15  | `pane_at_pos/miss/16` 0.1%, `layout/balanced/4` 1.1% |
+
+Unpinned it is far worse — up to 71% on a single ID. Pinning is worth doing and
+roughly halves the spread, but **12 of 39 IDs still exceed 15% with no code
+change at all**, and the worst offender is not one of the sub-10 ns ones. A
+per-ID 15% gate would therefore fire constantly on noise and prove nothing.
+
+**What this benchmark is actually good for, and how to use it:**
+
+1. **Algorithmic shape, compared *within* a single run.** This is reliable and
+   is the real value. In every run, `layout` roughly doubles per pane-count
+   doubling; `pane_at_pos/first_hit` stays flat (~3.5 ns) at every pane count
+   while `last_hit` and `miss` grow with it; `find` grows with depth. If a
+   change makes `layout` superlinear, or makes `first_hit` start scaling, that
+   shows up unmistakably and is exactly the class of regression worth catching.
+2. **Order-of-magnitude changes**, which survive the noise trivially.
+3. It is **not** a detector of a 15% wall-clock change, and no subtask should
+   claim it verified one.
+
+When re-running, pin the process, and report the *shape* across pane counts
+plus any order-of-magnitude move — not per-ID percentage deltas, which are
+noise at this resolution. Capture two runs of the unchanged code first if a
+per-ID number is ever genuinely needed, so the claim is made against that day's
+measured noise floor rather than against this table.
 
 #### 122.15 — Publish per-pane terminal-rect origin (unblocks 121.17)
 

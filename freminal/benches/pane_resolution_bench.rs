@@ -7,7 +7,8 @@
 //!
 //! Two distinct call sites are covered, for one reason: subtask 122.3
 //! re-types **all five** of these functions onto toolkit-neutral geometry
-//! (egui `Rect`/`Pos2` today), so this file is 122.3's performance gate. Any
+//! (`freminal_common::geometry::{Rect, Point}`, migrated from `egui::Rect`/
+//! `Pos2` by this subtask), so this file is 122.3's performance gate. Any
 //! post-122.3 run must not regress more than the 15% threshold in
 //! `performance-benchmarks`.
 //!
@@ -84,7 +85,6 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use egui::{Pos2, Rect, pos2, vec2};
 use freminal::gui::panes::{
     Pane, PaneId, PaneIdGenerator, PaneTree, SplitBorder, SplitDirection, active_highlight_segment,
     pane_at_pos,
@@ -93,6 +93,7 @@ use freminal::gui::pty::{CommandFinishedEvent, TabChannels};
 use freminal::gui::renderer::WindowPostRenderer;
 use freminal::gui::shell_history::new_seeded_history;
 use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::geometry::{Rect, point};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
@@ -237,7 +238,7 @@ fn synthetic_layout(pane_count: usize) -> Vec<(PaneId, Rect)> {
         .map(|i| {
             let id = id_gen.next_id();
             let x0 = i as f32 * pane_width;
-            let rect = Rect::from_min_size(pos2(x0, 0.0), vec2(pane_width, WINDOW_HEIGHT));
+            let rect = Rect::from_min_max(point(x0, 0.0), point(x0 + pane_width, WINDOW_HEIGHT));
             (id, rect)
         })
         .collect()
@@ -247,7 +248,7 @@ fn synthetic_layout(pane_count: usize) -> Vec<(PaneId, Rect)> {
 // bench_layout
 // ---------------------------------------------------------------
 fn bench_layout(c: &mut Criterion) {
-    let rect = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW_WIDTH, WINDOW_HEIGHT));
+    let rect = Rect::from_min_max(point(0.0, 0.0), point(WINDOW_WIDTH, WINDOW_HEIGHT));
     let mut group = c.benchmark_group("layout");
 
     for &count in &PANE_COUNTS {
@@ -277,7 +278,7 @@ fn bench_layout(c: &mut Criterion) {
 // bench_split_borders
 // ---------------------------------------------------------------
 fn bench_split_borders(c: &mut Criterion) {
-    let rect = Rect::from_min_size(Pos2::ZERO, vec2(WINDOW_WIDTH, WINDOW_HEIGHT));
+    let rect = Rect::from_min_max(point(0.0, 0.0), point(WINDOW_WIDTH, WINDOW_HEIGHT));
     let mut group = c.benchmark_group("split_borders");
 
     for &count in &PANE_COUNTS {
@@ -360,13 +361,13 @@ fn bench_pane_at_pos(c: &mut Criterion) {
         let pane_width = WINDOW_WIDTH / count as f32;
 
         // Hit on the first pane: the linear scan matches immediately.
-        let first_hit = pos2(pane_width / 2.0, WINDOW_HEIGHT / 2.0);
+        let first_hit = point(pane_width / 2.0, WINDOW_HEIGHT / 2.0);
         // Hit on the last pane: worst-case scan through every prior rect
         // before matching.
-        let last_hit = pos2(WINDOW_WIDTH - pane_width / 2.0, WINDOW_HEIGHT / 2.0);
+        let last_hit = point(WINDOW_WIDTH - pane_width / 2.0, WINDOW_HEIGHT / 2.0);
         // Miss: full scan, no match. Negative coordinates guarantee a miss
         // regardless of `Rect::contains`'s edge inclusivity.
-        let miss = pos2(-10.0, -10.0);
+        let miss = point(-10.0, -10.0);
 
         group.bench_function(BenchmarkId::new("first_hit", count), |b| {
             b.iter(|| {
@@ -403,24 +404,26 @@ fn bench_active_highlight_segment(c: &mut Criterion) {
     let bordering = SplitBorder {
         direction: SplitDirection::Horizontal,
         first_child_pane: PaneId::first(),
-        rect: Rect::from_min_size(pos2(959.0, 0.0), vec2(2.0, WINDOW_HEIGHT)),
+        rect: Rect::from_min_max(point(959.0, 0.0), point(961.0, WINDOW_HEIGHT)),
         parent_extent: WINDOW_WIDTH,
         active_in_first: Some(true),
     };
-    let bordering_active_rect =
-        Rect::from_min_size(pos2(960.0, 0.0), vec2(WINDOW_WIDTH - 960.0, WINDOW_HEIGHT));
+    let bordering_active_rect = Rect::from_min_max(
+        point(960.0, 0.0),
+        point(960.0 + (WINDOW_WIDTH - 960.0), WINDOW_HEIGHT),
+    );
 
     // A divider nowhere near the active pane: the fast "does not border"
     // path returns `None` immediately.
     let non_bordering = SplitBorder {
         direction: SplitDirection::Horizontal,
         first_child_pane: PaneId::first(),
-        rect: Rect::from_min_size(pos2(99.0, 0.0), vec2(2.0, WINDOW_HEIGHT)),
+        rect: Rect::from_min_max(point(99.0, 0.0), point(101.0, WINDOW_HEIGHT)),
         parent_extent: WINDOW_WIDTH,
         active_in_first: Some(false),
     };
     let non_bordering_active_rect =
-        Rect::from_min_size(pos2(500.0, 0.0), vec2(400.0, WINDOW_HEIGHT));
+        Rect::from_min_max(point(500.0, 0.0), point(900.0, WINDOW_HEIGHT));
 
     let mut group = c.benchmark_group("active_highlight_segment");
 

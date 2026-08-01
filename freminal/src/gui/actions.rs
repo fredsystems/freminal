@@ -150,13 +150,24 @@ impl super::FreminalGui {
 
         let current_id = tab.active_pane;
 
-        let layout = match tab.pane_tree.layout(available_rect) {
+        let layout = match tab
+            .pane_tree
+            .layout(super::geometry_interop::rect_from_egui(available_rect))
+        {
             Ok(l) => l,
             Err(e) => {
                 error!("Failed to compute pane layout for navigation: {e}");
                 return;
             }
         };
+        // `PaneTree::layout` returns the toolkit-neutral `geometry::Rect`;
+        // this function's remaining logic (`.center().distance(...)`) uses
+        // `egui`-only operations, so convert once here rather than at each
+        // use inside the filter/min_by closures below.
+        let layout: Vec<_> = layout
+            .into_iter()
+            .map(|(id, r)| (id, super::geometry_interop::rect_to_egui(r)))
+            .collect();
 
         let Some(current_rect) = layout
             .iter()

@@ -19,6 +19,7 @@ use tracing::{debug, error, trace, warn};
 
 use super::chrome_damage;
 use super::frame_damage;
+use super::geometry_interop;
 use super::panes;
 use super::renderer::WindowPostRenderer;
 use super::rendering;
@@ -913,10 +914,18 @@ impl freminal_windowing::App for FreminalGui {
                 // actually the one currently rendered full-size.
                 let layout = active_tab.zoomed_pane.map_or_else(
                     || {
+                        // `PaneTree::layout` takes/returns the toolkit-neutral
+                        // `geometry::Rect`; convert at this boundary and map
+                        // the result straight back since the rest of this
+                        // closure (`.contains(pos)` with `pos: egui::Pos2`,
+                        // and the sibling `zoomed_id` branch) is egui-typed.
                         active_tab
                             .pane_tree
-                            .layout(central_rect)
+                            .layout(geometry_interop::rect_from_egui(central_rect))
                             .unwrap_or_default()
+                            .into_iter()
+                            .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
+                            .collect()
                     },
                     |zoomed_id| vec![(zoomed_id, central_rect)],
                 );
@@ -2163,12 +2172,19 @@ impl freminal_windowing::App for FreminalGui {
             } else {
                 // Width of the border drawn between adjacent panes (logical pixels).
                 let bw: f32 = if has_multiple_panes { 1.0 } else { 0.0 };
+                // `PaneTree::layout` takes/returns the toolkit-neutral
+                // `geometry::Rect`; `pane_layout` below is consumed by many
+                // egui-painting loops further down, so convert once here
+                // (eagerly) rather than at each of those use sites.
                 let layout = win
                     .tabs
                     .active_tab()
                     .pane_tree
-                    .layout(available_rect)
-                    .unwrap_or_default();
+                    .layout(geometry_interop::rect_from_egui(available_rect))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
+                    .collect();
                 (layout, bw)
             };
 
@@ -2341,7 +2357,10 @@ impl freminal_windowing::App for FreminalGui {
                     .tabs
                     .active_tab()
                     .pane_tree
-                    .split_borders(available_rect, active_pane_id)
+                    .split_borders(
+                        geometry_interop::rect_from_egui(available_rect),
+                        active_pane_id,
+                    )
                     .unwrap_or_default();
 
                 // Half-width of the invisible drag sensor zone (pixels
@@ -2430,7 +2449,13 @@ impl freminal_windowing::App for FreminalGui {
                         // release pointer position; fall back to leaving focus
                         // unchanged if it isn't over any pane.
                         if let Some(pos) = ui.ctx().pointer_hover_pos()
-                            && let Some(under_id) = panes::pane_at_pos(&pane_layout, pos)
+                            && let Some(under_id) = panes::pane_at_pos(
+                                &pane_layout
+                                    .iter()
+                                    .map(|(id, r)| (*id, geometry_interop::rect_from_egui(*r)))
+                                    .collect::<Vec<_>>(),
+                                geometry_interop::point_from_egui(pos),
+                            )
                         {
                             let tab = win.tabs.active_tab_mut();
                             if tab.active_pane != under_id {
@@ -3539,17 +3564,22 @@ impl freminal_windowing::App for FreminalGui {
                 };
 
                 // Rect of the currently focused pane; used to decide which
-                // divider segments border it.
+                // divider segments border it. Converted once here (rather
+                // than per-border below) since `active_highlight_segment`
+                // takes the toolkit-neutral `geometry::Rect`.
                 let active_rect = pane_layout
                     .iter()
                     .find(|(id, _)| *id == active_pane_id)
-                    .map(|(_, r)| *r);
+                    .map(|(_, r)| geometry_interop::rect_from_egui(*r));
 
                 let border_rects = win
                     .tabs
                     .active_tab()
                     .pane_tree
-                    .split_borders(available_rect, active_pane_id)
+                    .split_borders(
+                        geometry_interop::rect_from_egui(available_rect),
+                        active_pane_id,
+                    )
                     .unwrap_or_default();
 
                 // Tolerance for matching a divider coordinate to a pane edge.
@@ -3565,7 +3595,11 @@ impl freminal_windowing::App for FreminalGui {
                 };
 
                 for border in &border_rects {
-                    let r = border.rect;
+                    // `SplitBorder::rect` is the toolkit-neutral
+                    // `geometry::Rect`; this loop paints with egui-only
+                    // methods (`left_top`/`left_bottom`/`right_top`), so
+                    // convert per-border here at the point of use.
+                    let r = geometry_interop::rect_to_egui(border.rect);
 
                     if exactly_two_panes {
                         // Half-fill: the active pane's side gets the active
@@ -3610,6 +3644,7 @@ impl freminal_windowing::App for FreminalGui {
                     if let Some(seg) = active_rect
                         .and_then(|ar| panes::active_highlight_segment(border, ar, edge_epsilon))
                     {
+                        let seg = geometry_interop::rect_to_egui(seg);
                         match border.direction {
                             panes::SplitDirection::Horizontal => {
                                 stroke(seg.left_top(), seg.left_bottom(), active_color);
@@ -3935,8 +3970,11 @@ impl freminal_windowing::App for FreminalGui {
                 let zoomed_pane = active_tab.zoomed_pane;
                 let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
                     .pane_tree
-                    .layout(content_rect)
-                    .unwrap_or_default();
+                    .layout(geometry_interop::rect_from_egui(content_rect))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
+                    .collect();
                 let resolve_pane_rect =
                     move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
                         if let Some(zoomed_id) = zoomed_pane {
