@@ -16,6 +16,8 @@
 //!   output types
 //! - [`colors`] — terminal color representation and 256-color palette
 //! - [`cursor`] — cursor position and visual style types
+//! - [`geometry`] — toolkit-agnostic 2D geometry primitives (`Point`,
+//!   `Rect`); no egui dependency
 //! - [`themes`] — embedded color theme palettes
 //! - [`gui_theme`] — toolkit-agnostic GUI styling geometry (radii, strokes,
 //!   spacing); no colors, no egui dependency
@@ -65,6 +67,9 @@ pub mod colors;
 pub mod config;
 /// Cursor position and visual style types.
 pub mod cursor;
+/// Toolkit-agnostic 2D geometry primitives (`Point`, `Rect`); no egui
+/// dependency.
+pub mod geometry;
 /// Toolkit-agnostic GUI styling geometry (corner radii, strokes, spacing).
 pub mod gui_theme;
 /// Configurable key bindings: actions, key combos, and the binding map.

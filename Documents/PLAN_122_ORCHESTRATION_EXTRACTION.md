@@ -509,6 +509,16 @@ this, measured exhaustively from `panes/mod.rs`:
 Plus derives `PartialEq` (relied on by `assert_eq!` at `panes/mod.rs:1871`),
 `Copy`, `Clone`, `Debug`.
 
+**Counts corrected 2026-07-30 (122.2 adversarial review).** The **API set above
+is right and complete** — re-verified against production code (`panes/mod.rs`
+lines 1-1572; the test module starts at 1573) and confirmed sufficient for
+122.3. The **occurrence counts are not**, in two ways: they include the test
+module, and the `contains` figure conflates three unrelated methods. There is
+exactly **one** production `Rect::contains` call (`pane_at_pos`,
+`panes/mod.rs:1567`); the other hits are `PaneNode::contains(PaneId)`, a
+recursive tree search, and `String::contains` in test assertions. Treat the
+table as "what the API must provide", not as a measurement.
+
 **Deliberately NOT provided** (verified absent from `panes/mod.rs`): `shrink`,
 `expand`, `translate`, `intersect`, `union`, `from_min_size`,
 `split_left_right_at_x`, `left`/`right`/`top`/`bottom`. Do not add them
@@ -532,6 +542,37 @@ API beyond the table. Do NOT touch `panes/mod.rs` (that is 122.3). Do NOT use
 raw `as` casts — `conv2` per `freminal-numeric-conversions`.
 
 Stop: report the module's public API and test results; await review.
+
+**DONE.** `freminal-common/src/geometry.rs` — `Point` (with a free `point(x, y)`
+constructor mirroring `egui::pos2`) and `Rect`, all six items `const fn`, no
+egui dependency added, `freminal-common/Cargo.toml` untouched. 12 tests.
+
+Float semantics verified operation-by-operation against `emath` 0.35.0 on disk,
+including operand order: `contains` inclusive on all four bounds
+(`rect.rs:274-276`); `width`/`height` as plain subtraction, negative permitted;
+`center` as `(min + max) / 2.0` per component, matching `fast_midpoint`
+(`lib.rs:122-128`) rather than `min + (max - min) / 2.0`, which differs by one
+ULP for values the test pins; `from_min_max` stores verbatim without
+normalising.
+
+`Rect::center` carries `#[allow(clippy::manual_midpoint)]`. The lint wants
+`f32::midpoint`, which uses an `f64` intermediate to avoid overflow and so
+diverges from emath's naive form — but only near `f32::MAX` (`a = b = f32::MAX`
+gives `inf` vs `f32::MAX`), which screen geometry never reaches. The allow is
+kept for parity **by construction**, and the code comment now says exactly
+that rather than implying the divergence is reachable or tested.
+
+The adversarial review found two false claims in the first draft's doc
+comments, both corrected: `Rect::contains` cited
+`pointer_in_gutter_strip_boundary_at_exact_far_edge_is_false` as evidence for
+inclusive boundaries, but that predicate is scalar arithmetic using a
+**half-open** interval and never touches `Rect`; and `Rect::center` claimed
+`active_highlight_segment` uses a 0.5 epsilon when `edge_epsilon` is `1.0`
+(`app_impl.rs:3556`). The real justification for inclusivity — now documented —
+is that `split_rect` gives both halves of a split the *same* boundary
+coordinate, so adjacent pane rects **share** an edge; a pointer on that edge is
+contained by both and `pane_at_pos` takes the first match. Half-open would make
+every split boundary a one-pixel dead stripe.
 
 #### 122.3 — Move `panes/mod.rs` production geometry onto the neutral types
 
