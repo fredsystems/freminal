@@ -430,6 +430,21 @@ pub struct ClosedPaneResult {
 
 // ── SplitBorder ──────────────────────────────────────────────────────
 
+/// Which subtree of a split node the active pane lives in.
+///
+/// Used by the GUI to implement tmux-style half-highlighted borders: the
+/// half of the divider on the active pane's side is drawn in the active
+/// color, the other half stays inactive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSubtree {
+    /// The active pane is in the split's **first** (top or left) subtree.
+    First,
+    /// The active pane is in the split's **second** (bottom or right) subtree.
+    Second,
+    /// The active pane is in **neither** subtree of this split.
+    Neither,
+}
+
 /// Describes a single split border between adjacent panes.
 ///
 /// Used by the GUI to create invisible drag sensor rects on the border,
@@ -467,13 +482,11 @@ pub struct SplitBorder {
     /// Used by the GUI to correctly scale pixel drag distance into ratio delta.
     pub parent_extent: f32,
 
-    /// Whether the active pane lives in the **first** child's subtree.
+    /// Which subtree of this split contains the active pane.
     ///
     /// Used by the GUI to implement tmux-style half-highlighted borders:
-    /// when `true`, the first half (top or left) of the border is drawn
-    /// in the active color; when `false`, the second half is highlighted.
-    /// If the active pane is in neither subtree, both halves are inactive.
-    pub active_in_first: Option<bool>,
+    /// see [`ActiveSubtree`] for what each variant means for rendering.
+    pub active_subtree: ActiveSubtree,
 }
 
 /// The sub-segment of a split divider that should be highlighted to
@@ -688,7 +701,7 @@ impl PaneNode {
     /// Then recurses into both children with their respective sub-rects.
     ///
     /// `active_pane` is the currently focused pane; used to compute
-    /// [`SplitBorder::active_in_first`] for tmux-style half-highlighted
+    /// [`SplitBorder::active_subtree`] for tmux-style half-highlighted
     /// borders.
     fn split_borders(&self, rect: Rect, active_pane: PaneId, out: &mut Vec<SplitBorder>) {
         match self {
@@ -722,12 +735,12 @@ impl PaneNode {
                 };
 
                 // Determine which subtree (if either) contains the active pane.
-                let active_in_first = if first.contains(active_pane) {
-                    Some(true)
+                let active_subtree = if first.contains(active_pane) {
+                    ActiveSubtree::First
                 } else if second.contains(active_pane) {
-                    Some(false)
+                    ActiveSubtree::Second
                 } else {
-                    None
+                    ActiveSubtree::Neither
                 };
 
                 // Find any leaf pane in the first subtree to use as the
@@ -742,7 +755,7 @@ impl PaneNode {
                             SplitDirection::Horizontal => rect.width(),
                             SplitDirection::Vertical => rect.height(),
                         },
-                        active_in_first,
+                        active_subtree,
                     });
                 }
 
@@ -1098,7 +1111,7 @@ impl PaneTree {
     /// [`PaneTree::resize_split`] on drag.
     ///
     /// `active_pane` is the currently focused pane; each returned
-    /// [`SplitBorder`] carries an `active_in_first` field indicating
+    /// [`SplitBorder`] carries an `active_subtree` field indicating
     /// which subtree the active pane belongs to, enabling tmux-style
     /// half-highlighted border rendering.
     ///
@@ -2493,7 +2506,7 @@ mod tests {
         let border = &borders[0];
         assert_eq!(border.direction, SplitDirection::Horizontal);
         assert_eq!(border.first_child_pane, PaneId(0));
-        assert_eq!(border.active_in_first, Some(true));
+        assert_eq!(border.active_subtree, ActiveSubtree::First);
 
         // The split should be at x=400 (50% of 800) ± 0.5
         let center_x = border.rect.center().x;
@@ -2504,11 +2517,11 @@ mod tests {
 
         // Active pane in second child (right).
         let borders = tree.split_borders(rect, PaneId(1)).unwrap();
-        assert_eq!(borders[0].active_in_first, Some(false));
+        assert_eq!(borders[0].active_subtree, ActiveSubtree::Second);
 
         // Active pane not in either subtree.
         let borders = tree.split_borders(rect, PaneId(99)).unwrap();
-        assert_eq!(borders[0].active_in_first, None);
+        assert_eq!(borders[0].active_subtree, ActiveSubtree::Neither);
     }
 
     #[test]
@@ -2525,7 +2538,7 @@ mod tests {
         assert_eq!(borders.len(), 1);
         let border = &borders[0];
         assert_eq!(border.direction, SplitDirection::Vertical);
-        assert_eq!(border.active_in_first, Some(true));
+        assert_eq!(border.active_subtree, ActiveSubtree::First);
 
         // The split should be at y=300 (50% of 600) ± 0.5
         let center_y = border.rect.center().y;
@@ -2575,14 +2588,14 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(true));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::First);
 
         // The inner vertical border: active pane 0 is in the first (top) subtree.
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, Some(true));
+        assert_eq!(v_border.active_subtree, ActiveSubtree::First);
 
         // Active pane 1: in second child of outer H-split, not in inner V-split.
         let borders = tree.split_borders(rect, PaneId(1)).unwrap();
@@ -2590,12 +2603,12 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(false));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::Second);
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, None);
+        assert_eq!(v_border.active_subtree, ActiveSubtree::Neither);
 
         // Active pane 2: in first child of outer H-split, second child of inner V-split.
         let borders = tree.split_borders(rect, PaneId(2)).unwrap();
@@ -2603,12 +2616,68 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(true));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::First);
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, Some(false));
+        assert_eq!(v_border.active_subtree, ActiveSubtree::Second);
+    }
+
+    #[test]
+    fn split_borders_active_subtree_pins_first_second_and_neither() {
+        // Pins `ActiveSubtree`'s three-way classification (Task 122.3a) in
+        // one place, isolated from the geometry/direction assertions that
+        // `split_borders_nested_tree_returns_all_borders` already covers.
+        //
+        //       root (H split: A | B)
+        //      /                    \
+        //   A (V split: A1 / A2)     B
+        //
+        // For the inner V-split (dividing A into A1/A2):
+        //   - A1 active  -> First  (active pane in the split's first subtree)
+        //   - A2 active  -> Second (active pane in the split's second subtree)
+        //   - B active   -> Neither, because B is a *sibling* of A, not
+        //     because the pane is missing (the nonexistent-pane case for
+        //     `Neither` is already covered by
+        //     `split_borders_single_horizontal_split`).
+        let mut tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let mut id_gen = PaneIdGenerator::new(1);
+
+        // Split root into A (PaneId(0)) | B (PaneId(1)).
+        tree.split(
+            PaneId(0),
+            SplitDirection::Horizontal,
+            &mut id_gen,
+            make_dummy,
+        )
+        .unwrap();
+        // Split A into A1 (PaneId(0)) / A2 (PaneId(2)).
+        tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
+            .unwrap();
+
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
+
+        let inner_v_border = |active: PaneId| {
+            tree.split_borders(rect, active)
+                .unwrap()
+                .into_iter()
+                .find(|b| b.direction == SplitDirection::Vertical)
+                .unwrap()
+        };
+
+        assert_eq!(
+            inner_v_border(PaneId(0)).active_subtree,
+            ActiveSubtree::First
+        );
+        assert_eq!(
+            inner_v_border(PaneId(2)).active_subtree,
+            ActiveSubtree::Second
+        );
+        assert_eq!(
+            inner_v_border(PaneId(1)).active_subtree,
+            ActiveSubtree::Neither
+        );
     }
 
     // ── active_highlight_segment (Task 109) ──────────────────────────
@@ -2633,7 +2702,7 @@ mod tests {
             first_child_pane: PaneId(1),
             rect: Rect::from_min_max(point(0.0, 299.5), point(800.0, 300.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         }
     }
 
@@ -2643,7 +2712,7 @@ mod tests {
             first_child_pane: PaneId(2),
             rect: Rect::from_min_max(point(399.5, 300.0), point(400.5, 600.0)),
             parent_extent: 800.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         }
     }
 
@@ -2718,14 +2787,14 @@ mod tests {
             first_child_pane: PaneId(0),
             rect: Rect::from_min_max(point(0.0, 199.5), point(800.0, 200.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         };
         let lower = SplitBorder {
             direction: SplitDirection::Vertical,
             first_child_pane: PaneId(1),
             rect: Rect::from_min_max(point(0.0, 399.5), point(800.0, 400.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         };
         let top = Rect::from_min_max(point(0.0, 0.0), point(800.0, 200.0));
         let middle = Rect::from_min_max(point(0.0, 200.0), point(800.0, 400.0));

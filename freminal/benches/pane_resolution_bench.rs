@@ -86,8 +86,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use freminal::gui::panes::{
-    Pane, PaneId, PaneIdGenerator, PaneTree, SplitBorder, SplitDirection, active_highlight_segment,
-    pane_at_pos,
+    ActiveSubtree, Pane, PaneId, PaneIdGenerator, PaneTree, SplitBorder, SplitDirection,
+    active_highlight_segment, pane_at_pos,
 };
 use freminal::gui::pty::{CommandFinishedEvent, TabChannels};
 use freminal::gui::renderer::WindowPostRenderer;
@@ -285,7 +285,7 @@ fn bench_split_borders(c: &mut Criterion) {
         let (tree, leaves) = build_balanced_tree(count);
 
         // `active_pane` is not just a passenger: `PaneNode::split_borders`
-        // computes each border's `active_in_first` by calling
+        // computes each border's `active_subtree` by calling
         // `first.contains(active_pane)` before `second.contains(active_pane)`
         // at every internal node, and a failed `contains` walks that whole
         // subtree before falling back. So the choice of active pane changes
@@ -406,7 +406,7 @@ fn bench_active_highlight_segment(c: &mut Criterion) {
         first_child_pane: PaneId::first(),
         rect: Rect::from_min_max(point(959.0, 0.0), point(961.0, WINDOW_HEIGHT)),
         parent_extent: WINDOW_WIDTH,
-        active_in_first: Some(true),
+        active_subtree: ActiveSubtree::First,
     };
     let bordering_active_rect = Rect::from_min_max(
         point(960.0, 0.0),
@@ -420,7 +420,7 @@ fn bench_active_highlight_segment(c: &mut Criterion) {
         first_child_pane: PaneId::first(),
         rect: Rect::from_min_max(point(99.0, 0.0), point(101.0, WINDOW_HEIGHT)),
         parent_extent: WINDOW_WIDTH,
-        active_in_first: Some(false),
+        active_subtree: ActiveSubtree::Second,
     };
     let non_bordering_active_rect =
         Rect::from_min_max(point(500.0, 0.0), point(900.0, WINDOW_HEIGHT));

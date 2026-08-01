@@ -3603,13 +3603,14 @@ impl freminal_windowing::App for FreminalGui {
 
                     if exactly_two_panes {
                         // Half-fill: the active pane's side gets the active
-                        // color; the other half stays inactive. `active_in_first`
-                        // is true when the active pane is the first child
-                        // (top for a vertical line, left for a horizontal line).
-                        let (first_color, second_color) = match border.active_in_first {
-                            Some(true) => (active_color, inactive_color),
-                            Some(false) => (inactive_color, active_color),
-                            None => (inactive_color, inactive_color),
+                        // color; the other half stays inactive.
+                        // `active_subtree` is `First` when the active pane is
+                        // the first child (top for a vertical line, left for
+                        // a horizontal line).
+                        let (first_color, second_color) = match border.active_subtree {
+                            panes::ActiveSubtree::First => (active_color, inactive_color),
+                            panes::ActiveSubtree::Second => (inactive_color, active_color),
+                            panes::ActiveSubtree::Neither => (inactive_color, inactive_color),
                         };
                         match border.direction {
                             panes::SplitDirection::Horizontal => {
