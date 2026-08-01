@@ -52,6 +52,7 @@ mod menu;
 mod notifications;
 pub mod paste_guard;
 mod platform;
+mod pointer_motion;
 mod published_frame_state;
 mod recording;
 mod rendering;

@@ -36,15 +36,18 @@
 //!
 //! Deliberately **excluded**: the free functions
 //! `pointer_motion_needs_repaint_decision`, `pane_hover_region_risk`,
-//! `animation_in_flight_composed`, and `pointer_in_gutter_strip` in
-//! `app_impl.rs`. All four are private (not reachable from an external bench
-//! crate without widening `mod app_impl`'s visibility, which subtask
-//! 122.14's scope forbids) and are O(1) boolean compositions over
-//! already-resolved flags — a wall-clock benchmark of them would measure
-//! Criterion's own harness overhead, not freminal. They are covered by 22
-//! unit tests in `app_impl.rs:4805-5015` instead (9 + 5 + 4 + 4 in the order
-//! listed above). The five functions benchmarked here are the ones that
-//! actually walk the tree or scan geometry.
+//! `animation_in_flight_composed`, and `pointer_in_gutter_strip`, plus the
+//! pane-resolution chain `resolve_pane_under_pointer` that subtask 122.5
+//! extracted. All live in the private `gui::pointer_motion` module (moved
+//! there from `app_impl.rs` by subtask 122.5a) and are not reachable from an
+//! external bench crate without widening that module's visibility — a trade
+//! the 122.14 amendment and 122.5a both declined. The four predicates are
+//! O(1) boolean compositions over already-resolved flags, so a wall-clock
+//! benchmark of them would measure Criterion's own harness overhead rather
+//! than freminal; they and the chain are covered by unit tests in
+//! `gui::pointer_motion`'s own test module instead. The five functions
+//! benchmarked here are the ones that actually walk the tree or scan
+//! geometry.
 //!
 //! ## Tree shape
 //!

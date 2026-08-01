@@ -817,6 +817,56 @@ function genuinely fits without it. Do NOT alter the conservative directions
 Stop: report the extracted signature, the benchmark number, and test results;
 await review.
 
+#### 122.5a — Give the pointer-motion decision its own module
+
+Scope: new `freminal/src/gui/pointer_motion.rs`, `freminal/src/gui/mod.rs`,
+`freminal/src/gui/app_impl.rs`.
+
+**Added 2026-07-30, after 122.5 landed.** 122.5 made the pane-resolution chain
+pure and testable but left it in `app_impl.rs`, which **grew** to 5,784 lines
+as a result — the extraction added ~450 lines of tests to the god file it was
+meant to relieve. Measured after 122.5, one coherent concept accounts for
+~840 of those lines:
+
+| Part                                                                | Lines |
+| ------------------------------------------------------------------- | ----- |
+| `PointerMotionPaneSignals`, `PaneSnapshotInputs`, `PaneResolution`  | ~387  |
+| `pane_hover_region_risk`, `pane_hover_region_terms`,                | (in   |
+| `pointer_in_gutter_strip`, `animation_in_flight_composed`,          | the   |
+| `pointer_motion_needs_repaint_decision`, `resolve_pane_under_pointer` | above) |
+| their 35 test functions                                             | ~450  |
+
+That is one concept — **the out-of-frame pointer-motion repaint decision** —
+and `freminal-module-cohesion` says it should be a module whose path names it.
+This is also the concrete case the `freminal-extend-or-extract` skill (122.0)
+was written for: the alternative is leaving it in the file it was already too
+big for.
+
+What: move those six functions, the three types, and their tests into
+`freminal/src/gui/pointer_motion.rs`. `App::pointer_motion_needs_repaint` and
+`is_chrome_interactive_at` stay in `app_impl.rs` — they are trait-impl methods
+needing `&self` — and call into the new module.
+
+**Keep the module `pub(super)`, not `pub`.** It is tempting to make it `pub`
+so 122.5's skipped benchmark becomes possible, but that repeats the trade the
+122.14 amendment rejected: widening visibility to serve a benchmark. Cohesion
+is the justification here; benchmarking is not. If a later subtask wants the
+benchmark badly enough, it can make that case on its own.
+
+Deliverable: the module, the moved code and tests, and a line-count delta on
+`app_impl.rs`.
+
+Verification: standard suite, plus `--features frame-profiling`. This is a
+**pure move** — no test assertion may change, and no function body may change
+except for import paths and visibility keywords.
+
+Prohibitions: do NOT change any function body's logic. Do NOT widen visibility
+beyond `pub(super)`. Do NOT move `pointer_motion_needs_repaint` or
+`is_chrome_interactive_at` themselves. Do NOT move `PublishedFrameState` (it
+has its own module). Do NOT rename anything.
+
+Stop: report the line-count delta and that no assertion changed; await review.
+
 #### 122.6 — `DummyApp` override so the dispatch path is testable
 
 Scope: `freminal-windowing/src/lib.rs` and `freminal-windowing/src/event_loop.rs`

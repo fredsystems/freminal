@@ -646,9 +646,10 @@ pub(super) struct FrameStats {
 /// the eight conditions considered by `App::pointer_motion_needs_repaint`
 /// were true for one call.
 ///
-/// Distinct from `app_impl.rs`'s `PointerMotionPaneSignals`: that struct
-/// feeds the actual repaint DECISION for a resolved pane (two aggregated
-/// bools — `mouse_tracking_active` and a single `hover_region_risk`); this
+/// Distinct from `pointer_motion.rs`'s `PointerMotionPaneSignals`: that
+/// struct feeds the actual repaint DECISION for a resolved pane (two
+/// aggregated bools — `mouse_tracking_active` and a single
+/// `hover_region_risk`); this
 /// struct is diagnostic-only, exhaustive over every named condition in the
 /// predicate (including the three individual sub-terms
 /// `pane_hover_region_risk` ORs together), and never affects behavior — it
