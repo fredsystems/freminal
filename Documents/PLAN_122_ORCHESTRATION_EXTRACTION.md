@@ -1066,6 +1066,60 @@ and results; await review.
 
 ### Group C — cleanup (static targets, demoted)
 
+#### 122.11a — Consolidate the per-frame pane drains into one module
+
+Scope: new `freminal/src/gui/frame_drain.rs`, `freminal/src/gui/mod.rs`,
+`freminal/src/gui/app_impl.rs`.
+
+**Added 2026-07-30, after 122.8.** Group B is shrinking the god *functions* as
+intended — `update()`'s inline body and `central_body` are both materially
+smaller — but `app_impl.rs` itself has **grown**, because each subtask's doc
+comments and tests land in the same file:
+
+| After  | `app_impl.rs` |
+| ------ | ------------- |
+| 122.5a | 4,878         |
+| 122.7  | 5,252         |
+| 122.8  | 5,545         |
+
+The plan's success criterion is explicitly not line counts, and the goal
+statement is about god *functions*, so this is not a failure. But finishing
+Group B with the file larger than it started would be a poor outcome for a task
+whose headline is decomposition, and there is now an obvious home.
+
+Two independent sub-agents, asked separately, proposed the same concept:
+**per-frame pane-event draining** — everything that walks `win.tabs` once per
+frame to drain a channel and stage results for later handling. That is a real
+concept, it names itself, and it currently accounts for roughly 700 lines
+spread across `app_impl.rs`.
+
+What: move into `frame_drain.rs` the three drains and their supporting types
+and tests — `drain_command_finished_events`, `process_dead_panes`,
+`DeadPaneOutcome`, `drain_window_manipulation_commands`,
+`WindowManipulationEvents`, and `route_window_manipulation_events`. `WindowFocus`
+goes too if nothing outside the group uses it by then; check.
+
+Two known wrinkles: `route_window_manipulation_events` takes `&self` on
+`FreminalGui`, so it either becomes a free function taking explicit references
+(consistent with the other two, and preferred) or stays behind; and
+`process_dead_panes` takes `&mut PerWindowState`, which is fine for a sibling
+module but confirm no visibility has to widen past `pub(super)`.
+
+**Run this after Group B's extractions are complete**, not between them, so the
+move happens once rather than churning the same code repeatedly. It is a pure
+move: no logic change, no test-assertion change, identical test count.
+
+Deliverable: the module, the move, and the line-count delta on `app_impl.rs`.
+
+Verification: standard suite plus `--features frame-profiling`, and **both**
+clippy invocations.
+
+Prohibitions: do NOT change any logic. Do NOT widen visibility past
+`pub(super)`. Do NOT fold the three drains into one. Do NOT move anything that
+is not a per-frame drain merely because it is nearby.
+
+Stop: report the delta and that no assertion changed; await review.
+
 #### 122.12 — Name `write_input_to_terminal`'s parameters and result
 
 Scope: `freminal/src/gui/terminal/input.rs` and

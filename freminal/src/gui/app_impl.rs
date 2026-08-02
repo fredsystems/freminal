@@ -398,6 +398,139 @@ fn process_dead_panes(
     DeadPaneOutcome::Continue
 }
 
+/// OSC-derived events collected by [`drain_window_manipulation_commands`]
+/// during its per-tab, per-pane `handle_window_manipulation` drain, staged
+/// for routing by [`FreminalGui::route_window_manipulation_events`] once the
+/// drain loop's mutable borrow of the tab list has ended.
+struct WindowManipulationEvents {
+    /// OSC 9 / OSC 777 notifications collected from every pane this frame,
+    /// routed after the drain loop (Task 76.4).
+    osc_notifications: Vec<crate::gui::notifications::NotificationRequest>,
+    /// OSC 99 stateful notifications collected from every pane this frame,
+    /// routed after the drain loop (Task 99.5a) alongside
+    /// `osc_notifications`. Each item is paired with a clone of the
+    /// originating pane's `pty_write_tx` (Task 99.5c Gap 2) so the
+    /// reverse-path write (Task 99.6) can target the right pane.
+    osc99_notifications: Vec<(
+        freminal_common::buffer_states::window_manipulation::Notification99Data,
+        crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+    )>,
+    /// OSC 99 app→terminal control sequences (p=close/p=alive/p=?) collected
+    /// from every pane this frame (Task 99.5c), answered after the drain
+    /// loop.
+    osc99_controls: Vec<(
+        crate::gui::notifications::Osc99Control,
+        crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
+    )>,
+    /// OSC 52 clipboard events (remote write / blocked read) collected from
+    /// every pane this frame, routed to a toast after the drain loop (issue
+    /// #433).
+    osc52_events: Vec<rendering::Osc52ToastEvent>,
+}
+
+/// Drain pending `WindowCommand`s for every pane in every tab of `tabs`,
+/// calling `rendering::handle_window_manipulation` per pane, and collect the
+/// OSC 9/777, OSC 99 (notification + control), and OSC 52 events it produces
+/// for [`FreminalGui::route_window_manipulation_events`] to route once this
+/// function returns.
+///
+/// **Discard-rule contract**, preserved exactly from the pre-extraction
+/// inline block: this drains ALL tabs and ALL panes, not just the active
+/// one, but active and non-active panes are handled differently. The active
+/// tab's active pane gets full handling (viewport commands, reports, title
+/// updates, clipboard). Every other pane gets reports answered, titles
+/// updated, and clipboard handled — but viewport-mutating commands (resize,
+/// move, minimize, fullscreen) are discarded, since a non-active pane must
+/// not alter the shared window geometry. See
+/// `rendering::handle_window_manipulation`'s own doc for the full
+/// per-variant breakdown (including the split-pane resize suppression via
+/// `is_only_pane`). Changing this branching changes which panes may
+/// resize/move/minimize the shared OS window — do not touch it casually.
+///
+/// Extracted from `App::update`'s `central_body` closure (Task 122.8).
+/// Unlike the zero-egui helpers extracted in Task 122.7, this is **not** an
+/// egui-freeing extraction: `rendering::handle_window_manipulation` itself
+/// needs `ui` (OSC 52 clipboard access, the window content rect for
+/// Report* responses), so `ui` is threaded straight through. `window_focus`
+/// is computed by the caller (`ui.input(|i| i.focused)`) and passed in as a
+/// named enum per `freminal-state-representation`, since it crosses this
+/// function boundary.
+///
+/// Takes the whole `config` rather than its `security`, `bell`, and
+/// `tab_title` sections individually to stay under clippy's
+/// `too_many_arguments` threshold; the config-toggle fields it reads
+/// (`security.allow_clipboard_read`) are exempt from
+/// `freminal-state-representation`'s bool-parameter rule per that skill's
+/// "config toggles deserialised from TOML" case.
+fn drain_window_manipulation_commands(
+    ui: &egui::Ui,
+    tabs: &mut TabManager,
+    font_width: usize,
+    font_height: usize,
+    window_focus: WindowFocus,
+    config: &freminal_common::config::Config,
+) -> WindowManipulationEvents {
+    let window_width = ui.input(|i: &egui::InputState| i.content_rect());
+    let active_idx = tabs.active_index();
+    let active_pane_id_for_drain = tabs.active_tab().active_pane;
+
+    let mut events = WindowManipulationEvents {
+        osc_notifications: Vec::new(),
+        osc99_notifications: Vec::new(),
+        osc99_controls: Vec::new(),
+        osc52_events: Vec::new(),
+    };
+
+    for (idx, tab) in tabs.iter_mut().enumerate() {
+        let is_active_tab = idx == active_idx;
+        let is_only_pane = match tab.pane_tree.pane_count() {
+            Ok(count) => count == 1,
+            Err(e) => {
+                trace!("pane_count error (treating as split): {e}");
+                false
+            }
+        };
+        if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
+            let mut tab_shell_set_title = false;
+            for pane in panes {
+                let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
+                let shell_set = rendering::handle_window_manipulation(
+                    ui,
+                    &pane.window_cmd_rx,
+                    &pane.pty_write_tx,
+                    font_width,
+                    font_height,
+                    window_width,
+                    &mut pane.title_stack,
+                    &mut pane.title,
+                    &mut pane.bell_active,
+                    &mut pane.view_state.bell_since,
+                    config.bell.mode,
+                    &rendering::WindowManipFlags {
+                        allow_clipboard_read: config.security.allow_clipboard_read,
+                        is_active: is_fully_active,
+                        window_focused: window_focus.is_focused(),
+                        is_only_pane,
+                    },
+                    &mut events.osc_notifications,
+                    &mut events.osc99_notifications,
+                    &mut events.osc99_controls,
+                    &mut events.osc52_events,
+                );
+                if shell_set {
+                    tab_shell_set_title = true;
+                }
+            }
+            // The title policy decides whether a shell-asserted OSC
+            // 0/1/2 title clears the user-pinned custom name (only
+            // under `OscWins`); see `Tab::apply_osc_title_policy`.
+            tab.apply_osc_title_policy(config.tab_title.policy, tab_shell_set_title);
+        }
+    }
+
+    events
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -1754,17 +1887,6 @@ impl freminal_windowing::App for FreminalGui {
             win.published
                 .publish_cached_gutter_inset_logical(gutter_inset_logical);
 
-            let window_width = ui.input(|i: &egui::InputState| i.content_rect());
-
-            // Drain window commands for ALL tabs and ALL panes within each tab.
-            // The active tab's active pane gets full handling (viewport commands,
-            // reports, title updates, clipboard). All other panes get reports
-            // answered, titles updated, and clipboard handled — only
-            // viewport-mutating commands (resize, move, minimize, fullscreen)
-            // are discarded since a non-active pane must not alter the shared
-            // window geometry.
-            let active_idx = win.tabs.active_index();
-            let active_pane_id_for_drain = win.tabs.active_tab().active_pane;
             // Read live from egui rather than a per-pane cached flag: the
             // latter is only ever updated while a given pane happens to be
             // the active one, so it goes permanently stale for every other
@@ -1773,189 +1895,25 @@ impl freminal_windowing::App for FreminalGui {
             // #436.3 §3.3 "Window focus change" chrome signal.
             let chrome_focus_changed = window_focused != win.prev_window_focused;
             win.prev_window_focused = window_focused;
-            // OSC 9 / OSC 777 notifications collected from every pane this
-            // frame, routed after the loop (Task 76.4).
-            let mut osc_notifications: Vec<crate::gui::notifications::NotificationRequest> =
-                Vec::new();
-            // OSC 99 stateful notifications collected from every pane this
-            // frame, routed after the loop (Task 99.5a) alongside
-            // `osc_notifications`. Each item is paired with a clone of the
-            // originating pane's `pty_write_tx` (Task 99.5c Gap 2) so future
-            // reverse-path writes (Task 99.6) can target the right pane.
-            let mut osc99_notifications: Vec<(
-                freminal_common::buffer_states::window_manipulation::Notification99Data,
-                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
-            )> = Vec::new();
-            // OSC 99 app→terminal control sequences (p=close/p=alive/p=?)
-            // collected from every pane this frame (Task 99.5c). Inert for
-            // now — logged after the loop, not yet answered (Tasks 99.6/99.7).
-            let mut osc99_controls: Vec<(
-                crate::gui::notifications::Osc99Control,
-                crossbeam_channel::Sender<freminal_common::pty_write::PtyWrite>,
-            )> = Vec::new();
-            // OSC 52 clipboard events (remote write / blocked read) collected from
-            // every pane this frame, routed to a toast after the loop (issue #433).
-            let mut osc52_events: Vec<rendering::Osc52ToastEvent> = Vec::new();
-            for (idx, tab) in win.tabs.iter_mut().enumerate() {
-                let is_active_tab = idx == active_idx;
-                let is_only_pane = match tab.pane_tree.pane_count() {
-                    Ok(count) => count == 1,
-                    Err(e) => {
-                        trace!("pane_count error (treating as split): {e}");
-                        false
-                    }
-                };
-                if let Ok(panes) = tab.pane_tree.iter_panes_mut() {
-                    let mut tab_shell_set_title = false;
-                    for pane in panes {
-                        let is_fully_active = is_active_tab && pane.id == active_pane_id_for_drain;
-                        let shell_set = rendering::handle_window_manipulation(
-                            ui,
-                            &pane.window_cmd_rx,
-                            &pane.pty_write_tx,
-                            font_width,
-                            font_height,
-                            window_width,
-                            &mut pane.title_stack,
-                            &mut pane.title,
-                            &mut pane.bell_active,
-                            &mut pane.view_state.bell_since,
-                            self.config.bell.mode,
-                            &rendering::WindowManipFlags {
-                                allow_clipboard_read: self.config.security.allow_clipboard_read,
-                                is_active: is_fully_active,
-                                window_focused,
-                                is_only_pane,
-                            },
-                            &mut osc_notifications,
-                            &mut osc99_notifications,
-                            &mut osc99_controls,
-                            &mut osc52_events,
-                        );
-                        if shell_set {
-                            tab_shell_set_title = true;
-                        }
-                    }
-                    // The title policy decides whether a shell-asserted OSC
-                    // 0/1/2 title clears the user-pinned custom name (only
-                    // under `OscWins`); see `Tab::apply_osc_title_policy`.
-                    tab.apply_osc_title_policy(self.config.tab_title.policy, tab_shell_set_title);
-                }
-            }
 
-            // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
-            // Done after the pane loop so `self.config` and the toast stack
-            // are borrowable without conflicting with the `win.tabs` borrow.
-            if !osc_notifications.is_empty()
-                && let Ok(mut toasts) = self.toasts.try_borrow_mut()
-            {
-                for req in &osc_notifications {
-                    crate::gui::notifications::NotificationRouter::route(
-                        req,
-                        &self.config.notifications,
-                        window_focused,
-                        &mut toasts,
-                    );
-                }
-            }
-
-            // Surface OSC 52 remote-clipboard events as toasts (issue #433).
-            // Done after the pane loop so `self.config`/`self.toasts` are
-            // borrowable without conflicting with the `win.tabs` borrow.
-            for event in &osc52_events {
-                let (title, detail) = rendering::osc52_toast_text(event);
-                self.route_freminal_toast(
-                    freminal_common::config::FreminalToastCategory::ClipboardRemote,
-                    crate::gui::toast::ToastKind::Info,
-                    title,
-                    detail,
-                    crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
-                );
-            }
-
-            // Route OSC 99 stateful notifications collected above (Task
-            // 99.5a). Done after the pane loop so `self.config`, the toast
-            // stack, and the OSC 99 session maps are borrowable without
-            // conflicting with the `win.tabs` borrow.
-            if !osc99_notifications.is_empty() {
-                let window_minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
-                if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
-                    self.toasts.try_borrow_mut(),
-                    self.osc99_icon_cache.try_borrow_mut(),
-                    self.osc99_live.try_borrow_mut(),
-                ) {
-                    let ctx = crate::gui::notifications::Osc99DisplayContext {
-                        window_focused,
-                        window_minimized,
-                    };
-                    // `tx` (the originating pane's `pty_write_tx` clone) is
-                    // threaded into the reverse-write path (Task 99.6): the
-                    // notification thread uses it to write activation/close
-                    // reports back to the pane that produced this OSC 99
-                    // sequence.
-                    for (data, tx) in &osc99_notifications {
-                        crate::gui::notifications::NotificationRouter::route_osc99(
-                            data,
-                            &self.config.notifications,
-                            ctx,
-                            &mut toasts,
-                            &mut icon_cache,
-                            &mut live,
-                            tx,
-                        );
-                    }
-                }
-            }
-
-            // Answer OSC 99 control sequences collected above (Task 99.6 for
-            // Close/Alive; the Query capability handshake is Task 99.7). Run
-            // after the display-routing block above so its `osc99_live`
-            // borrow has already been released.
-            for (control, tx) in &osc99_controls {
-                match control.kind {
-                    Osc99ControlKind::Alive => {
-                        // Answer the poll with the current live notification ids.
-                        if let Ok(live) = self.osc99_live.try_borrow() {
-                            let ids = crate::gui::notifications::live_ids_sorted(&live);
-                            let bytes = crate::gui::notifications::osc99_alive_report(
-                                control.id.as_deref(),
-                                &ids,
-                            );
-                            send_or_log!(
-                                tx,
-                                PtyWrite::Write(bytes),
-                                "Failed to send OSC 99 alive report"
-                            );
-                        }
-                    }
-                    Osc99ControlKind::Close => {
-                        // App-driven close request: prune the live entry.
-                        // freminal cannot programmatically close an OS
-                        // notification it already delegated to the desktop
-                        // environment, so this only reconciles our liveness
-                        // map — no report is sent here (the close report is
-                        // emitted only when WE observe a close on the
-                        // notification thread with `c=1`).
-                        if let (Some(id), Ok(mut live)) =
-                            (control.id.as_deref(), self.osc99_live.try_borrow_mut())
-                        {
-                            crate::gui::notifications::forget_osc99(&mut live, id);
-                        }
-                    }
-                    Osc99ControlKind::Query => {
-                        // OSC 99 p=? capability handshake (Task 99.7): answer
-                        // with freminal's truthfully-advertised OSC 99
-                        // capabilities.
-                        let bytes =
-                            crate::gui::notifications::osc99_query_response(control.id.as_deref());
-                        send_or_log!(
-                            tx,
-                            PtyWrite::Write(bytes),
-                            "Failed to send OSC 99 capability response"
-                        );
-                    }
-                }
-            }
+            // Drain window commands for ALL tabs and ALL panes within each
+            // tab, then route the OSC 9/777, OSC 52, and OSC 99 events that
+            // drain collected (Task 122.8). See
+            // `drain_window_manipulation_commands`'s doc for the
+            // active/non-active discard-rule contract this preserves.
+            let window_manipulation_events = drain_window_manipulation_commands(
+                ui,
+                &mut win.tabs,
+                font_width,
+                font_height,
+                WindowFocus::from_bool(window_focused),
+                &self.config,
+            );
+            self.route_window_manipulation_events(
+                ui,
+                WindowFocus::from_bool(window_focused),
+                &window_manipulation_events,
+            );
 
             // ── Multi-pane rendering loop ────────────────────────────
             //
@@ -4178,6 +4136,145 @@ impl FreminalGui {
         }
     }
 
+    /// Route the OSC 9/777, OSC 52, and OSC 99 events that
+    /// [`drain_window_manipulation_commands`] collected during its per-pane
+    /// drain: OSC 9/777 notifications go through
+    /// [`crate::gui::notifications::NotificationRouter::route`], OSC 52
+    /// clipboard events surface as a toast via [`Self::route_freminal_toast`],
+    /// OSC 99 stateful notifications go through
+    /// [`crate::gui::notifications::NotificationRouter::route_osc99`], and
+    /// OSC 99 control sequences (alive/close/query) get PTY-written
+    /// responses.
+    ///
+    /// Called after `drain_window_manipulation_commands` returns, i.e. after
+    /// its mutable borrow of the tab list has ended, so `self.config`,
+    /// `self.toasts`, and the OSC 99 session maps (`self.osc99_icon_cache`,
+    /// `self.osc99_live`) are all borrowable here without conflicting with
+    /// that borrow.
+    ///
+    /// The four routing destinations are kept as four separate blocks
+    /// deliberately (Task 122.8 prohibition): they route to different
+    /// destinations, and the OSC 99 control block writes PTY responses via
+    /// `send_or_log!`. Do not fold them into one.
+    fn route_window_manipulation_events(
+        &self,
+        ui: &egui::Ui,
+        window_focus: WindowFocus,
+        events: &WindowManipulationEvents,
+    ) {
+        // Route OSC 9 / OSC 777 notifications collected above (Task 76.4).
+        // `self.config` and the toast stack are borrowable here without
+        // conflicting with the drain's tab-list borrow.
+        if !events.osc_notifications.is_empty()
+            && let Ok(mut toasts) = self.toasts.try_borrow_mut()
+        {
+            for req in &events.osc_notifications {
+                crate::gui::notifications::NotificationRouter::route(
+                    req,
+                    &self.config.notifications,
+                    window_focus.is_focused(),
+                    &mut toasts,
+                );
+            }
+        }
+
+        // Surface OSC 52 remote-clipboard events as toasts (issue #433).
+        for event in &events.osc52_events {
+            let (title, detail) = rendering::osc52_toast_text(event);
+            self.route_freminal_toast(
+                freminal_common::config::FreminalToastCategory::ClipboardRemote,
+                crate::gui::toast::ToastKind::Info,
+                title,
+                detail,
+                crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
+            );
+        }
+
+        // Route OSC 99 stateful notifications collected above (Task 99.5a).
+        // `self.config`, the toast stack, and the OSC 99 session maps are
+        // borrowable here without conflicting with the drain's tab-list
+        // borrow.
+        if !events.osc99_notifications.is_empty() {
+            let window_minimized = ui.ctx().input(|i| i.viewport().minimized.unwrap_or(false));
+            if let (Ok(mut toasts), Ok(mut icon_cache), Ok(mut live)) = (
+                self.toasts.try_borrow_mut(),
+                self.osc99_icon_cache.try_borrow_mut(),
+                self.osc99_live.try_borrow_mut(),
+            ) {
+                let ctx = crate::gui::notifications::Osc99DisplayContext {
+                    window_focused: window_focus.is_focused(),
+                    window_minimized,
+                };
+                // `tx` (the originating pane's `pty_write_tx` clone) is
+                // threaded into the reverse-write path (Task 99.6): the
+                // notification thread uses it to write activation/close
+                // reports back to the pane that produced this OSC 99
+                // sequence.
+                for (data, tx) in &events.osc99_notifications {
+                    crate::gui::notifications::NotificationRouter::route_osc99(
+                        data,
+                        &self.config.notifications,
+                        ctx,
+                        &mut toasts,
+                        &mut icon_cache,
+                        &mut live,
+                        tx,
+                    );
+                }
+            }
+        }
+
+        // Answer OSC 99 control sequences collected above (Task 99.6 for
+        // Close/Alive; the Query capability handshake is Task 99.7). Run
+        // after the display-routing block above so its `osc99_live` borrow
+        // has already been released.
+        for (control, tx) in &events.osc99_controls {
+            match control.kind {
+                Osc99ControlKind::Alive => {
+                    // Answer the poll with the current live notification ids.
+                    if let Ok(live) = self.osc99_live.try_borrow() {
+                        let ids = crate::gui::notifications::live_ids_sorted(&live);
+                        let bytes = crate::gui::notifications::osc99_alive_report(
+                            control.id.as_deref(),
+                            &ids,
+                        );
+                        send_or_log!(
+                            tx,
+                            PtyWrite::Write(bytes),
+                            "Failed to send OSC 99 alive report"
+                        );
+                    }
+                }
+                Osc99ControlKind::Close => {
+                    // App-driven close request: prune the live entry.
+                    // freminal cannot programmatically close an OS
+                    // notification it already delegated to the desktop
+                    // environment, so this only reconciles our liveness
+                    // map — no report is sent here (the close report is
+                    // emitted only when WE observe a close on the
+                    // notification thread with `c=1`).
+                    if let (Some(id), Ok(mut live)) =
+                        (control.id.as_deref(), self.osc99_live.try_borrow_mut())
+                    {
+                        crate::gui::notifications::forget_osc99(&mut live, id);
+                    }
+                }
+                Osc99ControlKind::Query => {
+                    // OSC 99 p=? capability handshake (Task 99.7): answer
+                    // with freminal's truthfully-advertised OSC 99
+                    // capabilities.
+                    let bytes =
+                        crate::gui::notifications::osc99_query_response(control.id.as_deref());
+                    send_or_log!(
+                        tx,
+                        PtyWrite::Write(bytes),
+                        "Failed to send OSC 99 capability response"
+                    );
+                }
+            }
+        }
+    }
+
     /// First-window spawn path when no layout or session restore will apply.
     ///
     /// Spawns a default single-pane PTY.  PTY-spawn failures surface as a
@@ -4598,14 +4695,17 @@ impl FreminalGui {
 mod tests {
     use super::{
         DeadPaneOutcome, SettingsOwnerCloseDecision, WindowFocus, cursor_blink_wants_repaint,
-        drain_command_finished_events, pointer_forces_full_present, settings_owner_close_decision,
+        drain_command_finished_events, drain_window_manipulation_commands,
+        pointer_forces_full_present, settings_owner_close_decision,
     };
     use crate::gui::panes::{Pane, PaneId, PaneIdGenerator};
     use crate::gui::pty::CommandFinishedEvent;
     use crate::gui::tabs::{Tab, TabId, TabManager};
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
-    use freminal_common::config::{BellConfig, NotificationsConfig, TabTitlePolicy};
+    use freminal_common::buffer_states::window_manipulation::WindowManipulation;
+    use freminal_common::config::{BellConfig, Config, NotificationsConfig, TabTitlePolicy};
     use freminal_common::cursor::CursorVisualStyle;
+    use freminal_terminal_emulator::io::WindowCommand;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -5247,6 +5347,199 @@ mod tests {
         assert!(
             panes[0].bell_active,
             "on_command_finished + BellMode::Visual must set bell_active"
+        );
+    }
+
+    // ── drain_window_manipulation_commands (Task 122.8) ──────────────────
+    //
+    // Unlike `drain_command_finished_events` (Task 122.7), this function is
+    // not zero-egui: `rendering::handle_window_manipulation` needs `ui` to
+    // send `ViewportCommand`s. `egui::Context::run_ui` (already used above
+    // for the band-shape-range tests) supplies a real `Ui`, so the
+    // active/non-active discard rule can be exercised through the actual
+    // production call rather than a re-implementation of its branching.
+
+    /// Build a `Pane` with a caller-supplied `window_cmd_rx`, for
+    /// `drain_window_manipulation_commands` tests. Mirrors `test_pane`
+    /// above, but keeps the *window-command* sender alive instead of the
+    /// *command-finished* sender, since these tests push `WindowCommand`s
+    /// in rather than `CommandFinishedEvent`s.
+    fn test_window_manip_pane(
+        id: PaneId,
+        window_cmd_rx: crossbeam_channel::Receiver<WindowCommand>,
+    ) -> Pane {
+        let arc_swap = Arc::new(arc_swap::ArcSwap::from_pointee(TerminalSnapshot::empty()));
+        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
+        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
+        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded(1);
+        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
+        let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
+        Pane {
+            id,
+            arc_swap,
+            input_tx,
+            pty_write_tx,
+            window_cmd_rx,
+            clipboard_rx,
+            search_buffer_rx,
+            pty_dead_rx,
+            title: String::new(),
+            bell_active: false,
+            pending_copy: false,
+            title_stack: Vec::new(),
+            view_state: super::view_state::ViewState::new(),
+            echo_off: Arc::new(AtomicBool::new(false)),
+            child_pid: None,
+            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
+                crate::gui::renderer::WindowPostRenderer::new(),
+            ))),
+            render_cache: crate::gui::terminal::PaneRenderCache::new(),
+            command_event_rx,
+            recent_commands: std::collections::VecDeque::new(),
+            history_seed: crate::gui::shell_history::new_seeded_history(),
+            shell_program: None,
+            shell_histfile_last_seen: None,
+            command_texts: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Build a two-tab `TabManager` (tab 0 active, tab 1 non-active) whose
+    /// panes have caller-visible `WindowCommand` senders, for the
+    /// discard-rule tests below.
+    fn two_tab_manager_with_window_cmd_senders() -> (
+        TabManager,
+        crossbeam_channel::Sender<WindowCommand>,
+        crossbeam_channel::Sender<WindowCommand>,
+    ) {
+        let mut ids = PaneIdGenerator::new(0);
+        let (active_tx, active_rx) = crossbeam_channel::unbounded();
+        let (bg_tx, bg_rx) = crossbeam_channel::unbounded();
+        let active_pane = test_window_manip_pane(ids.next_id(), active_rx);
+        let bg_pane = test_window_manip_pane(ids.next_id(), bg_rx);
+
+        let mut tabs = TabManager::new(Tab::new(TabId::first(), active_pane));
+        tabs.add_tab(Tab::new(TabId::offset(1), bg_pane));
+        // `add_tab` switches to the new tab; restore tab 0 as active so tab
+        // 1 is the non-active tab under test, mirroring
+        // `drain_command_finished_events_flags_only_the_non_active_tab`.
+        if let Err(e) = tabs.switch_to(0) {
+            panic!("switch back to tab 0: {e}");
+        }
+
+        (tabs, active_tx, bg_tx)
+    }
+
+    #[test]
+    fn drain_window_manipulation_commands_only_broadcasts_title_for_the_active_pane() {
+        let (mut tabs, active_tx, bg_tx) = two_tab_manager_with_window_cmd_senders();
+
+        // Every pane's own `title` field updates regardless of active
+        // state (`rendering::handle_window_manipulation` always does
+        // `tab_title.clone_from(&title)`) — that is NOT the discriminator.
+        // What must differ is whether the shared OS window title bar is
+        // asserted via `ViewportCommand::Title`, which only the active
+        // tab's active pane may do.
+        if let Err(e) = active_tx.send(WindowCommand::Viewport(
+            WindowManipulation::SetTitleBarText("active-title".to_owned()),
+        )) {
+            panic!("send to active pane: {e}");
+        }
+        if let Err(e) = bg_tx.send(WindowCommand::Viewport(
+            WindowManipulation::SetTitleBarText("bg-title".to_owned()),
+        )) {
+            panic!("send to bg pane: {e}");
+        }
+
+        let config = Config::default();
+        let ctx = egui::Context::default();
+        let mut events = None;
+        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            events = Some(drain_window_manipulation_commands(
+                ui,
+                &mut tabs,
+                8,
+                16,
+                WindowFocus::Focused,
+                &config,
+            ));
+        });
+        let Some(events) = events else {
+            panic!("closure runs synchronously inside run_ui");
+        };
+
+        let title_commands: Vec<String> = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|vp| {
+                vp.commands
+                    .iter()
+                    .filter_map(|c| match c {
+                        egui::ViewportCommand::Title(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        assert_eq!(
+            title_commands,
+            vec!["active-title".to_owned()],
+            "only the active tab's active pane may assert the shared OS window title"
+        );
+
+        // This scenario produces no OSC 9/99/52 events; a title-only frame
+        // must not spuriously populate any of the routed vectors.
+        assert!(events.osc_notifications.is_empty());
+        assert!(events.osc99_notifications.is_empty());
+        assert!(events.osc99_controls.is_empty());
+        assert!(events.osc52_events.is_empty());
+    }
+
+    #[test]
+    fn drain_window_manipulation_commands_discards_viewport_mutation_for_non_active_pane() {
+        let (mut tabs, active_tx, bg_tx) = two_tab_manager_with_window_cmd_senders();
+
+        // `MinimizeWindow` is one of the viewport-mutating commands that
+        // `rendering::handle_window_manipulation` discards outright
+        // (`{}`, no title/report/clipboard side effect at all) when
+        // `!flags.is_active` — a non-active pane must not be able to
+        // minimize the shared OS window.
+        if let Err(e) = active_tx.send(WindowCommand::Viewport(WindowManipulation::MinimizeWindow))
+        {
+            panic!("send to active pane: {e}");
+        }
+        if let Err(e) = bg_tx.send(WindowCommand::Viewport(WindowManipulation::MinimizeWindow)) {
+            panic!("send to bg pane: {e}");
+        }
+
+        let config = Config::default();
+        let ctx = egui::Context::default();
+        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = drain_window_manipulation_commands(
+                ui,
+                &mut tabs,
+                8,
+                16,
+                WindowFocus::Focused,
+                &config,
+            );
+        });
+
+        let minimize_commands: usize = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(0, |vp| {
+                vp.commands
+                    .iter()
+                    .filter(|c| matches!(c, egui::ViewportCommand::Minimized(true)))
+                    .count()
+            });
+
+        assert_eq!(
+            minimize_commands, 1,
+            "exactly one Minimized(true) command must reach the OS window — from the \
+             active pane only, never from the non-active tab's discarded copy"
         );
     }
 }
