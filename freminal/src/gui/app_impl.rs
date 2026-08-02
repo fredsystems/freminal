@@ -783,6 +783,122 @@ fn stage_frame_damage(
     )
 }
 
+/// Per-frame §3.3 boolean signals [`stage_chrome_signals`] needs from its
+/// caller, computed earlier in `central_body` from state this function has
+/// no access to (the style-cache comparison, the previous-active-pane
+/// cache, the #435 `stage_frame_damage` observations, DPI/focus/size
+/// bookkeeping, and the #436 warm-up counter). Grouped into a params
+/// struct to stay under clippy's `too_many_arguments` threshold —
+/// [`FrameDamageInputs`] (above, in this same file) is the in-tree
+/// precedent for this pattern. Each field is an independent,
+/// simultaneously-observable per-frame signal — the same "independent
+/// simultaneous signals" exemption `chrome_damage::ChromeSignals` itself
+/// documents, not a state machine — so grouping in a struct rather than
+/// converting to enums is correct (`freminal-state-representation`).
+///
+/// Field names deliberately mirror the local variables at the
+/// `stage_chrome_signals` call site (not `ChromeSignals`' own field names)
+/// so the forwarding assignment inside `stage_chrome_signals` is a visible
+/// rename, not a silent one.
+#[allow(clippy::struct_excessive_bools)]
+struct ChromeSignalInputs {
+    /// Forwarded to `ChromeSignals::any_overlay_open`.
+    ui_overlay_open: bool,
+    /// Forwarded to `ChromeSignals::style_changed`.
+    chrome_style_changed: bool,
+    /// Forwarded to `ChromeSignals::active_pane_changed`.
+    active_pane_changed: bool,
+    /// Forwarded to `ChromeSignals::shader_active`.
+    shader_recomposites: bool,
+    /// Forwarded to `ChromeSignals::toast_active`.
+    toast_active: bool,
+    /// Forwarded to `ChromeSignals::size_changed`.
+    chrome_size_changed: bool,
+    /// Forwarded to `ChromeSignals::ppp_changed`.
+    ppp_changed: bool,
+    /// Forwarded to `ChromeSignals::focus_changed`.
+    chrome_focus_changed: bool,
+    /// Forwarded to `ChromeSignals::warming_up`.
+    chrome_warming_up: bool,
+    /// Forwarded to `ChromeSignals::foreground_overlay_open`.
+    foreground_overlay_open: bool,
+}
+
+/// Stage this frame's #436.3 [`chrome_damage::ChromeTabSnapshot`] and the
+/// [`chrome_damage::ChromeSignals`] it partly feeds, extracted from
+/// `App::update`'s `central_body` closure (Task 122.10).
+///
+/// Returns both values rather than assigning them: the caller is
+/// responsible for replacing `win.prev_chrome_tab_snapshot` with the
+/// returned snapshot (next frame's diff baseline) and for handing the
+/// returned `ChromeSignals` to
+/// `PublishedChromeState::publish_pending_chrome_signals` — the final
+/// `ChromeDamage` decision additionally needs the after-toast-render
+/// dismissible-presence sample, which can only be taken once
+/// `central_body` returns (the toast overlay renders after it), so this
+/// function only stages the signals; it does not decide or publish
+/// anything. This mirrors [`stage_frame_damage`]'s "return, don't mutate"
+/// shape (122.9) for the same reason: keeping both writes visible at the
+/// call site.
+///
+/// `bell_active` and `active_tab_id` are computed here, inline, exactly as
+/// in the original block, rather than threaded in as extra parameters:
+/// `bell_active` folds `per_pane_damage` (already a parameter, so no
+/// re-evaluation risk) and `active_tab_id` reads `win.tabs.active_tab().id`
+/// directly. Hoisting either out to the caller would only add an
+/// opportunity for it to be evaluated at a different point relative to the
+/// snapshot build than it is today.
+fn stage_chrome_signals(
+    win: &PerWindowState,
+    tab_title_policy: freminal_common::config::TabTitlePolicy,
+    tab_title_separator: &str,
+    pane_layout: &[(panes::PaneId, egui::Rect)],
+    zoomed_pane: Option<panes::PaneId>,
+    per_pane_damage: &[frame_damage::PaneDamageInput],
+    inputs: &ChromeSignalInputs,
+) -> (
+    chrome_damage::ChromeTabSnapshot,
+    chrome_damage::ChromeSignals,
+) {
+    let chrome_tab_snapshot = chrome_damage::ChromeTabSnapshot {
+        tab_ids: win.tabs.iter().map(|t| t.id).collect(),
+        active_tab_id: Some(win.tabs.active_tab().id),
+        tab_titles: win
+            .tabs
+            .iter()
+            .map(|t| {
+                t.display_name(tab_title_policy, tab_title_separator)
+                    .into_owned()
+            })
+            .collect(),
+        pane_ids: pane_layout.iter().map(|(id, _)| *id).collect(),
+        zoomed_pane,
+        broadcast_input: win.tabs.active_tab().broadcast_input,
+    };
+    let chrome_tab_diff =
+        chrome_damage::diff_tab_snapshots(&win.prev_chrome_tab_snapshot, &chrome_tab_snapshot);
+
+    let chrome_signals = chrome_damage::ChromeSignals {
+        any_overlay_open: inputs.ui_overlay_open,
+        style_changed: inputs.chrome_style_changed,
+        active_pane_changed: inputs.active_pane_changed,
+        tab_set_changed: chrome_tab_diff.tab_set_changed,
+        tab_title_changed: chrome_tab_diff.tab_title_changed,
+        pane_layout_changed: chrome_tab_diff.pane_layout_changed,
+        broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
+        shader_active: inputs.shader_recomposites,
+        bell_active: per_pane_damage.iter().any(|p| p.bell_active),
+        toast_active: inputs.toast_active,
+        size_changed: inputs.chrome_size_changed,
+        ppp_changed: inputs.ppp_changed,
+        focus_changed: inputs.chrome_focus_changed,
+        warming_up: inputs.chrome_warming_up,
+        foreground_overlay_open: inputs.foreground_overlay_open,
+    };
+
+    (chrome_tab_snapshot, chrome_signals)
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -3349,48 +3465,28 @@ impl freminal_windowing::App for FreminalGui {
             // toast overlay renders after it) — so `win.published`'s staged
             // chrome signals are a staging value, combined into
             // `win.pending_chrome_damage` near the end of `update()`.
-            let chrome_tab_snapshot = chrome_damage::ChromeTabSnapshot {
-                tab_ids: win.tabs.iter().map(|t| t.id).collect(),
-                active_tab_id: Some(win.tabs.active_tab().id),
-                tab_titles: win
-                    .tabs
-                    .iter()
-                    .map(|t| {
-                        t.display_name(
-                            self.config.tab_title.policy,
-                            &self.config.tab_title.separator,
-                        )
-                        .into_owned()
-                    })
-                    .collect(),
-                pane_ids: pane_layout.iter().map(|(id, _)| *id).collect(),
+            let (chrome_tab_snapshot, chrome_signals) = stage_chrome_signals(
+                &win,
+                self.config.tab_title.policy,
+                &self.config.tab_title.separator,
+                &pane_layout,
                 zoomed_pane,
-                broadcast_input: win.tabs.active_tab().broadcast_input,
-            };
-            let chrome_tab_diff = chrome_damage::diff_tab_snapshots(
-                &win.prev_chrome_tab_snapshot,
-                &chrome_tab_snapshot,
+                &per_pane_damage,
+                &ChromeSignalInputs {
+                    ui_overlay_open,
+                    chrome_style_changed,
+                    active_pane_changed,
+                    shader_recomposites,
+                    toast_active,
+                    chrome_size_changed,
+                    ppp_changed,
+                    chrome_focus_changed,
+                    chrome_warming_up,
+                    foreground_overlay_open,
+                },
             );
             win.prev_chrome_tab_snapshot = chrome_tab_snapshot;
-
-            win.published
-                .publish_pending_chrome_signals(chrome_damage::ChromeSignals {
-                    any_overlay_open: ui_overlay_open,
-                    style_changed: chrome_style_changed,
-                    active_pane_changed,
-                    tab_set_changed: chrome_tab_diff.tab_set_changed,
-                    tab_title_changed: chrome_tab_diff.tab_title_changed,
-                    pane_layout_changed: chrome_tab_diff.pane_layout_changed,
-                    broadcast_state_changed: chrome_tab_diff.broadcast_state_changed,
-                    shader_active: shader_recomposites,
-                    bell_active: per_pane_damage.iter().any(|p| p.bell_active),
-                    toast_active,
-                    size_changed: chrome_size_changed,
-                    ppp_changed,
-                    focus_changed: chrome_focus_changed,
-                    warming_up: chrome_warming_up,
-                    foreground_overlay_open,
-                });
+            win.published.publish_pending_chrome_signals(chrome_signals);
 
             // Task 121 frame-profiling harness follow-up (issue #459/#461
             // gate-blocker investigation): count which individual §3.3
