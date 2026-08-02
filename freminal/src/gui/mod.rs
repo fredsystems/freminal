@@ -44,6 +44,7 @@ mod close_guard;
 mod command_blocks;
 mod command_history;
 mod frame_damage;
+mod frame_drain;
 mod geometry_interop;
 mod hot_reload;
 pub(crate) mod icons;
