@@ -1213,7 +1213,39 @@ reversal of §8 subtask 1.3. Two reasons:
    `1513`, on the KKP release path). **They are not equivalent.** See the
    cleanup entry 122.C1 below.
 
-Deliverable: the two structs, the migrated call site, and a note in this
+**Shape decided (maintainer, 2026-08-02), before implementation started.**
+Recon established that **four of the seven return values are four of the
+parameters, round-tripped** — `last_reported_mouse_pos`, `previous_key`,
+`scroll_amount`, `super_state`, each `let mut x = x;`-shadowed at the top of
+the body and each landing back on a `PaneRenderCache` field at the call site.
+So it is three types, not two:
+
+- `InputCarryState` — the four round-tripped values, appearing in **both** the
+  params and the result, so the in-equals-out invariant is stated rather than
+  left for the reader to notice. `PaneRenderCache` itself is **not** regrouped
+  (out of scope); the call site packs and unpacks.
+- the params struct, carrying `InputCarryState` plus the remaining thirteen.
+- the result struct: the carry plus `left_mouse_button_pressed`,
+  `clipboard_pending`, `deferred_actions`.
+
+Two further decisions:
+
+- **`is_active_pane: bool` becomes a named enum.** It is a bool *parameter* —
+  `freminal-state-representation` rule 1, no exceptions — and that skill names
+  `PaneFocus { Active, Inactive }` as its own exemplar. Converted at the call
+  site; `show`'s own `is_active_pane` parameter is out of scope and unchanged.
+- **The result's two remaining bools stay bools.** `left_mouse_button_pressed`
+  and `clipboard_pending` are independent observation flags composed by the
+  caller (`left |= inner`, `clipboard_pending || *pending_copy`), which is the
+  skill's "independent simultaneous signals" exemption. Naming them as struct
+  fields already removes the positional-tuple hazard rule 3 exists to address.
+  Record this reasoning on the result type.
+
+Also noted during recon, to fix in passing: the existing "Return value" doc
+comment lists **six** bullets for a seven-element tuple — `deferred_actions`
+has no entry.
+
+Deliverable: the structs, the migrated call site, and a note in this
 document confirming byte-for-byte identical behaviour.
 
 Verification: standard suite. The 50 existing tests in `input.rs` must pass
