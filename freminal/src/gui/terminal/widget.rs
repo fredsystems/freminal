@@ -11,7 +11,7 @@ use crate::gui::{
     icons::ChromeIcon,
     mouse::PreviousMouseState,
     shaping::ShapedLine,
-    view_state::{CellCoord, ViewState},
+    view_state::{CellCoord, ImageAnimationTick, ViewState},
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -1630,6 +1630,540 @@ fn image_pixels_changed(
     build_image_pixel_ptrs(images, selected) != *prev
 }
 
+/// Per-`*_changed` dirty-tracking observations computed once per frame by
+/// [`evaluate_frame_dirty_state`].
+///
+/// Each field is an independent, simultaneously-observable signal — more
+/// than one commonly fires together in the same frame (e.g. a fold toggle
+/// alongside a selection change) — so per `freminal-state-representation`'s
+/// exemption for independent simultaneous signals these stay plain `bool`
+/// fields rather than becoming a single enum. Only the *derived*
+/// vertex-rebuild decision ([`VertexRebuild`]) is an enum, because that
+/// value selects between mutually-exclusive code paths.
+// Bools are independent, simultaneously-observable dirty-tracking signals
+// (the `freminal-state-representation` exemption for independent
+// simultaneous signals) — not a state machine, so an enum would add noise
+// without improving clarity.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+struct FrameDirtyObservations {
+    /// Whether the rendered text content, theme, dimensions, or fold layout
+    /// changed since the last full rebuild.
+    content_changed: bool,
+    /// Whether the normalised selection changed since the last full rebuild.
+    selection_changed: bool,
+    /// Whether the search match count or current-match index changed since
+    /// the last full rebuild.
+    search_changed: bool,
+    /// Whether the command-block gutter hover-tint range changed since the
+    /// last full rebuild.
+    hover_changed: bool,
+    /// Whether any visible animated image advanced to a new frame this tick.
+    image_frame_changed: bool,
+    /// Whether any visible image's selected-frame pixel buffer was mutated
+    /// in place since the last full rebuild (e.g. a Kitty `a=c` animation
+    /// compose) without any accompanying cell or `run_mode` change.
+    image_pixels_changed: bool,
+    /// Whether text-blink visibility (slow or fast phase) changed since the
+    /// last full rebuild.
+    text_blink_changed: bool,
+}
+
+/// Which vertex-rebuild path [`FreminalTerminalWidget::show`] should take
+/// this frame, as decided by [`evaluate_frame_dirty_state`].
+///
+/// This is a two-way switch on *what check runs next*, not a description of
+/// what ultimately happens: `CursorOnly` fully determines the frame (patch
+/// the cursor quad, nothing else). `ReevaluateFullRebuild` means the cheap
+/// fast path does not apply — the caller must independently check
+/// [`FrameDirtyObservations`] (and whether the decoration buffer is empty)
+/// to decide between a full vertex rebuild and reusing the previous frame's
+/// GPU buffers completely unchanged. Preserving this shape (rather than
+/// collapsing to a `CursorOnly`/`Full` binary) matters: not every
+/// non-cursor-only frame triggers a full rebuild — the common steady-state
+/// frame (nothing changed at all) takes neither branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VertexRebuild {
+    /// Patch just the cursor quad in the existing decoration buffer
+    /// ([`build_cursor_verts_only`]) — no re-shaping, no full rebuild.
+    CursorOnly,
+    /// Not the cursor-only fast path; the full-rebuild trigger flags must
+    /// still be checked by the caller.
+    ReevaluateFullRebuild,
+}
+
+/// Everything [`evaluate_frame_dirty_state`] computes that the rest of
+/// [`FreminalTerminalWidget::show`] needs afterward: the selected
+/// vertex-rebuild path, the individual damage observations, and the derived
+/// cursor/selection/search/image state shared by the cursor-only and
+/// full-rebuild branches (and, for a few fields, by the post-branch
+/// animation bookkeeping that runs after both).
+struct DirtyTrackingOutcome {
+    /// Which vertex-rebuild path to take this frame.
+    rebuild: VertexRebuild,
+    /// The individual `*_changed` observations the decision was derived
+    /// from.
+    observations: FrameDirtyObservations,
+    /// The normalised selection for this frame (buffer-absolute rows),
+    /// after the content-change auto-clear rule has been applied.
+    current_selection: Option<(CellCoord, CellCoord)>,
+    /// The selection translated into snapshot-row space, clamped to the
+    /// flattened window, for the renderer.
+    screen_selection: Option<(usize, usize, usize, usize)>,
+    /// Number of search matches this frame (cached for next frame's
+    /// comparison).
+    search_match_count: usize,
+    /// Current search match index this frame (cached for next frame's
+    /// comparison).
+    search_current_match: usize,
+    /// Command-block gutter hover-tint rendered-row range this frame.
+    command_block_hover_rows: Option<(usize, usize)>,
+    /// Whether the cursor should actually be drawn this frame (DECTCEM,
+    /// echo-off, active-pane, and fold-visibility all folded in).
+    effective_show_cursor: bool,
+    /// Pixel position of the (possibly trail-animated) visual cursor.
+    cursor_pixel_pos: (f32, f32),
+    /// Horizontal scale factor for the cursor quad (`2.0` on a
+    /// DECDWL/DECDHL row, `1.0` otherwise).
+    cursor_x_scale: f32,
+    /// Whether the cursor-trail animation is still interpolating; drives a
+    /// repaint request after the branch below runs.
+    cursor_animating: bool,
+    /// This frame's Kitty animated-image playback tick result.
+    image_anim_tick: ImageAnimationTick,
+}
+
+/// Compute this frame's dirty-tracking decision: which vertex-rebuild path
+/// [`FreminalTerminalWidget::show`] should take, plus every derived
+/// observation the two candidate branches (and the post-branch animation
+/// bookkeeping) need.
+///
+/// This is `show`'s largest near-pure block. `cache` is read-only here —
+/// nothing is written back into it; the caller does that once the branch it
+/// selects has actually run. The only non-freminal touch is locking
+/// `render_state` to check whether `deco_verts` is empty.
+///
+/// Mutates `view_state` in three ways, in this order (preserved exactly,
+/// since later reads in this same function depend on the earlier writes):
+/// clearing the selection when content genuinely changed (and no selection
+/// is in progress or was just committed), resetting the one-frame
+/// `selection_committed_this_frame` edge flag, and advancing the cursor
+/// trail / image animation clocks.
+/// The borrowed per-frame state [`evaluate_frame_dirty_state`] reads.
+///
+/// Grouped so the function stays under clippy's `too_many_arguments`
+/// threshold without a suppression. Every field is `Copy` (shared
+/// references and a `u64`), so the struct destructures by value at the top
+/// of the function and the body reads exactly as it did inline.
+#[derive(Clone, Copy)]
+struct FrameDirtyContext<'a> {
+    /// The snapshot being rendered this frame.
+    snap: &'a TerminalSnapshot,
+    /// Previous-frame values this decision diffs against. Read-only here.
+    cache: &'a PaneRenderCache,
+    /// Locked only to test whether `deco_verts` is empty.
+    render_state: &'a Arc<Mutex<RenderState>>,
+    /// Command-block fold layout for this frame.
+    layout: &'a FoldLayout,
+    /// Fold-layout generation counter, diffed against the cache.
+    fold_epoch: u64,
+    /// Command-block config, for the gutter hover-row test.
+    command_blocks_config: &'a freminal_common::config::CommandBlocksConfig,
+}
+
+/// Pixel geometry [`evaluate_frame_dirty_state`] needs to translate the
+/// selection into screen coordinates and place the cursor.
+#[derive(Clone, Copy)]
+struct FrameDirtyGeometry {
+    /// The pane's full rect, including the command-block gutter.
+    pane_rect: Rect,
+    /// The terminal band's rect, i.e. `pane_rect` minus the gutter inset.
+    terminal_rect: Rect,
+    /// Total gutter inset in logical points.
+    gutter_inset: f32,
+    /// Logical (not physical) cell height.
+    logical_cell_h: f32,
+    /// Cell width in physical pixels.
+    cell_w_f: f32,
+    /// Row height in physical pixels.
+    row_h_f: f32,
+}
+
+/// Cursor-related inputs for one frame.
+///
+/// These are three independent simultaneous conditions plus a duration, not
+/// a state machine — but they are *parameters*, and a positional bool list
+/// is the case `freminal-state-representation` rule 1 forbids outright.
+/// Naming them as fields is what makes the call site readable.
+#[derive(Clone, Copy)]
+struct CursorFrameInputs {
+    /// Whether the blink phase is currently in its visible half.
+    blink_on: bool,
+    /// Whether the cursor should be drawn at all this frame. Reassigned
+    /// inside the function and returned in [`DirtyTrackingOutcome`].
+    show_cursor: bool,
+    /// Whether the cursor-trail animation is enabled by config.
+    trail_enabled: bool,
+    /// How long a cursor-trail animation runs.
+    trail_duration: Duration,
+}
+
+// `too_many_lines` is genuine: the length comes from the block being
+// extracted, which this does not shorten. The argument count was NOT
+// inherited -- the block was inline and took no parameters at all, so the
+// extraction introduced the signature -- and it is fixed by grouping above
+// rather than suppressed.
+#[allow(clippy::too_many_lines)]
+fn evaluate_frame_dirty_state(
+    ctx: &FrameDirtyContext<'_>,
+    view_state: &mut ViewState,
+    geometry: FrameDirtyGeometry,
+    cursor: CursorFrameInputs,
+) -> DirtyTrackingOutcome {
+    let &FrameDirtyContext {
+        snap,
+        cache,
+        render_state,
+        layout,
+        fold_epoch,
+        command_blocks_config,
+    } = ctx;
+    let FrameDirtyGeometry {
+        pane_rect,
+        terminal_rect,
+        gutter_inset,
+        logical_cell_h,
+        cell_w_f,
+        row_h_f,
+    } = geometry;
+    let CursorFrameInputs {
+        blink_on: cursor_blink_on,
+        show_cursor: mut effective_show_cursor,
+        trail_enabled: cursor_trail,
+        trail_duration: cursor_trail_duration,
+    } = cursor;
+
+    let row_map = &layout.row_map;
+
+    // Detect content changes via `Arc::ptr_eq` — this is immune to the
+    // race where the PTY thread overwrites a "changed" snapshot with a
+    // "clean" one before the GUI wakes up.  If the `visible_chars` arc
+    // is a different allocation from the one we last rendered, the
+    // content has changed regardless of the `content_changed` flag.
+    //
+    // We deliberately do NOT OR in the snapshot's `content_changed`
+    // flag here (issue #439 fix #4). That flag is baked into the
+    // published snapshot at build time, so when the GUI re-reads the
+    // SAME `Arc` on the ~14 frames between real PTY updates it reads a
+    // stale `true` and forces a full vertex rebuild every frame — a
+    // ~60fps rebuild for a screen changing a few times/sec. The
+    // `Arc::ptr_eq` check below already detects every genuine change:
+    // whenever real content changes, `flatten_visible` allocates a NEW
+    // `visible_chars` `Arc` (so ptr_eq fails and we rebuild), and a
+    // cursor-blink re-flatten that produces a byte-identical-but-new
+    // `Arc` also fails ptr_eq and rebuilds. Re-observing the same `Arc`
+    // correctly reports "unchanged". So the raw flag is redundant here
+    // and, worse, sticky — dropping it is what lets an idle screen fall
+    // through to the cheap cursor-only / no-op path.
+    //
+    // Also force a full rebuild when the theme palette changes, since
+    // foreground/background colors are baked into the vertex buffers.
+    let theme_changed = cache
+        .previous_theme
+        .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
+    // Detect terminal grid resize (cols or rows changed).  The cell
+    // background and foreground instance VBOs hold per-cell vertices
+    // that encode column indices and pixel positions based on the
+    // terminal width at build time; drawing them into a viewport sized
+    // for a different column count leaves stale glyph slivers at the
+    // right edge.  Force a full rebuild on resize.
+    let dims_changed = snap.term_width != cache.previous_term_width
+        || snap.term_height != cache.previous_term_height;
+    // Force a rebuild when the fold-range set changes (user folded or
+    // unfolded a command block): the rendered row layout shifts, so
+    // the cached background/foreground vertex buffers are stale even
+    // if `visible_chars` is byte-identical.
+    let folds_changed = fold_epoch != cache.previous_fold_epoch;
+    let content_changed = theme_changed
+        || dims_changed
+        || folds_changed
+        || cache
+            .last_rendered_visible
+            .as_ref()
+            .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars))
+        || cache
+            .last_rendered_line_widths
+            .as_ref()
+            .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_line_widths));
+
+    // Clear the selection when actual terminal text content changes so
+    // stale highlights don't linger over shifted text.  We use
+    // `snap.content_changed` here (NOT the `Arc::ptr_eq`-augmented
+    // `content_changed`) because the PTY thread may re-flatten and
+    // allocate a new Arc for cursor-blink dirty rows even when the
+    // visible text is byte-identical.  Using the broader check would
+    // clear the selection within ~500 ms of mouse release (on every
+    // cursor blink), making copy impossible.
+    //
+    // We also exclude scroll events (`scroll_changed`) — when the
+    // visible window moves (user scrolling OR auto-scroll-to-bottom on
+    // new PTY output), the flat content changes but the underlying
+    // buffer text at the selected rows has not mutated.  Selection
+    // coordinates are buffer-absolute, so they remain valid across
+    // scroll offset changes.
+    //
+    // Edge case: if `enforce_scrollback_limit` evicts rows from the
+    // top of the buffer, all row indices shift and the selection may
+    // point to different text.  This is a pre-existing limitation
+    // shared by all finite-scrollback terminals; the proper fix is to
+    // adjust selection coordinates on eviction, not to clear here.
+    //
+    // We also exclude frames where a selection was just finalized by
+    // a mouse release (`selection_committed_this_frame`). Input is
+    // processed before this auto-clear runs each frame, so by the
+    // time we get here `selection.is_selecting` is already `false`
+    // for a just-completed selection. Without this flag, PTY output
+    // that arrives on the same frame as the release would set
+    // `snap.content_changed` and immediately wipe the
+    // just-committed selection (defect 2, Task 116.2).
+    if snap.content_changed
+        && !snap.scroll_changed
+        && !view_state.selection.is_selecting
+        && !view_state.selection_committed_this_frame
+    {
+        view_state.selection.clear();
+    }
+    // Reset the per-frame edge flag unconditionally so it does not
+    // persist into subsequent frames (Task 116.2).
+    view_state.selection_committed_this_frame = false;
+
+    // Check whether the selection has changed since the last frame.
+    let current_selection = view_state.selection.normalised();
+    let selection_changed = current_selection != cache.previous_selection;
+
+    // Check whether search highlight state has changed since last frame.
+    let search_match_count = view_state.search_state.matches.len();
+    let search_current_match = view_state.search_state.current_match;
+    let search_changed = search_match_count != cache.previous_search_match_count
+        || search_current_match != cache.previous_search_current_match;
+
+    // Convert buffer-absolute selection coordinates to snapshot-row
+    // space for the renderer.  `win_start` is the flattened window top
+    // (it includes the fold extra rows); the snapshot covers `snap_rows`
+    // rows.  Selection rows are later mapped snapshot → rendered →
+    // screen alongside the shaped lines.
+    let win_start = layout.flat_window_start;
+    let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
+
+    // Compute the command-block hover-row range NOW (before the
+    // vertex-rebuild decision) so a hover-only change — which does not
+    // touch text content, selection, or search — still forces a full
+    // rebuild.  The hover tint is baked into the background instance
+    // VBO, so without this a hover change would be invisible until some
+    // other event (PTY output, fold) invalidated the cache.
+    let command_block_hover_rows_early = compute_command_block_hover_rows(
+        snap,
+        view_state,
+        command_blocks_config,
+        layout,
+        pane_rect,
+        terminal_rect,
+        gutter_inset,
+        logical_cell_h,
+    );
+    let hover_changed = command_block_hover_rows_early != cache.previous_command_block_hover_rows;
+
+    let screen_selection = current_selection.and_then(|(s, e)| {
+        // Clamp the selection to the flattened window.  If both start
+        // and end are outside the window, there is nothing to
+        // highlight on screen.
+        let win_end = win_start + snap_rows;
+        if e.row < win_start || s.row >= win_end {
+            return None; // entirely outside visible window
+        }
+        let s_row = s.row.saturating_sub(win_start);
+        let e_row = e
+            .row
+            .saturating_sub(win_start)
+            .min(snap_rows.saturating_sub(1));
+
+        let is_block = view_state.selection.is_block;
+
+        // For linear selections, when the start row is above the
+        // visible window the selection begins at column 0 of the first
+        // visible row.  Block selections always preserve the original
+        // column bounds regardless of row clamping.
+        let s_col = if !is_block && s.row < win_start {
+            0
+        } else {
+            s.col
+        };
+        // Similarly, linear selections that extend below the window
+        // run to the last column.  Block selections keep their column.
+        let e_col = if !is_block && e.row >= win_end {
+            snap.term_width.saturating_sub(1)
+        } else {
+            e.col
+        };
+        Some((s_col, s_row, e_col, e_row))
+    });
+
+    // ── Cursor trail animation ─────────────────────────────────────
+    // Update the animated cursor position.  When trail is enabled, the
+    // visual position glides from the previous location to the new one.
+    // When disabled, it snaps instantly.
+    //
+    // The animation target is in **rendered-row** space — when a fold
+    // collapses rows above the cursor, the cursor's rendered row index
+    // is less than `snap.cursor_pos.y`.  If the cursor's snapshot row
+    // is *inside* a folded range (which shouldn't happen normally
+    // because the prompt is never folded, but is defensible against
+    // races) we suppress the cursor for this frame.
+    // The cursor row is reported relative to the *normal* visible
+    // window top; shift it into snapshot-row space (the flattened
+    // window has `window_extra_rows` extra rows above it), map through
+    // the fold collapse, then to the bottom-anchored screen row.
+    let cursor_snap_row = snap.cursor_pos.y.saturating_add(snap.window_extra_rows);
+    let cursor_screen_row = row_map
+        .snapshot_to_rendered(cursor_snap_row)
+        .and_then(|rendered| layout.rendered_to_screen(rendered));
+    let cursor_visible = cursor_screen_row.is_some();
+    // If the cursor's snapshot row is hidden behind a fold (or scrolled
+    // off the top), suppress it for this frame.  AND-ing here means the
+    // cursor-only fast path and the full rebuild path agree on
+    // visibility.
+    effective_show_cursor = effective_show_cursor && cursor_visible;
+    let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
+    let target_row = cursor_screen_row
+        .unwrap_or(snap.cursor_pos.y)
+        .approx_as::<f32>()
+        .unwrap_or(0.0);
+    let cursor_animating = view_state.update_cursor_animation(
+        target_col,
+        target_row,
+        cursor_trail,
+        cursor_trail_duration,
+    );
+
+    // Compute the pixel position from the (possibly animated) visual
+    // cursor coordinates.  These are fractional cell coords, so we
+    // multiply by cell dimensions in pixels.
+    //
+    // For double-width / double-height rows (DECDWL / DECDHL), the
+    // cursor x-position is scaled by the row's horizontal scale factor
+    // so it aligns with the magnified glyphs.
+    let cursor_row_lw = snap
+        .visible_line_widths
+        .get(cursor_snap_row)
+        .copied()
+        .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
+    let cursor_x_scale = if cursor_row_lw.is_double_width() {
+        2.0
+    } else {
+        1.0
+    };
+    let cursor_pixel_pos = (
+        view_state.cursor_visual_col * cell_w_f * cursor_x_scale,
+        view_state.cursor_visual_row * row_h_f,
+    );
+
+    // ── Kitty animated image playback (Task 100.2c) ─────────────────
+    // Advance the GUI-side wall-clock frame selector for every
+    // animated image visible in this snapshot. A frame change forces
+    // the full-rebuild path below (via `image_frame_changed`) so the
+    // cloned `snap_images` picks up the newly-selected frame's pixels
+    // before `sync_image_textures` runs.
+    let anim_tick = view_state.tick_image_animations(&snap.images);
+    let image_frame_changed = !anim_tick.changed.is_empty();
+
+    // ── Store-level image pixel mutation detection (Task 100.12) ────
+    // A Kitty `a=c` animation compose overwrites an existing frame's
+    // pixels in place (a new `Arc<Vec<u8>>` for that frame) without
+    // touching any cell or `run_mode`, so `content_changed` and
+    // `image_frame_changed` both stay false and the full-rebuild path
+    // (the only path that refreshes `snap_images` and therefore
+    // drives `sync_image_textures`) never runs. Compare the
+    // currently-selected-frame pixel pointer for every visible image
+    // against what was actually uploaded last frame to catch this
+    // case (and any other store-only pixel mutation) directly.
+    //
+    // This is recomputed unconditionally every frame (cheap — a
+    // `HashMap` build over visible images, typically empty) and the
+    // cache is refreshed only when a full rebuild actually runs (see
+    // below), so the comparison always reflects what the GPU last
+    // saw.
+    let image_pixels_changed = image_pixels_changed(
+        &snap.images,
+        |id| view_state.selected_frame(id),
+        &cache.last_rendered_image_pixel_ptrs,
+    );
+
+    // Determine whether we can take the cursor-only fast path.
+    //
+    // Cursor-only: content has not changed, the selection has not
+    // changed, but the cursor blink state or position has changed
+    // since the last frame.  We only need to patch the cursor quad
+    // in the background VBO — no re-shaping and no full vertex
+    // rebuild required.
+    //
+    // When cursor trail is animating, we also enter the cursor-only
+    // path so the visual position is updated each frame.
+    let cursor_state_changed = cursor_blink_on != cache.previous_cursor_blink_on
+        || snap.cursor_pos != cache.previous_cursor_pos
+        || effective_show_cursor != cache.previous_show_cursor
+        || snap.cursor_color_override != cache.previous_cursor_color_override
+        || cursor_animating;
+
+    // A text-blink visibility change requires rebuilding the foreground
+    // vertex buffer (glyphs are included or excluded per run).  This is
+    // a separate trigger from cursor-only so it always goes through the
+    // full rebuild path.
+    let text_blink_changed = snap.has_blinking_text
+        && (view_state.text_blink_slow_visible != cache.previous_text_blink_slow_visible
+            || view_state.text_blink_fast_visible != cache.previous_text_blink_fast_visible);
+
+    let cursor_only = !content_changed
+        && !selection_changed
+        && !text_blink_changed
+        && !search_changed
+        && !hover_changed
+        && !image_frame_changed
+        && !image_pixels_changed
+        && cursor_state_changed
+        && !render_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deco_verts
+            .is_empty();
+
+    DirtyTrackingOutcome {
+        rebuild: if cursor_only {
+            VertexRebuild::CursorOnly
+        } else {
+            VertexRebuild::ReevaluateFullRebuild
+        },
+        observations: FrameDirtyObservations {
+            content_changed,
+            selection_changed,
+            search_changed,
+            hover_changed,
+            image_frame_changed,
+            image_pixels_changed,
+            text_blink_changed,
+        },
+        current_selection,
+        screen_selection,
+        search_match_count,
+        search_current_match,
+        command_block_hover_rows: command_block_hover_rows_early,
+        effective_show_cursor,
+        cursor_pixel_pos,
+        cursor_x_scale,
+        cursor_animating,
+        image_anim_tick: anim_tick,
+    }
+}
+
 /// The egui widget that owns and drives the terminal render pipeline.
 ///
 /// `FreminalTerminalWidget` holds shared resources that are common across all
@@ -2365,686 +2899,457 @@ impl FreminalTerminalWidget {
         };
 
         if !snap.skip_draw {
-            // Detect content changes via `Arc::ptr_eq` — this is immune to the
-            // race where the PTY thread overwrites a "changed" snapshot with a
-            // "clean" one before the GUI wakes up.  If the `visible_chars` arc
-            // is a different allocation from the one we last rendered, the
-            // content has changed regardless of the `content_changed` flag.
-            //
-            // We deliberately do NOT OR in the snapshot's `content_changed`
-            // flag here (issue #439 fix #4). That flag is baked into the
-            // published snapshot at build time, so when the GUI re-reads the
-            // SAME `Arc` on the ~14 frames between real PTY updates it reads a
-            // stale `true` and forces a full vertex rebuild every frame — a
-            // ~60fps rebuild for a screen changing a few times/sec. The
-            // `Arc::ptr_eq` check below already detects every genuine change:
-            // whenever real content changes, `flatten_visible` allocates a NEW
-            // `visible_chars` `Arc` (so ptr_eq fails and we rebuild), and a
-            // cursor-blink re-flatten that produces a byte-identical-but-new
-            // `Arc` also fails ptr_eq and rebuilds. Re-observing the same `Arc`
-            // correctly reports "unchanged". So the raw flag is redundant here
-            // and, worse, sticky — dropping it is what lets an idle screen fall
-            // through to the cheap cursor-only / no-op path.
-            //
-            // Also force a full rebuild when the theme palette changes, since
-            // foreground/background colors are baked into the vertex buffers.
-            let theme_changed = cache
-                .previous_theme
-                .is_none_or(|prev| !std::ptr::eq(prev, snap.theme));
-            // Detect terminal grid resize (cols or rows changed).  The cell
-            // background and foreground instance VBOs hold per-cell vertices
-            // that encode column indices and pixel positions based on the
-            // terminal width at build time; drawing them into a viewport sized
-            // for a different column count leaves stale glyph slivers at the
-            // right edge.  Force a full rebuild on resize.
-            let dims_changed = snap.term_width != cache.previous_term_width
-                || snap.term_height != cache.previous_term_height;
-            // Force a rebuild when the fold-range set changes (user folded or
-            // unfolded a command block): the rendered row layout shifts, so
-            // the cached background/foreground vertex buffers are stale even
-            // if `visible_chars` is byte-identical.
-            let folds_changed = fold_epoch != cache.previous_fold_epoch;
-            let content_changed = theme_changed
-                || dims_changed
-                || folds_changed
-                || cache
-                    .last_rendered_visible
-                    .as_ref()
-                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars))
-                || cache
-                    .last_rendered_line_widths
-                    .as_ref()
-                    .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_line_widths));
-
-            // Clear the selection when actual terminal text content changes so
-            // stale highlights don't linger over shifted text.  We use
-            // `snap.content_changed` here (NOT the `Arc::ptr_eq`-augmented
-            // `content_changed`) because the PTY thread may re-flatten and
-            // allocate a new Arc for cursor-blink dirty rows even when the
-            // visible text is byte-identical.  Using the broader check would
-            // clear the selection within ~500 ms of mouse release (on every
-            // cursor blink), making copy impossible.
-            //
-            // We also exclude scroll events (`scroll_changed`) — when the
-            // visible window moves (user scrolling OR auto-scroll-to-bottom on
-            // new PTY output), the flat content changes but the underlying
-            // buffer text at the selected rows has not mutated.  Selection
-            // coordinates are buffer-absolute, so they remain valid across
-            // scroll offset changes.
-            //
-            // Edge case: if `enforce_scrollback_limit` evicts rows from the
-            // top of the buffer, all row indices shift and the selection may
-            // point to different text.  This is a pre-existing limitation
-            // shared by all finite-scrollback terminals; the proper fix is to
-            // adjust selection coordinates on eviction, not to clear here.
-            //
-            // We also exclude frames where a selection was just finalized by
-            // a mouse release (`selection_committed_this_frame`). Input is
-            // processed before this auto-clear runs each frame, so by the
-            // time we get here `selection.is_selecting` is already `false`
-            // for a just-completed selection. Without this flag, PTY output
-            // that arrives on the same frame as the release would set
-            // `snap.content_changed` and immediately wipe the
-            // just-committed selection (defect 2, Task 116.2).
-            if snap.content_changed
-                && !snap.scroll_changed
-                && !view_state.selection.is_selecting
-                && !view_state.selection_committed_this_frame
-            {
-                view_state.selection.clear();
-            }
-            // Reset the per-frame edge flag unconditionally so it does not
-            // persist into subsequent frames (Task 116.2).
-            view_state.selection_committed_this_frame = false;
-
-            // Check whether the selection has changed since the last frame.
-            let current_selection = view_state.selection.normalised();
-            let selection_changed = current_selection != cache.previous_selection;
-
-            // Check whether search highlight state has changed since last frame.
-            let search_match_count = view_state.search_state.matches.len();
-            let search_current_match = view_state.search_state.current_match;
-            let search_changed = search_match_count != cache.previous_search_match_count
-                || search_current_match != cache.previous_search_current_match;
-
-            // Convert buffer-absolute selection coordinates to snapshot-row
-            // space for the renderer.  `win_start` is the flattened window top
-            // (it includes the fold extra rows); the snapshot covers `snap_rows`
-            // rows.  Selection rows are later mapped snapshot → rendered →
-            // screen alongside the shaped lines.
-            let win_start = flat_window_start;
-            let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
-
-            // Compute the command-block hover-row range NOW (before the
-            // vertex-rebuild decision) so a hover-only change — which does not
-            // touch text content, selection, or search — still forces a full
-            // rebuild.  The hover tint is baked into the background instance
-            // VBO, so without this a hover change would be invisible until some
-            // other event (PTY output, fold) invalidated the cache.
-            let command_block_hover_rows_early = compute_command_block_hover_rows(
-                snap,
+            // See `evaluate_frame_dirty_state`'s doc for the full rationale
+            // behind every flag and translation computed here; this call
+            // site only destructures the result back into the same local
+            // names the two branches below (and the post-branch animation
+            // bookkeeping) already expect.
+            let dirty = evaluate_frame_dirty_state(
+                &FrameDirtyContext {
+                    snap,
+                    cache,
+                    render_state,
+                    layout: &layout,
+                    fold_epoch,
+                    command_blocks_config,
+                },
                 view_state,
-                command_blocks_config,
-                &layout,
-                pane_rect,
-                terminal_rect,
-                gutter_inset,
-                logical_cell_h,
+                FrameDirtyGeometry {
+                    pane_rect,
+                    terminal_rect,
+                    gutter_inset,
+                    logical_cell_h,
+                    cell_w_f,
+                    row_h_f,
+                },
+                CursorFrameInputs {
+                    blink_on: cursor_blink_on,
+                    show_cursor: effective_show_cursor,
+                    trail_enabled: self.cursor_trail,
+                    trail_duration: self.cursor_trail_duration,
+                },
             );
-            let hover_changed =
-                command_block_hover_rows_early != cache.previous_command_block_hover_rows;
-
-            let screen_selection = current_selection.and_then(|(s, e)| {
-                // Clamp the selection to the flattened window.  If both start
-                // and end are outside the window, there is nothing to
-                // highlight on screen.
-                let win_end = win_start + snap_rows;
-                if e.row < win_start || s.row >= win_end {
-                    return None; // entirely outside visible window
-                }
-                let s_row = s.row.saturating_sub(win_start);
-                let e_row = e
-                    .row
-                    .saturating_sub(win_start)
-                    .min(snap_rows.saturating_sub(1));
-
-                let is_block = view_state.selection.is_block;
-
-                // For linear selections, when the start row is above the
-                // visible window the selection begins at column 0 of the first
-                // visible row.  Block selections always preserve the original
-                // column bounds regardless of row clamping.
-                let s_col = if !is_block && s.row < win_start {
-                    0
-                } else {
-                    s.col
-                };
-                // Similarly, linear selections that extend below the window
-                // run to the last column.  Block selections keep their column.
-                let e_col = if !is_block && e.row >= win_end {
-                    snap.term_width.saturating_sub(1)
-                } else {
-                    e.col
-                };
-                Some((s_col, s_row, e_col, e_row))
-            });
-
-            // ── Cursor trail animation ─────────────────────────────────────
-            // Update the animated cursor position.  When trail is enabled, the
-            // visual position glides from the previous location to the new one.
-            // When disabled, it snaps instantly.
-            //
-            // The animation target is in **rendered-row** space — when a fold
-            // collapses rows above the cursor, the cursor's rendered row index
-            // is less than `snap.cursor_pos.y`.  If the cursor's snapshot row
-            // is *inside* a folded range (which shouldn't happen normally
-            // because the prompt is never folded, but is defensible against
-            // races) we suppress the cursor for this frame.
-            // The cursor row is reported relative to the *normal* visible
-            // window top; shift it into snapshot-row space (the flattened
-            // window has `window_extra_rows` extra rows above it), map through
-            // the fold collapse, then to the bottom-anchored screen row.
-            let cursor_snap_row = snap.cursor_pos.y.saturating_add(snap.window_extra_rows);
-            let cursor_screen_row = row_map
-                .snapshot_to_rendered(cursor_snap_row)
-                .and_then(|rendered| layout.rendered_to_screen(rendered));
-            let cursor_visible = cursor_screen_row.is_some();
-            // If the cursor's snapshot row is hidden behind a fold (or scrolled
-            // off the top), suppress it for this frame.  AND-ing here means the
-            // cursor-only fast path and the full rebuild path agree on
-            // visibility.
-            effective_show_cursor = effective_show_cursor && cursor_visible;
-            let target_col = snap.cursor_pos.x.approx_as::<f32>().unwrap_or(0.0);
-            let target_row = cursor_screen_row
-                .unwrap_or(snap.cursor_pos.y)
-                .approx_as::<f32>()
-                .unwrap_or(0.0);
-            let cursor_animating = view_state.update_cursor_animation(
-                target_col,
-                target_row,
-                self.cursor_trail,
-                self.cursor_trail_duration,
-            );
-
-            // Compute the pixel position from the (possibly animated) visual
-            // cursor coordinates.  These are fractional cell coords, so we
-            // multiply by cell dimensions in pixels.
-            //
-            // For double-width / double-height rows (DECDWL / DECDHL), the
-            // cursor x-position is scaled by the row's horizontal scale factor
-            // so it aligns with the magnified glyphs.
-            let cursor_row_lw = snap
-                .visible_line_widths
-                .get(cursor_snap_row)
-                .copied()
-                .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
-            let cursor_x_scale = if cursor_row_lw.is_double_width() {
-                2.0
-            } else {
-                1.0
-            };
-            let cursor_pixel_pos = (
-                view_state.cursor_visual_col * cell_w_f * cursor_x_scale,
-                view_state.cursor_visual_row * row_h_f,
-            );
-
-            // ── Kitty animated image playback (Task 100.2c) ─────────────────
-            // Advance the GUI-side wall-clock frame selector for every
-            // animated image visible in this snapshot. A frame change forces
-            // the full-rebuild path below (via `image_frame_changed`) so the
-            // cloned `snap_images` picks up the newly-selected frame's pixels
-            // before `sync_image_textures` runs.
-            let anim_tick = view_state.tick_image_animations(&snap.images);
-            let image_frame_changed = !anim_tick.changed.is_empty();
-
-            // ── Store-level image pixel mutation detection (Task 100.12) ────
-            // A Kitty `a=c` animation compose overwrites an existing frame's
-            // pixels in place (a new `Arc<Vec<u8>>` for that frame) without
-            // touching any cell or `run_mode`, so `content_changed` and
-            // `image_frame_changed` both stay false and the full-rebuild path
-            // (the only path that refreshes `snap_images` and therefore
-            // drives `sync_image_textures`) never runs. Compare the
-            // currently-selected-frame pixel pointer for every visible image
-            // against what was actually uploaded last frame to catch this
-            // case (and any other store-only pixel mutation) directly.
-            //
-            // This is recomputed unconditionally every frame (cheap — a
-            // `HashMap` build over visible images, typically empty) and the
-            // cache is refreshed only when a full rebuild actually runs (see
-            // below), so the comparison always reflects what the GPU last
-            // saw.
-            let image_pixels_changed = image_pixels_changed(
-                &snap.images,
-                |id| view_state.selected_frame(id),
-                &cache.last_rendered_image_pixel_ptrs,
-            );
-
-            // Determine whether we can take the cursor-only fast path.
-            //
-            // Cursor-only: content has not changed, the selection has not
-            // changed, but the cursor blink state or position has changed
-            // since the last frame.  We only need to patch the cursor quad
-            // in the background VBO — no re-shaping and no full vertex
-            // rebuild required.
-            //
-            // When cursor trail is animating, we also enter the cursor-only
-            // path so the visual position is updated each frame.
-            let cursor_state_changed = cursor_blink_on != cache.previous_cursor_blink_on
-                || snap.cursor_pos != cache.previous_cursor_pos
-                || effective_show_cursor != cache.previous_show_cursor
-                || snap.cursor_color_override != cache.previous_cursor_color_override
-                || cursor_animating;
-
-            // A text-blink visibility change requires rebuilding the foreground
-            // vertex buffer (glyphs are included or excluded per run).  This is
-            // a separate trigger from cursor-only so it always goes through the
-            // full rebuild path.
-            let text_blink_changed = snap.has_blinking_text
-                && (view_state.text_blink_slow_visible != cache.previous_text_blink_slow_visible
-                    || view_state.text_blink_fast_visible
-                        != cache.previous_text_blink_fast_visible);
-
-            let cursor_only = !content_changed
-                && !selection_changed
-                && !text_blink_changed
-                && !search_changed
-                && !hover_changed
-                && !image_frame_changed
-                && !image_pixels_changed
-                && cursor_state_changed
-                && !render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .deco_verts
-                    .is_empty();
+            let content_changed = dirty.observations.content_changed;
+            let selection_changed = dirty.observations.selection_changed;
+            let search_changed = dirty.observations.search_changed;
+            let hover_changed = dirty.observations.hover_changed;
+            let image_frame_changed = dirty.observations.image_frame_changed;
+            let image_pixels_changed = dirty.observations.image_pixels_changed;
+            let text_blink_changed = dirty.observations.text_blink_changed;
+            let current_selection = dirty.current_selection;
+            let screen_selection = dirty.screen_selection;
+            let search_match_count = dirty.search_match_count;
+            let search_current_match = dirty.search_current_match;
+            let command_block_hover_rows_early = dirty.command_block_hover_rows;
+            effective_show_cursor = dirty.effective_show_cursor;
+            let cursor_pixel_pos = dirty.cursor_pixel_pos;
+            let cursor_x_scale = dirty.cursor_x_scale;
+            let cursor_animating = dirty.cursor_animating;
+            let anim_tick = dirty.image_anim_tick;
 
             // Default: this pane rendered no change (the no-op reuse branch).
             // The cursor-only and full-rebuild branches below overwrite this
             // with the appropriate `PaneFrameDamage` (#435).
             cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Unchanged;
 
-            if cursor_only {
-                // Fast path: build just the cursor quad and stash it.
-                let cursor_verts = build_cursor_verts_only(
-                    cell_w,
-                    cell_h,
-                    effective_show_cursor,
-                    cursor_blink_on,
-                    cursor_pixel_pos,
-                    cursor_x_scale,
-                    &snap.cursor_visual_style,
-                    snap.theme,
-                    snap.cursor_color_override,
-                );
-                is_cursor_only = true;
-
-                // Compute the frame-damage rect (#435): the region that
-                // actually changed this frame, so the windowing layer can
-                // skip the full clear and present only this rect. The changed
-                // region is the union of the cursor's *previous* cell (whose
-                // glyph is revealed when the cursor moves or blinks off) and
-                // its *current* cell. Coordinates are physical framebuffer
-                // pixels; `CursorDamage` handles the Y-flip to GL origin.
-                //
-                // Convert the terminal viewport's logical top-left to physical
-                // pixels, and derive the framebuffer height from egui's screen
-                // rect (logical) scaled by `ppp`.
-                let vp_left_px = terminal_rect.min.x * ppp;
-                let vp_top_px = terminal_rect.min.y * ppp;
-                let screen_h_logical = ui
-                    .ctx()
-                    .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.max.y));
-                let fb_height_px: i32 = (screen_h_logical * ppp)
-                    .ceil()
-                    .approx_as_by::<i32, conv2::RoundToNearest>()
-                    .unwrap_or(0);
-                let cell_w_px = cell_w_f * cursor_x_scale;
-                // Current cursor cell, relative to the viewport top-left.
-                let (cur_x, cur_y) = cursor_pixel_pos;
-                let mut damage_cells: Vec<(f32, f32, f32, f32)> =
-                    vec![(cur_x, cur_y, cell_w_px, row_h_f)];
-                // If the cursor moved since last frame, also damage the old
-                // cell so the present covers the revealed glyph there.
-                let prev = cache.previous_cursor_pos;
-                if prev != snap.cursor_pos {
-                    // The vacated cell's horizontal scale is the PREVIOUS
-                    // row's line width, not the current row's — they can
-                    // differ (DECDWL/DECDHL), and using the current row's
-                    // scale would under-cover a revealed double-width glyph.
-                    let prev_x_scale = snap
-                        .visible_line_widths
-                        .get(prev.y)
-                        .copied()
-                        .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
-                    let prev_scale = if prev_x_scale.is_double_width() {
-                        2.0
-                    } else {
-                        1.0
-                    };
-                    let prev_x = prev.x.approx_as::<f32>().unwrap_or(0.0) * cell_w_f * prev_scale;
-                    let prev_y = prev.y.approx_as::<f32>().unwrap_or(0.0) * row_h_f;
-                    let prev_cell_w = cell_w_f * prev_scale;
-                    damage_cells.push((prev_x, prev_y, prev_cell_w, row_h_f));
-                }
-                let cursor_damage = crate::gui::renderer::CursorDamage::from_cursor_cells(
-                    vp_left_px,
-                    vp_top_px,
-                    fb_height_px,
-                    &damage_cells,
-                );
-                cache.last_frame_cursor_damage =
-                    crate::gui::renderer::PaneFrameDamage::CursorOnly(cursor_damage);
-                cursor_only_scissor = cursor_damage;
-
-                let mut rs = render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // We overwrite the cursor quad data in the CPU copy so that if
-                // a full rebuild happens next frame it starts from correct state.
-                let cfo = rs.cursor_vert_float_offset;
-                patch_cursor_only_deco_verts(&mut rs.deco_verts, cfo, &cursor_verts);
-            } else if content_changed
-                || selection_changed
-                || text_blink_changed
-                || search_changed
-                || hover_changed
-                || image_frame_changed
-                || image_pixels_changed
-                || render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .deco_verts
-                    .is_empty()
-            {
-                // Full rebuild path: the whole pane changed, so the frame
-                // must clear + present fully (#435).
-                cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Full;
-
-                let shaped_lines = cache.shaping_cache.shape_visible(
-                    &snap.visible_chars,
-                    &snap.visible_tags,
-                    snap.term_width,
-                    &mut self.font_manager,
-                    cell_w_f,
-                    self.ligatures,
-                    &snap.visible_line_widths,
-                );
-
-                // ── Apply folding to shaped_lines ─────────────────────────
-                //
-                // The renderer iterates `shaped_lines` by enumerated index
-                // and treats that index as the screen row.  When folds are
-                // active, the rendered row layout differs from the snapshot
-                // row layout: each folded range collapses to a single
-                // *placeholder* row.  Build a new Vec sized to
-                // `rendered_row_count`, mapping each rendered row index back
-                // to its snapshot row (or to a blank placeholder).
-                //
-                // 72.10b-3: each placeholder row carries a shaped line of
-                // `"▶ {N} lines hidden — click to unfold"` rendered in a
-                // dim foreground colour (BrightBlack from the active
-                // palette).  Per-placeholder hit rects are recorded into
-                // `cache.placeholder_hit_rects` so the input handler can
-                // turn primary clicks on those rows into `view_state.unfold()`.
-                cache.placeholder_hit_rects.clear();
-                let rendered_shaped_lines: Vec<Arc<ShapedLine>> = if row_map.ranges().is_empty()
-                    && render_skip == 0
-                    && snap.window_extra_rows == 0
-                {
-                    // No folds and no extra rows: snapshot rows == screen rows.
-                    shaped_lines
-                } else {
-                    let empty_placeholder = Arc::new(ShapedLine {
-                        runs: Vec::new(),
-                        line_width: LineWidth::Normal,
-                    });
-                    let dim_fg = freminal_common::colors::TerminalColor::BrightBlack;
-                    // Paint exactly the bottom `term_height` rendered rows
-                    // (screen rows). `render_skip` rendered rows are scrolled
-                    // off the top so the live bottom stays pinned.
-                    let mut out: Vec<Arc<ShapedLine>> = Vec::with_capacity(snap.term_height);
-                    for screen in 0..snap.term_height {
-                        let rendered = layout.screen_to_rendered(screen);
-                        match row_map.rendered_to_snapshot(rendered) {
-                            Some(RenderedRow::Snapshot(snap_row)) => {
-                                out.push(
-                                    shaped_lines
-                                        .get(snap_row)
-                                        .cloned()
-                                        .unwrap_or_else(|| Arc::clone(&empty_placeholder)),
-                                );
-                            }
-                            Some(RenderedRow::Placeholder(range)) => {
-                                let text = format_placeholder_text(
-                                    range.block_total_rows,
-                                    snap.term_width,
-                                );
-                                let shaped = crate::gui::shaping::shape_placeholder_line(
-                                    &text,
-                                    dim_fg,
-                                    &mut self.font_manager,
-                                    cell_w_f,
-                                    self.ligatures,
-                                );
-                                out.push(Arc::new(shaped));
-
-                                // Record the placeholder's hit rect in
-                                // logical pixel coordinates (screen row) so the
-                                // input handler (which sees pointer positions in
-                                // window coordinates) can hit-test against it
-                                // directly.
-                                let screen_f = screen.approx_as::<f32>().unwrap_or(0.0);
-                                let row_top = screen_f.mul_add(logical_cell_h, terminal_rect.min.y);
-                                let rect = Rect::from_min_size(
-                                    egui::pos2(terminal_rect.min.x, row_top),
-                                    egui::vec2(terminal_rect.width(), logical_cell_h),
-                                );
-                                cache
-                                    .placeholder_hit_rects
-                                    .push((rect, range.command_block_id));
-                            }
-                            None => {
-                                out.push(Arc::clone(&empty_placeholder));
-                            }
-                        }
-                    }
-                    out
-                };
-
-                // Build search match highlights from the current search state.
-                // Only matches within the flattened window are included, with
-                // rows converted from buffer-absolute to snapshot-relative.
-                let win_start = flat_window_start;
-                let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
-                let search_highlights_snap: Vec<MatchHighlight> =
-                    matches_to_highlights(&view_state.search_state, win_start, snap_rows);
-                // Translate from snapshot-row space to screen-row space and
-                // drop highlights inside folded ranges or scrolled off the top.
-                let search_highlights: Vec<MatchHighlight> =
-                    if row_map.ranges().is_empty() && render_skip == 0 {
-                        search_highlights_snap
-                    } else {
-                        search_highlights_snap
-                            .into_iter()
-                            .filter_map(|h| {
-                                let rendered = row_map.snapshot_to_rendered(h.row)?;
-                                let screen = layout.rendered_to_screen(rendered)?;
-                                Some(MatchHighlight { row: screen, ..h })
-                            })
-                            .collect()
-                    };
-
-                // Translate the selection's row indices from snapshot to
-                // bottom-anchored screen space.  If either endpoint sits inside
-                // a folded range or is scrolled off the top, drop the selection
-                // for this frame (it will reappear when the user unfolds /
-                // scrolls back).
-                let screen_selection_rendered = if row_map.ranges().is_empty() && render_skip == 0 {
-                    screen_selection
-                } else {
-                    screen_selection.and_then(|(sc, sr, ec, er)| {
-                        let sr_s = layout.rendered_to_screen(row_map.snapshot_to_rendered(sr)?)?;
-                        let er_s = layout.rendered_to_screen(row_map.snapshot_to_rendered(er)?)?;
-                        Some((sc, sr_s, ec, er_s))
-                    })
-                };
-
-                // ── Command-block hover-row range (current frame) ──
-                //
-                // Determine which OSC 133 block (if any) the mouse is
-                // hovering over and compute its rendered-row span.  The
-                // result is passed into `BackgroundFrame` so the tint
-                // is drawn alongside selection / search highlights in
-                // the same vertex batch.  Disabled when the feature is
-                // off, when the alternate screen is active (command
-                // blocks describe primary-screen rows and must not tint
-                // a full-screen TUI), or when no blocks exist.
-                //
-                // Two trigger surfaces feed this: hovering a cell inside
-                // the terminal area (72.12), and hovering the command-block
-                // gutter strip (73.3).  73.5 will retire the cell trigger,
-                // leaving the gutter as the sole affordance.
-                // `command_block_hover_rows` was computed earlier (before the
-                // vertex-rebuild decision) so a hover-only change can force a
-                // rebuild; reuse it here.
-                let command_block_hover_rows = command_block_hover_rows_early;
-
-                // Acquire the lock early so all vertex builders can write
-                // directly into the persistent `RenderState` Vecs, reusing
-                // their heap allocations (clear+extend pattern) instead of
-                // allocating fresh Vecs every frame.
-                let mut rs = render_state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // Reborrow through `&mut *rs` so the borrow checker can see
-                // disjoint field accesses (MutexGuard's DerefMut is opaque).
-                let rs_ref: &mut RenderState = &mut rs;
-
-                let cursor_quad_appended = build_background_instances(
-                    &BackgroundFrame {
-                        shaped_lines: &rendered_shaped_lines,
-                        cell_width: cell_w,
-                        cell_height: cell_h,
-                        ascent: self.font_manager.ascent(),
-                        underline_offset: self.font_manager.underline_offset(),
-                        strikeout_offset: self.font_manager.strikeout_offset(),
-                        stroke_size: self.font_manager.stroke_size(),
-                        show_cursor: effective_show_cursor,
+            match dirty.rebuild {
+                VertexRebuild::CursorOnly => {
+                    // Fast path: build just the cursor quad and stash it.
+                    let cursor_verts = build_cursor_verts_only(
+                        cell_w,
+                        cell_h,
+                        effective_show_cursor,
                         cursor_blink_on,
                         cursor_pixel_pos,
-                        cursor_width_scale: cursor_x_scale,
-                        cursor_visual_style: &snap.cursor_visual_style,
-                        selection: screen_selection_rendered,
-                        selection_is_block: view_state.selection.is_block,
-                        match_highlights: &search_highlights,
-                        command_block_hover_rows,
-                        term_width_cols: snap.term_width,
-                        theme: snap.theme,
-                        cursor_color_override: snap.cursor_color_override,
-                        // Task 115.2: DECSCNM (whole-screen reverse video)
-                        // composes with per-cell SGR-7 by XOR inside the
-                        // vertex builders via `effective_fg`/`effective_bg`.
-                        // `is_normal_display` is `true` for normal display,
-                        // so DECSCNM-active is its negation.
-                        reverse_screen: !snap.is_normal_display,
-                    },
-                    &mut rs_ref.bg_instances,
-                    &mut rs_ref.deco_verts,
-                );
+                        cursor_x_scale,
+                        &snap.cursor_visual_style,
+                        snap.theme,
+                        snap.cursor_color_override,
+                    );
+                    is_cursor_only = true;
 
-                // Record where the cursor quad starts in the decoration VBO.
-                // The cursor is always appended at the END of deco_verts, and
-                // is exactly CURSOR_QUAD_FLOATS floats (or absent when
-                // hidden). MUST use `cursor_quad_appended` (the authoritative
-                // answer from `build_background_instances`) rather than
-                // re-deriving it from `effective_show_cursor` alone —
-                // `effective_show_cursor` does not account for the blink
-                // phase, so recomputing it here could disagree with what was
-                // actually appended whenever this rebuild happened to land on
-                // the cursor's blink-off phase, corrupting a later
-                // cursor-only patch (issue #432).
-                let cursor_vert_float_offset = if cursor_quad_appended {
-                    rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
-                } else {
-                    rs_ref.deco_verts.len()
-                };
-
-                let fg_opts = FgRenderOptions {
-                    selection: screen_selection_rendered,
-                    selection_is_block: view_state.selection.is_block,
-                    text_blink_slow_visible: view_state.text_blink_slow_visible,
-                    text_blink_fast_visible: view_state.text_blink_fast_visible,
-                    // Task 115.2: see the matching `BackgroundFrame`
-                    // construction above for the XOR-compose rationale.
-                    reverse_screen: !snap.is_normal_display,
-                };
-                build_foreground_instances(
-                    &rendered_shaped_lines,
-                    &mut rs_ref.atlas,
-                    &self.font_manager,
-                    cell_h,
-                    self.font_manager.ascent(),
-                    &fg_opts,
-                    snap.theme,
-                    &mut rs_ref.fg_instances,
-                );
-                build_image_verts(
-                    &snap.visible_image_placements,
-                    &snap.images,
-                    snap.term_width,
-                    cell_w,
-                    cell_h,
-                    &mut rs_ref.image_verts,
-                    &mut rs_ref.image_draw_order,
-                );
-                // Clone the image map into RenderState so the PaintCallback
-                // (which must be Send+Sync+'static) can pass it to the renderer.
-                rs_ref.snap_images.clone_from(snap.images.as_ref());
-                // Overwrite each animated image's pixels with the frame
-                // currently selected by the GUI-side wall-clock playback
-                // clock (Task 100.2c). `build_image_verts` above only reads
-                // frame-invariant display dims, so only the texture-upload
-                // path (which reads `img.pixels`) needs the swapped frame.
-                for (id, img) in &mut rs_ref.snap_images {
-                    if img.is_animated()
-                        && let Some(px) = img.frame_pixels(view_state.selected_frame(*id))
-                    {
-                        img.pixels = Arc::clone(px);
+                    // Compute the frame-damage rect (#435): the region that
+                    // actually changed this frame, so the windowing layer can
+                    // skip the full clear and present only this rect. The changed
+                    // region is the union of the cursor's *previous* cell (whose
+                    // glyph is revealed when the cursor moves or blinks off) and
+                    // its *current* cell. Coordinates are physical framebuffer
+                    // pixels; `CursorDamage` handles the Y-flip to GL origin.
+                    //
+                    // Convert the terminal viewport's logical top-left to physical
+                    // pixels, and derive the framebuffer height from egui's screen
+                    // rect (logical) scaled by `ppp`.
+                    let vp_left_px = terminal_rect.min.x * ppp;
+                    let vp_top_px = terminal_rect.min.y * ppp;
+                    let screen_h_logical = ui
+                        .ctx()
+                        .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.max.y));
+                    let fb_height_px: i32 = (screen_h_logical * ppp)
+                        .ceil()
+                        .approx_as_by::<i32, conv2::RoundToNearest>()
+                        .unwrap_or(0);
+                    let cell_w_px = cell_w_f * cursor_x_scale;
+                    // Current cursor cell, relative to the viewport top-left.
+                    let (cur_x, cur_y) = cursor_pixel_pos;
+                    let mut damage_cells: Vec<(f32, f32, f32, f32)> =
+                        vec![(cur_x, cur_y, cell_w_px, row_h_f)];
+                    // If the cursor moved since last frame, also damage the old
+                    // cell so the present covers the revealed glyph there.
+                    let prev = cache.previous_cursor_pos;
+                    if prev != snap.cursor_pos {
+                        // The vacated cell's horizontal scale is the PREVIOUS
+                        // row's line width, not the current row's — they can
+                        // differ (DECDWL/DECDHL), and using the current row's
+                        // scale would under-cover a revealed double-width glyph.
+                        let prev_x_scale = snap
+                            .visible_line_widths
+                            .get(prev.y)
+                            .copied()
+                            .unwrap_or(freminal_terminal_emulator::LineWidth::Normal);
+                        let prev_scale = if prev_x_scale.is_double_width() {
+                            2.0
+                        } else {
+                            1.0
+                        };
+                        let prev_x =
+                            prev.x.approx_as::<f32>().unwrap_or(0.0) * cell_w_f * prev_scale;
+                        let prev_y = prev.y.approx_as::<f32>().unwrap_or(0.0) * row_h_f;
+                        let prev_cell_w = cell_w_f * prev_scale;
+                        damage_cells.push((prev_x, prev_y, prev_cell_w, row_h_f));
                     }
-                }
-                rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
-                rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
-                rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
-                rs_ref.bg_opacity = bg_opacity;
-                rs_ref.bg_image_opacity = bg_image_opacity;
-                rs_ref.bg_image_mode = bg_image_mode;
-                drop(rs);
+                    let cursor_damage = crate::gui::renderer::CursorDamage::from_cursor_cells(
+                        vp_left_px,
+                        vp_top_px,
+                        fb_height_px,
+                        &damage_cells,
+                    );
+                    cache.last_frame_cursor_damage =
+                        crate::gui::renderer::PaneFrameDamage::CursorOnly(cursor_damage);
+                    cursor_only_scissor = cursor_damage;
 
-                // Remember which `visible_chars` allocation we rendered, so
-                // the next frame can detect changes via `Arc::ptr_eq`.
-                cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
-                cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
-                cache.previous_theme = Some(snap.theme);
-                cache.previous_selection = current_selection;
-                cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
-                cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
-                cache.previous_search_match_count = search_match_count;
-                cache.previous_search_current_match = search_current_match;
-                cache.previous_command_block_hover_rows = command_block_hover_rows_early;
-                cache.previous_term_width = snap.term_width;
-                cache.previous_term_height = snap.term_height;
-                cache.previous_fold_epoch = fold_epoch;
-                // Record exactly which selected-frame pixel buffers were just
-                // uploaded (Task 100.12), so the next frame's
-                // `image_pixels_changed` comparison is against fresh state —
-                // otherwise a one-off pixel mutation would pin the pane in
-                // the full-rebuild path forever.
-                cache.last_rendered_image_pixel_ptrs =
-                    build_image_pixel_ptrs(&snap.images, |id| view_state.selected_frame(id));
+                    let mut rs = render_state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // We overwrite the cursor quad data in the CPU copy so that if
+                    // a full rebuild happens next frame it starts from correct state.
+                    let cfo = rs.cursor_vert_float_offset;
+                    patch_cursor_only_deco_verts(&mut rs.deco_verts, cfo, &cursor_verts);
+                }
+                VertexRebuild::ReevaluateFullRebuild => {
+                    if content_changed
+                        || selection_changed
+                        || text_blink_changed
+                        || search_changed
+                        || hover_changed
+                        || image_frame_changed
+                        || image_pixels_changed
+                        || render_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .deco_verts
+                            .is_empty()
+                    {
+                        // Full rebuild path: the whole pane changed, so the frame
+                        // must clear + present fully (#435).
+                        cache.last_frame_cursor_damage =
+                            crate::gui::renderer::PaneFrameDamage::Full;
+
+                        let shaped_lines = cache.shaping_cache.shape_visible(
+                            &snap.visible_chars,
+                            &snap.visible_tags,
+                            snap.term_width,
+                            &mut self.font_manager,
+                            cell_w_f,
+                            self.ligatures,
+                            &snap.visible_line_widths,
+                        );
+
+                        // ── Apply folding to shaped_lines ─────────────────────────
+                        //
+                        // The renderer iterates `shaped_lines` by enumerated index
+                        // and treats that index as the screen row.  When folds are
+                        // active, the rendered row layout differs from the snapshot
+                        // row layout: each folded range collapses to a single
+                        // *placeholder* row.  Build a new Vec sized to
+                        // `rendered_row_count`, mapping each rendered row index back
+                        // to its snapshot row (or to a blank placeholder).
+                        //
+                        // 72.10b-3: each placeholder row carries a shaped line of
+                        // `"▶ {N} lines hidden — click to unfold"` rendered in a
+                        // dim foreground colour (BrightBlack from the active
+                        // palette).  Per-placeholder hit rects are recorded into
+                        // `cache.placeholder_hit_rects` so the input handler can
+                        // turn primary clicks on those rows into `view_state.unfold()`.
+                        cache.placeholder_hit_rects.clear();
+                        let rendered_shaped_lines: Vec<Arc<ShapedLine>> =
+                            if row_map.ranges().is_empty()
+                                && render_skip == 0
+                                && snap.window_extra_rows == 0
+                            {
+                                // No folds and no extra rows: snapshot rows == screen rows.
+                                shaped_lines
+                            } else {
+                                let empty_placeholder = Arc::new(ShapedLine {
+                                    runs: Vec::new(),
+                                    line_width: LineWidth::Normal,
+                                });
+                                let dim_fg = freminal_common::colors::TerminalColor::BrightBlack;
+                                // Paint exactly the bottom `term_height` rendered rows
+                                // (screen rows). `render_skip` rendered rows are scrolled
+                                // off the top so the live bottom stays pinned.
+                                let mut out: Vec<Arc<ShapedLine>> =
+                                    Vec::with_capacity(snap.term_height);
+                                for screen in 0..snap.term_height {
+                                    let rendered = layout.screen_to_rendered(screen);
+                                    match row_map.rendered_to_snapshot(rendered) {
+                                        Some(RenderedRow::Snapshot(snap_row)) => {
+                                            out.push(
+                                                shaped_lines.get(snap_row).cloned().unwrap_or_else(
+                                                    || Arc::clone(&empty_placeholder),
+                                                ),
+                                            );
+                                        }
+                                        Some(RenderedRow::Placeholder(range)) => {
+                                            let text = format_placeholder_text(
+                                                range.block_total_rows,
+                                                snap.term_width,
+                                            );
+                                            let shaped =
+                                                crate::gui::shaping::shape_placeholder_line(
+                                                    &text,
+                                                    dim_fg,
+                                                    &mut self.font_manager,
+                                                    cell_w_f,
+                                                    self.ligatures,
+                                                );
+                                            out.push(Arc::new(shaped));
+
+                                            // Record the placeholder's hit rect in
+                                            // logical pixel coordinates (screen row) so the
+                                            // input handler (which sees pointer positions in
+                                            // window coordinates) can hit-test against it
+                                            // directly.
+                                            let screen_f = screen.approx_as::<f32>().unwrap_or(0.0);
+                                            let row_top = screen_f
+                                                .mul_add(logical_cell_h, terminal_rect.min.y);
+                                            let rect = Rect::from_min_size(
+                                                egui::pos2(terminal_rect.min.x, row_top),
+                                                egui::vec2(terminal_rect.width(), logical_cell_h),
+                                            );
+                                            cache
+                                                .placeholder_hit_rects
+                                                .push((rect, range.command_block_id));
+                                        }
+                                        None => {
+                                            out.push(Arc::clone(&empty_placeholder));
+                                        }
+                                    }
+                                }
+                                out
+                            };
+
+                        // Build search match highlights from the current search state.
+                        // Only matches within the flattened window are included, with
+                        // rows converted from buffer-absolute to snapshot-relative.
+                        let win_start = flat_window_start;
+                        let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
+                        let search_highlights_snap: Vec<MatchHighlight> =
+                            matches_to_highlights(&view_state.search_state, win_start, snap_rows);
+                        // Translate from snapshot-row space to screen-row space and
+                        // drop highlights inside folded ranges or scrolled off the top.
+                        let search_highlights: Vec<MatchHighlight> =
+                            if row_map.ranges().is_empty() && render_skip == 0 {
+                                search_highlights_snap
+                            } else {
+                                search_highlights_snap
+                                    .into_iter()
+                                    .filter_map(|h| {
+                                        let rendered = row_map.snapshot_to_rendered(h.row)?;
+                                        let screen = layout.rendered_to_screen(rendered)?;
+                                        Some(MatchHighlight { row: screen, ..h })
+                                    })
+                                    .collect()
+                            };
+
+                        // Translate the selection's row indices from snapshot to
+                        // bottom-anchored screen space.  If either endpoint sits inside
+                        // a folded range or is scrolled off the top, drop the selection
+                        // for this frame (it will reappear when the user unfolds /
+                        // scrolls back).
+                        let screen_selection_rendered =
+                            if row_map.ranges().is_empty() && render_skip == 0 {
+                                screen_selection
+                            } else {
+                                screen_selection.and_then(|(sc, sr, ec, er)| {
+                                    let sr_s = layout
+                                        .rendered_to_screen(row_map.snapshot_to_rendered(sr)?)?;
+                                    let er_s = layout
+                                        .rendered_to_screen(row_map.snapshot_to_rendered(er)?)?;
+                                    Some((sc, sr_s, ec, er_s))
+                                })
+                            };
+
+                        // ── Command-block hover-row range (current frame) ──
+                        //
+                        // Determine which OSC 133 block (if any) the mouse is
+                        // hovering over and compute its rendered-row span.  The
+                        // result is passed into `BackgroundFrame` so the tint
+                        // is drawn alongside selection / search highlights in
+                        // the same vertex batch.  Disabled when the feature is
+                        // off, when the alternate screen is active (command
+                        // blocks describe primary-screen rows and must not tint
+                        // a full-screen TUI), or when no blocks exist.
+                        //
+                        // Two trigger surfaces feed this: hovering a cell inside
+                        // the terminal area (72.12), and hovering the command-block
+                        // gutter strip (73.3).  73.5 will retire the cell trigger,
+                        // leaving the gutter as the sole affordance.
+                        // `command_block_hover_rows` was computed earlier (before the
+                        // vertex-rebuild decision) so a hover-only change can force a
+                        // rebuild; reuse it here.
+                        let command_block_hover_rows = command_block_hover_rows_early;
+
+                        // Acquire the lock early so all vertex builders can write
+                        // directly into the persistent `RenderState` Vecs, reusing
+                        // their heap allocations (clear+extend pattern) instead of
+                        // allocating fresh Vecs every frame.
+                        let mut rs = render_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Reborrow through `&mut *rs` so the borrow checker can see
+                        // disjoint field accesses (MutexGuard's DerefMut is opaque).
+                        let rs_ref: &mut RenderState = &mut rs;
+
+                        let cursor_quad_appended = build_background_instances(
+                            &BackgroundFrame {
+                                shaped_lines: &rendered_shaped_lines,
+                                cell_width: cell_w,
+                                cell_height: cell_h,
+                                ascent: self.font_manager.ascent(),
+                                underline_offset: self.font_manager.underline_offset(),
+                                strikeout_offset: self.font_manager.strikeout_offset(),
+                                stroke_size: self.font_manager.stroke_size(),
+                                show_cursor: effective_show_cursor,
+                                cursor_blink_on,
+                                cursor_pixel_pos,
+                                cursor_width_scale: cursor_x_scale,
+                                cursor_visual_style: &snap.cursor_visual_style,
+                                selection: screen_selection_rendered,
+                                selection_is_block: view_state.selection.is_block,
+                                match_highlights: &search_highlights,
+                                command_block_hover_rows,
+                                term_width_cols: snap.term_width,
+                                theme: snap.theme,
+                                cursor_color_override: snap.cursor_color_override,
+                                // Task 115.2: DECSCNM (whole-screen reverse video)
+                                // composes with per-cell SGR-7 by XOR inside the
+                                // vertex builders via `effective_fg`/`effective_bg`.
+                                // `is_normal_display` is `true` for normal display,
+                                // so DECSCNM-active is its negation.
+                                reverse_screen: !snap.is_normal_display,
+                            },
+                            &mut rs_ref.bg_instances,
+                            &mut rs_ref.deco_verts,
+                        );
+
+                        // Record where the cursor quad starts in the decoration VBO.
+                        // The cursor is always appended at the END of deco_verts, and
+                        // is exactly CURSOR_QUAD_FLOATS floats (or absent when
+                        // hidden). MUST use `cursor_quad_appended` (the authoritative
+                        // answer from `build_background_instances`) rather than
+                        // re-deriving it from `effective_show_cursor` alone —
+                        // `effective_show_cursor` does not account for the blink
+                        // phase, so recomputing it here could disagree with what was
+                        // actually appended whenever this rebuild happened to land on
+                        // the cursor's blink-off phase, corrupting a later
+                        // cursor-only patch (issue #432).
+                        let cursor_vert_float_offset = if cursor_quad_appended {
+                            rs_ref.deco_verts.len().saturating_sub(CURSOR_QUAD_FLOATS)
+                        } else {
+                            rs_ref.deco_verts.len()
+                        };
+
+                        let fg_opts = FgRenderOptions {
+                            selection: screen_selection_rendered,
+                            selection_is_block: view_state.selection.is_block,
+                            text_blink_slow_visible: view_state.text_blink_slow_visible,
+                            text_blink_fast_visible: view_state.text_blink_fast_visible,
+                            // Task 115.2: see the matching `BackgroundFrame`
+                            // construction above for the XOR-compose rationale.
+                            reverse_screen: !snap.is_normal_display,
+                        };
+                        build_foreground_instances(
+                            &rendered_shaped_lines,
+                            &mut rs_ref.atlas,
+                            &self.font_manager,
+                            cell_h,
+                            self.font_manager.ascent(),
+                            &fg_opts,
+                            snap.theme,
+                            &mut rs_ref.fg_instances,
+                        );
+                        build_image_verts(
+                            &snap.visible_image_placements,
+                            &snap.images,
+                            snap.term_width,
+                            cell_w,
+                            cell_h,
+                            &mut rs_ref.image_verts,
+                            &mut rs_ref.image_draw_order,
+                        );
+                        // Clone the image map into RenderState so the PaintCallback
+                        // (which must be Send+Sync+'static) can pass it to the renderer.
+                        rs_ref.snap_images.clone_from(snap.images.as_ref());
+                        // Overwrite each animated image's pixels with the frame
+                        // currently selected by the GUI-side wall-clock playback
+                        // clock (Task 100.2c). `build_image_verts` above only reads
+                        // frame-invariant display dims, so only the texture-upload
+                        // path (which reads `img.pixels`) needs the swapped frame.
+                        for (id, img) in &mut rs_ref.snap_images {
+                            if img.is_animated()
+                                && let Some(px) = img.frame_pixels(view_state.selected_frame(*id))
+                            {
+                                img.pixels = Arc::clone(px);
+                            }
+                        }
+                        rs_ref.cursor_vert_float_offset = cursor_vert_float_offset;
+                        rs_ref.cell_width_px = f32::approx_from(cell_w).unwrap_or(0.0);
+                        rs_ref.cell_height_px = f32::approx_from(cell_h).unwrap_or(0.0);
+                        rs_ref.bg_opacity = bg_opacity;
+                        rs_ref.bg_image_opacity = bg_image_opacity;
+                        rs_ref.bg_image_mode = bg_image_mode;
+                        drop(rs);
+
+                        // Remember which `visible_chars` allocation we rendered, so
+                        // the next frame can detect changes via `Arc::ptr_eq`.
+                        cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+                        cache.last_rendered_line_widths =
+                            Some(Arc::clone(&snap.visible_line_widths));
+                        cache.previous_theme = Some(snap.theme);
+                        cache.previous_selection = current_selection;
+                        cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
+                        cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
+                        cache.previous_search_match_count = search_match_count;
+                        cache.previous_search_current_match = search_current_match;
+                        cache.previous_command_block_hover_rows = command_block_hover_rows_early;
+                        cache.previous_term_width = snap.term_width;
+                        cache.previous_term_height = snap.term_height;
+                        cache.previous_fold_epoch = fold_epoch;
+                        // Record exactly which selected-frame pixel buffers were just
+                        // uploaded (Task 100.12), so the next frame's
+                        // `image_pixels_changed` comparison is against fresh state —
+                        // otherwise a one-off pixel mutation would pin the pane in
+                        // the full-rebuild path forever.
+                        cache.last_rendered_image_pixel_ptrs =
+                            build_image_pixel_ptrs(&snap.images, |id| {
+                                view_state.selected_frame(id)
+                            });
+                    }
+                    // If neither path applies (content unchanged, cursor unchanged,
+                    // selection unchanged, buffers not empty) we simply re-draw the
+                    // existing VBO data — no CPU work at all.
+                }
             }
-            // If neither path applies (content unchanged, cursor unchanged,
-            // selection unchanged, buffers not empty) we simply re-draw the
-            // existing VBO data — no CPU work at all.
 
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
@@ -4611,6 +4916,222 @@ mod image_pixels_changed_tests {
             image_pixels_changed(&images, |_| 1, &prev),
             "a removed image id must trigger a rebuild"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod evaluate_frame_dirty_state_tests {
+    //! Unit tests for [`evaluate_frame_dirty_state`] (Task 122.11), calling
+    //! the real decision function rather than re-implementing its boolean
+    //! logic inline. The property that matters most — and the one every
+    //! test here is built around — is that [`VertexRebuild::CursorOnly`]
+    //! must fire *only* when every content/selection/search/hover/image/
+    //! text-blink observation is false, the cursor state genuinely changed,
+    //! and the decoration buffer is non-empty. Getting any of those terms
+    //! wrong is a visible rendering bug (a stale frame or a needless full
+    //! rebuild every frame), not just a wrong test assertion.
+    use super::*;
+    use freminal_common::config::CommandBlocksConfig;
+    use freminal_terminal_emulator::snapshot::TerminalSnapshot;
+
+    /// A minimal, deterministic snapshot: a 10x5 grid, cursor at the
+    /// origin, no command blocks, no blinking text — chosen so the cursor
+    /// is always visible (no folds, no scrolled-off rows) and the
+    /// command-block hover lookup always short-circuits to `None`.
+    fn base_snapshot() -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.term_width = 10;
+        snap.term_height = 5;
+        snap.total_rows = 5;
+        snap
+    }
+
+    /// A [`PaneRenderCache`] pre-populated to describe "the last full
+    /// rebuild rendered exactly `snap`, with the given cursor-blink phase
+    /// and effective cursor visibility" — i.e. a settled frame where
+    /// re-observing the identical `snap` unmodified should report no
+    /// changes at all.
+    fn settled_cache(
+        snap: &TerminalSnapshot,
+        cursor_blink_on: bool,
+        effective_show_cursor: bool,
+    ) -> PaneRenderCache {
+        let mut cache = PaneRenderCache::new();
+        cache.previous_theme = Some(snap.theme);
+        cache.previous_term_width = snap.term_width;
+        cache.previous_term_height = snap.term_height;
+        cache.previous_fold_epoch = 0;
+        cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
+        cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
+        cache.previous_selection = None;
+        cache.previous_search_match_count = 0;
+        cache.previous_search_current_match = 0;
+        cache.previous_command_block_hover_rows = None;
+        cache.previous_cursor_blink_on = cursor_blink_on;
+        cache.previous_cursor_pos = snap.cursor_pos;
+        cache.previous_show_cursor = effective_show_cursor;
+        cache.previous_cursor_color_override = snap.cursor_color_override;
+        cache.previous_text_blink_slow_visible = true;
+        cache.previous_text_blink_fast_visible = true;
+        cache
+    }
+
+    /// A fresh, GL-context-free `Arc<Mutex<RenderState>>`, optionally with a
+    /// non-empty `deco_verts` (mirroring "a previous full rebuild already
+    /// ran and left decoration vertices behind for the cursor-only patch
+    /// path to overwrite").
+    fn render_state_with_deco_verts(non_empty: bool) -> Arc<Mutex<RenderState>> {
+        let rs = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+        if non_empty {
+            rs.lock().unwrap().deco_verts.push(0.0);
+        }
+        rs
+    }
+
+    /// Call `evaluate_frame_dirty_state` with fixed, inert geometry
+    /// (irrelevant here because `base_snapshot` has no command blocks, so
+    /// the hover lookup short-circuits before touching any of it) and the
+    /// given cache/cursor-state inputs.
+    fn call(
+        snap: &TerminalSnapshot,
+        view_state: &mut ViewState,
+        cache: &PaneRenderCache,
+        render_state: &Arc<Mutex<RenderState>>,
+        cursor_blink_on: bool,
+        effective_show_cursor: bool,
+    ) -> DirtyTrackingOutcome {
+        let layout = FoldLayout::new(snap, &view_state.folded_blocks);
+        let command_blocks_config = CommandBlocksConfig::default();
+        let pane_rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
+        let terminal_rect = pane_rect;
+        evaluate_frame_dirty_state(
+            &FrameDirtyContext {
+                snap,
+                cache,
+                render_state,
+                layout: &layout,
+                fold_epoch: 0,
+                command_blocks_config: &command_blocks_config,
+            },
+            view_state,
+            FrameDirtyGeometry {
+                pane_rect,
+                terminal_rect,
+                gutter_inset: 0.0,
+                logical_cell_h: 10.0,
+                cell_w_f: 8.0,
+                row_h_f: 16.0,
+            },
+            CursorFrameInputs {
+                blink_on: cursor_blink_on,
+                show_cursor: effective_show_cursor,
+                trail_enabled: false,
+                trail_duration: Duration::from_millis(120),
+            },
+        )
+    }
+
+    #[test]
+    fn settled_frame_with_no_changes_is_not_cursor_only() {
+        // Nothing changed at all, not even the cursor: the fast path must
+        // NOT fire, because `cursor_state_changed` is false. This is the
+        // common steady-state frame that (at the call site) takes neither
+        // branch — it re-draws the existing VBO data unchanged.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(!outcome.observations.content_changed);
+        assert!(!outcome.observations.selection_changed);
+        assert!(!outcome.observations.search_changed);
+        assert!(!outcome.observations.hover_changed);
+    }
+
+    #[test]
+    fn cursor_blink_change_alone_takes_the_fast_path() {
+        // Everything else settled; only the cursor blink phase flipped, and
+        // the decoration buffer already has data to patch into. This is
+        // exactly the fast path's reason to exist.
+        let snap = base_snapshot();
+        // Cache remembers blink ON; this frame observes blink OFF.
+        let cache = settled_cache(&snap, true, true);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::CursorOnly);
+    }
+
+    #[test]
+    fn cursor_change_with_empty_deco_verts_forces_full_rebuild() {
+        // Same cursor-blink change as above, but no previous rebuild ever
+        // populated `deco_verts` — there is nothing to patch, so the fast
+        // path must not be selected even though every other flag agrees.
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(false);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    #[test]
+    fn content_change_beats_cursor_change() {
+        // A theme change AND a cursor-blink change happen on the same
+        // frame: `content_changed` must veto the fast path even though the
+        // cursor state also changed.
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        cache.previous_theme = Some(&freminal_common::themes::DRACULA);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn dims_change_beats_cursor_change() {
+        // A terminal resize AND a cursor-blink change happen on the same
+        // frame: the stale-vertex-slivers hazard means `content_changed`
+        // (via `dims_changed`) must veto the fast path.
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        cache.previous_term_width = snap.term_width + 1;
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.content_changed);
+    }
+
+    #[test]
+    fn search_change_beats_cursor_change() {
+        // The search match count changed AND the cursor blinked: the tint
+        // is baked into vertices the fast path never touches, so
+        // `search_changed` must veto it.
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        cache.previous_search_match_count = 1;
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
+
+        assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+        assert!(outcome.observations.search_changed);
     }
 }
 
