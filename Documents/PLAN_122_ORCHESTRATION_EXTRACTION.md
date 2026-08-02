@@ -16,6 +16,76 @@ version summary and `Documents/MASTER_PLAN.md` for roadmap position.
 
 ---
 
+## Execution state — updated 2026-07-30
+
+**Branch: `task-122/orchestration-extraction`** (not yet pushed, no PR open).
+All work below is committed and green. **Resume at 122.12.**
+
+### Done
+
+| Subtask    | Commit     | Note                                                       |
+| ---------- | ---------- | ---------------------------------------------------------- |
+| 122.0      | `ee278082` | merged to `main` before the branch                          |
+| 122.14     | `4e2949d9` | **amended** — original spec was self-contradictory          |
+| 122.1      | `be982808` | inventory verified; nothing had moved                       |
+| 122.2      | `d360c897` | `Point`/`Rect` in `freminal-common`                         |
+| 122.3      | `cb83143c` | + `geometry_interop.rs` seam (scope widened)                |
+| **122.3a** | `67ab18f2` | **added** — `Option<bool>` → `ActiveSubtree`                |
+| 122.4      | `9e82b412` | `PublishedFrameState`                                       |
+| 122.5      | `c6e584c0` | pane-resolution chain extracted — the success criterion     |
+| **122.5a** | `16b5efb9` | **added** — `pointer_motion.rs` module                      |
+| 122.6      | `79ce4dc1` | `DummyApp` overrides; completes Group A                     |
+| 122.7      | `4d023728` | two zero-egui blocks                                        |
+| 122.8      | `ab6f382f` | window-command drain + OSC routing                          |
+| 122.9      | `cba0b833` | frame-damage aggregation (double-write preserved)           |
+| 122.10     | `5b81ef4e` | chrome-signal staging                                       |
+| 122.11     | `f5a12776` | `show`'s dirty-tracking block                               |
+| **122.11a**| `0fd403af` | **added** — `frame_drain.rs` consolidation                  |
+
+### Remaining
+
+**122.12**, **122.13** (Group C), then **122.15** (last implementation
+subtask, by maintainer decision — unblocks 121.17), then **122.16**
+(close-out). Finally `cargo xtask check-windows` before the PR, per
+`freminal-windows-crosscheck` — **not yet run on this branch**.
+
+### Where the file sizes landed
+
+`app_impl.rs` was 5,319 at activation, peaked at 5,856 mid-Group-B as each
+extraction's docs and tests landed in it, and is now **4,990** after 122.11a
+moved the drains out. New modules: `pointer_motion.rs` (945),
+`frame_drain.rs` (938), `published_frame_state.rs` (~430),
+`geometry_interop.rs` (~115), plus `freminal-common/src/geometry.rs` (~300).
+
+### Three subtasks were added beyond the signed-off plan
+
+122.3a, 122.5a and 122.11a. Each is documented in its own section with the
+reason. 122.5a and 122.11a exist because extractions that leave the extracted
+code in the god file make it *bigger*, which is the opposite of the goal;
+122.3a is the maintainer's instruction to take `freminal-state-representation`
+opportunities as they surface.
+
+### Open items for 122.16
+
+- **`agents.md`'s clippy command does not match the pre-commit hook.** See the
+  section below; this is a repo-wide documentation gap, not a Task 122 issue,
+  and needs a maintainer decision.
+- 122.5's benchmark extension was **skipped deliberately** — reaching the
+  extracted chain needs `mod app_impl` public, the trade 122.14 rejected.
+- The 15% per-ID benchmark gate was **replaced** with an algorithmic-shape
+  check after measurement showed a >15% same-code noise floor on 12 of 39 IDs.
+
+### Not attempted, and out of scope
+
+Making this an orchestration **crate**. Design decision 1 says modules
+designed as if they were a crate; crate extraction is explicitly not part of
+Task 122. Confirmed with the maintainer 2026-07-30: the priority is finishing
+122 so Task 121 can close out the CPU work, and the crate question — which is
+separable from the egui question and belongs in
+`DECOUPLING_FRAMEWORK.md` — is deferred.
+
+---
+
 ## Goal
 
 Give orchestration logic — event triage, view window, input encoding, frame

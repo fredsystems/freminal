@@ -63,7 +63,7 @@ before executing.
 | 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
 | 121 | Performance Remediation           | Large     | In progress | None           |
-| 122 | Orchestration Extraction          | Large     | Planned     | None           |
+| 122 | Orchestration Extraction          | Large     | In progress | None           |
 
 ---
 
