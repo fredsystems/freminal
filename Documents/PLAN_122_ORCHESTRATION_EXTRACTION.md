@@ -384,6 +384,39 @@ cargo test --all --features frame-profiling
 `cfg(windows)` / `cfg(target_os)` code, so the risk is low, but the gate still
 applies.
 
+### The documented clippy command does not match the pre-commit hook
+
+**Found during 122.6, 2026-07-30.** `agents.md`'s verification suite says:
+
+```text
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+The pre-commit hook runs something different:
+
+```text
+cargo clippy --workspace --all-targets
+```
+
+These are **not equivalent**, and 122.6 hit a case where the documented command
+passes and the hook fails. A `pub(crate) struct DummyApp` inside a private
+`mod tests` triggers `clippy::redundant_pub_crate` (denied via
+`clippy::nursery`) under the hook's invocation, but **not** under
+`--all-features`. Enabling all features changes the compiled configuration
+enough to suppress it.
+
+Consequence for this task and any other: **running only the `agents.md` command
+is not sufficient to predict a clean commit.** Every subtask in Task 122 should
+run both, and a green `--all-features` run should not be reported as "clippy
+clean" on its own. Note also that a passing run can come from cache: after a
+failure, re-running the *documented* command appeared clean because that
+feature set's fingerprint was already cached as successful. Prefer the hook's
+invocation as the primary gate.
+
+This is a repo-wide documentation gap rather than a Task 122 issue. It is
+recorded here because it was found here; whether `agents.md` should be
+corrected is a maintainer decision, noted for 122.16.
+
 ---
 
 ### Group Z — mandate (runs first)

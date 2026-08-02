@@ -1555,13 +1555,14 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
-        clamp_repaint_delay, effective_chrome_gate_delay, effective_repaint_delay, is_blocked_key,
-        is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
+        App, MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
+        WindowId, clamp_repaint_delay, effective_chrome_gate_delay, effective_repaint_delay,
+        is_blocked_key, is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
         physical_to_logical_pos, should_force_chrome_full_for_pointer,
         should_schedule_cursor_moved, should_set_chrome_input_pending, update_chrome_drag_latch,
         viewport_command_flags,
     };
+    use crate::tests::DummyApp;
     use winit::event::{DeviceId, WindowEvent};
     use winit::keyboard::KeyCode;
 
@@ -1950,6 +1951,152 @@ mod tests {
     fn should_schedule_cursor_moved_not_needed_to_needed_transition_schedules() {
         // The reverse transition schedules via `current_needed` alone.
         assert!(should_schedule_cursor_moved(false, false, true));
+    }
+
+    // ── 122.6: `CursorMoved` dispatch driven by a live `App`, not
+    // hand-supplied booleans (`event_loop.rs:809-845`) ────────────────────
+    //
+    // The tests above pin `should_schedule_cursor_moved` and
+    // `should_force_chrome_full_for_pointer` in isolation, fed literal
+    // `true`/`false`. These tests instead call the SAME functions in the
+    // SAME order the `CursorMoved` arm of `Handler::window_event` does, fed
+    // by `App::pointer_motion_needs_repaint` / `App::is_chrome_interactive_at`'s
+    // REAL answers from a live `App` (`DummyApp`, configured per 122.6) —
+    // pinning the app-to-dispatch wiring itself, not just the pure helpers.
+    //
+    // `Handler::window_event` cannot be called directly from a unit test:
+    // `WindowState` (`event_loop.rs:457-507`) holds a real
+    // `winit::window::Window` plus a live GL context (`GlState`/
+    // `EguiState`), neither constructible without an actual display/GL
+    // driver, so a `Handler<A>` cannot exist headlessly. This is as close
+    // to the real dispatch path as a unit test can get without one.
+
+    #[test]
+    fn cursor_moved_dispatch_conservative_app_schedules_at_steady_state() {
+        // The trait-default (conservative) app answers "needed" for every
+        // position, so dispatch — fed that REAL answer, not a literal
+        // `true` — schedules every event, matching pre-Task-121 "every
+        // pointer motion repaints" behavior.
+        let app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let previous_needed = true; // `WindowState::pointer_motion_needed_last`'s initial value
+        assert!(should_schedule_cursor_moved(
+            false, // no chrome-border drag in progress
+            previous_needed,
+            current_needed,
+        ));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_suppressing_app_suppresses_at_steady_state() {
+        // A suppressing app answers "not needed"; once the edge-detect latch
+        // (`previous_needed`) has also settled to `false`, dispatch fed that
+        // REAL answer suppresses the repaint — the headline Task 121 case,
+        // now proven against a live `App` instead of literal bools.
+        let app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        assert!(
+            !current_needed,
+            "the configured app must actually answer false"
+        );
+
+        let previous_needed = false; // steady state after the one-time edge-detect frame
+        assert!(!should_schedule_cursor_moved(
+            false,
+            previous_needed,
+            current_needed
+        ));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_suppressing_app_still_schedules_the_transition_frame() {
+        // Edge-detect: the FIRST event after a live app starts suppressing
+        // still schedules once (`previous_needed` is still `true` from the
+        // prior conservative answer), driven by the app's real transition.
+        let app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let previous_needed = true;
+        assert!(should_schedule_cursor_moved(
+            false,
+            previous_needed,
+            current_needed
+        ));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_chrome_drag_latch_overrides_a_suppressing_app() {
+        // A chrome-border drag in progress must keep repainting even though
+        // the app itself would suppress — proven with the app's real
+        // (suppressing) answer, not a literal `false`.
+        let app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        assert!(should_schedule_cursor_moved(true, false, current_needed));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_chrome_interactive_app_forces_full_regardless_of_latch() {
+        // The trait-default (conservative) app's `is_chrome_interactive_at`
+        // forces `ChromeMode::Full` via `should_force_chrome_full_for_pointer`
+        // even with no drag latch held — mirrors `event_loop.rs:813-819`.
+        let app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let is_over_chrome = Some(app.is_chrome_interactive_at(window_id, pos));
+        assert!(should_force_chrome_full_for_pointer(is_over_chrome, false));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_chrome_non_interactive_app_does_not_force_full_without_latch() {
+        // A live app that answers "not chrome-interactive" at this position,
+        // with no drag latch held, does NOT force `ChromeMode::Full` —
+        // mirrors terminal-content-only pointer motion.
+        let app = DummyApp {
+            chrome_interactive: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let is_over_chrome = Some(app.is_chrome_interactive_at(window_id, pos));
+        assert!(!should_force_chrome_full_for_pointer(is_over_chrome, false));
+    }
+
+    #[test]
+    fn cursor_moved_dispatch_chrome_non_interactive_app_still_forced_full_by_drag_latch() {
+        // The drag latch overrides even a non-interactive answer from the
+        // app — a drag that moves off the sensor mid-drag must not lose
+        // `ChromeMode::Full`.
+        let app = DummyApp {
+            chrome_interactive: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        let is_over_chrome = Some(app.is_chrome_interactive_at(window_id, pos));
+        assert!(should_force_chrome_full_for_pointer(is_over_chrome, true));
     }
 
     // ── Task 121 spike: `effective_repaint_delay` (liveness-critical) ────
