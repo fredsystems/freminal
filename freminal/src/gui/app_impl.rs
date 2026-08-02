@@ -531,6 +531,258 @@ fn drain_window_manipulation_commands(
     events
 }
 
+/// Per-frame boolean signals [`stage_frame_damage`] needs from its caller,
+/// computed earlier in `central_body` from state this function has no
+/// access to (egui overlay bookkeeping, the previous-active-pane cache, the
+/// border-drag latch). Grouped into a params struct to stay under clippy's
+/// `too_many_arguments` threshold — [`rendering::WindowManipFlags`] is the
+/// in-tree precedent for this pattern. Each field is an independent,
+/// simultaneously-observable signal (per `freminal-state-representation`'s
+/// bool-vs-enum rule this is the "independent simultaneous signals"
+/// exemption, not a state machine), so grouping in a struct rather than
+/// converting to enums is correct.
+struct FrameDamageInputs {
+    /// Whether a menu/settings/context-menu-class overlay is open this
+    /// frame (forces `Full`).
+    ui_overlay_open: bool,
+    /// Whether the active pane changed this frame (the border highlight
+    /// moved, forces `Full`).
+    active_pane_changed: bool,
+    /// Whether a pane-border resize drag is currently latched.
+    border_drag_active: bool,
+}
+
+/// Observations [`stage_frame_damage`] computes alongside its
+/// [`freminal_windowing::FrameDamage`] decision, needed by `central_body`
+/// after that call returns: the Task 121 frame-profiling duty-cycle
+/// counters (gated in the caller, not here — see that function's doc), the
+/// #436 `ChromeSignals` staging (`central_body`, near
+/// `publish_pending_chrome_signals`), and the frame-attribution diagnostic
+/// block that immediately follows this frame's decision.
+// struct_excessive_bools: each field is an independent yes/no observation
+// this frame (window-post shader state, toast/overlay presence, per-pane
+// overlay OR-accumulation) feeding two unrelated downstream decisions (the
+// #436 `ChromeSignals` staging and the Task 121 duty-cycle counters) — not
+// a state machine. `force_full`/`unresolved_pane` are additionally
+// `#[cfg(feature = "frame-profiling")]`-gated (mirrors `FrameStats`'s own
+// per-field gating in `window.rs`): they are read only by the caller's
+// feature-gated counters, so a default build must not carry them at all.
+#[allow(clippy::struct_excessive_bools)]
+struct FrameDamageObservations {
+    /// Whether a window-post shader is recompositing the whole window this
+    /// frame. Reused as `ChromeSignals::shader_active`.
+    shader_recomposites: bool,
+    /// The `force_full` term as decided here (`ui_overlay_open ||
+    /// shader_recomposites || active_pane_changed ||
+    /// pointer_forces_full_present(..)`), read only by the caller's
+    /// `#[cfg(feature = "frame-profiling")]` duty-cycle counters.
+    #[cfg(feature = "frame-profiling")]
+    force_full: bool,
+    /// Whether a pane in `pane_layout` could not be resolved in the pane
+    /// tree this frame (forces `Full`), read only by the caller's
+    /// `#[cfg(feature = "frame-profiling")]` duty-cycle counters.
+    #[cfg(feature = "frame-profiling")]
+    unresolved_pane: bool,
+    /// Whether a toast or the resize overlay is animating this frame.
+    /// Reused as `ChromeSignals::toast_active` and by the caller's
+    /// feature-gated duty-cycle counters.
+    toast_active: bool,
+    /// OR-accumulated across every rendered pane: whether any has an open
+    /// overlay that paints above the terminal band. Reused as
+    /// `ChromeSignals::foreground_overlay_open`.
+    foreground_overlay_open: bool,
+    /// The per-pane damage facts fed to `decide_frame_damage`, reused by the
+    /// caller to compute `ChromeSignals::bell_active` and by its
+    /// feature-gated duty-cycle counters.
+    per_pane_damage: Vec<frame_damage::PaneDamageInput>,
+    /// The active pane's per-frame damage class (`None` if the active pane
+    /// could not be resolved this frame), reused by the frame-attribution
+    /// diagnostic stats that follow in `central_body`.
+    active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage>,
+}
+
+/// Decide this frame's #435 [`freminal_windowing::FrameDamage`], extracted
+/// from `App::update`'s `central_body` closure (Task 122.9).
+///
+/// ## Double-write contract — do not collapse
+///
+/// `win.pending_frame_damage` is written **twice** per frame, deliberately:
+///
+/// 1. **Here** (the caller assigns this function's return value) — the
+///    PRE-composition value, decided from #435 signals only.
+/// 2. **Again**, unconditionally, by `frame_damage::compose_with_chrome_damage`
+///    after `central_body` returns (near the end of `update()`) — which can
+///    *upgrade* a `Partial` decided here to `Full` once the #436 chrome-cache
+///    decision is known. That decision is not available yet at this call
+///    site: it needs the after-toast-render dismissible-presence sample,
+///    which can only be taken once `central_body` returns.
+///
+/// This function returns the `FrameDamage` rather than assigning
+/// `win.pending_frame_damage` itself, so write #1 stays visible at the call
+/// site and is not confused with write #2. Merging the two writes into one
+/// — or moving this decision to run after the composition step — silently
+/// reintroduces the bug the second write exists to prevent (a `Partial`
+/// frame presented while chrome pixels outside the cursor rect changed);
+/// see `compose_with_chrome_damage`'s call site for the defect it fixed.
+/// [`tests::pending_frame_damage_double_write_stays_distinct`] pins that the
+/// pre- and post-composition values can differ, so a future collapse of
+/// the two writes fails loudly.
+///
+/// ## `pointer_over_chrome` — do not use `is_chrome_interactive_at`
+///
+/// `win` was removed from `self.windows` at the top of `update()` for this
+/// frame (see `self.windows.remove` there), so `FreminalGui::
+/// is_chrome_interactive_at` would find no window for `window_id` and
+/// always return `true`. This function has no access to `self` at all, so
+/// that mistake cannot be made here structurally — but if `self` is ever
+/// threaded into a future revision of this function, do not reach for that
+/// method; hit-test `win`'s own published chrome rects directly, as below.
+///
+/// ## Feature-gated duty-cycle counters — NOT computed here
+///
+/// The Task 121 `chrome_mode` duty-cycle and `zero_change_presented`
+/// counters read this function's outputs but are recorded by the caller
+/// under its own `#[cfg(feature = "frame-profiling")]` block, not inside
+/// this function (Subtask 122.5's contract: return what the counters need
+/// and gate only the recording). `chrome_mode` is already a parameter of
+/// `App::update` itself, so `central_body` has it in scope without this
+/// function re-accepting it — threading it through here just to gate on it
+/// internally would be the "the whole function behind `#[cfg]`" shape this
+/// contract exists to avoid.
+fn stage_frame_damage(
+    win: &PerWindowState,
+    ctx: &egui::Context,
+    pane_layout: &[(panes::PaneId, egui::Rect)],
+    active_pane_id: panes::PaneId,
+    inputs: &FrameDamageInputs,
+    toasts: &std::cell::RefCell<super::toast::ToastStack>,
+) -> (freminal_windowing::FrameDamage, FrameDamageObservations) {
+    // A window-post shader recomposites the entire window every frame, so it
+    // forces `Full`.
+    let shader_recomposites = {
+        let wpr = win
+            .window_post
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        wpr.is_active() || wpr.pending_shader.is_some()
+    };
+    // The pane-border active-pane highlight, menu/tab-bar hover tints, and
+    // other chrome are painted by the plain egui painter every frame —
+    // outside the per-pane damage tracking. They only *change* pixels when
+    // the active pane changes (border moves) or the pointer moves (hover).
+    // Presenting only the cursor rect on such a frame would leave that
+    // chrome stale, so both force `Full`.
+    let pointer_moving = ctx.input(|i| i.pointer.is_moving());
+    // #459 item 9: pointer motion only changes plain-egui-painter pixels
+    // when it is over a chrome-interactive region (menu/tab-bar hover
+    // tints, pane-border highlight) or an active pane-border drag is in
+    // progress (the drag may have moved the pointer off the ±3px sensor
+    // mid-drag). Motion purely over terminal content changes no
+    // egui-painted chrome — the terminal band tracks its own hover effects
+    // (gutter tint, URL cursor, scrollbar thumb) through explicit per-pane
+    // damage signals. NB: `self.is_chrome_interactive_at` is UNUSABLE here
+    // — `win` was removed from `self.windows` for this frame (see the
+    // `self.windows.remove` at the top of `update`), so it would always
+    // return `true`; hit-test the local `win` rects directly.
+    let pointer_over_chrome = ctx.input(|i| i.pointer.latest_pos()).is_none_or(|pos| {
+        chrome_damage::point_in_chrome_rects(
+            pos,
+            win.published.chrome_head_rects(),
+            win.published.chrome_border_rects(),
+            win.published.chrome_toast_rects(),
+        )
+    });
+    let force_full = inputs.ui_overlay_open
+        || shader_recomposites
+        || inputs.active_pane_changed
+        || pointer_forces_full_present(
+            pointer_moving,
+            pointer_over_chrome,
+            inputs.border_drag_active,
+        );
+    // A toast being visible animates its own region each frame. The resize
+    // overlay (issue #433) animates the same way — it fades out over its
+    // linger window on the plain painter — so it must force a `Full`
+    // present too, or a cursor-only `Partial` frame would leave the fading
+    // overlay outside the damage rect stale/ghosted.
+    let toast_active = win.published.resize_overlay().is_some()
+        || toasts.try_borrow().is_ok_and(|stack| !stack.is_empty());
+    // Inspect only the panes actually rendered this frame — the entries in
+    // `pane_layout`. Under zoom, only the zoomed pane is rendered;
+    // iterating the whole tree would read stale `last_frame_cursor_damage`
+    // from non-rendered siblings and wrongly force `Full` every frame. The
+    // per-pane -> `FrameDamage` decision itself (and its full
+    // case-by-case rationale) is extracted into `decide_frame_damage`
+    // (#436.2b) so both this path and the future REPLAY path compute it
+    // identically.
+    let active_tab = win.tabs.active_tab();
+    let mut unresolved_pane = false;
+    // OR-accumulated across every rendered pane: does ANY of them have an
+    // open overlay that paints ABOVE the terminal band — the
+    // `Order::Foreground` context menu, in-terminal search bar, or
+    // command-history palette, OR the `Order::Tooltip` URL-hover tooltip?
+    // All of these paint as TAIL chrome outside the captured terminal-band
+    // range, so a REPLAY frame (which reuses the stale cached tail) must
+    // not be permitted while one is open, or it would vanish/ghost
+    // (#436.4b fix — see `ChromeSignals::foreground_overlay_open`). The URL
+    // tooltip is driven by `render_cache.cached_hovered_url`, which is
+    // recomputed even under a STATIONARY mouse when PTY output scrolls new
+    // content under the cursor — i.e. it can change on a frame with no
+    // window input event, exactly the frame a REPLAY would otherwise be
+    // chosen.
+    let mut foreground_overlay_open = false;
+    // Diagnostic: capture the active pane's per-frame damage class (reused
+    // from the #435 signal) for the frame-attribution stats flushed by the
+    // caller; `None` if the active pane isn't resolved.
+    let mut active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage> = None;
+    let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
+        Vec::with_capacity(pane_layout.len());
+    for (pane_id, _) in pane_layout {
+        let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
+            // A pane in the layout we cannot resolve -> be safe. This also
+            // aborts the `foreground_overlay_open` scan before every pane
+            // has been inspected, so conservatively treat an unresolved
+            // pane as if a foreground overlay were open — it already
+            // forces `FrameDamage::Full` below, and the chrome decision
+            // must be at least as conservative.
+            unresolved_pane = true;
+            foreground_overlay_open = true;
+            break;
+        };
+        foreground_overlay_open |= pane.view_state.context_menu_pos.is_some()
+            || pane.view_state.search_state.is_open
+            || pane.view_state.command_history.is_open
+            || pane.render_cache.hover_tooltip_active();
+        if *pane_id == active_pane_id {
+            active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage);
+        }
+        per_pane_damage.push(frame_damage::PaneDamageInput {
+            bell_active: pane.view_state.bell_since.is_some(),
+            cursor_damage: pane.render_cache.last_frame_cursor_damage,
+        });
+    }
+    let decided = frame_damage::decide_frame_damage(
+        force_full || unresolved_pane,
+        toast_active,
+        &per_pane_damage,
+    );
+
+    (
+        decided,
+        FrameDamageObservations {
+            shader_recomposites,
+            #[cfg(feature = "frame-profiling")]
+            force_full,
+            #[cfg(feature = "frame-profiling")]
+            unresolved_pane,
+            toast_active,
+            foreground_overlay_open,
+            per_pane_damage,
+            active_pane_damage,
+        },
+    )
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -2964,119 +3216,29 @@ impl freminal_windowing::App for FreminalGui {
             // false positive here still cannot corrupt the frame on a fresh
             // or aged back buffer — but we avoid false positives regardless.
             //
-            // A window-post shader recomposites the entire window every frame,
-            // so it forces `Full`.
-            let shader_recomposites = {
-                let wpr = win
-                    .window_post
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                wpr.is_active() || wpr.pending_shader.is_some()
-            };
-            // The pane-border active-pane highlight, menu/tab-bar hover tints,
-            // and other chrome are painted by the plain egui painter every
-            // frame — outside the per-pane damage tracking. They only *change*
-            // pixels when the active pane changes (border moves) or the
-            // pointer moves (hover). Presenting only the cursor rect on such a
-            // frame would leave that chrome stale, so both force `Full`.
-            let pointer_moving = ctx.input(|i| i.pointer.is_moving());
-            // #459 item 9: pointer motion only changes plain-egui-painter pixels
-            // when it is over a chrome-interactive region (menu/tab-bar hover
-            // tints, pane-border highlight) or an active pane-border drag is in
-            // progress (the drag may have moved the pointer off the ±3px sensor
-            // mid-drag). Motion purely over terminal content changes no
-            // egui-painted chrome — the terminal band tracks its own hover
-            // effects (gutter tint, URL cursor, scrollbar thumb) through explicit
-            // per-pane damage signals. NB: `self.is_chrome_interactive_at` is
-            // UNUSABLE here — `win` was removed from `self.windows` for this frame
-            // (see the `self.windows.remove` at the top of `update`), so it would
-            // always return `true`; hit-test the local `win` rects directly.
-            let pointer_over_chrome = ctx.input(|i| i.pointer.latest_pos()).is_none_or(|pos| {
-                chrome_damage::point_in_chrome_rects(
-                    pos,
-                    win.published.chrome_head_rects(),
-                    win.published.chrome_border_rects(),
-                    win.published.chrome_toast_rects(),
-                )
-            });
-            let force_full = ui_overlay_open
-                || shader_recomposites
-                || active_pane_changed
-                || pointer_forces_full_present(
-                    pointer_moving,
-                    pointer_over_chrome,
+            // See `stage_frame_damage`'s doc for the full decision rationale,
+            // the mandatory double-write contract with
+            // `compose_with_chrome_damage` (write #2, near the end of
+            // `update()`), and why `pointer_over_chrome` must hit-test `win`'s
+            // own chrome rects rather than call `self.is_chrome_interactive_at`.
+            let (frame_damage, damage_obs) = stage_frame_damage(
+                &win,
+                ctx,
+                &pane_layout,
+                active_pane_id,
+                &FrameDamageInputs {
+                    ui_overlay_open,
+                    active_pane_changed,
                     border_drag_active,
-                );
-            // A toast being visible animates its own region each frame. The
-            // resize overlay (issue #433) animates the same way — it fades out
-            // over its linger window on the plain painter — so it must force a
-            // `Full` present too, or a cursor-only `Partial` frame would leave
-            // the fading overlay outside the damage rect stale/ghosted.
-            let toast_active = win.published.resize_overlay().is_some()
-                || self
-                    .toasts
-                    .try_borrow()
-                    .is_ok_and(|stack| !stack.is_empty());
-            // Inspect only the panes actually rendered this frame — the
-            // entries in `pane_layout`. Under zoom, only the zoomed pane is
-            // rendered; iterating the whole tree would read stale
-            // `last_frame_cursor_damage` from non-rendered siblings and
-            // wrongly force `Full` every frame. The per-pane -> `FrameDamage`
-            // decision itself (and its full case-by-case rationale) is
-            // extracted into `decide_frame_damage` (#436.2b) so both this
-            // path and the future REPLAY path compute it identically.
-            let active_tab = win.tabs.active_tab();
-            let mut unresolved_pane = false;
-            // OR-accumulated across every rendered pane: does ANY of them
-            // have an open overlay that paints ABOVE the terminal band —
-            // the `Order::Foreground` context menu, in-terminal search bar,
-            // or command-history palette, OR the `Order::Tooltip` URL-hover
-            // tooltip? All of these paint as TAIL chrome outside the captured
-            // terminal-band range, so a REPLAY frame (which reuses the stale
-            // cached tail) must not be permitted while one is open, or it
-            // would vanish/ghost (#436.4b fix — see
-            // `ChromeSignals::foreground_overlay_open`). The URL tooltip is
-            // driven by `render_cache.cached_hovered_url`, which is recomputed
-            // even under a STATIONARY mouse when PTY output scrolls new
-            // content under the cursor — i.e. it can change on a frame with
-            // no window input event, exactly the frame a REPLAY would
-            // otherwise be chosen.
-            let mut foreground_overlay_open = false;
-            // Diagnostic: capture the active pane's per-frame damage class
-            // (reused from the #435 signal) for the frame-attribution stats
-            // flushed below; `None` if the active pane isn't resolved.
-            let mut active_pane_damage: Option<crate::gui::renderer::PaneFrameDamage> = None;
-            let mut per_pane_damage: Vec<frame_damage::PaneDamageInput> =
-                Vec::with_capacity(pane_layout.len());
-            for (pane_id, _) in &pane_layout {
-                let Some(pane) = active_tab.pane_tree.find(*pane_id) else {
-                    // A pane in the layout we cannot resolve -> be safe. This
-                    // also aborts the `foreground_overlay_open` scan before
-                    // every pane has been inspected, so conservatively treat
-                    // an unresolved pane as if a foreground overlay were open
-                    // — it already forces `FrameDamage::Full` below, and the
-                    // chrome decision must be at least as conservative.
-                    unresolved_pane = true;
-                    foreground_overlay_open = true;
-                    break;
-                };
-                foreground_overlay_open |= pane.view_state.context_menu_pos.is_some()
-                    || pane.view_state.search_state.is_open
-                    || pane.view_state.command_history.is_open
-                    || pane.render_cache.hover_tooltip_active();
-                if *pane_id == active_pane_id {
-                    active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage);
-                }
-                per_pane_damage.push(frame_damage::PaneDamageInput {
-                    bell_active: pane.view_state.bell_since.is_some(),
-                    cursor_damage: pane.render_cache.last_frame_cursor_damage,
-                });
-            }
-            win.pending_frame_damage = frame_damage::decide_frame_damage(
-                force_full || unresolved_pane,
-                toast_active,
-                &per_pane_damage,
+                },
+                &self.toasts,
             );
+            win.pending_frame_damage = frame_damage;
+            let shader_recomposites = damage_obs.shader_recomposites;
+            let toast_active = damage_obs.toast_active;
+            let foreground_overlay_open = damage_obs.foreground_overlay_open;
+            let per_pane_damage = damage_obs.per_pane_damage;
+            let active_pane_damage = damage_obs.active_pane_damage;
 
             // Task 121 frame-profiling harness (feature-gated): chrome-mode
             // duty cycle and zero-pixel-change-but-presented counters.
@@ -3094,6 +3256,11 @@ impl freminal_windowing::App for FreminalGui {
             // collected damage-rect list is empty (see that function's
             // step 4). This is measurement only -- the fallback-to-Full
             // behavior is NOT changed here.
+            //
+            // Subtask 122.9: only the RECORDING stays feature-gated here --
+            // `force_full`/`unresolved_pane`/`toast_active`/`per_pane_damage`
+            // were computed unconditionally by `stage_frame_damage`, above,
+            // per the Subtask 122.5 contract (see that function's doc).
             #[cfg(feature = "frame-profiling")]
             {
                 let stats = &mut win.frame_stats;
@@ -3105,8 +3272,8 @@ impl freminal_windowing::App for FreminalGui {
                         stats.chrome_mode_replay = stats.chrome_mode_replay.saturating_add(1);
                     }
                 }
-                let all_panes_unchanged = !force_full
-                    && !unresolved_pane
+                let all_panes_unchanged = !damage_obs.force_full
+                    && !damage_obs.unresolved_pane
                     && !toast_active
                     && per_pane_damage.iter().all(|p| {
                         !p.bell_active
@@ -4698,8 +4865,10 @@ mod tests {
         drain_command_finished_events, drain_window_manipulation_commands,
         pointer_forces_full_present, settings_owner_close_decision,
     };
+    use crate::gui::frame_damage::{self, PaneDamageInput};
     use crate::gui::panes::{Pane, PaneId, PaneIdGenerator};
     use crate::gui::pty::CommandFinishedEvent;
+    use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
     use crate::gui::tabs::{Tab, TabId, TabManager};
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
     use freminal_common::buffer_states::window_manipulation::WindowManipulation;
@@ -4793,6 +4962,52 @@ mod tests {
         assert!(!pointer_forces_full_present(false, false, true));
         // Not moving, neither chrome nor drag -> no forced Full.
         assert!(!pointer_forces_full_present(false, false, false));
+    }
+
+    /// Pins the `stage_frame_damage` double-write contract (see that
+    /// function's doc): the #435 pre-composition `FrameDamage` decided by
+    /// `decide_frame_damage` (write #1, assigned to
+    /// `win.pending_frame_damage` at the `stage_frame_damage` call site) and
+    /// the #436 post-composition value produced by
+    /// `compose_with_chrome_damage` (write #2, applied after `central_body`
+    /// returns) must be able to disagree — that disagreement is the entire
+    /// reason the second write exists (a chrome-changed frame must not be
+    /// presented `Partial` even if #435's signals alone said so). If the two
+    /// writes were ever collapsed into one, this frame's pre-composition
+    /// `Partial` and post-composition `Full` would silently converge and
+    /// this assertion would start failing loudly instead of the bug
+    /// regressing silently.
+    #[test]
+    fn pending_frame_damage_double_write_stays_distinct() {
+        // One pane took the cursor-only fast path with a real damage rect,
+        // no bell, no force-full/toast override -> `decide_frame_damage`
+        // (write #1) resolves to `Partial`.
+        let per_pane_damage = [PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::CursorOnly(Some(CursorDamage {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 16,
+            })),
+        }];
+        let pre_composition = frame_damage::decide_frame_damage(false, false, &per_pane_damage);
+        assert!(
+            matches!(pre_composition, freminal_windowing::FrameDamage::Partial(_)),
+            "expected write #1 (pre-composition) to be Partial, got {pre_composition:?}"
+        );
+
+        // The #436 chrome-cache decision independently found chrome pixels
+        // changed this same frame (e.g. a hover tint moved) -> write #2
+        // upgrades the pre-composition `Partial` to `Full`.
+        let post_composition = frame_damage::compose_with_chrome_damage(
+            pre_composition,
+            freminal_windowing::ChromeDamage::Changed,
+        );
+        assert!(
+            matches!(post_composition, freminal_windowing::FrameDamage::Full),
+            "expected write #2 (post-composition) to be Full, got {post_composition:?}"
+        );
     }
 
     #[test]
