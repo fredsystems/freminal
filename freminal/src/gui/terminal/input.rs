@@ -879,7 +879,7 @@ pub(super) fn dispatch_binding_action(
         }
         KeyAction::ClearScrollback => {
             // Reset the local scroll offset so the next render pulls from the
-            // live view — the PTY side will also drop its gui_scroll_offset
+            // live view — the PTY side will also drop its requested_scroll_offset
             // when it processes the ClearScrollback event. Doing it here
             // avoids one frame of stale rendering if the user was scrolled
             // back at the moment they pressed the key.

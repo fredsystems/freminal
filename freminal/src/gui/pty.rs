@@ -735,7 +735,7 @@ fn spawn_pty_consumer_thread(
                             emulator.internal.send_focus_event(focused);
                         }
                         InputEvent::ScrollOffset { offset, extra_rows } => {
-                            emulator.set_gui_scroll_window(offset, extra_rows);
+                            emulator.set_requested_scroll_window(offset, extra_rows);
                         }
                         InputEvent::ThemeChange(theme) => {
                             emulator.internal.handler.set_theme(theme);
@@ -793,11 +793,11 @@ fn spawn_pty_consumer_thread(
                         InputEvent::ClearScrollback => {
                             // Drop every scrollback row; the visible display
                             // is unaffected. Also reset the PTY-side
-                            // gui_scroll_offset so snapshots immediately render
+                            // requested_scroll_offset so snapshots immediately render
                             // from the live view (the GUI resets its local
                             // ViewState::scroll_offset in parallel).
                             emulator.internal.handler.buffer_mut().erase_scrollback();
-                            emulator.set_gui_scroll_offset(0);
+                            emulator.set_requested_scroll_offset(0);
                         }
                     }
 

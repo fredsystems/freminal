@@ -8,7 +8,7 @@
 //! Covered:
 //! - `write_raw_bytes` — bytes land on the PTY write channel as `PtyWrite::Write`
 //! - `clone_write_tx` — cloned sender delivers messages to the same receiver
-//! - `set_gui_scroll_offset` / `reset_scroll_offset` — offsets are reflected in
+//! - `set_requested_scroll_offset` / `reset_scroll_offset` — offsets are reflected in
 //!   subsequent snapshots, and are clamped to `max_scroll_offset`
 //! - `build_snapshot` — `scroll_offset` / `max_scroll_offset` semantics under
 //!   normal use, clamping, reset, and alternate-screen force-zero
@@ -146,12 +146,12 @@ fn test_clone_write_tx_works() {
     );
 }
 
-// ─── set_gui_scroll_offset ───────────────────────────────────────────────────
+// ─── set_requested_scroll_offset ───────────────────────────────────────────────────
 
 /// After creating sufficient scrollback and setting a scroll offset, the next
 /// snapshot carries that exact offset in `snap.scroll_offset`.
 #[test]
-fn test_set_gui_scroll_offset_and_snapshot() {
+fn test_set_requested_scroll_offset_and_snapshot() {
     let (mut emu, _rx) = make_emulator();
 
     fill_scrollback(&mut emu, 150);
@@ -162,7 +162,7 @@ fn test_set_gui_scroll_offset_and_snapshot() {
         live.max_scroll_offset
     );
 
-    emu.set_gui_scroll_offset(10);
+    emu.set_requested_scroll_offset(10);
     let snap = emu.build_snapshot();
     assert_eq!(
         snap.scroll_offset, 10,
@@ -173,7 +173,7 @@ fn test_set_gui_scroll_offset_and_snapshot() {
 /// An offset larger than `max_scroll_offset` is silently clamped to the
 /// maximum valid value.
 #[test]
-fn test_set_gui_scroll_offset_clamped() {
+fn test_set_requested_scroll_offset_clamped() {
     let (mut emu, _rx) = make_emulator();
 
     fill_scrollback(&mut emu, 150);
@@ -181,7 +181,7 @@ fn test_set_gui_scroll_offset_clamped() {
     let max = live.max_scroll_offset;
     assert!(max > 0, "expected scrollback; max_scroll_offset = {max}");
 
-    emu.set_gui_scroll_offset(999_999);
+    emu.set_requested_scroll_offset(999_999);
     let snap = emu.build_snapshot();
     assert_eq!(
         snap.scroll_offset, max,
@@ -206,7 +206,7 @@ fn test_reset_scroll_offset() {
     let live = emu.build_snapshot();
     assert!(live.max_scroll_offset > 0, "expected scrollback");
 
-    emu.set_gui_scroll_offset(10);
+    emu.set_requested_scroll_offset(10);
     let before_reset = emu.build_snapshot();
     assert_eq!(
         before_reset.scroll_offset, 10,
@@ -224,7 +224,7 @@ fn test_reset_scroll_offset() {
 // ─── handle_incoming_data auto-reset ─────────────────────────────────────────
 
 /// When the user is scrolled back and new PTY data arrives,
-/// `handle_incoming_data` resets `gui_scroll_offset` to 0; the subsequent
+/// `handle_incoming_data` resets `requested_scroll_offset` to 0; the subsequent
 /// snapshot reports `scroll_offset == 0`.
 #[test]
 fn test_handle_incoming_data_resets_scroll() {
@@ -234,7 +234,7 @@ fn test_handle_incoming_data_resets_scroll() {
     let live = emu.build_snapshot();
     assert!(live.max_scroll_offset > 0, "expected scrollback");
 
-    emu.set_gui_scroll_offset(5);
+    emu.set_requested_scroll_offset(5);
     let scrolled = emu.build_snapshot();
     assert_eq!(
         scrolled.scroll_offset, 5,
@@ -299,7 +299,7 @@ fn test_extract_selection_empty() {
 // ─── alternate screen forces scroll_offset to zero ───────────────────────────
 
 /// While in the alternate screen buffer, `build_snapshot` must always report
-/// `scroll_offset == 0`, regardless of what `set_gui_scroll_offset` was called
+/// `scroll_offset == 0`, regardless of what `set_requested_scroll_offset` was called
 /// with.  Alternate screens have no scrollback history.
 #[test]
 fn test_scroll_offset_zero_in_alternate() {
@@ -309,7 +309,7 @@ fn test_scroll_offset_zero_in_alternate() {
     emu.handle_incoming_data(b"\x1b[?1049h");
 
     // Attempt to set a non-zero offset while on the alternate screen.
-    emu.set_gui_scroll_offset(5);
+    emu.set_requested_scroll_offset(5);
     let snap = emu.build_snapshot();
 
     assert!(
@@ -318,7 +318,7 @@ fn test_scroll_offset_zero_in_alternate() {
     );
     assert_eq!(
         snap.scroll_offset, 0,
-        "alternate screen must force scroll_offset = 0 regardless of set_gui_scroll_offset"
+        "alternate screen must force scroll_offset = 0 regardless of set_requested_scroll_offset"
     );
     assert_eq!(
         snap.max_scroll_offset, 0,
