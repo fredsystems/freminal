@@ -198,7 +198,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Complete  | Task 118               |
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 | 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | In progress | None                 |
-| 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | In progress | None                 |
+| 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Pending merge | None               |
 
 ---
 
@@ -723,7 +723,7 @@ Update this section as tasks complete:
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
 | 121  | 2026-07-27 |            | 121.1-121.14 (PR #467), 121.23, 121.26 done; 121.25 partial; rest open           |
-| 122  | 2026-07-30 |            | Groups Z/A/B done (16 of 20 subtasks, incl. 3 added). Resume at 122.12           |
+| 122  | 2026-07-30 |            | All subtasks done (19, incl. 3 added). Pending merge; 121.17 seam landed (122.15) |
 
 ---
 

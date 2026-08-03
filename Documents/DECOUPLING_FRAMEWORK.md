@@ -560,19 +560,33 @@ big-bang cutover.
 
 ### Phase 1 — orchestration extraction (no behaviour change)
 
-> **This phase is tracked as Task 122 ("Orchestration Extraction") in
-> `MASTER_PLAN.md`, carried by v0.12.0** — status `Stub`, summarised in
-> `PLAN_VERSION_120.md`. It is the one phase in this document that is a roadmap
-> task, because it is required under any outcome of the rewrite decision. The
-> subtask list below is its plan content, but it has **not** been activated:
-> re-measure and write real subtasks before executing.
+> **SUPERSEDED (2026-08-02). This phase's plan content is now
+> `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`**, which is the authoritative
+> breakdown for Task 122 and replaces the 1.1–1.6 list below. That document was
+> written at activation against the real code and reaches materially different
+> conclusions from this section — read it, not this list.
 >
-> **The line counts below are point-in-time and have already drifted.** Measured
-> on `main` at the time Task 122 was created: `App::update` is **3,051** lines
-> (not 2,743), `central_body` is **1,989** (not 1,859), and `panes/mod.rs` carries
-> **58** `Rect` / `Pos2` occurrences (not 44). `show` (1,851) and
-> `write_input_to_terminal` (1,226) still match. Re-measure at activation per
-> `freminal-version-activation`; do not quote these numbers as current.
+> **Where the activation pass disagreed with §8, and why:**
+>
+> - **The shape was wrong.** §8 is a flat "decompose these five big functions"
+>   list. Re-measurement found two of the five targets are *static*, and that the
+>   growth has a single nameable cause: render-time state published during a frame
+>   purely for out-of-frame consumers, with no name, type or invariant. The
+>   breakdown targets that seam instead, and demotes the static targets to cleanup.
+> - **1.3 was reversed.** Task 122 deliberately does **not** decompose
+>   `write_input_to_terminal`; its concerns are interleaved rather than separable by
+>   line range, and the obvious win is a trap (see 122.C1 — `control_key` and
+>   `egui_key_to_terminal_input` look like duplicates and disagree on `Key::Space`).
+>   Subtask 122.12 named its parameters and result instead, which addresses 1.3's
+>   actual complaint.
+> - **The parameter count was wrong: 17, not 16** (the 17th is
+>   `super_state: SuperKeyState`, added by subtask 101.2). `show`'s own
+>   23-parameter signature is not counted by §8 at all.
+> - **1.4 landed, and went further** — toolkit-neutral `Point`/`Rect` are in
+>   `freminal-common`, with a `geometry_interop.rs` seam.
+>
+> **The line counts below are stale and were already stale when written.** Do not
+> quote them. `PLAN_122` carries the re-measurement.
 
 Required under any outcome, including abandoning the rewrite. Since Phase 0 showed
 the rewrite case is a maintainability judgement rather than a performance
@@ -592,7 +606,8 @@ argument.
 - **1.1** Decompose `App::update` (2,743 lines) and `central_body` (1,859).
 - **1.2** Decompose `terminal/widget.rs::show` (1,851 lines).
 - **1.3** Decompose `terminal/input.rs::write_input_to_terminal` (1,226 lines,
-  16 parameters, returns a 7-tuple; mixes egui event parsing, VT byte encoding,
+  **17** parameters — this section long said 16 — returns a 7-tuple; mixes egui
+  event parsing, VT byte encoding,
   `ViewState` mutation, PTY channel writes, clipboard, kitty-keyboard logic and
   broadcast fan-out).
 - **1.4** Introduce toolkit-neutral `Rect` / `Point` in `freminal-common` and

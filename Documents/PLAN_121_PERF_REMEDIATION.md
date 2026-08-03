@@ -76,7 +76,7 @@ creates — see that subtask.
 | --------------------------------------- | ------------- | ------------- |
 | A — Completed work (merged to `main`)   | 121.1–121.11  | Complete      |
 | B — Bugs found and fixed                | 121.12–121.14 | Complete      |
-| B — Bug blocked behind Task 122         | 121.15        | Not started   |
+| B — Bug blocked behind Task 122         | 121.15        | Unblocked     |
 | B — Withdrawn                           | 121.16        | Withdrawn     |
 | C — Unifying improvement                | 121.17        | Not started   |
 | D — Unactioned issue #459 items         | 121.18–121.22, 121.24 | Not started |
@@ -474,6 +474,25 @@ accurate, its suggested remedy is not the one being taken.
 ## Group C — Unifying improvement
 
 ### 121.17 — Cell-granular pointer suppression
+
+> **UNBLOCKED on the Task 122 side (2026-08-02), but RE-CHECK YOUR ASSUMPTIONS
+> BEFORE STARTING.** Two things changed under this subtask on the same day:
+>
+> 1. **The seam it was waiting for exists.** Subtask 122.15 publishes the per-pane
+>    terminal-rect origin through `PublishedFrameState`
+>    (`pane_terminal_origin(pane_id) -> Option<Point>`), and logical cell size was
+>    already reachable out-of-frame via `cell_size()`. The reader currently carries
+>    `#[allow(dead_code)]` with a TODO naming this subtask — **remove that allow**
+>    as part of landing 121.17.
+> 2. **The chrome cache is disabled (121.32), and may be deleted outright.** This
+>    subtask's measured prize and its "also un-gates 121.13" finding below were
+>    both computed in a world where `ChromeMode::Replay` was live. 121.13 is
+>    reverted, `Replay` is never chosen, and 121.34 may remove the machinery
+>    entirely. **The numbers below are stale and the un-gating argument no longer
+>    holds as written.** Re-measure before committing to a design, and do not
+>    resurrect the 121.13 interaction as a justification.
+>
+> The Task 122 dependency is discharged. The chrome-cache dependency is new.
 
 Nearly all of the terminal's interactive state changes at **cell** granularity, not
 pixel granularity: URL hover, gutter hover, selection extent, and mouse-tracking

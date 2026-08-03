@@ -1,27 +1,27 @@
 # PLAN_122_ORCHESTRATION_EXTRACTION.md — Task 122 "Orchestration Extraction"
 
-> **STATUS: ACTIVATED, AWAITING SIGN-OFF.** This document is the output of the
-> Task 122 activation pass (2026-07-30, on `main` at `f8ebd17a`). It replaces
-> `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1 as Task 122's plan content.
-> Per `freminal-version-activation`, decomposition and execution are separate
-> sessions: the subtasks below need maintainer sign-off before any is spawned.
+> **STATUS: EXECUTED, AWAITING MERGE (2026-08-02).** All 19 subtasks are
+> complete on `task-122/orchestration-extraction` and the branch is green.
+> This document remains the authoritative plan content for Task 122 and
+> **supersedes `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1**, which has been
+> annotated accordingly.
 >
-> **Exception: 122.0 is done.** The maintainer moved the agent-skill change to
-> the front and approved it on 2026-07-30, on the grounds that running it last
-> would mean every other subtask executes under the skills that caused the
-> drift. No production code has been touched.
+> Read the **Execution state** section immediately below before anything else:
+> it records what was done, three subtasks added beyond the signed-off plan,
+> corrections the execution found in this document's own text, and one open
+> item deliberately left for the maintainer.
 
 Task 122 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
 
 ---
 
-## Execution state — updated 2026-07-30
+## Execution state — updated 2026-08-02
 
-**Branch: `task-122/orchestration-extraction`** (not yet pushed, no PR open).
-All work below is committed and green. **Resume at 122.12.**
+**Branch: `task-122/orchestration-extraction`.** All subtasks are complete and
+committed; the branch is green. **Awaiting PR / merge.**
 
-### Done
+### Done — all 19 subtasks
 
 | Subtask    | Commit     | Note                                                       |
 | ---------- | ---------- | ---------------------------------------------------------- |
@@ -41,48 +41,60 @@ All work below is committed and green. **Resume at 122.12.**
 | 122.10     | `5b81ef4e` | chrome-signal staging                                       |
 | 122.11     | `f5a12776` | `show`'s dirty-tracking block                               |
 | **122.11a**| `0fd403af` | **added** — `frame_drain.rs` consolidation                  |
+| 122.12     | `82975fbb` | params/result named; `InputCarryState`, `PaneFocus`         |
+| 122.13     | `ea58d9d3` | rename; plan's "one file" scope was stale — six files       |
+| 122.15     | `cd0dc0e4` | terminal-rect origin published; unblocks 121.17             |
+| 122.16     | (this)     | document reconciliation                                     |
 
-### Remaining
+### Interruption: the beta.7 chrome regression
 
-**122.12**, **122.13** (Group C), then **122.15** (last implementation
-subtask, by maintainer decision — unblocks 121.17), then **122.16**
-(close-out). Finally `cargo xtask check-windows` before the PR, per
-`freminal-windows-crosscheck` — **not yet run on this branch**.
-
-### Where the file sizes landed
-
-`app_impl.rs` was 5,319 at activation, peaked at 5,856 mid-Group-B as each
-extraction's docs and tests landed in it, and is now **4,990** after 122.11a
-moved the drains out. New modules: `pointer_motion.rs` (945),
-`frame_drain.rs` (938), `published_frame_state.rs` (~430),
-`geometry_interop.rs` (~115), plus `freminal-common/src/geometry.rs` (~300).
+Work paused mid-task on 2026-08-02 for a live regression (tab clicks and
+pane-border drags broken in 0.12.0-beta.7). Resolved on `main` as **121.32** —
+the #436 chrome cache is now disabled by default. Task 122 did not cause it and
+was not affected by it; `main` was merged into this branch at `4c10b876` with one
+trivial conflict (a `use` list). The episode is recorded here only because it
+changed 121.17's premises — see the note added to that subtask.
 
 ### Three subtasks were added beyond the signed-off plan
 
-122.3a, 122.5a and 122.11a. Each is documented in its own section with the
-reason. 122.5a and 122.11a exist because extractions that leave the extracted
-code in the god file make it *bigger*, which is the opposite of the goal;
-122.3a is the maintainer's instruction to take `freminal-state-representation`
-opportunities as they surface.
+122.3a, 122.5a and 122.11a. 122.5a and 122.11a exist because extractions that
+leave the extracted code in the god file make it *bigger*, which is the opposite
+of the goal; 122.3a is the maintainer's instruction to take
+`freminal-state-representation` opportunities as they surface.
 
-### Open items for 122.16
+### Corrections the execution found in the plan itself
 
-- **`agents.md`'s clippy command does not match the pre-commit hook.** See the
-  section below; this is a repo-wide documentation gap, not a Task 122 issue,
-  and needs a maintainer decision.
-- 122.5's benchmark extension was **skipped deliberately** — reaching the
-  extracted chain needs `mod app_impl` public, the trade 122.14 rejected.
-- The 15% per-ID benchmark gate was **replaced** with an algorithmic-shape
-  check after measurement showed a >15% same-code noise floor on 12 of 39 IDs.
+- **122.13's scope was wrong.** It states the renamed symbols are "all confined to
+  this one file". The real surface is six files, including two integration-test
+  files that reach the emulator through the public setters.
+- **122.12's parameter count confirmed at 17**, and four of the seven return
+  values turned out to be four of the parameters round-tripped — which is why
+  `InputCarryState` exists and the plan text did not anticipate it.
+- **Line-number citations throughout this document drift constantly**, because
+  Task 122 keeps rewriting `app_impl.rs`. Every subtask's stated ranges were stale
+  by the time it was executed. Locate blocks by grepping for content.
+
+### Open item for the maintainer — NOT decided by 122.16
+
+**`agents.md`'s clippy command does not match the pre-commit hook.** The hook runs
+`cargo clippy --workspace --all-targets`; `agents.md` documents
+`cargo clippy --all-targets --all-features -- -D warnings`. These are **not
+equivalent**: `--all-features` masks lints the hook catches (this bit 122.6), and
+a passing re-run can come from a cached fingerprint. Every subtask in this task
+was verified with **both**. This is a repo-wide documentation gap, not a Task 122
+issue, and changing `agents.md` is a maintainer decision — deliberately left
+unmade here.
 
 ### Not attempted, and out of scope
 
-Making this an orchestration **crate**. Design decision 1 says modules
-designed as if they were a crate; crate extraction is explicitly not part of
-Task 122. Confirmed with the maintainer 2026-07-30: the priority is finishing
-122 so Task 121 can close out the CPU work, and the crate question — which is
-separable from the egui question and belongs in
-`DECOUPLING_FRAMEWORK.md` — is deferred.
+Making this an orchestration **crate**. Design decision 1 scopes Task 122 to
+modules designed *as if* they were a crate. **The maintainer is actively
+reconsidering this** (2026-08-02) and wants it discussed once Task 122 is
+complete; the 121.32 chrome failure is read as evidence that egui imposes a CPU
+floor which raises the value of being ready to replace it. Note that 122.2/122.3
+already did the hardest preparatory piece — toolkit-neutral geometry with an
+interop seam — but `PublishedFrameState` and much of the GUI still hold
+`egui::Rect`. That conversation is deferred, not closed.
 
 ---
 
