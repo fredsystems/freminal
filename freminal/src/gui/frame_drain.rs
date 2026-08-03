@@ -412,7 +412,7 @@ pub(super) fn drain_window_manipulation_commands(
     window_focus: WindowFocus,
     config: &Config,
 ) -> WindowManipulationEvents {
-    let window_width = ui.input(|i: &egui::InputState| i.content_rect());
+    let window_content_rect = ui.input(|i: &egui::InputState| i.content_rect());
     let active_idx = tabs.active_index();
     let active_pane_id_for_drain = tabs.active_tab().active_pane;
 
@@ -442,7 +442,7 @@ pub(super) fn drain_window_manipulation_commands(
                     &pane.pty_write_tx,
                     font_width,
                     font_height,
-                    window_width,
+                    window_content_rect,
                     &mut pane.title_stack,
                     &mut pane.title,
                     &mut pane.bell_active,

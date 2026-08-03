@@ -548,19 +548,31 @@ clean pane at its 2–3 fps blink floor. **Roughly 20×.**
 0.1–0.2% over a typical sampling window, which is why informal observation (121.25)
 read the vetoed and unvetoed paths as identical. Use the counters, not a meter.
 
-### 121.17 also un-gates 121.13 (found while measuring)
+### 121.17 also un-gates 121.13 (WITHDRAWN - the premise no longer exists)
 
-`Replay` duty cycle collapses 58.3% → 5.8% in the vetoed case, with
+> **WITHDRAWN 2026-08-02. Do not use this as a justification for 121.17.**
+> 121.13 is reverted and the #436 chrome cache is disabled by default (121.32),
+> so `ChromeMode::Replay` is never chosen. There is no 121.13 win left to
+> un-gate, and 121.34 may delete the machinery entirely. The measurement below
+> is retained only as a record of what was observed while the cache was live;
+> **every number in it is stale** and none of it supports 121.17 today.
+>
+> 121.17 must stand on its own measured prize, re-taken against current code.
+> If the chrome cache is ever re-enabled soundly, this interaction can be
+> re-measured then - but it would need re-measuring, not restoring.
+
+Historical record, measured 2026-07-29 while 121.13 was live and `Replay` was
+engaging:
+
+`Replay` duty cycle collapsed 58.3% -> 5.8% in the vetoed case, with
 `gate_blocked_not_settled` accounting for essentially every `Full` frame
-(`settle_repaint_delay = 0µs`, `settle_terminal_requested_delay = 500000µs`).
+(`settle_repaint_delay = 0us`, `settle_terminal_requested_delay = 500000us`).
+The reading at the time was that `effective_chrome_gate_delay` substitutes only
+when `suppressed_only`, so 121.13's win was gated on suppression actually
+engaging, and 121.17 would retroactively switch it on for the vetoed path.
 
-This is correct by design: `effective_chrome_gate_delay` substitutes only when
-`suppressed_only`, and in the vetoed case egui's zero is genuine information rather
-than an artifact of suppressed events. But the consequence is that **121.13's win is
-gated on suppression actually engaging**, so the vetoed path loses both axes at once —
-full frame rate *and* full chrome-rebuild cost per frame. 121.17 therefore does not
-just cut frame count; it retroactively switches the 121.13 win on for that path. The
-two compound, which is a stronger case for 121.17 than the code alone supports.
+That compounding argument is void: both halves of it depend on a `Replay` path
+that no longer runs.
 
 ---
 

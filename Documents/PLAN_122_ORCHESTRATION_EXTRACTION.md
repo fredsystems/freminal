@@ -356,11 +356,22 @@ plan groups them correctly; only the code comment undercounts.
 
 #### The invariant 122.4 must preserve
 
-Each of the seven fields is written **at most once per successfully-completing
-`App::update`**, at a fixed point in that function — `chrome_head_rects` only
-on a `Full` frame (`1753`), the other six unconditionally once reached — and
-from nowhere else. None of the four early-return paths writes any of them, so
-each holds whatever the last fully-reaching `update()` left. Reads happen
+Each of the seven fields reaches its **final published value at most once per
+successfully-completing `App::update`**, at a fixed point in that function —
+`chrome_head_rects` only on a `Full` frame (`1753`), the other six
+unconditionally once reached — and from nowhere else.
+
+"Final value" is the precise form, and the distinction matters: two of the
+fields are **reset before that final write**. `chrome_border_rects` is cleared
+at `2467` on frames that build no border sensors, and `chrome_toast_rects` is
+pre-cleared at `3915` before the toast stack lays out. Those resets are writes,
+so the invariant is *not* "one store instruction per frame" — it is that no
+field is published from more than one site, and that a given frame's published
+value is settled by the time `update()` returns. A wrapper must permit the
+clear-then-fill pattern while still forbidding a second, unrelated publisher.
+
+None of the four early-return paths writes any of them, so each holds whatever
+the last fully-reaching `update()` left. Reads happen
 exclusively from `is_chrome_interactive_at` and `pointer_motion_needs_repaint`,
 called on `freminal-windowing`'s pointer fast path
 (`event_loop.rs:815, 828-831, 868, 885`), a control path fully decoupled from
@@ -960,6 +971,27 @@ Also **extend 122.14's benchmark** to cover the newly-callable chain, and record
 the number against that baseline; 122.14 could not do this because the chain was
 not extractable when it ran.
 
+> **NOT DONE - deliberately skipped at execution (2026-08-02).** The benchmark
+> extension above was **not** delivered, and 122.5 was accepted without it. The
+> extracted chain (`resolve_pane_under_pointer`) is private to `app_impl`, and
+> `freminal/src/gui/mod.rs` declares `mod app_impl;` - not `pub`. A Criterion
+> bench compiles as an **external crate**, so reaching the chain requires making
+> the ~5,000-line `app_impl` module `pub`, plus `pub` on the chain and its
+> parameter types. That is exactly the trade 122.14's own amendment rejected,
+> and `freminal-module-cohesion` says to decline a split that widens visibility
+> on a god module purely to serve a bench. The decision was taken twice - once
+> in 122.14's amendment, once here - and should not be re-litigated without
+> first solving the visibility problem.
+>
+> **What the 39 recorded IDs therefore cover:** the chain's *constituents*
+> (`pane_at_pos`, `layout`, `find`, `split_borders`, `active_highlight_segment`),
+> not the composed chain. That is a real gap in this task's benchmark story,
+> stated here rather than papered over. It is of limited practical consequence:
+> the composed chain is an O(1) fold over those constituents, and per 122.14's
+> amendment the benchmark is an **algorithmic-shape check compared within a
+> run**, not a wall-clock gate - 12 of the 39 IDs exceed 15% run-to-run on
+> identical code.
+
 Verification: standard suite, plus `--features frame-profiling` — the recording
 call must still fire with the same values for the same inputs as before, and
 `FrameStats::record_pointer_motion_check` still mutates through a `Cell` under
@@ -1330,8 +1362,18 @@ encode that the GUI is the thing asking. Surface:
 - methods `set_gui_scroll_offset` (`506-516`), `set_gui_scroll_window`
   (`518-529`), `reset_scroll_offset` (`531-538`)
 - reads in `handle_incoming_data` (`418`) and `build_snapshot` (`629`, `648`)
-- 27 occurrences of `gui_scroll_offset`, 16 of `gui_extra_rows`, **all confined
-  to this one file**; tests poke the private fields directly (`1058`, `1062`,
+- **CORRECTED AT EXECUTION (2026-08-02): the "all confined to this one file"
+  claim below is WRONG.** The real surface is **six** files —
+  `freminal-terminal-emulator/src/interface.rs`, `src/io/mod.rs`,
+  `freminal/src/gui/pty.rs`, `freminal/src/gui/terminal/input.rs`, and the two
+  integration-test files `tests/interface_tests.rs` and
+  `tests/snapshot_build.rs`. The integration tests are **external crates** and
+  therefore reach the emulator through the **public setters**, not the private
+  fields, so the setter renames are load-bearing there. Two test function
+  *names* also embed the old term. Locate call sites by grepping for content,
+  not by the line numbers below.
+- 27 occurrences of `gui_scroll_offset`, 16 of `gui_extra_rows` in
+  `interface.rs`; its own unit tests poke the private fields directly (`1058`, `1062`,
   `1070`, `1072`, `1084`, `1086`, `1097`, `1098`, `1180`, `1212-1215`, `1534`)
 
 Semantically these are the **requested scrollback viewport position** and the
@@ -1459,7 +1501,7 @@ Stop: report the benchmark IDs and baseline numbers; await review.
 Bench file: `freminal/benches/pane_resolution_bench.rs`. Captured 2026-07-30 on
 `task-122/orchestration-extraction`, Criterion `sample_size(50)`,
 `measurement_time(2s)`. Figures are the **median** of Criterion's
-`[low median high]` triple. 34 benchmark IDs.
+`[low median high]` triple. 39 benchmark IDs.
 
 `PaneTree::layout` — the pointer-motion chain's step 1, and the frame path's
 layout call. `chain/16` is the degenerate right-leaning shape.

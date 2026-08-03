@@ -1825,6 +1825,21 @@ struct CursorFrameInputs {
     trail_duration: Duration,
 }
 
+/// Decide, for one pane in one frame, what has changed since the previous
+/// frame and therefore what must be rebuilt.
+///
+/// Extracted from `show` by subtask 122.11. It folds the per-frame dirty
+/// observations ([`FrameDirtyObservations`]) against the cached previous-frame
+/// values and yields a [`DirtyTrackingOutcome`] saying which vertex buffers
+/// need rebuilding ([`VertexRebuild`]), whether the cursor is drawn, and what
+/// repaint the pane wants next.
+///
+/// Pure with respect to egui: it takes already-sampled inputs
+/// ([`FrameDirtyContext`], [`FrameDirtyGeometry`], [`CursorFrameInputs`])
+/// rather than a `Ui`, which is what makes the decision unit-testable — it was
+/// previously an inline block inside `show` and reachable only by rendering a
+/// live frame.
+///
 // `too_many_lines` is genuine: the length comes from the block being
 // extracted, which this does not shorten. The argument count was NOT
 // inherited -- the block was inline and took no parameters at all, so the
