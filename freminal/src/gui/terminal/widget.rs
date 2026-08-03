@@ -1442,6 +1442,22 @@ pub struct PaneRenderCache {
     /// `effective_repaint_delay`'s suppressed-pointer substitution and would be
     /// silently downgraded to the fallback interval.
     pub(crate) pending_repaint_delay: Option<std::time::Duration>,
+    /// This pane's terminal-rect origin (`terminal_rect.min`, the top-left
+    /// corner of the cell grid after the command-block gutter inset is
+    /// applied), as computed by [`FreminalTerminalWidget::show`] this frame.
+    ///
+    /// Set unconditionally, every frame `show()` runs, immediately after
+    /// `terminal_rect` is computed — this is the *only* place the value is
+    /// computed; nothing else may re-derive it (subtask 122.15). `app_impl`
+    /// lifts this into [`crate::gui::published_frame_state::PublishedFrameState`]
+    /// right after `show()` returns, the same way it drains
+    /// [`Self::pending_repaint_delay`], so subtask 121.17 can read a pane's
+    /// terminal-rect origin from outside a frame. Holds a stale (previous
+    /// frame's) value before the first `show()` call and between frames;
+    /// callers needing "is this fresh" semantics must go through the
+    /// published type's own per-frame rebuild discipline rather than this
+    /// field directly.
+    pub(crate) terminal_rect_origin: freminal_common::geometry::Point,
 }
 
 impl PaneRenderCache {
@@ -1484,6 +1500,7 @@ impl PaneRenderCache {
             last_rendered_image_pixel_ptrs: std::collections::HashMap::new(),
             last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage::Unchanged,
             pending_repaint_delay: None,
+            terminal_rect_origin: freminal_common::geometry::point(0.0, 0.0),
         }
     }
 
@@ -2202,6 +2219,26 @@ pub struct FreminalTerminalWidget {
     egui_fonts_dirty: bool,
 }
 
+/// Compute a pane's terminal-rect origin: the top-left corner of the cell
+/// grid, after the command-block gutter (if any) shifts it right by
+/// `gutter_inset` logical points off `pane_rect`'s left edge.
+///
+/// This is a small pure extraction of the first component of the
+/// `terminal_rect` computation inside [`FreminalTerminalWidget::show`] (see
+/// the call site there), done **solely** so a unit test can exercise the
+/// exact computation `show` uses without driving a full `show()` call
+/// (which needs a live `Ui`, GPU-backed `RenderState`, and PTY channels —
+/// not practical to construct in a unit test). `show` and the test below
+/// are the only two callers; subtask 122.15 forbids any *third* call site
+/// re-deriving this from `cached_central_rect` + `cached_gutter_inset_logical`
+/// independently — see `PublishedFrameState::pane_terminal_origin`'s doc.
+fn terminal_rect_origin(
+    pane_rect: egui::Rect,
+    gutter_inset: f32,
+) -> freminal_common::geometry::Point {
+    freminal_common::geometry::point(pane_rect.min.x + gutter_inset, pane_rect.min.y)
+}
+
 impl FreminalTerminalWidget {
     /// Create a new `FreminalTerminalWidget`, loading fonts and initialising
     /// shared rendering resources from the provided config.
@@ -2474,10 +2511,20 @@ impl FreminalTerminalWidget {
             pane_rect.min,
             egui::pos2(pane_rect.min.x + gutter_strip_w, pane_rect.max.y),
         );
+        let terminal_origin = terminal_rect_origin(pane_rect, gutter_inset);
         let terminal_rect = egui::Rect::from_min_max(
-            egui::pos2(pane_rect.min.x + gutter_inset, pane_rect.min.y),
+            crate::gui::geometry_interop::point_to_egui(terminal_origin),
             pane_rect.max,
         );
+
+        // Publish this frame's terminal-rect origin (subtask 122.15 seam for
+        // 121.17's cell-granular suppression). `terminal_origin` above (fed
+        // into `terminal_rect` itself, immediately above) is the one and
+        // only place this value is computed; record it into the pane's
+        // cache immediately so nothing downstream is tempted to re-derive
+        // it from `content_rect` + `gutter_inset_logical` (which would
+        // silently drift — see the field's doc comment).
+        cache.terminal_rect_origin = terminal_origin;
 
         // Keep the gutter hover-tint live.  This works together with the
         // `hover_changed` cache invalidation below; both are required:
@@ -5653,5 +5700,82 @@ mod pane_render_cache_repaint_delay_tests {
         // Second drain (as if a new frame started with no new requests):
         // must be `None`, not the previous frame's value.
         assert_eq!(cache.take_pending_repaint_delay(), None);
+    }
+}
+
+#[cfg(test)]
+mod terminal_rect_origin_tests {
+    //! Subtask 122.15: proves `PaneRenderCache::terminal_rect_origin` (what
+    //! `app_impl` publishes into `PublishedFrameState`) agrees with what
+    //! `FreminalTerminalWidget::show` itself computes for `terminal_rect`,
+    //! for the *same* frame's geometry.
+    //!
+    //! `show()` cannot be driven directly in a unit test — it needs a live
+    //! `Ui`, a GL-context-backed `RenderState`, and PTY channels. So this
+    //! pins the invariant one level down, at `terminal_rect_origin`: the
+    //! pure helper `show()` calls to build **both** `terminal_rect.min` and
+    //! `cache.terminal_rect_origin` from the same value (see the call site
+    //! a few hundred lines above `impl FreminalTerminalWidget`). The test
+    //! below reconstructs `terminal_rect` the *exact* way `show()` does —
+    //! `egui::Rect::from_min_max(point_to_egui(terminal_rect_origin(..)), pane_rect.max)`
+    //! — and asserts its `.min` corner equals what gets published. A test
+    //! that instead re-derived the origin independently (e.g. straight from
+    //! `pane_rect.min.x + gutter_inset` inline, without going through
+    //! `terminal_rect_origin`) would pass even if `show()`'s real
+    //! `terminal_rect` construction silently drifted from this helper — see
+    //! the prohibition on that in the helper's own doc comment.
+
+    use super::{PaneRenderCache, terminal_rect_origin};
+    use crate::gui::geometry_interop::point_to_egui;
+
+    /// Fixed geometry mirroring the crate doc's example: a pane whose
+    /// top-left is not at the window origin (200, 50), an 808x500 available
+    /// area, and a non-zero command-block gutter inset (18 logical points —
+    /// larger than a single gutter test's 8px, to make a copy-paste-only
+    /// "origin == `pane_rect.min`" bug visible).
+    fn fixture() -> (egui::Rect, f32) {
+        let pane_rect =
+            egui::Rect::from_min_max(egui::pos2(200.0, 50.0), egui::pos2(1008.0, 550.0));
+        let gutter_inset = 18.0_f32;
+        (pane_rect, gutter_inset)
+    }
+
+    /// The published origin must equal `terminal_rect.min` as `show()`
+    /// constructs it — reconstructed here verbatim from the same helper.
+    #[test]
+    fn published_origin_matches_terminal_rect_min_as_show_constructs_it() {
+        let (pane_rect, gutter_inset) = fixture();
+
+        // Exactly what `show()` does: compute the origin via the shared
+        // helper, then build `terminal_rect` from it.
+        let terminal_origin = terminal_rect_origin(pane_rect, gutter_inset);
+        let terminal_rect = egui::Rect::from_min_max(point_to_egui(terminal_origin), pane_rect.max);
+
+        // Exactly what `show()` does with `cache` right after: record the
+        // same `terminal_origin` value into the pane's render cache, which
+        // `app_impl` then lifts into `PublishedFrameState` verbatim.
+        let mut cache = PaneRenderCache::new();
+        cache.terminal_rect_origin = terminal_origin;
+
+        assert_eq!(
+            point_to_egui(cache.terminal_rect_origin),
+            terminal_rect.min,
+            "the value app_impl publishes must equal the min corner of the \
+             exact terminal_rect show() builds this frame"
+        );
+        // Sanity: the gutter inset must actually have moved the origin off
+        // the pane's left edge, so this test could not pass by accident if
+        // the inset were silently dropped.
+        assert!((terminal_rect.min.x - pane_rect.min.x - gutter_inset).abs() < f32::EPSILON);
+        assert!((terminal_rect.min.y - pane_rect.min.y).abs() < f32::EPSILON);
+    }
+
+    /// A zero gutter inset (no command-block gutter, or an alt-screen
+    /// frame) leaves the origin at the pane's own top-left corner.
+    #[test]
+    fn zero_gutter_inset_origin_is_pane_top_left() {
+        let (pane_rect, _) = fixture();
+        let origin = terminal_rect_origin(pane_rect, 0.0);
+        assert_eq!(point_to_egui(origin), pane_rect.min);
     }
 }

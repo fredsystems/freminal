@@ -9,6 +9,7 @@
 //! for the full publish/read discipline.
 
 use super::chrome_damage::ChromeSignals;
+use super::panes::PaneId;
 use super::window::ResizeOverlayState;
 
 /// State written during one [`App::update`](freminal_windowing::App::update)
@@ -122,6 +123,31 @@ pub(super) struct PublishedFrameState {
     /// Active resize-overlay HUD state, or `None` when no resize is in
     /// progress / the overlay has timed out (issue #433).
     resize_overlay: Option<ResizeOverlayState>,
+    /// Each live pane's terminal-rect origin (`terminal_rect.min` — the
+    /// top-left corner of the cell grid, after the command-block gutter
+    /// inset) as of the most recent frame, keyed by [`PaneId`].
+    ///
+    /// This is the subtask 122.15 seam: 121.17's cell-granular suppression
+    /// will need a pane's terminal-rect origin readable from outside a
+    /// frame, and [`super::terminal::FreminalTerminalWidget::show`] is the
+    /// only place that origin is computed. `show` records it into the
+    /// pane's `PaneRenderCache` (`terminal_rect_origin`), and `app_impl`
+    /// lifts it in here immediately after `show()` returns for that pane —
+    /// it is never recomputed from `cached_central_rect` +
+    /// `cached_gutter_inset_logical`, which would look equivalent but would
+    /// silently drift from what `show` actually drew.
+    ///
+    /// **Rebuilt every frame; explicitly cleared before the per-pane render
+    /// loop begins** (mirrors `chrome_border_rects`'s rebuilt-every-frame
+    /// discipline) — panes come and go (split/close), so a stale entry for
+    /// a closed pane must not linger. Unlike `chrome_border_rects`, there is
+    /// no "no sensors built this frame" branch here: every pane in that
+    /// frame's `pane_layout` always publishes exactly one entry, so the map
+    /// after a fully-completing frame contains precisely the currently-live
+    /// panes. An early-return frame (see the type doc's "Early-return
+    /// staleness" section) leaves this holding whatever the last
+    /// fully-completing `update()` left, same as every other field here.
+    pane_terminal_origins: std::collections::HashMap<PaneId, freminal_common::geometry::Point>,
 }
 
 impl PublishedFrameState {
@@ -225,6 +251,43 @@ impl PublishedFrameState {
     pub(super) const fn clear_resize_overlay(&mut self) {
         self.resize_overlay = None;
     }
+
+    /// The terminal-rect origin published for `pane_id` on the most recent
+    /// frame that rendered it, or `None` if that pane has never published
+    /// one (not yet rendered, or closed and never replaced this slot).
+    ///
+    /// TODO(121.17): this subtask (122.15) builds the seam only — no
+    /// production code calls this getter yet, so it has no caller outside
+    /// the round-trip tests below until subtask 121.17 wires its
+    /// cell-granular suppression check through it. It is real, finished,
+    /// production-shaped API (not a throwaway), so the `allow` below is
+    /// temporary rather than permanent; remove it when 121.17 adds its
+    /// first production call site.
+    #[allow(dead_code)]
+    pub(super) fn pane_terminal_origin(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<freminal_common::geometry::Point> {
+        self.pane_terminal_origins.get(&pane_id).copied()
+    }
+
+    /// Publish `pane_id`'s terminal-rect origin for this frame, as computed
+    /// by `FreminalTerminalWidget::show` and recorded into that pane's
+    /// `PaneRenderCache`.
+    pub(super) fn publish_pane_terminal_origin(
+        &mut self,
+        pane_id: PaneId,
+        origin: freminal_common::geometry::Point,
+    ) {
+        self.pane_terminal_origins.insert(pane_id, origin);
+    }
+
+    /// Clear every published terminal-rect origin. Called once, before the
+    /// per-pane render loop begins, so a pane closed since the last frame
+    /// does not leave a stale entry behind.
+    pub(super) fn clear_pane_terminal_origins(&mut self) {
+        self.pane_terminal_origins.clear();
+    }
 }
 
 #[cfg(test)]
@@ -232,6 +295,7 @@ impl PublishedFrameState {
 mod tests {
     use super::PublishedFrameState;
     use crate::gui::chrome_damage::ChromeSignals;
+    use crate::gui::panes::PaneIdGenerator;
     use crate::gui::window::ResizeOverlayState;
 
     fn rect(x: f32, y: f32) -> egui::Rect {
@@ -452,5 +516,63 @@ mod tests {
 
         state.clear_resize_overlay();
         assert!(state.resize_overlay().is_none());
+    }
+
+    /// Subtask 122.15: a fresh instance has no published terminal-rect
+    /// origins (no pane has rendered yet).
+    #[test]
+    fn fresh_instance_has_no_pane_terminal_origins() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane = id_gen.next_id();
+        let state = PublishedFrameState::new();
+        assert_eq!(state.pane_terminal_origin(pane), None);
+    }
+
+    /// Publishing an origin for one pane does not affect another pane's
+    /// (never-published) slot.
+    #[test]
+    fn publish_then_read_is_keyed_per_pane() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let pane_b = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+
+        let origin_a = freminal_common::geometry::point(12.0, 34.0);
+        state.publish_pane_terminal_origin(pane_a, origin_a);
+
+        assert_eq!(state.pane_terminal_origin(pane_a), Some(origin_a));
+        assert_eq!(state.pane_terminal_origin(pane_b), None);
+    }
+
+    /// Pin: the exact per-frame lifecycle documented on the field —
+    /// `clear_pane_terminal_origins` (called once before the per-pane loop)
+    /// followed by one `publish_pane_terminal_origin` per still-live pane —
+    /// must NOT leave a closed pane's stale origin behind.
+    #[test]
+    fn clear_then_republish_drops_closed_panes() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let pane_b = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+
+        // "Frame 1": both panes are live and publish an origin.
+        state.publish_pane_terminal_origin(pane_a, freminal_common::geometry::point(1.0, 1.0));
+        state.publish_pane_terminal_origin(pane_b, freminal_common::geometry::point(2.0, 2.0));
+        assert!(state.pane_terminal_origin(pane_a).is_some());
+        assert!(state.pane_terminal_origin(pane_b).is_some());
+
+        // "Frame 2": pane_b was closed. The per-pane loop clears the whole
+        // map first, then republishes only the panes still in that frame's
+        // `pane_layout` — here, only pane_a.
+        state.clear_pane_terminal_origins();
+        let new_origin_a = freminal_common::geometry::point(9.0, 9.0);
+        state.publish_pane_terminal_origin(pane_a, new_origin_a);
+
+        assert_eq!(state.pane_terminal_origin(pane_a), Some(new_origin_a));
+        assert_eq!(
+            state.pane_terminal_origin(pane_b),
+            None,
+            "a closed pane's stale origin must not survive the clear"
+        );
     }
 }

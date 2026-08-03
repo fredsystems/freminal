@@ -2396,6 +2396,14 @@ impl freminal_windowing::App for FreminalGui {
             #[cfg(feature = "frame-profiling")]
             let mut phase_panes_this_frame = std::time::Duration::ZERO;
 
+            // Subtask 122.15: clear last frame's published terminal-rect
+            // origins before the per-pane loop republishes one entry per
+            // live pane below. Panes come and go (split/close), so this
+            // must happen unconditionally every frame rather than only on
+            // some branch — otherwise a closed pane's origin would linger
+            // in `win.published` forever.
+            win.published.clear_pane_terminal_origins();
+
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
                 // Each pane edge that is interior (shared with another pane)
@@ -2655,6 +2663,16 @@ impl freminal_windowing::App for FreminalGui {
                     shortest_repaint_delay =
                         Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
                 }
+
+                // Subtask 122.15: lift this pane's terminal-rect origin —
+                // computed by `show()` above and recorded into
+                // `pane.render_cache.terminal_rect_origin` — into the
+                // published, out-of-frame-readable type. Read directly from
+                // the cache (not recomputed from `content_rect` +
+                // `gutter_inset_logical`) so the published value can never
+                // drift from what `show` actually drew.
+                win.published
+                    .publish_pane_terminal_origin(pane_id, pane.render_cache.terminal_rect_origin);
 
                 if copied_to_clipboard {
                     self.route_freminal_toast(
