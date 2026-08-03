@@ -141,15 +141,6 @@ fn clamp_repaint_delay(delay: std::time::Duration) -> std::time::Duration {
 /// chrome input forces Full), so the one interactive widget most likely to
 /// carry egui-internal animation state cannot itself be open during a
 /// `Replay` frame.
-///
-/// The Item 1 residual-gap fix (`effective_chrome_gate_delay`, see its doc)
-/// widens this latent window: settling the chrome gate on `app_requested_delay:
-/// None` now permits `Replay` in the "app requested nothing" case that used to
-/// pin `Full`, so both mechanisms above are reachable in a strictly larger set
-/// of frames than before that fix. This was a deliberate, accepted trade
-/// (maintainer decision) — the primary win (correct settling for the
-/// btop/`DECTCEM`-hidden-cursor workload) outweighs a latent risk with no
-/// currently-existing trigger.
 const SUPPRESSED_POINTER_FALLBACK_DELAY: std::time::Duration =
     std::time::Duration::from_millis(500);
 
@@ -180,47 +171,6 @@ fn effective_repaint_delay(
 ) -> std::time::Duration {
     if suppressed_only && repaint_delay.is_zero() {
         app_requested_delay.unwrap_or(SUPPRESSED_POINTER_FALLBACK_DELAY)
-    } else {
-        repaint_delay
-    }
-}
-
-/// Subtask 121.13 residual-gap fix (maintainer decision): the value stashed
-/// for next frame's chrome-settle check (see [`chrome_repaint_settled`] via
-/// `EguiState::stash_effective_repaint_delay`), which answers a DIFFERENT
-/// question than [`effective_repaint_delay`] despite sharing its inputs and
-/// its substitution condition.
-///
-/// [`effective_repaint_delay`] answers "what delay do we actually schedule
-/// the next wake at?" — and the answer there MUST be bounded
-/// ([`SUPPRESSED_POINTER_FALLBACK_DELAY`]) when the app requested nothing,
-/// because we cannot prove nothing needs drawing and an unbounded wait would
-/// stall the window.
-///
-/// This function answers "did anything actually WANT a repaint this frame?"
-/// — and when the app requested nothing, the absence of any request IS the
-/// proof that nothing wanted one. Substituting the synthetic liveness poll
-/// interval here would make it masquerade as evidence of a real want, which
-/// is exactly the residual gap the maintainer flagged: `chrome_repaint_settled`'s
-/// `None` arm requires the delay to equal `Duration::MAX` to call the frame
-/// settled, so feeding it 500ms permanently reads as "unsettled" for as long
-/// as suppressed pointer motion continues, even though nothing chrome-relevant
-/// is scheduled.
-///
-/// The two functions diverge in EXACTLY one case: `suppressed_only &&
-/// repaint_delay.is_zero() && app_requested_delay.is_none()`. Every other
-/// input combination yields the same output from both — when `app_requested_delay`
-/// is `Some(_)` the substitution is identical; when substitution does not
-/// apply, both pass `repaint_delay` through unchanged.
-///
-/// Pure so the divergence itself is unit-testable without a live event loop.
-fn effective_chrome_gate_delay(
-    suppressed_only: bool,
-    repaint_delay: std::time::Duration,
-    app_requested_delay: Option<std::time::Duration>,
-) -> std::time::Duration {
-    if suppressed_only && repaint_delay.is_zero() {
-        app_requested_delay.unwrap_or(std::time::Duration::MAX)
     } else {
         repaint_delay
     }
@@ -1260,38 +1210,6 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     frame_output.app_requested_delay,
                 );
 
-                // Subtask 121.13 + residual-gap fix (maintainer decision):
-                // `run_frame` (inside `state.egui`) already stashed the RAW
-                // `frame_output.repaint_delay` for next frame's chrome-settle
-                // check. Overwrite it here with `effective_chrome_gate_delay`
-                // — NOT `effective_delay`/`effective_repaint_delay` above,
-                // which answers a different question (what to schedule) and
-                // therefore must stay bounded even when the app requested
-                // nothing. The gate value must NOT be bounded in that case:
-                // see `effective_chrome_gate_delay`'s doc for why the two
-                // diverge in exactly one case, and
-                // `EguiState::stash_effective_repaint_delay`'s doc for why
-                // this is a deliberate second write over `run_frame`'s stash.
-                //
-                // Unconditional rather than "only when it differs": the two
-                // gate-delay branches are equal to `repaint_delay` whenever
-                // `suppressed_only` was false, so an unconditional write is a
-                // no-op on every non-suppressed frame and therefore
-                // behaviourally identical to a guarded write, just without
-                // the extra comparison.
-                //
-                // Must run on every path that reaches this point (no early
-                // return follows it in this arm) — the field would go stale
-                // on any suppressed-pointer frame that skipped it.
-                let effective_gate_delay = effective_chrome_gate_delay(
-                    suppressed_only,
-                    frame_output.repaint_delay,
-                    frame_output.app_requested_delay,
-                );
-                state
-                    .egui
-                    .stash_effective_repaint_delay(effective_gate_delay);
-
                 if effective_delay < std::time::Duration::from_hours(1) {
                     let deadline = Instant::now() + clamp_repaint_delay(effective_delay);
                     state.repaint_at = Some(deadline);
@@ -1556,7 +1474,7 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 mod tests {
     use super::{
         MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
-        clamp_repaint_delay, effective_chrome_gate_delay, effective_repaint_delay, is_blocked_key,
+        clamp_repaint_delay, effective_repaint_delay, is_blocked_key,
         is_unconditional_chrome_input, logical_coord_to_i32, logical_dim_to_u32,
         physical_to_logical_pos, should_force_chrome_full_for_pointer,
         should_schedule_cursor_moved, should_set_chrome_input_pending, update_chrome_drag_latch,
@@ -2031,82 +1949,6 @@ mod tests {
         assert_eq!(
             effective_repaint_delay(false, std::time::Duration::MAX, None),
             std::time::Duration::MAX
-        );
-    }
-
-    // ── Residual-gap fix (maintainer decision): `effective_chrome_gate_delay` ──
-    //
-    // Mirrors the `effective_repaint_delay` tests above for its sibling: same
-    // branches, same inputs, but the `None`-substitution branch answers
-    // `Duration::MAX` instead of the bounded fallback, because this function
-    // answers "did anything want a repaint?" rather than "what do we
-    // schedule?". See the divergence-pinning test at the end of this block.
-
-    #[test]
-    fn effective_chrome_gate_delay_substitutes_app_delay_when_suppressed_and_egui_wants_immediate()
-    {
-        // Identical to `effective_repaint_delay`'s headline case: the app's
-        // own request substitutes for egui's queue-artifact zero.
-        assert_eq!(
-            effective_chrome_gate_delay(true, std::time::Duration::ZERO, Some(MS500)),
-            MS500
-        );
-    }
-
-    #[test]
-    fn effective_chrome_gate_delay_becomes_max_when_app_wants_nothing() {
-        // THIS is where the two functions diverge: `effective_repaint_delay`
-        // must stay bounded here (liveness), but the gate delay must become
-        // `Duration::MAX` — the absence of any app request IS the proof that
-        // nothing wanted a repaint, so the synthetic liveness poll interval
-        // must not masquerade as evidence of one.
-        assert_eq!(
-            effective_chrome_gate_delay(true, std::time::Duration::ZERO, None),
-            std::time::Duration::MAX
-        );
-    }
-
-    #[test]
-    fn effective_chrome_gate_delay_passes_egui_delay_through_when_not_suppressed() {
-        assert_eq!(
-            effective_chrome_gate_delay(false, std::time::Duration::ZERO, Some(MS500)),
-            std::time::Duration::ZERO
-        );
-        assert_eq!(effective_chrome_gate_delay(false, MS16, Some(MS500)), MS16);
-    }
-
-    #[test]
-    fn effective_chrome_gate_delay_never_overrides_a_nonzero_egui_request() {
-        assert_eq!(effective_chrome_gate_delay(true, MS16, Some(MS500)), MS16);
-        assert_eq!(effective_chrome_gate_delay(true, MS16, None), MS16);
-    }
-
-    #[test]
-    fn effective_chrome_gate_delay_preserves_max_when_not_suppressed() {
-        assert_eq!(
-            effective_chrome_gate_delay(false, std::time::Duration::MAX, None),
-            std::time::Duration::MAX
-        );
-    }
-
-    #[test]
-    fn effective_repaint_delay_and_effective_chrome_gate_delay_diverge_only_when_app_requested_nothing()
-     {
-        // Pin the divergence explicitly: same `suppressed_only`/`repaint_delay`
-        // inputs, `app_requested_delay: None`, and the two functions now
-        // disagree on purpose. `effective_repaint_delay` returns the bounded
-        // liveness fallback (what we schedule); `effective_chrome_gate_delay`
-        // returns `Duration::MAX` (nothing wanted a repaint).
-        let scheduled = effective_repaint_delay(true, std::time::Duration::ZERO, None);
-        let gated = effective_chrome_gate_delay(true, std::time::Duration::ZERO, None);
-
-        assert_eq!(scheduled, SUPPRESSED_POINTER_FALLBACK_DELAY);
-        assert_eq!(gated, std::time::Duration::MAX);
-        assert_ne!(
-            scheduled, gated,
-            "the two questions ('what to schedule' vs 'did anything want a \
-             repaint') must diverge in this exact case, or the residual gap \
-             this fix closes has regressed"
         );
     }
 
