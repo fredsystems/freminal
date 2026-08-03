@@ -74,6 +74,52 @@ of the goal; 122.3a is the maintainer's instruction to take
   Task 122 keeps rewriting `app_impl.rs`. Every subtask's stated ranges were stale
   by the time it was executed. Locate blocks by grepping for content.
 
+### Cleanup entries — status at close-out
+
+Per `freminal-orchestrator-protocol`, bugs found outside a subtask's scope are
+numbered entries here rather than TODOs or informal known-issues sections.
+**All three remain OPEN and none is part of Task 122:**
+
+| Entry  | Surfaced   | Summary                                                       |
+| ------ | ---------- | ------------------------------------------------------------- |
+| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space` |
+| 122.C2 | activation | `assert_eq!` production panic path in `control_key`            |
+| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it  |
+
+122.C1 was explicitly excluded from 122.12; 122.C2 is independent; 122.C3 was
+found by this close-out's own line-count audit.
+
+### Why the branch is +7,079 / -2,277, for a "mechanical extraction"
+
+The question is fair and the answer is mostly — but not entirely — benign.
+
+| Category                        | Net    | Note                                            |
+| ------------------------------- | ------ | ----------------------------------------------- |
+| `Documents/`                    | +766   | this plan document; not code                     |
+| `pane_resolution_bench.rs`      | +469   | 122.14; `performance-benchmarks` mandates a bench where none existed |
+| New modules (4 files)           | +2,573 | see composition below                            |
+| `freminal-common/geometry.rs`   | +342   | new neutral `Point`/`Rect` + tests               |
+| `app_impl.rs`                   | **-311** | the target shrank (-249 code lines)            |
+| `widget.rs`                     | **+645** | **the anomaly — see 122.C3**                   |
+
+The four new modules (`pointer_motion.rs`, `frame_drain.rs`,
+`published_frame_state.rs`, `geometry_interop.rs`) total 2,573 lines composed as:
+
+- **51% tests** (1,321 lines) — genuinely new coverage. These predicates were
+  previously unreachable inside a 3,000-line closure, which is much of why the
+  task existed; making them testable was the point, not a side effect.
+- **27% doc comments** (668 lines) — house style. Honestly, some are
+  disproportionate (40-line docs on three-line predicates). Worth trimming if it
+  ever becomes a burden, but churn to do now.
+- **19% production code** (506 lines).
+
+So actual production code moved and added is ~500 lines against `app_impl.rs`'s
+249-line reduction. The codebase did not silently gain thousands of lines of
+logic. **The one real regression is `widget.rs`**, which grew 645 lines (only 16
+of them tests) and has now overtaken `app_impl.rs` as the largest GUI file.
+That is tracked as 122.C3 and is a fair criticism of this task's execution, not
+of its plan.
+
 ### Open item for the maintainer — NOT decided by 122.16
 
 **`agents.md`'s clippy command does not match the pre-commit hook.** The hook runs
@@ -1653,6 +1699,54 @@ a third-party enum's `name()`.
 Scope of fix: `input.rs:930-978`. Approach: return `None` rather than assert.
 
 Scheduling: independent; may be done any time. Not part of Task 122.
+
+### 122.C3 — 122.11 grew the god file it extracted from
+
+Surface point: 122.16 close-out audit, 2026-08-02, while accounting for the
+branch's net line growth.
+
+Subtask 122.11 ("extract `show`'s dirty-tracking decision block") did the
+**decomposition** correctly — it produced six named types
+(`FrameDirtyObservations`, `VertexRebuild`, `DirtyTrackingOutcome`,
+`FrameDirtyContext`, `FrameDirtyGeometry`, `CursorFrameInputs`) and one pure,
+unit-testable function, `evaluate_frame_dirty_state`. That is the Task 122
+pattern and the decision is now testable where it previously was not.
+
+It did **not** do the relocation. All of it landed in `widget.rs`:
+
+| Metric                    | Before | After | Delta   |
+| ------------------------- | ------ | ----- | ------- |
+| `show()` length           | 1,882  | 1,663 | **-219** |
+| `widget.rs` total         | 5,136  | 5,781 | **+645** |
+| `widget.rs` code-only     | 3,064  | 3,422 | **+358** |
+| `widget.rs` test region   | 60     | 76    | +16     |
+
+So the god *function* shrank modestly while the god *file* grew substantially,
+and the growth is **not** test coverage — only 16 of the 645 lines are tests.
+
+This is the exact failure mode that produced 122.5a (`pointer_motion.rs`) and
+122.11a (`frame_drain.rs`): an extraction that leaves the extracted code in the
+god file makes the file bigger, which is the opposite of the goal. Those two
+subtasks were added mid-task for precisely this reason; 122.11 predates the
+second of them and was not revisited afterwards.
+
+Impact: none functional. `widget.rs` is now the largest file in the GUI (5,781
+lines, having overtaken `app_impl.rs` at 5,008), which is a structural
+regression against this task's own goal even though every individual change was
+sound.
+
+Scope of fix: move the six types and `evaluate_frame_dirty_state` (plus their
+tests) out of `widget.rs` into their own module — `frame_dirty.rs` — mirroring
+`pointer_motion.rs` and `frame_drain.rs`. Mechanical; no logic change. Check
+whether the move forces any `pub(super)` to widen, and decline the split if it
+does, per `freminal-module-cohesion`.
+
+Scheduling: **not** part of Task 122 — it is a new subtask's worth of work
+surfaced at close-out, and folding it in would mean editing `widget.rs` again
+after the PR was raised. Cheap and self-contained; suitable for any later pass,
+and a natural candidate to fold into Task 123 if the crate extraction proceeds,
+since `frame_dirty.rs` would be a crate candidate on the same terms as
+`pointer_motion.rs`.
 
 ---
 
