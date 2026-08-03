@@ -18,10 +18,11 @@ version summary and `Documents/MASTER_PLAN.md` for roadmap position.
 
 ## Execution state — updated 2026-08-02
 
-**Branch: `task-122/orchestration-extraction`.** All subtasks are complete and
-committed; the branch is green. **Awaiting PR / merge.**
+**Branch: `task-122/orchestration-extraction`.** All subtasks and all three
+cleanup entries are complete and committed; the branch is green. **Awaiting PR /
+merge** (PR #472).
 
-### Done — all 19 subtasks
+### Done — 19 subtasks plus 3 cleanup entries
 
 | Subtask    | Commit     | Note                                                       |
 | ---------- | ---------- | ---------------------------------------------------------- |
@@ -45,6 +46,9 @@ committed; the branch is green. **Awaiting PR / merge.**
 | 122.13     | `ea58d9d3` | rename; plan's "one file" scope was stale — six files       |
 | 122.15     | `cd0dc0e4` | terminal-rect origin published; unblocks 121.17             |
 | 122.16     | (this)     | document reconciliation                                     |
+| **122.C1** | PR #472    | **resolved** — key-encoding characterisation tests           |
+| **122.C2** | PR #472    | **resolved** — production `assert_eq!` panic removed         |
+| **122.C3** | PR #472    | **resolved** — `frame_dirty.rs`; `widget.rs` 5,796 -> 5,035  |
 
 ### Interruption: the beta.7 chrome regression
 
@@ -78,16 +82,32 @@ of the goal; 122.3a is the maintainer's instruction to take
 
 Per `freminal-orchestrator-protocol`, bugs found outside a subtask's scope are
 numbered entries here rather than TODOs or informal known-issues sections.
-**All three remain OPEN and none is part of Task 122:**
+**All three are RESOLVED in this task (PR #472):**
 
-| Entry  | Surfaced   | Summary                                                       |
-| ------ | ---------- | ------------------------------------------------------------- |
-| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space` |
-| 122.C2 | activation | `assert_eq!` production panic path in `control_key`            |
-| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it  |
+| Entry  | Surfaced   | Summary                                                              | Status   |
+| ------ | ---------- | -------------------------------------------------------------------- | -------- |
+| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space`  | Resolved |
+| 122.C2 | activation | `assert_eq!` production panic path in `control_key`                   | Resolved |
+| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it         | Resolved |
 
-122.C1 was explicitly excluded from 122.12; 122.C2 is independent; 122.C3 was
-found by this close-out's own line-count audit.
+**A process note worth keeping, because it is the reason these nearly shipped
+open.** The protocol says a cleanup entry "is part of the task — not a separate
+task, not a TODO comment in code, not a tracking issue elsewhere." The
+activation-time plan then wrote "Scheduling: **not** part of Task 122" on C1 and
+C2, which silently inverted that default; the close-out inherited it and filed
+C3 the same way. The entries had become exactly what the protocol forbids — a
+tracking list. C2 in particular was an active `agents.md` violation (a panic in
+production input handling) left open from activation to close-out. **If a plan
+document ever says a cleanup entry is out of the host task's scope, treat that
+as a claim needing justification, not as settled.**
+
+What each fix was:
+
+- **122.C1** — characterisation tests only; the two functions are unchanged. The
+  reconciliation stays unscheduled but is now safe to attempt.
+- **122.C2** — the panic became a `None` return.
+- **122.C3** — `frame_dirty.rs` created; `widget.rs` 5,796 -> **5,035**, below
+  its `main` size of 5,136.
 
 ### Why the branch is +7,079 / -2,277, for a "mechanical extraction"
 
@@ -100,7 +120,7 @@ The question is fair and the answer is mostly — but not entirely — benign.
 | New modules (4 files)           | +2,573 | see composition below                            |
 | `freminal-common/geometry.rs`   | +342   | new neutral `Point`/`Rect` + tests               |
 | `app_impl.rs`                   | **-311** | the target shrank (-249 code lines)            |
-| `widget.rs`                     | **+645** | **the anomaly — see 122.C3**                   |
+| `widget.rs`                     | **-101** | was +645; reversed by 122.C3, now below `main` |
 
 The four new modules (`pointer_motion.rs`, `frame_drain.rs`,
 `published_frame_state.rs`, `geometry_interop.rs`) total 2,573 lines composed as:
@@ -115,10 +135,13 @@ The four new modules (`pointer_motion.rs`, `frame_drain.rs`,
 
 So actual production code moved and added is ~500 lines against `app_impl.rs`'s
 249-line reduction. The codebase did not silently gain thousands of lines of
-logic. **The one real regression is `widget.rs`**, which grew 645 lines (only 16
-of them tests) and has now overtaken `app_impl.rs` as the largest GUI file.
-That is tracked as 122.C3 and is a fair criticism of this task's execution, not
-of its plan.
+logic.
+
+`widget.rs` **was** the one real regression — it grew 645 lines (only 16 of them
+tests) and briefly overtook `app_impl.rs` as the largest GUI file. 122.C3 moved
+that block into `frame_dirty.rs`, leaving `widget.rs` at 5,035, i.e. 101 lines
+**below** where it started on `main`. Both god files therefore end this task
+smaller than they began it, which is what the task set out to do.
 
 ### Open item for the maintainer — NOT decided by 122.16
 
@@ -1384,6 +1407,21 @@ support). The existing doc comments already describe them accurately without the
 `previous_extra_flatten_rows`, and `set_requested_scroll_offset` /
 `set_requested_scroll_window` (`reset_scroll_offset` keeps its name).
 
+> **TWO OF THOSE NAMES WERE WRONG AND WERE CORRECTED (PR #472 review).** The two
+> `previous_*` fields do **not** cache the *requested* values — they cache the
+> **effective** ones. `interface.rs` clamps the request to `max_scroll_offset`
+> and forces `0` on the alternate screen before storing, and the extra-row count
+> is likewise clamped to the rows actually available above the window. Naming
+> them `previous_requested_*` was a regression against the original neutral
+> `previous_scroll_offset`, which was at least accurate. Final names:
+> **`previous_effective_scroll_offset`** and
+> **`previous_effective_extra_rows`**, each documenting why it is deliberately
+> not `requested`. The comparison is against the effective value computed each
+> frame, so a request that clamps to the same effective offset correctly does
+> *not* invalidate the snapshot cache — which is the behaviour the wrong name
+> would have led a reader to doubt. (CodeRabbit flagged the scroll field; the
+> extra-rows field had the identical defect and was found by inspection.)
+
 Deliverable: the rename, existing tests passing.
 
 Verification: standard suite. Confirm no propagation into `freminal-buffer`.
@@ -1723,7 +1761,29 @@ pins both call sites' current output first.
 Scope of fix: `input.rs`. Approach: characterisation tests over both functions
 across the full `egui::Key` range before touching either.
 
-Scheduling: **not** part of Task 122. Deliberately excluded from 122.12.
+**RESOLVED in Task 122 (PR #472).** The characterisation tests exist:
+`key_encoding_characterisation_tests` in `input.rs`, four tests covering the
+whole `egui::Key` range —
+
+- `space_encodes_differently_in_the_two_functions` pins the divergence itself
+  (`control_key` -> `Ctrl(32)` NUL, `egui_key_to_terminal_input` -> `Ascii(32)`
+  literal space) and asserts the two stay observably different;
+- `control_key_maps_every_letter_to_its_control_byte` pins all 26 A-Z mappings
+  (and so also guards 122.C2's fix);
+- `control_key_c0_table_is_pinned_and_absent_from_the_other_function` pins all
+  13 C0 punctuation/digit entries;
+- `coverage_sets_of_the_two_functions_are_pinned` pins the coverage counts
+  (39 vs 71) so a change to either *set* is caught even when no individual
+  encoding moved — the failure mode a de-duplication attempt would cause.
+
+`TerminalInput` derives only `Clone, Debug`, so comparison is on the `Debug`
+rendering. **The functions themselves are unchanged**: this entry was always
+about pinning behaviour before anyone merges them, not about merging them. The
+reconciliation itself remains undone and unscheduled, and is now safe to
+attempt.
+
+Original scheduling note (superseded): not part of Task 122, deliberately
+excluded from 122.12.
 
 ### 122.C2 — `assert_eq!` production panic path in `control_key`
 
@@ -1740,7 +1800,16 @@ a third-party enum's `name()`.
 
 Scope of fix: `input.rs:930-978`. Approach: return `None` rather than assert.
 
-Scheduling: independent; may be done any time. Not part of Task 122.
+**RESOLVED in Task 122 (PR #472).** `assert_eq!(name.len(), 1)` is gone;
+the A-Z branch of `control_key` now destructures with
+`let [name_c] = name.as_bytes() else { return None };`, so an `egui::Key` whose
+`name()` is not a single byte yields "not translatable" instead of crashing a
+hot input path. 122.C1's `control_key_maps_every_letter_to_its_control_byte`
+pins that all 26 real letters still resolve, i.e. the graceful path changed no
+encoding.
+
+Original scheduling note (superseded): independent, may be done any time, not
+part of Task 122.
 
 ### 122.C3 — 122.11 grew the god file it extracted from
 
@@ -1783,12 +1852,33 @@ tests) out of `widget.rs` into their own module — `frame_dirty.rs` — mirrori
 whether the move forces any `pub(super)` to widen, and decline the split if it
 does, per `freminal-module-cohesion`.
 
-Scheduling: **not** part of Task 122 — it is a new subtask's worth of work
-surfaced at close-out, and folding it in would mean editing `widget.rs` again
-after the PR was raised. Cheap and self-contained; suitable for any later pass,
-and a natural candidate to fold into Task 123 if the crate extraction proceeds,
-since `frame_dirty.rs` would be a crate candidate on the same terms as
+**RESOLVED in Task 122 (PR #472).** The six types and
+`evaluate_frame_dirty_state`, plus their test module, now live in
+`freminal/src/gui/terminal/frame_dirty.rs`, mirroring `pointer_motion.rs`
+(122.5a) and `frame_drain.rs` (122.11a). The move was byte-identical apart from
+visibility, `use` lines and the new `//!` header, and **nothing widened past
+`pub(super)`** — the `freminal-module-cohesion` condition that would have
+required declining the split.
+
+Result:
+
+| File                    | `main` | after 122.11 | after 122.C3 |
+| ----------------------- | ------ | ------------ | ------------ |
+| `widget.rs`             | 5,136  | 5,796        | **5,035**    |
+| `frame_dirty.rs`        | —      | —            | 800          |
+
+`widget.rs` is now **below** where it started on `main` and is no longer the
+largest GUI file, so the structural regression 122.11 introduced is reversed
+rather than merely recorded.
+
+`frame_dirty.rs` becomes a Task 123 crate candidate on the same terms as
 `pointer_motion.rs`.
+
+Original scheduling note (superseded): not part of Task 122, because folding it
+in would mean editing `widget.rs` again after the PR was raised. The maintainer
+directed otherwise — `freminal-orchestrator-protocol` makes cleanup entries part
+of the host task, and the activation-time "not part of Task 122" notes on C1 and
+C2 had quietly inverted that default.
 
 ---
 

@@ -929,10 +929,17 @@ pub(super) fn dispatch_binding_action(
 
 pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
+        // 122.C2: this was `assert_eq!(name.len(), 1)` -- a panic in
+        // production code, which `agents.md` forbids and which the
+        // `unwrap_used` / `expect_used` lints do not catch. The invariant
+        // holds for every `egui::Key` in `A..=Z` today, but it rests on a
+        // third-party enum's `name()` and sits in a hot input path, so it is
+        // now a graceful `None` (key not translatable) rather than a crash.
         let name = key.name();
-        assert_eq!(name.len(), 1);
-        let name_c = name.as_bytes()[0];
-        return Some(vec![TerminalInput::Ctrl(name_c)].into());
+        let [name_c] = name.as_bytes() else {
+            return None;
+        };
+        return Some(vec![TerminalInput::Ctrl(*name_c)].into());
     }
 
     // https://catern.com/posts/terminal_quirks.html
@@ -3487,6 +3494,153 @@ mod finalize_selection_drag_tests {
             vs.selection.end,
             Some(CellCoord { col: 9, row: 0 }),
             "end must be preserved verbatim regardless of any snapshot state"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod key_encoding_characterisation_tests {
+    //! Cleanup entry 122.C1: characterisation tests for the two key-encoding
+    //! functions in this module.
+    //!
+    //! [`control_key`] and [`egui_key_to_terminal_input`] look like duplicates
+    //! and are **not**. They are each correct for their own call site, and the
+    //! activation pass for Task 122 deliberately declined to de-duplicate them
+    //! because doing so is a semantic reconciliation, not a refactor.
+    //!
+    //! These tests exist so that any future attempt to merge them has to
+    //! confront the actual divergence rather than discover it in production.
+    //! They pin CURRENT behaviour across the entire `egui::Key` range. They are
+    //! deliberately assertions about what the code does today, not about what
+    //! it ought to do — if you change an encoding on purpose, update them and
+    //! say why in the commit.
+    //!
+    //! `TerminalInput` derives only `Clone, Debug` (no `PartialEq`), so
+    //! comparison is on the `Debug` rendering.
+
+    use super::{control_key, egui_key_to_terminal_input};
+    use egui::{Key, Modifiers};
+
+    /// Render one key's `control_key` result for comparison.
+    fn control_repr(key: Key) -> Option<String> {
+        control_key(key).map(|c| format!("{:?}", c.as_ref()))
+    }
+
+    /// Render one key's `egui_key_to_terminal_input` result, with no modifiers
+    /// held — the shape the KKP flag-2 release path calls it with.
+    fn plain_repr(key: Key) -> Option<String> {
+        egui_key_to_terminal_input(key, Modifiers::default(), false).map(|t| format!("{t:?}"))
+    }
+
+    /// THE DIVERGENCE, pinned. `Key::Space` is the case that makes these two
+    /// functions non-interchangeable: `control_key` maps it to the C0 NUL
+    /// control byte (its caller has already established Ctrl is held), while
+    /// `egui_key_to_terminal_input` maps it to a literal space. Merging the two
+    /// without addressing this would silently change Ctrl+Space.
+    #[test]
+    fn space_encodes_differently_in_the_two_functions() {
+        let ctrl = control_repr(Key::Space).expect("control_key maps Space");
+        let plain = plain_repr(Key::Space).expect("egui_key_to_terminal_input maps Space");
+
+        assert!(
+            ctrl.contains("Ctrl(32)"),
+            "control_key(Space) should be Ctrl(0x20) = NUL, got {ctrl}"
+        );
+        assert!(
+            plain.contains("Ascii(32)"),
+            "egui_key_to_terminal_input(Space) should be a literal space, got {plain}"
+        );
+        assert_ne!(
+            ctrl, plain,
+            "122.C1: these two must stay observably different until the \
+             reconciliation is done deliberately"
+        );
+    }
+
+    /// `control_key` maps every A-Z to `Ctrl(<uppercase byte>)`. This also
+    /// covers cleanup entry 122.C2: that branch previously carried
+    /// `assert_eq!(name.len(), 1)` — a production panic — and now returns
+    /// `None` instead. This test pins that the graceful path did not change
+    /// any real encoding: all 26 still resolve.
+    #[test]
+    fn control_key_maps_every_letter_to_its_control_byte() {
+        let letters = Key::ALL
+            .iter()
+            .copied()
+            .filter(|k| *k >= Key::A && *k <= Key::Z);
+
+        let mut seen = 0_usize;
+        for key in letters {
+            seen += 1;
+            let repr = control_repr(key)
+                .unwrap_or_else(|| panic!("control_key returned None for {}", key.name()));
+            let expected = key.name().as_bytes()[0];
+            assert!(
+                repr.contains(&format!("Ctrl({expected})")),
+                "control_key({}) should be Ctrl({expected}), got {repr}",
+                key.name()
+            );
+        }
+        assert_eq!(seen, 26, "expected exactly 26 letter keys in Key::ALL");
+    }
+
+    /// The full `control_key` C0 table, pinned key-by-key. `egui_key_to_terminal_input`
+    /// has NO such table — the second half of the divergence.
+    #[test]
+    fn control_key_c0_table_is_pinned_and_absent_from_the_other_function() {
+        let cases: &[(Key, &str)] = &[
+            (Key::OpenBracket, "Ctrl(91)"),
+            (Key::CloseBracket, "Ctrl(93)"),
+            (Key::Backslash, "Ctrl(92)"),
+            (Key::Space, "Ctrl(32)"),
+            (Key::Minus, "Ascii(31)"),
+            (Key::Slash, "Ascii(31)"),
+            (Key::Num7, "Ascii(31)"),
+            (Key::Num2, "Ascii(0)"),
+            (Key::Num3, "Ascii(27)"),
+            (Key::Num4, "Ascii(28)"),
+            (Key::Num5, "Ascii(29)"),
+            (Key::Num6, "Ascii(30)"),
+            (Key::Num8, "Ascii(127)"),
+        ];
+
+        for (key, expected) in cases {
+            let repr = control_repr(*key)
+                .unwrap_or_else(|| panic!("control_key returned None for {}", key.name()));
+            assert!(
+                repr.contains(expected),
+                "control_key({}) expected {expected}, got {repr}",
+                key.name()
+            );
+        }
+    }
+
+    /// Whole-range characterisation: which keys each function answers for at
+    /// all. A change to either coverage set shows up here even if no individual
+    /// encoding changed, which is the failure mode a merge attempt would cause.
+    #[test]
+    fn coverage_sets_of_the_two_functions_are_pinned() {
+        let control_covered = Key::ALL
+            .iter()
+            .filter(|k| control_key(**k).is_some())
+            .count();
+        let plain_covered = Key::ALL
+            .iter()
+            .filter(|k| egui_key_to_terminal_input(**k, Modifiers::default(), false).is_some())
+            .count();
+
+        assert_eq!(
+            control_covered, 39,
+            "control_key coverage changed (26 letters + 13 C0-table entries)"
+        );
+        assert_eq!(
+            plain_covered, 71,
+            "egui_key_to_terminal_input coverage changed"
+        );
+        assert_ne!(
+            control_covered, plain_covered,
+            "122.C1: the two functions cover different key sets by design"
         );
     }
 }

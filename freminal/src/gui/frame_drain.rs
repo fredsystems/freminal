@@ -527,22 +527,25 @@ mod tests {
     // `FreminalTerminalWidget`, no `WindowId` — so a real (if minimal)
     // `TabManager`/`Tab`/`Pane` fixture can exercise it directly.
 
-    /// Build a `Pane` with real, connected channels for
-    /// `drain_command_finished_events` tests.
+    /// Build a `Pane` with real, connected channels, given both the
+    /// `CommandFinishedEvent` and `WindowCommand` receivers.
     ///
+    /// Shared by [`test_pane`] and [`test_window_manip_pane`], which each
+    /// supply the receiver their tests actually push events into and
+    /// manufacture a throwaway sender/receiver pair for the other channel.
     /// Mirrors `panes::mod`'s private `dummy_pane` test helper, but keeps
-    /// `command_event_rx`'s sender alive by taking it as a receiver built
-    /// by the caller (that helper drops its sender immediately, which is
-    /// fine for its own pane-data-model tests but unusable here, where the
-    /// test needs to push `CommandFinishedEvent`s in).
-    fn test_pane(
+    /// the caller-supplied channel's sender alive by taking it as a
+    /// receiver built by the caller (that helper drops its sender
+    /// immediately, which is fine for its own pane-data-model tests but
+    /// unusable here, where tests need to push events in).
+    fn test_pane_with(
         id: PaneId,
         command_event_rx: crossbeam_channel::Receiver<CommandFinishedEvent>,
+        window_cmd_rx: crossbeam_channel::Receiver<WindowCommand>,
     ) -> Pane {
         let arc_swap = Arc::new(arc_swap::ArcSwap::from_pointee(TerminalSnapshot::empty()));
         let (input_tx, _input_rx) = crossbeam_channel::unbounded();
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
-        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
         let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
@@ -573,6 +576,19 @@ mod tests {
             shell_histfile_last_seen: None,
             command_texts: std::collections::HashMap::new(),
         }
+    }
+
+    /// Build a `Pane` with real, connected channels for
+    /// `drain_command_finished_events` tests.
+    ///
+    /// Wraps [`test_pane_with`], manufacturing a throwaway `WindowCommand`
+    /// sender/receiver pair since these tests never push window commands.
+    fn test_pane(
+        id: PaneId,
+        command_event_rx: crossbeam_channel::Receiver<CommandFinishedEvent>,
+    ) -> Pane {
+        let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
+        test_pane_with(id, command_event_rx, window_cmd_rx)
     }
 
     /// A finished, successfully-executed `CommandBlock` with a known
@@ -753,48 +769,16 @@ mod tests {
     // production call rather than a re-implementation of its branching.
 
     /// Build a `Pane` with a caller-supplied `window_cmd_rx`, for
-    /// `drain_window_manipulation_commands` tests. Mirrors `test_pane`
-    /// above, but keeps the *window-command* sender alive instead of the
-    /// *command-finished* sender, since these tests push `WindowCommand`s
-    /// in rather than `CommandFinishedEvent`s.
+    /// `drain_window_manipulation_commands` tests. Wraps [`test_pane_with`],
+    /// manufacturing a throwaway `CommandFinishedEvent` sender/receiver
+    /// pair since these tests push `WindowCommand`s in rather than
+    /// `CommandFinishedEvent`s.
     fn test_window_manip_pane(
         id: PaneId,
         window_cmd_rx: crossbeam_channel::Receiver<WindowCommand>,
     ) -> Pane {
-        let arc_swap = Arc::new(arc_swap::ArcSwap::from_pointee(TerminalSnapshot::empty()));
-        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
-        let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
-        let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded(1);
-        let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
         let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
-        Pane {
-            id,
-            arc_swap,
-            input_tx,
-            pty_write_tx,
-            window_cmd_rx,
-            clipboard_rx,
-            search_buffer_rx,
-            pty_dead_rx,
-            title: String::new(),
-            bell_active: false,
-            pending_copy: false,
-            title_stack: Vec::new(),
-            view_state: crate::gui::view_state::ViewState::new(),
-            echo_off: Arc::new(AtomicBool::new(false)),
-            child_pid: None,
-            render_state: crate::gui::terminal::new_render_state(Arc::new(std::sync::Mutex::new(
-                crate::gui::renderer::WindowPostRenderer::new(),
-            ))),
-            render_cache: crate::gui::terminal::PaneRenderCache::new(),
-            command_event_rx,
-            recent_commands: std::collections::VecDeque::new(),
-            history_seed: crate::gui::shell_history::new_seeded_history(),
-            shell_program: None,
-            shell_histfile_last_seen: None,
-            command_texts: std::collections::HashMap::new(),
-        }
+        test_pane_with(id, command_event_rx, window_cmd_rx)
     }
 
     /// Build a two-tab `TabManager` (tab 0 active, tab 1 non-active) whose

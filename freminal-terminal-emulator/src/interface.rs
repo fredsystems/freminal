@@ -184,14 +184,22 @@ pub struct TerminalEmulator {
     /// `0` for the common case (no folds). Reset to 0 on new PTY output along
     /// with the scroll offset.
     extra_flatten_rows: usize,
-    /// The scroll offset used for the previous snapshot.  When this differs
-    /// from the current `requested_scroll_offset`, the visible window has moved and
-    /// the cached snapshot must be invalidated.
-    previous_requested_scroll_offset: usize,
-    /// The `extra_flatten_rows` value used for the previous snapshot. When this
-    /// differs from the current value the flatten window grew/shrank and the
-    /// cached snapshot must be invalidated.
-    previous_extra_flatten_rows: usize,
+    /// The **effective** scroll offset used for the previous snapshot — i.e.
+    /// `requested_scroll_offset` after clamping to `max_scroll_offset`, and
+    /// forced to `0` on the alternate screen. Deliberately NOT named
+    /// `previous_requested_*`: it is compared against the effective value
+    /// computed each frame, not against the raw request, so a request that
+    /// clamps to the same effective offset correctly does not invalidate the
+    /// cache. When it differs, the visible window has moved and the cached
+    /// snapshot must be invalidated.
+    previous_effective_scroll_offset: usize,
+    /// The **effective** extra-row count used for the previous snapshot — i.e.
+    /// `extra_flatten_rows` after clamping to the rows actually available
+    /// above the window, and forced to `0` on the alternate screen. Same
+    /// naming reasoning as `previous_effective_scroll_offset` above. When it
+    /// differs, the flatten window grew or shrank and the cached snapshot must
+    /// be invalidated.
+    previous_effective_extra_rows: usize,
     /// The terminal dimensions (cols, rows) at the time of the previous
     /// snapshot.  When these change (e.g. after a pane resize), the cached
     /// snapshot must be invalidated — it was built for a different grid size.
@@ -230,8 +238,8 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             requested_scroll_offset: 0,
             extra_flatten_rows: 0,
-            previous_requested_scroll_offset: 0,
-            previous_extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         }
@@ -260,8 +268,8 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             requested_scroll_offset: 0,
             extra_flatten_rows: 0,
-            previous_requested_scroll_offset: 0,
-            previous_extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -341,8 +349,8 @@ impl TerminalEmulator {
             previous_was_alternate: false,
             requested_scroll_offset: 0,
             extra_flatten_rows: 0,
-            previous_requested_scroll_offset: 0,
-            previous_extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -672,7 +680,7 @@ impl TerminalEmulator {
         //
         // The visible window moved — the cached flat content is from a
         // different set of rows and must not be reused.
-        let scroll_changed = scroll_offset != self.previous_requested_scroll_offset;
+        let scroll_changed = scroll_offset != self.previous_effective_scroll_offset;
         if scroll_changed {
             self.previous_visible_snap = None;
             // The stashed other-buffer cache also covers a specific viewport.
@@ -682,7 +690,7 @@ impl TerminalEmulator {
             // window. Clear it so the buffer switch re-flattens instead of
             // reusing viewport-stale rows.
             self.stashed_visible_snap_other_buffer = None;
-            self.previous_requested_scroll_offset = scroll_offset;
+            self.previous_effective_scroll_offset = scroll_offset;
         }
 
         // ── Invalidate the snap cache when the extra-row count changes ───────
@@ -690,13 +698,13 @@ impl TerminalEmulator {
         // A fold/unfold changes how many rows are flattened above the window;
         // the cached flat content covers a different row span and must not be
         // reused.
-        if extra_rows != self.previous_extra_flatten_rows {
+        if extra_rows != self.previous_effective_extra_rows {
             self.previous_visible_snap = None;
             // Same reasoning as the scroll-change case: the stashed cache
             // covers a specific flatten window and must not be restored across
             // an extra-row change.
             self.stashed_visible_snap_other_buffer = None;
-            self.previous_extra_flatten_rows = extra_rows;
+            self.previous_effective_extra_rows = extra_rows;
         }
 
         // ── Invalidate the snap cache when terminal dimensions change ────
