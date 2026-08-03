@@ -583,6 +583,46 @@ struct ChromeGatePredicates {
     no_chrome_input: bool,
 }
 
+/// Is the #436 chrome cache (`ChromeMode::Replay`) enabled at all?
+///
+/// **Default: DISABLED.** Set `FREMINAL_CHROME_CACHE=1` to re-enable.
+///
+/// The cache is a painting optimisation that skips constructing the chrome
+/// widgets and replays a cached texture instead. That is only sound if egui
+/// never needs the chrome widgets on a `Replay` frame — and it does, because
+/// egui resolves *interaction*, not just painting, against the widget set:
+///
+/// | Site                  | Code                                            |
+/// | --------------------- | ----------------------------------------------- |
+/// | `context.rs:475`      | `hit_test(&viewport.prev_pass.widgets, …)`      |
+/// | `context.rs:488`      | `interact(…, &viewport.prev_pass.widgets, …)`   |
+/// | `interaction.rs:109`  | clears `potential_click_id` if absent from it   |
+///
+/// Note `prev_pass` — the PREVIOUS frame's set. So a press on frame N can
+/// only hit a widget built on frame N-1, and a single `Replay` frame
+/// anywhere in a gesture discards the in-flight click or drag. In
+/// 0.12.0-beta.7 this made tab clicks mostly fail and pane-border drags
+/// unusable, worst while a TUI ran in a pane (a TUI supplies a stream of
+/// PTY-driven frames, every one eligible for `Replay`, during the moment the
+/// pointer is at rest before a click).
+///
+/// It is off by default because that unsoundness is structural, not a tuning
+/// error: no amount of adjusting *when* `Replay` is chosen fixes the fact
+/// that `Replay` frames do not register widgets. Any re-enabling must first
+/// make `Replay` construct the chrome widgets (and only skip their
+/// tessellation/paint), or otherwise guarantee `Full` on every frame the user
+/// could interact on **and the frame before it**. See 121.32 / 121.33 in
+/// `Documents/PLAN_121_PERF_REMEDIATION.md`.
+///
+/// The env var exists so the two states can be A/B'd in one binary, using the
+/// `frame-profiling` counters, without a rebuild between samples.
+fn chrome_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FREMINAL_CHROME_CACHE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
 impl ChromeGatePredicates {
     /// A REPLAY is permitted only when every predicate holds.
     const fn all_pass(&self) -> bool {
@@ -828,7 +868,11 @@ impl EguiState {
             self.prev_chrome_damage,
             chrome_input_this_frame,
         );
-        let chrome_mode = gate.chrome_mode();
+        let chrome_mode = if chrome_cache_enabled() {
+            gate.chrome_mode()
+        } else {
+            crate::ChromeMode::Full
+        };
 
         // Task 121 frame-profiling harness: count which `ChromeMode` was
         // just decided. Cross-checkable against `freminal`'s own
@@ -1214,25 +1258,6 @@ impl EguiState {
         // returns immediately (macOS with vsync disabled).
 
         // Stash this frame's signals for next frame's `chrome_mode` decision.
-        //
-        // Subtask 121.13: this is egui's RAW `repaint_delay`, not the value
-        // `event_loop.rs`'s `RedrawRequested` arm actually stashes for the
-        // chrome gate via `effective_chrome_gate_delay` (a sibling of, but
-        // NOT the same as, the `effective_repaint_delay` used to decide what
-        // to schedule — see that function's doc for why the two questions
-        // differ). On a suppressed-pointer frame the raw value here is
-        // always `ZERO` (egui's event queue is non-empty because the
-        // suppressed pointer events are still handed to `on_window_event`),
-        // which makes `chrome_repaint_settled` see "not settled" and hold
-        // the chrome cache in `ChromeMode::Full` for as long as the pointer
-        // moves. `event_loop.rs` calls `stash_effective_repaint_delay`
-        // immediately after this write to overwrite it with the gate value
-        // — see that method's doc for why this double-write is intentional
-        // and not a race. Do NOT delete either write without re-reading both
-        // docs: deleting this one leaves the field unwritten on any path
-        // that never reaches the event loop's override, and deleting that
-        // one silently reintroduces the "chrome cache disabled during
-        // pointer motion" bug.
         self.prev_repaint_delay = repaint_delay;
         self.prev_chrome_damage = chrome_damage;
         self.prev_terminal_requested_delay = terminal_requested_delay;
@@ -1431,40 +1456,6 @@ impl EguiState {
     /// by an internal `destroyed` flag), so calling it more than once is safe.
     pub(crate) fn destroy_painter(&mut self) {
         self.painter.destroy();
-    }
-
-    /// Subtask 121.13 + residual-gap fix (maintainer decision): overwrite
-    /// `prev_repaint_delay` with the value `event_loop.rs`'s
-    /// `RedrawRequested` arm computes via `effective_chrome_gate_delay` —
-    /// NOT the raw `frame_output.repaint_delay` that `run_frame` stashed a
-    /// few lines earlier in the same event-loop pass, and NOT
-    /// `effective_repaint_delay`'s return value either (that function
-    /// answers "what do we schedule?", a bounded-liveness question; this
-    /// stash answers "did anything want a repaint?", for which an
-    /// unbounded/`MAX` answer is correct when nothing did). See
-    /// `effective_chrome_gate_delay`'s doc for the exact single case where
-    /// the two diverge.
-    ///
-    /// WHY the value must be substituted at all: on a frame where the only
-    /// thing that happened was suppressed pointer motion, egui's raw delay
-    /// is always `ZERO` (its input queue is non-empty because the suppressed
-    /// pointer events are still delivered to `on_window_event`, even though
-    /// the event-loop classified them as needing no repaint). Feeding that
-    /// raw zero into `chrome_repaint_settled` next frame permanently reads
-    /// as "not settled" for as long as the pointer keeps moving, which holds
-    /// `ChromeMode` at `Full` and disables the #436 chrome cache exactly
-    /// when it matters most (continuous pointer motion is the common case).
-    /// The substituted delay reflects what was ACTUALLY scheduled/wanted —
-    /// the app's own requested delay when suppression applied, or
-    /// `Duration::MAX` when the app wanted nothing at all — so the settle
-    /// check reasons about reality instead of an artifact of how egui's
-    /// input queue works.
-    ///
-    /// This is a deliberate second write to `prev_repaint_delay` immediately
-    /// after `run_frame`'s own stash (see the comment there). Do not remove
-    /// either write in isolation — see that comment for what breaks.
-    pub(crate) const fn stash_effective_repaint_delay(&mut self, delay: std::time::Duration) {
-        self.prev_repaint_delay = delay;
     }
 }
 
@@ -2010,105 +2001,6 @@ mod tests {
             .chrome_mode(),
             crate::ChromeMode::Replay
         );
-    }
-
-    // ── Subtask 121.13 (+ residual-gap fix): suppressed-pointer-motion
-    //    chrome-cache regression ──
-    //
-    // `evaluate_chrome_gate`/`chrome_repaint_settled` are pure and know
-    // nothing about `effective_repaint_delay`/`effective_chrome_gate_delay`
-    // (those functions live in `event_loop.rs` and are private there, so
-    // they cannot be called from this module's tests directly) — these
-    // tests instead pin the `prev_repaint_delay` values those functions can
-    // produce for a suppressed-pointer frame, proving the gate reacts to
-    // each exactly as `EguiState::stash_effective_repaint_delay`'s doc
-    // claims.
-    //
-    // IMPORTANT SCOPE NOTE (review item 5b): these tests exercise ONLY the
-    // pure decision functions in THIS module. Neither 121.13 nor the
-    // residual-gap fix changed `chrome_repaint_settled` or
-    // `evaluate_chrome_gate` themselves — both subtasks changed what
-    // `event_loop.rs` stashes into `prev_repaint_delay` BEFORE it reaches
-    // these functions. That means these tests would pass identically
-    // against the pre-121.13 code: they pin the REASONING ("given this
-    // stashed value, what does the gate decide?"), not the WIRING ("does
-    // `event_loop.rs` actually stash the right value, at the right point,
-    // on every reachable path?"). The wiring has no automated coverage
-    // because it needs a live winit window and GL context to exercise
-    // `Handler::window_event`'s `RedrawRequested` arm end-to-end. A future
-    // refactor that reorders, deletes, or misroutes the
-    // `stash_effective_repaint_delay` call would NOT be caught by anything
-    // in this file — do not read a green run of these tests as proof the
-    // wiring is intact.
-
-    /// BEFORE 121.13: `run_frame` stashed egui's RAW `repaint_delay`, which
-    /// `InputState::wants_repaint_after` always returns as `ZERO` while the
-    /// suppressed pointer events are still sitting in egui's input queue —
-    /// regardless of whether the app itself requested anything. Pinning
-    /// this as `Full` documents the bug: the chrome cache reads as
-    /// "unsettled" for as long as the pointer moves, even with an active
-    /// 500ms blink schedule that, substituted, would settle just fine (see
-    /// the next test).
-    #[test]
-    fn raw_zero_delay_during_suppressed_pointer_motion_decides_full() {
-        let inputs = Inputs {
-            prev_repaint_delay: Duration::ZERO,
-            prev_terminal_requested_delay: Some(Duration::from_millis(500)),
-            ..Inputs::all_clear()
-        };
-        assert_eq!(inputs.decide(), crate::ChromeMode::Full);
-    }
-
-    /// AFTER 121.13: `event_loop.rs`'s `RedrawRequested` arm overwrites the
-    /// raw zero with `effective_repaint_delay`'s substituted value, which
-    /// equals `app_requested_delay` whenever that is `Some` (the
-    /// `suppressed_only && repaint_delay.is_zero()` branch). This is the
-    /// fix's intended outcome: a suppressed-pointer frame with an active
-    /// app-side schedule (the common blinking-cursor-while-mouse-moves
-    /// case) now settles and permits `Replay`, instead of being pinned to
-    /// `Full` at ~0.5% duty cycle for as long as the pointer moves.
-    #[test]
-    fn substituted_delay_during_suppressed_pointer_motion_decides_replay() {
-        let inputs = Inputs {
-            // What `effective_repaint_delay(true, Duration::ZERO,
-            // Some(500ms))` returns: the app's own request, substituted for
-            // egui's raw zero.
-            prev_repaint_delay: Duration::from_millis(500),
-            prev_terminal_requested_delay: Some(Duration::from_millis(500)),
-            ..Inputs::all_clear()
-        };
-        assert_eq!(inputs.decide(), crate::ChromeMode::Replay);
-    }
-
-    /// Residual-gap fix (maintainer decision, follow-up to 121.13): when the
-    /// app requested NOTHING this frame (no blink schedule, no animation, no
-    /// toast — `app_requested_delay: None`, e.g. `DECTCEM` hid the cursor),
-    /// the value stashed for the chrome gate is now
-    /// `effective_chrome_gate_delay`'s `Duration::MAX` — NOT
-    /// `effective_repaint_delay`'s bounded
-    /// `SUPPRESSED_POINTER_FALLBACK_DELAY` (500ms), which is what gets
-    /// SCHEDULED but must not be fed to the settle check (see
-    /// `effective_chrome_gate_delay`'s doc). Before the residual-gap fix,
-    /// `event_loop.rs` stashed the same 500ms value it scheduled, which
-    /// `chrome_repaint_settled`'s `None` arm reads as "unsettled" (it
-    /// requires EXACTLY `Duration::MAX`), pinning `ChromeMode::Full` for the
-    /// entire duration of suppressed pointer motion whenever nothing else
-    /// was scheduled — the btop/`DECTCEM`-hidden-cursor workload. This test
-    /// used to pin that unfixed `Full` outcome; it now pins the fixed
-    /// `Replay` outcome, since `None` app-request is exactly the case where
-    /// nothing wanted a repaint.
-    #[test]
-    fn no_app_request_during_suppressed_pointer_motion_now_decides_replay() {
-        let inputs = Inputs {
-            // What `effective_chrome_gate_delay(true, Duration::ZERO, None)`
-            // returns: `Duration::MAX`, i.e. proof nothing wanted a repaint
-            // (as opposed to `effective_repaint_delay`'s bounded fallback,
-            // which answers a different, scheduling-only question).
-            prev_repaint_delay: Duration::MAX,
-            prev_terminal_requested_delay: None,
-            ..Inputs::all_clear()
-        };
-        assert_eq!(inputs.decide(), crate::ChromeMode::Replay);
     }
 
     // ── #436.7: multi-frame FULL/REPLAY sequence properties ─────────────

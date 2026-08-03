@@ -85,6 +85,8 @@ creates — see that subtask.
 | E — Measurement debt (partly captured)  | 121.25        | In progress   |
 | E — Blink-off comparison                | 121.26        | Complete      |
 | F — Surfaced by the Group B work        | 121.29–121.31 | Not started   |
+| G — beta.7 interaction regression       | 121.32        | Provisional   |
+| G — Surfaced by 121.32                  | 121.33        | Not started   |
 
 Subtask numbers are stable once assigned. A withdrawn or dissolved subtask keeps its
 number and records why (the convention Task 118 used for 118.10), so the decision is
@@ -237,10 +239,12 @@ Commit `f762ca02`. One real bug plus cleanups, from automated review of PR #465.
 
 ## Group B — Bugs found by Group A
 
-These were surfaced by Group A. 121.12, 121.13 and 121.14 are **fixed and merged to
-`main`** via PR #467 (merge commit `f7dac216`, one atomic commit per subtask on
-`task-121/group-b`). 121.15 remains unfixed and is deliberately left to 121.17, which
-is blocked behind Task 122. 121.16 is withdrawn.
+These were surfaced by Group A. 121.12, 121.13 and 121.14 were **merged to `main`** via
+PR #467 (merge commit `f7dac216`, one atomic commit per subtask on `task-121/group-b`).
+**121.13 was subsequently reverted (2026-08-02) — it shipped a user-visible interaction
+regression in 0.12.0-beta.7; see 121.32.** 121.12 and 121.14 stand. 121.15 remains
+unfixed and is deliberately left to 121.17, which is blocked behind Task 122. 121.16 is
+withdrawn.
 
 ### 121.12 — The 250 ms fallback makes blink-off slower than blink-on
 
@@ -315,7 +319,36 @@ settled. Consequence: `ChromeMode::Replay` sits at roughly 0.5% duty cycle while
 mouse is moving, against 100% at idle. The 121.8 win is silently switched off for
 exactly as long as the pointer moves.
 
-### 121.13 outcome (DONE — merged, PR #467)
+### 121.13 outcome (REVERTED 2026-08-02 — but NOT the cause of the beta.7 bug)
+
+> **READ THIS BEFORE RE-LITIGATING 121.13. It was investigated at length on
+> 2026-08-02 and the conclusions below are measured, not argued.**
+>
+> **Status: reverted on `main`.** The scheduling analysis below is **correct** and was
+> never disproved: `run_frame` really did stash the raw
+> `ViewportOutput::repaint_delay`; that value really is always zero while pointer
+> events sit in egui's queue; `ChromeMode::Replay` really was pinned near 0% duty
+> cycle while the mouse moved. Substituting the effective delay really did fix that.
+>
+> **121.13 was NOT the proximate cause of the beta.7 tab-click / border-drag
+> regression.** That was the initial hypothesis, it drove the revert, and **reverting
+> it did not fix the symptom** — verified by the maintainer against a system build.
+> Do not re-derive that hypothesis; it is closed.
+>
+> What 121.13 *did* do is raise `Replay`'s duty cycle, which increases exposure to a
+> **structural unsoundness in the chrome cache that is older than 121.13 and
+> independent of it** (121.32). 121.14 raises that duty cycle too, and the
+> unsoundness is reachable without either.
+>
+> **The revert is retained for a different reason than it was made:** with the chrome
+> cache now disabled by default (121.32), 121.13's substitution only affects *when*
+> `Replay` would be chosen, and `Replay` is never chosen. It is dead code with a
+> subtle double-write contract, so it stays reverted until and unless the cache is
+> re-enabled soundly.
+>
+> **If you are re-enabling the chrome cache, 121.13's reasoning is worth restoring —
+> but only after 121.32's structural constraint is satisfied. Restoring 121.13 alone
+> re-creates the exposure without fixing anything.**
 
 Fixed with a narrow `EguiState::stash_effective_repaint_delay` called from the
 `RedrawRequested` arm once `effective_delay` is known. `run_frame` still performs
@@ -795,6 +828,17 @@ The trigger to action this is the introduction of any `ctx.animate_*`-driven chr
 widget, or evidence of an `area.rs` cause arriving on a frame that *was* suppressed.
 Both mechanisms are documented at the constant.
 
+> **Correction (2026-08-02, from 121.32).** "Latent, not live" was wrong. This entry
+> reasoned about non-construction on `Replay` purely as an **animation** problem and
+> cleared it because freminal uses no `ctx.animate_*` in chrome. The reachable
+> consequence was **input**: egui resolves hit-testing and click/drag validity against
+> the previous frame's widget set, so widgets that are not built are not merely
+> unanimated, they are uninteractable — and in beta.7 that broke tab clicks and
+> pane-border drags badly enough to require reverting 121.13. The transferable lesson:
+> "the widgets are not built" is a statement about the widget **set**, and egui uses
+> that set for interaction as well as painting. Enumerating one consumer of it
+> under-scoped the risk.
+
 ### 121.31 — Every frame is a full present during pointer motion
 
 Observed while capturing 121.17's numbers, not yet diagnosed.
@@ -811,6 +855,153 @@ confound rather than a bug.
 **Diagnose before fixing**, and re-run without the startup toast present. Second-order
 against 121.17 (which cuts the frame count on the path where this costs most), so
 schedule it after. Cheap read-only recon; do not change the damage logic speculatively.
+
+### 121.32 — The chrome cache is structurally unsound; disabled by default
+
+**Live regression shipped in 0.12.0-beta.7. Resolved 2026-08-02 by disabling the #436
+chrome cache by default (`FREMINAL_CHROME_CACHE=1` re-enables it).**
+
+Symptoms: clicking a tab mostly did nothing; pane-border drag-to-resize was inconsistent
+to unusable. Markedly worse while a TUI (`btop` etc.) was running in a pane. Hover
+highlighting on tabs appeared to work throughout.
+
+#### What was tried and FALSIFIED — do not re-derive these
+
+Recorded so future work does not repeat the sequence. Each was a plausible,
+code-reading-derived hypothesis; each was disproved by a maintainer build test.
+
+| # | Hypothesis                                                      | Result                                                                                   |
+| - | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1 | Half-wired #436.8 drag latch: OR the latch into the frame drain | **Falsified.** Reduced tab-click failures, made border drags *worse*. Withdrawn.          |
+| 2 | 121.13 raised `Replay` duty cycle and is the cause; revert it   | **Falsified.** Revert verified present in the build; symptom persisted.                   |
+| 3 | Dependency change in the beta.6→beta.7 window                   | **Ruled out** statically: only `toml 1.1.3→1.1.4`. egui stack pinned and untouched.      |
+
+Hypothesis 1 was wrong because it protects the span *after* a press registers, and the
+decisive frame is the one *before* it (see below). Hypothesis 2 was wrong because
+121.13 only changes *how often* `Replay` is chosen — 121.14 also raises it, and the
+underlying defect does not need either commit to be reachable.
+
+**Methodological note, which is the durable lesson.** All three hypotheses came from
+reading code, and two survived adversarial sub-agent review before being disproved by a
+single click test. This bug is timing-, GL- and window-dependent; static reasoning
+repeatedly produced confident wrong answers. 121.13 shipped the same way — its own test
+module states its wiring has no automated coverage. **Do not accept a code-reading
+argument about this subsystem. Measure it** (see "How to measure" below).
+
+**Established fact (verified against `egui-0.35.0` source, not inferred).** egui resolves
+interaction entirely against the **previous** frame's widget set:
+
+- `context.rs:475` — `hit_test(&viewport.prev_pass.widgets, …)`
+- `context.rs:488` — `interact(…, &viewport.prev_pass.widgets, …)`
+- `interaction.rs:109-123` — if `potential_click_id` is not in that set it is cleared
+  (*"The widget we were interested in clicking is gone"*); same for `potential_drag_id`
+
+Consequences, both load-bearing:
+
+1. A press on frame N can only hit a widget that was **built on frame N-1**.
+2. A **single** `Replay` frame anywhere in a gesture discards the in-flight click/drag.
+
+Since freminal builds the tab strip only on `ChromeMode::Full`, any `Replay` frame
+adjacent to a click is fatal to it. **Hover is not evidence against this**: on a `Replay`
+frame the cached chrome texture is replayed *including the highlight drawn on the last
+`Full` frame*, so hover looks live while the widget set backing it is absent. That
+appearance misled the first two diagnosis attempts.
+
+Why a TUI made it worse: with the pointer at rest, `CursorMoved` stops firing, so nothing
+sets `chrome_input_pending`. A TUI supplies a continuous stream of PTY-driven frames,
+every one of which is then eligible for `Replay`. With no TUI, an idle app produces no
+such frames, the last `Full` frame persists, and the click lands.
+
+#### Resolution: the cache is off by default
+
+`chrome_cache_enabled()` in `egui_integration.rs` gates the whole mechanism and
+**defaults to disabled**; `chrome_mode` is then unconditionally `Full`. Set
+`FREMINAL_CHROME_CACHE=1` to re-enable, which exists so both states can be A/B'd in one
+binary against the `frame-profiling` counters without a rebuild between samples.
+
+This is not a workaround pending a "real" fix. The unsoundness is structural: `Replay`
+skips *constructing* the widgets, and egui needs the widget set for **interaction**, not
+only painting. There is no scheduling policy that repairs that, because the frame whose
+mode decides whether a click can land is the frame *before* an event that has not
+happened yet. The only sound designs are:
+
+1. Make `Replay` still construct the chrome widgets and skip only tessellation/paint —
+   i.e. cache the *output*, not the *pass*. This preserves the widget set and is the
+   only variant that keeps the optimisation.
+2. Delete the chrome cache. **Actively under consideration by the maintainer**
+   (2026-08-02): the measured win is small and process memory has grown substantially
+   since #436 introduced it. If this is chosen, 121.13, 121.14's chrome half, and the
+   whole `ChromeGatePredicates` apparatus go with it.
+
+Do not re-enable the cache without picking (1) or (2) explicitly.
+
+**Two further contributing defects were identified. Neither is fixed, and neither is
+sufficient on its own to explain the symptom.**
+
+- **The #436.8 drag latch is only half-wired.** `chrome_input_pending` is
+  edge-triggered (set only by an arriving input event) and drained per frame;
+  `chrome_drag_pressed_count` is level-triggered but is consulted only at the four
+  pointer-event sites, never at the `RedrawRequested` drain. A frame driven by anything
+  other than a pointer event therefore ignores a held chrome drag. This is genuinely
+  wrong independent of 121.13.
+- **The `Full`/`Replay` `Ui` id divergence (121.33) is probably an active participant,
+  not the latent risk it was filed as.** See that entry.
+
+**How to measure (use this instead of arguing).** The `frame-profiling` counters
+already exist and answer the question directly:
+
+```text
+cargo build --release --features frame-profiling
+RUST_LOG=none,freminal_windowing=debug ./target/release/freminal
+```
+
+A line flushes every 120 frames carrying `chrome_mode_full`, `chrome_mode_replay`,
+`chrome_replay_duty_cycle_pct` and the four `gate_blocked_*` breakdowns; deltas between
+consecutive lines give per-interval behaviour. The acceptance test for any re-enabled
+cache is two-condition and falsifiable: hovering over chrome must produce **zero**
+`Replay` frames, and hovering over the terminal must produce **many**.
+
+**Verification status — READ BEFORE BUILDING ON THIS.** As of the commit that
+introduced the default-off switch, the evidence is **provisional**:
+
+- Maintainer's assessment of the default-off build was *"hard to say, I think it's
+  fixed"* — an improvement, not a confirmation. It was committed specifically so it
+  could be installed as the system terminal and exercised under real daily use, which
+  is the only workload that reliably reproduced the bug.
+- The A/B against `FREMINAL_CHROME_CACHE=1` has **not** been run.
+
+So "the chrome cache causes it" is well-supported by the egui source (the `prev_pass`
+citations above are fact) but is **not yet pinned by experiment**. Two outcomes to watch
+for, both of which invalidate part of this entry:
+
+1. Symptom persists with the cache **off** → the cache is not the cause, this entry is
+   wrong, and the search must widen beyond PR #467 entirely, including to code older
+   than beta.6.
+2. Symptom does not reproduce with the cache **on** → the correlation with `Replay` is
+   wrong and the beta.6→beta.7 bisect boundary should be re-examined.
+
+Update this section with the result either way. Do not let it stand as settled.
+
+### 121.33 — `Full` / `Replay` `Ui` id divergence
+
+Surfaced by 121.32. `central_body`'s `Ui` is allocated by `CentralPanel::show` on `Full`
+(an unsalted `new_child`, id auto-derived from the root id plus a per-frame child-index
+counter) and by a bare `egui::Ui::new(ctx, Id::new("freminal_root"), …)` on `Replay`.
+Any widget inside it keying persistent state off its `Ui`-derived id churns that state
+across a mode toggle.
+
+Pane-border drag sensors are exactly such a widget, and unlike the tab strip they **are**
+built on both paths — so they fail by id churn rather than by absence.
+
+The in-code comment calls this "inert" because "real user interaction with such a widget
+forces `ChromeMode::Full` on the same frame". **That premise is false** — it is precisely
+what 121.32 disproved — and the comment should be corrected whether or not the
+divergence is fixed. Forcing `Full` on the same frame is also insufficient on its own,
+per 121.32's point 1.
+
+Scope of fix: give both paths the same explicit, stable id salt so neither depends on
+egui's child-index counter. Approach: pin the current `Full`-path id with a test first,
+then make `Replay` match. Prerequisite for any re-landing of 121.13.
 
 ---
 
