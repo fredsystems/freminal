@@ -85,8 +85,11 @@ creates — see that subtask.
 | E — Measurement debt (partly captured)  | 121.25        | In progress   |
 | E — Blink-off comparison                | 121.26        | Complete      |
 | F — Surfaced by the Group B work        | 121.29–121.31 | Not started   |
-| G — beta.7 interaction regression       | 121.32        | Provisional   |
+| G — beta.7 interaction regression       | 121.32        | Complete      |
 | G — Surfaced by 121.32                  | 121.33        | Not started   |
+| G — Chrome-cache decision gate          | 121.34        | Not started   |
+| G — Chrome-cache waste while disabled   | 121.35        | Deferred      |
+| G — Confine Replay to non-chrome        | 121.36        | Conditional   |
 
 Subtask numbers are stable once assigned. A withdrawn or dissolved subtask keeps its
 number and records why (the convention Task 118 used for 118.10), so the decision is
@@ -859,7 +862,8 @@ schedule it after. Cheap read-only recon; do not change the damage logic specula
 ### 121.32 — The chrome cache is structurally unsound; disabled by default
 
 **Live regression shipped in 0.12.0-beta.7. Resolved 2026-08-02 by disabling the #436
-chrome cache by default (`FREMINAL_CHROME_CACHE=1` re-enables it).**
+chrome cache by default (`FREMINAL_CHROME_CACHE=1` re-enables it). Confirmed fixed by
+the maintainer under real daily use.**
 
 Symptoms: clicking a tab mostly did nothing; pane-border drag-to-resize was inconsistent
 to unusable. Markedly worse while a TUI (`btop` etc.) was running in a pane. Hover
@@ -961,26 +965,25 @@ consecutive lines give per-interval behaviour. The acceptance test for any re-en
 cache is two-condition and falsifiable: hovering over chrome must produce **zero**
 `Replay` frames, and hovering over the terminal must produce **many**.
 
-**Verification status — READ BEFORE BUILDING ON THIS.** As of the commit that
-introduced the default-off switch, the evidence is **provisional**:
+**Verification status: CONFIRMED** (maintainer, 2026-08-02, system build under real
+daily use). Disabling the cache resolved both the tab-click and pane-border-drag
+failures. The bug had survived three earlier code-reading fixes, so this was held at
+"provisional" until it had been exercised as the daily-driver terminal rather than in a
+test session.
 
-- Maintainer's assessment of the default-off build was *"hard to say, I think it's
-  fixed"* — an improvement, not a confirmation. It was committed specifically so it
-  could be installed as the system terminal and exercised under real daily use, which
-  is the only workload that reliably reproduced the bug.
-- The A/B against `FREMINAL_CHROME_CACHE=1` has **not** been run.
+**A corroborating symptom, recorded because it is the recognisable signature of this
+bug class.** The maintainer noted that even when a tab click *did* register, it was
+"subtly delayed — hard to put into words", and that the delay is gone with the cache
+off. That is the same defect expressed as latency rather than loss: a click landing on
+a `Replay` frame could not be serviced, so it waited until the gate happened to pick
+`Full`. Whether an interaction is *lost* or merely *late* depends only on how soon the
+next `Full` frame arrives. **If a future change reintroduces the cache, watch for input
+latency as well as dropped clicks** — the latency appears first and at a much higher
+rate, and is the earlier warning.
 
-So "the chrome cache causes it" is well-supported by the egui source (the `prev_pass`
-citations above are fact) but is **not yet pinned by experiment**. Two outcomes to watch
-for, both of which invalidate part of this entry:
-
-1. Symptom persists with the cache **off** → the cache is not the cause, this entry is
-   wrong, and the search must widen beyond PR #467 entirely, including to code older
-   than beta.6.
-2. Symptom does not reproduce with the cache **on** → the correlation with `Replay` is
-   wrong and the beta.6→beta.7 bisect boundary should be re-examined.
-
-Update this section with the result either way. Do not let it stand as settled.
+The A/B against `FREMINAL_CHROME_CACHE=1` was not run; it was not needed once the
+default-off build held up in real use, and the escape hatch remains available if anyone
+wants to pin the correlation formally later.
 
 ### 121.33 — `Full` / `Replay` `Ui` id divergence
 
@@ -1002,6 +1005,152 @@ per 121.32's point 1.
 Scope of fix: give both paths the same explicit, stable id salt so neither depends on
 egui's child-index counter. Approach: pin the current `Full`-path id with a test first,
 then make `Replay` match. Prerequisite for any re-landing of 121.13.
+
+### 121.34 — Measure what always-`Full` actually costs (DECISION GATE)
+
+**This subtask gates the keep/delete/confine decision for the chrome cache. Do not
+choose between the three designs in 121.32 without it.**
+
+121.32 disabled the cache and restored a usable terminal. What that costs is currently
+**unmeasured**, and the original #436 justification is no longer trustworthy as a
+number: it was taken before 121.8 made the cache actually engage, before 121.12–121.14
+changed the scheduling, and before the cache was found to be unsound. Re-derive it.
+
+**Separate the two mechanisms before measuring — they are routinely conflated.**
+
+| Mechanism            | What it decides                                                       | Status after 121.32  |
+| -------------------- | --------------------------------------------------------------------- | -------------------- |
+| Frame suppression    | Whether a `CursorMoved` schedules a repaint **at all** (`should_schedule_cursor_moved` / `pointer_motion_needs_repaint`, `event_loop.rs`) | **Intact, untouched** |
+| Chrome cache         | Given a frame happens, rebuild chrome widgets or replay a cached texture (`ChromeMode`) | **Disabled globally** |
+
+The "don't render when the pointer is just moving over terminal content" win is
+mechanism 1 and still works. 121.32 disabled mechanism 2, and disabled it on **every
+rendered frame** — including PTY-driven frames with the pointer over the terminal or
+outside the window entirely. The cost is therefore global, not confined to chrome
+interaction, which is what makes 121.36 worth considering.
+
+**What to measure.** Per `performance-benchmarks`, before/after on the same machine in
+one sitting, cache off vs `FREMINAL_CHROME_CACHE=1`:
+
+```text
+cargo build --release --features frame-profiling
+RUST_LOG=none,freminal_windowing=debug ./target/release/freminal
+```
+
+Capture, for each arm, over the same workload:
+
+- `chrome_mode_full` / `chrome_mode_replay` / `chrome_replay_duty_cycle_pct` — with the
+  cache off the duty cycle is 0 by construction; the ON arm establishes how often
+  `Replay` *would* have been taken, which is the upper bound on any possible saving.
+- `phase_total_total` / `phase_total_max`, and the tessellation phase specifically —
+  chrome re-tessellation is the actual work being avoided.
+- Process CPU at idle, and with a TUI (`btop`) running in a pane.
+- RSS, sampled over several minutes in each arm (see 121.35 — the current build still
+  *populates* the cache it never reads, so an honest RSS comparison needs 121.35 landed
+  first or the ON/OFF arms are not comparable).
+
+**Workloads, at minimum:** idle with a visible cursor; idle with the cursor hidden
+(DECTCEM — the btop case); pointer moving over terminal content; pointer at rest over
+chrome; TUI redrawing continuously.
+
+**Decision rule, fixed in advance so the result cannot be rationalised:**
+
+- Saving below roughly 5% of frame time and no material RSS difference → **delete the
+  cache** (121.32 design 2). Take the machinery out: `ChromeCache`,
+  `ChromeGatePredicates`, `evaluate_chrome_gate`, the `gate_blocked_*` counters, the
+  reverted 121.13, and 121.14's chrome half.
+- Saving material **and** concentrated in the pointer-over-terminal path → **confine**
+  (121.36).
+- Saving material and spread across all frames → the only sound option is 121.32
+  design 1 (cache the output, construct the widgets), which is a larger job and should
+  get its own subtask rather than being smuggled into 121.36.
+
+**Prohibitions:** do not re-enable the cache by default as part of this subtask. Do not
+change any production logic — this is measurement only. Do not report a single
+aggregate number; the whole point is which workload the cost lands in.
+
+### 121.35 — Stop populating the chrome cache while it is disabled
+
+**Deferred by maintainer decision (2026-08-02): written up now, not scheduled.
+Task 122 takes priority.**
+
+121.32 bypassed the cache **read** but not the **write**. `chrome_mode` is forced to
+`Full`, and the `Full` arm still populates `ChromeCache` on every single frame:
+
+```text
+let head_shapes = shapes[..start].to_vec();                      // clone
+let tail_shapes = shapes[end..].to_vec();                        // clone
+let head_primitives = self.ctx.tessellate(head_shapes.clone(), ppp);  // clone
+let tail_primitives = self.ctx.tessellate(tail_shapes.clone(), ppp);  // clone
+self.chrome_cache = Some(ChromeCache {
+    head_shapes, tail_shapes,
+    head_primitives: head_primitives.clone(),                    // clone
+    tail_primitives: tail_primitives.clone(),                    // clone
+    ppp, size,
+});
+```
+
+Six vector clones per frame to fill a cache nothing reads. Because every frame is now
+`Full`, the allocation churn is *higher* than before the cache was disabled.
+
+Steady-state retention is bounded — one `ChromeCache`, overwritten each frame — so this
+is **not** unbounded growth, and this entry should not be cited as one. But sustained
+churn of large shape and primitive vectors is a plausible contributor to the RSS growth
+observed since #436, and freminal already carries `malloc_trim` discipline (Task 118)
+precisely because allocator behaviour under churn matters here.
+
+Scope of fix: skip the `ChromeCache` construction (and the two extra `clone()`s feeding
+`tessellate`) when `chrome_cache_enabled()` is false. Keep the tessellation itself — the
+frame still needs its primitives.
+
+**Sequencing note: this should land BEFORE 121.34's RSS arm**, or the cache-on and
+cache-off arms are not comparable on memory. It is independent of the keep/delete/confine
+decision and worth doing either way — if the cache is deleted, this code goes with it.
+
+### 121.36 — Confine `Replay` to frames where the pointer is not over chrome
+
+**Conditional on 121.34.** Only worth doing if measurement says the saving is real and
+concentrated in the pointer-over-terminal path. **Blocked on 121.33.**
+
+The insight 121.32 arrived at only after the fact: the cost of always-`Full` is paid on
+every frame, but the *soundness* requirement only binds where the user can interact with
+chrome. Confine the loss to that region instead of paying it globally.
+
+Design: permit `Replay` only when the pointer is **provably not** over a
+chrome-interactive region and no chrome drag is latched — evaluated **every frame**
+(level-triggered), not on pointer-event arrival (edge-triggered).
+
+**Why this is sound where 121.13, 121.14 and the withdrawn drag-latch fix were not.** All
+three tried to predict, at event time, that a frame would need to be `Full`. That cannot
+work: egui hit-tests a press against the **previous** frame's widget set, so the
+deciding frame precedes an event that has not happened yet. A level-triggered
+position test does not predict anything — while the pointer is over chrome, every frame
+is `Full`, including the one before any click. `last_cursor_pos` and
+`is_chrome_interactive_at` already exist and already cover tab strip, menu bar, pane
+borders and toasts.
+
+**Two things that must be settled first, or this reintroduces the bug in a new shape:**
+
+1. **121.33 is a hard prerequisite.** Every `Full`↔`Replay` transition churns the
+   `Ui`-derived id of anything built in `central_body` on both paths — the pane-border
+   drag sensors. Confining `Replay` makes those transitions *more* frequent at the chrome
+   boundary, which is exactly where border drags start.
+2. **`last_cursor_pos == None` must be handled deliberately.** At pointer-event time the
+   existing convention treats unknown position as "over chrome" (conservative, force
+   `Full`). At *frame* time `None` means the pointer is not in the window, where forcing
+   `Full` forever would defeat the whole subtask. The two conventions differ and the
+   frame-time one must be written down where it is used.
+
+**Acceptance test, using the counters already in `egui_integration.rs` — two conditions,
+both falsifiable, no code-reading argument accepted:**
+
+- Pointer at rest over the tab strip with a TUI running → `chrome_mode_replay` delta of
+  **exactly zero** across several flush intervals.
+- Pointer over terminal content with a TUI running → `chrome_mode_replay` delta **high**.
+
+Plus manual confirmation of tab clicks and pane-border drags with a TUI running, since
+that is the workload that reproduced the original bug and no automated coverage of this
+wiring exists (issue #440 / 121.28).
 
 ---
 
