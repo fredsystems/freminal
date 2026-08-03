@@ -879,7 +879,7 @@ pub(super) fn dispatch_binding_action(
         }
         KeyAction::ClearScrollback => {
             // Reset the local scroll offset so the next render pulls from the
-            // live view — the PTY side will also drop its gui_scroll_offset
+            // live view — the PTY side will also drop its requested_scroll_offset
             // when it processes the ClearScrollback event. Doing it here
             // avoids one frame of stale rendering if the user was scrolled
             // back at the moment they pressed the key.
@@ -929,10 +929,17 @@ pub(super) fn dispatch_binding_action(
 
 pub(super) fn control_key(key: Key) -> Option<Cow<'static, [TerminalInput]>> {
     if key >= Key::A && key <= Key::Z {
+        // 122.C2: this was `assert_eq!(name.len(), 1)` -- a panic in
+        // production code, which `agents.md` forbids and which the
+        // `unwrap_used` / `expect_used` lints do not catch. The invariant
+        // holds for every `egui::Key` in `A..=Z` today, but it rests on a
+        // third-party enum's `name()` and sits in a hot input path, so it is
+        // now a graceful `None` (key not translatable) rather than a crash.
         let name = key.name();
-        assert_eq!(name.len(), 1);
-        let name_c = name.as_bytes()[0];
-        return Some(vec![TerminalInput::Ctrl(name_c)].into());
+        let [name_c] = name.as_bytes() else {
+            return None;
+        };
+        return Some(vec![TerminalInput::Ctrl(*name_c)].into());
     }
 
     // https://catern.com/posts/terminal_quirks.html
@@ -1246,18 +1253,114 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
-/// Return type of [`write_input_to_terminal`] — see its "Return value" doc
-/// section for the meaning of each element. Factored into a named alias
-/// (rather than an inline tuple) to satisfy `clippy::type_complexity`.
-type WriteInputResult = (
-    bool,
-    Option<PreviousMouseState>,
-    Option<Key>,
-    f32,
-    bool,
-    Vec<KeyAction>,
-    SuperKeyState,
-);
+/// Whether the pane [`write_input_to_terminal`] is processing input for is
+/// the currently-focused (active) pane.
+///
+/// Per `freminal-state-representation` (which names this exact enum as its
+/// own worked example): bool *parameters* are converted to a named domain
+/// enum with no exceptions. `FreminalTerminalWidget::show`'s own
+/// `is_active_pane: bool` parameter is a separate, wider public widget-API
+/// boundary and is out of scope here — it stays a bool; this enum is
+/// constructed from it at the single `write_input_to_terminal` call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneFocus {
+    /// This pane currently has keyboard/mouse focus; all input routes to it.
+    Active,
+    /// This pane is not focused; only a primary left-click press is detected
+    /// (for click-to-focus), all other input is suppressed.
+    Inactive,
+}
+
+/// Per-frame input-handling state that [`write_input_to_terminal`] both
+/// consumes (via [`WriteInputParams::carry`]) and produces (via
+/// [`WriteInputResult::carry`]).
+///
+/// **Invariant:** every field here round-trips. The caller reads each field
+/// off `PaneRenderCache` before the call and writes the (possibly updated)
+/// value in the result back onto the *same* `PaneRenderCache` field
+/// afterwards, ready for the next frame:
+///
+/// | Field                   | `PaneRenderCache` field           |
+/// |--------------------------|-----------------------------------|
+/// | `last_reported_mouse_pos` | `previous_mouse_state`           |
+/// | `previous_key`            | `previous_key`                   |
+/// | `scroll_amount`           | `previous_scroll_amount`          |
+/// | `super_state`             | `super_state`                    |
+///
+/// Grouping them into one struct — appearing in both the params and result
+/// types under the same name — states that invariant in the type rather
+/// than leaving a future reader to infer it by matching up parameter and
+/// return-tuple positions.
+#[derive(Debug, Clone)]
+pub(super) struct InputCarryState {
+    /// Mouse-tracking state carried from the previous frame; updated with
+    /// this frame's finishing state before being returned.
+    pub(super) last_reported_mouse_pos: Option<PreviousMouseState>,
+    /// Last key processed, used for key-repeat deduplication of
+    /// `Event::Text`.
+    pub(super) previous_key: Option<Key>,
+    /// Accumulated fractional scroll pixels not yet converted to full line
+    /// units.
+    pub(super) scroll_amount: f32,
+    /// Physical Super/Command hold-state, tracked per side across frames
+    /// (Task 101.2 — see [`SuperKeyState`]).
+    pub(super) super_state: SuperKeyState,
+}
+
+/// Parameters for [`write_input_to_terminal`].
+///
+/// `'a` bounds every borrow taken for the duration of the call, including
+/// the reference to `recording_ctx` itself. `'rec` is `RecordingContext`'s
+/// own internal lifetime (the lifetime of the [`RecordingHandle`] it
+/// borrows) — kept distinct from `'a` because collapsing them would force
+/// the recording session to live exactly as long as this one call, which
+/// over-constrains the type for no reason.
+///
+/// `view_state: &'a mut ViewState` makes this struct invariant over `'a`.
+/// That is fine: the struct is constructed and consumed within a single
+/// `write_input_to_terminal` call and never stored.
+///
+/// [`RecordingHandle`]: freminal_terminal_emulator::recording::RecordingHandle
+pub(super) struct WriteInputParams<'a, 'rec> {
+    pub(super) input: &'a InputState,
+    pub(super) snap: &'a TerminalSnapshot,
+    pub(super) input_tx: &'a Sender<InputEvent>,
+    pub(super) view_state: &'a mut ViewState,
+    pub(super) character_size_x: f32,
+    pub(super) character_size_y: f32,
+    pub(super) terminal_rect: Rect,
+    pub(super) repeat_characters: Decarm,
+    pub(super) binding_map: &'a BindingMap,
+    pub(super) pane_focus: PaneFocus,
+    pub(super) recording_ctx: Option<&'a RecordingContext<'rec>>,
+    pub(super) placeholder_rects: &'a [(Rect, CommandBlockId)],
+    pub(super) key_broadcast_targets: &'a [Sender<InputEvent>],
+    pub(super) carry: InputCarryState,
+}
+
+/// Result of [`write_input_to_terminal`] — see its "Return value" doc
+/// section for the meaning of each field.
+///
+/// `carry` mirrors [`WriteInputParams::carry`]: the same [`InputCarryState`]
+/// fields, updated by this call, that the caller folds back onto the
+/// matching `PaneRenderCache` fields for the next frame.
+///
+/// `left_mouse_button_pressed` and `clipboard_pending` stay bare `bool`s
+/// rather than becoming an enum — by maintainer decision. They are
+/// independent, simultaneously-observable per-frame flags that the caller
+/// composes with other frame-local state it already holds
+/// (`left_mouse_button_pressed |= inner`, `clipboard_pending || *pending_copy`),
+/// not two states of one concept — the "independent simultaneous signals"
+/// exemption in `freminal-state-representation`. Naming them as struct
+/// fields (rather than tuple positions) already removes the
+/// positional-transport hazard that skill exists to prevent; do not "fix"
+/// these into an enum.
+pub(super) struct WriteInputResult {
+    pub(super) carry: InputCarryState,
+    pub(super) left_mouse_button_pressed: bool,
+    pub(super) clipboard_pending: bool,
+    pub(super) deferred_actions: Vec<KeyAction>,
+}
 
 /// Finalizes an in-progress text-selection drag on primary-button release.
 ///
@@ -1316,11 +1419,7 @@ fn finalize_selection_drag(
     }
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    clippy::too_many_arguments
-)]
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 /// Translate egui input events into terminal input and send them to the PTY.
 ///
 /// ## Input routing
@@ -1354,17 +1453,18 @@ fn finalize_selection_drag(
 ///
 /// ## Return value
 ///
-/// Returns `(left_mouse_pressed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending, deferred_actions, super_pressed)`:
-/// - `left_mouse_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
-/// - `last_reported_mouse_pos` — updated mouse tracking state for the next call.
-/// - `previous_key` — last pressed key (used for key-repeat deduplication).
-/// - `scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
+/// Returns a [`WriteInputResult`]:
+/// - `carry.last_reported_mouse_pos` — updated mouse tracking state for the next call.
+/// - `carry.previous_key` — last pressed key (used for key-repeat deduplication).
+/// - `carry.scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
+/// - `carry.super_state` — updated physical Super/Command hold-state for the next call.
+/// - `left_mouse_button_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
-/// - `super_pressed` — updated physical Super/Command hold-state (see `super_pressed` parameter) for the next call.
+/// - `deferred_actions` — [`KeyAction`]s dispatched by the binding map this frame that the caller must still apply (e.g. actions that need state outside this function's scope).
 ///
 /// ## Active-pane gating
 ///
-/// When `is_active_pane` is `false`, only primary left-click presses are detected (to support
+/// When `pane_focus` is [`PaneFocus::Inactive`], only primary left-click presses are detected (to support
 /// click-to-focus in the caller). All keyboard, text, paste, copy, scroll, and mouse-tracking
 /// events are suppressed — they are never forwarded to the inactive pane's PTY.
 ///
@@ -1376,35 +1476,42 @@ fn finalize_selection_drag(
 /// sequences, and paste payloads) is mirrored to every target. Mouse,
 /// scroll-derived, resize, focus, and selection events are never mirrored.
 /// The slice is empty when broadcast is off or this is not the active pane.
-pub(super) fn write_input_to_terminal(
-    input: &InputState,
-    snap: &TerminalSnapshot,
-    input_tx: &Sender<InputEvent>,
-    view_state: &mut ViewState,
-    character_size_x: f32,
-    character_size_y: f32,
-    terminal_rect: Rect,
-    last_reported_mouse_pos: Option<PreviousMouseState>,
-    repeat_characters: Decarm,
-    previous_key: Option<Key>,
-    scroll_amount: f32,
-    binding_map: &BindingMap,
-    is_active_pane: bool,
-    recording_ctx: Option<&RecordingContext<'_>>,
-    placeholder_rects: &[(Rect, CommandBlockId)],
-    key_broadcast_targets: &[Sender<InputEvent>],
-    super_state: SuperKeyState,
-) -> WriteInputResult {
+pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> WriteInputResult {
+    let WriteInputParams {
+        input,
+        snap,
+        input_tx,
+        view_state,
+        character_size_x,
+        character_size_y,
+        terminal_rect,
+        repeat_characters,
+        binding_map,
+        pane_focus,
+        recording_ctx,
+        placeholder_rects,
+        key_broadcast_targets,
+        carry:
+            InputCarryState {
+                last_reported_mouse_pos,
+                previous_key,
+                scroll_amount,
+                super_state,
+            },
+    } = params;
+
     if input.raw.events.is_empty() {
-        return (
-            false,
-            last_reported_mouse_pos,
-            previous_key,
-            scroll_amount,
-            false,
-            Vec::new(),
-            super_state,
-        );
+        return WriteInputResult {
+            carry: InputCarryState {
+                last_reported_mouse_pos,
+                previous_key,
+                scroll_amount,
+                super_state,
+            },
+            left_mouse_button_pressed: false,
+            clipboard_pending: false,
+            deferred_actions: Vec::new(),
+        };
     }
 
     let mut previous_key = previous_key;
@@ -1451,7 +1558,7 @@ pub(super) fn write_input_to_terminal(
         // Non-active panes: only detect primary left-click press so the caller
         // can implement click-to-focus.  All other events (keyboard, scroll,
         // paste, mouse tracking) are suppressed — they belong to the active pane.
-        if !is_active_pane {
+        if matches!(pane_focus, PaneFocus::Inactive) {
             if let Event::PointerButton {
                 button: PointerButton::Primary,
                 pressed: true,
@@ -2592,15 +2699,17 @@ pub(super) fn write_input_to_terminal(
         debug!("Inputs detected, forwarding to PTY consumer thread");
     }
 
-    (
+    WriteInputResult {
+        carry: InputCarryState {
+            last_reported_mouse_pos,
+            previous_key,
+            scroll_amount,
+            super_state,
+        },
         left_mouse_button_pressed,
-        last_reported_mouse_pos,
-        previous_key,
-        scroll_amount,
         clipboard_pending,
         deferred_actions,
-        super_state,
-    )
+    }
 }
 
 #[cfg(test)]
@@ -3385,6 +3494,153 @@ mod finalize_selection_drag_tests {
             vs.selection.end,
             Some(CellCoord { col: 9, row: 0 }),
             "end must be preserved verbatim regardless of any snapshot state"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod key_encoding_characterisation_tests {
+    //! Cleanup entry 122.C1: characterisation tests for the two key-encoding
+    //! functions in this module.
+    //!
+    //! [`control_key`] and [`egui_key_to_terminal_input`] look like duplicates
+    //! and are **not**. They are each correct for their own call site, and the
+    //! activation pass for Task 122 deliberately declined to de-duplicate them
+    //! because doing so is a semantic reconciliation, not a refactor.
+    //!
+    //! These tests exist so that any future attempt to merge them has to
+    //! confront the actual divergence rather than discover it in production.
+    //! They pin CURRENT behaviour across the entire `egui::Key` range. They are
+    //! deliberately assertions about what the code does today, not about what
+    //! it ought to do — if you change an encoding on purpose, update them and
+    //! say why in the commit.
+    //!
+    //! `TerminalInput` derives only `Clone, Debug` (no `PartialEq`), so
+    //! comparison is on the `Debug` rendering.
+
+    use super::{control_key, egui_key_to_terminal_input};
+    use egui::{Key, Modifiers};
+
+    /// Render one key's `control_key` result for comparison.
+    fn control_repr(key: Key) -> Option<String> {
+        control_key(key).map(|c| format!("{:?}", c.as_ref()))
+    }
+
+    /// Render one key's `egui_key_to_terminal_input` result, with no modifiers
+    /// held — the shape the KKP flag-2 release path calls it with.
+    fn plain_repr(key: Key) -> Option<String> {
+        egui_key_to_terminal_input(key, Modifiers::default(), false).map(|t| format!("{t:?}"))
+    }
+
+    /// THE DIVERGENCE, pinned. `Key::Space` is the case that makes these two
+    /// functions non-interchangeable: `control_key` maps it to the C0 NUL
+    /// control byte (its caller has already established Ctrl is held), while
+    /// `egui_key_to_terminal_input` maps it to a literal space. Merging the two
+    /// without addressing this would silently change Ctrl+Space.
+    #[test]
+    fn space_encodes_differently_in_the_two_functions() {
+        let ctrl = control_repr(Key::Space).expect("control_key maps Space");
+        let plain = plain_repr(Key::Space).expect("egui_key_to_terminal_input maps Space");
+
+        assert!(
+            ctrl.contains("Ctrl(32)"),
+            "control_key(Space) should be Ctrl(0x20) = NUL, got {ctrl}"
+        );
+        assert!(
+            plain.contains("Ascii(32)"),
+            "egui_key_to_terminal_input(Space) should be a literal space, got {plain}"
+        );
+        assert_ne!(
+            ctrl, plain,
+            "122.C1: these two must stay observably different until the \
+             reconciliation is done deliberately"
+        );
+    }
+
+    /// `control_key` maps every A-Z to `Ctrl(<uppercase byte>)`. This also
+    /// covers cleanup entry 122.C2: that branch previously carried
+    /// `assert_eq!(name.len(), 1)` — a production panic — and now returns
+    /// `None` instead. This test pins that the graceful path did not change
+    /// any real encoding: all 26 still resolve.
+    #[test]
+    fn control_key_maps_every_letter_to_its_control_byte() {
+        let letters = Key::ALL
+            .iter()
+            .copied()
+            .filter(|k| *k >= Key::A && *k <= Key::Z);
+
+        let mut seen = 0_usize;
+        for key in letters {
+            seen += 1;
+            let repr = control_repr(key)
+                .unwrap_or_else(|| panic!("control_key returned None for {}", key.name()));
+            let expected = key.name().as_bytes()[0];
+            assert!(
+                repr.contains(&format!("Ctrl({expected})")),
+                "control_key({}) should be Ctrl({expected}), got {repr}",
+                key.name()
+            );
+        }
+        assert_eq!(seen, 26, "expected exactly 26 letter keys in Key::ALL");
+    }
+
+    /// The full `control_key` C0 table, pinned key-by-key. `egui_key_to_terminal_input`
+    /// has NO such table — the second half of the divergence.
+    #[test]
+    fn control_key_c0_table_is_pinned_and_absent_from_the_other_function() {
+        let cases: &[(Key, &str)] = &[
+            (Key::OpenBracket, "Ctrl(91)"),
+            (Key::CloseBracket, "Ctrl(93)"),
+            (Key::Backslash, "Ctrl(92)"),
+            (Key::Space, "Ctrl(32)"),
+            (Key::Minus, "Ascii(31)"),
+            (Key::Slash, "Ascii(31)"),
+            (Key::Num7, "Ascii(31)"),
+            (Key::Num2, "Ascii(0)"),
+            (Key::Num3, "Ascii(27)"),
+            (Key::Num4, "Ascii(28)"),
+            (Key::Num5, "Ascii(29)"),
+            (Key::Num6, "Ascii(30)"),
+            (Key::Num8, "Ascii(127)"),
+        ];
+
+        for (key, expected) in cases {
+            let repr = control_repr(*key)
+                .unwrap_or_else(|| panic!("control_key returned None for {}", key.name()));
+            assert!(
+                repr.contains(expected),
+                "control_key({}) expected {expected}, got {repr}",
+                key.name()
+            );
+        }
+    }
+
+    /// Whole-range characterisation: which keys each function answers for at
+    /// all. A change to either coverage set shows up here even if no individual
+    /// encoding changed, which is the failure mode a merge attempt would cause.
+    #[test]
+    fn coverage_sets_of_the_two_functions_are_pinned() {
+        let control_covered = Key::ALL
+            .iter()
+            .filter(|k| control_key(**k).is_some())
+            .count();
+        let plain_covered = Key::ALL
+            .iter()
+            .filter(|k| egui_key_to_terminal_input(**k, Modifiers::default(), false).is_some())
+            .count();
+
+        assert_eq!(
+            control_covered, 39,
+            "control_key coverage changed (26 letters + 13 C0-table entries)"
+        );
+        assert_eq!(
+            plain_covered, 71,
+            "egui_key_to_terminal_input coverage changed"
+        );
+        assert_ne!(
+            control_covered, plain_covered,
+            "122.C1: the two functions cover different key sets by design"
         );
     }
 }

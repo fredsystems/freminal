@@ -10,7 +10,8 @@ use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::{
     PaneBorderDrag,
-    chrome_damage::{ChromeSignals, ChromeTabSnapshot, DismissiblePresence},
+    chrome_damage::{ChromeTabSnapshot, DismissiblePresence},
+    published_frame_state::PublishedFrameState,
     renderer::WindowPostRenderer,
     tabs::TabId,
     tabs::TabManager,
@@ -77,9 +78,9 @@ pub(super) fn resize_overlay_alpha(
 /// final 250ms fade.
 ///
 /// **Returns `true` for `elapsed >= linger`, NOT `false`.** This is the
-/// non-obvious part: the overlay is only ever cleared to `None` by a
-/// rendered frame reaching the `win.resize_overlay = None` branch in
-/// `app_impl.rs`'s resize-overlay block — nothing else clears it. If this
+/// non-obvious part: the overlay is only ever cleared by a rendered frame
+/// reaching the `clear_resize_overlay` call in `app_impl.rs`'s
+/// resize-overlay block — nothing else clears it. If this
 /// predicate went `false` again past `linger` (before that clearing frame
 /// had actually run), a caller using it to gate "may I suppress waking this
 /// window" would stop scheduling frames while the overlay was still
@@ -199,9 +200,16 @@ pub(super) struct PerWindowState {
     /// Active pane border drag state (mouse drag-to-resize).
     pub(super) border_drag: Option<PaneBorderDrag>,
 
-    /// Active resize-overlay HUD state, or `None` when no resize is in
-    /// progress / the overlay has timed out (issue #433).
-    pub(super) resize_overlay: Option<ResizeOverlayState>,
+    /// Group A (#122.4): cached rects, staged chrome signals, and the
+    /// resize-overlay HUD — everything written once per completing
+    /// `App::update` and read only from `is_chrome_interactive_at` /
+    /// `pointer_motion_needs_repaint`, outside any frame. See
+    /// [`PublishedFrameState`] for the full publish/read discipline this
+    /// replaces (formerly seven separate fields:
+    /// `cached_central_rect`, `cached_gutter_inset_logical`,
+    /// `chrome_head_rects`, `chrome_border_rects`, `chrome_toast_rects`,
+    /// `pending_chrome_signals`, `resize_overlay`).
+    pub(super) published: PublishedFrameState,
 
     /// Last modified time of the shader file, used for hot-reload detection.
     /// `None` when no shader is configured or hot-reload is disabled.
@@ -410,17 +418,6 @@ pub(super) struct PerWindowState {
     /// return (mirrors `pending_frame_damage`'s same risk/precedent).
     pub(super) pending_chrome_damage: freminal_windowing::ChromeDamage,
 
-    /// The individual #436 §3.3 signals computed during the most recent
-    /// `update()` of this window, staged here because most of them are only
-    /// available inside the `CentralPanel` closure while the final decision
-    /// (which also needs the post-toast-render dismissible-presence sample)
-    /// can only be made after that closure returns. Combined with the §3.5
-    /// presence-transition/settle inputs into `pending_chrome_damage` right
-    /// before `update()` returns. Defaults to all-`false` — harmless, since
-    /// it is always overwritten before being read on any frame that reaches
-    /// the point where `pending_chrome_damage` is computed.
-    pub(super) pending_chrome_signals: ChromeSignals,
-
     /// #436 §3.5 self-dismissal settle rule: `true` when a dismissible
     /// element (toast, About, Welcome, paste/broadcast/close-guard dialogs,
     /// save-layout prompt) transitioned presence on the PREVIOUS frame, which
@@ -475,110 +472,6 @@ pub(super) struct PerWindowState {
     /// whether a REPLAY is permitted: a REPLAY requires that nothing OTHER
     /// than this frame's own request also wants a wake. Defaults to `None`.
     pub(super) pending_terminal_requested_delay: Option<std::time::Duration>,
-
-    /// The `CentralPanel` content rect (`ui.available_rect_before_wrap()`)
-    /// captured on the most recent FULL frame (#436.4b).
-    ///
-    /// On a REPLAY frame `update()` skips building the menu bar, tab bar,
-    /// and `CentralPanel` (all cached chrome), so there is no fresh
-    /// `available_rect` to read the terminal band's content rect from.
-    /// Instead the band's `Ui` is constructed directly at this cached rect,
-    /// in the same background layer chrome uses — valid because a REPLAY is
-    /// only permitted when chrome (including window size) is proven
-    /// unchanged since the frame that last set this field. `None` before
-    /// the first FULL frame (a REPLAY can never be chosen then, since
-    /// `chrome_cache` is also `None` at that point).
-    pub(super) cached_central_rect: Option<egui::Rect>,
-
-    /// Task 121 spike: the command-block gutter's total inset in egui **logical
-    /// points**, cached from `update()` each frame.
-    ///
-    /// `App::pointer_motion_needs_repaint` runs outside a frame, where
-    /// `pixels_per_point` is not available, so it cannot compute
-    /// `inset_px / ppp` itself. Caching the already-computed logical value here
-    /// lets the gutter hit-test use real geometry instead of assuming
-    /// `ppp >= 1.0` to justify treating a physical-pixel width as a logical
-    /// upper bound — an assumption whose safety direction inverts on displays
-    /// reporting fractional scale below 1.0.
-    ///
-    /// This is the total inset (strip + padding gap), which is strictly wider
-    /// than the painted strip, so using it as the hit-test bound stays
-    /// conservative by construction. `0.0` before the first frame, which is
-    /// harmless: `cached_central_rect` is `None` then, and that independently
-    /// forces "needs repaint".
-    pub(super) cached_gutter_inset_logical: f32,
-
-    /// #436.8 menu-bar + tab-bar rects (egui logical points), captured on FULL
-    /// frames (REPLAY skips building the panels). `None` until the first FULL
-    /// frame => `is_chrome_interactive_at` returns the conservative `true`.
-    pub(super) chrome_head_rects: Option<Vec<egui::Rect>>,
-    /// #436.8 split-border drag-sensor rects (egui logical points), rebuilt
-    /// every frame; explicitly cleared on frames that build no sensors
-    /// (single pane / zoomed / overlay open).
-    pub(super) chrome_border_rects: Vec<egui::Rect>,
-
-    /// Subtask 121.14 (review item 2 follow-up): the most recently laid-out
-    /// toast pill hit-rects, appended by the app-level toast-rendering block
-    /// (in `app_impl.rs`, after `central_body` returns) whenever it actually
-    /// runs `ToastStack::show()`. `App::pointer_motion_needs_repaint` runs
-    /// OUTSIDE any frame (from `event_loop`'s `CursorMoved` handling) and
-    /// needs a cached rect list to test whether the pointer is over a
-    /// toast — hovering one changes chrome pixels (close-button highlight,
-    /// hover-pauses-expiry) even though toasts are not menu/tab-bar/split-
-    /// border chrome.
-    ///
-    /// A dedicated field rather than appending to [`Self::chrome_border_rects`]
-    /// (121.14's original approach, corrected by review): that field's name
-    /// and doc describe split-border drag sensors specifically, and any
-    /// future consumer correlating `chrome_border_rects[i]` with
-    /// `pane_tree.split_borders()[i]` by index would silently get corrupted
-    /// indices whenever a toast is showing. See
-    /// `crate::gui::chrome_damage::point_in_chrome_rects`, which both
-    /// consumers now call with this field as an explicit extra parameter
-    /// rather than duplicating a `rect.contains(pos)` scan at each call site.
-    ///
-    /// **Staleness discipline — this field is NOT rebuilt in `central_body`
-    /// the way [`Self::chrome_border_rects`] is, so it must be written
-    /// explicitly on every reachable path:**
-    ///
-    ///   - On every `ChromeMode::Full` frame, write this field — new rects
-    ///     when the toast block actually runs (`chrome_mode == Full &&
-    ///     !stack.is_empty()`), or an emptied `Vec` when it does not (stack
-    ///     empty, or toast rendering otherwise skipped). Writing
-    ///     unconditionally on `Full` (rather than only inside the toast
-    ///     block) is what prevents an emptied stack from leaving stale rects
-    ///     behind forever, which would otherwise permanently force
-    ///     `ChromeMode::Full`/hover-interactive over that now-vacated screen
-    ///     region.
-    ///   - On every `ChromeMode::Replay` frame, leave this field untouched.
-    ///     A `Replay` frame can only be entered while the toast stack is
-    ///     provably empty: the `toast_active` local (`app_impl.rs`'s
-    ///     `App::update`, ~3180) is threaded into the
-    ///     `ChromeSignals { .. toast_active, .. }` literal assigned to
-    ///     `win.pending_chrome_signals` (`app_impl.rs`, ~3374-3390, field at
-    ///     ~3384), which `ChromeSignals::any_fired` (`chrome_damage.rs`,
-    ///     ~140-156) checks — forcing `ChromeDamage::Changed` — and
-    ///     therefore `ChromeMode::Full` — for as long as any toast exists, so
-    ///     by the time a `Replay` frame is reached this field is already
-    ///     correctly empty (or, before then, already reflects the
-    ///     truly-last `Full` frame's rects, which is what a `Replay` frame
-    ///     reuses for everything else it does not rebuild). One frame stale
-    ///     by construction (like `chrome_head_rects`): while the stack
-    ///     reflows (e.g. a dismissed toast shifts its neighbours), a hover
-    ///     can be missed for a single frame. (Citations are name-first so
-    ///     they stay useful if the line numbers drift again.)
-    ///
-    ///   - There is a third, pre-existing path where this field goes stale
-    ///     that the two bullets above don't cover: `App::update`'s
-    ///     "active tab has no active pane" bail-out (the `CLEANUP-436-A`
-    ///     branch, `app_impl.rs`, ~1615-1627) reinserts `win` into
-    ///     `self.windows` and returns without tearing the window down or
-    ///     writing this field. That is a documented should-never-happen
-    ///     defensive branch (guarded by a `warn!`, not expected in normal
-    ///     operation), and the resulting staleness is shared symmetrically
-    ///     with [`Self::chrome_head_rects`] and [`Self::chrome_border_rects`]
-    ///     — this field does not introduce it.
-    pub(super) chrome_toast_rects: Vec<egui::Rect>,
 
     /// Per-frame render attribution counters (diagnostic), flushed to a
     /// `debug` log line every [`FrameStats::FLUSH_EVERY`] drawn frames. Lets
@@ -691,7 +584,7 @@ pub(super) struct FrameStats {
     /// the SAME as `ChromeSignals::named_fields()`'s array order (see that
     /// method's doc for the exhaustiveness guarantee this indexing relies
     /// on). Incremented in `app_impl.rs` right after
-    /// `win.pending_chrome_signals` is finalised for the frame.
+    /// `win.published`'s chrome signals are published for the frame.
     #[cfg(feature = "frame-profiling")]
     pub(super) chrome_signal_fired_counts: [u64; 15],
 
@@ -753,9 +646,10 @@ pub(super) struct FrameStats {
 /// the eight conditions considered by `App::pointer_motion_needs_repaint`
 /// were true for one call.
 ///
-/// Distinct from `app_impl.rs`'s `PointerMotionPaneSignals`: that struct
-/// feeds the actual repaint DECISION for a resolved pane (two aggregated
-/// bools — `mouse_tracking_active` and a single `hover_region_risk`); this
+/// Distinct from `pointer_motion.rs`'s `PointerMotionPaneSignals`: that
+/// struct feeds the actual repaint DECISION for a resolved pane (two
+/// aggregated bools — `mouse_tracking_active` and a single
+/// `hover_region_risk`); this
 /// struct is diagnostic-only, exhaustive over every named condition in the
 /// predicate (including the three individual sub-terms
 /// `pane_hover_region_risk` ORs together), and never affects behavior — it

@@ -616,7 +616,43 @@ mod tests {
     /// `take_frame_damage` default — without constructing a full
     /// `freminal::gui::FreminalGui`, which is impractical headlessly (its
     /// windows are keyed by a real winit `WindowId`).
-    struct DummyApp;
+    ///
+    /// 122.6: `pointer_motion_needs_repaint` and `chrome_interactive` are
+    /// configurable so tests (here and in `event_loop.rs`, which has
+    /// `pub(crate)` visibility onto this struct) can exercise BOTH the
+    /// conservative trait defaults (`true`/`true` — `Default::default()`,
+    /// matching `App::pointer_motion_needs_repaint`/`is_chrome_interactive_at`'s
+    /// own bodies at `lib.rs:355`/`332`) and a suppressing app (`false`)
+    /// against the real `event_loop.rs` dispatch functions
+    /// (`should_schedule_cursor_moved`, `should_force_chrome_full_for_pointer`)
+    /// instead of re-implementing their boolean expressions inline in a
+    /// test.
+    ///
+    /// State-representation note: these are named fields set via struct-update
+    /// syntax at the call site (`DummyApp { pointer_motion_needs_repaint:
+    /// false, ..Default::default() }`), which reads unambiguously — the
+    /// forbidden case per `freminal-state-representation` is a *positional*
+    /// bool constructor (`DummyApp::new(true, false)`), not a named-field
+    /// literal or a `bool` field read back by the identically-named trait
+    /// method it overrides.
+    pub struct DummyApp {
+        /// Overrides `App::pointer_motion_needs_repaint`'s return value.
+        pub pointer_motion_needs_repaint: bool,
+        /// Overrides `App::is_chrome_interactive_at`'s return value.
+        pub chrome_interactive: bool,
+    }
+
+    impl Default for DummyApp {
+        /// Matches the trait's own conservative defaults (`true` for both
+        /// hooks) so every pre-122.6 `DummyApp::default()` (previously bare
+        /// `DummyApp`) construction site keeps its original meaning.
+        fn default() -> Self {
+            Self {
+                pointer_motion_needs_repaint: true,
+                chrome_interactive: true,
+            }
+        }
+    }
 
     impl App for DummyApp {
         fn update(
@@ -645,11 +681,19 @@ mod tests {
         fn clear_color(&self, _window_id: WindowId) -> [f32; 4] {
             [0.0, 0.0, 0.0, 1.0]
         }
+
+        fn pointer_motion_needs_repaint(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+            self.pointer_motion_needs_repaint
+        }
+
+        fn is_chrome_interactive_at(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+            self.chrome_interactive
+        }
     }
 
     #[test]
     fn take_terminal_band_range_default_is_empty_and_reset_on_read() {
-        let mut app = DummyApp;
+        let mut app = DummyApp::default();
         let window_id = WindowId(winit::window::WindowId::dummy());
 
         // Empty (`0..0`) by default (no `update()` has run / default trait
@@ -667,7 +711,7 @@ mod tests {
     /// windows are keyed by a real winit `WindowId`, impractical headlessly).
     #[test]
     fn take_chrome_damage_default_is_changed_and_reset_on_read() {
-        let mut app = DummyApp;
+        let mut app = DummyApp::default();
         let window_id = WindowId(winit::window::WindowId::dummy());
 
         // Conservative default: `Changed` (no `update()` has run / default
@@ -684,11 +728,55 @@ mod tests {
     /// above, using the same `DummyApp`.
     #[test]
     fn take_terminal_requested_delay_default_is_none_and_reset_on_read() {
-        let mut app = DummyApp;
+        let mut app = DummyApp::default();
         let window_id = WindowId(winit::window::WindowId::dummy());
 
         assert_eq!(app.take_terminal_requested_delay(window_id), None);
         // Reset-on-read: a second call still returns `None`.
         assert_eq!(app.take_terminal_requested_delay(window_id), None);
+    }
+
+    // ── 122.6: `DummyApp`'s configurable overrides ───────────────────────
+
+    #[test]
+    fn dummy_app_default_matches_conservative_trait_defaults() {
+        // `DummyApp::default()` must reproduce the exact behavior every
+        // pre-122.6 bare `DummyApp` construction relied on: the trait's own
+        // conservative bodies at `lib.rs:332` (`is_chrome_interactive_at`)
+        // and `lib.rs:355` (`pointer_motion_needs_repaint`), both `true`.
+        let app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(10.0, 10.0);
+
+        assert!(app.pointer_motion_needs_repaint(window_id, pos));
+        assert!(app.is_chrome_interactive_at(window_id, pos));
+    }
+
+    #[test]
+    fn dummy_app_can_be_configured_to_suppress_pointer_motion() {
+        let app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(10.0, 10.0);
+
+        assert!(!app.pointer_motion_needs_repaint(window_id, pos));
+        // The other hook is untouched by the `..Default::default()` fill-in.
+        assert!(app.is_chrome_interactive_at(window_id, pos));
+    }
+
+    #[test]
+    fn dummy_app_can_be_configured_as_chrome_non_interactive() {
+        let app = DummyApp {
+            chrome_interactive: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(10.0, 10.0);
+
+        assert!(!app.is_chrome_interactive_at(window_id, pos));
+        // The other hook is untouched by the `..Default::default()` fill-in.
+        assert!(app.pointer_motion_needs_repaint(window_id, pos));
     }
 }

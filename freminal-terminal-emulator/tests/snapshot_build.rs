@@ -220,7 +220,7 @@ fn alternate_screen_always_has_zero_scroll_offsets() {
     emu.handle_incoming_data(b"\x1b[?1049h");
     // Even if we attempt to set a non-zero scroll offset, alternate screen
     // must clamp both values to 0.
-    emu.set_gui_scroll_offset(999);
+    emu.set_requested_scroll_offset(999);
     let snap = emu.build_snapshot();
     assert_eq!(
         snap.scroll_offset, 0,
@@ -286,7 +286,7 @@ fn show_cursor_is_false_when_scrolled_back() {
     );
 
     // Scroll back by one row.
-    emu.set_gui_scroll_offset(1);
+    emu.set_requested_scroll_offset(1);
     let scrolled = emu.build_snapshot();
     assert!(
         !scrolled.show_cursor,
@@ -319,7 +319,7 @@ fn scroll_changed_true_on_first_snapshot_after_offset_set() {
         live.max_scroll_offset
     );
 
-    emu.set_gui_scroll_offset(5);
+    emu.set_requested_scroll_offset(5);
     let scrolled = emu.build_snapshot();
     assert!(
         scrolled.scroll_changed,
@@ -339,7 +339,7 @@ fn scroll_changed_false_on_second_snapshot_at_same_offset() {
         live.max_scroll_offset
     );
 
-    emu.set_gui_scroll_offset(5);
+    emu.set_requested_scroll_offset(5);
     let _first_scrolled = emu.build_snapshot(); // scroll_changed = true here
     // Same offset, no movement → scroll_changed must be false.
     let second_scrolled = emu.build_snapshot();
@@ -363,7 +363,7 @@ fn new_data_while_scrolled_back_resets_scroll_offset_to_zero() {
         live.max_scroll_offset
     );
 
-    emu.set_gui_scroll_offset(10);
+    emu.set_requested_scroll_offset(10);
     let scrolled = emu.build_snapshot();
     assert_eq!(
         scrolled.scroll_offset, 10,
@@ -394,7 +394,7 @@ fn scroll_offset_is_clamped_to_max() {
     );
 
     // Request an offset way beyond the max.
-    emu.set_gui_scroll_offset(max + 9999);
+    emu.set_requested_scroll_offset(max + 9999);
     let clamped = emu.build_snapshot();
     assert_eq!(
         clamped.scroll_offset, max,
@@ -639,7 +639,7 @@ fn extra_rows_extends_flattened_window() {
     assert_eq!(base_rows, baseline.term_height);
 
     // Request 5 extra rows above the live window (live bottom, offset 0).
-    emu.set_gui_scroll_window(0, 5);
+    emu.set_requested_scroll_window(0, 5);
     let extended = emu.build_snapshot();
     assert_eq!(
         extended.window_extra_rows, 5,
@@ -667,7 +667,7 @@ fn extra_rows_clamped_to_available_scrollback() {
     let max = emu.build_snapshot().max_scroll_offset;
 
     // Scroll to the very top, then request more extra rows than exist above.
-    emu.set_gui_scroll_window(max, 9999);
+    emu.set_requested_scroll_window(max, 9999);
     let snap = emu.build_snapshot();
     // At the top of scrollback there are no rows above the window, so the
     // effective extra-row count is clamped to 0.
@@ -683,7 +683,7 @@ fn extra_rows_forced_zero_on_alternate_screen() {
     fill_scrollback(&mut emu, 150);
     // Enter the alternate screen.
     emu.handle_incoming_data(b"\x1b[?1049h");
-    emu.set_gui_scroll_window(0, 5);
+    emu.set_requested_scroll_window(0, 5);
     let snap = emu.build_snapshot();
     assert!(snap.is_alternate_screen);
     assert_eq!(
@@ -698,11 +698,11 @@ fn extra_rows_change_invalidates_cache() {
     let (mut emu, _rx) = make_emulator();
     fill_scrollback(&mut emu, 150);
 
-    emu.set_gui_scroll_window(0, 0);
+    emu.set_requested_scroll_window(0, 0);
     let _ = emu.build_snapshot();
     // Changing only the extra-row count must produce a fresh flatten with a
     // different row count (cache cannot be reused).
-    emu.set_gui_scroll_window(0, 3);
+    emu.set_requested_scroll_window(0, 3);
     let snap = emu.build_snapshot();
     assert_eq!(snap.row_offsets.len(), snap.term_height + 3);
 }
@@ -711,10 +711,10 @@ fn extra_rows_change_invalidates_cache() {
 // TASK 113 — SMOKE TEST (permanent regression coverage).
 //
 // Bug E (amplifier): `handle_incoming_data` snaps the scroll offset to the live
-// bottom on new output (resets `gui_scroll_offset` to 0) but used to leave
-// `gui_extra_rows` stale. A dedicated `reset_scroll_offset()` clears BOTH;
+// bottom on new output (resets `requested_scroll_offset` to 0) but used to leave
+// `extra_flatten_rows` stale. A dedicated `reset_scroll_offset()` clears BOTH;
 // `handle_incoming_data` now calls it instead of only zeroing the offset. While
-// a fold is in view, a stale `gui_extra_rows` left the flatten window extended
+// a fold is in view, a stale `extra_flatten_rows` left the flatten window extended
 // above the live bottom against a buffer that no longer had a fold there.
 //
 //   cargo test -p freminal-terminal-emulator --test snapshot_build task_113_new_data_resets_extra_rows
@@ -728,7 +728,7 @@ fn task_113_new_data_resets_extra_rows() {
 
     // Simulate the GUI scrolled back with a fold in view: a non-zero
     // extra-row request riding alongside a non-zero scroll offset.
-    emu.set_gui_scroll_window(10, 5);
+    emu.set_requested_scroll_window(10, 5);
     let scrolled = emu.build_snapshot();
     assert_eq!(scrolled.scroll_offset, 10);
     assert_eq!(scrolled.window_extra_rows, 5);
@@ -743,7 +743,7 @@ fn task_113_new_data_resets_extra_rows() {
     // longer has a fold in view.
     assert_eq!(
         after.window_extra_rows, 0,
-        "handle_incoming_data must clear gui_extra_rows on new output \
+        "handle_incoming_data must clear extra_flatten_rows on new output \
          (call reset_scroll_offset, not just zero the offset)"
     );
 }

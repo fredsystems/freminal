@@ -1,18 +1,169 @@
 # PLAN_122_ORCHESTRATION_EXTRACTION.md — Task 122 "Orchestration Extraction"
 
-> **STATUS: ACTIVATED, AWAITING SIGN-OFF.** This document is the output of the
-> Task 122 activation pass (2026-07-30, on `main` at `f8ebd17a`). It replaces
-> `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1 as Task 122's plan content.
-> Per `freminal-version-activation`, decomposition and execution are separate
-> sessions: the subtasks below need maintainer sign-off before any is spawned.
+> **STATUS: EXECUTED, AWAITING MERGE (2026-08-02).** All 19 subtasks are
+> complete on `task-122/orchestration-extraction` and the branch is green.
+> This document remains the authoritative plan content for Task 122 and
+> **supersedes `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1**, which has been
+> annotated accordingly.
 >
-> **Exception: 122.0 is done.** The maintainer moved the agent-skill change to
-> the front and approved it on 2026-07-30, on the grounds that running it last
-> would mean every other subtask executes under the skills that caused the
-> drift. No production code has been touched.
+> Read the **Execution state** section immediately below before anything else:
+> it records what was done, three subtasks added beyond the signed-off plan,
+> corrections the execution found in this document's own text, and one open
+> item deliberately left for the maintainer.
 
 Task 122 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
+
+---
+
+## Execution state — updated 2026-08-02
+
+**Branch: `task-122/orchestration-extraction`.** All subtasks and all three
+cleanup entries are complete and committed; the branch is green. **Awaiting PR /
+merge** (PR #472).
+
+### Done — 19 subtasks plus 3 cleanup entries
+
+| Subtask    | Commit     | Note                                                       |
+| ---------- | ---------- | ---------------------------------------------------------- |
+| 122.0      | `ee278082` | merged to `main` before the branch                          |
+| 122.14     | `4e2949d9` | **amended** — original spec was self-contradictory          |
+| 122.1      | `be982808` | inventory verified; nothing had moved                       |
+| 122.2      | `d360c897` | `Point`/`Rect` in `freminal-common`                         |
+| 122.3      | `cb83143c` | + `geometry_interop.rs` seam (scope widened)                |
+| **122.3a** | `67ab18f2` | **added** — `Option<bool>` → `ActiveSubtree`                |
+| 122.4      | `9e82b412` | `PublishedFrameState`                                       |
+| 122.5      | `c6e584c0` | pane-resolution chain extracted — the success criterion     |
+| **122.5a** | `16b5efb9` | **added** — `pointer_motion.rs` module                      |
+| 122.6      | `79ce4dc1` | `DummyApp` overrides; completes Group A                     |
+| 122.7      | `4d023728` | two zero-egui blocks                                        |
+| 122.8      | `ab6f382f` | window-command drain + OSC routing                          |
+| 122.9      | `cba0b833` | frame-damage aggregation (double-write preserved)           |
+| 122.10     | `5b81ef4e` | chrome-signal staging                                       |
+| 122.11     | `f5a12776` | `show`'s dirty-tracking block                               |
+| **122.11a**| `0fd403af` | **added** — `frame_drain.rs` consolidation                  |
+| 122.12     | `82975fbb` | params/result named; `InputCarryState`, `PaneFocus`         |
+| 122.13     | `ea58d9d3` | rename; plan's "one file" scope was stale — six files       |
+| 122.15     | `cd0dc0e4` | terminal-rect origin published; unblocks 121.17             |
+| 122.16     | (this)     | document reconciliation                                     |
+| **122.C1** | PR #472    | **resolved** — key-encoding characterisation tests           |
+| **122.C2** | PR #472    | **resolved** — production `assert_eq!` panic removed         |
+| **122.C3** | PR #472    | **resolved** — `frame_dirty.rs`; `widget.rs` 5,796 -> 5,035  |
+
+### Interruption: the beta.7 chrome regression
+
+Work paused mid-task on 2026-08-02 for a live regression (tab clicks and
+pane-border drags broken in 0.12.0-beta.7). Resolved on `main` as **121.32** —
+the #436 chrome cache is now disabled by default. Task 122 did not cause it and
+was not affected by it; `main` was merged into this branch at `4c10b876` with one
+trivial conflict (a `use` list). The episode is recorded here only because it
+changed 121.17's premises — see the note added to that subtask.
+
+### Three subtasks were added beyond the signed-off plan
+
+122.3a, 122.5a and 122.11a. 122.5a and 122.11a exist because extractions that
+leave the extracted code in the god file make it *bigger*, which is the opposite
+of the goal; 122.3a is the maintainer's instruction to take
+`freminal-state-representation` opportunities as they surface.
+
+### Corrections the execution found in the plan itself
+
+- **122.13's scope was wrong.** It states the renamed symbols are "all confined to
+  this one file". The real surface is six files, including two integration-test
+  files that reach the emulator through the public setters.
+- **122.12's parameter count confirmed at 17**, and four of the seven return
+  values turned out to be four of the parameters round-tripped — which is why
+  `InputCarryState` exists and the plan text did not anticipate it.
+- **Line-number citations throughout this document drift constantly**, because
+  Task 122 keeps rewriting `app_impl.rs`. Every subtask's stated ranges were stale
+  by the time it was executed. Locate blocks by grepping for content.
+
+### Cleanup entries — status at close-out
+
+Per `freminal-orchestrator-protocol`, bugs found outside a subtask's scope are
+numbered entries here rather than TODOs or informal known-issues sections.
+**All three are RESOLVED in this task (PR #472):**
+
+| Entry  | Surfaced   | Summary                                                              | Status   |
+| ------ | ---------- | -------------------------------------------------------------------- | -------- |
+| 122.C1 | activation | `control_key` / `egui_key_to_terminal_input` diverge on `Key::Space`  | Resolved |
+| 122.C2 | activation | `assert_eq!` production panic path in `control_key`                   | Resolved |
+| 122.C3 | close-out  | 122.11 grew `widget.rs` by 645 lines while extracting from it         | Resolved |
+
+**A process note worth keeping, because it is the reason these nearly shipped
+open.** The protocol says a cleanup entry "is part of the task — not a separate
+task, not a TODO comment in code, not a tracking issue elsewhere." The
+activation-time plan then wrote "Scheduling: **not** part of Task 122" on C1 and
+C2, which silently inverted that default; the close-out inherited it and filed
+C3 the same way. The entries had become exactly what the protocol forbids — a
+tracking list. C2 in particular was an active `agents.md` violation (a panic in
+production input handling) left open from activation to close-out. **If a plan
+document ever says a cleanup entry is out of the host task's scope, treat that
+as a claim needing justification, not as settled.**
+
+What each fix was:
+
+- **122.C1** — characterisation tests only; the two functions are unchanged. The
+  reconciliation stays unscheduled but is now safe to attempt.
+- **122.C2** — the panic became a `None` return.
+- **122.C3** — `frame_dirty.rs` created; `widget.rs` 5,796 -> **5,035**, below
+  its `main` size of 5,136.
+
+### Why the branch is +7,079 / -2,277, for a "mechanical extraction"
+
+The question is fair and the answer is mostly — but not entirely — benign.
+
+| Category                        | Net    | Note                                            |
+| ------------------------------- | ------ | ----------------------------------------------- |
+| `Documents/`                    | +766   | this plan document; not code                     |
+| `pane_resolution_bench.rs`      | +469   | 122.14; `performance-benchmarks` mandates a bench where none existed |
+| New modules (4 files)           | +2,573 | see composition below                            |
+| `freminal-common/geometry.rs`   | +342   | new neutral `Point`/`Rect` + tests               |
+| `app_impl.rs`                   | **-311** | the target shrank (-249 code lines)            |
+| `widget.rs`                     | **-101** | was +645; reversed by 122.C3, now below `main` |
+
+The four new modules (`pointer_motion.rs`, `frame_drain.rs`,
+`published_frame_state.rs`, `geometry_interop.rs`) total 2,573 lines composed as:
+
+- **51% tests** (1,321 lines) — genuinely new coverage. These predicates were
+  previously unreachable inside a 3,000-line closure, which is much of why the
+  task existed; making them testable was the point, not a side effect.
+- **27% doc comments** (668 lines) — house style. Honestly, some are
+  disproportionate (40-line docs on three-line predicates). Worth trimming if it
+  ever becomes a burden, but churn to do now.
+- **19% production code** (506 lines).
+
+So actual production code moved and added is ~500 lines against `app_impl.rs`'s
+249-line reduction. The codebase did not silently gain thousands of lines of
+logic.
+
+`widget.rs` **was** the one real regression — it grew 645 lines (only 16 of them
+tests) and briefly overtook `app_impl.rs` as the largest GUI file. 122.C3 moved
+that block into `frame_dirty.rs`, leaving `widget.rs` at 5,035, i.e. 101 lines
+**below** where it started on `main`. Both god files therefore end this task
+smaller than they began it, which is what the task set out to do.
+
+### Open item for the maintainer — NOT decided by 122.16
+
+**`agents.md`'s clippy command does not match the pre-commit hook.** The hook runs
+`cargo clippy --workspace --all-targets`; `agents.md` documents
+`cargo clippy --all-targets --all-features -- -D warnings`. These are **not
+equivalent**: `--all-features` masks lints the hook catches (this bit 122.6), and
+a passing re-run can come from a cached fingerprint. Every subtask in this task
+was verified with **both**. This is a repo-wide documentation gap, not a Task 122
+issue, and changing `agents.md` is a maintainer decision — deliberately left
+unmade here.
+
+### Not attempted, and out of scope
+
+Making this an orchestration **crate**. Design decision 1 scopes Task 122 to
+modules designed *as if* they were a crate. **The maintainer is actively
+reconsidering this** (2026-08-02) and wants it discussed once Task 122 is
+complete; the 121.32 chrome failure is read as evidence that egui imposes a CPU
+floor which raises the value of being ready to replace it. Note that 122.2/122.3
+already did the hardest preparatory piece — toolkit-neutral geometry with an
+interop seam — but `PublishedFrameState` and much of the GUI still hold
+`egui::Rect`. That conversation is deferred, not closed.
 
 ---
 
@@ -120,15 +271,15 @@ and only one class is genuinely unowned:
 
 Type B — read from outside any frame. **This is Group A's scope.**
 
-| Field                          | Def (`window.rs`) | Written (`app_impl.rs`)      | Read out-of-frame        |
-| ------------------------------ | ----------------- | ---------------------------- | ------------------------ |
-| `cached_central_rect`          | 491               | 2114 (in `central_body`)     | 879, 906                 |
-| `cached_gutter_inset_logical`  | 509               | 1895 (in `central_body`)     | 903                      |
-| `chrome_head_rects`            | 514               | 1753 (`Full` only)           | 755                      |
-| `chrome_border_rects`          | 518               | 2461, cleared 2467           | 756                      |
-| `chrome_toast_rects`           | 581               | 3970, cleared 3915           | 766                      |
-| `pending_chrome_signals`       | 422               | 3374-3390                    | 866-867                  |
-| `resize_overlay`               | 204               | feature state                | 849-856                  |
+| Field                         | Def (`window.rs`) | Type                       | Written (`app_impl.rs`)          | Read out-of-frame |
+| ----------------------------- | ----------------- | -------------------------- | -------------------------------- | ----------------- |
+| `cached_central_rect`         | 491               | `Option<egui::Rect>`       | 2114 (in `central_body`)         | 879, 906          |
+| `cached_gutter_inset_logical` | 509               | `f32`                      | 1895 (in `central_body`)         | 903               |
+| `chrome_head_rects`           | 514               | `Option<Vec<egui::Rect>>`  | 1753 (`Full` only)               | 755               |
+| `chrome_border_rects`         | 518               | `Vec<egui::Rect>`          | 2461, cleared 2467               | 756               |
+| `chrome_toast_rects`          | 581               | `Vec<egui::Rect>`          | 3970, cleared 3915               | 766               |
+| `pending_chrome_signals`      | 422               | `ChromeSignals` (14 bools) | 3374-3390                        | 866-867           |
+| `resize_overlay`              | 204               | `Option<ResizeOverlayState>` | 3113 set, 3663 cleared; 524 init | 849-856         |
 
 Type A — drained same tick, already contracted. **Not restructured.**
 
@@ -146,6 +297,139 @@ Type C — cross-module, on `PaneRenderCache`. **Noted, not restructured.**
 | `pending_repaint_delay`    | 1444              | `app_impl.rs:2861` after `show()`       |
 | `last_frame_cursor_damage` | 1436              | `app_impl.rs:3188, 3233, 3237`          |
 | `placeholder_hit_rects`    | 1406              | `input.rs` `write_input_to_terminal`    |
+
+### 122.1 audit result (2026-07-30, `task-122/orchestration-extraction`)
+
+**All 14 rows of all three tables verified line-for-line against current code.
+Nothing moved.** Every definition line, write site, drain site and read site
+above is exact, as are `is_chrome_interactive_at` (`app_impl.rs:751-769`),
+`pointer_motion_needs_repaint` (`823-1025`), the `CursorMoved` fast-path call
+sites (`event_loop.rs:815, 828-831, 868, 885`), and the same-tick Type A drain
+(`event_loop.rs:1182-1185`, immediately after `app.update()` at `1180`). The
+`resize_overlay` row's "feature state" gloss has been replaced with its real
+write sites. Field types are added because 122.4 needs them.
+
+`last_observed_visible` (`widget.rs:1362`, init `1474`, used `1527-1536`) was
+re-checked and is still `widget.rs`-internal — correctly excluded from Type C.
+
+#### The Type B set is complete — with two exclusions now stated explicitly
+
+Every `win.<field>` read inside the two out-of-frame predicates was enumerated.
+The read set is the seven fields above plus `win.tabs` (`app_impl.rs:870`) and
+`win.frame_stats` (`1004`). Neither belongs in 122.4's type:
+
+- **`win.tabs`** is live structural domain state (the pane tree), mutated
+  synchronously by input handling. It reflects current truth at any instant —
+  it is not a render-time snapshot cached for later reuse, which is the whole
+  category 122.4 exists to name.
+- **`win.frame_stats`** is a write-only diagnostic accumulator behind
+  `#[cfg(feature = "frame-profiling")]`, using `Cell` so it can be mutated
+  through `&self`. `app_impl.rs:998` already documents that it does not
+  influence the predicate's return value.
+
+**Correction to 122.1's own brief.** It asked to "confirm there are no others"
+beyond `is_chrome_interactive_at`, `pointer_motion_needs_repaint` and the four
+`take_*` drains. As literally worded that is not satisfiable: the `App` trait
+has 13 methods (`freminal-windowing/src/lib.rs:194-372`) and six more are
+called from outside `update()` — `on_window_created` (`event_loop.rs:659`),
+`on_close_requested` (`1074, 1311`), `on_raw_key_event` (`1011-1012`),
+`clear_color` (`1143`), `raw_input_hook` (`1159`), `present_partial_flag`
+(`1165`). Walking each body, only two touch `PerWindowState` at all, and
+**neither is Type B**:
+
+- **`clear_color` reads `win.os_dark_mode`** (`app_impl.rs:731`), a field
+  `update()` writes (`1323`). Structurally the same shape as a Type B read, but
+  a materially different timing discipline: it is called exactly once per
+  frame, deterministically immediately *before* `update()` for that same window
+  in the same `RedrawRequested` pass (`event_loop.rs:1143` vs `1180`). It cannot
+  accumulate multi-frame staleness the way a `CursorMoved`-driven read can.
+- **`present_partial_flag` reads `win.present_is_partial`**
+  (`app_impl.rs:748`) but clones an `Arc<AtomicBool>` rather than copying a
+  value. It is a shared-mutation handle, exempt by construction.
+
+**Both stay out of 122.4's type**, deliberately: folding them in would put two
+different timing disciplines under one name and weaken the invariant the type
+exists to carry. `on_window_created`, `on_close_requested`, `on_raw_key_event`
+and `raw_input_hook` read no `PerWindowState` field at all (`on_raw_key_event`
+only *writes*, pushing to `win.pending_raw_keys` at `4254`).
+
+#### Early-return behaviour
+
+All four claims in 122.1's brief **confirmed**: `app_impl.rs:1179` (settings
+window, branch at `1106`) has no `PerWindowState` at all; `1225`
+(`windows.remove` returned `None`) has nothing to reinsert; `1591` and `1626`
+are byte-identical in effect, both `insert(window_id, win); return;`; and
+`window.rs:540-580` already documents the discipline and names the `1626`
+bail-out.
+
+The decisive fact for 122.4: **both `1591` and `1626` occur before line 1704**,
+which opens the `Full`-vs-`Replay` branch containing the earliest Type B write
+(`chrome_head_rects` at `1753`). Every other Type B write site is later still
+(`1895`, `2114`, `2461`/`2467`, `3113`/`3663`, `3374-3390`, `3915`/`3970`). So
+on both paths `win` is reinserted untouched and **all seven fields retain the
+value left by the last fully-completing `update()`** — an early-return
+staleness layered on top of the ordinary one-frame staleness. `1179` and `1225`
+are vacuous (no `PerWindowState` instance in play).
+
+Minor pre-existing doc gap, recorded not fixed: the comment at
+`app_impl.rs:1096-1098` enumerates *three* early-return paths, but there are
+four return sites — `1591` ("last tab closes the whole window") and `1626`
+("no active pane") are distinct scenarios the comment merges. Behaviourally the
+plan groups them correctly; only the code comment undercounts.
+
+#### The invariant 122.4 must preserve
+
+Each of the seven fields reaches its **final published value at most once per
+successfully-completing `App::update`**, at a fixed point in that function —
+`chrome_head_rects` only on a `Full` frame (`1753`), the other six
+unconditionally once reached — and from nowhere else.
+
+"Final value" is the precise form, and the distinction matters: two of the
+fields are **reset before that final write**. `chrome_border_rects` is cleared
+at `2467` on frames that build no border sensors, and `chrome_toast_rects` is
+pre-cleared at `3915` before the toast stack lays out. Those resets are writes,
+so the invariant is *not* "one store instruction per frame" — it is that no
+field is published from more than one site, and that a given frame's published
+value is settled by the time `update()` returns. A wrapper must permit the
+clear-then-fill pattern while still forbidding a second, unrelated publisher.
+
+None of the four early-return paths writes any of them, so each holds whatever
+the last fully-reaching `update()` left. Reads happen
+exclusively from `is_chrome_interactive_at` and `pointer_motion_needs_repaint`,
+called on `freminal-windowing`'s pointer fast path
+(`event_loop.rs:815, 828-831, 868, 885`), a control path fully decoupled from
+`update()`: a read may therefore observe the same snapshot across arbitrarily
+many pointer events between two frames, and is **one frame stale by
+construction even in the best case**. Write *ordering* among the three rect
+fields is itself load-bearing and must not be collapsed: `chrome_head_rects`
+early and `Full`-only (`1753`), `chrome_border_rects` inside `central_body`
+(`2461`, cleared `2467` when no border sensors were built), `chrome_toast_rects`
+after `central_body` returns (`3970`, pre-cleared `3915`). A wrapper that let a
+caller read `chrome_toast_rects` mid-`central_body` would surface a value the
+current frame has not yet had the chance to overwrite — reintroducing exactly
+the staleness class `window.rs:540-580` was written to bound.
+
+#### State-representation verdict (per `freminal-state-representation`)
+
+**No bool-to-enum conversion is warranted among the seven Type B fields.** Six
+are not bool-related (rects, an `f32`, and two `Option<T>`s — note
+`resize_overlay` already uses `Option<T>` rather than a bool-plus-value pair,
+which is the correct presence encoding). The seventh,
+`pending_chrome_signals: ChromeSignals`, is 14 independent simultaneous signals
+and is one of the four types the skill **names explicitly as a legitimate bool
+bag that must not be converted**. No field admits an illegal state: no
+`Option<bool>`, and no pair among the seven that cannot both be set.
+
+One shape decision 122.4 must make, flagged here rather than left to be
+discovered: **`chrome_head_rects` is `Option<Vec<Rect>>` while its two
+structural siblings are plain `Vec<Rect>`** (empty-vec-as-absent). The three
+disagree today. 122.4 wraps all three and will have to either preserve the
+disagreement or unify it — and unifying is a **semantic** change for
+`chrome_head_rects`, whose `None` means "no `Full` frame has rendered yet",
+which is distinguishable from "a `Full` frame rendered and produced no head
+rects". Preserving the types as-is is the default per 122.4's "do NOT change
+any field's type" prohibition; this note exists so that prohibition is
+understood as deliberate rather than an oversight.
 
 ---
 
@@ -185,13 +469,20 @@ pane-resolution chain is headlessly testable.**
 The pure decision cores are **already well covered** — this plan's first draft
 claimed "zero tests" and was wrong:
 
-| Function                               | Tests | Location                |
-| -------------------------------------- | ----- | ----------------------- |
-| `pointer_motion_needs_repaint_decision` | 8     | `app_impl.rs:4932-5011` |
+| Function                                | Tests | Location                |
+| --------------------------------------- | ----- | ----------------------- |
+| `pointer_motion_needs_repaint_decision` | 9     | `app_impl.rs:4932-5015` |
 | `pane_hover_region_risk`                | 5     | `app_impl.rs:4827-4849` |
 | `animation_in_flight_composed`          | 4     | `app_impl.rs:4805-4821` |
 | `pointer_in_gutter_strip`               | 4     | `app_impl.rs:4900-4923` |
 | `pane_hover_region_terms`               | 3     | `app_impl.rs:4868-4884` |
+
+**Count corrected 2026-07-30 (122.14 adversarial review).** The activation
+pass recorded 8 for `pointer_motion_needs_repaint_decision` and an end line of
+5011; the real figures are **9** tests ending at **5015** — the ninth is
+`pointer_motion_needs_repaint_decision_pane_signals_both_false_is_false`
+(`app_impl.rs:5004`), whose body extends past the previously-cited range. The
+four excluded predicate cores therefore carry **22** tests in total, not 21.
 
 What is genuinely untested is the **glue**:
 
@@ -254,6 +545,39 @@ cargo test --all --features frame-profiling
 `freminal-windows-crosscheck`. None of the five primary files contains
 `cfg(windows)` / `cfg(target_os)` code, so the risk is low, but the gate still
 applies.
+
+### The documented clippy command does not match the pre-commit hook
+
+**Found during 122.6, 2026-07-30.** `agents.md`'s verification suite says:
+
+```text
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+The pre-commit hook runs something different:
+
+```text
+cargo clippy --workspace --all-targets
+```
+
+These are **not equivalent**, and 122.6 hit a case where the documented command
+passes and the hook fails. A `pub(crate) struct DummyApp` inside a private
+`mod tests` triggers `clippy::redundant_pub_crate` (denied via
+`clippy::nursery`) under the hook's invocation, but **not** under
+`--all-features`. Enabling all features changes the compiled configuration
+enough to suppress it.
+
+Consequence for this task and any other: **running only the `agents.md` command
+is not sufficient to predict a clean commit.** Every subtask in Task 122 should
+run both, and a green `--all-features` run should not be reported as "clippy
+clean" on its own. Note also that a passing run can come from cache: after a
+failure, re-running the *documented* command appeared clean because that
+feature set's fingerprint was already cached as successful. Prefer the hook's
+invocation as the primary gate.
+
+This is a repo-wide documentation gap rather than a Task 122 issue. It is
+recorded here because it was found here; whether `agents.md` should be
+corrected is a maintainer decision, noted for 122.16.
 
 ---
 
@@ -346,6 +670,20 @@ Do NOT proceed to 122.2.
 
 Stop: report the corrected tables; await review.
 
+**DONE.** See "122.1 audit result" above. All 14 rows of all three tables
+verified line-for-line; nothing had moved. Field types added for 122.4's
+benefit, and `resize_overlay`'s "feature state" gloss replaced with real write
+sites. The Type B set is confirmed complete, with `win.tabs` and
+`win.frame_stats` excluded for stated reasons; the brief's "confirm there are no
+others" was corrected (six further `App` methods run outside `update()`, of
+which only `clear_color` and `present_partial_flag` touch `PerWindowState`, and
+neither is Type B). Early-return behaviour recorded per field — the decisive
+fact being that both `1591` and `1626` precede the earliest Type B write at
+`1753`. The invariant statement 122.4 must preserve is recorded. Per the
+`freminal-state-representation` skill, no bool-to-enum conversion is warranted
+among the seven; the one bool-bearing field is an explicitly exempt signal bag.
+One shape decision (`Option<Vec<Rect>>` vs `Vec<Rect>`) is flagged for 122.4.
+
 #### 122.2 — Toolkit-neutral `Rect` / `Point` in `freminal-common`
 
 Scope: new module in `freminal-common/src/`, plus `freminal-common/src/lib.rs`.
@@ -365,6 +703,16 @@ this, measured exhaustively from `panes/mod.rs`:
 
 Plus derives `PartialEq` (relied on by `assert_eq!` at `panes/mod.rs:1871`),
 `Copy`, `Clone`, `Debug`.
+
+**Counts corrected 2026-07-30 (122.2 adversarial review).** The **API set above
+is right and complete** — re-verified against production code (`panes/mod.rs`
+lines 1-1572; the test module starts at 1573) and confirmed sufficient for
+122.3. The **occurrence counts are not**, in two ways: they include the test
+module, and the `contains` figure conflates three unrelated methods. There is
+exactly **one** production `Rect::contains` call (`pane_at_pos`,
+`panes/mod.rs:1567`); the other hits are `PaneNode::contains(PaneId)`, a
+recursive tree search, and `String::contains` in test assertions. Treat the
+table as "what the API must provide", not as a measurement.
 
 **Deliberately NOT provided** (verified absent from `panes/mod.rs`): `shrink`,
 `expand`, `translate`, `intersect`, `union`, `from_min_size`,
@@ -390,9 +738,54 @@ raw `as` casts — `conv2` per `freminal-numeric-conversions`.
 
 Stop: report the module's public API and test results; await review.
 
+**DONE.** `freminal-common/src/geometry.rs` — `Point` (with a free `point(x, y)`
+constructor mirroring `egui::pos2`) and `Rect`, all six items `const fn`, no
+egui dependency added, `freminal-common/Cargo.toml` untouched. 12 tests.
+
+Float semantics verified operation-by-operation against `emath` 0.35.0 on disk,
+including operand order: `contains` inclusive on all four bounds
+(`rect.rs:274-276`); `width`/`height` as plain subtraction, negative permitted;
+`center` as `(min + max) / 2.0` per component, matching `fast_midpoint`
+(`lib.rs:122-128`) rather than `min + (max - min) / 2.0`, which differs by one
+ULP for values the test pins; `from_min_max` stores verbatim without
+normalising.
+
+`Rect::center` carries `#[allow(clippy::manual_midpoint)]`. The lint wants
+`f32::midpoint`, which uses an `f64` intermediate to avoid overflow and so
+diverges from emath's naive form — but only near `f32::MAX` (`a = b = f32::MAX`
+gives `inf` vs `f32::MAX`), which screen geometry never reaches. The allow is
+kept for parity **by construction**, and the code comment now says exactly
+that rather than implying the divergence is reachable or tested.
+
+The adversarial review found two false claims in the first draft's doc
+comments, both corrected: `Rect::contains` cited
+`pointer_in_gutter_strip_boundary_at_exact_far_edge_is_false` as evidence for
+inclusive boundaries, but that predicate is scalar arithmetic using a
+**half-open** interval and never touches `Rect`; and `Rect::center` claimed
+`active_highlight_segment` uses a 0.5 epsilon when `edge_epsilon` is `1.0`
+(`app_impl.rs:3556`). The real justification for inclusivity — now documented —
+is that `split_rect` gives both halves of a split the *same* boundary
+coordinate, so adjacent pane rects **share** an edge; a pointer on that edge is
+contained by both and `pane_at_pos` takes the first match. Half-open would make
+every split boundary a one-pixel dead stripe.
+
 #### 122.3 — Move `panes/mod.rs` production geometry onto the neutral types
 
-Scope: `freminal/src/gui/panes/mod.rs` only.
+Scope: `freminal/src/gui/panes/mod.rs`, plus
+`freminal/benches/pane_resolution_bench.rs`.
+
+**Scope widened 2026-07-30 (122.14 adversarial review).** It was
+`panes/mod.rs` only, which was unsatisfiable: 122.14 added
+`freminal/benches/pane_resolution_bench.rs`, which benchmarks
+`PaneTree::layout`, `PaneTree::split_borders`, `pane_at_pos` and
+`active_highlight_segment` through their current `egui::Rect` / `Pos2`
+signatures. Re-typing those four onto the neutral geometry breaks that file's
+compilation, so `cargo bench --no-run --all` would fail and 122.3 could not
+reach a green verification suite without touching it. Note the bench builds
+rects with `egui::Rect::from_min_size` and `egui::vec2`, and the 122.2 neutral
+type deliberately provides **neither** — the bench's constructions convert to
+`from_min_max` form. That is an adaptation of bench fixtures only; **do not add
+`from_min_size` to the neutral type** to avoid it.
 
 What: migrate the 58 `Rect` / `Pos2` occurrences. Every **production** use in
 this file is pure geometry — `from_min_max`, field reads, `width`/`height`/
@@ -408,6 +801,22 @@ layout calls. Affected items:
 
 Callers outside this file convert at the boundary; that conversion is part of
 this subtask's scope only where it is a one-line adaptation at the call site.
+There are **nine** such sites, in two files: `gui/actions.rs:153` and
+`gui/app_impl.rs:918, 2170, 2344, 2433, 3552, 3575, 3611, 3938`.
+
+**A conversion seam is required, and the plan did not anticipate it (added
+2026-07-30, before implementation).** Those call sites pass `egui::Rect` in
+(from `ui.available_rect_before_wrap()`) and paint with what comes out, so both
+directions are needed. Neither direction can be a `From` impl: `freminal-common`
+must not depend on egui, and in the `freminal` binary both `egui::Rect` and
+`geometry::Rect` are foreign types, so the orphan rule forbids it. The seam is
+therefore **free functions in a new small module,
+`freminal/src/gui/geometry_interop.rs`**, named for exactly that one concept
+per `freminal-module-cohesion`: converting between egui's geometry types and
+the neutral ones. It is placed in the `freminal` binary because that is the
+only crate that legally sees both. Do **not** put these helpers on
+`panes/mod.rs` — the conversion is not a pane concept, and two of the nine call
+sites are not pane-tree calls.
 
 Deliverable: migrated file, existing tests (`panes/mod.rs:1573`+) passing
 unchanged in intent.
@@ -417,6 +826,33 @@ uses `mul_add` and `.round()`, and the existing tests assert exact widths and
 heights. Any test needing a tolerance change is a red flag, not a fix: stop and
 report.
 
+Additionally, **re-run the 122.14 benchmark** — it covers exactly the functions
+this subtask re-types. Per the measured noise floor recorded under the 122.14
+baseline, check it for **algorithmic-shape change within a run**, not for a
+per-ID 15% wall-clock delta, which this hardware cannot resolve.
+
+**DONE.** `freminal-common::geometry::{Rect, Point, point}` now carries
+`SplitBorder.rect`, `active_highlight_segment`, `PaneNode`/`PaneTree::layout`,
+`PaneNode`/`PaneTree::split_borders`, `split_rect` and `pane_at_pos`. The
+`panes/mod.rs` diff is mechanical — `egui::pos2(` to `point(`, one import — and
+`split_rect`'s `mul_add(...).round()` expressions are byte-identical, so the
+float behaviour is unchanged by construction. `split_rect` additionally became
+`const fn`, forced by `clippy::missing_const_for_fn` now that the neutral
+type's methods are `const` where egui's are not; that is compile-time only.
+
+Conversion seam added as planned: `freminal/src/gui/geometry_interop.rs`, four
+`pub const fn` free functions. Nine boundary call sites converted in
+`app_impl.rs` (8) and `actions.rs` (1). No test assertion or tolerance was
+altered.
+
+**On performance:** the change is neutral by construction, and that is the
+claim being made — `geometry::Rect` has the same layout as `egui::Rect` (two
+pairs of `f32`), performs the same arithmetic in the same operand order, and
+the only delta is compile-time `const`-ness. The benchmark corroborates: the
+algorithmic shape is unchanged across pane counts in every group. Per-ID
+wall-clock deltas were **not** used to support this, because the same-code
+noise floor measured here (12 of 39 IDs above 15%) exceeds them.
+
 Prohibitions: do NOT change any layout, resize or hit-test **semantics**. Do NOT
 alter rounding. Do NOT touch `window.rs`'s `chrome_*_rects` or
 `cached_central_rect` — decision 3 keeps those `egui::Rect`. Do NOT proceed to
@@ -424,10 +860,64 @@ alter rounding. Do NOT touch `window.rs`'s `chrome_*_rects` or
 
 Stop: report files changed and that no test tolerance was altered; await review.
 
+#### 122.3a — `SplitBorder::active_in_first` becomes a named enum
+
+Scope: `freminal/src/gui/panes/mod.rs`, `freminal/src/gui/app_impl.rs` (the
+single match at `3575`), `freminal/benches/pane_resolution_bench.rs` (fixture).
+
+**Added 2026-07-30**, at maintainer instruction to take the
+`freminal-state-representation` opportunities that this task's extractions
+surface, rather than only moving code.
+
+What: `SplitBorder.active_in_first` is `Option<bool>` (`panes/mod.rs:474`)
+carrying **three** meanings its own doc comment has to spell out in prose —
+`Some(true)` = the active pane is in the first (top/left) subtree,
+`Some(false)` = it is in the second, `None` = it is in neither. That is a
+named-domain-enum case under `freminal-state-representation`: the value crosses
+a module boundary on a `pub` struct, and `Some(false)` is exactly the kind of
+double-negative a reader has to decode at the far end. Its only consumer is a
+three-arm `match` at `app_impl.rs:3575` choosing which half of a divider gets
+the active colour, so the conversion is mechanical.
+
+Replace it with a named enum in the domain's own vocabulary — e.g.
+`ActiveSubtree { First, Second, Neither }` — and drop the `Option`. Name the
+enum for the concept, not generically; do not introduce a shared
+two-state/three-state helper type (that is the anti-pattern the skill names).
+
+Deliverable: the enum, the migrated producer in `PaneNode::split_borders`, the
+migrated `match`, and the bench fixture updated.
+
+Verification: standard suite, plus `--features frame-profiling`. Existing
+`active_highlight_segment` and `split_borders` tests must pass unchanged —
+note `active_highlight_segment` does not read this field at all, so its tests
+should be entirely unaffected.
+
+Prohibitions: do NOT change which half of a divider is highlighted for any
+input. Do NOT fold this into 122.3 — the geometry migration is the riskiest
+diff in Group A and must stay independently reviewable. Do NOT convert any
+other bool in this file; `SplitDirection` is already an enum and nothing else
+here qualifies.
+
+Stop: report the enum and that the highlight behaviour is unchanged; await
+review.
+
 #### 122.4 — Introduce the named published-state type
 
-Scope: new module under `freminal/src/gui/`, plus `freminal/src/gui/window.rs`
-and `freminal/src/gui/app_impl.rs`.
+Scope: new module under `freminal/src/gui/`, plus `freminal/src/gui/window.rs`,
+`freminal/src/gui/app_impl.rs` and `freminal/src/gui/layout_ops.rs`.
+
+**Scope corrected 2026-07-30, before implementation.** The stated scope missed a
+`PerWindowState` construction site. There are **three**, all of which initialise
+all seven fields and so must be migrated together:
+`freminal/src/gui/layout_ops.rs:706-741`, `app_impl.rs:~524-559`, and
+`app_impl.rs:~4499-4534`. Two further files mention the fields only in prose —
+`toast.rs:472, 1571` and `chrome_damage.rs:974-975` (a commented-out example) —
+and should have those references retargeted at the new type, but need no code
+change. `settings.rs:1887`'s `show_resize_overlay` is an unrelated config field;
+do not touch it. `window.rs`'s `resize_overlay_alpha` /
+`resize_overlay_is_animating` / `resize_overlay_repaint_delay` helpers take
+`Duration` arguments rather than the field, so they and their ~30 tests are
+unaffected.
 
 What: introduce a named type owning the **seven Type B fields** from the
 inventory, designed as if it were a crate (decision 1). It is a **wrapper**: the
@@ -504,6 +994,27 @@ Also **extend 122.14's benchmark** to cover the newly-callable chain, and record
 the number against that baseline; 122.14 could not do this because the chain was
 not extractable when it ran.
 
+> **NOT DONE - deliberately skipped at execution (2026-08-02).** The benchmark
+> extension above was **not** delivered, and 122.5 was accepted without it. The
+> extracted chain (`resolve_pane_under_pointer`) is private to `app_impl`, and
+> `freminal/src/gui/mod.rs` declares `mod app_impl;` - not `pub`. A Criterion
+> bench compiles as an **external crate**, so reaching the chain requires making
+> the ~5,000-line `app_impl` module `pub`, plus `pub` on the chain and its
+> parameter types. That is exactly the trade 122.14's own amendment rejected,
+> and `freminal-module-cohesion` says to decline a split that widens visibility
+> on a god module purely to serve a bench. The decision was taken twice - once
+> in 122.14's amendment, once here - and should not be re-litigated without
+> first solving the visibility problem.
+>
+> **What the 39 recorded IDs therefore cover:** the chain's *constituents*
+> (`pane_at_pos`, `layout`, `find`, `split_borders`, `active_highlight_segment`),
+> not the composed chain. That is a real gap in this task's benchmark story,
+> stated here rather than papered over. It is of limited practical consequence:
+> the composed chain is an O(1) fold over those constituents, and per 122.14's
+> amendment the benchmark is an **algorithmic-shape check compared within a
+> run**, not a wall-clock gate - 12 of the 39 IDs exceed 15% run-to-run on
+> identical code.
+
 Verification: standard suite, plus `--features frame-profiling` — the recording
 call must still fire with the same values for the same inputs as before, and
 `FrameStats::record_pointer_motion_check` still mutates through a `Cell` under
@@ -521,6 +1032,56 @@ function genuinely fits without it. Do NOT alter the conservative directions
 
 Stop: report the extracted signature, the benchmark number, and test results;
 await review.
+
+#### 122.5a — Give the pointer-motion decision its own module
+
+Scope: new `freminal/src/gui/pointer_motion.rs`, `freminal/src/gui/mod.rs`,
+`freminal/src/gui/app_impl.rs`.
+
+**Added 2026-07-30, after 122.5 landed.** 122.5 made the pane-resolution chain
+pure and testable but left it in `app_impl.rs`, which **grew** to 5,784 lines
+as a result — the extraction added ~450 lines of tests to the god file it was
+meant to relieve. Measured after 122.5, one coherent concept accounts for
+~840 of those lines:
+
+| Part                                                                | Lines |
+| ------------------------------------------------------------------- | ----- |
+| `PointerMotionPaneSignals`, `PaneSnapshotInputs`, `PaneResolution`  | ~387  |
+| `pane_hover_region_risk`, `pane_hover_region_terms`,                | (in   |
+| `pointer_in_gutter_strip`, `animation_in_flight_composed`,          | the   |
+| `pointer_motion_needs_repaint_decision`, `resolve_pane_under_pointer` | above) |
+| their 35 test functions                                             | ~450  |
+
+That is one concept — **the out-of-frame pointer-motion repaint decision** —
+and `freminal-module-cohesion` says it should be a module whose path names it.
+This is also the concrete case the `freminal-extend-or-extract` skill (122.0)
+was written for: the alternative is leaving it in the file it was already too
+big for.
+
+What: move those six functions, the three types, and their tests into
+`freminal/src/gui/pointer_motion.rs`. `App::pointer_motion_needs_repaint` and
+`is_chrome_interactive_at` stay in `app_impl.rs` — they are trait-impl methods
+needing `&self` — and call into the new module.
+
+**Keep the module `pub(super)`, not `pub`.** It is tempting to make it `pub`
+so 122.5's skipped benchmark becomes possible, but that repeats the trade the
+122.14 amendment rejected: widening visibility to serve a benchmark. Cohesion
+is the justification here; benchmarking is not. If a later subtask wants the
+benchmark badly enough, it can make that case on its own.
+
+Deliverable: the module, the moved code and tests, and a line-count delta on
+`app_impl.rs`.
+
+Verification: standard suite, plus `--features frame-profiling`. This is a
+**pure move** — no test assertion may change, and no function body may change
+except for import paths and visibility keywords.
+
+Prohibitions: do NOT change any function body's logic. Do NOT widen visibility
+beyond `pub(super)`. Do NOT move `pointer_motion_needs_repaint` or
+`is_chrome_interactive_at` themselves. Do NOT move `PublishedFrameState` (it
+has its own module). Do NOT rename anything.
+
+Stop: report the line-count delta and that no assertion changed; await review.
 
 #### 122.6 — `DummyApp` override so the dispatch path is testable
 
@@ -688,6 +1249,60 @@ and results; await review.
 
 ### Group C — cleanup (static targets, demoted)
 
+#### 122.11a — Consolidate the per-frame pane drains into one module
+
+Scope: new `freminal/src/gui/frame_drain.rs`, `freminal/src/gui/mod.rs`,
+`freminal/src/gui/app_impl.rs`.
+
+**Added 2026-07-30, after 122.8.** Group B is shrinking the god *functions* as
+intended — `update()`'s inline body and `central_body` are both materially
+smaller — but `app_impl.rs` itself has **grown**, because each subtask's doc
+comments and tests land in the same file:
+
+| After  | `app_impl.rs` |
+| ------ | ------------- |
+| 122.5a | 4,878         |
+| 122.7  | 5,252         |
+| 122.8  | 5,545         |
+
+The plan's success criterion is explicitly not line counts, and the goal
+statement is about god *functions*, so this is not a failure. But finishing
+Group B with the file larger than it started would be a poor outcome for a task
+whose headline is decomposition, and there is now an obvious home.
+
+Two independent sub-agents, asked separately, proposed the same concept:
+**per-frame pane-event draining** — everything that walks `win.tabs` once per
+frame to drain a channel and stage results for later handling. That is a real
+concept, it names itself, and it currently accounts for roughly 700 lines
+spread across `app_impl.rs`.
+
+What: move into `frame_drain.rs` the three drains and their supporting types
+and tests — `drain_command_finished_events`, `process_dead_panes`,
+`DeadPaneOutcome`, `drain_window_manipulation_commands`,
+`WindowManipulationEvents`, and `route_window_manipulation_events`. `WindowFocus`
+goes too if nothing outside the group uses it by then; check.
+
+Two known wrinkles: `route_window_manipulation_events` takes `&self` on
+`FreminalGui`, so it either becomes a free function taking explicit references
+(consistent with the other two, and preferred) or stays behind; and
+`process_dead_panes` takes `&mut PerWindowState`, which is fine for a sibling
+module but confirm no visibility has to widen past `pub(super)`.
+
+**Run this after Group B's extractions are complete**, not between them, so the
+move happens once rather than churning the same code repeatedly. It is a pure
+move: no logic change, no test-assertion change, identical test count.
+
+Deliverable: the module, the move, and the line-count delta on `app_impl.rs`.
+
+Verification: standard suite plus `--features frame-profiling`, and **both**
+clippy invocations.
+
+Prohibitions: do NOT change any logic. Do NOT widen visibility past
+`pub(super)`. Do NOT fold the three drains into one. Do NOT move anything that
+is not a per-frame drain merely because it is nearby.
+
+Stop: report the delta and that no assertion changed; await review.
+
 #### 122.12 — Name `write_input_to_terminal`'s parameters and result
 
 Scope: `freminal/src/gui/terminal/input.rs` and
@@ -711,7 +1326,39 @@ reversal of §8 subtask 1.3. Two reasons:
    `1513`, on the KKP release path). **They are not equivalent.** See the
    cleanup entry 122.C1 below.
 
-Deliverable: the two structs, the migrated call site, and a note in this
+**Shape decided (maintainer, 2026-08-02), before implementation started.**
+Recon established that **four of the seven return values are four of the
+parameters, round-tripped** — `last_reported_mouse_pos`, `previous_key`,
+`scroll_amount`, `super_state`, each `let mut x = x;`-shadowed at the top of
+the body and each landing back on a `PaneRenderCache` field at the call site.
+So it is three types, not two:
+
+- `InputCarryState` — the four round-tripped values, appearing in **both** the
+  params and the result, so the in-equals-out invariant is stated rather than
+  left for the reader to notice. `PaneRenderCache` itself is **not** regrouped
+  (out of scope); the call site packs and unpacks.
+- the params struct, carrying `InputCarryState` plus the remaining thirteen.
+- the result struct: the carry plus `left_mouse_button_pressed`,
+  `clipboard_pending`, `deferred_actions`.
+
+Two further decisions:
+
+- **`is_active_pane: bool` becomes a named enum.** It is a bool *parameter* —
+  `freminal-state-representation` rule 1, no exceptions — and that skill names
+  `PaneFocus { Active, Inactive }` as its own exemplar. Converted at the call
+  site; `show`'s own `is_active_pane` parameter is out of scope and unchanged.
+- **The result's two remaining bools stay bools.** `left_mouse_button_pressed`
+  and `clipboard_pending` are independent observation flags composed by the
+  caller (`left |= inner`, `clipboard_pending || *pending_copy`), which is the
+  skill's "independent simultaneous signals" exemption. Naming them as struct
+  fields already removes the positional-tuple hazard rule 3 exists to address.
+  Record this reasoning on the result type.
+
+Also noted during recon, to fix in passing: the existing "Return value" doc
+comment lists **six** bullets for a seven-element tuple — `deferred_actions`
+has no entry.
+
+Deliverable: the structs, the migrated call site, and a note in this
 document confirming byte-for-byte identical behaviour.
 
 Verification: standard suite. The 50 existing tests in `input.rs` must pass
@@ -738,8 +1385,18 @@ encode that the GUI is the thing asking. Surface:
 - methods `set_gui_scroll_offset` (`506-516`), `set_gui_scroll_window`
   (`518-529`), `reset_scroll_offset` (`531-538`)
 - reads in `handle_incoming_data` (`418`) and `build_snapshot` (`629`, `648`)
-- 27 occurrences of `gui_scroll_offset`, 16 of `gui_extra_rows`, **all confined
-  to this one file**; tests poke the private fields directly (`1058`, `1062`,
+- **CORRECTED AT EXECUTION (2026-08-02): the "all confined to this one file"
+  claim below is WRONG.** The real surface is **six** files —
+  `freminal-terminal-emulator/src/interface.rs`, `src/io/mod.rs`,
+  `freminal/src/gui/pty.rs`, `freminal/src/gui/terminal/input.rs`, and the two
+  integration-test files `tests/interface_tests.rs` and
+  `tests/snapshot_build.rs`. The integration tests are **external crates** and
+  therefore reach the emulator through the **public setters**, not the private
+  fields, so the setter renames are load-bearing there. Two test function
+  *names* also embed the old term. Locate call sites by grepping for content,
+  not by the line numbers below.
+- 27 occurrences of `gui_scroll_offset`, 16 of `gui_extra_rows` in
+  `interface.rs`; its own unit tests poke the private fields directly (`1058`, `1062`,
   `1070`, `1072`, `1084`, `1086`, `1097`, `1098`, `1180`, `1212-1215`, `1534`)
 
 Semantically these are the **requested scrollback viewport position** and the
@@ -749,6 +1406,21 @@ support). The existing doc comments already describe them accurately without the
 `requested_scroll_offset`, `extra_flatten_rows`, `previous_requested_scroll_offset`,
 `previous_extra_flatten_rows`, and `set_requested_scroll_offset` /
 `set_requested_scroll_window` (`reset_scroll_offset` keeps its name).
+
+> **TWO OF THOSE NAMES WERE WRONG AND WERE CORRECTED (PR #472 review).** The two
+> `previous_*` fields do **not** cache the *requested* values — they cache the
+> **effective** ones. `interface.rs` clamps the request to `max_scroll_offset`
+> and forces `0` on the alternate screen before storing, and the extra-row count
+> is likewise clamped to the rows actually available above the window. Naming
+> them `previous_requested_*` was a regression against the original neutral
+> `previous_scroll_offset`, which was at least accurate. Final names:
+> **`previous_effective_scroll_offset`** and
+> **`previous_effective_extra_rows`**, each documenting why it is deliberately
+> not `requested`. The comparison is against the effective value computed each
+> frame, so a request that clamps to the same effective offset correctly does
+> *not* invalidate the snapshot cache — which is the behaviour the wrong name
+> would have led a reader to doubt. (CodeRabbit flagged the scroll field; the
+> extra-rows field had the identical defect and was found by inspection.)
 
 Deliverable: the rename, existing tests passing.
 
@@ -781,17 +1453,71 @@ What: **no existing benchmark covers this code.** The suite is
 `performance-benchmarks`, a change to a measured hot path with no benchmark
 requires adding one first.
 
-Benchmark **only what exists today**: the pure predicate cores
+**AMENDED 2026-07-30 (maintainer decision), before any code was written.** The
+original text asked for a benchmark of the four pure predicate cores
 (`pointer_motion_needs_repaint_decision`, `pane_hover_region_risk`,
-`animation_in_flight_composed`, `pointer_in_gutter_strip`). Record a baseline in
-this document.
+`animation_in_flight_composed`, `pointer_in_gutter_strip`) *and* prohibited
+changing production code. Recon established those two requirements are mutually
+exclusive, and that satisfying the first would produce a benchmark with no
+regression-detection power:
 
-**122.14 does not benchmark the pane-resolution chain**, because 122.5 is what
-makes that chain callable. Extending the benchmark to cover it is a requirement
-*of 122.5*, not of this subtask — an earlier revision of this plan asked 122.14
-to benchmark something that does not exist when it runs, which was
-self-contradictory. One subtask, one concern: this one establishes the baseline
-for the code as it stands.
+- All four are **private** module-level `const fn`s, and
+  `freminal/src/gui/mod.rs:39` is `mod app_impl;` — not `pub`. A Criterion bench
+  compiles as an **external crate** against the `freminal` lib, so reaching them
+  requires making the 5,319-line `app_impl` module `pub`, plus `pub` on five
+  functions, plus making `PointerMotionPaneSignals` `pub` with `pub` fields.
+  That is a production-code change, and one that widens visibility on the
+  binary's largest internal module purely to serve a bench — which
+  `freminal-module-cohesion` says to decline.
+- All four are **O(1) boolean compositions over already-computed inputs**
+  (`animation_in_flight_composed` is `a || b`). Criterion would report
+  sub-nanosecond figures dominated by its own harness overhead. There is no
+  regression such a benchmark can detect, and they already carry 22 unit tests
+  — 9 + 5 + 4 + 4 (`app_impl.rs:4805-5015`; see the corrected count above).
+  Benchmarking them would be a gate in name only.
+
+**What is benchmarked instead: the pane-resolution chain's constituents, which
+are already `pub` and require no production-code change at all.** The four
+predicates are the cheap tail of the `CursorMoved` path. Reading
+`app_impl.rs:905-990`, the dominant per-event cost is:
+
+| Step | Call                                          | Work                                    |
+| ---- | --------------------------------------------- | --------------------------------------- |
+| 1    | `PaneTree::layout` (`panes/mod.rs:1087`)      | recursive tree walk + `Vec` alloc, O(n) |
+| 2    | inline rect-containment `find` (`930-933`)    | linear scan; same work as `pane_at_pos` |
+| 3    | `PaneTree::find` (`panes/mod.rs:1042`)        | tree search, O(n)                       |
+| 4    | `pane.arc_swap.load()` (`942`)                | `ArcSwap` guard acquire                 |
+| 5    | the four predicates                           | O(1) boolean composition                |
+
+Steps 1-4 are all `pub`, and `PaneTree` is constructible headlessly through the
+public `Pane::from_channels` (`panes/mod.rs:301`) plus a hand-assembled
+`pty::TabChannels` (`pty.rs:248`, all fields `pub`) plus
+`WindowPostRenderer::new()` (`renderer/gpu.rs:1866`, a `pub const fn`
+documented as creating GPU resources lazily on first `init`). No window, no GL
+context, no PTY process.
+
+Benchmark, parameterised over 1/2/4/8/16 panes where pane count is an input:
+
+- `PaneTree::layout`
+- `PaneTree::split_borders`
+- `PaneTree::find`
+- `panes::pane_at_pos` (over a synthetic `Vec<(PaneId, Rect)>` — no `PaneTree`
+  needed)
+- `panes::active_highlight_segment` (`panes/mod.rs:507`)
+
+This framing also **gives 122.3 a performance gate it otherwise lacks**:
+`PaneTree::layout`, `split_borders`, `pane_at_pos` and
+`active_highlight_segment` are precisely the functions 122.3 re-types onto the
+neutral geometry, and 122.3's verification was otherwise only "no test
+tolerance changed".
+
+**122.14 still does not benchmark the extracted pane-resolution chain itself**,
+because 122.5 is what makes that chain callable as a unit. Extending the
+benchmark to cover it remains a requirement *of 122.5* — but 122.5 now extends
+a benchmark whose constituent parts are already measured, rather than starting
+from nothing.
+
+Record the baseline in this document.
 
 Deliverable: the benchmark plus a recorded baseline.
 
@@ -799,10 +1525,142 @@ Verification: `cargo bench --no-run --all` compiles; standard suite unaffected.
 
 Prohibitions: do NOT attempt to benchmark `App::update` end to end — it needs a
 live window and that harness does not exist (see 121.28 / issue #440). Do NOT
-change production code. Do NOT benchmark the pane-resolution chain — it is not
+change production code — in particular do NOT widen the visibility of
+`mod app_impl`, `mod chrome_damage` or `mod frame_damage`, and do NOT add `pub`
+to any function or field to make it benchmarkable. If a candidate is not
+reachable today, it is out of scope. Do NOT benchmark the four O(1) predicate
+cores. Do NOT benchmark the extracted pane-resolution chain — it is not
 extractable yet; that belongs to 122.5. Do NOT proceed to any other subtask.
 
 Stop: report the benchmark IDs and baseline numbers; await review.
+
+##### 122.14 recorded baseline
+
+Bench file: `freminal/benches/pane_resolution_bench.rs`. Captured 2026-07-30 on
+`task-122/orchestration-extraction`, Criterion `sample_size(50)`,
+`measurement_time(2s)`. Figures are the **median** of Criterion's
+`[low median high]` triple. 39 benchmark IDs.
+
+`PaneTree::layout` — the pointer-motion chain's step 1, and the frame path's
+layout call. `chain/16` is the degenerate right-leaning shape.
+
+| Bench ID            | Median    |
+| ------------------- | --------- |
+| `layout/balanced/1`  | 32.816 ns |
+| `layout/balanced/2`  | 45.409 ns |
+| `layout/balanced/4`  | 80.883 ns |
+| `layout/balanced/8`  | 167.15 ns |
+| `layout/balanced/16` | 348.70 ns |
+| `layout/chain/16`    | 412.52 ns |
+
+`PaneTree::split_borders` — frame-path divider geometry. `active_first` is the
+cheapest possible input (pane 0 sits on the all-`first` spine, so every
+ancestor's `first.contains` hits immediately); `active_last` is the
+representative case (a `second` child, so at least one ancestor pays a failed
+exhaustive subtree scan). At 16 panes the difference is ~43%, which is why both
+are recorded — measuring only `active_first` would have understated the
+baseline.
+
+| Bench ID                       | Median    |
+| ------------------------------ | --------- |
+| `split_borders/active_first/1`  | 15.393 ns |
+| `split_borders/active_last/1`   | 15.559 ns |
+| `split_borders/active_first/2`  | 67.040 ns |
+| `split_borders/active_last/2`   | 51.677 ns |
+| `split_borders/active_first/4`  | 116.45 ns |
+| `split_borders/active_last/4`   | 101.00 ns |
+| `split_borders/active_first/8`  | 392.74 ns |
+| `split_borders/active_last/8`   | 352.62 ns |
+| `split_borders/active_first/16` | 718.11 ns |
+| `split_borders/active_last/16`  | 1.0302 µs |
+
+At 2, 4 and 8 panes `active_last` measured marginally *faster* than
+`active_first`; the run-to-run spread at those sizes (e.g. `active_first/8`
+spans 362-425 ns) exceeds the gap, so those pairs are within noise. Only the
+16-pane pair separates cleanly.
+
+`PaneTree::find` — the pointer-motion chain's step 3, worst case (last-inserted
+id). Balanced and chain land within noise of each other, as predicted: a full
+depth-first search visits the same node count under either shape.
+
+| Bench ID          | Median    |
+| ----------------- | --------- |
+| `find/balanced/1`  | 4.4778 ns |
+| `find/balanced/2`  | 6.5536 ns |
+| `find/balanced/4`  | 14.703 ns |
+| `find/balanced/8`  | 26.036 ns |
+| `find/balanced/16` | 58.346 ns |
+| `find/chain/16`    | 57.853 ns |
+
+`pane_at_pos` — the same linear rect-containment scan the chain inlines at
+`app_impl.rs:930-933`. `first_hit` is flat in pane count (matches immediately);
+`last_hit` and `miss` scale, as a linear scan must.
+
+| Bench ID                    | Median    |
+| --------------------------- | --------- |
+| `pane_at_pos/first_hit/1`    | 4.9338 ns |
+| `pane_at_pos/last_hit/1`     | 4.5014 ns |
+| `pane_at_pos/miss/1`         | 4.1744 ns |
+| `pane_at_pos/first_hit/2`    | 6.1305 ns |
+| `pane_at_pos/last_hit/2`     | 7.6166 ns |
+| `pane_at_pos/miss/2`         | 5.8324 ns |
+| `pane_at_pos/first_hit/4`    | 6.2849 ns |
+| `pane_at_pos/last_hit/4`     | 6.1088 ns |
+| `pane_at_pos/miss/4`         | 6.3946 ns |
+| `pane_at_pos/first_hit/8`    | 5.2452 ns |
+| `pane_at_pos/last_hit/8`     | 12.538 ns |
+| `pane_at_pos/miss/8`         | 7.5946 ns |
+| `pane_at_pos/first_hit/16`   | 5.5787 ns |
+| `pane_at_pos/last_hit/16`    | 24.230 ns |
+| `pane_at_pos/miss/16`        | 11.306 ns |
+
+`active_highlight_segment` — frame-path divider highlight, not pane-count
+parameterised.
+
+| Bench ID                              | Median    |
+| ------------------------------------- | --------- |
+| `active_highlight_segment/bordering`     | 6.8619 ns |
+| `active_highlight_segment/non_bordering` | 5.4369 ns |
+
+#### Measured noise floor — this is NOT a 15% wall-clock gate
+
+**Revised 2026-07-30 during 122.3, with measurement.** The baseline above was
+recorded expecting the standard 15% threshold from `performance-benchmarks` to
+apply per ID. **It cannot, on this hardware.** The development machine is a
+laptop; `opencode` alone holds a core at ~90% and freminal itself takes ~12%,
+so a quiet machine is not achievable and should not be waited for.
+
+Two full runs of the **identical binary**, pinned (`taskset -c 12,13,14,15
+nice -n -5`), give this run-to-run spread:
+
+| Spread on identical code | IDs | Examples                                        |
+| ------------------------ | --- | ----------------------------------------------- |
+| > 15%                    | 12  | `split_borders/active_first/4` **54%**, `/16` 22% |
+| 5-15%                    | 12  | `layout/balanced/16` 5.5%, `find/balanced/8` 7.8% |
+| < 5%                     | 15  | `pane_at_pos/miss/16` 0.1%, `layout/balanced/4` 1.1% |
+
+Unpinned it is far worse — up to 71% on a single ID. Pinning is worth doing and
+roughly halves the spread, but **12 of 39 IDs still exceed 15% with no code
+change at all**, and the worst offender is not one of the sub-10 ns ones. A
+per-ID 15% gate would therefore fire constantly on noise and prove nothing.
+
+**What this benchmark is actually good for, and how to use it:**
+
+1. **Algorithmic shape, compared *within* a single run.** This is reliable and
+   is the real value. In every run, `layout` roughly doubles per pane-count
+   doubling; `pane_at_pos/first_hit` stays flat (~3.5 ns) at every pane count
+   while `last_hit` and `miss` grow with it; `find` grows with depth. If a
+   change makes `layout` superlinear, or makes `first_hit` start scaling, that
+   shows up unmistakably and is exactly the class of regression worth catching.
+2. **Order-of-magnitude changes**, which survive the noise trivially.
+3. It is **not** a detector of a 15% wall-clock change, and no subtask should
+   claim it verified one.
+
+When re-running, pin the process, and report the *shape* across pane counts
+plus any order-of-magnitude move — not per-ID percentage deltas, which are
+noise at this resolution. Capture two runs of the unchanged code first if a
+per-ID number is ever genuinely needed, so the claim is made against that day's
+measured noise floor rather than against this table.
 
 #### 122.15 — Publish per-pane terminal-rect origin (unblocks 121.17)
 
@@ -903,7 +1761,29 @@ pins both call sites' current output first.
 Scope of fix: `input.rs`. Approach: characterisation tests over both functions
 across the full `egui::Key` range before touching either.
 
-Scheduling: **not** part of Task 122. Deliberately excluded from 122.12.
+**RESOLVED in Task 122 (PR #472).** The characterisation tests exist:
+`key_encoding_characterisation_tests` in `input.rs`, four tests covering the
+whole `egui::Key` range —
+
+- `space_encodes_differently_in_the_two_functions` pins the divergence itself
+  (`control_key` -> `Ctrl(32)` NUL, `egui_key_to_terminal_input` -> `Ascii(32)`
+  literal space) and asserts the two stay observably different;
+- `control_key_maps_every_letter_to_its_control_byte` pins all 26 A-Z mappings
+  (and so also guards 122.C2's fix);
+- `control_key_c0_table_is_pinned_and_absent_from_the_other_function` pins all
+  13 C0 punctuation/digit entries;
+- `coverage_sets_of_the_two_functions_are_pinned` pins the coverage counts
+  (39 vs 71) so a change to either *set* is caught even when no individual
+  encoding moved — the failure mode a de-duplication attempt would cause.
+
+`TerminalInput` derives only `Clone, Debug`, so comparison is on the `Debug`
+rendering. **The functions themselves are unchanged**: this entry was always
+about pinning behaviour before anyone merges them, not about merging them. The
+reconciliation itself remains undone and unscheduled, and is now safe to
+attempt.
+
+Original scheduling note (superseded): not part of Task 122, deliberately
+excluded from 122.12.
 
 ### 122.C2 — `assert_eq!` production panic path in `control_key`
 
@@ -920,7 +1800,85 @@ a third-party enum's `name()`.
 
 Scope of fix: `input.rs:930-978`. Approach: return `None` rather than assert.
 
-Scheduling: independent; may be done any time. Not part of Task 122.
+**RESOLVED in Task 122 (PR #472).** `assert_eq!(name.len(), 1)` is gone;
+the A-Z branch of `control_key` now destructures with
+`let [name_c] = name.as_bytes() else { return None };`, so an `egui::Key` whose
+`name()` is not a single byte yields "not translatable" instead of crashing a
+hot input path. 122.C1's `control_key_maps_every_letter_to_its_control_byte`
+pins that all 26 real letters still resolve, i.e. the graceful path changed no
+encoding.
+
+Original scheduling note (superseded): independent, may be done any time, not
+part of Task 122.
+
+### 122.C3 — 122.11 grew the god file it extracted from
+
+Surface point: 122.16 close-out audit, 2026-08-02, while accounting for the
+branch's net line growth.
+
+Subtask 122.11 ("extract `show`'s dirty-tracking decision block") did the
+**decomposition** correctly — it produced six named types
+(`FrameDirtyObservations`, `VertexRebuild`, `DirtyTrackingOutcome`,
+`FrameDirtyContext`, `FrameDirtyGeometry`, `CursorFrameInputs`) and one pure,
+unit-testable function, `evaluate_frame_dirty_state`. That is the Task 122
+pattern and the decision is now testable where it previously was not.
+
+It did **not** do the relocation. All of it landed in `widget.rs`:
+
+| Metric                    | Before | After | Delta   |
+| ------------------------- | ------ | ----- | ------- |
+| `show()` length           | 1,882  | 1,663 | **-219** |
+| `widget.rs` total         | 5,136  | 5,781 | **+645** |
+| `widget.rs` code-only     | 3,064  | 3,422 | **+358** |
+| `widget.rs` test region   | 60     | 76    | +16     |
+
+So the god *function* shrank modestly while the god *file* grew substantially,
+and the growth is **not** test coverage — only 16 of the 645 lines are tests.
+
+This is the exact failure mode that produced 122.5a (`pointer_motion.rs`) and
+122.11a (`frame_drain.rs`): an extraction that leaves the extracted code in the
+god file makes the file bigger, which is the opposite of the goal. Those two
+subtasks were added mid-task for precisely this reason; 122.11 predates the
+second of them and was not revisited afterwards.
+
+Impact: none functional. `widget.rs` is now the largest file in the GUI (5,781
+lines, having overtaken `app_impl.rs` at 5,008), which is a structural
+regression against this task's own goal even though every individual change was
+sound.
+
+Scope of fix: move the six types and `evaluate_frame_dirty_state` (plus their
+tests) out of `widget.rs` into their own module — `frame_dirty.rs` — mirroring
+`pointer_motion.rs` and `frame_drain.rs`. Mechanical; no logic change. Check
+whether the move forces any `pub(super)` to widen, and decline the split if it
+does, per `freminal-module-cohesion`.
+
+**RESOLVED in Task 122 (PR #472).** The six types and
+`evaluate_frame_dirty_state`, plus their test module, now live in
+`freminal/src/gui/terminal/frame_dirty.rs`, mirroring `pointer_motion.rs`
+(122.5a) and `frame_drain.rs` (122.11a). The move was byte-identical apart from
+visibility, `use` lines and the new `//!` header, and **nothing widened past
+`pub(super)`** — the `freminal-module-cohesion` condition that would have
+required declining the split.
+
+Result:
+
+| File                    | `main` | after 122.11 | after 122.C3 |
+| ----------------------- | ------ | ------------ | ------------ |
+| `widget.rs`             | 5,136  | 5,796        | **5,035**    |
+| `frame_dirty.rs`        | —      | —            | 800          |
+
+`widget.rs` is now **below** where it started on `main` and is no longer the
+largest GUI file, so the structural regression 122.11 introduced is reversed
+rather than merely recorded.
+
+`frame_dirty.rs` becomes a Task 123 crate candidate on the same terms as
+`pointer_motion.rs`.
+
+Original scheduling note (superseded): not part of Task 122, because folding it
+in would mean editing `widget.rs` again after the PR was raised. The maintainer
+directed otherwise — `freminal-orchestrator-protocol` makes cleanup entries part
+of the host task, and the activation-time "not part of Task 122" notes on C1 and
+C2 had quietly inverted that default.
 
 ---
 

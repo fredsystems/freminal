@@ -76,7 +76,7 @@ creates — see that subtask.
 | --------------------------------------- | ------------- | ------------- |
 | A — Completed work (merged to `main`)   | 121.1–121.11  | Complete      |
 | B — Bugs found and fixed                | 121.12–121.14 | Complete      |
-| B — Bug blocked behind Task 122         | 121.15        | Not started   |
+| B — Bug blocked behind Task 122         | 121.15        | Unblocked     |
 | B — Withdrawn                           | 121.16        | Withdrawn     |
 | C — Unifying improvement                | 121.17        | Not started   |
 | D — Unactioned issue #459 items         | 121.18–121.22, 121.24 | Not started |
@@ -475,6 +475,25 @@ accurate, its suggested remedy is not the one being taken.
 
 ### 121.17 — Cell-granular pointer suppression
 
+> **UNBLOCKED on the Task 122 side (2026-08-02), but RE-CHECK YOUR ASSUMPTIONS
+> BEFORE STARTING.** Two things changed under this subtask on the same day:
+>
+> 1. **The seam it was waiting for exists.** Subtask 122.15 publishes the per-pane
+>    terminal-rect origin through `PublishedFrameState`
+>    (`pane_terminal_origin(pane_id) -> Option<Point>`), and logical cell size was
+>    already reachable out-of-frame via `cell_size()`. The reader currently carries
+>    `#[allow(dead_code)]` with a TODO naming this subtask — **remove that allow**
+>    as part of landing 121.17.
+> 2. **The chrome cache is disabled (121.32), and may be deleted outright.** This
+>    subtask's measured prize and its "also un-gates 121.13" finding below were
+>    both computed in a world where `ChromeMode::Replay` was live. 121.13 is
+>    reverted, `Replay` is never chosen, and 121.34 may remove the machinery
+>    entirely. **The numbers below are stale and the un-gating argument no longer
+>    holds as written.** Re-measure before committing to a design, and do not
+>    resurrect the 121.13 interaction as a justification.
+>
+> The Task 122 dependency is discharged. The chrome-cache dependency is new.
+
 Nearly all of the terminal's interactive state changes at **cell** granularity, not
 pixel granularity: URL hover, gutter hover, selection extent, and mouse-tracking
 reports are all per-cell. Pointer motion within a single cell therefore cannot
@@ -529,19 +548,31 @@ clean pane at its 2–3 fps blink floor. **Roughly 20×.**
 0.1–0.2% over a typical sampling window, which is why informal observation (121.25)
 read the vetoed and unvetoed paths as identical. Use the counters, not a meter.
 
-### 121.17 also un-gates 121.13 (found while measuring)
+### 121.17 also un-gates 121.13 (WITHDRAWN - the premise no longer exists)
 
-`Replay` duty cycle collapses 58.3% → 5.8% in the vetoed case, with
+> **WITHDRAWN 2026-08-02. Do not use this as a justification for 121.17.**
+> 121.13 is reverted and the #436 chrome cache is disabled by default (121.32),
+> so `ChromeMode::Replay` is never chosen. There is no 121.13 win left to
+> un-gate, and 121.34 may delete the machinery entirely. The measurement below
+> is retained only as a record of what was observed while the cache was live;
+> **every number in it is stale** and none of it supports 121.17 today.
+>
+> 121.17 must stand on its own measured prize, re-taken against current code.
+> If the chrome cache is ever re-enabled soundly, this interaction can be
+> re-measured then - but it would need re-measuring, not restoring.
+
+Historical record, measured 2026-07-29 while 121.13 was live and `Replay` was
+engaging:
+
+`Replay` duty cycle collapsed 58.3% -> 5.8% in the vetoed case, with
 `gate_blocked_not_settled` accounting for essentially every `Full` frame
-(`settle_repaint_delay = 0µs`, `settle_terminal_requested_delay = 500000µs`).
+(`settle_repaint_delay = 0us`, `settle_terminal_requested_delay = 500000us`).
+The reading at the time was that `effective_chrome_gate_delay` substitutes only
+when `suppressed_only`, so 121.13's win was gated on suppression actually
+engaging, and 121.17 would retroactively switch it on for the vetoed path.
 
-This is correct by design: `effective_chrome_gate_delay` substitutes only when
-`suppressed_only`, and in the vetoed case egui's zero is genuine information rather
-than an artifact of suppressed events. But the consequence is that **121.13's win is
-gated on suppression actually engaging**, so the vetoed path loses both axes at once —
-full frame rate *and* full chrome-rebuild cost per frame. 121.17 therefore does not
-just cut frame count; it retroactively switches the 121.13 win on for that path. The
-two compound, which is a stronger case for 121.17 than the code alone supports.
+That compounding argument is void: both halves of it depend on a `Replay` path
+that no longer runs.
 
 ---
 

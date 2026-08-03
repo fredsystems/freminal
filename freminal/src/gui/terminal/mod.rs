@@ -10,6 +10,7 @@
 //! and `new_render_state`) required by the multi-pane GUI architecture.
 
 pub(crate) mod coords;
+pub(crate) mod frame_dirty;
 pub(crate) mod input;
 pub(crate) mod widget;
 

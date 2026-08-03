@@ -173,25 +173,33 @@ pub struct TerminalEmulator {
     ///
     /// Updated when an `InputEvent::ScrollOffset(n)` is received.  Reset to 0
     /// when new PTY output arrives (auto-scroll to bottom).
-    gui_scroll_offset: usize,
+    requested_scroll_offset: usize,
     /// Number of extra rows the GUI wants flattened **above** the normal
     /// visible window (command-block fold support).
     ///
-    /// Updated alongside `gui_scroll_offset` when an
+    /// Updated alongside `requested_scroll_offset` when an
     /// `InputEvent::ScrollOffset` is received. When the GUI has folds active
     /// in the visible window, it requests extra rows so the renderer can fill
     /// the screen after collapsing folds (keeping the live bottom pinned).
     /// `0` for the common case (no folds). Reset to 0 on new PTY output along
     /// with the scroll offset.
-    gui_extra_rows: usize,
-    /// The scroll offset used for the previous snapshot.  When this differs
-    /// from the current `gui_scroll_offset`, the visible window has moved and
-    /// the cached snapshot must be invalidated.
-    previous_scroll_offset: usize,
-    /// The `gui_extra_rows` value used for the previous snapshot. When this
-    /// differs from the current value the flatten window grew/shrank and the
-    /// cached snapshot must be invalidated.
-    previous_extra_rows: usize,
+    extra_flatten_rows: usize,
+    /// The **effective** scroll offset used for the previous snapshot — i.e.
+    /// `requested_scroll_offset` after clamping to `max_scroll_offset`, and
+    /// forced to `0` on the alternate screen. Deliberately NOT named
+    /// `previous_requested_*`: it is compared against the effective value
+    /// computed each frame, not against the raw request, so a request that
+    /// clamps to the same effective offset correctly does not invalidate the
+    /// cache. When it differs, the visible window has moved and the cached
+    /// snapshot must be invalidated.
+    previous_effective_scroll_offset: usize,
+    /// The **effective** extra-row count used for the previous snapshot — i.e.
+    /// `extra_flatten_rows` after clamping to the rows actually available
+    /// above the window, and forced to `0` on the alternate screen. Same
+    /// naming reasoning as `previous_effective_scroll_offset` above. When it
+    /// differs, the flatten window grew or shrank and the cached snapshot must
+    /// be invalidated.
+    previous_effective_extra_rows: usize,
     /// The terminal dimensions (cols, rows) at the time of the previous
     /// snapshot.  When these change (e.g. after a pane resize), the cached
     /// snapshot must be invalidated — it was built for a different grid size.
@@ -228,10 +236,10 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
-            gui_scroll_offset: 0,
-            gui_extra_rows: 0,
-            previous_scroll_offset: 0,
-            previous_extra_rows: 0,
+            requested_scroll_offset: 0,
+            extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         }
@@ -258,10 +266,10 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
-            gui_scroll_offset: 0,
-            gui_extra_rows: 0,
-            previous_scroll_offset: 0,
-            previous_extra_rows: 0,
+            requested_scroll_offset: 0,
+            extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -339,10 +347,10 @@ impl TerminalEmulator {
             previous_visible_snap: None,
             stashed_visible_snap_other_buffer: None,
             previous_was_alternate: false,
-            gui_scroll_offset: 0,
-            gui_extra_rows: 0,
-            previous_scroll_offset: 0,
-            previous_extra_rows: 0,
+            requested_scroll_offset: 0,
+            extra_flatten_rows: 0,
+            previous_effective_scroll_offset: 0,
+            previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
         };
@@ -399,14 +407,14 @@ impl TerminalEmulator {
     /// Process a chunk of raw PTY bytes.
     ///
     /// This wraps `TerminalState::handle_incoming_data` for the consumer thread.
-    /// When the user is scrolled back (`gui_scroll_offset > 0`) or a
+    /// When the user is scrolled back (`requested_scroll_offset > 0`) or a
     /// command-block fold has extended the flatten window above the live bottom
-    /// (`gui_extra_rows > 0`), new output auto-scrolls fully to the live bottom.
+    /// (`extra_flatten_rows > 0`), new output auto-scrolls fully to the live bottom.
     pub fn handle_incoming_data(&mut self, incoming: &[u8]) {
         self.internal.handle_incoming_data(incoming);
         // Auto-scroll to the live bottom on new output, matching standard
         // terminal behavior.  This must clear BOTH the scroll offset AND the
-        // fold extra-rows request: leaving `gui_extra_rows` stale keeps the
+        // fold extra-rows request: leaving `extra_flatten_rows` stale keeps the
         // flattened window extended above the live bottom against a buffer that
         // no longer has a fold there (Task 113, Bug E).  `reset_scroll_offset`
         // clears both; the next snapshot then carries scroll_offset = 0 and
@@ -415,7 +423,7 @@ impl TerminalEmulator {
         // Only reset when actually scrolled back or extended, so that ordinary
         // output at the live bottom (the common case) does not needlessly
         // invalidate the snapshot cache.
-        if self.gui_scroll_offset > 0 || self.gui_extra_rows > 0 {
+        if self.requested_scroll_offset > 0 || self.extra_flatten_rows > 0 {
             self.reset_scroll_offset();
         }
     }
@@ -509,10 +517,10 @@ impl TerminalEmulator {
     /// `InputEvent::ScrollOffset(n)`.  The value is clamped to
     /// `max_scroll_offset()` during the next `build_snapshot()` call.
     ///
-    /// Leaves `gui_extra_rows` unchanged; use
-    /// [`Self::set_gui_scroll_window`] to update both at once.
-    pub const fn set_gui_scroll_offset(&mut self, offset: usize) {
-        self.gui_scroll_offset = offset;
+    /// Leaves `extra_flatten_rows` unchanged; use
+    /// [`Self::set_requested_scroll_window`] to update both at once.
+    pub const fn set_requested_scroll_offset(&mut self, offset: usize) {
+        self.requested_scroll_offset = offset;
     }
 
     /// Update the GUI-requested scroll offset together with the number of
@@ -523,9 +531,9 @@ impl TerminalEmulator {
     /// `InputEvent::ScrollOffset`. Both values are clamped during the next
     /// `build_snapshot()` call (`offset` to `max_scroll_offset()`, and the
     /// effective `extra_rows` to the available scrollback above the window).
-    pub const fn set_gui_scroll_window(&mut self, offset: usize, extra_rows: usize) {
-        self.gui_scroll_offset = offset;
-        self.gui_extra_rows = extra_rows;
+    pub const fn set_requested_scroll_window(&mut self, offset: usize, extra_rows: usize) {
+        self.requested_scroll_offset = offset;
+        self.extra_flatten_rows = extra_rows;
     }
 
     /// Reset the scroll offset to 0 (live bottom) and clear any extra-row
@@ -533,8 +541,8 @@ impl TerminalEmulator {
     ///
     /// Called when new PTY data arrives while the user is scrolled back.
     pub const fn reset_scroll_offset(&mut self) {
-        self.gui_scroll_offset = 0;
-        self.gui_extra_rows = 0;
+        self.requested_scroll_offset = 0;
+        self.extra_flatten_rows = 0;
     }
 
     /// Write to the terminal
@@ -626,12 +634,12 @@ impl TerminalEmulator {
             // Clamp to the maximum scrollback offset so an out-of-range value
             // (e.g. from a previous buffer state) doesn't panic.
             let max = self.internal.handler.buffer().max_scroll_offset();
-            (self.gui_scroll_offset.min(max), max)
+            (self.requested_scroll_offset.min(max), max)
         };
 
         // ── Extra rows above the visible window (command-block folds) ────────
         //
-        // The GUI requests `gui_extra_rows` extra rows flattened ABOVE the
+        // The GUI requests `extra_flatten_rows` extra rows flattened ABOVE the
         // normal visible window so it can fill the screen after collapsing
         // folded command blocks (keeping the live bottom pinned). The
         // effective count is clamped to the rows actually available above the
@@ -645,7 +653,7 @@ impl TerminalEmulator {
             let available_above = total_rows
                 .saturating_sub(term_height)
                 .saturating_sub(scroll_offset);
-            self.gui_extra_rows.min(available_above)
+            self.extra_flatten_rows.min(available_above)
         };
 
         // ── Swap the snap cache on primary ↔ alternate screen switch ─────────
@@ -672,7 +680,7 @@ impl TerminalEmulator {
         //
         // The visible window moved — the cached flat content is from a
         // different set of rows and must not be reused.
-        let scroll_changed = scroll_offset != self.previous_scroll_offset;
+        let scroll_changed = scroll_offset != self.previous_effective_scroll_offset;
         if scroll_changed {
             self.previous_visible_snap = None;
             // The stashed other-buffer cache also covers a specific viewport.
@@ -682,7 +690,7 @@ impl TerminalEmulator {
             // window. Clear it so the buffer switch re-flattens instead of
             // reusing viewport-stale rows.
             self.stashed_visible_snap_other_buffer = None;
-            self.previous_scroll_offset = scroll_offset;
+            self.previous_effective_scroll_offset = scroll_offset;
         }
 
         // ── Invalidate the snap cache when the extra-row count changes ───────
@@ -690,13 +698,13 @@ impl TerminalEmulator {
         // A fold/unfold changes how many rows are flattened above the window;
         // the cached flat content covers a different row span and must not be
         // reused.
-        if extra_rows != self.previous_extra_rows {
+        if extra_rows != self.previous_effective_extra_rows {
             self.previous_visible_snap = None;
             // Same reasoning as the scroll-change case: the stashed cache
             // covers a specific flatten window and must not be restored across
             // an extra-row change.
             self.stashed_visible_snap_other_buffer = None;
-            self.previous_extra_rows = extra_rows;
+            self.previous_effective_extra_rows = extra_rows;
         }
 
         // ── Invalidate the snap cache when terminal dimensions change ────
@@ -1055,11 +1063,11 @@ mod tests {
     fn handle_incoming_data_resets_scroll_offset() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         // Manually set a non-zero scroll offset.
-        emu.gui_scroll_offset = 5;
+        emu.requested_scroll_offset = 5;
         // Receiving new data should auto-scroll back to bottom (offset = 0).
         emu.handle_incoming_data(b"new data");
         assert_eq!(
-            emu.gui_scroll_offset, 0,
+            emu.requested_scroll_offset, 0,
             "scroll offset should reset to 0 on new data"
         );
     }
@@ -1067,23 +1075,26 @@ mod tests {
     #[test]
     fn handle_incoming_data_zero_offset_unchanged() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        emu.gui_scroll_offset = 0;
+        emu.requested_scroll_offset = 0;
         emu.handle_incoming_data(b"data");
-        assert_eq!(emu.gui_scroll_offset, 0);
+        assert_eq!(emu.requested_scroll_offset, 0);
     }
 
     #[test]
     fn handle_incoming_data_clears_extra_rows() {
         // Task 113, Bug E: new output must clear the fold extra-rows request,
         // not just the scroll offset.  Here the offset is already 0 but a fold
-        // has extended the window (gui_extra_rows > 0); new data must still
+        // has extended the window (extra_flatten_rows > 0); new data must still
         // snap fully to the live bottom.
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        emu.set_gui_scroll_window(0, 4);
+        emu.set_requested_scroll_window(0, 4);
         emu.handle_incoming_data(b"new data");
-        assert_eq!(emu.gui_scroll_offset, 0, "offset stays at live bottom");
         assert_eq!(
-            emu.gui_extra_rows, 0,
+            emu.requested_scroll_offset, 0,
+            "offset stays at live bottom"
+        );
+        assert_eq!(
+            emu.extra_flatten_rows, 0,
             "fold extra-rows request must be cleared on new output"
         );
     }
@@ -1092,10 +1103,10 @@ mod tests {
     fn handle_incoming_data_resets_both_offset_and_extra_rows() {
         // Both scrolled back AND a fold in view → new output clears both.
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        emu.set_gui_scroll_window(7, 3);
+        emu.set_requested_scroll_window(7, 3);
         emu.handle_incoming_data(b"new data");
-        assert_eq!(emu.gui_scroll_offset, 0);
-        assert_eq!(emu.gui_extra_rows, 0);
+        assert_eq!(emu.requested_scroll_offset, 0);
+        assert_eq!(emu.extra_flatten_rows, 0);
     }
 
     // ── set_win_size ───────────────────────────────────────────────────────────
@@ -1177,7 +1188,7 @@ mod tests {
             snap1.max_scroll_offset
         );
         // Move scroll offset by 1 — cache should be invalidated.
-        emu.set_gui_scroll_offset(1);
+        emu.set_requested_scroll_offset(1);
         let snap2 = emu.build_snapshot();
         assert!(
             snap2.content_changed,
@@ -1204,15 +1215,15 @@ mod tests {
         );
     }
 
-    // ── set_gui_scroll_offset / reset_scroll_offset ───────────────────────────
+    // ── set_requested_scroll_offset / reset_scroll_offset ───────────────────────────
 
     #[test]
     fn set_and_reset_scroll_offset() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
-        emu.set_gui_scroll_offset(7);
-        assert_eq!(emu.gui_scroll_offset, 7);
+        emu.set_requested_scroll_offset(7);
+        assert_eq!(emu.requested_scroll_offset, 7);
         emu.reset_scroll_offset();
-        assert_eq!(emu.gui_scroll_offset, 0);
+        assert_eq!(emu.requested_scroll_offset, 0);
     }
 
     // ── clone_write_tx / write_raw_bytes ──────────────────────────────────────
@@ -1531,7 +1542,7 @@ mod tests {
 
         // Scroll back into history and snapshot — this caches a primary
         // VisibleSnap for scroll_offset > 0.
-        emu.set_gui_scroll_offset(50);
+        emu.set_requested_scroll_offset(50);
         let scrolled = emu.build_snapshot();
         assert_eq!(scrolled.scroll_offset, 50, "should be scrolled back");
         let scrolled_first_row = first_visible_row(&scrolled.visible_chars);

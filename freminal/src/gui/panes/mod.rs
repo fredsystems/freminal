@@ -26,9 +26,9 @@ use std::sync::atomic::AtomicBool;
 
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
-use egui::Rect;
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
 use freminal_common::buffer_states::tchar::TChar;
+use freminal_common::geometry::{Point, Rect, point};
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
@@ -430,6 +430,21 @@ pub struct ClosedPaneResult {
 
 // ── SplitBorder ──────────────────────────────────────────────────────
 
+/// Which subtree of a split node the active pane lives in.
+///
+/// Used by the GUI to implement tmux-style half-highlighted borders: the
+/// half of the divider on the active pane's side is drawn in the active
+/// color, the other half stays inactive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSubtree {
+    /// The active pane is in the split's **first** (top or left) subtree.
+    First,
+    /// The active pane is in the split's **second** (bottom or right) subtree.
+    Second,
+    /// The active pane is in **neither** subtree of this split.
+    Neither,
+}
+
 /// Describes a single split border between adjacent panes.
 ///
 /// Used by the GUI to create invisible drag sensor rects on the border,
@@ -467,13 +482,11 @@ pub struct SplitBorder {
     /// Used by the GUI to correctly scale pixel drag distance into ratio delta.
     pub parent_extent: f32,
 
-    /// Whether the active pane lives in the **first** child's subtree.
+    /// Which subtree of this split contains the active pane.
     ///
     /// Used by the GUI to implement tmux-style half-highlighted borders:
-    /// when `true`, the first half (top or left) of the border is drawn
-    /// in the active color; when `false`, the second half is highlighted.
-    /// If the active pane is in neither subtree, both halves are inactive.
-    pub active_in_first: Option<bool>,
+    /// see [`ActiveSubtree`] for what each variant means for rendering.
+    pub active_subtree: ActiveSubtree,
 }
 
 /// The sub-segment of a split divider that should be highlighted to
@@ -527,8 +540,8 @@ pub fn active_highlight_segment(
                 return None;
             }
             Some(Rect::from_min_max(
-                egui::pos2(r.min.x, top),
-                egui::pos2(r.max.x, bottom),
+                point(r.min.x, top),
+                point(r.max.x, bottom),
             ))
         }
         // Horizontal dividing line (Vertical split): the divider runs along
@@ -547,8 +560,8 @@ pub fn active_highlight_segment(
                 return None;
             }
             Some(Rect::from_min_max(
-                egui::pos2(left, r.min.y),
-                egui::pos2(right, r.max.y),
+                point(left, r.min.y),
+                point(right, r.max.y),
             ))
         }
     }
@@ -688,7 +701,7 @@ impl PaneNode {
     /// Then recurses into both children with their respective sub-rects.
     ///
     /// `active_pane` is the currently focused pane; used to compute
-    /// [`SplitBorder::active_in_first`] for tmux-style half-highlighted
+    /// [`SplitBorder::active_subtree`] for tmux-style half-highlighted
     /// borders.
     fn split_borders(&self, rect: Rect, active_pane: PaneId, out: &mut Vec<SplitBorder>) {
         match self {
@@ -707,27 +720,27 @@ impl PaneNode {
                         // Vertical dividing line at split_x.
                         let split_x = r1.max.x;
                         Rect::from_min_max(
-                            egui::pos2(split_x - 0.5, rect.min.y),
-                            egui::pos2(split_x + 0.5, rect.max.y),
+                            point(split_x - 0.5, rect.min.y),
+                            point(split_x + 0.5, rect.max.y),
                         )
                     }
                     SplitDirection::Vertical => {
                         // Horizontal dividing line at split_y.
                         let split_y = r1.max.y;
                         Rect::from_min_max(
-                            egui::pos2(rect.min.x, split_y - 0.5),
-                            egui::pos2(rect.max.x, split_y + 0.5),
+                            point(rect.min.x, split_y - 0.5),
+                            point(rect.max.x, split_y + 0.5),
                         )
                     }
                 };
 
                 // Determine which subtree (if either) contains the active pane.
-                let active_in_first = if first.contains(active_pane) {
-                    Some(true)
+                let active_subtree = if first.contains(active_pane) {
+                    ActiveSubtree::First
                 } else if second.contains(active_pane) {
-                    Some(false)
+                    ActiveSubtree::Second
                 } else {
-                    None
+                    ActiveSubtree::Neither
                 };
 
                 // Find any leaf pane in the first subtree to use as the
@@ -742,7 +755,7 @@ impl PaneNode {
                             SplitDirection::Horizontal => rect.width(),
                             SplitDirection::Vertical => rect.height(),
                         },
-                        active_in_first,
+                        active_subtree,
                     });
                 }
 
@@ -1098,7 +1111,7 @@ impl PaneTree {
     /// [`PaneTree::resize_split`] on drag.
     ///
     /// `active_pane` is the currently focused pane; each returned
-    /// [`SplitBorder`] carries an `active_in_first` field indicating
+    /// [`SplitBorder`] carries an `active_subtree` field indicating
     /// which subtree the active pane belongs to, enabling tmux-style
     /// half-highlighted border rendering.
     ///
@@ -1511,18 +1524,24 @@ where
 // ── Layout helpers ───────────────────────────────────────────────────
 
 /// Split a rectangle along the given direction at the given ratio.
+// NOT `const`, despite clippy's `missing_const_for_fn` being satisfiable on
+// newer toolchains: `f32::mul_add` (used below) is not const-stable on this
+// workspace's MSRV of 1.95.0, so marking this `const fn` compiles on the dev
+// toolchain and breaks the MSRV build. `split_rect` is only ever called at
+// runtime, so `const` buys nothing here. (PR #472 review.)
+#[allow(clippy::missing_const_for_fn)]
 fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
     match direction {
         SplitDirection::Horizontal => {
             let split_x = rect.width().mul_add(ratio, rect.min.x).round();
-            let left = Rect::from_min_max(rect.min, egui::pos2(split_x, rect.max.y));
-            let right = Rect::from_min_max(egui::pos2(split_x, rect.min.y), rect.max);
+            let left = Rect::from_min_max(rect.min, point(split_x, rect.max.y));
+            let right = Rect::from_min_max(point(split_x, rect.min.y), rect.max);
             (left, right)
         }
         SplitDirection::Vertical => {
             let split_y = rect.height().mul_add(ratio, rect.min.y).round();
-            let top = Rect::from_min_max(rect.min, egui::pos2(rect.max.x, split_y));
-            let bottom = Rect::from_min_max(egui::pos2(rect.min.x, split_y), rect.max);
+            let top = Rect::from_min_max(rect.min, point(rect.max.x, split_y));
+            let bottom = Rect::from_min_max(point(rect.min.x, split_y), rect.max);
             (top, bottom)
         }
     }
@@ -1561,7 +1580,7 @@ pub const fn should_focus_inactive_pane(
 /// over any pane in `layout` (e.g. the drag ended outside the terminal
 /// band).
 #[must_use]
-pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: egui::Pos2) -> Option<PaneId> {
+pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: Point) -> Option<PaneId> {
     layout
         .iter()
         .find(|(_, rect)| rect.contains(pos))
@@ -1609,21 +1628,21 @@ mod tests {
         let layout = vec![
             (
                 pane_a,
-                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+                Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0)),
             ),
             (
                 pane_b,
-                Rect::from_min_max(egui::pos2(100.0, 0.0), egui::pos2(200.0, 100.0)),
+                Rect::from_min_max(point(100.0, 0.0), point(200.0, 100.0)),
             ),
         ];
 
         assert_eq!(
-            pane_at_pos(&layout, egui::pos2(50.0, 50.0)),
+            pane_at_pos(&layout, point(50.0, 50.0)),
             Some(pane_a),
             "point inside pane A's rect must resolve to pane A"
         );
         assert_eq!(
-            pane_at_pos(&layout, egui::pos2(150.0, 50.0)),
+            pane_at_pos(&layout, point(150.0, 50.0)),
             Some(pane_b),
             "point inside pane B's rect must resolve to pane B"
         );
@@ -1634,11 +1653,11 @@ mod tests {
         let pane_a = PaneId(0);
         let layout = vec![(
             pane_a,
-            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0)),
+            Rect::from_min_max(point(0.0, 0.0), point(100.0, 100.0)),
         )];
 
         assert_eq!(
-            pane_at_pos(&layout, egui::pos2(500.0, 500.0)),
+            pane_at_pos(&layout, point(500.0, 500.0)),
             None,
             "point outside every pane rect must resolve to None"
         );
@@ -1647,7 +1666,7 @@ mod tests {
     #[test]
     fn pane_at_pos_empty_layout_returns_none() {
         let layout: Vec<(PaneId, Rect)> = Vec::new();
-        assert_eq!(pane_at_pos(&layout, egui::pos2(0.0, 0.0)), None);
+        assert_eq!(pane_at_pos(&layout, point(0.0, 0.0)), None);
     }
 
     // ── PaneId tests ─────────────────────────────────────────────────
@@ -1864,7 +1883,7 @@ mod tests {
     #[test]
     fn tree_single_layout() {
         let tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         assert_eq!(layout.len(), 1);
         assert_eq!(layout[0].0, PaneId(0));
@@ -1956,7 +1975,7 @@ mod tests {
         )
         .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         assert_eq!(layout.len(), 2);
 
@@ -1980,7 +1999,7 @@ mod tests {
         tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         assert_eq!(layout.len(), 2);
 
@@ -2038,7 +2057,7 @@ mod tests {
         tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         assert_eq!(layout.len(), 3);
 
@@ -2213,7 +2232,7 @@ mod tests {
         tree.resize_split(PaneId(0), SplitDirection::Horizontal, 0.1)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         // First pane should now be 60% wide (0.5 + 0.1 = 0.6)
         let first_width = layout[0].1.width();
@@ -2239,7 +2258,7 @@ mod tests {
         tree.resize_split(PaneId(0), SplitDirection::Horizontal, -0.9)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(1000.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         // Clamped to MIN_SPLIT_RATIO (0.1)
         let first_width = layout[0].1.width();
@@ -2265,7 +2284,7 @@ mod tests {
         tree.resize_split(PaneId(0), SplitDirection::Horizontal, 0.9)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(1000.0, 600.0));
         let layout = tree.layout(rect).unwrap();
         // Clamped to MAX_SPLIT_RATIO (0.9)
         let first_width = layout[0].1.width();
@@ -2327,7 +2346,7 @@ mod tests {
         tree.resize_split(PaneId(2), SplitDirection::Horizontal, 0.1)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(1000.0, 600.0));
         let layout = tree.layout(rect).unwrap();
 
         // The outer horizontal split should now be at 0.6 ratio
@@ -2467,7 +2486,7 @@ mod tests {
     #[test]
     fn split_borders_single_pane_returns_empty() {
         let tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let borders = tree.split_borders(rect, PaneId(0)).unwrap();
         assert!(borders.is_empty());
     }
@@ -2485,7 +2504,7 @@ mod tests {
         )
         .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
 
         // Active pane in first child (left).
         let borders = tree.split_borders(rect, PaneId(0)).unwrap();
@@ -2493,7 +2512,7 @@ mod tests {
         let border = &borders[0];
         assert_eq!(border.direction, SplitDirection::Horizontal);
         assert_eq!(border.first_child_pane, PaneId(0));
-        assert_eq!(border.active_in_first, Some(true));
+        assert_eq!(border.active_subtree, ActiveSubtree::First);
 
         // The split should be at x=400 (50% of 800) ± 0.5
         let center_x = border.rect.center().x;
@@ -2504,11 +2523,11 @@ mod tests {
 
         // Active pane in second child (right).
         let borders = tree.split_borders(rect, PaneId(1)).unwrap();
-        assert_eq!(borders[0].active_in_first, Some(false));
+        assert_eq!(borders[0].active_subtree, ActiveSubtree::Second);
 
         // Active pane not in either subtree.
         let borders = tree.split_borders(rect, PaneId(99)).unwrap();
-        assert_eq!(borders[0].active_in_first, None);
+        assert_eq!(borders[0].active_subtree, ActiveSubtree::Neither);
     }
 
     #[test]
@@ -2519,13 +2538,13 @@ mod tests {
         tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
         let borders = tree.split_borders(rect, PaneId(0)).unwrap();
 
         assert_eq!(borders.len(), 1);
         let border = &borders[0];
         assert_eq!(border.direction, SplitDirection::Vertical);
-        assert_eq!(border.active_in_first, Some(true));
+        assert_eq!(border.active_subtree, ActiveSubtree::First);
 
         // The split should be at y=300 (50% of 600) ± 0.5
         let center_y = border.rect.center().y;
@@ -2552,7 +2571,7 @@ mod tests {
         tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
             .unwrap();
 
-        let rect = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
 
         // Active pane 0: in first child of outer H-split AND first child of inner V-split.
         let borders = tree.split_borders(rect, PaneId(0)).unwrap();
@@ -2575,14 +2594,14 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(true));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::First);
 
         // The inner vertical border: active pane 0 is in the first (top) subtree.
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, Some(true));
+        assert_eq!(v_border.active_subtree, ActiveSubtree::First);
 
         // Active pane 1: in second child of outer H-split, not in inner V-split.
         let borders = tree.split_borders(rect, PaneId(1)).unwrap();
@@ -2590,12 +2609,12 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(false));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::Second);
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, None);
+        assert_eq!(v_border.active_subtree, ActiveSubtree::Neither);
 
         // Active pane 2: in first child of outer H-split, second child of inner V-split.
         let borders = tree.split_borders(rect, PaneId(2)).unwrap();
@@ -2603,12 +2622,68 @@ mod tests {
             .iter()
             .find(|b| b.direction == SplitDirection::Horizontal)
             .unwrap();
-        assert_eq!(h_border.active_in_first, Some(true));
+        assert_eq!(h_border.active_subtree, ActiveSubtree::First);
         let v_border = borders
             .iter()
             .find(|b| b.direction == SplitDirection::Vertical)
             .unwrap();
-        assert_eq!(v_border.active_in_first, Some(false));
+        assert_eq!(v_border.active_subtree, ActiveSubtree::Second);
+    }
+
+    #[test]
+    fn split_borders_active_subtree_pins_first_second_and_neither() {
+        // Pins `ActiveSubtree`'s three-way classification (Task 122.3a) in
+        // one place, isolated from the geometry/direction assertions that
+        // `split_borders_nested_tree_returns_all_borders` already covers.
+        //
+        //       root (H split: A | B)
+        //      /                    \
+        //   A (V split: A1 / A2)     B
+        //
+        // For the inner V-split (dividing A into A1/A2):
+        //   - A1 active  -> First  (active pane in the split's first subtree)
+        //   - A2 active  -> Second (active pane in the split's second subtree)
+        //   - B active   -> Neither, because B is a *sibling* of A, not
+        //     because the pane is missing (the nonexistent-pane case for
+        //     `Neither` is already covered by
+        //     `split_borders_single_horizontal_split`).
+        let mut tree = PaneTree::new(dummy_pane(PaneId(0), "root"));
+        let mut id_gen = PaneIdGenerator::new(1);
+
+        // Split root into A (PaneId(0)) | B (PaneId(1)).
+        tree.split(
+            PaneId(0),
+            SplitDirection::Horizontal,
+            &mut id_gen,
+            make_dummy,
+        )
+        .unwrap();
+        // Split A into A1 (PaneId(0)) / A2 (PaneId(2)).
+        tree.split(PaneId(0), SplitDirection::Vertical, &mut id_gen, make_dummy)
+            .unwrap();
+
+        let rect = Rect::from_min_max(point(0.0, 0.0), point(800.0, 600.0));
+
+        let inner_v_border = |active: PaneId| {
+            tree.split_borders(rect, active)
+                .unwrap()
+                .into_iter()
+                .find(|b| b.direction == SplitDirection::Vertical)
+                .unwrap()
+        };
+
+        assert_eq!(
+            inner_v_border(PaneId(0)).active_subtree,
+            ActiveSubtree::First
+        );
+        assert_eq!(
+            inner_v_border(PaneId(2)).active_subtree,
+            ActiveSubtree::Second
+        );
+        assert_eq!(
+            inner_v_border(PaneId(1)).active_subtree,
+            ActiveSubtree::Neither
+        );
     }
 
     // ── active_highlight_segment (Task 109) ──────────────────────────
@@ -2631,9 +2706,9 @@ mod tests {
         SplitBorder {
             direction: SplitDirection::Vertical,
             first_child_pane: PaneId(1),
-            rect: Rect::from_min_max(egui::pos2(0.0, 299.5), egui::pos2(800.0, 300.5)),
+            rect: Rect::from_min_max(point(0.0, 299.5), point(800.0, 300.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         }
     }
 
@@ -2641,18 +2716,15 @@ mod tests {
         SplitBorder {
             direction: SplitDirection::Horizontal,
             first_child_pane: PaneId(2),
-            rect: Rect::from_min_max(egui::pos2(399.5, 300.0), egui::pos2(400.5, 600.0)),
+            rect: Rect::from_min_max(point(399.5, 300.0), point(400.5, 600.0)),
             parent_extent: 800.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         }
     }
 
-    const PANE1: fn() -> Rect =
-        || Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 300.0));
-    const PANE2: fn() -> Rect =
-        || Rect::from_min_max(egui::pos2(0.0, 300.0), egui::pos2(400.0, 600.0));
-    const PANE3: fn() -> Rect =
-        || Rect::from_min_max(egui::pos2(400.0, 300.0), egui::pos2(800.0, 600.0));
+    const PANE1: fn() -> Rect = || Rect::from_min_max(point(0.0, 0.0), point(800.0, 300.0));
+    const PANE2: fn() -> Rect = || Rect::from_min_max(point(0.0, 300.0), point(400.0, 600.0));
+    const PANE3: fn() -> Rect = || Rect::from_min_max(point(400.0, 300.0), point(800.0, 600.0));
 
     #[test]
     fn highlight_pane1_full_horizontal_divider() {
@@ -2697,7 +2769,7 @@ mod tests {
 
     #[test]
     fn highlight_returns_none_when_divider_does_not_touch_pane() {
-        let detached = Rect::from_min_max(egui::pos2(10.0, 10.0), egui::pos2(100.0, 100.0));
+        let detached = Rect::from_min_max(point(10.0, 10.0), point(100.0, 100.0));
         assert!(active_highlight_segment(&h_divider(), detached, 1.0).is_none());
         assert!(active_highlight_segment(&v_divider(), detached, 1.0).is_none());
     }
@@ -2719,20 +2791,20 @@ mod tests {
         let upper = SplitBorder {
             direction: SplitDirection::Vertical,
             first_child_pane: PaneId(0),
-            rect: Rect::from_min_max(egui::pos2(0.0, 199.5), egui::pos2(800.0, 200.5)),
+            rect: Rect::from_min_max(point(0.0, 199.5), point(800.0, 200.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         };
         let lower = SplitBorder {
             direction: SplitDirection::Vertical,
             first_child_pane: PaneId(1),
-            rect: Rect::from_min_max(egui::pos2(0.0, 399.5), egui::pos2(800.0, 400.5)),
+            rect: Rect::from_min_max(point(0.0, 399.5), point(800.0, 400.5)),
             parent_extent: 600.0,
-            active_in_first: None,
+            active_subtree: ActiveSubtree::Neither,
         };
-        let top = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 200.0));
-        let middle = Rect::from_min_max(egui::pos2(0.0, 200.0), egui::pos2(800.0, 400.0));
-        let bottom = Rect::from_min_max(egui::pos2(0.0, 400.0), egui::pos2(800.0, 600.0));
+        let top = Rect::from_min_max(point(0.0, 0.0), point(800.0, 200.0));
+        let middle = Rect::from_min_max(point(0.0, 200.0), point(800.0, 400.0));
+        let bottom = Rect::from_min_max(point(0.0, 400.0), point(800.0, 600.0));
         (upper, lower, top, middle, bottom)
     }
 
