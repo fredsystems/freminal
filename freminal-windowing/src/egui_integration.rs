@@ -583,6 +583,46 @@ struct ChromeGatePredicates {
     no_chrome_input: bool,
 }
 
+/// Is the #436 chrome cache (`ChromeMode::Replay`) enabled at all?
+///
+/// **Default: DISABLED.** Set `FREMINAL_CHROME_CACHE=1` to re-enable.
+///
+/// The cache is a painting optimisation that skips constructing the chrome
+/// widgets and replays a cached texture instead. That is only sound if egui
+/// never needs the chrome widgets on a `Replay` frame — and it does, because
+/// egui resolves *interaction*, not just painting, against the widget set:
+///
+/// | Site                  | Code                                            |
+/// | --------------------- | ----------------------------------------------- |
+/// | `context.rs:475`      | `hit_test(&viewport.prev_pass.widgets, …)`      |
+/// | `context.rs:488`      | `interact(…, &viewport.prev_pass.widgets, …)`   |
+/// | `interaction.rs:109`  | clears `potential_click_id` if absent from it   |
+///
+/// Note `prev_pass` — the PREVIOUS frame's set. So a press on frame N can
+/// only hit a widget built on frame N-1, and a single `Replay` frame
+/// anywhere in a gesture discards the in-flight click or drag. In
+/// 0.12.0-beta.7 this made tab clicks mostly fail and pane-border drags
+/// unusable, worst while a TUI ran in a pane (a TUI supplies a stream of
+/// PTY-driven frames, every one eligible for `Replay`, during the moment the
+/// pointer is at rest before a click).
+///
+/// It is off by default because that unsoundness is structural, not a tuning
+/// error: no amount of adjusting *when* `Replay` is chosen fixes the fact
+/// that `Replay` frames do not register widgets. Any re-enabling must first
+/// make `Replay` construct the chrome widgets (and only skip their
+/// tessellation/paint), or otherwise guarantee `Full` on every frame the user
+/// could interact on **and the frame before it**. See 121.32 / 121.33 in
+/// `Documents/PLAN_121_PERF_REMEDIATION.md`.
+///
+/// The env var exists so the two states can be A/B'd in one binary, using the
+/// `frame-profiling` counters, without a rebuild between samples.
+fn chrome_cache_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FREMINAL_CHROME_CACHE").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
 impl ChromeGatePredicates {
     /// A REPLAY is permitted only when every predicate holds.
     const fn all_pass(&self) -> bool {
@@ -828,7 +868,11 @@ impl EguiState {
             self.prev_chrome_damage,
             chrome_input_this_frame,
         );
-        let chrome_mode = gate.chrome_mode();
+        let chrome_mode = if chrome_cache_enabled() {
+            gate.chrome_mode()
+        } else {
+            crate::ChromeMode::Full
+        };
 
         // Task 121 frame-profiling harness: count which `ChromeMode` was
         // just decided. Cross-checkable against `freminal`'s own
