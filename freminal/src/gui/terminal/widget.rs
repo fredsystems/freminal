@@ -44,7 +44,7 @@ use super::{
         },
     },
     coords::{encode_egui_mouse_pos_as_usize, flat_index_for_cell, running_block_extent},
-    input::write_input_to_terminal,
+    input::{InputCarryState, PaneFocus, WriteInputParams, write_input_to_terminal},
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
@@ -2680,41 +2680,41 @@ impl FreminalTerminalWidget {
         } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
-            let (
-                left_mouse_button_pressed_inner,
-                new_mouse_pos,
-                previous_key,
-                scroll_amount,
-                clipboard_pending,
-                actions,
-                super_state,
-            ) = ui.input(|input_state| {
-                write_input_to_terminal(
-                    input_state,
+            let pane_focus = if is_active_pane {
+                PaneFocus::Active
+            } else {
+                PaneFocus::Inactive
+            };
+            let result = ui.input(|input_state| {
+                write_input_to_terminal(WriteInputParams {
+                    input: input_state,
                     snap,
                     input_tx,
                     view_state,
-                    logical_cell_w,
-                    logical_cell_h,
+                    character_size_x: logical_cell_w,
+                    character_size_y: logical_cell_h,
                     terminal_rect,
-                    cache.previous_mouse_state.clone(),
                     repeat_characters,
-                    cache.previous_key,
-                    cache.previous_scroll_amount,
                     binding_map,
-                    is_active_pane,
+                    pane_focus,
                     recording_ctx,
-                    &cache.placeholder_hit_rects,
+                    placeholder_rects: &cache.placeholder_hit_rects,
                     key_broadcast_targets,
-                    cache.super_state,
-                )
+                    carry: InputCarryState {
+                        last_reported_mouse_pos: cache.previous_mouse_state.clone(),
+                        previous_key: cache.previous_key,
+                        scroll_amount: cache.previous_scroll_amount,
+                        super_state: cache.super_state,
+                    },
+                })
             });
-            left_mouse_button_pressed |= left_mouse_button_pressed_inner;
-            cache.previous_mouse_state = new_mouse_pos;
-            cache.previous_key = previous_key;
-            cache.previous_scroll_amount = scroll_amount;
-            cache.super_state = super_state;
-            deferred_actions = actions;
+            left_mouse_button_pressed |= result.left_mouse_button_pressed;
+            cache.previous_mouse_state = result.carry.last_reported_mouse_pos;
+            cache.previous_key = result.carry.previous_key;
+            cache.previous_scroll_amount = result.carry.scroll_amount;
+            cache.super_state = result.carry.super_state;
+            let clipboard_pending = result.clipboard_pending;
+            deferred_actions = result.deferred_actions;
 
             // Perform the clipboard copy OUTSIDE the ui.input() closure.
             // copy_text() calls ctx.output_mut() which needs a write lock on

@@ -1246,18 +1246,114 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
-/// Return type of [`write_input_to_terminal`] — see its "Return value" doc
-/// section for the meaning of each element. Factored into a named alias
-/// (rather than an inline tuple) to satisfy `clippy::type_complexity`.
-type WriteInputResult = (
-    bool,
-    Option<PreviousMouseState>,
-    Option<Key>,
-    f32,
-    bool,
-    Vec<KeyAction>,
-    SuperKeyState,
-);
+/// Whether the pane [`write_input_to_terminal`] is processing input for is
+/// the currently-focused (active) pane.
+///
+/// Per `freminal-state-representation` (which names this exact enum as its
+/// own worked example): bool *parameters* are converted to a named domain
+/// enum with no exceptions. `FreminalTerminalWidget::show`'s own
+/// `is_active_pane: bool` parameter is a separate, wider public widget-API
+/// boundary and is out of scope here — it stays a bool; this enum is
+/// constructed from it at the single `write_input_to_terminal` call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneFocus {
+    /// This pane currently has keyboard/mouse focus; all input routes to it.
+    Active,
+    /// This pane is not focused; only a primary left-click press is detected
+    /// (for click-to-focus), all other input is suppressed.
+    Inactive,
+}
+
+/// Per-frame input-handling state that [`write_input_to_terminal`] both
+/// consumes (via [`WriteInputParams::carry`]) and produces (via
+/// [`WriteInputResult::carry`]).
+///
+/// **Invariant:** every field here round-trips. The caller reads each field
+/// off `PaneRenderCache` before the call and writes the (possibly updated)
+/// value in the result back onto the *same* `PaneRenderCache` field
+/// afterwards, ready for the next frame:
+///
+/// | Field                   | `PaneRenderCache` field           |
+/// |--------------------------|-----------------------------------|
+/// | `last_reported_mouse_pos` | `previous_mouse_state`           |
+/// | `previous_key`            | `previous_key`                   |
+/// | `scroll_amount`           | `previous_scroll_amount`          |
+/// | `super_state`             | `super_state`                    |
+///
+/// Grouping them into one struct — appearing in both the params and result
+/// types under the same name — states that invariant in the type rather
+/// than leaving a future reader to infer it by matching up parameter and
+/// return-tuple positions.
+#[derive(Debug, Clone)]
+pub(super) struct InputCarryState {
+    /// Mouse-tracking state carried from the previous frame; updated with
+    /// this frame's finishing state before being returned.
+    pub(super) last_reported_mouse_pos: Option<PreviousMouseState>,
+    /// Last key processed, used for key-repeat deduplication of
+    /// `Event::Text`.
+    pub(super) previous_key: Option<Key>,
+    /// Accumulated fractional scroll pixels not yet converted to full line
+    /// units.
+    pub(super) scroll_amount: f32,
+    /// Physical Super/Command hold-state, tracked per side across frames
+    /// (Task 101.2 — see [`SuperKeyState`]).
+    pub(super) super_state: SuperKeyState,
+}
+
+/// Parameters for [`write_input_to_terminal`].
+///
+/// `'a` bounds every borrow taken for the duration of the call, including
+/// the reference to `recording_ctx` itself. `'rec` is `RecordingContext`'s
+/// own internal lifetime (the lifetime of the [`RecordingHandle`] it
+/// borrows) — kept distinct from `'a` because collapsing them would force
+/// the recording session to live exactly as long as this one call, which
+/// over-constrains the type for no reason.
+///
+/// `view_state: &'a mut ViewState` makes this struct invariant over `'a`.
+/// That is fine: the struct is constructed and consumed within a single
+/// `write_input_to_terminal` call and never stored.
+///
+/// [`RecordingHandle`]: freminal_terminal_emulator::recording::RecordingHandle
+pub(super) struct WriteInputParams<'a, 'rec> {
+    pub(super) input: &'a InputState,
+    pub(super) snap: &'a TerminalSnapshot,
+    pub(super) input_tx: &'a Sender<InputEvent>,
+    pub(super) view_state: &'a mut ViewState,
+    pub(super) character_size_x: f32,
+    pub(super) character_size_y: f32,
+    pub(super) terminal_rect: Rect,
+    pub(super) repeat_characters: Decarm,
+    pub(super) binding_map: &'a BindingMap,
+    pub(super) pane_focus: PaneFocus,
+    pub(super) recording_ctx: Option<&'a RecordingContext<'rec>>,
+    pub(super) placeholder_rects: &'a [(Rect, CommandBlockId)],
+    pub(super) key_broadcast_targets: &'a [Sender<InputEvent>],
+    pub(super) carry: InputCarryState,
+}
+
+/// Result of [`write_input_to_terminal`] — see its "Return value" doc
+/// section for the meaning of each field.
+///
+/// `carry` mirrors [`WriteInputParams::carry`]: the same [`InputCarryState`]
+/// fields, updated by this call, that the caller folds back onto the
+/// matching `PaneRenderCache` fields for the next frame.
+///
+/// `left_mouse_button_pressed` and `clipboard_pending` stay bare `bool`s
+/// rather than becoming an enum — by maintainer decision. They are
+/// independent, simultaneously-observable per-frame flags that the caller
+/// composes with other frame-local state it already holds
+/// (`left_mouse_button_pressed |= inner`, `clipboard_pending || *pending_copy`),
+/// not two states of one concept — the "independent simultaneous signals"
+/// exemption in `freminal-state-representation`. Naming them as struct
+/// fields (rather than tuple positions) already removes the
+/// positional-transport hazard that skill exists to prevent; do not "fix"
+/// these into an enum.
+pub(super) struct WriteInputResult {
+    pub(super) carry: InputCarryState,
+    pub(super) left_mouse_button_pressed: bool,
+    pub(super) clipboard_pending: bool,
+    pub(super) deferred_actions: Vec<KeyAction>,
+}
 
 /// Finalizes an in-progress text-selection drag on primary-button release.
 ///
@@ -1316,11 +1412,7 @@ fn finalize_selection_drag(
     }
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    clippy::too_many_arguments
-)]
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 /// Translate egui input events into terminal input and send them to the PTY.
 ///
 /// ## Input routing
@@ -1354,17 +1446,18 @@ fn finalize_selection_drag(
 ///
 /// ## Return value
 ///
-/// Returns `(left_mouse_pressed, last_reported_mouse_pos, previous_key, scroll_amount, clipboard_pending, deferred_actions, super_pressed)`:
-/// - `left_mouse_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
-/// - `last_reported_mouse_pos` — updated mouse tracking state for the next call.
-/// - `previous_key` — last pressed key (used for key-repeat deduplication).
-/// - `scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
+/// Returns a [`WriteInputResult`]:
+/// - `carry.last_reported_mouse_pos` — updated mouse tracking state for the next call.
+/// - `carry.previous_key` — last pressed key (used for key-repeat deduplication).
+/// - `carry.scroll_amount` — accumulated fractional scroll pixels not yet converted to full line units.
+/// - `carry.super_state` — updated physical Super/Command hold-state for the next call.
+/// - `left_mouse_button_pressed` — true if a primary left-click was pressed inside this pane's rect this frame (used for click-to-focus by the caller).
 /// - `clipboard_pending` — true if a selection-copy was queued; the caller reads the clipboard channel.
-/// - `super_pressed` — updated physical Super/Command hold-state (see `super_pressed` parameter) for the next call.
+/// - `deferred_actions` — [`KeyAction`]s dispatched by the binding map this frame that the caller must still apply (e.g. actions that need state outside this function's scope).
 ///
 /// ## Active-pane gating
 ///
-/// When `is_active_pane` is `false`, only primary left-click presses are detected (to support
+/// When `pane_focus` is [`PaneFocus::Inactive`], only primary left-click presses are detected (to support
 /// click-to-focus in the caller). All keyboard, text, paste, copy, scroll, and mouse-tracking
 /// events are suppressed — they are never forwarded to the inactive pane's PTY.
 ///
@@ -1376,35 +1469,42 @@ fn finalize_selection_drag(
 /// sequences, and paste payloads) is mirrored to every target. Mouse,
 /// scroll-derived, resize, focus, and selection events are never mirrored.
 /// The slice is empty when broadcast is off or this is not the active pane.
-pub(super) fn write_input_to_terminal(
-    input: &InputState,
-    snap: &TerminalSnapshot,
-    input_tx: &Sender<InputEvent>,
-    view_state: &mut ViewState,
-    character_size_x: f32,
-    character_size_y: f32,
-    terminal_rect: Rect,
-    last_reported_mouse_pos: Option<PreviousMouseState>,
-    repeat_characters: Decarm,
-    previous_key: Option<Key>,
-    scroll_amount: f32,
-    binding_map: &BindingMap,
-    is_active_pane: bool,
-    recording_ctx: Option<&RecordingContext<'_>>,
-    placeholder_rects: &[(Rect, CommandBlockId)],
-    key_broadcast_targets: &[Sender<InputEvent>],
-    super_state: SuperKeyState,
-) -> WriteInputResult {
+pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> WriteInputResult {
+    let WriteInputParams {
+        input,
+        snap,
+        input_tx,
+        view_state,
+        character_size_x,
+        character_size_y,
+        terminal_rect,
+        repeat_characters,
+        binding_map,
+        pane_focus,
+        recording_ctx,
+        placeholder_rects,
+        key_broadcast_targets,
+        carry:
+            InputCarryState {
+                last_reported_mouse_pos,
+                previous_key,
+                scroll_amount,
+                super_state,
+            },
+    } = params;
+
     if input.raw.events.is_empty() {
-        return (
-            false,
-            last_reported_mouse_pos,
-            previous_key,
-            scroll_amount,
-            false,
-            Vec::new(),
-            super_state,
-        );
+        return WriteInputResult {
+            carry: InputCarryState {
+                last_reported_mouse_pos,
+                previous_key,
+                scroll_amount,
+                super_state,
+            },
+            left_mouse_button_pressed: false,
+            clipboard_pending: false,
+            deferred_actions: Vec::new(),
+        };
     }
 
     let mut previous_key = previous_key;
@@ -1451,7 +1551,7 @@ pub(super) fn write_input_to_terminal(
         // Non-active panes: only detect primary left-click press so the caller
         // can implement click-to-focus.  All other events (keyboard, scroll,
         // paste, mouse tracking) are suppressed — they belong to the active pane.
-        if !is_active_pane {
+        if matches!(pane_focus, PaneFocus::Inactive) {
             if let Event::PointerButton {
                 button: PointerButton::Primary,
                 pressed: true,
@@ -2592,15 +2692,17 @@ pub(super) fn write_input_to_terminal(
         debug!("Inputs detected, forwarding to PTY consumer thread");
     }
 
-    (
+    WriteInputResult {
+        carry: InputCarryState {
+            last_reported_mouse_pos,
+            previous_key,
+            scroll_amount,
+            super_state,
+        },
         left_mouse_button_pressed,
-        last_reported_mouse_pos,
-        previous_key,
-        scroll_amount,
         clipboard_pending,
         deferred_actions,
-        super_state,
-    )
+    }
 }
 
 #[cfg(test)]
