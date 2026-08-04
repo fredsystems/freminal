@@ -118,7 +118,7 @@ jobs:
         # -> `as_chunks_mut`, which does not exist on stable/MSRV). Gating CI on
         # nightly clippy would make the build fail on lint drift we cannot act
         # on without breaking the MSRV.
-        toolchain: ["stable", "1.95.0"]
+        toolchain: ["stable", "1.96.0"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

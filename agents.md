@@ -12,7 +12,7 @@ gives you the map; the skills give you the moves.
 ## Project Overview
 
 Freminal is a modern terminal emulator written in Rust (Edition 2024,
-MSRV 1.95.0). It targets deep ANSI/DEC/xterm escape-sequence
+MSRV 1.96.0). It targets deep ANSI/DEC/xterm escape-sequence
 compatibility, sub-millisecond frame times, and pixel-perfect
 rendering via egui/glow.
 

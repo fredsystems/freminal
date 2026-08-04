@@ -1524,13 +1524,7 @@ where
 // ── Layout helpers ───────────────────────────────────────────────────
 
 /// Split a rectangle along the given direction at the given ratio.
-// NOT `const`, despite clippy's `missing_const_for_fn` being satisfiable on
-// newer toolchains: `f32::mul_add` (used below) is not const-stable on this
-// workspace's MSRV of 1.95.0, so marking this `const fn` compiles on the dev
-// toolchain and breaks the MSRV build. `split_rect` is only ever called at
-// runtime, so `const` buys nothing here. (PR #472 review.)
-#[allow(clippy::missing_const_for_fn)]
-fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
+const fn split_rect(rect: Rect, direction: SplitDirection, ratio: f32) -> (Rect, Rect) {
     match direction {
         SplitDirection::Horizontal => {
             let split_x = rect.width().mul_add(ratio, rect.min.x).round();
