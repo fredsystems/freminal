@@ -6,7 +6,7 @@ default-members = ["freminal", "freminal-buffer", "freminal-common", "freminal-t
 [workspace.package]
 version = "0.12.0-beta.7"
 edition = "2024"
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 description = "A terminal emulator written in Rust"
 documentation = "https://github.com/fredsystems/freminal/README.md"
 readme = "README.md"
