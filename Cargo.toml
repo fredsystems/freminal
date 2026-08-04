@@ -43,7 +43,7 @@ egui_glow = { version = "=0.35.0", default-features = false }
 egui-winit = "=0.35.0"
 filedescriptor = "0.8.3"
 flate2 = "1.1.9"
-fontdb = "0.23.0"
+fontdb = "0.24.0"
 futures = "0.3.32"
 glow = "0.17.0"
 glutin = "0.32.3"
