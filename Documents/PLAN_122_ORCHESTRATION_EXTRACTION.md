@@ -1,10 +1,10 @@
 # PLAN_122_ORCHESTRATION_EXTRACTION.md — Task 122 "Orchestration Extraction"
 
-> **STATUS: EXECUTED, AWAITING MERGE (2026-08-02).** All 19 subtasks are
-> complete on `task-122/orchestration-extraction` and the branch is green.
-> This document remains the authoritative plan content for Task 122 and
-> **supersedes `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1**, which has been
-> annotated accordingly.
+> **STATUS: COMPLETE. Merged to `main` on 2026-08-03 via PR #472 (merge commit
+> `e533ed00`).** All 19 subtasks are complete and merged. This document remains
+> the authoritative plan content for Task 122 and **supersedes
+> `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1**, which has been annotated
+> accordingly.
 >
 > Read the **Execution state** section immediately below before anything else:
 > it records what was done, three subtasks added beyond the signed-off plan,
@@ -16,11 +16,11 @@ version summary and `Documents/MASTER_PLAN.md` for roadmap position.
 
 ---
 
-## Execution state — updated 2026-08-02
+## Execution state — updated 2026-08-03
 
 **Branch: `task-122/orchestration-extraction`.** All subtasks and all three
-cleanup entries are complete and committed; the branch is green. **Awaiting PR /
-merge** (PR #472).
+cleanup entries are complete and committed. **Merged to `main` on 2026-08-03
+via PR #472** (merge commit `e533ed00`).
 
 ### Done — 19 subtasks plus 3 cleanup entries
 

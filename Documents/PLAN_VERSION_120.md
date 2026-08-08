@@ -33,8 +33,8 @@ hot, so it ships together):
 
 **Theme 3 — structural cleanup:**
 
-- **Task 122 — Orchestration Extraction** (planned, activated 2026-07-30): decompose the
-  GUI binary's god functions and give orchestration logic (event triage, view window, input
+- **Task 122 — Orchestration Extraction** (complete, merged 2026-08-03 via PR #472): decompose
+  the GUI binary's god functions and give orchestration logic (event triage, view window, input
   encoding, frame decisions) a home. A no-behaviour-change refactor. Required whichever way
   the egui decision falls. Broken down in
   `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md`; summarised in the Task 122 section below.
@@ -63,7 +63,7 @@ before executing.
 | 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
 | 121 | Performance Remediation           | Large     | In progress | None           |
-| 122 | Orchestration Extraction          | Large     | Pending merge | None         |
+| 122 | Orchestration Extraction          | Large     | Complete    | None           |
 
 ---
 
@@ -834,19 +834,24 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 
 ### 121 Subtask summary
 
-| Group                                 | Subtasks      | Status      | Covers                                                                    |
-| ------------------------------------- | ------------- | ----------- | ------------------------------------------------------------------------- |
-| A — Completed work                    | 121.1–121.11  | Complete      | PRs #458, #460, #461, #464, #465                                        |
-| B — Bugs found and fixed              | 121.12–121.14 | Complete      | blink-off fallback, chrome cache off during motion, animation signal    |
-| B — Bug blocked behind Task 122       | 121.15        | Not started   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17            |
-| B — Withdrawn                         | 121.16        | Withdrawn     | config kill switch — rejected; revert-and-fix is the remedy             |
-| C — Unifying improvement              | 121.17        | Not started   | cell-granular pointer suppression (depends on Task 122)                 |
-| D — Unactioned issue #459 items       | 121.18–121.22, 121.24 | Not started | items 3–7 plus per-`CursorMoved` allocations                    |
-| D — Profiling methodology             | 121.23        | Complete      | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file |
-| E — Measurement debt                  | 121.27–121.28 | Not started   | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                   |
-| E — Measurement debt (partly done)    | 121.25        | In progress   | clean Finding 3 re-run done; typing and btop outstanding                |
-| E — Blink-off comparison              | 121.26        | Complete      | blink-off ≈ blink-on ≈ 0.0–0.1% at idle; resolution-limited             |
-| F — Surfaced by the Group B work      | 121.29–121.31 | Not started   | `repaint_causes()`; chrome not built on `Replay`; full present on motion |
+| Group                                 | Subtasks              | Status      | Covers                                                                                           |
+| ------------------------------------- | --------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
+| A — Completed work                    | 121.1–121.11          | Complete    | PRs #458, #460, #461, #464, #465                                                                 |
+| B — Bugs found and fixed              | 121.12–121.14         | Complete    | blink-off fallback, chrome cache off during motion, animation signal                             |
+| B — Bug blocked behind Task 122       | 121.15                | Unblocked   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17                                    |
+| B — Withdrawn                         | 121.16                | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy                                      |
+| C — Unifying improvement              | 121.17                | Not started | cell-granular pointer suppression; Task 122 seam landed, chrome-cache numbers stale (re-measure) |
+| D — Unactioned issue #459 items       | 121.18–121.22, 121.24 | Not started | items 3–7 plus per-`CursorMoved` allocations                                                     |
+| D — Profiling methodology             | 121.23                | Complete    | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file                         |
+| E — Measurement debt                  | 121.27–121.28         | Not started | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                                            |
+| E — Measurement debt (partly done)    | 121.25                | In progress | clean Finding 3 re-run done; typing and btop outstanding                                         |
+| E — Blink-off comparison              | 121.26                | Complete    | blink-off ≈ blink-on ≈ 0.0–0.1% at idle; resolution-limited                                      |
+| F — Surfaced by the Group B work      | 121.29–121.31         | Not started | `repaint_causes()`; chrome not built on `Replay`; full present on motion                         |
+| G — beta.7 interaction regression     | 121.32                | Complete    | chrome cache disabled by default; tab-click / border-drag regression fixed                       |
+| G — Surfaced by 121.32                | 121.33                | Not started | `Full`/`Replay` `Ui` id divergence churns pane-border drag state                                 |
+| G — Chrome-cache decision gate        | 121.34                | Not started | measure always-`Full` cost; decides keep/delete/confine (121.32)                                 |
+| G — Chrome-cache waste while disabled | 121.35                | Deferred    | stop populating cache while disabled; Task 122 takes priority                                    |
+| G — Confine Replay to non-chrome      | 121.36                | Conditional | confine `Replay` to pointer-not-over-chrome frames; conditional on 121.34, blocked on 121.33     |
 
 ### 121 Headline result
 
@@ -884,10 +889,11 @@ those numbers and do not contradict them.
 
 ## Task 122 — Orchestration Extraction
 
-> **STATUS: PLANNED (activated 2026-07-30), awaiting sign-off.** The full per-subtask
-> breakdown is `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (17 subtasks in five
-> groups). That document **supersedes** `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1,
-> whose subtasks 1.1–1.6 and line counts are stale. This section is a summary only.
+> **STATUS: COMPLETE.** Merged to `main` on 2026-08-03 via PR #472 (merge commit
+> `e533ed00`). The full per-subtask breakdown is
+> `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` (17 subtasks in five groups). That
+> document **supersedes** `Documents/DECOUPLING_FRAMEWORK.md` §8 Phase 1, whose subtasks
+> 1.1–1.6 and line counts are stale. This section is a summary only.
 
 ### 122 Summary
 
@@ -924,17 +930,19 @@ priced accurately.
 
 ### 122 Sequencing within the version
 
-Independent of Tasks 118–120 entirely (different crates). Against Task 121 it is a blocker
-for exactly one subtask:
+Independent of Tasks 118–120 entirely (different crates). Against Task 121 it was a blocker
+for exactly one subtask, now discharged:
 
-- **121.17 (cell-granular suppression) depends on Task 122.** It needs per-pane render-time
-  geometry captured during `update()` and read from the event layer, which is the seam this
-  task builds. Adding a fifth round to the suppression predicate in its current shape is how
-  the maintainability argument for the rewrite gets stronger for no good reason.
-- **Everything else in Task 121 is independent.** Groups D and E live in `shaping.rs`,
+- **121.17 (cell-granular suppression) depended on Task 122** for per-pane render-time
+  geometry captured during `update()` and read from the event layer — the seam this task
+  built. Adding a fifth round to the suppression predicate in its current shape would have
+  made the maintainability argument for the rewrite stronger for no good reason. Task 122
+  merged (PR #472, 2026-08-03) and subtask 122.15 publishes that seam, so 121.17 is now
+  **unblocked** — see its entry in `PLAN_121_PERF_REMEDIATION.md` for the re-check-your-
+  assumptions caveat left by the chrome-cache changes.
+- **Everything else in Task 121 was independent.** Groups D and E live in `shaping.rs`,
   `vertex.rs`, `atlas.rs`, the GL layer and `freminal-windowing`, none of which Task 122
-  touches; 121.12–121.15 sit in already-extracted predicates. Do not gate the live bug fixes
-  behind this refactor.
+  touched; 121.12–121.15 sit in already-extracted predicates.
 
 ### 122 Activation outcome (2026-07-30)
 
