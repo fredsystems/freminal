@@ -86,7 +86,7 @@ This is the actual rule, and it cuts both ways:
   or crate mid-subtask is its own scope violation.
 
 Report the choice and let the orchestrator decide. Per
-`freminal-orchestrator-protocol`, a sub-agent that hits one of the
+`agent-orchestration-protocol`, a sub-agent that hits one of the
 triggers above **stops and reports**; the orchestrator resolves it by
 re-scoping or sequencing, not by widening the sub-agent's scope. If
 you are the orchestrator, this is your decision to make and to write
@@ -118,4 +118,4 @@ into the plan document as a numbered subtask.
   you were given. Stop and say so, rather than doing a partial version
   that leaves two homes for one concept. A numbered cleanup entry in
   the host task's plan document is the correct output here (see
-  `freminal-orchestrator-protocol`).
+  `agent-orchestration-protocol`).

@@ -102,6 +102,13 @@ These are the seams the subtasks target. Verify at activation.
 
 ## Execution model — branches & parallelism
 
+The rules governing this section live in **`parallel-work-isolation`**:
+foundation-first for shared types, one active editor per shared-file region,
+worktrees with their own build directory for genuinely concurrent agents,
+fork-from-and-merge-back-to an integration branch, and sequential merge-back
+with full verification after each merge. Read that skill for the reasoning;
+this section records only the v0.11.0-specific facts.
+
 Tasks 99, 100, and 101 are **largely independent in their primary code** (OSC
 dispatch/notifications vs. graphics handler/store/renderer vs. keyboard input),
 so they can run as three isolated workstreams. They are **not** independent in
@@ -143,21 +150,17 @@ main
 ### Execution order (audits parallel → foundation → staggered implementation)
 
 1. **Audits in parallel.** The READ-ONLY audit subtasks (100.1, 101.1, and a 99
-   design/seam pass) write no code and cannot collide — run them concurrently.
-2. **Foundation first (110.0), on `v0.11.0-kitty` directly.** Land the shared
-   `freminal-common` type _shells_ (and the `KeyModifiers` fields) once, before the feature
-   branches fork, so no two branches race the same `freminal-common` edit. See
-   110.0 below.
+   design/seam pass) write no code, so they are safe to run concurrently on one
+   checkout.
+2. **Foundation first: 110.0, on `v0.11.0-kitty` directly.** The shared
+   `freminal-common` type _shells_ and the `KeyModifiers` fields land once,
+   before the feature branches fork. See 110.0 below.
 3. **Staggered implementation.** Feature branches fork from the
-   foundation-carrying `v0.11.0-kitty`. Keep **at most one actively-editing agent
-   per shared-file region at a time** (`terminal_handler/mod.rs`, `config.rs`);
-   rebase each branch after every merge. Branches isolate the files (no
-   corruption); staggering minimizes the merge-conflict + review-serialization
-   tax, which is inherent to shared-file edits and not removed by branching.
+   foundation-carrying `v0.11.0-kitty`. The shared-file regions requiring one
+   active editor at a time are **`terminal_handler/mod.rs`** and
+   **`config.rs`**; rebase each branch after every merge.
 
-Each subtask still stops at its review gate per `freminal-orchestrator-protocol`;
-"parallel" means parallel _branches/workstreams_, not three agents editing the
-same file at the same instant.
+Each subtask stops at its review gate per `agent-orchestration-protocol`.
 
 ### 110.0 — Shared foundation (land first, on `v0.11.0-kitty`)
 
@@ -2220,7 +2223,7 @@ delivery, 114.5–114.8) are largely independent but both touch
 `freminal/src/gui/terminal/input.rs` (the `egui_mods_to_key_modifiers` /
 `write_input_to_terminal` region) and `freminal-windowing`, so they are **staggered,
 not parallel-on-the-same-file** (one active editor per shared region at a time), per
-`freminal-orchestrator-protocol`. Each subtask stops at its review gate; each leaves
+`agent-orchestration-protocol`. Each subtask stops at its review gate; each leaves
 `cargo test --all` green.
 
 #### 114.1 — Linux lock-state query (evdev) in `freminal-windowing`

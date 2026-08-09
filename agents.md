@@ -2,10 +2,40 @@
 
 This document is the always-on orientation for AI coding agents working
 in the Freminal workspace. **Operational procedures are no longer
-inlined here** -- they live as opencode skills (sourced from fred's
-nixos config repo at `~/GitHub/nixos/.opencode/skills/`, wired in via
-this repo's `opencode.json`) and are loaded on demand. This document
-gives you the map; the skills give you the moves.
+inlined here** -- they live as opencode skills (the shared ones are
+installed at `~/.config/opencode/skills/` from fred's nixos config
+repo; freminal-specific ones live in this repo's `.opencode/skills/`)
+and are loaded on demand. This document gives you the map; the skills
+give you the moves.
+
+---
+
+## Execution model
+
+This repo uses the shared orchestration model. `autonomy-boundaries`
+governs when to continue versus stop: the assigned scope is the
+boundary, not a step count, and irreversible operations still need
+explicit approval. `agent-orchestration-protocol` governs sub-agent
+scoping, `plan-decomposition` governs turning plans into subtasks,
+`plan-sequencing-discipline` governs the numbered plan set (ordering,
+cross-plan dependencies, status at merge), and
+`parallel-work-isolation` governs concurrent work.
+
+**"Do version X" means all of version X, front to back, and nothing
+else.** Do not stop between subtasks to ask permission for work that is
+already in the plan. Do stop the moment a hard trigger fires -- see
+`autonomy-boundaries` for the full list, and "When to Stop" below for
+the freminal-specific ones.
+
+Note what that declaration does. opencode discovers the shared skills
+globally and loads them by description match, so their presence is not
+opt-in. What this section opts into is **authority**: `agents.md` is
+always-on core context and therefore outranks an on-demand skill, so
+without this declaration this file would win any conflict.
+
+If you want the older one-step-at-a-time cadence for a particular
+session, say so in the prompt (`Step-by-step mode: ...`) and it takes
+precedence for that session.
 
 ---
 
@@ -83,7 +113,6 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | Skill                              | When it fires                                                                                                                                     |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `freminal-architecture`            | Architecture-affecting changes (GUI/PTY split, snapshot transport, crate boundaries).                                                             |
-| `freminal-orchestrator-protocol`   | About to spawn sub-agents. The action-class / scope / stop-condition discipline is mandatory.                                                     |
 | `freminal-bench-table`             | Touching render / PTY / buffer / parser / `build_snapshot`. Names which bench file covers what (procedure lives in `performance-benchmarks`).     |
 | `freminal-frec-decoder`            | Analyzing `.frec` / `.bin` recording files. Use `sequence_decoder.py`, not ad-hoc parsers.                                                        |
 | `freminal-escape-sequence-docs`    | Adding / removing / altering escape sequence support. Dual-doc update required.                                                                    |
@@ -95,6 +124,13 @@ The `freminal-numeric-conversions` skill expands the `as`-casts /
 | `freminal-modal-input-suppression` | Adding / debugging a GUI modal, dialog, or overlay with a text field. Register in `ui_overlay_open` + `lock_focus(true)` or it can't be typed in. |
 | `freminal-module-cohesion`         | About to add a type to an existing file whose name describes a different concept, add a second unrelated test module, or add to a file you had to scroll to the end of. One *concept* per module; path should name the concept; decline splits that widen visibility. |
 | `freminal-windows-crosscheck`      | Before any PR, esp. `#[cfg(windows)]` / `portable-pty` / path / thread changes. Run `cargo xtask check-windows` (clippy for windows-gnu) locally. |
+| `agent-orchestration-protocol`     | About to spawn sub-agents. Action classes, scope, prohibitions, stop conditions. Mandatory.                                                       |
+| `autonomy-boundaries`              | Executing a multi-step plan. Scope is the boundary, not a step count; irreversible operations need approval.                                      |
+| `plan-decomposition`               | Turning a version or epic into implementable subtasks.                                                                                            |
+| `plan-sequencing-discipline`       | Maintaining the numbered plan set: ordering, cross-plan deps, merge barrier, status at merge, index drift.                                        |
+| `parallel-work-isolation`          | Running more than one implementation agent at once. Worktrees, foundation-first, merge-back.                                                      |
+| `module-cohesion`                  | Generic one-concept-per-module rule (freminal specifics in `freminal-module-cohesion`).                                                            |
+| `state-representation`             | Generic bool-to-enum rule (freminal high-risk sites in `freminal-state-representation`).                                                           |
 | `rust-best-practices`              | Any Rust edit. Panic-free production, clippy maxed, no bypass.                                                                                    |
 | `performance-benchmarks`           | Generic before/after capture procedure and 15% regression threshold (used together with `freminal-bench-table`).                                  |
 | `flake-dev-shell-discipline`       | About to need a system tool not in the dev shell. Add to `flake.nix`, stop, wait for `nix develop`.                                               |
@@ -236,7 +272,7 @@ Agents may be instructed to operate in one of:
 
 The orchestrator spawning sub-agents uses the more granular
 **READ-ONLY / CODE-REVIEW / IMPLEMENTATION / COMMIT** action classes
-documented in `freminal-orchestrator-protocol`. Use that when
+documented in `agent-orchestration-protocol`. Use that when
 decomposing.
 
 ---
@@ -247,21 +283,23 @@ For tasks with ordered dependencies (e.g. multi-phase refactors):
 
 1. Read the entire task document before doing anything.
 2. Find the first incomplete step.
-3. Execute that one step and nothing else.
+3. Execute it. Keep its scope exactly as written.
 4. Run the verification suite -- confirm it passes.
 5. Update the tracking document: mark the step complete, add a brief
    note.
-6. Stop and post a summary in chat -- wait for user confirmation
-   before continuing.
+6. Continue to the next step.
 
-Do NOT execute multiple steps in one session, even if they seem
-small. Do NOT proceed to the next step without explicit user
-confirmation. Each step must leave `cargo test --all` passing.
+Each step must leave `cargo test --all` passing before the next one
+starts -- a red suite is a full stop, not something to fix on the way
+past. `autonomy-boundaries` governs when to continue and when to stop;
+the assigned scope is the boundary, not a step count. Finish the
+version, then report.
 
 Pre-existing bugs surfaced mid-task become numbered cleanup entries in
 the host task's plan document (see Task 72.16 in
-`Documents/PLAN_VERSION_090.md` for the convention). Full procedure in
-`freminal-orchestrator-protocol`.
+`Documents/PLAN_VERSION_090.md` for the convention -- that is the
+freminal example of the generic procedure in
+`agent-orchestration-protocol`).
 
 ---
 
@@ -301,13 +339,26 @@ procedure in `performance-benchmarks` + freminal-specific catalog in
 
 ## When to Stop
 
-Stop and ask if:
+`autonomy-boundaries` carries the generic trigger list, including the
+rule that irreversible operations need approval even when they are in
+scope. These are the freminal-specific additions:
 
-- Requirements are ambiguous.
-- A change would weaken invariants.
-- Behavior is unclear or under-specified.
-- You're tempted to "fill in" missing semantics.
-- You feel unsure but think you can guess.
+- Requirements are ambiguous, or behavior is unclear / under-specified.
+- A change would weaken a stated invariant -- particularly the
+  lock-free architecture or the crate dependency direction.
+- You're tempted to "fill in" missing terminal semantics. Look it up in
+  the spec or stop; do not infer what an escape sequence "probably"
+  does.
 - A sub-task requires modifying files outside its assigned scope.
+- A plan document marks the task `TENTATIVE` or "needs maintainer
+  approval".
+- A test needs its tolerance loosened to pass. That is a red flag, not
+  a fix.
+
+Note what is deliberately **not** on this list any more: "you feel
+unsure but think you can guess". It was unfalsifiable -- an agent can
+always claim it, so it licensed stopping anywhere. Uncertainty about
+*terminal semantics* is a real stop (above); a general feeling of
+unease about correct in-scope work is not.
 
 Correctness > completeness > speed.

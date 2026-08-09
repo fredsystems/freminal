@@ -43,13 +43,15 @@ seams if execution is deferred — the codebase may move.
 
 ## Execution model (READ THIS FIRST)
 
+**`parallel-work-isolation`** governs this section -- in particular why
+concurrent cargo-running agents must not share a checkout, and why each
+concurrent worktree needs its own build directory (verify `CARGO_TARGET_DIR`
+is unset or per-worktree; the dev shell can set it out from under you).
+Read that skill before running anything concurrently. The v0.11.1-specific
+facts:
+
 The three tasks are **logically independent** — Task 115 is GUI-renderer, Task
 116 is GUI-input state, Task 117 is the buffer crate — and touch disjoint files.
-**They must NOT be executed by concurrent cargo-running sub-agents on the same
-checkout.** All agents share one `target/` directory and one workspace; a
-transient compilation error introduced by one agent's in-progress edit causes
-another agent's `cargo test` / `cargo clippy` to fail spuriously, and the agents
-thrash trying to "fix" damage that isn't theirs.
 
 Permitted execution strategies:
 
@@ -57,15 +59,16 @@ Permitted execution strategies:
    (or at least green and committed) before the next begins. Recommended order:
    **117 → 116 → 115** (lowest-risk/self-contained first; renderer change with a
    design decision last).
-2. **Parallel via isolated worktrees.** If parallelism is desired, each task
-   runs in its **own `git worktree` with its own `target/`** so no two agents
-   share a build directory. Only then may the three run concurrently.
+2. **Parallel via isolated worktrees**, per `parallel-work-isolation`. Only then
+   may the three run concurrently.
 
-Within a task, subtasks are strictly sequential (each leaves `cargo test --all`
-green before the next starts), per `agents.md`'s multi-step protocol.
+Within a task, subtasks are sequential: each leaves `cargo test --all` green
+before the next starts. `autonomy-boundaries` governs continue-versus-stop --
+work the task front to back, and stop on a hard trigger rather than between
+subtasks.
 
 Each subtask carries the five-part contract (scope / what / deliverable /
-verification / prohibitions / stop) from the `freminal-orchestrator-protocol`
+verification / prohibitions / stop) from the `agent-orchestration-protocol`
 skill. Verification for every implementation subtask is:
 
 ```text

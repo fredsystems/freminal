@@ -1,201 +1,101 @@
 ---
 name: freminal-version-activation
-description: Use ONLY in the freminal repository when activating a version from MASTER_PLAN.md whose plan document is a stub (no per-subtask breakdown), or when fleshing out / decomposing any version's tasks into implementable subtasks. Codifies the just-in-time planning policy (don't decompose far-future versions; flesh a version out at activation against the real code), the Sonnet-sized subtask shape (scope, deliverable, verification, prohibitions, stop condition), and the Opus-orchestrates / Sonnet-implements / Opus-reviews division of labour. Pairs with freminal-orchestrator-protocol (planning-time companion to that execution-time skill).
+description: Use ONLY in the freminal repository when activating a version from MASTER_PLAN.md whose plan document is a stub (no per-subtask breakdown), or when fleshing out / decomposing any version's tasks into implementable subtasks. Names the freminal-specific reading list for activation recon, the decomposition heuristics peculiar to this codebase (types-before-behaviour-before-render, reverse-PTY-write paths, config-option wiring, escape-sequence dual-doc, benchmark capture), and which skill owns each downstream step. The generic just-in-time planning policy and subtask contract live in the shared plan-decomposition skill.
 ---
 
-# Freminal: version activation & subtask scoping
+# Freminal: version activation specifics
 
-This skill governs **planning time** in freminal: turning a stub version
-plan into implementable, tightly-scoped subtasks. It is the companion to
-`freminal-orchestrator-protocol`, which governs **execution time** (how
-sub-agent prompts are written once subtasks exist). Read both when
-activating a version.
+The generic policy -- two-tier plans, just-in-time decomposition, the
+orchestrator/implementer division of labour, the five-part subtask
+contract and its template, and the "no unresolved design decision
+reaches the implementer" rule -- lives in **`plan-decomposition`**.
+Read that first. This skill only carries what is specific to freminal.
 
-## The core policy: flesh out just in time, against real code
+## Activation recon: what to read in this repo
 
-Freminal's roadmap (`Documents/MASTER_PLAN.md`) spans many versions.
-**Plan documents are deliberately written in two tiers:**
+Before decomposing anything, read the _current code_ the version will
+touch. In freminal that means:
 
-- **Near-term, imminently-activated versions** carry a full
-  per-subtask breakdown, written against the _current_ codebase.
-- **Far-term versions** are **enriched stubs**: goal, task summary,
-  every durable design decision already made, and open questions
-  deferred to activation -- but **no subtask decomposition**.
+- `Documents/MASTER_PLAN.md` (the version's row and its dependencies)
+  and the version's own stub document.
+- The `freminal-architecture` skill, for the lock-free PTY/GUI split
+  and the crate dependency direction the version must not violate.
+- For escape-sequence work: `Documents/ESCAPE_SEQUENCE_COVERAGE.md`,
+  `Documents/ESCAPE_SEQUENCE_GAPS.md`, **and the authoritative external
+  spec**. Do not scope escape-sequence work from memory of what a
+  sequence does.
+- For anything in the egui rendering stack:
+  `Documents/EGUI_UPGRADE_ASSUMPTIONS.md`, because the chrome-caching
+  work depends on undocumented egui 0.35.0 behaviour.
 
-The reason is economic and correctness-driven, not laziness:
+## Freminal decomposition heuristics
 
-1. A subtask breakdown written N versions early is a guess about a
-   codebase that will have changed underneath it. It rots.
-2. Decomposition is the expensive (Opus) orchestration work. Doing it
-   early means paying for it, watching it go stale, and paying again to
-   re-validate at activation. Do it once, late, correct.
-3. An extension/feature API (and any plan) should crystallise a
-   _stable, shipped_ feature set -- not lead it.
+These are the seams this codebase actually splits along:
 
-**Durable decisions are recorded; perishable breakdowns are deferred.**
-When you make a real design decision during discussion (an invariant, a
-dependency cut, a scope change, a chosen crate), write it into the
-relevant stub now. Do NOT invent Sonnet-level subtask lists for a
-version that is not next.
-
-### What "enriched stub" means concretely
-
-A far-term plan document contains:
-
-- A one-paragraph goal.
-- A task-summary table (feature, scope estimate, status, deps).
-- Every durable design decision captured as prose or a decisions
-  section (invariants, chosen approach, rejected alternatives + why).
-- Open questions explicitly tagged "decide at activation".
-- A pointer to this skill for how it gets decomposed.
-
-It does NOT contain: numbered subtasks, file-level scoping, per-subtask
-verification steps, or commit-mapping. Those are produced at activation.
-
-## Activation: one dedicated session per version
-
-When a version is activated (moved from stub to active work):
-
-1. **Read first.** `MASTER_PLAN.md`, the version's stub, every
-   dependency's plan doc, and -- critically -- the _current code_ the
-   version will touch. Use `freminal-architecture` and the relevant
-   project skills to map the seams. For escape-sequence work, read
-   `ESCAPE_SEQUENCE_COVERAGE.md` / `ESCAPE_SEQUENCE_GAPS.md` and the
-   authoritative external spec before scoping anything.
-2. **Resolve open questions** with the maintainer. The stub's "decide
-   at activation" list is the agenda. Do not silently pick answers.
-3. **Decompose into Sonnet-sized subtasks** (shape below), written
-   against the real seams found in step 1.
-4. **Write the breakdown into the version's plan doc**, replacing the
-   stub body. Update the `MASTER_PLAN.md` status row.
-5. **Then, and only then, begin execution** under
-   `freminal-orchestrator-protocol` and the multi-step task protocol in
-   `agents.md`.
-
-Activation planning is itself Opus work. It is orchestration, not
-implementation.
-
-At activation you set the version's status to `In progress` and its
-tasks to `Planned` (step 4 above). Every subsequent status transition —
-including the one that gets forgotten, advancing a task to `Complete`
-when its PR merges — is governed by the **`freminal-plan-status-lifecycle`**
-skill. Load it whenever you edit `MASTER_PLAN.md` status columns.
-
-## The Sonnet-sized subtask shape
-
-The division of labour:
-
-- **Opus orchestrates**: reads code, decomposes, writes subtasks,
-  sequences them, reviews sub-agent output, makes architectural calls.
-- **Sonnet implements**: executes one tightly-scoped subtask per
-  invocation with no architectural latitude.
-- **Opus reviews**: every implementation subtask gets a CODE-REVIEW
-  pass before it is accepted.
-
-A subtask is correctly scoped for Sonnet when **all** of these hold:
-
-1. **Single concern.** One logical change. If the description needs
-   "and also", split it.
-2. **Explicit file scope.** The exact files Sonnet may touch are
-   named. No "and related files".
-3. **No architectural decisions left open.** Every type name, enum
-   variant, function signature, and design choice is already decided by
-   Opus and written into the subtask. Sonnet fills in the body, not the
-   shape.
-4. **Self-contained verification.** The subtask names the exact
-   commands that prove it correct (`cargo test --all`,
-   `cargo clippy --all-targets --all-features -- -D warnings`, a
-   specific new test module). Each subtask leaves `cargo test --all`
-   green -- the commit-discipline invariant.
-5. **Bounded.** Roughly one focused implementation pass. If it spans
-   many files across crate boundaries or needs judgement calls
-   mid-stream, it is an Opus task or needs splitting.
-
-Each written subtask records: number, title, scope (file list),
-deliverable, verification commands, explicit prohibitions, and stop
-condition -- the same five-part contract
-`freminal-orchestrator-protocol` requires in the spawned prompt. The
-plan-doc subtask and the sub-agent prompt are two views of the same
-contract.
-
-### Subtask entry template (in the plan doc)
-
-```text
-#### NN.M -- <single-concern title>
-
-Scope: <exact file list>
-
-What: <the one change, with concrete type/fn/enum names Opus has
-already chosen -- not "design a way to ...">
-
-Deliverable: <the code + the tests that prove it>
-
-Verification: cargo test --all; cargo clippy --all-targets
---all-features -- -D warnings; <any subtask-specific test>
-
-Prohibitions: do NOT touch files outside scope; do NOT decide
-<the thing already decided above>; do NOT proceed to NN.(M+1).
-
-Stop: report files changed + verification results; await review.
-```
-
-## Decomposition heuristics
-
-- **Audit before implement.** When current behaviour is ambiguous (a
-  reused OSC number, a stubbed-but-typed handler, a "verify
-  completeness" item), the FIRST subtask is a READ-ONLY audit that
-  resolves the ambiguity and feeds the implementation subtasks. Do not
-  fold the audit into the first implementation subtask.
 - **Types/state before behaviour before render.** A typical
   parser/handler/renderer feature splits cleanly: (a) add the typed
-  state in `freminal-common`, (b) wire the
-  parser/handler in `freminal-terminal-emulator`, (c) transport via the
-  snapshot, (d) render in `freminal`. Each is its own subtask; (a)
-  precedes (b) precedes (c) precedes (d).
-- **Reverse-PTY-write features** (anything where the terminal writes
-  back to the application -- notification activation, transfer acks,
-  query responses) get an explicit subtask for the write path, scoped
-  to the existing `write_to_pty` / `Pane::pty_write_tx` plumbing, never
-  a new channel without Opus sign-off.
-- **Config options** that a feature introduces follow the
-  `freminal-config-options` wiring checklist as their own subtask --
-  never bolted onto a feature subtask, because the `ConfigPartial` /
-  `apply_partial` omission is a known silent-failure class.
+  state in `freminal-common`, (b) wire the parser/handler in
+  `freminal-terminal-emulator`, (c) transport it via the snapshot,
+  (d) render in `freminal`. Each is its own subtask, in that order.
+  Because `freminal-common` sits at the bottom of the dependency
+  graph, (a) is also the natural foundation-first subtask when the
+  version will run as parallel workstreams -- see
+  `parallel-work-isolation`.
+- **Audit before implement.** When current behaviour is ambiguous -- a
+  reused OSC number, a stubbed-but-typed handler, a "verify
+  completeness" item -- the first subtask is a READ-ONLY audit whose
+  findings feed the implementation subtasks. Do not fold the audit into
+  the first implementation subtask.
+- **Reverse-PTY-write features** (notification activation, transfer
+  acks, query responses -- anything where the terminal writes back to
+  the application) get an explicit subtask for the write path, scoped
+  to the existing `write_to_pty` / `Pane::pty_write_tx` plumbing.
+  A new channel needs maintainer sign-off.
+- **Config options** follow the `freminal-config-options` wiring
+  checklist as their own subtask, never bolted onto a feature subtask.
+  The `ConfigPartial` / `apply_partial` omission is a known
+  silent-failure class in this repo.
 - **Escape-sequence changes** carry a final subtask for the mandatory
   dual-doc update (`freminal-escape-sequence-docs`).
-- **Benchmarks**: if the version touches a benchmarked hot path, a
-  before/after capture subtask is mandatory
-  (`performance-benchmarks` + `freminal-bench-table`).
+- **Benchmarked hot paths** carry a before/after capture subtask
+  (`performance-benchmarks` for the procedure,
+  `freminal-bench-table` for which bench file covers what).
 
-## Hard rules
+## Verification in every subtask
 
-- Do NOT decompose a version that is not the one being activated.
-  Capturing a durable decision in a far-term stub is fine; writing its
-  subtasks is not.
-- Do NOT begin implementation in the same breath as decomposition.
-  Decompose, get maintainer sign-off on the breakdown, then execute.
-- Do NOT let a subtask carry an unresolved design decision into Sonnet.
-  If Sonnet would have to choose a type, a name, or an approach, the
-  decomposition is incomplete -- that choice is Opus's.
-- Do NOT write subtasks against remembered code. Re-read the seams at
-  activation; the codebase moved since the stub was written.
-- Do NOT leave a task at `Pending merge` / `Planned` after its PR has
-  merged. Advancing status in MASTER_PLAN is governed by the
-  `freminal-plan-status-lifecycle` skill — load it for the full rule.
+Every implementation subtask names these, and leaves them green:
+
+```text
+cargo test --all
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+Plus `cargo xtask check-windows` before any PR touching
+`#[cfg(windows)]`, `portable-pty`, paths, or threads
+(`freminal-windows-crosscheck`).
+
+## Status, once activated
+
+Set the version to `In progress` and its tasks to `Planned` as part of
+writing the breakdown. Every subsequent transition -- including the one
+that gets forgotten, advancing to `Complete` when the PR merges -- is
+governed by **`freminal-plan-status-lifecycle`** for this repo's
+vocabulary and two-table invariant, and by
+**`plan-sequencing-discipline`** for the generic rules (merge is the
+completion trigger, the merge barrier, no forward dependencies).
 
 ## When to stop and ask
 
-- An open question in the stub has no obvious answer and the maintainer
-  has not weighed in. Stop; that is the activation conversation.
-- The external spec a version targets is unstable / under active
-  revision. Do NOT decompose against a moving target; surface it and
-  keep the version a stub with the instability noted (this is exactly
-  why a version can be deferred).
-- Decomposition reveals the version is far larger than its stub
-  estimate. Stop and re-scope with the maintainer before writing twenty
-  subtasks.
-- You are tempted to flesh out the _next_ version too "while you're
-  here". Don't. One version per activation session.
+The generic stop conditions are in `plan-decomposition`. Freminal
+additions:
 
-Base directory for this skill:
-file:///home/fred/GitHub/freminal/.opencode/skills/freminal-version-activation
+- The external spec the version targets is unstable or under active
+  revision. Do not decompose against a moving target; keep the version
+  a stub and note the instability.
+- The version touches the egui stack and
+  `EGUI_UPGRADE_ASSUMPTIONS.md`'s assumptions no longer hold against
+  the pinned version.
+- Decomposition would require a new PTY write channel, a new crate, or
+  a change to the snapshot transport. Those are architecture decisions
+  (`freminal-architecture`, `freminal-extend-or-extract`), not
+  decomposition ones.

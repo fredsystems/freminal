@@ -80,7 +80,7 @@ of the goal; 122.3a is the maintainer's instruction to take
 
 ### Cleanup entries — status at close-out
 
-Per `freminal-orchestrator-protocol`, bugs found outside a subtask's scope are
+Per `agent-orchestration-protocol`, bugs found outside a subtask's scope are
 numbered entries here rather than TODOs or informal known-issues sections.
 **All three are RESOLVED in this task (PR #472):**
 
@@ -1731,7 +1731,7 @@ Stop: report the edits; await review.
 
 ## Cleanup entries surfaced during activation
 
-Per `freminal-orchestrator-protocol`, bugs found outside a subtask's scope
+Per `agent-orchestration-protocol`, bugs found outside a subtask's scope
 become numbered entries here rather than TODO comments or informal
 known-issues sections.
 
@@ -1876,7 +1876,7 @@ rather than merely recorded.
 
 Original scheduling note (superseded): not part of Task 122, because folding it
 in would mean editing `widget.rs` again after the PR was raised. The maintainer
-directed otherwise — `freminal-orchestrator-protocol` makes cleanup entries part
+directed otherwise — `agent-orchestration-protocol` makes cleanup entries part
 of the host task, and the activation-time "not part of Task 122" notes on C1 and
 C2 had quietly inverted that default.
 

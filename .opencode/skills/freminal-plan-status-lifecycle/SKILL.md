@@ -5,6 +5,14 @@ description: Use ONLY when working in the freminal repository AND changing task 
 
 # Freminal: MASTER_PLAN status lifecycle
 
+The generic rules -- merge is the completion trigger, an index and its
+detail documents are reconciled in the same commit, numbering is
+execution order, no forward dependencies, a number freezes once work
+starts, and the merge barrier for concurrent plans -- live in the shared
+**`plan-sequencing-discipline`** skill. This skill is freminal's
+concrete instance of them: the exact tables, the exact status
+vocabulary, and the `main`-lag caveat.
+
 `Documents/MASTER_PLAN.md` is the roadmap of record. It tracks status
 in **two** hand-maintained places that must always agree:
 
