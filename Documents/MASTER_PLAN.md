@@ -595,7 +595,7 @@ v0.7.0:       ├── Task 59 (FREC v2 Recording)
   and plan document creation/updates.
 
 The division of labour and the just-in-time planning policy are codified in the
-`freminal-version-activation` skill (planning time) and `freminal-orchestrator-protocol`
+`freminal-version-activation` skill (planning time) and `agent-orchestration-protocol`
 (execution time): Opus decomposes a version into Sonnet-sized subtasks at activation, Sonnet
 implements one tightly-scoped subtask per pass, Opus code-reviews. Far-future versions stay
 enriched stubs — durable decisions captured, subtasks deferred until activation.
