@@ -62,3 +62,49 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pull-request-branch-prefix: update-
           automerge: true
+
+      # cargo-bundle-src is a non-flake `github:` input pointing at
+      # burtonageo/cargo-bundle, which stopped committing its own Cargo.lock
+      # after v0.9.0. flake.nix vendors nix/cargo-bundle.lock and builds
+      # cargo-bundle from that source via `cargoLock.lockFile`, so bumping
+      # the input without regenerating the vendored lockfile breaks the Nix
+      # build the moment upstream's Cargo.toml drifts from it (see PR #481).
+      # This mirrors, for this one hand-vendored lockfile, what Renovate's
+      # lockFileMaintenance does automatically for the main Cargo.lock.
+      - name: Regenerate nix/cargo-bundle.lock for cargo-bundle-src
+        if: matrix.flake == 'cargo-bundle-src'
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          BRANCH: update-${{ matrix.flake }}
+        run: |
+          set -euo pipefail
+
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+
+          if ! git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            echo "No ${BRANCH} branch was created/updated this run; nothing to regenerate."
+            exit 0
+          fi
+
+          git fetch origin "${BRANCH}:${BRANCH}" --force
+          git checkout --force "${BRANCH}"
+
+          rev="$(jq -r '.nodes["cargo-bundle-src"].locked.rev' flake.lock)"
+          owner="$(jq -r '.nodes["cargo-bundle-src"].locked.owner' flake.lock)"
+          repo="$(jq -r '.nodes["cargo-bundle-src"].locked.repo' flake.lock)"
+
+          workdir="$(mktemp -d)"
+          git clone --quiet "https://github.com/${owner}/${repo}.git" "${workdir}"
+          git -C "${workdir}" checkout --quiet "${rev}"
+
+          nix shell nixpkgs#cargo nixpkgs#rustc -c \
+            cargo generate-lockfile --manifest-path "${workdir}/Cargo.toml"
+
+          if ! cmp -s "${workdir}/Cargo.lock" nix/cargo-bundle.lock; then
+            cp "${workdir}/Cargo.lock" nix/cargo-bundle.lock
+            git add nix/cargo-bundle.lock
+            git commit -m "chore(nix/cargo-bundle.lock): regenerate for cargo-bundle-src ${rev:0:8}"
+            git push origin "${BRANCH}"
+          else
+            echo "nix/cargo-bundle.lock already matches upstream; no changes needed."
+          fi
