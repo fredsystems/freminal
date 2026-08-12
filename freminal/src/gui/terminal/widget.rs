@@ -3691,10 +3691,52 @@ fn shell_escape_path(path: &std::path::Path) -> String {
     out
 }
 
+/// Build the PTY payload for a set of dropped file paths: each path
+/// shell-escaped, space-separated, with a trailing space so the shell treats
+/// the insertion as a finished argument list the user can keep typing after.
+///
+/// Returns an empty string when there is nothing to send, which the caller
+/// uses as the "don't write to the PTY at all" signal.
+///
+/// **Empty paths are skipped.** egui 0.36 changed `dropped_files` to a
+/// `Vec<Arc<dyn DroppedFile>>` whose `path()` returns a plain `&Path`, where
+/// the pre-0.36 API had an `Option<PathBuf>` that this code gated on. On native
+/// that `Option` was always `Some` (`egui-winit` fills it straight from the
+/// winit event), but skipping empties preserves the old gate's behaviour for
+/// any source that cannot supply a real filesystem path — without it such an
+/// entry would shell-escape to a literal `''` and inject an empty argument into
+/// the user's command line.
+///
+/// Split out of [`handle_file_drop`] because that function needs a live
+/// `egui::Ui` and so cannot be called from a test, while this assembly step
+/// carries all the behaviour worth pinning (escaping, separator placement, the
+/// trailing space, and the empty-path skip).
+fn dropped_files_payload<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>) -> String {
+    let mut payload = String::new();
+    for path in paths {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        // Guarded on `payload`, not on the loop index: with empty paths
+        // skipped, an index-based check would emit a leading separator
+        // whenever the first entry was the one skipped.
+        if !payload.is_empty() {
+            payload.push(' ');
+        }
+        payload.push_str(&shell_escape_path(path));
+    }
+    if !payload.is_empty() {
+        payload.push(' ');
+    }
+    payload
+}
+
 /// Handle file drag-and-drop events on the terminal area.
 ///
 /// **Drop:** Shell-escapes each dropped file path and sends the result as
-/// keyboard input to the PTY (space-separated, with a trailing space).
+/// keyboard input to the PTY (space-separated, with a trailing space). The
+/// payload assembly itself lives in [`dropped_files_payload`], which is where
+/// its behaviour is tested.
 ///
 /// **Hover:** Draws a semi-transparent overlay with a "Drop files here" label
 /// while files are being dragged over the terminal area.
@@ -3711,20 +3753,8 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
     // ── Drop handling ────────────────────────────────────────────────
     let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
     if pointer_over_terminal && !dropped_files.is_empty() {
-        let mut payload = String::new();
-        for (i, file) in dropped_files.iter().enumerate() {
-            if i > 0 {
-                payload.push(' ');
-            }
-            // egui 0.36 made `dropped_files` a `Vec<Arc<dyn DroppedFile>>`
-            // whose `path()` returns a plain `&Path` rather than the old
-            // `Option<PathBuf>` field. The `Option` was always `Some` on
-            // native anyway (`egui-winit` filled it from the winit event), so
-            // dropping the `if let` changes no behaviour here.
-            payload.push_str(&shell_escape_path(file.path()));
-        }
+        let payload = dropped_files_payload(dropped_files.iter().map(|file| file.path()));
         if !payload.is_empty() {
-            payload.push(' ');
             send_or_log!(
                 input_tx,
                 InputEvent::Key(payload.into_bytes()),
@@ -4776,7 +4806,7 @@ mod shell_escape_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::path::Path;
 
-    use super::shell_escape_path;
+    use super::{dropped_files_payload, shell_escape_path};
 
     #[test]
     fn simple_path() {
@@ -4812,6 +4842,66 @@ mod shell_escape_tests {
     fn empty_path() {
         let result = shell_escape_path(Path::new(""));
         assert_eq!(result, "''");
+    }
+
+    // ── `dropped_files_payload` ──────────────────────────────────────
+
+    fn payload_of(paths: &[&str]) -> String {
+        dropped_files_payload(paths.iter().map(Path::new))
+    }
+
+    #[test]
+    fn payload_for_no_files_is_empty() {
+        assert_eq!(payload_of(&[]), "");
+    }
+
+    /// The trailing space is deliberate: it leaves the shell's argument
+    /// finished so the user can keep typing after the drop.
+    #[test]
+    fn payload_for_one_file_is_escaped_with_a_trailing_space() {
+        assert_eq!(payload_of(&["/tmp/a.txt"]), "'/tmp/a.txt' ");
+    }
+
+    #[test]
+    fn payload_separates_multiple_files_with_single_spaces() {
+        assert_eq!(
+            payload_of(&["/tmp/a.txt", "/tmp/b c.txt"]),
+            "'/tmp/a.txt' '/tmp/b c.txt' "
+        );
+    }
+
+    #[test]
+    fn payload_escapes_each_path_independently() {
+        assert_eq!(
+            payload_of(&["it's", "$plain"]),
+            "'it'\\''s' '$plain' ",
+            "quote escaping must apply per path, not to the joined string"
+        );
+    }
+
+    /// egui 0.36 replaced the `Option<PathBuf>` this code used to gate on with
+    /// a plain `&Path`. An empty path must be skipped, not escaped to `''`,
+    /// which would inject an empty argument into the user's command line.
+    #[test]
+    fn payload_skips_empty_paths() {
+        assert_eq!(payload_of(&[""]), "", "a lone empty path sends nothing");
+        assert_eq!(payload_of(&["", ""]), "");
+    }
+
+    /// Regression guard for the separator placement: the space is emitted
+    /// based on what has already been written, so a skipped *first* entry
+    /// must not leave a leading space.
+    #[test]
+    fn payload_does_not_emit_a_leading_space_when_the_first_path_is_skipped() {
+        assert_eq!(payload_of(&["", "/tmp/a.txt"]), "'/tmp/a.txt' ");
+    }
+
+    #[test]
+    fn payload_skips_an_empty_path_between_two_real_ones() {
+        assert_eq!(
+            payload_of(&["/tmp/a.txt", "", "/tmp/b.txt"]),
+            "'/tmp/a.txt' '/tmp/b.txt' "
+        );
     }
 }
 

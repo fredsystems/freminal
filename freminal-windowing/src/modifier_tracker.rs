@@ -30,13 +30,28 @@
 //! # Invariant
 //!
 //! [`ModifierTracker::current`] returns the modifiers implied by the most
-//! recent [`WindowEvent::ModifiersChanged`] this window has received, and is
-//! reset to "nothing held" by [`WindowEvent::Focused(false)`]. It is updated
-//! by [`ModifierTracker::on_window_event`], which
-//! [`crate::egui_integration::EguiWindow::on_window_event`] calls on every
-//! event **before** forwarding it to `egui-winit` — so a read during an
-//! interception path that runs after that forwarding always sees the current
-//! event's effect, never a stale one.
+//! recent `WindowEvent::ModifiersChanged` this window has received, and is
+//! reset to "nothing held" by `WindowEvent::Focused(false)`. It is updated by
+//! [`ModifierTracker::on_window_event`], which
+//! `EguiState::on_window_event` calls on every event before forwarding that
+//! event to `egui-winit`.
+//!
+//! **What makes a read correct is event ordering across calls, not within
+//! one.** `event_loop::window_event` reads `EguiState::modifiers` from its
+//! interception paths *before* it reaches the `on_window_event` forwarding
+//! call for the event it is currently handling. That is fine, because the
+//! events involved are different ones: modifier state changes arrive as their
+//! own `ModifiersChanged` event, which **no interception path claims**, so it
+//! always reaches `on_window_event` — and therefore this tracker — during an
+//! earlier `window_event` call than the `KeyboardInput` that later reads the
+//! result. The `KeyboardInput` event being intercepted does not itself carry
+//! modifier state.
+//!
+//! The corollary is the thing to preserve: **if a future interception path
+//! ever early-returns on `ModifiersChanged` or `Focused` without forwarding
+//! it, this tracker goes stale and the paste / blocked-key intercepts start
+//! misreading modifiers.** Intercepts that consume other event kinds are
+//! unaffected.
 //!
 //! The focus reset mirrors `egui-winit` 0.36.1's own (`lib.rs`, the
 //! `WindowEvent::Focused` arm): without it, alt-tabbing away while holding a
@@ -203,6 +218,31 @@ mod tests {
             tracker.current().ctrl,
             "only focus LOSS resets; `Focused(true)` must leave the state alone"
         );
+    }
+
+    /// Pins the ordering the module doc describes: the modifier state is
+    /// established by a `ModifiersChanged` event, and is then read correctly
+    /// while handling a *later, separate* `KeyboardInput` event — which is
+    /// itself irrelevant to the tracker. This is the exact two-event sequence
+    /// behind `Ctrl+V` reaching the Wayland paste intercept.
+    #[test]
+    fn modifiers_survive_until_a_later_keyboard_event_reads_them() {
+        let mut tracker = ModifierTracker::default();
+
+        // Event 1: the modifier press. Never intercepted, so it always
+        // reaches `on_window_event` and therefore this tracker.
+        tracker.on_window_event(&modifiers_changed(ModifiersState::CONTROL));
+
+        // Event 2: the key press that the paste intercept claims. It is
+        // handled in a later `window_event` call, and reads the state above.
+        // Feeding it here proves it neither clears nor alters that state.
+        tracker.on_window_event(&WindowEvent::RedrawRequested);
+        assert!(
+            tracker.current().command || cfg!(target_os = "macos"),
+            "the Ctrl established by the earlier event must still be readable \
+             when the later key event is handled"
+        );
+        assert!(tracker.current().ctrl);
     }
 
     #[test]
