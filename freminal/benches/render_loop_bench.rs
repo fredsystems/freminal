@@ -1237,10 +1237,16 @@ fn bench_chrome_frame_record(c: &mut Criterion) {
         // Warm the context once so the timed region measures the recurring
         // steady-state cost, not the first-frame font-atlas population.
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+        discarded_output.drop_without_applying_deltas();
 
         b.iter(|| {
-            let full_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+            // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+            // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+            let mut full_output = ctx.run_ui(chrome_bench_raw_input(), chrome_bench_ui);
+            full_output.textures_delta.clear();
             let ppp = ctx.pixels_per_point();
             let clipped = ctx.tessellate(full_output.shapes, ppp);
             std::hint::black_box(clipped);

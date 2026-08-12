@@ -33,6 +33,7 @@ pub mod error;
 mod egui_integration;
 mod event_loop;
 mod gl_context;
+mod modifier_tracker;
 
 pub use error::Error;
 pub use event_loop::run;

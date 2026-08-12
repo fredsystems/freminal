@@ -40,9 +40,15 @@
         "winit",
         "raw-window-handle"
       ],
-      "description": "The chrome-caching work relies on undocumented internal behaviour of the egui 0.35.0 stack; egui/egui_glow/egui-winit are exact-pinned. Never auto-merge these, and require explicit Dependency-Dashboard approval before a bump PR is even opened, so a human consciously runs the Documents/EGUI_UPGRADE_ASSUMPTIONS.md re-verification checklist first.",
+      "description": "The chrome-caching work relies on undocumented internal behaviour of the egui stack; egui/egui_glow/egui-winit are exact-pinned. Never auto-merge these, and require explicit Dependency-Dashboard approval before a bump PR is even opened, so a human consciously runs the Documents/EGUI_UPGRADE_ASSUMPTIONS.md re-verification checklist first.",
       "automerge": false,
       "dependencyDashboardApproval": true
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["glow"],
+      "description": "glow is held below 0.18 because egui_glow declares `glow = \"0.17.0\"` and upstream cannot move (wgpu 30's wgpu-hal pins glow 0.17). We pass `Arc<glow::Context>` directly to `egui_glow::Painter`, so two glow versions is a type error, not just a duplicate dep. Without this constraint the egui group proposes glow 0.18 on every run, an update that cannot resolve. Remove once egui_glow's own declared glow requirement moves.",
+      "allowedVersions": "<0.18"
     },
     {
       "groupName": "tracing",
