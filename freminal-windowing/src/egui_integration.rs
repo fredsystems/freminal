@@ -1464,9 +1464,17 @@ impl EguiState {
         window: &Window,
         event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
-        // Mirror the modifier state BEFORE egui-winit consumes the event, so
-        // `modifiers()` is current for the interception paths in
-        // `event_loop::window_event` that read it after this call.
+        // Mirror the modifier state before handing the event to egui-winit.
+        //
+        // Note what this does NOT claim: `event_loop::window_event` reads
+        // `modifiers()` at its interception paths *before* it reaches this
+        // call for the event in hand (and may early-return without reaching
+        // it at all). Correctness comes from the events being different ones
+        // -- modifier state arrives as its own `ModifiersChanged`, which no
+        // interception path claims, so it lands here during an earlier
+        // `window_event` call than the `KeyboardInput` that reads the result.
+        // See `ModifierTracker`'s module doc for the full invariant and the
+        // one way to break it.
         self.modifier_tracker.on_window_event(event);
         self.winit_state.on_window_event(window, event)
     }
