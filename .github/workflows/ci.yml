@@ -91,7 +91,7 @@ jobs:
       - uses: taiki-e/install-action@67729d5c413db75907f0ad1e39bb04b9c868ff60 # v2.85.7
         with:
           tool: cargo-llvm-cov
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask coverage
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
@@ -129,7 +129,7 @@ jobs:
           # clippy for pinned-version toolchains (only the named @stable /
           # @nightly entry points bundle it), so request it explicitly.
           components: clippy
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask check
 
   # Run the test suite natively on every target platform. The `check`
@@ -156,7 +156,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask test
 
   ci-success:
