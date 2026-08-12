@@ -11,7 +11,7 @@ re-tessellating, and re-painting the "chrome" (menu bar, tab bar, borders,
 overlays) on frames where the chrome provably did not change, while always
 freshly rebuilding the terminal band. To do this correctly it relies on a
 number of **undocumented, internal behaviours** of the egui stack
-(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.35.0**.
+(`egui`, `epaint`, `egui_glow`, `egui-winit`) at version **0.36.1**.
 
 These behaviours are not part of any crate's public API contract. A version
 bump — even a patch bump — could silently change one of them. The failure mode
@@ -21,9 +21,16 @@ runtime.
 
 To contain that risk:
 
-- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.35.0`) in the
+- `egui`, `egui_glow`, and `egui-winit` are **exact-pinned** (`=0.36.1`) in the
   workspace `Cargo.toml`, as a matched set. This is deliberate — do not "clean
   it up" to a caret range.
+- `glow` is separately held at **0.17** (a caret range, not an exact pin)
+  because `egui_glow` declares `glow = "0.17.0"` and upstream cannot move:
+  wgpu 30's `wgpu-hal` pins glow 0.17. We hand `Arc<glow::Context>` straight to
+  `egui_glow::Painter`, so two glow versions in the graph is a _type error_, not
+  merely a duplicate dependency. `renovate.json` constrains glow to `<0.18` so
+  the group stops proposing an unresolvable bump; lift that constraint only when
+  `egui_glow`'s own declared glow requirement moves.
 - Renovate is configured so the "egui + windowing stack" group **never
   auto-merges** and requires explicit Dependency-Dashboard approval before a
   bump PR is even opened (see `renovate.json`). Dependabot cargo updates are
@@ -39,9 +46,14 @@ must be adapted (and this file updated) before the bump can land.
 
 ## How to use this on a bump
 
-1. Read the new version's source for each `Upstream (0.35.0)` location below
+1. Read the new version's source for each `Upstream (0.36.1)` location below
    and confirm the behaviour still holds. Line numbers will drift between
    versions; find the equivalent code, do not trust the line number blindly.
+
+   The fastest reliable method, used for the 0.35.0 → 0.36.1 walk: fetch the
+   new crates, extract them, and `diff -u` each file named below against the
+   copy already in `~/.cargo/registry/src/*/`. A zero-line diff discharges
+   every assumption resting on that file at once; anything else you read.
 2. For any assumption that changed, fix the corresponding `Our code` site and
    update this table.
 3. Run `cargo test --all` (catches the headless-verifiable subset — callback
@@ -50,12 +62,14 @@ must be adapted (and this file updated) before the bump can land.
 4. Run the pixel-level verification for every "Symptom if broken" scenario. A
    green `cargo test` is **not** sufficient — the load-bearing failures are
    pixel-only.
-5. Only then update the `=0.35.0` pins.
+5. Only then update the exact pins.
+6. Record the walk in the verification log at the bottom of this file, so the
+   next bump can see what was checked and how.
 
 ## The assumptions
 
 Each row: what we rely on, where our code depends on it, the upstream source
-that proves it in 0.35.0, and what breaks (visibly) if a bump invalidates it.
+that proves it in 0.36.1, and what breaks (visibly) if a bump invalidates it.
 
 ### A1 — `paint_primitives` fully re-establishes GL state per call (except FBO)
 
@@ -69,27 +83,64 @@ for restoring that.
 
 - **Our code:** `freminal-windowing/src/egui_integration.rs` (the three
   `paint_primitives` calls in `run_frame`, head/band/tail).
-- **Upstream (0.35.0):** `egui_glow/src/painter.rs` — `prepare_painting`
+- **Upstream (0.36.1):** `egui_glow/src/painter.rs` — `prepare_painting`
   (`~300-349`), called at `paint_primitives` entry (`~405`) and after each
   callback (`~450`). No `bind_framebuffer` anywhere in `prepare_painting`.
 - **Symptom if broken:** garbled / mis-clipped / wrongly-blended chrome or
   terminal content; state from the band leaking into chrome paint (or vice
   versa). Multi-pane with an active post-process shader is the sharpest test.
 
-### A2 — `paint_and_update_textures` is set-all then paint then free-all
+### A2 — `paint_and_update_textures` is set-all then paint then free-all, and each delta is applied exactly once
 
 We do not call `paint_and_update_textures`; we hand-inline its three phases
-(upload every `textures_delta.set`, then our three `paint_primitives` calls,
+(apply every `textures_delta.set`, then our three `paint_primitives` calls,
 then free every `textures_delta.free`) so the band can be painted separately.
 This is only correct if that is exactly what the upstream method does.
 
+Two sub-assumptions, both load-bearing:
+
+1. **Phase order** is set-all → paint → free-all. Unchanged since 0.35.0.
+2. **Each delta is consumed exactly once.** Since egui 0.36 this is enforced,
+   not merely conventional — see below.
+
+**Changed in 0.36 (upstream #8356, "Prevent accidentally dropping
+`TexturesDelta`").** Three things moved at once:
+
+- `TexturesDelta::set` went from an ordered `Vec<(TextureId, ImageDelta)>` to a
+  `HashMap<TextureId, SmallVec<[ImageDelta; 1]>>`, and `free` from a `Vec` to a
+  `HashSet`. **One texture can now carry several queued deltas.** Cross-texture
+  ordering became nondeterministic, which is harmless (textures upload
+  independently), but per-texture order is significant and `SmallVec`
+  preserves it.
+- `TexturesDelta` gained a `Drop` impl that `debug_assert!`s it is empty.
+  Iterating the deltas **by reference** therefore panics in debug builds when
+  the frame's `FullOutput` falls out of scope. Upstream's own
+  `paint_and_update_textures` now takes `&mut` and `drain()`s both halves; ours
+  drains to match. `FullOutput::drop_without_applying_deltas()` (or
+  `textures_delta.clear()` where the output has been partially moved) is the
+  sanctioned escape hatch for a test or bench with no painter.
+- `TexturesDelta::push` replaces the queued vector when the incoming delta is
+  whole, but _appends_ partial deltas after it. This is what makes A6's
+  predicate "any delta is whole" rather than "the delta is whole".
+
 - **Our code:** `freminal-windowing/src/egui_integration.rs` (the
-  `set_texture` loop, three paints, `free_texture` loop in `run_frame`).
-- **Upstream (0.35.0):** `egui_glow/src/painter.rs` —
-  `paint_and_update_textures` (`~356-374`).
+  draining `set_texture` loop, three paints, draining `free_texture` loop in
+  `run_frame`; `full_output` is bound `mut` for this). Every painter-less
+  `run_ui` in the test/bench suites defuses the drop-bomb explicitly —
+  `freminal/src/gui/app_impl.rs`, `freminal/src/gui/frame_drain.rs`,
+  `freminal/benches/render_loop_bench.rs`, and this file's own test module.
+- **Upstream (0.36.1):** `egui_glow/src/painter.rs` —
+  `paint_and_update_textures` (`~356-378`, note the `drain()` on both halves
+  and the nested loop over each texture's deltas); `epaint/src/textures.rs` —
+  `TexturesDelta` (`~283-345`, the new collection types, `push`, and the `Drop`
+  bomb at `~337`); `egui/src/data/output.rs` —
+  `FullOutput::drop_without_applying_deltas` (`~74-76`).
 - **Symptom if broken:** a texture referenced by a primitive is freed too
   early or uploaded too late — missing glyphs, blank text, or a use-after-free
-  crash in the GL layer.
+  crash in the GL layer. If the drop-bomb half regresses (we stop draining), a
+  debug build panics at end of frame with "Dropped TexturesDelta with N
+  unapplied deltas"; a release build silently leaks the deltas instead, so the
+  atlas upload for a newly shaped glyph never reaches the GPU.
 
 ### A3 — the background layer drains first and contiguously into `FullOutput.shapes`
 
@@ -103,7 +154,7 @@ by egui).
 - **Our code:** `freminal/src/gui/app_impl.rs` (`band_shape_start` /
   `band_shape_end` capture); `freminal-windowing/src/egui_integration.rs`
   (the head/band/tail slice of `full_output.shapes`).
-- **Upstream (0.35.0):** `egui/src/layers.rs` — `enum Order` (`Background`
+- **Upstream (0.36.1):** `egui/src/layers.rs` — `enum Order` (`Background`
   first), `Order::ALL`, `GraphicLayers::drain` (`~213-260`, iterates
   `Order::ALL`, appends into one `Vec`).
 - **Symptom if broken:** the band paints at the wrong z-position (under chrome,
@@ -124,7 +175,7 @@ dependency pulls a `rayon` we never build against).
   callbacks), `freminal/src/gui/terminal/widget.rs` (per-pane callback); test
   `band_gl_callbacks_stay_contiguous_and_ordered_across_the_split` in
   `freminal-windowing/src/egui_integration.rs`.
-- **Upstream (0.35.0):** `epaint/src/tessellator.rs` —
+- **Upstream (0.36.1):** `epaint/src/tessellator.rs` —
   `tessellate_clipped_shape` callback branch (`~1375-1394`), the
   `Primitive::Callback(_) => true` merge-break, the sequential
   `tessellate_shapes` loop (`~2230`), and the rayon `should_parallelize`
@@ -143,7 +194,7 @@ the atlas-resize self-heal (A6).
 - **Our code:** `freminal-windowing/src/egui_integration.rs` (the REPLAY
   atlas-grow self-heal re-tessellating cached chrome shapes); test
   `atlas_growth_invalidates_cached_text_uvs_and_retessellation_fixes_it`.
-- **Upstream (0.35.0):** `egui/src/context.rs` — `tessellate` (`~2757-2795`,
+- **Upstream (0.36.1):** `egui/src/context.rs` — `tessellate` (`~2757-2795`,
   reads `texture_atlas.size()` fresh, builds a new `Tessellator`);
   `epaint/src/tessellator.rs` — `tessellate_text` UV normalization by
   `font_tex_size` (`~2029-2030`).
@@ -159,9 +210,21 @@ never relocates already-allocated glyphs and only marks the whole image dirty
 on a resize/recreate — so there is no way for existing UVs to become stale
 without a whole-upload delta.
 
+**The predicate is "ANY delta for the font atlas is whole."** Since egui 0.36
+(#8356, see A2) `TexturesDelta::set` holds a _vector_ of deltas per texture, and
+`TexturesDelta::push` only collapses that vector when the incoming delta is
+whole — partials pushed afterwards are appended. A frame that resizes the atlas
+and then allocates further glyphs into the resized atlas therefore leaves
+`[whole, partial, …]`. Reading only one delta per texture (the natural shape of
+the pre-0.36 predicate, when `set` was a flat ordered `Vec`) would miss that
+frame's growth, skip the self-heal, and garble cached chrome text with no
+visible cause. Pinned by
+`atlas_grew_true_when_a_partial_is_queued_after_the_whole_upload` and its
+negative twin.
+
 - **Our code:** `freminal-windowing/src/egui_integration.rs` — the
   `atlas_grew` helper.
-- **Upstream (0.35.0):** `epaint/src/texture_atlas.rs` — `allocate`
+- **Upstream (0.36.1):** `epaint/src/texture_atlas.rs` — `allocate`
   (`~220-263`, forward-only cursor, never repositions), `resize_to_min_height`
   (sets `dirty = Rectu::EVERYTHING`), `take_delta` (turns `EVERYTHING` into
   `ImageDelta::full`); `epaint/src/image.rs` — `ImageDelta::is_whole`
@@ -177,7 +240,7 @@ without a whole-upload delta.
 first and stable for the whole `Context` lifetime. A6's detector keys on it.
 
 - **Our code:** `freminal-windowing/src/egui_integration.rs` — `atlas_grew`.
-- **Upstream (0.35.0):** `egui/src/context.rs` —
+- **Upstream (0.36.1):** `egui/src/context.rs` —
   `WrappedTextureManager::default` (`~73-91`, allocates the font texture first
   with an `assert_eq!(font_id, TextureId::default())`);
   `epaint/src/textures.rs` — `TextureManager::alloc` doc (`~24-28`).
@@ -193,7 +256,7 @@ closure) to bracket the band range. This works because `ctx.graphics()` /
 
 - **Our code:** `freminal/src/gui/app_impl.rs` — `band_shape_start` /
   `band_shape_end` captures via `ctx.graphics(...)`.
-- **Upstream (0.35.0):** `egui/src/context.rs` — `graphics` / `graphics_mut`
+- **Upstream (0.36.1):** `egui/src/context.rs` — `graphics` / `graphics_mut`
   (`~971-981`), and `end_pass` draining `viewport.graphics` (`~2617-2619`).
 - **Symptom if broken:** the band range is captured against the wrong or an
   empty layer set — the band is mis-sliced (blank terminal or duplicated
@@ -209,7 +272,7 @@ overridden.
 
 - **Our code:** `freminal/src/gui/app_impl.rs` — the root Ui construction and
   the REPLAY `band_ui` construction (explicit `.layer_id(background())`).
-- **Upstream (0.35.0):** `egui/src/ui.rs` — `Ui::new`
+- **Upstream (0.36.1):** `egui/src/ui.rs` — `Ui::new`
   (`layer_id.unwrap_or_else(LayerId::background)`, `~124`), `Ui::new_child`
   (`~224-231`, clones parent painter, only overrides layer if the builder
   supplies one).
@@ -230,7 +293,7 @@ our own blink/content scheduling wants an earlier wake."
   `chrome_repaint_settled`; `freminal/src/gui/app_impl.rs` —
   `shortest_repaint_delay` / `request_repaint_after` /
   `take_terminal_requested_delay`.
-- **Upstream (0.35.0):** `egui/src/context.rs` — `request_repaint_after`
+- **Upstream (0.36.1):** `egui/src/context.rs` — `request_repaint_after`
   effect writes `viewport.repaint.repaint_delay` (`~158-159`); the same field
   is read into `ViewportOutput.repaint_delay` (`~2719`); egui-internal
   scheduling writes it too (`~111`, `~113`).
@@ -252,9 +315,14 @@ hide the gutter-hover / interaction widgets.
   approach (band stays in background layer); regression tests
   `same_layer_widget_is_not_hidden_by_containing_widget` and
   `dedicated_background_layer_hides_contained_widget_cross_layer`.
-- **Upstream (0.35.0):** `egui/src/hit_test.rs` — the hidden-rule loop
+- **Upstream (0.36.1):** `egui/src/hit_test.rs` — the hidden-rule loop
   (`~143-151`: `contains_rect(...) && current.layer_id != next.layer_id =>
-  hidden.insert(...)`).
+  hidden.insert(...)`). Note that 0.36 added a filter _upstream of_ this loop
+  (`egui/src/context.rs`, `begin_pass`: layers are now collected through
+  `memory.areas().is_interactable(layer_id)`, so non-interactable areas are
+  click-through and never reach the hit-test). That narrows which layers are
+  considered but does not change the rule this assumption rests on; both
+  regression tests below still pass unchanged.
 - **Symptom if broken:** if the rule is removed or changed, the "band must stay
   in background layer" constraint may relax — but do not rely on that; the
   regression tests pin the current behaviour. If they fail on a bump, the
@@ -270,13 +338,13 @@ event.
 
 **Carve-out (found post-#436, fixed after #436 landed): `RedrawRequested` must
 be excluded from the `response.repaint` half of this gate.** `egui-winit`
-0.35.0 returns `EventResponse { repaint: true, .. }` for
+returns `EventResponse { repaint: true, .. }` for
 `WindowEvent::RedrawRequested` _unconditionally_, via a grouped match arm
 commented "Things that may require repaint:" that also covers
 `CursorEntered`/`Destroyed`/`Occluded`/`Resized`/`Moved`/`TouchpadPressure`/
-`CloseRequested` (`egui-winit-0.35.0/src/lib.rs:489-500`). Note this is a
+`CloseRequested` (`egui-winit-0.36.1/src/lib.rs:512-522`). Note this is a
 _different_ arm from `ScaleFactorChanged`'s, which is its own separate arm
-(`~310-324`) that happens to return `repaint: true` too — the two are not
+(`~324-338`) that happens to return `repaint: true` too — the two are not
 grouped together, they merely share the outcome this gate relies on. But `RedrawRequested` is also the
 event that drives every single frame, and `window_event`'s `RedrawRequested`
 arm reads this gate back (via `std::mem::take(&mut
@@ -303,9 +371,9 @@ becomes a harmless no-op rather than wrong.
   `is_unconditional_chrome_input`, `should_set_chrome_input_pending` (the
   `RedrawRequested` carve-out), and the general event arm's call to it in
   place of the old inline `|| response.repaint` OR.
-- **Upstream (0.35.0):** `egui-winit/src/lib.rs` —
-  `WindowEvent::ScaleFactorChanged { .. }` (`~310-324`) and
-  `WindowEvent::RedrawRequested` (`~489-500`, in the grouped "Things that may
+- **Upstream (0.36.1):** `egui-winit/src/lib.rs` —
+  `WindowEvent::ScaleFactorChanged { .. }` (`~324-338`) and
+  `WindowEvent::RedrawRequested` (`~512-522`, in the grouped "Things that may
   require repaint:" arm) each return `EventResponse { repaint: true, .. }`
   unconditionally, from **separate** match arms. On a bump, re-verify both
   that `ScaleFactorChanged` still flags a repaint (the gate's completeness
@@ -343,7 +411,7 @@ this by setting `Options::zoom_with_keyboard = false` and never calling
 - **Our code:** `freminal-windowing/src/event_loop.rs` —
   `physical_to_logical_pos` (divides by `window.scale_factor()`);
   `freminal/src/gui/rendering.rs` — `options.zoom_with_keyboard = false`.
-- **Upstream (0.35.0):** `egui-winit/src/lib.rs` — `pixels_per_point(ctx,
+- **Upstream (0.36.1):** `egui-winit/src/lib.rs` — `pixels_per_point(ctx,
   window) = window.scale_factor() * ctx.zoom_factor()`; egui zoom is driven
   only by `egui::gui_zoom::zoom_with_keyboard` (gated on the option) or an
   explicit `set_zoom_factor`.
@@ -360,3 +428,60 @@ Behaviours that _are_ part of a stable public API (e.g. `Context::run_ui`,
 `Context::tessellate` signatures, `PaintCallback` shape) are not listed — a
 version bump that changes those is a compile error and needs no special
 checklist. This file is only for the silent, undocumented, internal behaviours.
+
+## Verification log
+
+One entry per bump. Record what was checked and how, so the next bump can tell
+a genuine re-verification from a rubber stamp.
+
+### 0.35.0 → 0.36.1
+
+Method: extracted the 0.36.1 `egui`, `epaint`, `egui_glow` and `egui-winit`
+crates and `diff -u`'d every file named in the table above against the 0.35.0
+copies in `~/.cargo/registry/src/*/`.
+
+| File | Diff | Assumptions discharged |
+| --- | --- | --- |
+| `egui/src/layers.rs` | identical | A3 |
+| `epaint/src/texture_atlas.rs` | identical | A6 (upstream half) |
+| `epaint/src/image.rs` | identical | A6 (delta half) |
+| `egui/src/ui.rs` | identical | A9 |
+| `epaint/src/tessellator.rs` | cosmetic only (`fast_midpoint`, an import) | A4, A5 |
+| `egui/src/hit_test.rs` | one `expect` attribute removed | A11 |
+| `egui_glow/src/painter.rs` | `paint_and_update_textures` only | A1 holds, **A2 changed** |
+| `egui/src/context.rs` | `run_logic`, `sync_window_theme`, hit-test filter | A5, A7, A8, A10 |
+| `epaint/src/textures.rs` | `TexturesDelta` reshaped | **A2 changed** |
+| `egui-winit/src/lib.rs` | modifiers, dropped files, IME purpose | A12, A13 |
+
+Outcome: **A2 changed** (see its entry — the `TexturesDelta` reshape and drop
+bomb, upstream #8356); **A6 held upstream but its consumer needed rewriting**
+for the new per-texture delta vector. All eleven others held unchanged.
+
+Absorbed alongside, all of them ordinary compile-time API changes rather than
+silent behaviour (so not assumption rows):
+
+- `RawInput::modifiers` was removed in favour of `egui::Event::ModifiersChanged`
+  (#8336), and `egui_winit::State`'s replacement copy is **private with no
+  accessor**. `Context::input(|i| i.modifiers)` is not a substitute: it only
+  advances when a pass runs, so the pre-egui interception paths in
+  `event_loop.rs` (the Wayland paste work-around and the Task 114 blocked-key
+  routing) would read the _previous frame's_ modifiers and miss a `Ctrl` pressed
+  in the same frame interval as the `V` that follows it. Hence
+  `freminal-windowing/src/modifier_tracker.rs`, which mirrors the state from the
+  same winit events, applying the same platform `command` rule and the same
+  focus-loss reset.
+- `RawInput::dropped_files` became `Vec<Arc<dyn DroppedFile>>`, whose `path()`
+  returns `&Path` rather than the old `Option<PathBuf>` field. Behaviour is
+  unchanged on native, where the `Option` was always `Some`.
+- `Options::sync_window_theme` is new and **defaults to `true`**. It is a no-op
+  for freminal: it emits `ViewportCommand::SetTheme` derived from egui's own
+  `Options::theme_preference`, which freminal never sets (it manages themes
+  entirely through its own palette system), and
+  `event_loop.rs::process_viewport_command` does not handle `SetTheme` — the
+  command falls into the catch-all and is logged at `trace`. If we ever _want_
+  the OS titlebar to follow freminal's theme, this option plus a `SetTheme` arm
+  is the route.
+
+Pixel verification: see the "Symptom if broken" scenarios; `cargo test --all`,
+`cargo clippy --all-targets --all-features -D warnings`, `cargo machete` and
+`cargo xtask check-windows` all green.

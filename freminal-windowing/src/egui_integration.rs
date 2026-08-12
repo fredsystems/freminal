@@ -12,6 +12,7 @@ use winit::window::Window;
 
 use crate::error::Error;
 use crate::gl_context::GlState;
+use crate::modifier_tracker::ModifierTracker;
 
 /// Output from a single egui frame.
 pub struct FrameOutput {
@@ -70,6 +71,11 @@ pub struct EguiState {
     pub(crate) ctx: egui::Context,
     pub(crate) winit_state: egui_winit::State,
     pub(crate) painter: egui_glow::Painter,
+    /// Live modifier state for this window. Mirrors what `egui-winit` tracks
+    /// privately, because egui 0.36 removed `RawInput::modifiers` and exposes
+    /// no accessor for its replacement — see [`ModifierTracker`] for why the
+    /// egui-side `Context::input(|i| i.modifiers)` is not a substitute.
+    modifier_tracker: ModifierTracker,
     /// Cached chrome primitives from the last FULL frame — see [`ChromeCache`].
     chrome_cache: Option<ChromeCache>,
     /// The repaint delay `run_frame` returned last frame. Consulted, via
@@ -555,11 +561,20 @@ fn chrome_repaint_settled(
 ///
 /// Pure (no `self`/`egui::Context` state needed beyond the delta itself),
 /// so directly unit-testable.
+///
+/// egui 0.36 (upstream #8356) reshaped `TexturesDelta::set` from an ordered
+/// `Vec<(TextureId, ImageDelta)>` into a `HashMap<TextureId, SmallVec<[ImageDelta; 1]>>`,
+/// so one texture can now carry several queued deltas. `TexturesDelta::push`
+/// collapses the vector to a single entry when the incoming delta is whole, but
+/// *partial* deltas queued afterwards are appended to it — so a frame that both
+/// resizes the atlas and then allocates further glyphs into it leaves
+/// `[whole, partial, ..]`. The predicate is therefore "**any** delta for the
+/// font atlas is whole", not "the delta for the font atlas is whole".
 fn atlas_grew(textures_delta: &egui::TexturesDelta) -> bool {
     textures_delta
         .set
-        .iter()
-        .any(|(id, delta)| *id == egui::TextureId::default() && delta.is_whole())
+        .get(&egui::TextureId::default())
+        .is_some_and(|deltas| deltas.iter().any(egui::epaint::ImageDelta::is_whole))
 }
 
 /// The four independent REPLAY gate predicates from [`decide_chrome_mode`]'s
@@ -719,6 +734,7 @@ impl EguiState {
             ctx,
             winit_state,
             painter,
+            modifier_tracker: ModifierTracker::default(),
             chrome_cache: None,
             prev_repaint_delay: std::time::Duration::MAX,
             prev_chrome_damage: crate::ChromeDamage::Changed,
@@ -956,7 +972,10 @@ impl EguiState {
         // the windowing side.
         #[cfg(feature = "frame-profiling")]
         let run_ui_start = std::time::Instant::now();
-        let full_output = self.ctx.run_ui(raw_input, |root_ui| {
+        // `mut` because the texture-delta application below drains
+        // `full_output.textures_delta` in place (egui 0.36 / #8356 — see the
+        // comment at the drain site).
+        let mut full_output = self.ctx.run_ui(raw_input, |root_ui| {
             let signals = ui_fn(&*root_ui, &gl_state.glow_context, chrome_mode);
             frame_damage = signals.frame_damage;
             band_range = signals.band_range;
@@ -1199,9 +1218,26 @@ impl EguiState {
         // first (e.g. the `CentralPanel` background fill, which must be
         // UNDER the band), then band, then tail (overlays/borders, which
         // must be OVER the band).
+        //
+        // egui 0.36 (upstream #8356) made `TexturesDelta` a drop-bomb: it
+        // `debug_assert!`s that it is empty when dropped, and upstream's
+        // `paint_and_update_textures` now `drain()`s both halves rather than
+        // iterating them by reference. So these two loops must drain too —
+        // iterating by reference would leave the delta populated and panic in
+        // debug builds at the end of the frame. Draining also matches the
+        // upstream contract that each delta is applied exactly once.
+        //
+        // `set` is a `HashMap<TextureId, SmallVec<[ImageDelta; 1]>>` as of
+        // 0.36 (it was an ordered `Vec` before). Cross-texture ordering is
+        // irrelevant — each texture is uploaded independently — but the
+        // per-texture order within a `SmallVec` is significant (a whole upload
+        // followed by partial patches of it), and `SmallVec`'s iteration
+        // preserves it.
         let size_px = [size.width, size.height];
-        for (id, image_delta) in &full_output.textures_delta.set {
-            self.painter.set_texture(*id, image_delta);
+        for (id, image_deltas) in full_output.textures_delta.set.drain() {
+            for image_delta in image_deltas {
+                self.painter.set_texture(id, &image_delta);
+            }
         }
         // Task 121 frame-profiling harness: time the three `paint_primitives`
         // calls, summed (a contiguous span across all three, since nothing
@@ -1220,8 +1256,8 @@ impl EguiState {
             self.frame_profile.paint_total += d;
             self.frame_profile.paint_max = self.frame_profile.paint_max.max(d);
         }
-        for id in &full_output.textures_delta.free {
-            self.painter.free_texture(*id);
+        for id in full_output.textures_delta.free.drain() {
+            self.painter.free_texture(id);
         }
 
         // Pre-present notify for Wayland frame pacing
@@ -1428,6 +1464,10 @@ impl EguiState {
         window: &Window,
         event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
+        // Mirror the modifier state BEFORE egui-winit consumes the event, so
+        // `modifiers()` is current for the interception paths in
+        // `event_loop::window_event` that read it after this call.
+        self.modifier_tracker.on_window_event(event);
         self.winit_state.on_window_event(window, event)
     }
 
@@ -1445,8 +1485,13 @@ impl EguiState {
     }
 
     /// Read the current egui modifier state.
-    pub(crate) fn modifiers(&self) -> egui::Modifiers {
-        self.winit_state.egui_input().modifiers
+    ///
+    /// Sourced from [`ModifierTracker`], not from egui: egui 0.36 removed
+    /// `RawInput::modifiers`, and `Context::input(|i| i.modifiers)` only
+    /// advances when a pass runs, so it would report last frame's modifiers to
+    /// the pre-egui interception paths that call this.
+    pub(crate) const fn modifiers(&self) -> egui::Modifiers {
+        self.modifier_tracker.current()
     }
 
     /// Free the painter's OpenGL resources.
@@ -2157,6 +2202,32 @@ mod tests {
         )))
     }
 
+    /// Run `atlas_grew` over a hand-built delta, then discard the delta
+    /// safely.
+    ///
+    /// egui 0.36 (#8356) gave `TexturesDelta` a `Drop` impl that
+    /// `debug_assert!`s the delta was emptied by a painter, so a test that
+    /// merely lets a populated one fall out of scope panics. `clear()` is the
+    /// sanctioned "I am deliberately dropping this" escape hatch; every test
+    /// below goes through this helper so none of them can forget it.
+    fn atlas_grew_of(deltas: &[(TextureId, ImageDelta)]) -> bool {
+        let mut textures_delta = TexturesDelta::default();
+        for (id, delta) in deltas {
+            textures_delta.push(*id, delta.clone());
+        }
+        let grew = atlas_grew(&textures_delta);
+        textures_delta.clear();
+        grew
+    }
+
+    fn whole() -> ImageDelta {
+        ImageDelta::full(tiny_image(), TextureOptions::default())
+    }
+
+    fn patch() -> ImageDelta {
+        ImageDelta::partial([0, 0], tiny_image(), TextureOptions::default())
+    }
+
     #[test]
     fn atlas_grew_false_on_empty_delta() {
         assert!(!atlas_grew(&TexturesDelta::default()));
@@ -2167,11 +2238,8 @@ mod tests {
         // `ImageDelta::full` sets `pos: None` -- `is_whole() == true` --
         // exactly the resize/respecify marker the self-heal watches for,
         // on `TextureId::default()` (the font atlas).
-        let delta = ImageDelta::full(tiny_image(), TextureOptions::default());
-        assert!(delta.is_whole(), "sanity: ImageDelta::full is whole");
-        let mut textures_delta = TexturesDelta::default();
-        textures_delta.set.push((TextureId::default(), delta));
-        assert!(atlas_grew(&textures_delta));
+        assert!(whole().is_whole(), "sanity: ImageDelta::full is whole");
+        assert!(atlas_grew_of(&[(TextureId::default(), whole())]));
     }
 
     #[test]
@@ -2179,14 +2247,11 @@ mod tests {
         // `ImageDelta::partial` sets `pos: Some(_)` -- a normal
         // new-glyph-added-to-the-existing-atlas upload, NOT a resize. Must
         // NOT be mistaken for atlas growth.
-        let delta = ImageDelta::partial([0, 0], tiny_image(), TextureOptions::default());
         assert!(
-            !delta.is_whole(),
+            !patch().is_whole(),
             "sanity: ImageDelta::partial is not whole"
         );
-        let mut textures_delta = TexturesDelta::default();
-        textures_delta.set.push((TextureId::default(), delta));
-        assert!(!atlas_grew(&textures_delta));
+        assert!(!atlas_grew_of(&[(TextureId::default(), patch())]));
     }
 
     #[test]
@@ -2194,10 +2259,7 @@ mod tests {
         // A whole-texture upload of some OTHER texture (e.g. an
         // image-protocol texture) is not the font atlas and must not
         // trigger the chrome-UV self-heal.
-        let delta = ImageDelta::full(tiny_image(), TextureOptions::default());
-        let mut textures_delta = TexturesDelta::default();
-        textures_delta.set.push((TextureId::User(42), delta));
-        assert!(!atlas_grew(&textures_delta));
+        assert!(!atlas_grew_of(&[(TextureId::User(42), whole())]));
     }
 
     #[test]
@@ -2205,16 +2267,37 @@ mod tests {
         // A realistic frame may carry multiple texture deltas; growth must
         // be detected even when the font-atlas entry is not the only one
         // (or not first).
-        let mut textures_delta = TexturesDelta::default();
-        textures_delta.set.push((
-            TextureId::User(7),
-            ImageDelta::partial([0, 0], tiny_image(), TextureOptions::default()),
-        ));
-        textures_delta.set.push((
-            TextureId::default(),
-            ImageDelta::full(tiny_image(), TextureOptions::default()),
-        ));
-        assert!(atlas_grew(&textures_delta));
+        assert!(atlas_grew_of(&[
+            (TextureId::User(7), patch()),
+            (TextureId::default(), whole()),
+        ]));
+    }
+
+    /// egui 0.36 regression guard (#8356 reshape).
+    ///
+    /// `TexturesDelta::set` now holds a *vector* of deltas per texture, and
+    /// `TexturesDelta::push` only collapses it when the incoming delta is
+    /// whole — a partial pushed afterwards is appended. So a frame that
+    /// resizes the atlas and then allocates further glyphs into the resized
+    /// atlas leaves `[whole, partial]`. Reading only one entry per texture
+    /// (the shape of the pre-0.36 predicate) would miss the growth and skip
+    /// the self-heal, garbling cached chrome text with no visible cause.
+    #[test]
+    fn atlas_grew_true_when_a_partial_is_queued_after_the_whole_upload() {
+        assert!(atlas_grew_of(&[
+            (TextureId::default(), whole()),
+            (TextureId::default(), patch()),
+        ]));
+    }
+
+    /// The mirror of the above: several partials and no whole upload is the
+    /// ordinary "new glyphs, same atlas" frame, which must NOT self-heal.
+    #[test]
+    fn atlas_grew_false_on_several_font_atlas_patches_without_a_whole_upload() {
+        assert!(!atlas_grew_of(&[
+            (TextureId::default(), patch()),
+            (TextureId::default(), patch()),
+        ]));
     }
 
     /// Reproduces the exact §5.2 hazard end-to-end using only
@@ -2260,9 +2343,12 @@ mod tests {
         // atlas and a cached shape list + its tessellation — this stands
         // in for `ChromeCache::{head_shapes, head_primitives}` after a
         // FULL frame.
-        let chrome_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut chrome_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.label("Chrome");
         });
+        chrome_output.textures_delta.clear();
         let cached_shapes = chrome_output.shapes;
         let cached_primitives_before = ctx.tessellate(cached_shapes.clone(), ppp);
 
@@ -2280,7 +2366,9 @@ mod tests {
         let big_text: String = (0x4E00u32..0x4E00u32 + 300)
             .filter_map(char::from_u32)
             .collect();
-        let band_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut band_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.label(egui::RichText::new(big_text.clone()).size(80.0));
         });
 
@@ -2289,6 +2377,9 @@ mod tests {
             "sanity: the band frame must actually grow the font atlas for \
              this test to exercise the hazard"
         );
+        // Only NOW is the delta spent: the assert above is the whole point of
+        // this frame, so the drop-bomb defusal has to come after it.
+        band_output.textures_delta.clear();
 
         // The hazard: painting `cached_primitives_before` now (after
         // growth, without re-tessellating) would sample the WRONG atlas
@@ -2407,7 +2498,9 @@ mod tests {
         let ctx = egui::Context::default();
         let pixels_per_point = 1.0;
 
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // Shape 0: "head" (chrome painted before the band).
             ui.painter().rect_filled(
                 Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)),
@@ -2432,6 +2525,7 @@ mod tests {
                 Color32::YELLOW,
             );
         });
+        full_output.textures_delta.clear();
 
         let shapes = full_output.shapes;
         assert_eq!(shapes.len(), 4, "sanity: exactly the four shapes painted");
@@ -2508,7 +2602,9 @@ mod tests {
     fn default_band_range_puts_everything_in_tail() {
         let ctx = egui::Context::default();
 
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             ui.painter().rect_filled(
                 Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)),
                 0.0,
@@ -2520,6 +2616,7 @@ mod tests {
                 Color32::GREEN,
             );
         });
+        full_output.textures_delta.clear();
 
         let shapes = full_output.shapes;
         assert_eq!(shapes.len(), 2, "sanity: exactly the two shapes painted");
@@ -2592,7 +2689,9 @@ mod tests {
         let ctx = egui::Context::default();
         let pixels_per_point = 1.0;
 
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // HEAD: chrome painted before the band (menu/tab bar stand-in).
             ui.painter().rect_filled(
                 Rect::from_min_size(pos2(0.0, 0.0), vec2(5.0, 5.0)),
@@ -2621,6 +2720,7 @@ mod tests {
                 Color32::YELLOW,
             );
         });
+        full_output.textures_delta.clear();
 
         let shapes = full_output.shapes;
         // 1 head rect + 4 callbacks + 1 border rect + 1 tail rect.

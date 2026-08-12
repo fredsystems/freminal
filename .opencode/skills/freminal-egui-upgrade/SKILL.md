@@ -1,6 +1,6 @@
 ---
 name: freminal-egui-upgrade
-description: Use ONLY when working in the freminal repository AND bumping, unpinning, or otherwise changing the version of any crate in the egui rendering stack — `egui`, `epaint`, `egui_glow`, `egui-winit` (and closely-coupled `glow` / `glutin` / `winit` / `raw-window-handle`) — or editing their `=0.35.0` exact pins in the workspace `Cargo.toml`, or touching the Renovate "egui + windowing stack" group. The chrome-caching work (#435/#436) relies on undocumented internal behaviour of egui 0.35.0; this skill mandates walking the `Documents/EGUI_UPGRADE_ASSUMPTIONS.md` re-verification checklist and running the pixel-level smoke before any such bump lands, and explains why the exact pins and the no-auto-merge Renovate rule are deliberate.
+description: Use ONLY when working in the freminal repository AND bumping, unpinning, or otherwise changing the version of any crate in the egui rendering stack — `egui`, `epaint`, `egui_glow`, `egui-winit` (and closely-coupled `glow` / `glutin` / `winit` / `raw-window-handle`) — or editing their exact-version pins in the workspace `Cargo.toml`, or touching the Renovate "egui + windowing stack" group. The chrome-caching work (#435/#436) relies on undocumented internal behaviour of the pinned egui version; this skill mandates walking the `Documents/EGUI_UPGRADE_ASSUMPTIONS.md` re-verification checklist and running the pixel-level smoke before any such bump lands, and explains why the exact pins and the no-auto-merge Renovate rule are deliberate.
 ---
 
 # Freminal: verify the egui stack before bumping it
@@ -9,7 +9,8 @@ The chrome-caching work (issues #435 and #436) makes the GUI skip
 re-recording / re-tessellating / re-painting chrome on frames where the
 chrome did not change. To do this it depends on a set of **undocumented,
 internal behaviours** of the egui stack (`egui`, `epaint`, `egui_glow`,
-`egui-winit`) at version **0.35.0** — things that are not part of any
+`egui-winit`) at the exact version pinned in the workspace `Cargo.toml`
+(currently **0.36.1**) — things that are not part of any
 crate's public API contract and can change silently across versions.
 
 The failure mode is the dangerous kind: **no compile error, no headless
@@ -18,19 +19,28 @@ ghosted chrome, or stale overlays at runtime.
 
 ## The rules
 
-1. **`egui`, `egui_glow`, and `egui-winit` are exact-pinned (`=0.35.0`) as a
+1. **`egui`, `egui_glow`, and `egui-winit` are exact-pinned (`=`) as a
    matched set** in the workspace `Cargo.toml`. This is deliberate. Do **not**
    relax them to a caret range as a "cleanup". A patch bump can change the
    internal behaviour we rely on.
 
-2. **Never auto-merge an egui-stack bump.** Renovate's "egui + windowing
+2. **`glow` is not ours to bump — it follows `egui_glow`.** `egui_glow`
+   declares `glow = "0.17.0"` and upstream cannot move to 0.18, because
+   wgpu 30's `wgpu-hal` pins glow 0.17. We pass `Arc<glow::Context>` straight
+   into `egui_glow::Painter`, so two glow versions in the graph is a **type
+   error**, not merely a duplicate dependency. `renovate.json` constrains glow
+   to `<0.18` for this reason; Renovate's group will otherwise propose a bump
+   that cannot resolve. Before bumping glow, read the _new_ `egui_glow`'s
+   `Cargo.toml` and only follow what it declares.
+
+3. **Never auto-merge an egui-stack bump.** Renovate's "egui + windowing
    stack" group is configured with `automerge: false` and
    `dependencyDashboardApproval: true`, so a bump PR is not even opened until a
    human approves it on the Dependency Dashboard. Do not remove those settings.
    (Dependabot cargo updates are disabled entirely via
    `open-pull-requests-limit: 0`.)
 
-3. **Before bumping any crate in the egui stack, walk every row of
+4. **Before bumping any crate in the egui stack, walk every row of
    `Documents/EGUI_UPGRADE_ASSUMPTIONS.md`** against the new version's source.
    For each assumption:
    - Read the new version's equivalent upstream code (line numbers will have
@@ -39,7 +49,7 @@ ghosted chrome, or stale overlays at runtime.
    - If it changed, fix the corresponding `Our code` site and update the
      assumptions doc _in the same PR_.
 
-4. **A green `cargo test --all` is NOT sufficient.** It only catches the
+5. **A green `cargo test --all` is NOT sufficient.** It only catches the
    headless-verifiable subset (callback ordering, atlas-growth detection logic,
    the FULL/REPLAY decision, the damage composition). The load-bearing failures
    are pixel-only. You must additionally run the pixel-level verification:
@@ -50,7 +60,8 @@ ghosted chrome, or stale overlays at runtime.
      menu / search bar / command palette / URL-hover tooltip left idle, an OS
      dark/light switch, a DPI/scale-factor change).
 
-5. **Only after all of the above passes may the `=0.35.0` pins move.**
+6. **Only after all of the above passes may the exact pins move**, and the
+   verification log at the bottom of the assumptions doc gains an entry.
 
 ## Why this is worth the friction
 
@@ -72,4 +83,5 @@ verified act rather than an automated one.
 
 See `Documents/EGUI_UPGRADE_ASSUMPTIONS.md` for the full assumption table
 (A1–A12): what we rely on, where our code depends on it, the upstream source
-that proves it in 0.35.0, and the visible symptom if a bump breaks it.
+that proves it in the pinned version, and the visible symptom if a bump
+breaks it.

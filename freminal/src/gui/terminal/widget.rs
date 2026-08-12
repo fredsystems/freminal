@@ -3716,9 +3716,12 @@ fn handle_file_drop(ui: &Ui, terminal_rect: Rect, input_tx: &Sender<InputEvent>)
             if i > 0 {
                 payload.push(' ');
             }
-            if let Some(path) = &file.path {
-                payload.push_str(&shell_escape_path(path));
-            }
+            // egui 0.36 made `dropped_files` a `Vec<Arc<dyn DroppedFile>>`
+            // whose `path()` returns a plain `&Path` rather than the old
+            // `Option<PathBuf>` field. The `Option` was always `Some` on
+            // native anyway (`egui-winit` filled it from the winit event), so
+            // dropping the `if let` changes no behaviour here.
+            payload.push_str(&shell_escape_path(file.path()));
         }
         if !payload.is_empty() {
             payload.push(' ');

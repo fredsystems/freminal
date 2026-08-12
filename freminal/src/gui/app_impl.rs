@@ -4760,7 +4760,9 @@ mod tests {
         // range.
         let mut extracted: Vec<egui::epaint::ClippedShape> = Vec::new();
         let mut chrome_shape_count = 0usize;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             // "Chrome" shape, painted before the band region starts.
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(5.0, 5.0)),
@@ -4798,6 +4800,7 @@ mod tests {
                     })
             });
         });
+        discarded_output.drop_without_applying_deltas();
 
         assert_eq!(
             chrome_shape_count, 1,
@@ -4821,7 +4824,9 @@ mod tests {
         // rendering is unaffected by the extraction seam existing.
         let ctx = egui::Context::default();
 
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let band_shape_start = ui.ctx().graphics(|g| {
                 g.get(egui::LayerId::background())
                     .map_or(0, |list| list.all_entries().len())
@@ -4843,6 +4848,7 @@ mod tests {
             });
             assert!(!extracted.is_empty());
         });
+        full_output.textures_delta.clear();
 
         assert!(
             !full_output.shapes.is_empty(),
@@ -4889,7 +4895,9 @@ mod tests {
         // `band_layer_id`. `big` mimics `CentralPanel`'s content-area
         // widget rect (which fully contains the band); `small` mimics a
         // band-region interactive widget (e.g. the command-block gutter).
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
                 big_rect,
                 egui::Id::new("root_content_area"),
@@ -4901,6 +4909,7 @@ mod tests {
                 egui::Sense::click(),
             );
         });
+        discarded_output.drop_without_applying_deltas();
 
         // Frame 2: pointer is over `small_rect`. Hit-testing (computed at
         // the start of this frame from frame 1's registered widget rects)
@@ -4913,7 +4922,9 @@ mod tests {
             ..Default::default()
         };
         let mut small_hovered = false;
-        let _ = ctx.run_ui(raw_input, |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(
                 big_rect,
                 egui::Id::new("root_content_area"),
@@ -4926,6 +4937,7 @@ mod tests {
             );
             small_hovered = small_response.hovered();
         });
+        discarded_output.drop_without_applying_deltas();
 
         assert!(
             small_hovered,
@@ -4957,7 +4969,9 @@ mod tests {
         );
 
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _big = ui.interact(
                 big_rect,
                 egui::Id::new("root_content_area"),
@@ -4974,13 +4988,16 @@ mod tests {
                 egui::Sense::click(),
             );
         });
+        discarded_output.drop_without_applying_deltas();
 
         let raw_input = egui::RawInput {
             events: vec![egui::Event::PointerMoved(pointer_pos)],
             ..Default::default()
         };
         let mut small_hovered = false;
-        let _ = ctx.run_ui(raw_input, |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let discarded_output = ctx.run_ui(raw_input, |ui| {
             let _big = ui.interact(
                 big_rect,
                 egui::Id::new("root_content_area"),
@@ -4998,6 +5015,7 @@ mod tests {
             );
             small_hovered = small_response.hovered();
         });
+        discarded_output.drop_without_applying_deltas();
 
         assert!(
             !small_hovered,

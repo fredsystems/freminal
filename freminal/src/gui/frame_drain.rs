@@ -831,7 +831,9 @@ mod tests {
         let config = Config::default();
         let ctx = egui::Context::default();
         let mut events = None;
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             events = Some(drain_window_manipulation_commands(
                 ui,
                 &mut tabs,
@@ -841,6 +843,7 @@ mod tests {
                 &config,
             ));
         });
+        full_output.textures_delta.clear();
         let Some(events) = events else {
             panic!("closure runs synchronously inside run_ui");
         };
@@ -892,7 +895,9 @@ mod tests {
 
         let config = Config::default();
         let ctx = egui::Context::default();
-        let full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+        // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md.
+        let mut full_output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let _ = drain_window_manipulation_commands(
                 ui,
                 &mut tabs,
@@ -902,6 +907,7 @@ mod tests {
                 &config,
             );
         });
+        full_output.textures_delta.clear();
 
         let minimize_commands: usize = full_output
             .viewport_output
