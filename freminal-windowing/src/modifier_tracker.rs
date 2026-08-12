@@ -220,31 +220,20 @@ mod tests {
         );
     }
 
-    /// Pins the ordering the module doc describes: the modifier state is
-    /// established by a `ModifiersChanged` event, and is then read correctly
-    /// while handling a *later, separate* `KeyboardInput` event — which is
-    /// itself irrelevant to the tracker. This is the exact two-event sequence
-    /// behind `Ctrl+V` reaching the Wayland paste intercept.
-    #[test]
-    fn modifiers_survive_until_a_later_keyboard_event_reads_them() {
-        let mut tracker = ModifierTracker::default();
-
-        // Event 1: the modifier press. Never intercepted, so it always
-        // reaches `on_window_event` and therefore this tracker.
-        tracker.on_window_event(&modifiers_changed(ModifiersState::CONTROL));
-
-        // Event 2: the key press that the paste intercept claims. It is
-        // handled in a later `window_event` call, and reads the state above.
-        // Feeding it here proves it neither clears nor alters that state.
-        tracker.on_window_event(&WindowEvent::RedrawRequested);
-        assert!(
-            tracker.current().command || cfg!(target_os = "macos"),
-            "the Ctrl established by the earlier event must still be readable \
-             when the later key event is handled"
-        );
-        assert!(tracker.current().ctrl);
-    }
-
+    /// The state is sticky: it changes only on `ModifiersChanged` or a focus
+    /// loss, and survives any number of intervening events untouched.
+    ///
+    /// This is as close as a unit test gets to the cross-call ordering in the
+    /// module doc — that a `Ctrl` from one `window_event` call is still
+    /// readable when a later call handles the `V`. The real sequence cannot be
+    /// pinned here, or anywhere: the second event would have to be a
+    /// `WindowEvent::KeyboardInput`, and `winit::KeyEvent` has a private
+    /// `platform_specific` field so it cannot be constructed outside winit.
+    /// Driving `event_loop::window_event` instead needs an `ActiveEventLoop`,
+    /// a real window and a GL context — the harness gap tracked in issue #440.
+    /// So the guarantee rests on the module doc's argument (modifier state
+    /// arrives as its own event, which no interception path claims) plus this
+    /// stickiness property, not on an end-to-end test.
     #[test]
     fn unrelated_events_leave_the_state_untouched() {
         let mut tracker = ModifierTracker::default();
@@ -252,6 +241,12 @@ mod tests {
 
         tracker.on_window_event(&WindowEvent::RedrawRequested);
         tracker.on_window_event(&WindowEvent::CloseRequested);
-        assert!(tracker.current().ctrl);
+        tracker.on_window_event(&WindowEvent::Focused(true));
+        tracker.on_window_event(&WindowEvent::Occluded(true));
+        assert!(
+            tracker.current().ctrl,
+            "modifier state must persist across unrelated events -- a read \
+             from a later `window_event` call still sees it"
+        );
     }
 }
