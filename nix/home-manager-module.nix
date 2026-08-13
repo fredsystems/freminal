@@ -1128,7 +1128,7 @@ in
 
     # On Linux, Freminal reads $XDG_CONFIG_HOME/freminal/config.toml.
     # On macOS, it reads ~/Library/Application Support/Freminal/config.toml.
-    xdg.configFile."freminal/config.toml" = lib.mkIf (!pkgs.stdenv.hostPlatform.isDarwinn) {
+    xdg.configFile."freminal/config.toml" = lib.mkIf (!pkgs.stdenv.hostPlatform.isDarwin) {
       source = tomlFormat.generate "freminal-config" configAttrset;
     };
     home.file."Library/Application Support/Freminal/config.toml" =
