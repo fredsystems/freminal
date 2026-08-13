@@ -1128,12 +1128,14 @@ in
 
     # On Linux, Freminal reads $XDG_CONFIG_HOME/freminal/config.toml.
     # On macOS, it reads ~/Library/Application Support/Freminal/config.toml.
-    xdg.configFile."freminal/config.toml" = lib.mkIf (!pkgs.stdenv.isDarwin) {
+    xdg.configFile."freminal/config.toml" = lib.mkIf (!pkgs.stdenv.hostPlatform.isDarwinn) {
       source = tomlFormat.generate "freminal-config" configAttrset;
     };
-    home.file."Library/Application Support/Freminal/config.toml" = lib.mkIf pkgs.stdenv.isDarwin {
-      source = tomlFormat.generate "freminal-config" configAttrset;
-    };
+    home.file."Library/Application Support/Freminal/config.toml" =
+      lib.mkIf pkgs.stdenv.hostPlatform.isDarwin
+        {
+          source = tomlFormat.generate "freminal-config" configAttrset;
+        };
 
     # On macOS, Home Manager automatically copies .app bundles from
     # home.packages into ~/Applications/Home Manager Apps/. No custom

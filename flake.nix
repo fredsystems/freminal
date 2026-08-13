@@ -61,7 +61,7 @@
           runtimeLibs = [
             pkgs.libxkbcommon
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.wayland
             pkgs.libGL
           ];
@@ -132,13 +132,13 @@
               pkgs.pkg-config
               pkgs.makeWrapper
             ]
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.copyDesktopItems
             ];
 
             buildInputs = runtimeLibs;
 
-            desktopItems = pkgs.lib.optionals pkgs.stdenv.isLinux [
+            desktopItems = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               desktopItem
             ];
 
@@ -149,7 +149,7 @@
             ];
 
             postInstall =
-              if pkgs.stdenv.isDarwin then
+              if pkgs.stdenv.hostPlatform.isDarwin then
                 ''
                   # Create a macOS .app bundle so Freminal appears in
                   # Finder / Spotlight / Launchpad.
@@ -394,7 +394,7 @@
                 pkgs.markdownlint-cli2
                 pkgs.python313Packages.msgpack # For sequence decoder
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.cargo-llvm-cov
                 pkgs.cachix
               ];
@@ -428,7 +428,7 @@
                 pkgs.libicns
                 pkgs.cargo-msrv
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.perf
                 pkgs.fish
                 # Windows cross-check toolchain (see `windowsCheck`). Linux-only,
@@ -447,7 +447,7 @@
                   pkgs.libGL
                   pkgs.libxkbcommon
                 ]
-                ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+                ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                   pkgs.wayland
                 ];
 
@@ -462,7 +462,7 @@
               # `windowsCheck.toolchain` (with it). PATH order would otherwise
               # pick the wrong one, so `check_windows` invokes this cargo
               # explicitly rather than relying on `which cargo`.
-              windowsCheckEnv = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+              windowsCheckEnv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                 CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = windowsCheck.linker;
                 FREMINAL_WINDOWS_CARGO = "${windowsCheck.toolchain}/bin/cargo";
               };
