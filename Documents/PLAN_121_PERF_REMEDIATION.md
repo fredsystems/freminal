@@ -597,6 +597,67 @@ same cost as a full-screen rebuild. Measured at 4.80% self under btop. The exist
 quantify the recoverable headroom. Also listed as issue #405 Part B's own
 suggested-next-step 4.
 
+### 121.18 recon finding (2026-08-16): this is a redesign, not a subtask
+
+The premise is confirmed: both builders `clear()` and walk every visible row
+unconditionally. `build_background_instances` is
+`freminal/src/gui/renderer/vertex.rs:361-646`, `build_foreground_instances` is
+`vertex.rs:722-784`. Called only from `freminal/src/gui/terminal/widget.rs:2740`
+(bg) and `:2798` (fg), plus benches.
+
+**Blocker 1 — the instance buffers are variable-length per row, not
+fixed-stride.** Background skips `TerminalColor::DefaultBackground` runs
+entirely (`vertex.rs:408-415`, a `continue`); foreground skips zero-size glyphs
+i.e. spaces (`vertex.rs:1436-1439`). So a row's instance count is a function of
+its *content*. A single cell changing default-background→coloured changes that
+row's count and shifts every subsequent row's offset in the flat buffer. There
+is no row-start-offset index anywhere, so locating "row N's data" costs a full
+re-walk — the same cost as the rebuild it is trying to avoid.
+
+**Blocker 2 — `deco_verts` is not row-major past its first section.** The
+per-row underline/strikethrough pass runs in the row loop (`vertex.rs:434-503`),
+but search-match highlights (`vertex.rs:509-531`), the command-block hover tint
+(`546-566`) and selection highlights (`569-617`) are each appended afterwards as
+bulk global blocks spanning arbitrary row ranges, with the cursor quad always
+last (`619-643`). One row's decoration output can therefore live in up to three
+non-adjacent regions plus a shared tail.
+
+**Blocker 3 — no per-row dirty signal survives to the call site.**
+`evaluate_frame_dirty_state` in `freminal/src/gui/terminal/frame_dirty.rs:265-314`
+derives `content_changed` from `Arc::ptr_eq` over the whole `visible_chars` /
+`visible_line_widths` arrays, so one changed cell flips a single global bit for
+the entire screen. `freminal-buffer` does track per-row dirty bits internally,
+but they are consumed inside `rows_as_tchars_and_tags_cached` and never cross
+the snapshot boundary. `ShapingCache` (`freminal/src/gui/shaping.rs:196-228`)
+*does* compute per-row change via hash comparison, but discards which indices
+changed the moment it returns its `Vec<Arc<ShapedLine>>`.
+
+**Blocker 4 — the GL upload pattern forbids a partial write.** `upload_verts`
+(`freminal/src/gui/renderer/gpu.rs:1665-1682`) orphans the buffer
+(`buffer_data_size` + `STREAM_DRAW`) before every write specifically to avoid a
+sync stall, which leaves prior GPU-side contents undefined. A genuine partial
+`glBufferSubData` is therefore impossible without abandoning that pattern, and
+there is a double-buffered VBO discipline (`gpu.rs:587-623`) that issue #432
+depends on for correctness.
+
+**Assessment.** Making this incremental requires, in order: propagating
+per-row dirtiness out of `ShapingCache`; giving `bg_instances`/`fg_instances`
+either a fixed stride (padding blank cells, a real GPU-side cost needing its
+own benchmark) or a maintained per-row offset index (bookkeeping that silently
+corrupts unrelated rows when wrong — exactly the bug class issue #432 already
+produced once for the far simpler cursor-quad offset); deciding that
+`deco_verts` stays a full rebuild; and only then changing the upload strategy.
+That is a redesign of the CPU-side vertex representation plus a new dirty
+channel plus a GL-upload change, to recover a measured 4.80% self time.
+
+**Recommendation:** do not attempt 121.18 in its current framing. Either
+re-scope it explicitly as that redesign (and price it accordingly), or pursue
+the cheaper alternative of reducing how often the full rebuild is triggered at
+all — better dirty granularity at the snapshot level — which touches no buffer
+layout. Note the existing `instanced_bg_partial_dirty` /
+`instanced_fg_partial_dirty` benches quantify the headroom but are explicitly
+*not* an incremental implementation.
+
 ### 121.19 — ASCII / simple-text shaping fast path (#459 item 4)
 
 `<char as UnicodeGeneralCategory>::general_category` was 8.56% self under btop,
@@ -605,6 +666,75 @@ freminal code and not cacheable by us. `ShapingCache` already avoids re-shaping
 unchanged rows, so this is genuine reshape cost. The lever is a fast path that skips
 full rustybuzz shaping for runs that cannot need ligatures or complex script
 shaping. **Confirm no such path exists today before scoping.**
+
+### 121.19 recon finding (2026-08-16): the ASCII gate is dead on arrival at default config
+
+The entry asked to "confirm no such path exists today". **Confirmed: none
+exists.** Every `TextRun` reaches `rustybuzz` via `shape_single_run` →
+`FontManager::shape_cached` → `rustybuzz::shape_with_plan`
+(`freminal/src/gui/shaping.rs:661`, `freminal/src/gui/font_manager.rs:787`)
+with no complexity-based bypass. The only ASCII fast path in the tree is
+`TChar::from_string`'s grapheme-segmentation skip in
+`freminal-common/src/buffer_states/tchar.rs:143-146`, which is upstream in the
+buffer layer and unrelated to shaping.
+
+The cost attribution is confirmed too: `general_category` is called per
+character from inside rustybuzz's own `GlyphInfo::init_unicode_props`, during
+`shape_with_plan`. It is not reachable or cacheable from freminal code, so the
+only way to avoid it is to not call rustybuzz for that run.
+
+**The blocker: ASCII does not imply "cannot ligate".** `->`, `=>`, `!=` are
+pure ASCII and are precisely what ligature substitution targets.
+`shaping_features` (`shaping.rs:494-508`) enables `liga` and `calt` under the
+config flag, always enables `kern`, and always disables `dlig`. So the only
+formulation that is obviously safe is to gate the fast path on
+`ligatures == false` — and `FontConfig::default` sets `ligatures: true`
+(`freminal-common/src/config.rs:122`, with a test pinning it at
+`config.rs:2206`). The fast path would therefore be dead code for every user on
+default config, which is the overwhelming majority.
+
+**One risk is smaller than it looks.** Glyph positions are snapped to the cell
+grid (`shaping.rs:774-777`, `x_px = col * cell_width`), so rustybuzz's
+positional output is discarded for placement. `kern` is a GPOS pair adjustment
+and is positional-only, never substitutive, so kerning cannot change a glyph
+id. That narrows the substantive risk to the substitutive features `liga` /
+`calt` alone.
+
+**One risk is larger than it looks.** A fast path would have to source glyph
+ids from `FontManager::resolve_glyph` (`font_manager.rs:690-698`), which
+returns a swash **charmap** lookup. That is a different provenance from
+rustybuzz's shaped output, and nothing in the tree currently proves the two
+agree even for plain ASCII. The existing identity test
+(`shape_with_plan_matches_old_shape_for_mixed_content`) compares `shape_cached`
+against the old `rustybuzz::shape()` path — it does not compare charmap ids
+against shaped ids. Any fast path needs that proof first.
+
+**No coupling risk to selection/search/URLs.** `ShapedGlyph` / `ShapedRun` /
+`ShapedLine` are consumed only by `freminal/src/gui/renderer/vertex.rs` and
+`widget.rs`; selection, search and URL hit-testing work off the raw `TChar`
+grid and their own byte-offset maps, so a fast path's only obligation is
+producing identical rendered output.
+
+**Two alternative levers, both compatible with `ligatures = true`:**
+
+1. A content-addressed **run-level** shaping cache keyed on `(face_id,
+   ligatures, run text)` storing the raw shaped `(glyph_id, cluster)` pairs.
+   Today's `ShapingCache` (`shaping.rs:127`) is keyed by **line index**, so it
+   cannot hit across a scroll, and one changed character re-shapes every run
+   on that row. A run cache is provably behaviour-preserving (shaping is
+   deterministic given face + features + text) and positions are re-derived
+   from `col_start`/`cell_width`, which stay out of the key. Needs bounding
+   for memory.
+2. Per-run allocation reduction in `build_shaped_glyphs`
+   (`shaping.rs:701-802`), which builds four `Vec`s per run per cache miss
+   (`byte_to_char`, `run_chars`, `cum_cols`, and the output).
+
+**Do not implement either speculatively.** There is no shaping cache hit/miss
+instrumentation, and no benchmark models the full-screen TUI redraw workload
+that produced the 8.56% figure — the existing `shaping_ligatures` group
+benches a cold cache and a fully-warm cache, not a realistic
+partial-invalidation stream. Per this document's own standing instruction in
+121.24, measure first.
 
 ### 121.20 — GPU buffer-orphaning for `deco_verts` (#459 item 5)
 
