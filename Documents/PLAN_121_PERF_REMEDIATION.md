@@ -11,6 +11,25 @@ Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
 full breakdown.
 
+> **Citation re-verification (2026-08-16).** The egui stack moved 0.35.0 → 0.36.1 in
+> `06701ce8`; that bump re-verified `EGUI_UPGRADE_ASSUMPTIONS.md` but left this
+> document's internal-line citations pointing at the old source tree. All
+> `egui-0.35.0` citations below (121.9, 121.29, 121.30, 121.32) have been re-checked
+> against 0.36.1 and updated where the line moved. Two citations turned out to be
+> wrong in **both** versions — a four-line offset in 121.29 item 2, and an incorrect
+> claim in 121.32 that `potential_drag_id` is cleared the same way as
+> `potential_click_id` (it is not; egui deliberately leaves it alone). Both are
+> pre-existing errors, not bump-induced ones, and are fixed in place below. No
+> subtask's status or verdict changes as a result.
+>
+> **Dated harness captures are deliberately NOT re-pointed.** Where this document
+> quotes what `repaint_cause_top8` actually logged (121.29 and 121.30, both
+> "harness, 2026-07-29"), the `egui-0.35.0` paths are left verbatim, because that
+> is the version the run observed and a log is not a citation. So the same
+> mechanism legitimately appears twice at two versions: `context.rs:525` inside
+> the 0.35.0 capture, and `context.rs:536-537` as the live 0.36.1 reference. Do
+> not "fix" the captures to match.
+
 ---
 
 ## Goal
@@ -208,7 +227,7 @@ validated.
 ### 121.9 — egui repaint-cause instrumentation
 
 Commit `ab88d0f5`. Named the culprit behind Finding 2 exactly:
-`egui-0.35.0/src/context.rs` `begin_pass` calling
+`egui-0.36.1/src/context.rs` `begin_pass` calling
 `InputState::wants_repaint_after()`, which returns `Duration::ZERO` whenever
 `!self.events.is_empty()`. Zero freminal call sites appeared in the causes, which
 excluded the gutter, scrollbar and cursor-trail hypotheses by measurement rather
@@ -691,7 +710,10 @@ formulation that is obviously safe is to gate the fast path on
 `ligatures == false` — and `FontConfig::default` sets `ligatures: true`
 (`freminal-common/src/config.rs:122`, with a test pinning it at
 `config.rs:2206`). The fast path would therefore be dead code for every user on
-default config, which is the overwhelming majority.
+default config. There is no telemetry on how many users set `ligatures = false`,
+so no claim is made about the size of that population — but an optimisation that
+is inert unless a non-default option is set is a poor use of the effort either
+way.
 
 **One risk is smaller than it looks.** Glyph positions are snapped to the cell
 grid (`shaping.rs:774-777`, `x_px = col * cell_width`), so rustybuzz's
@@ -925,7 +947,7 @@ animations are unrepresentable in it and are masked by egui's events-driven zero
 `Duration::MAX` would freeze such an animation at partial alpha until an unrelated
 event arrived.
 
-A mechanism exists to discriminate. `egui-0.35.0/src/context.rs:524-525` pushes the
+A mechanism exists to discriminate. `egui-0.36.1/src/context.rs:536-537` pushes the
 events-driven zero as a `RepaintCause`, and `ContextImpl::request_repaint_after`
 pushes `causes` **unconditionally**, before the `delay < repaint_delay` early-out, so
 the list survives even though the delay value is flattened to zero.
@@ -938,7 +960,13 @@ internals, two of which are present-day holes rather than future-bump risks:
 1. The events-driven zero is recorded as a cause at all, identifiable by `file`+`line`
    — making an egui *source line number* load-bearing runtime data, in a repo whose
    own upgrade checklist says line numbers drift and must not be trusted.
-2. `causes.push` happening unconditionally (`context.rs:157-159`).
+2. `causes.push` happening unconditionally. **Correction (2026-08-16): the original
+   citation here, `context.rs:157-159`, was off by four lines in both 0.35.0 and
+   0.36.1 — a pre-existing error, not something the version bump introduced.** The
+   actual push, `viewport.repaint.causes.push(cause);`, is at `context.rs:153`; the
+   `if delay < viewport.repaint.repaint_delay {` early-out it precedes is at
+   `context.rs:158`. The substance of the claim is unaffected: the push genuinely
+   happens unconditionally, before that early-out.
 3. `repaint_causes()` returning `prev_causes` — exactly one pass stale
    (`context.rs:102-105`).
 4. **`outstanding`-driven repaints push no cause at all** (`context.rs:110-118`).
@@ -946,9 +974,10 @@ internals, two of which are present-day holes rather than future-bump risks:
    in two repaints, just to give some things time to settle"); the following pass is
    forced to `ZERO` down a path that never touches `causes`. A cause-based test is
    structurally blind to egui's own settling mechanism.
-5. **`run_dyn` is a multi-pass loop** (`context.rs:822-860`); `request_discard`
-   reruns `begin_pass`/`end_pass`, swapping `causes` again, so after a discarded pass
-   `repaint_causes()` is the second-to-last pass's causes.
+5. **`run_dyn` is a multi-pass loop** (`context.rs:835-875` in egui-0.36.1 — the loop
+   itself opens at `835` and closes at `875`; the enclosing `fn run_dyn` begins at
+   `823`); `request_discard` reruns `begin_pass`/`end_pass`, swapping `causes` again,
+   so after a discarded pass `repaint_causes()` is the second-to-last pass's causes.
 
 `set_request_repaint_callback` looked like the documented escape hatch but is not: it
 fires only when `delay < repaint_delay`, so once the events-zero lands at
@@ -1002,6 +1031,13 @@ Both mechanisms are documented at the constant.
 > "the widgets are not built" is a statement about the widget **set**, and egui uses
 > that set for interaction as well as painting. Enumerating one consumer of it
 > under-scoped the risk.
+>
+> **Refined 2026-08-16.** "That broke tab clicks and pane-border drags" is too
+> broad: non-construction accounts for the **tab clicks only**. Pane-border drag
+> sensors are built on both paths (121.33), so they are never absent and this
+> mechanism cannot be what breaks them. The lesson above still stands unchanged —
+> the widget set is used for interaction, not just painting — but see 121.32's
+> 2026-08-16 correction for the click/drag split.
 
 ### 121.31 — Every frame is a full present during pointer motion
 
@@ -1053,18 +1089,68 @@ repeatedly produced confident wrong answers. 121.13 shipped the same way — its
 module states its wiring has no automated coverage. **Do not accept a code-reading
 argument about this subsystem. Measure it** (see "How to measure" below).
 
-**Established fact (verified against `egui-0.35.0` source, not inferred).** egui resolves
-interaction entirely against the **previous** frame's widget set:
+**Established fact (verified against `egui-0.35.0` source at the time; re-verified
+against `egui-0.36.1` on 2026-08-16 — unchanged in substance, only line numbers
+moved).** egui resolves interaction entirely against the **previous** frame's widget
+set:
 
-- `context.rs:475` — `hit_test(&viewport.prev_pass.widgets, …)`
-- `context.rs:488` — `interact(…, &viewport.prev_pass.widgets, …)`
+- `context.rs:487` — `hit_test(&viewport.prev_pass.widgets, …)`
+- `context.rs:500` — `interact(…, &viewport.prev_pass.widgets, …)`
 - `interaction.rs:109-123` — if `potential_click_id` is not in that set it is cleared
-  (*"The widget we were interested in clicking is gone"*); same for `potential_drag_id`
+  (*"The widget we were interested in clicking is gone"*). **`potential_drag_id` is
+  handled differently, and this entry previously stated it wrong.** When absent from
+  the set, egui deliberately leaves it alone — the comment at that site reads "this
+  could be drag-and-drop, and the widget being dragged is now 'in the air' and thus
+  not registered in the new frame." Corrected 2026-08-16; see the consequences below
+  for what that changes.
 
-Consequences, both load-bearing:
+Consequences:
 
-1. A press on frame N can only hit a widget that was **built on frame N-1**.
-2. A **single** `Replay` frame anywhere in a gesture discards the in-flight click/drag.
+1. A press on frame N can only hit a widget that was **built on frame N-1**. This
+   holds for **both** clicks and drags — it is what breaks a gesture from *starting*
+   at all, regardless of which kind of gesture it is.
+2. A **single** `Replay` frame anywhere in a gesture discards the in-flight **click**
+   (`potential_click_id` is cleared). This does **not** hold for drags: per the
+   corrected fact above, an in-flight drag survives a `Replay` frame by design.
+
+**Correction (2026-08-16), and what it does NOT say.** These two consequences were
+previously stated as one, covering "click/drag" together. They diverge: consequence 2
+is click-only.
+
+Apply that split to the two observed symptoms separately, because they have different
+mechanisms and conflating them is what this correction is fixing:
+
+- **Tab clicks** are fully explained by consequence 1. The tab strip is built only on
+  `ChromeMode::Full`, so on a `Replay` frame it is genuinely **absent** from
+  `prev_pass.widgets` — and consequence 2 then discards any click that was already in
+  flight. Both apply.
+- **Pane-border drags are explained by NEITHER.** Consequence 1 does not apply,
+  because per 121.33 those sensors are built on **both** paths and so are never
+  absent. Consequence 2 does not apply, because an in-flight drag is deliberately
+  preserved. This correction therefore **eliminates the last mechanism in this entry
+  that could have accounted for the drag half of the symptom**, leaving 121.33's
+  `Ui` id churn as the explanation — which is exactly what 121.33 already says ("they
+  fail by id churn rather than by absence"). Before this correction, consequence 2's
+  "discards the in-flight click/drag" wording made it look as though 121.32 alone
+  covered drags too. It never did.
+
+The net effect is to **promote 121.33 from "probably an active participant" to the
+only remaining candidate mechanism for the drag symptom**, and to make it a hard
+prerequisite for any re-enabling work rather than a nice-to-have.
+
+**This does not reopen the decision below.** Consequence 1 is sufficient on its own to
+condemn the cache on the tab-click evidence, the drag symptom is still explained (by
+121.33), and the maintainer confirmed the fix under real daily use. Nothing here
+weakens that.
+
+**Forward-looking note (2026-08-16).** 0.36.1 adds a filter step —
+`.filter(|layer_id| self.memory.areas().is_interactable(*layer_id))` — when building
+the candidate layer list passed into `hit_test` (new `Areas::is_interactable` at
+`memory/mod.rs:1214`, wired around `context.rs:475-481`). Non-interactable layers are
+now excluded from hit-testing before it runs. This is **orthogonal** to the
+`prev_pass` unsoundness above and changes none of this subtask's conclusions — it did
+not exist when the original analysis was written, so any future reasoning about which
+layers get hit-tested must account for it.
 
 Since freminal builds the tab strip only on `ChromeMode::Full`, any `Replay` frame
 adjacent to a click is fatal to it. **Hover is not evidence against this**: on a `Replay`
@@ -1234,6 +1320,13 @@ aggregate number; the whole point is which workload the cost lands in.
 
 **Deferred by maintainer decision (2026-08-02): written up now, not scheduled.
 Task 122 takes priority.**
+
+> **The stated reason has lapsed (2026-08-16).** Task 122 merged on 2026-08-03,
+> so "Task 122 takes priority" no longer defers anything. This entry is left
+> `Deferred` rather than re-scheduled, because that was a maintainer call and
+> only the *reason* expired, not the decision. Note the sequencing constraint
+> below still binds: it should land before 121.34's RSS arm, or the cache-on and
+> cache-off arms are not comparable on memory.
 
 121.32 bypassed the cache **read** but not the **write**. `chrome_mode` is forced to
 `Full`, and the `Full` arm still populates `ChromeCache` on every single frame:

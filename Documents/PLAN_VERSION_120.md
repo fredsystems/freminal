@@ -837,7 +837,7 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 | Group                                 | Subtasks              | Status      | Covers                                                                                           |
 | ------------------------------------- | --------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
 | A — Completed work                    | 121.1–121.11          | Complete    | PRs #458, #460, #461, #464, #465                                                                 |
-| B — Bugs found and fixed              | 121.12–121.14         | Complete    | blink-off fallback, chrome cache off during motion, animation signal                             |
+| B — Bugs found and fixed              | 121.12–121.14         | Complete    | blink-off fallback; animation signal. NB 121.13 was reverted 2026-08-02 — see 121.32             |
 | B — Bug blocked behind Task 122       | 121.15                | Unblocked   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17                                    |
 | B — Withdrawn                         | 121.16                | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy                                      |
 | C — Unifying improvement              | 121.17                | Not started | cell-granular pointer suppression; Task 122 seam landed, chrome-cache numbers stale (re-measure) |
