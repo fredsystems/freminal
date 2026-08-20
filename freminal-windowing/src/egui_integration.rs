@@ -607,17 +607,25 @@ struct ChromeGatePredicates {
 /// never needs the chrome widgets on a `Replay` frame — and it does, because
 /// egui resolves *interaction*, not just painting, against the widget set:
 ///
-/// | Site                  | Code                                            |
-/// | --------------------- | ----------------------------------------------- |
-/// | `context.rs:475`      | `hit_test(&viewport.prev_pass.widgets, …)`      |
-/// | `context.rs:488`      | `interact(…, &viewport.prev_pass.widgets, …)`   |
-/// | `interaction.rs:109`  | clears `potential_click_id` if absent from it   |
+/// | Site                     | Code                                                       |
+/// | ------------------------ | ----------------------------------------------------------- |
+/// | `context.rs:487`         | `hit_test(&viewport.prev_pass.widgets, …)`                |
+/// | `context.rs:500`         | `interact(…, &viewport.prev_pass.widgets, …)`             |
+/// | `interaction.rs:109-123` | absent from that set: `potential_click_id` is **cleared**; `potential_drag_id` is deliberately **left alone** ("this could be drag-and-drop, and the widget being dragged is now 'in the air'") |
 ///
-/// Note `prev_pass` — the PREVIOUS frame's set. So a press on frame N can
-/// only hit a widget built on frame N-1, and a single `Replay` frame
-/// anywhere in a gesture discards the in-flight click or drag. In
-/// 0.12.0-beta.7 this made tab clicks mostly fail and pane-border drags
-/// unusable, worst while a TUI ran in a pane (a TUI supplies a stream of
+/// Note `prev_pass` — the PREVIOUS frame's set. A press on frame N can only
+/// hit a widget built on frame N-1, and a single `Replay` frame discards an
+/// in-flight *click*. Neither of those covers drags: an in-flight drag is
+/// deliberately preserved by egui (above), so the click and drag symptoms in
+/// 0.12.0-beta.7 do NOT share one mechanism:
+///
+/// - **Tab clicks** fail here. The tab strip is built only on `Full`, so on a
+///   `Replay` frame it is genuinely absent from the set.
+/// - **Pane-border drags do NOT fail here.** Those sensors are built on both
+///   paths, so they are never absent — they fail by `Ui` id churn across a
+///   `Full`/`Replay` toggle, which is subtask 121.33, not this mechanism.
+///
+/// Both were worst while a TUI ran in a pane (a TUI supplies a stream of
 /// PTY-driven frames, every one eligible for `Replay`, during the moment the
 /// pointer is at rest before a click).
 ///
@@ -626,7 +634,9 @@ struct ChromeGatePredicates {
 /// that `Replay` frames do not register widgets. Any re-enabling must first
 /// make `Replay` construct the chrome widgets (and only skip their
 /// tessellation/paint), or otherwise guarantee `Full` on every frame the user
-/// could interact on **and the frame before it**. See 121.32 / 121.33 in
+/// could interact on **and the frame before it** — *and* must fix 121.33
+/// first, since that is the whole of the drag symptom and is untouched by
+/// either remedy. See 121.32 / 121.33 in
 /// `Documents/PLAN_121_PERF_REMEDIATION.md`.
 ///
 /// The env var exists so the two states can be A/B'd in one binary, using the
