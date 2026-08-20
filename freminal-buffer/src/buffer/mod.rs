@@ -543,9 +543,7 @@ impl Buffer {
             return;
         }
         self.auto_detect_urls = enabled;
-        for entry in &mut self.row_cache {
-            *entry = None;
-        }
+        self.row_cache.fill(None);
         for row in &mut self.rows {
             row.mark_dirty();
         }
@@ -9398,9 +9396,7 @@ mod scrollback_compaction_tests {
             row.ensure_live();
             row.mark_dirty();
         }
-        for entry in &mut buf.row_cache {
-            *entry = None;
-        }
+        buf.row_cache.fill(None);
 
         let (live_vis_chars, live_vis_tags, ..) = buf.visible_as_tchars_and_tags(0);
         let (live_sb_chars, live_sb_tags, ..) = buf.scrollback_as_tchars_and_tags(0);

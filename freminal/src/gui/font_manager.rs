@@ -1507,7 +1507,7 @@ fn find_system_face_for_char(font_db: &Database, c: char) -> Option<LoadedFace> 
 
 /// Read `usWinAscent` (u16 at byte offset 74) and `usWinDescent` (u16 at byte
 /// offset 76) from a raw OS/2 table.  Returns `None` if the table is too short.
-fn read_os2_win_metrics(os2_data: &[u8]) -> Option<(u16, u16)> {
+const fn read_os2_win_metrics(os2_data: &[u8]) -> Option<(u16, u16)> {
     // usWinAscent is at offset 74, usWinDescent at offset 76.
     // Each is a big-endian u16; the table must be at least 78 bytes.
     if os2_data.len() < 78 {

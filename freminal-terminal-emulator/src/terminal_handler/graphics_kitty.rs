@@ -912,9 +912,11 @@ impl TerminalHandler {
                 }
                 let pixel_count = w_us.saturating_mul(h_us);
                 let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
-                for chunk in image_data.chunks_exact(3) {
-                    rgba.extend_from_slice(chunk);
-                    rgba.push(255);
+                // `as_chunks` yields fixed-size arrays rather than slices
+                // (clippy 1.98's `chunks_exact_to_as_chunks`). A trailing
+                // partial pixel is discarded exactly as `chunks_exact` did.
+                for [r, g, b] in image_data.as_chunks::<3>().0 {
+                    rgba.extend_from_slice(&[*r, *g, *b, 255]);
                 }
                 Some((rgba, w, h))
             }

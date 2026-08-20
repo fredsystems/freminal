@@ -983,7 +983,7 @@ pub fn parse_recording_from_bytes(data: &[u8]) -> Result<ParsedRecording, ParseE
 }
 
 /// Read a little-endian `u32` from a byte slice at the given offset.
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+const fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     let bytes: [u8; 4] = [
         data[offset],
         data[offset + 1],
@@ -994,7 +994,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 }
 
 /// Read a little-endian `u64` from a byte slice at the given offset.
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+const fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     let bytes: [u8; 8] = [
         data[offset],
         data[offset + 1],

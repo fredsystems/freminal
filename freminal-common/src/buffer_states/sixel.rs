@@ -294,11 +294,12 @@ impl SixelDecoder {
                 SixelBackground::Paint => {
                     let (r, g, b) = self.palette[0];
                     let mut buf = vec![0u8; size];
-                    for pixel in buf.chunks_exact_mut(4) {
-                        pixel[0] = r;
-                        pixel[1] = g;
-                        pixel[2] = b;
-                        pixel[3] = 255;
+                    // `as_chunks_mut` yields fixed-size arrays, so the four
+                    // component writes are bounds-check-free (clippy 1.98's
+                    // `chunks_exact_to_as_chunks`). `size` is a multiple of 4
+                    // by construction, so the remainder is always empty.
+                    for pixel in buf.as_chunks_mut::<4>().0 {
+                        *pixel = [r, g, b, 255];
                     }
                     buf
                 }
@@ -316,11 +317,9 @@ impl SixelDecoder {
             SixelBackground::Paint => {
                 let (r, g, b) = self.palette[0];
                 let mut buf = vec![0u8; new_total];
-                for pixel in buf.chunks_exact_mut(4) {
-                    pixel[0] = r;
-                    pixel[1] = g;
-                    pixel[2] = b;
-                    pixel[3] = 255;
+                // See the comment on the initial-allocation path above.
+                for pixel in buf.as_chunks_mut::<4>().0 {
+                    *pixel = [r, g, b, 255];
                 }
                 buf
             }

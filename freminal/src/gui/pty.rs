@@ -633,7 +633,7 @@ fn spawn_pty_consumer_thread(
                               arc_swap: &ArcSwap<TerminalSnapshot>,
                               repaint_handle: &OnceLock<(RepaintProxy, WindowId)>,
                               request_repaint: bool| {
-                let cmds: Vec<_> = emulator.internal.window_commands.drain(..).collect();
+                let cmds = std::mem::take(&mut emulator.internal.window_commands);
                 for cmd in cmds {
                     let wc = match &cmd {
                             WindowManipulation::ReportWindowState

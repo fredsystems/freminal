@@ -95,7 +95,7 @@ struct RasterizedGlyph {
 /// `data` must be a flat RGBA8 buffer (length a multiple of 4); any trailing
 /// partial pixel is ignored.
 fn premultiply_rgba_in_place(data: &mut [u8]) {
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let a = u16::from(px[3]);
         // (channel * alpha + 127) / 255, rounded to nearest. Always <= 255.
         px[0] = u8::try_from((u16::from(px[0]) * a + 127) / 255).unwrap_or(px[0]);
@@ -912,7 +912,7 @@ mod tests {
         atlas.rasterize_and_insert(key, &fm_mut);
 
         // Check that the atlas pixels contain non-zero alpha in the glyph region.
-        let has_nonzero_alpha = atlas.pixels().chunks_exact(4).any(|px| px[3] > 0);
+        let has_nonzero_alpha = atlas.pixels().as_chunks::<4>().0.iter().any(|px| px[3] > 0);
         assert!(
             has_nonzero_alpha,
             "atlas should contain non-zero alpha pixels"
