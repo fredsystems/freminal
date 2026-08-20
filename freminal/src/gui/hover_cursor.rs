@@ -101,3 +101,90 @@ impl HoverAffordance for Response {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HoverAffordance;
+    use egui::{CursorIcon, Event, Pos2, RawInput, Rect, Sense, Vec2};
+
+    /// Run egui frames with the pointer parked over a widget decorated by
+    /// `add`, and report the cursor the last frame requested.
+    ///
+    /// A real frame with a real pointer is required: `on_hover_cursor` only
+    /// applies while the widget is hovered, so there is nothing to observe
+    /// otherwise. Two passes because egui resolves hover against the previous
+    /// frame's widget rects -- the first registers the widget, the second is
+    /// the frame where it is hovered.
+    fn cursor_over(add: impl Fn(egui::Response) -> egui::Response) -> CursorIcon {
+        let ctx = egui::Context::default();
+        let mut input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 300.0))),
+            ..Default::default()
+        };
+        input
+            .events
+            .push(Event::PointerMoved(Pos2::new(50.0, 50.0)));
+
+        let mut icon = CursorIcon::Default;
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(input.clone(), |ui| {
+                // Large enough to contain the pointer wherever the layout
+                // starts it.
+                let response =
+                    ui.allocate_response(Vec2::new(250.0, 250.0), Sense::click_and_drag());
+                let _ = add(response);
+            });
+            icon = out.platform_output.cursor_icon;
+            // epaint asserts on a dropped `TexturesDelta` with unapplied
+            // entries; nothing here rasterises, so discard them explicitly.
+            out.textures_delta.clear();
+        }
+        icon
+    }
+
+    /// Guards the harness itself: an undecorated widget leaves the cursor
+    /// alone, so the assertions below are measuring the affordance and not an
+    /// egui default.
+    #[test]
+    fn an_undecorated_widget_leaves_the_cursor_alone() {
+        assert_eq!(cursor_over(|r| r), CursorIcon::Default);
+    }
+
+    #[test]
+    fn clickable_asks_for_the_pointing_hand() {
+        assert_eq!(
+            cursor_over(HoverAffordance::clickable),
+            CursorIcon::PointingHand
+        );
+    }
+
+    /// A disabled control must actively say it cannot be used, rather than
+    /// merely omitting the hand and looking inert.
+    #[test]
+    fn disabled_affordance_asks_for_not_allowed() {
+        assert_eq!(
+            cursor_over(HoverAffordance::disabled_affordance),
+            CursorIcon::NotAllowed
+        );
+    }
+
+    #[test]
+    fn clickable_when_picks_the_matching_affordance() {
+        assert_eq!(
+            cursor_over(|r| r.clickable_when(true)),
+            CursorIcon::PointingHand
+        );
+        assert_eq!(
+            cursor_over(|r| r.clickable_when(false)),
+            CursorIcon::NotAllowed
+        );
+    }
+
+    /// Hovering a drag handle offers the open hand. The closed-hand branch
+    /// needs an in-flight drag, which this harness does not simulate; it is
+    /// covered by the `dragged()` arm being the only other path.
+    #[test]
+    fn draggable_offers_the_open_hand_on_hover() {
+        assert_eq!(cursor_over(HoverAffordance::draggable), CursorIcon::Grab);
+    }
+}

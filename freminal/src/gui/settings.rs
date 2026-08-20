@@ -574,34 +574,7 @@ impl SettingsModal {
                 let warn = ui.visuals().warn_fg_color;
                 ui.colored_label(warn, msg);
             }
-            ui.horizontal(|ui| {
-                let reset_btn = egui::Button::new("Reset to Defaults");
-                if ui.add_enabled(!is_read_only, reset_btn).clicked() {
-                    self.draft = Config::default();
-                    self.status_message = Some("Reset to defaults (not saved yet)".to_string());
-                }
-                // Right-to-left layout, so these read [Cancel] [Apply] [OK]
-                // on screen -- the conventional order, with the dismissing
-                // commit furthest right.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ok_btn = egui::Button::new("OK");
-                    if ui.add_enabled(!is_read_only, ok_btn).clicked() {
-                        action = self.try_apply();
-                    }
-                    // Apply commits without dismissing, so a change can be
-                    // judged against a live terminal and then adjusted again
-                    // without reopening the dialog (issue #452).
-                    let apply_btn = egui::Button::new("Apply");
-                    if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                        action = self.apply_without_dismissing();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        // Route through the dirty-state guard so unsaved
-                        // edits surface a confirmation prompt.
-                        self.request_close();
-                    }
-                });
-            });
+            self.show_action_buttons(ui, is_read_only, &mut action);
             ui.add_space(4.0);
         });
 
@@ -760,33 +733,7 @@ impl SettingsModal {
                     ui.colored_label(warn, msg);
                 }
 
-                // --- Bottom buttons ---
-                ui.horizontal(|ui| {
-                    let reset_btn = egui::Button::new("Reset to Defaults");
-                    if ui.add_enabled(!is_read_only, reset_btn).clicked() {
-                        self.draft = Config::default();
-                        self.status_message = Some("Reset to defaults (not saved yet)".to_string());
-                    }
-
-                    // Right-to-left layout, so these read
-                    // [Cancel] [Apply] [OK] on screen.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let ok_btn = egui::Button::new("OK");
-                        if ui.add_enabled(!is_read_only, ok_btn).clicked() {
-                            action = self.try_apply();
-                        }
-                        // Commits without dismissing (issue #452).
-                        let apply_btn = egui::Button::new("Apply");
-                        if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                            action = self.apply_without_dismissing();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            // Route through the dirty-state guard so unsaved
-                            // edits surface a confirmation prompt.
-                            self.request_close();
-                        }
-                    });
-                });
+                self.show_action_buttons(ui, is_read_only, &mut action);
             });
 
         // Handle the X button on the window title bar.  When the user clicks
@@ -1489,6 +1436,63 @@ impl SettingsModal {
             ui.visuals().weak_text_color(),
             "Automatically recompile the shader when the file changes on disk.",
         );
+    }
+
+    /// The dialog's action row: `[Reset to Defaults] ... [Cancel] [Apply] [OK]`.
+    ///
+    /// Shared by the standalone window and the inline modal, which previously
+    /// carried byte-identical copies of it.
+    ///
+    /// Right-to-left layout, so the buttons added first sit furthest right --
+    /// the conventional order, with the dismissing commit at the end. When the
+    /// config is read-only the three committing buttons are disabled and say
+    /// so with the cursor rather than inviting a click that cannot work.
+    ///
+    /// Writes through `action` only when a button is actually clicked, so an
+    /// action a caller already resolved this frame is left intact.
+    fn show_action_buttons(
+        &mut self,
+        ui: &mut Ui,
+        is_read_only: bool,
+        action: &mut SettingsAction,
+    ) {
+        ui.horizontal(|ui| {
+            let reset_btn = egui::Button::new("Reset to Defaults");
+            if ui
+                .add_enabled(!is_read_only, reset_btn)
+                .clickable_when(!is_read_only)
+                .clicked()
+            {
+                self.draft = Config::default();
+                self.status_message = Some("Reset to defaults (not saved yet)".to_string());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ok_btn = egui::Button::new("OK");
+                if ui
+                    .add_enabled(!is_read_only, ok_btn)
+                    .clickable_when(!is_read_only)
+                    .clicked()
+                {
+                    *action = self.try_apply();
+                }
+                // Apply commits without dismissing, so a change can be judged
+                // against a live terminal and then adjusted again without
+                // reopening the dialog (issue #452).
+                let apply_btn = egui::Button::new("Apply");
+                if ui
+                    .add_enabled(!is_read_only, apply_btn)
+                    .clickable_when(!is_read_only)
+                    .clicked()
+                {
+                    *action = self.apply_without_dismissing();
+                }
+                if ui.button("Cancel").clicked() {
+                    // Route through the dirty-state guard so unsaved edits
+                    // surface a confirmation prompt.
+                    self.request_close();
+                }
+            });
+        });
     }
 
     /// Tab-title policy controls: how a tab combines the user's custom name

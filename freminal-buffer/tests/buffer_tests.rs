@@ -359,23 +359,53 @@ fn autowrap_onto_existing_row_preserves_unwritten_cells() {
 
 /// The wrapped row is still marked as a continuation of the logical line
 /// above, even though its pre-existing cells survive.
+///
+/// The destination row is built through a **hard break** (`handle_lf`) and
+/// asserted to be one before the wrap. Reaching it via an earlier wrap would
+/// have left it already `SoftWrap`/`ContinueLogicalLine`, making the
+/// post-wrap assertions pass no matter what `reuse_row_as_softwrap` did.
 #[test]
 fn autowrap_onto_existing_row_still_marks_it_a_continuation() {
     use freminal_buffer::row::{RowJoin, RowOrigin};
 
     let mut buf = Buffer::new(5, 10);
+
+    // Fill row 0, then reach row 1 with a line feed rather than a wrap, so
+    // the destination row genuinely starts its own logical line.
     buf.insert_text(&[ascii('A'); 5]);
+    buf.handle_lf();
+    buf.set_cursor_pos(Some(0), Some(1));
     buf.insert_text(&[ascii('B'); 5]);
 
-    // Row 1 was created by the first wrap, so reset it to a hard break to
-    // prove the second wrap is what re-marks it.
+    assert_eq!(
+        buf.rows()[1].origin,
+        RowOrigin::HardBreak,
+        "precondition: the destination row starts as a hard break"
+    );
+    assert_eq!(
+        buf.rows()[1].join,
+        RowJoin::NewLogicalLine,
+        "precondition: the destination row starts its own logical line"
+    );
+
+    // Fill row 0 to the right margin, then print one more character so
+    // autowrap lands on row 1.
     buf.set_cursor_pos(Some(4), Some(0));
     buf.insert_text(&[ascii('Z')]);
     buf.insert_text(&[ascii('Q')]);
 
     let row = &buf.rows()[1];
-    assert_eq!(row.origin, RowOrigin::SoftWrap);
+    assert_eq!(
+        row.origin,
+        RowOrigin::SoftWrap,
+        "the wrap must re-mark the destination row as a continuation"
+    );
     assert_eq!(row.join, RowJoin::ContinueLogicalLine);
+    assert_eq!(
+        row_text(&buf, 1, 5),
+        "QBBBB",
+        "and it must still preserve the cells it did not write"
+    );
 }
 
 /// Text that wraps and then keeps writing must still overwrite the cells it

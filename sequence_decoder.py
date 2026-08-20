@@ -89,7 +89,7 @@ for arg in sys.argv[1:]:
 
 # --framed only means anything as a modifier to --raw-pty. Fail loudly rather
 # than silently producing an unframed file the caller will misparse.
-if raw_pty_framed and raw_pty_out is None:
+if raw_pty_framed and not raw_pty_out:
     print("Error: --framed is a modifier for --raw-pty and requires it")
     sys.exit(1)
 

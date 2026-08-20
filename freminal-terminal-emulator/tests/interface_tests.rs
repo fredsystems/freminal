@@ -488,6 +488,76 @@ fn test_sync_updates_content_change_survives_many_skipped_frames() {
     );
 }
 
+/// `scroll_changed` is deferred by the same mechanism as `content_changed`
+/// and needs its own coverage.
+///
+/// The block is left via the 200 ms auto-resume rather than `?2026l`, because
+/// `?2026l` is itself PTY output and new output auto-resets the scroll offset
+/// to the live bottom -- which manufactures a fresh, genuine scroll edge and
+/// would let this pass with the deferral removed.
+#[test]
+fn test_sync_updates_scroll_change_survives_skipped_frame() {
+    use std::time::Duration;
+
+    let (mut emu, _rx) = make_emulator();
+    // Enough output for a non-zero scroll offset to be reachable.
+    for i in 0..200 {
+        emu.handle_incoming_data(format!("line {i}\r\n").as_bytes());
+    }
+    let _ = emu.build_snapshot();
+
+    // Enter the synchronized block, then scroll while frames are skipped.
+    emu.handle_incoming_data(b"\x1b[?2026h");
+    let _ = emu.build_snapshot();
+    emu.set_requested_scroll_offset(5);
+    let skipped = emu.build_snapshot();
+    assert!(skipped.skip_draw, "precondition: the frame is skipped");
+    assert!(
+        skipped.scroll_changed,
+        "precondition: the scroll edge occurs on the skipped frame"
+    );
+
+    // Release rendering without feeding any bytes.
+    std::thread::sleep(Duration::from_millis(250));
+
+    let rendered = emu.build_snapshot();
+    assert!(
+        !rendered.skip_draw,
+        "precondition: the timeout released rendering"
+    );
+    assert!(
+        rendered.scroll_changed,
+        "the scroll edge from the skipped frame must be replayed; without \
+         deferral the offset now matches the previous one and this reports false"
+    );
+
+    // Delivered exactly once, like the content flag.
+    let idle = emu.build_snapshot();
+    assert!(!idle.scroll_changed);
+}
+
+/// The two deferred flags are tracked independently: a content-only change
+/// must not manufacture a scroll that never happened. This matters because
+/// the GUI's selection auto-clear keys off exactly that distinction -- a pure
+/// scroll leaves a selection alone, a content change does not.
+#[test]
+fn test_sync_updates_content_change_does_not_imply_scroll_change() {
+    let (mut emu, _rx) = make_emulator();
+    let _ = emu.build_snapshot();
+
+    emu.handle_incoming_data(b"\x1b[?2026h\x1b[Hcontent only");
+    let skipped = emu.build_snapshot();
+    assert!(skipped.skip_draw, "precondition: the frame is skipped");
+
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let rendered = emu.build_snapshot();
+    assert!(rendered.content_changed, "the content edge is replayed");
+    assert!(
+        !rendered.scroll_changed,
+        "a content change must not be reported as a scroll"
+    );
+}
+
 /// A skipped frame with genuinely no change must not manufacture one.
 #[test]
 fn test_sync_updates_skipped_frame_without_change_reports_none() {

@@ -2233,11 +2233,6 @@ impl FreminalTerminalWidget {
         } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
-            let pane_focus = if is_active_pane {
-                PaneFocus::Active
-            } else {
-                PaneFocus::Inactive
-            };
             let result = ui.input(|input_state| {
                 write_input_to_terminal(WriteInputParams {
                     input: input_state,
@@ -2249,7 +2244,7 @@ impl FreminalTerminalWidget {
                     terminal_rect,
                     repeat_characters,
                     binding_map,
-                    pane_focus,
+                    pane_focus: pane_focus_now,
                     recording_ctx,
                     placeholder_rects: &cache.placeholder_hit_rects,
                     key_broadcast_targets,

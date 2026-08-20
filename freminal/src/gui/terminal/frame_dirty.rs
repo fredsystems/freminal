@@ -363,7 +363,14 @@ pub(super) fn evaluate_frame_dirty_state(
     //
     // Evaluated last so the O(visible_chars) comparison only runs on the rare
     // frame where every cheap condition already passed.
-    if snap.content_changed
+    // `has_selection()` first: with nothing selected the clear is a no-op, so
+    // this skips the comparison below on every frame of continuous PTY output.
+    // Equivalent, not merely cheaper -- a degenerate selection (`anchor ==
+    // end`, or `end == None`) reports `false` here and `clear()` would have
+    // done nothing to it either, so a later primary press still starts a
+    // fresh drag rather than being consumed dismissing a phantom.
+    if view_state.selection.has_selection()
+        && snap.content_changed
         && !snap.scroll_changed
         && !view_state.selection.is_selecting
         && !view_state.selection_committed_this_frame
