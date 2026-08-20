@@ -5,11 +5,20 @@
 > reverted**, so thirteen stand — plus 121.23, 121.26 and 121.32 landed directly.
 > The remainder — one bug now routed through 121.17 rather than blocked, one
 > unifying improvement (121.17, whose Task 122 dependency was discharged on
-> 2026-08-03 but whose measured numbers are stale), six unactioned issue #459 items
-> (of which 121.18 and 121.19 carry 2026-08-16 recon findings that re-scope them),
-> two-and-a-half pieces of measurement debt (121.25 is partly captured), three items
-> surfaced by the Group B work, and Group G's four open chrome-cache follow-ups
-> (121.33–121.36) — are outstanding and unscheduled.
+> 2026-08-03 but whose measured numbers are stale), two-and-a-half pieces of
+> measurement debt (121.25 is partly captured), three items surfaced by the Group B
+> work, and Group G's four open chrome-cache follow-ups (121.33–121.36) — are
+> outstanding and unscheduled.
+>
+> **Group D is drained (2026-08-20).** All six unactioned issue #459 items have now
+> been reconned. Four are **closed as not actionable as framed** — 121.18 and 121.19
+> (2026-08-16), 121.21 and 121.22 (2026-08-20). 121.24 is **complete and refuted by
+> measurement**, which also corrects 121.25's attribution of the pointer-motion
+> residual. Only 121.20 remains live, and it is **not** a scheduling matter but a
+> maintainer decision: its premise is confirmed, but the fix lands in issue #432's
+> silent-corruption bug class with no harness to catch a recurrence. Group D produced
+> no production-code change, which is the correct outcome for a group whose every
+> entry was gated on "measure/confirm before fixing".
 
 Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
@@ -102,7 +111,9 @@ creates — see that subtask.
 | B — Bug blocked behind Task 122         | 121.15        | Unblocked     |
 | B — Withdrawn                           | 121.16        | Withdrawn     |
 | C — Unifying improvement                | 121.17        | Not started   |
-| D — Unactioned issue #459 items         | 121.18–121.22, 121.24 | Not started |
+| D — Reconned, premise does not hold     | 121.18, 121.19, 121.21, 121.22 | Closed — not as framed |
+| D — Reconned, needs a maintainer gate   | 121.20        | Blocked on 121.28 or a QA gate |
+| D — Measured and refuted                | 121.24        | Complete      |
 | D — Profiling methodology               | 121.23        | Complete      |
 | E — Measurement debt                    | 121.27–121.28 | Not started   |
 | E — Measurement debt (partly captured)  | 121.25        | In progress   |
@@ -615,14 +626,41 @@ that no longer runs.
 ## Group D — Unactioned issue #459 items
 
 Issue #459 is still open. Its candidate list items 1 and 2 are done (121.3 and
-121.8); items 3 through 8 have never been actioned. Item 9 was added in a comment
-thread and is covered by 121.5.
+121.8). Item 9 was added in a comment thread and is covered by 121.5.
+
+**Group D is now fully reconned (2026-08-20) and the group heading has outlived its
+accuracy** — "unactioned" was true when it was written and is not any more. Every
+entry in this group carried a "measure/confirm before fixing" instruction, and every
+one has now had it honoured. The result:
+
+| Subtask | #459 item | Outcome                                                       |
+| ------- | --------- | ------------------------------------------------------------- |
+| 121.18  | 3         | Closed — a redesign, not a subtask (2026-08-16)               |
+| 121.19  | 4         | Closed — the ASCII gate is inert at default config (2026-08-16) |
+| 121.20  | 5         | Live, but needs a maintainer gate decision (2026-08-20)       |
+| 121.21  | 6         | Closed — not a freminal-side problem (2026-08-20)             |
+| 121.22  | 7         | Closed — freminal owns no lever (2026-08-20)                  |
+| 121.23  | 8         | Complete — `Documents/PROFILING.md`                           |
+| 121.24  | —         | Complete — measured and refuted (2026-08-20)                  |
+
+**Four of the six candidate items did not survive contact with their own
+verification step.** That is worth stating plainly rather than burying, because it
+is the same pattern `DECOUPLING_FRAMEWORK.md` §12 already records for PR #461: a
+plausible finding derived from a profile is a hypothesis, not a work item. The
+standing "measure first" instruction in these entries is what stopped four of them
+becoming speculative refactors. It is also why the maintainer priority ordering
+below is now moot in its specifics.
 
 **Maintainer priority ordering** (from `DECOUPLING_FRAMEWORK.md` §2A "Beyond
 scheduling: per-frame cost"): the font and text pipeline first — unicode width,
 rustybuzz shaping (121.19), and `build_foreground_instances` (121.18) — then the
 remainder. Note the savings are not idle-only: the same per-frame work is paid on
-the active path.
+the active path. **Superseded in its specifics (2026-08-20):** both named
+front-of-queue items are now closed, so this ordering no longer selects any live
+work. The principle it encodes — that per-frame cost in the font and text pipeline
+is where the remaining headroom is — is unaffected, and 121.19's recon names two
+surviving levers (a run-level shaping cache, and per-run allocation reduction) that
+inherit it.
 
 ### 121.18 — Non-incremental vertex-instance build (#459 item 3)
 
@@ -638,8 +676,16 @@ suggested-next-step 4.
 The premise is confirmed: both builders `clear()` and walk every visible row
 unconditionally. `build_background_instances` is
 `freminal/src/gui/renderer/vertex.rs:361-646`, `build_foreground_instances` is
-`vertex.rs:722-784`. Called only from `freminal/src/gui/terminal/widget.rs:2740`
-(bg) and `:2798` (fg), plus benches.
+`vertex.rs:722-784`. Called only from `freminal/src/gui/terminal/widget.rs:2770`
+(bg) and `:2828` (fg), plus benches.
+
+> **Citation correction (2026-08-20).** This line previously cited `widget.rs:2740`
+> and `:2798`. Both were wrong at the time they were written, and neither drifted:
+> `:2740` lands inside an unrelated comment block, and `:2798` is the closing `);`
+> of the *background* call's argument list, not the foreground call. The real call
+> sites are `:2770` and `:2828`, corrected above. Found by adversarial review of the
+> Group D close-out; a pre-existing error, not one introduced by it. Nothing in
+> 121.18's assessment depends on the line numbers, so no verdict changes.
 
 **Blocker 1 — the instance buffers are variable-length per row, not
 fixed-stride.** Background skips `TerminalColor::DefaultBackground` runs
@@ -782,16 +828,219 @@ pays a Mesa slab-allocator round trip on every blink tick for a small, fixed-siz
 payload. Roughly 10% combined at idle. Investigate whether orphaning is necessary at
 this payload size.
 
+### 121.20 recon finding (2026-08-20): premise confirmed; the only live Group D item, pending a maintainer gate
+
+The premise holds. `upload_verts`
+(`freminal/src/gui/renderer/gpu.rs:1665-1682`) orphans unconditionally —
+`buffer_data_size(..., STREAM_DRAW)` then `buffer_sub_data_u8_slice` — with **no
+size threshold anywhere**, in `upload_verts` or in any of its six callers
+(`upload_deco_verts` `gpu.rs:796`, `upload_bg_instances` `:804`,
+`upload_fg_instances` `:812`, `upload_img_verts` `:820`, plus
+`toast_text_pass.rs:562` and `toast_pass.rs:211`). At genuine idle the
+`deco_verts` payload floor is the cursor quad alone: `CURSOR_QUAD_FLOATS = 36`
+(`vertex.rs:149`) = **144 bytes**. A 144-byte payload against a slab-allocator
+round trip is a real mismatch of scale, so the item is not a phantom.
+
+**The blocker is the orphan's entanglement with commit `c76ae8d1` — but be precise
+about what that commit actually fixed, because the repo tells two different stories
+and the weaker one is the true one.** `gpu.rs`'s own doc comment asserts that the
+unsynchronized in-place `glBufferSubData` "was the confirmed root cause of
+issue #432". **The commit message says otherwise, and it is the primary source.** The
+root cause it describes is a pure CPU-side bookkeeping bug: the cursor tail-quad
+offset was derived from `show_cursor` alone, while `build_background_instances` only
+appends a cursor quad when `show_cursor` **and** the blink phase says visible, so a
+full rebuild landing on a blink-off instant left the offset pointing at the
+bottom-most selection quad, which the next blink-on frame then overwrote. The fix
+was to have `build_background_instances` return whether it actually appended a
+cursor quad. The GPU-side change is explicitly secondary — the message introduces it
+with "**Also** hardens the cursor-only GPU fast path found while investigating".
+
+That distinction cuts **in favour of 121.20**, and it is easy to get backwards —
+reading only the code comment yields the opposite conclusion, which is why it is
+spelled out here. The orphan is not the surviving half of the #432 fix; it is part
+of an opportunistic hardening bundled into the same commit. What
+that hardening actually introduced was `deco_vbo`'s own double-buffer index
+(`deco_vbo_index`, `gpu.rs:206`, separate from the `vbo_index` shared by
+bg/fg/img), described as ensuring the per-blink re-upload "always orphans into a
+slot the GPU isn't currently reading". So the two mechanisms were bundled, and the
+counterfactual that matters — **double-buffering alone, without re-orphaning** —
+was never isolated or tested. There is no `glFenceSync` / `glClientWaitSync`
+anywhere in `renderer/*.rs` (zero grep hits), so what remains is not a proven
+synchronisation bound but an untested pairing.
+
+**Do not resolve this by reading the code comment.** Reconcile the two narratives
+first; a risk assessment that cites the comment while the commit message contradicts
+it is exactly the "confident wrong answer from static reading" failure 121.32
+records as this subsystem's signature.
+
+Two further constraints on any fix. `buffer_sub_data` never resizes, so a
+persistent buffer must be pre-sized for the worst case (selection plus hover tint
+plus search highlights plus cursor, across several full-width rows) with an explicit
+resize fallback, or it corrupts adjacent VBO regions. And the failure mode of
+getting it wrong is **silent visual corruption**, not a crash — the same bug class
+as #432.
+
+**Assessment.** Unlike 121.18, 121.19 and 121.22, this is *not* "do not attempt".
+It is a narrow, low-line-count change whose regression risk is **smaller than the
+`gpu.rs` comment implies** — the offset bug that actually caused #432 is fixed
+independently and is unaffected by the orphan — but which still lands in a bug class
+this repo has shipped once, and whose failure mode is silent visual corruption
+rather than a crash. There is no automated way to catch a recurrence:
+`freminal/benches/` contains no GL benchmark, no bench holds a GL context, and
+121.28 independently confirms no pixel or headless-GL harness exists.
+
+**Recommendation — maintainer decision required, do not proceed without it.**
+Either sequence 121.20 behind 121.28, or accept a documented manual-QA gate
+reproducing #432's exact repro (sustained cursor blink concurrent with an active
+selection highlight, watching the bottom-most selected row). Note also that the
+"roughly 10% combined at idle" figure shares the AMD-radeonsi caveat recorded under
+121.21 below, and that per 121.21 the clear — and therefore much of the idle frame —
+is skipped entirely on partial-present frames, so the idle denominator this 10% was
+measured against may no longer exist.
+
 ### 121.21 — Compute-shader-dispatched buffer clear (#459 item 6)
 
 4.57% self at idle in `si_fast_clear` to `si_compute_clear_copy_buffer`. Confirm
 whether the clear is scoped to the damage rect or the full framebuffer, and why a
 compute dispatch is used rather than fixed-function.
 
+### 121.21 recon finding (2026-08-20): both questions have answers that dissolve the item
+
+**"Scoped to the damage rect or the full framebuffer?" — neither. There is no
+scoped clear, because on a partial-present frame there is no clear at all.**
+`freminal-windowing/src/egui_integration.rs:1195-1208` is the only production clear
+path:
+
+```rust
+let partial = match frame_damage {
+    crate::FrameDamage::Partial(rects)
+        if !rects.is_empty()
+            && gl_state.supports_partial_present()
+            && gl_state.buffer_age() == 1 => Some(rects),
+    _ => None,
+};
+
+if partial.is_none() {
+    gl_state.clear(clear_color);
+}
+```
+
+`GlState::clear` (`freminal-windowing/src/gl_context.rs:351-357`) is a plain
+`clear_color` + `clear(COLOR_BUFFER_BIT)` with **no scissor** — `gl_context.rs` has
+zero scissor references. Scissoring exists in the tree
+(`freminal/src/gui/terminal/widget.rs:3062-3067`) but is mutually exclusive with
+clearing by construction: its `cursor_only_scissor` gate is set only when the
+windowing layer already skipped the clear (comment at `widget.rs:3055-3059`). A
+blinking cursor with nothing else changing is exactly the case `decide_frame_damage`
+(`freminal/src/gui/frame_damage.rs:78-118`) routes to `Partial`.
+
+**"Why a compute dispatch rather than fixed-function?" — freminal never chose
+compute.** Grep for `dispatch_compute` / `GL_COMPUTE_SHADER` / `glow::COMPUTE*`
+across `freminal/src` and `freminal-windowing/src` returns zero GL hits. freminal
+issues the most basic GL-1.0-era fixed-function clear that exists.
+`si_compute_clear_copy_buffer` is Mesa radeonsi translating that request into its
+own internal compute fast-clear path for DCC/CMask-compressed surfaces. There is no
+GL entry point freminal calls that could select otherwise, so **there is no
+freminal-side lever here at all**.
+
+**And the clear cannot simply be deleted — it is load-bearing.**
+`build_background_instances` skips emitting a quad for any cell whose effective
+background is `TerminalColor::DefaultBackground` (`vertex.rs:408-415`, a `continue`),
+precisely because the clear paints those cells. `clear_color`
+(`freminal/src/gui/app_impl.rs:872-902`) returns the theme background at the default
+`background_opacity == 1.0` (`freminal-common/src/config.rs:359`) and transparent
+below it. Removing the clear would leave stale pixels in every default-background
+cell unless the `DefaultBackground` skip were also removed — which reinstates
+exactly the per-cell quad cost that skip exists to avoid.
+
+**Driver-specific.** The whole `si_fast_clear` / `si_execute_clears` /
+`si_compute_clear_copy_buffer` / `si_launch_grid` chain is Mesa radeonsi symbol
+namespace (`si_*` = GCN/Southern Islands); the adjacent `amdgpu_bo_create` confirms
+an AMD GPU. Intel `iris`, NVIDIA proprietary and `llvmpipe` would very plausibly
+execute the identical `glClear` with no compute dispatch and no comparable cost.
+This finding does not generalise past the capture machine.
+
+**Recommendation: close 121.21 as not actionable as framed.** The only remaining
+freminal-owned question is not a code change but a measurement — *how often does the
+partial-present skip actually engage at idle?* Both the `frame_damage_full` /
+`frame_damage_partial` counters (`freminal/src/gui/window.rs:526,530`) and 121.8's
+`120/120 partial` idle figure postdate issue #459's capture (#459 filed
+2026-07-27; the counters landed in `0620cc60` on 2026-07-28), so the original
+capture cannot tell us whether the skip was engaging. If a re-measurement shows the
+skip near 100% at idle, the residual is Mesa-internal and freminal has nothing left
+to fix. Fold that measurement into 121.25 rather than treating it as a code subtask.
+
 ### 121.22 — `wayland_client_handle` call frequency (#459 item 7)
 
 7.83% self at idle for what should be an O(1) `OnceCell` fetch. Almost certainly a
 call-frequency problem rather than a lookup-cost problem. Confirm before fixing.
+
+### 121.22 recon finding (2026-08-20): not actionable as framed — freminal owns no lever here
+
+The entry said "confirm before fixing". Confirmed, and the answer is that there is
+nothing on freminal's side to fix.
+
+**Two claims are in play and only one of them is refuted outright.** The narrow
+claim — that freminal repeatedly fetches a window/display handle somewhere it could
+hoist — is **refuted** by the two-hit grep below. The broad claim — that the 7.83%
+is real and attributable to call frequency — is **not refuted**; it is left open and
+un-actionable, because settling it needs measurement freminal cannot act on either
+way. This entry therefore reads "not actionable as framed", matching 121.18, 121.19
+and 121.21, rather than a flat "refuted".
+
+**The function is what it claims to be.**
+`wayland-sys-0.31.11/src/client.rs:113-117` is a `once_cell::sync::Lazy` fetch;
+every call after the first is an atomic load. The *first* call per process is not
+O(1) — it `dlopen`s `libwayland-client.so` and resolves ~40 symbols through the
+`external_library!` macro (`client.rs:20-84`). The `dlopen` feature is confirmed
+active: winit enables `wayland-dlopen` in its default feature set
+(`winit-0.30.13/Cargo.toml:77,117,331`) and freminal does not disable winit's
+defaults.
+
+**freminal never calls it, directly or transitively, from any hot path.** The two
+callers both live in dependencies: `calloop-wayland-source-0.3.0/src/lib.rs`'s
+lifecycle hooks (`before_sleep`, `before_handle_events`, `process_events`), which
+fire per **event-loop wake**, and winit's `request_frame_callback`
+(`winit-0.30.13/src/platform_impl/linux/wayland/window/state.rs:250-260`), which is
+**debounced** by `FrameCallbackState::Requested` and fires at most once per drawn
+frame. The sole freminal call that reaches the second path is
+`window.pre_present_notify()` (`freminal-windowing/src/egui_integration.rs:1274`),
+once per drawn frame. `window.request_redraw()` does *not* reach wayland FFI — it is
+an atomic `compare_exchange` plus a calloop `Ping`. freminal runs
+`ControlFlow::Wait` / `WaitUntil`, never `Poll` (`event_loop.rs:707-709`), so the
+loop genuinely blocks between wakes.
+
+**The one hypothesis worth testing — a repeated handle fetch freminal could hoist —
+is refuted outright.** Grepping `freminal-windowing/src` and `freminal/src` for
+`window_handle()`, `display_handle()`, `raw_window_handle`, `raw_display_handle`,
+`HasWindowHandle` and `HasDisplayHandle` yields **two hits, both the same call**:
+the `use` at `freminal-windowing/src/gl_context.rs:20` and the call at
+`gl_context.rs:206`, inside `GlState::new()`. That runs once per window at
+GL-context creation, and its result is already reused across all four subsequent
+`.as_raw()` uses in the same function body. It is maximally hoisted. In any case
+`WindowHandle<'a>` is a borrowed type (`raw-window-handle-0.6.2/src/borrowed.rs:211-222`)
+with no owned variant in 0.6.x, so wider caching is not possible even in principle.
+
+**The figure itself is suspect.** 7.83% is `perf report`'s share of *on-CPU
+samples*, not of wall-clock or of frame budget, over a 60 s capture of a process
+whose own idle baseline #459 records as ~0.1–0.5% CPU — so the absolute sample count
+behind that percentage is small and the noise floor correspondingly high. #459's own
+methodology section records that `perf script --inline` was "degrading (not
+eliminating) inline-frame peeling for some samples" in that environment.
+`wayland_client_handle` is a thin wrapper over two nested `Lazy`s whose init closure
+does the `dlopen`, which makes **one-time startup cost misattributed onto the
+shallow symbol** a live alternative explanation. The capture also predates every
+Phase 0 fix and `PROFILING.md`'s frame-rate-plus-per-frame-cost reporting rule
+(121.23), which it does not satisfy.
+
+**Recommendation: close 121.22 as not actionable as framed** — the third Group D
+item whose premise does not survive recon, after 121.18 and 121.19. Any real fix
+would have to land in winit, wayland-backend or calloop-wayland-source, none of
+which show a runaway call pattern under static reading. Should anyone want to
+pursue it anyway, it needs measurement and not more reading: a fresh Tier-2 capture
+per `PROFILING.md` on a post-Phase-0 build; then, if it still reproduces, a second
+capture started several seconds after launch to separate the one-time `dlopen`
+window from steady state; then `perf probe` for an actual calls/sec figure.
 
 ### 121.23 — Profiling methodology document (#459 item 8)
 
@@ -850,6 +1099,95 @@ between a `layout_into(&mut buf)` variant and a scratch buffer on `PerWindowStat
 Do not build the buffers speculatively: every Phase 0 hypothesis acted on without
 measurement turned out to be wrong.
 
+### 121.24 outcome (DONE — measured, and the hypothesis is REFUTED)
+
+Measured, per this entry's own instruction. **The two allocations are ~1.4% of the
+residual they were proposed to explain. Do not build the scratch buffer.**
+
+**Where the code went.** Task 122 moved the predicate: `pointer_motion_needs_repaint`
+is now at `freminal/src/gui/app_impl.rs:981-1152`, and its pure decision chain was
+extracted to `freminal/src/gui/pointer_motion.rs` by subtask 122.5a.
+`should_schedule_cursor_moved` stayed at `freminal-windowing/src/event_loop.rs:398`.
+PR #495 added a `focus_change_pending` term (`app_impl.rs:1139-1142`) but touched
+neither allocation site.
+
+**The allocation inventory is exactly two, and only in the non-zoomed case.**
+`iter_panes()` (`panes/mod.rs:1070-1075`, `Vec::with_capacity` of `&Pane`) is called
+unconditionally at `app_impl.rs:1034`. `layout()` (`panes/mod.rs:1100-1105`,
+`Vec::with_capacity` of `(PaneId, Rect)`) is called at `app_impl.rs:1077` **only
+when `zoomed_pane.is_none()`**; the zoomed branch uses `Vec::new()`, which does not
+allocate. Nothing else on the path allocates — no `String`, no `Box`, no allocating
+`Arc::clone`, no `HashMap`, no `collect()`. `arc_swap.load()` returns a `Guard` with
+an atomic-only fast path. Neither `iter_panes` nor `layout` has a single-pane fast
+path: `Vec::with_capacity(1)` on a non-ZST always allocates, so a brand-new
+single-pane window pays both.
+
+**How it was measured.** `bench_iter_panes` added to the existing
+`freminal/benches/pane_resolution_bench.rs`, mirroring `bench_layout`'s shape,
+pane counts, chain case, black-box discipline and Criterion configuration (both
+share `configure()` and `PANE_COUNTS`, so the settings are identical by
+construction). `layout` was already benched there by subtask 122.14; `iter_panes`
+was the missing half. Criterion medians, both benches captured in the same sitting.
+**One asymmetry, recorded so the table is not read as tighter than it is:**
+`iter_panes` takes no argument besides `&self`, so where `bench_layout` black-boxes
+its `rect` argument, `bench_iter_panes` must black-box the receiver
+(`black_box(&tree).iter_panes()`) to stop LLVM hoisting a loop-invariant call out of
+`b.iter()`. That costs one extra opaque barrier per iteration that `bench_layout`
+does not pay. It is sub-nanosecond, and it biases `iter_panes` *upward* — i.e.
+against the conclusion drawn below — so it is conservative, but the two columns are
+not comparable to each other at sub-nanosecond resolution. They are used here only
+as an order-of-magnitude bound, which is all the conclusion needs.
+
+| Case        | `layout` (ns) | `iter_panes` (ns) | Sum (ns) |
+| ----------- | ------------- | ----------------- | -------- |
+| balanced/1  | 11.528        | 11.309            | 22.84    |
+| balanced/2  | 13.009        | 11.521            | 24.53    |
+| balanced/4  | 27.956        | 12.165            | 40.12    |
+| balanced/8  | 58.946        | 19.943            | 78.89    |
+| balanced/16 | 123.45        | 36.464            | 159.91   |
+| chain/16    | 143.96        | 33.890            | 177.85   |
+
+**The arithmetic, at this entry's own measured 425–478 events/s.** At the modal
+single-pane configuration, 478 × 22.84 ns = **~0.0011% of a core** — against the
+~0.077% residual this entry proposed the allocations might be a material fraction
+of, that is **1.4%**. Even the degenerate 16-pane chain, an unusual configuration,
+reaches only 478 × 177.85 ns = 0.0085%, or **11%** of the residual.
+
+**The conclusion is insensitive to which baseline you use, which is why it can be
+trusted.** These `layout` figures are roughly 2.8× faster than 122.14's recorded
+2026-07-30 baseline (32.816 ns at `balanced/1`). That is a **different sitting on
+possibly different hardware and the two are not comparable** — per
+`performance-benchmarks`, no speedup is claimed and none should be read here.
+It does not matter: scaling both columns up by that 2.847 ratio still gives only
+~0.003% of a core, about 4% of the residual. Immaterial either way. (That scaling
+assumes `iter_panes` would have moved by the same ratio as `layout` between the two
+sittings — an unstated extrapolation, since `iter_panes` has no 122.14 baseline to
+substitute. The margin is wide enough that the assumption does not carry the
+conclusion: even the *unscaled worst case* in the table, a 16-pane chain, reaches
+only 11%.)
+
+**Secondary finding, which is the more useful one: 121.25's attribution of the
+motion residual to this predicate is not supported.** For
+`pointer_motion_needs_repaint` to account for 0.077% of a core at 478 events/s it
+would have to cost ~1611 ns per call. The two allocations are 22.8 ns of that
+budget. The rest of the predicate is O(1) boolean composition over already-resolved
+flags plus a per-pane atomic `arc_swap.load()` — nowhere near the remaining
+~1588 ns. So either the residual lives somewhere else on the per-event path
+(winit event decode, egui event translation, `on_window_event` — none of which
+anyone has measured), or the 0.077% figure is itself an artefact of the CPU-meter
+reading 121.25 already warns must not be used to discriminate. Recorded against
+121.25 as well.
+
+**What was deliberately not done.** No counter was added to production code. This
+entry offered "a counter **or** profile the predicate specifically"; the counter is
+the more invasive of the two and would have measured the wrong thing anyway. The
+full predicate is **not** benchable — it needs `&self` on `FreminalGui` plus a real
+`WindowId`, which has no public constructor outside the winit event loop (122.14
+recorded the same obstacle) — but the two allocating calls are pure, headlessly
+constructible, and are the only non-O(1) work in it. Benching them bounds the whole
+question, and the bound came out two orders of magnitude below the threshold that
+would have justified acting.
+
 ---
 
 ## Group E — Measurement debt
@@ -885,6 +1223,20 @@ at pointer rate would cost ~2–3% of a core. It is per-event work outside the f
 path: `pointer_motion_needs_repaint` running at 425–478 events/s doing `iter_panes()`,
 `pane_tree.layout()` and an `arc_swap.load()` per event. That brackets 121.24's own
 0.077% estimate and is corroborating evidence for it.
+
+> **Correction (2026-08-20, from 121.24). The named mechanism is wrong.** The
+> paragraph above attributes the motion residual to `iter_panes()` and
+> `pane_tree.layout()`. Those two calls have now been benchmarked and together cost
+> **22.84 ns** per event at the modal single-pane configuration — 1.4% of the
+> 0.077% they were said to explain, and ~1.4% of the ~1611 ns/call the predicate
+> would need to cost for that attribution to hold. The remainder of the predicate is
+> O(1) boolean composition plus an atomic `arc_swap.load()` and cannot plausibly
+> make up the difference. **The residual is therefore unattributed.** The two live
+> candidates are per-event plumbing upstream of the predicate (winit event decode,
+> egui event translation, `on_window_event`), which nobody has measured, and the
+> possibility that the 0.1–0.2% meter reading is itself below the tooling's
+> discriminating power — which this very entry warns about two paragraphs down. Do
+> not cite the predicate as the cause without a new measurement. See 121.24.
 
 **The vetoed path has since been measured with the harness** — see 121.17's
 measured-prize table. It reads 0.1–0.2% on a CPU meter, identical to the unvetoed

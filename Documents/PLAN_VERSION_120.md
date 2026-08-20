@@ -841,7 +841,9 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 | B — Bug blocked behind Task 122       | 121.15                | Unblocked   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17                                    |
 | B — Withdrawn                         | 121.16                | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy                                      |
 | C — Unifying improvement              | 121.17                | Not started | cell-granular pointer suppression; Task 122 seam landed, chrome-cache numbers stale (re-measure) |
-| D — Unactioned issue #459 items       | 121.18–121.22, 121.24 | Not started | items 3–7 plus per-`CursorMoved` allocations                                                     |
+| D — Reconned, premise does not hold   | 121.18, 121.19, 121.21, 121.22 | Closed | items 3, 4, 6, 7 — all four closed as not actionable as framed                          |
+| D — Reconned, needs maintainer gate   | 121.20                | Blocked     | item 5 — premise confirmed; needs 121.28 or an agreed manual-QA gate                             |
+| D — Measured and refuted              | 121.24                | Complete    | per-`CursorMoved` allocations are ~1.4% of the residual; no fix warranted                        |
 | D — Profiling methodology             | 121.23                | Complete    | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file                         |
 | E — Measurement debt                  | 121.27–121.28         | Not started | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                                            |
 | E — Measurement debt (partly done)    | 121.25                | In progress | clean Finding 3 re-run done; typing and btop outstanding                                         |
