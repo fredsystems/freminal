@@ -2017,6 +2017,7 @@ impl FreminalTerminalWidget {
         // response is only used for the repaint wake-up and the hand cursor.
         // We also force one repaint on the frame the pointer leaves so the
         // clearing frame is guaranteed.
+        let mut gutter_hovered = false;
         if gutter_inset > 0.0 && command_blocks_config.enabled && !snap.is_alternate_screen {
             let gutter_hit_rect = egui::Rect::from_min_max(
                 pane_rect.min,
@@ -2039,9 +2040,13 @@ impl FreminalTerminalWidget {
                 pointer_in_window,
                 cache.pointer_in_gutter_last_frame,
             );
-            if effectively_hovered {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
+            // Recorded rather than applied here: every cursor-icon write in
+            // this frame is resolved once, at the end of `show`, by
+            // `PointerHover`. Setting it at this point had no visible effect
+            // at all, because the URL / OSC-22 block below unconditionally
+            // overwrote `output.cursor_icon` a few hundred lines later
+            // (issue #462).
+            gutter_hovered = effectively_hovered;
             if needs_repaint {
                 // 16ms, not `Duration::ZERO` (subtask 121.12, comment
                 // corrected per review NIT #10): scheduling is unchanged
@@ -3436,20 +3441,6 @@ impl FreminalTerminalWidget {
                     });
                 }
 
-                // Update cursor icon from cached URL state.
-                // URL hover (pointing hand) takes priority over OSC 22 shape.
-                // Must be set unconditionally every frame because egui resets
-                // output.cursor_icon to Default at the start of each frame.
-                let new_icon = if cache.cached_hovered_url.is_some() {
-                    CursorIcon::PointingHand
-                } else {
-                    pointer_shape_to_cursor_icon(snap.pointer_shape)
-                };
-
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = new_icon;
-                });
-
                 // Tooltip: show the target URL at the pointer so the user
                 // can verify before Ctrl+clicking. Suppressed while the
                 // user is actively dragging out a selection so it does
@@ -3495,37 +3486,42 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area — fall back to OSC 22 shape.
+                // Mouse left the terminal area. Only the URL-hover cache is
+                // cleared here; the icon itself is resolved once below.
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
-                let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = base_icon;
-                });
             }
         } else {
-            // No URLs — apply OSC 22 shape (or default if none set).
+            // No URLs in the visible window, so nothing can be URL-hovered.
             cache.previous_hover_cell = None;
             cache.cached_hovered_url = None;
-            let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = base_icon;
-            });
         }
 
-        // Fold placeholder hover: override the cursor icon to a pointing
-        // hand whenever the mouse is over a placeholder row, regardless
-        // of URL or OSC 22 shape state. Runs every frame because egui
-        // resets `output.cursor_icon` to Default at the start of each
-        // frame, so the override must be reapplied.
-        if !cache.placeholder_hit_rects.is_empty()
-            && let Some(mouse_position) = view_state.mouse_position
-            && hit_test_placeholder(&cache.placeholder_hit_rects, mouse_position).is_some()
-        {
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::PointingHand;
+        // ── Cursor icon ──────────────────────────────────────────────
+        //
+        // Every source that wants a say in the pointer shape is gathered here
+        // and resolved by one explicit precedence rule, then written exactly
+        // once. This replaces four independent unconditional writes whose
+        // relative outcome was decided purely by which one happened to run
+        // last in `show` -- which silently discarded the command-block
+        // gutter's pointing-hand entirely (issue #462).
+        //
+        // The write is unconditional because egui resets
+        // `output.cursor_icon` to `Default` at the start of every frame.
+        let placeholder_hovered = !cache.placeholder_hit_rects.is_empty()
+            && view_state.mouse_position.is_some_and(|pos| {
+                hit_test_placeholder(&cache.placeholder_hit_rects, pos).is_some()
             });
-        }
+
+        let pointer_hover = PointerHover {
+            command_block_gutter: gutter_hovered,
+            fold_placeholder: placeholder_hovered,
+            url: cache.cached_hovered_url.is_some(),
+        };
+        let resolved_icon = cursor_icon_for(pointer_hover.resolve(), snap.pointer_shape);
+        ui.ctx().output_mut(|output| {
+            output.cursor_icon = resolved_icon;
+        });
 
         // ── Drag-and-drop ────────────────────────────────────────────
         handle_file_drop(ui, terminal_rect, input_tx);
@@ -3661,6 +3657,70 @@ impl FreminalTerminalWidget {
 ///
 /// [`PointerShape::Default`] and any value that has no direct egui equivalent
 /// both produce [`CursorIcon::Default`].
+/// What the mouse pointer is over, for the purpose of choosing a cursor icon.
+///
+/// Variants are listed in **descending precedence**: when several apply at
+/// once, the earliest wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerTarget {
+    /// The command-block gutter strip down the left edge of the pane. A
+    /// clickable chrome affordance that sits outside the terminal grid, so it
+    /// outranks anything the application asks for.
+    CommandBlockGutter,
+    /// A collapsed command-block fold placeholder row. Also chrome, also
+    /// clickable, and drawn over the grid.
+    FoldPlaceholder,
+    /// A hyperlink in the terminal grid.
+    Url,
+    /// Ordinary terminal content -- the application's OSC 22 pointer shape
+    /// applies, which is `Default` when it has not set one.
+    TerminalContent,
+}
+
+/// Which cursor-icon sources are active this frame.
+///
+/// These are independent simultaneous observations -- the pointer can be over
+/// a fold placeholder that happens to contain a URL -- so a set of bools is
+/// the right representation. The *precedence* between them, which is the part
+/// that was previously implicit and wrong, lives in [`Self::resolve`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PointerHover {
+    /// Pointer is over the command-block gutter strip.
+    pub(super) command_block_gutter: bool,
+    /// Pointer is over a collapsed fold placeholder row.
+    pub(super) fold_placeholder: bool,
+    /// Pointer is over a hyperlink.
+    pub(super) url: bool,
+}
+
+impl PointerHover {
+    /// Reduce the active sources to the single highest-precedence target.
+    pub(super) const fn resolve(self) -> PointerTarget {
+        if self.command_block_gutter {
+            PointerTarget::CommandBlockGutter
+        } else if self.fold_placeholder {
+            PointerTarget::FoldPlaceholder
+        } else if self.url {
+            PointerTarget::Url
+        } else {
+            PointerTarget::TerminalContent
+        }
+    }
+}
+
+/// The cursor icon for a resolved [`PointerTarget`].
+///
+/// Chrome affordances all use the pointing hand; only ordinary terminal
+/// content defers to the application's OSC 22 shape.
+const fn cursor_icon_for(target: PointerTarget, osc22_shape: PointerShape) -> CursorIcon {
+    match target {
+        PointerTarget::CommandBlockGutter | PointerTarget::FoldPlaceholder | PointerTarget::Url => {
+            CursorIcon::PointingHand
+        }
+        PointerTarget::TerminalContent => pointer_shape_to_cursor_icon(osc22_shape),
+    }
+}
+
 const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     match shape {
         PointerShape::Default => CursorIcon::Default,
@@ -4706,6 +4766,101 @@ impl InputSuppressors {
             && !self.context_menu
             && !self.command_history
             && !self.scrollbar_drag
+    }
+}
+
+#[cfg(test)]
+mod pointer_target_tests {
+    use super::{
+        CursorIcon, PointerHover, PointerShape, PointerTarget, cursor_icon_for,
+        pointer_shape_to_cursor_icon,
+    };
+
+    /// Nothing hovered.
+    const NONE: PointerHover = PointerHover {
+        command_block_gutter: false,
+        fold_placeholder: false,
+        url: false,
+    };
+
+    #[test]
+    fn nothing_hovered_defers_to_the_application_shape() {
+        assert_eq!(NONE.resolve(), PointerTarget::TerminalContent);
+        assert_eq!(
+            cursor_icon_for(NONE.resolve(), PointerShape::Crosshair),
+            CursorIcon::Crosshair,
+            "ordinary terminal content must honour the OSC 22 shape"
+        );
+    }
+
+    /// The regression: hovering the gutter must actually produce a pointing
+    /// hand, even though the application has set its own OSC 22 shape. This
+    /// previously lost to the URL/OSC-22 write that ran later in `show`.
+    #[test]
+    fn gutter_hover_beats_the_application_shape() {
+        let hover = PointerHover {
+            command_block_gutter: true,
+            ..NONE
+        };
+        assert_eq!(hover.resolve(), PointerTarget::CommandBlockGutter);
+        assert_eq!(
+            cursor_icon_for(hover.resolve(), PointerShape::Text),
+            CursorIcon::PointingHand
+        );
+    }
+
+    /// Precedence is total and deterministic, not last-writer-wins.
+    #[test]
+    fn precedence_is_gutter_then_placeholder_then_url() {
+        let all = PointerHover {
+            command_block_gutter: true,
+            fold_placeholder: true,
+            url: true,
+        };
+        assert_eq!(all.resolve(), PointerTarget::CommandBlockGutter);
+
+        let no_gutter = PointerHover {
+            command_block_gutter: false,
+            ..all
+        };
+        assert_eq!(no_gutter.resolve(), PointerTarget::FoldPlaceholder);
+
+        let url_only = PointerHover { url: true, ..NONE };
+        assert_eq!(url_only.resolve(), PointerTarget::Url);
+    }
+
+    /// Every chrome affordance uses the same icon, so which one wins is not
+    /// visually observable -- but the rule must still be defined.
+    #[test]
+    fn all_chrome_targets_use_the_pointing_hand() {
+        for target in [
+            PointerTarget::CommandBlockGutter,
+            PointerTarget::FoldPlaceholder,
+            PointerTarget::Url,
+        ] {
+            assert_eq!(
+                cursor_icon_for(target, PointerShape::Wait),
+                CursorIcon::PointingHand,
+                "{target:?} must not defer to the application shape"
+            );
+        }
+    }
+
+    /// Terminal content maps straight through the OSC 22 table.
+    #[test]
+    fn terminal_content_matches_the_osc22_table() {
+        for shape in [
+            PointerShape::Default,
+            PointerShape::Text,
+            PointerShape::Wait,
+            PointerShape::Grab,
+            PointerShape::None,
+        ] {
+            assert_eq!(
+                cursor_icon_for(PointerTarget::TerminalContent, shape),
+                pointer_shape_to_cursor_icon(shape)
+            );
+        }
     }
 }
 
