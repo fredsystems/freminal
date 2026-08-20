@@ -15,4 +15,5 @@ pub(crate) mod input;
 pub(crate) mod widget;
 
 pub use widget::FreminalTerminalWidget;
+pub use widget::SplitBorderHover;
 pub use widget::{PaneRenderCache, RenderState, new_render_state};

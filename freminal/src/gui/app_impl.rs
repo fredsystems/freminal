@@ -33,7 +33,7 @@ use super::pointer_motion::{
 use super::renderer::WindowPostRenderer;
 use super::rendering;
 use super::tabs::{Tab, TabManager};
-use super::terminal::FreminalTerminalWidget;
+use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
@@ -2280,6 +2280,34 @@ impl freminal_windowing::App for FreminalGui {
             // `win.terminal_widget` (issue #453).
             let border_drag_active = win.border_drag.is_some();
 
+            // Whether the pointer is over one of this frame's split-border
+            // drag sensors. Those sensors are wider than the border line they
+            // straddle, so the pointer is geometrically inside an adjacent
+            // pane while logically over chrome that has already set a resize
+            // cursor. Panes must abstain from writing `output.cursor_icon`
+            // there, or the resize arrow only survives in the hairline gap
+            // between the two pane rects -- the reported "clickable region is
+            // much larger than the region that shows the cursor" (#462).
+            //
+            // Read from the rects just published above, so it reflects this
+            // frame's layout, and computed here to avoid holding a borrow of
+            // `win.published` across the mutable borrow of
+            // `win.terminal_widget` in the pane loop.
+            let split_border_hover = {
+                let pointer = ctx.input(|i| i.pointer.latest_pos());
+                let over = pointer.is_some_and(|pos| {
+                    win.published
+                        .chrome_border_rects()
+                        .iter()
+                        .any(|r| r.contains(pos))
+                });
+                if over {
+                    SplitBorderHover::Over
+                } else {
+                    SplitBorderHover::Clear
+                }
+            };
+
             // ── Terminal band: shape-index range capture (#436.2a, range
             // exposed via `App::take_terminal_band_range` as of #436.4a) ───
             //
@@ -2644,6 +2672,7 @@ impl freminal_windowing::App for FreminalGui {
                             &mut pane.pending_copy,
                             &key_broadcast_targets,
                             &present_is_partial_for_panes,
+                            split_border_hover,
                         )
                     });
                 #[cfg(feature = "frame-profiling")]

@@ -1882,6 +1882,7 @@ impl FreminalTerminalWidget {
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
         present_is_partial: &Arc<std::sync::atomic::AtomicBool>,
+        split_border_hover: SplitBorderHover,
     ) -> (bool, bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -3532,8 +3533,10 @@ impl FreminalTerminalWidget {
         // would stamp its own icon over them after they were set.
         //
         // `rect_contains_pointer` respects layer and clip rect, so a modal
-        // drawn above the pane correctly keeps its own cursor.
-        if ui.rect_contains_pointer(pane_rect) {
+        // drawn above the pane correctly keeps its own cursor. Split-border
+        // sensors are not a separate layer -- they overlap the pane
+        // geometrically -- so they are excluded explicitly.
+        if ui.rect_contains_pointer(pane_rect) && split_border_hover == SplitBorderHover::Clear {
             let resolved_icon = cursor_icon_for(pointer_hover.resolve(), snap.pointer_shape);
             ui.ctx().output_mut(|output| {
                 output.cursor_icon = resolved_icon;
@@ -3674,6 +3677,23 @@ impl FreminalTerminalWidget {
 ///
 /// [`PointerShape::Default`] and any value that has no direct egui equivalent
 /// both produce [`CursorIcon::Default`].
+/// Whether the pointer is over a pane-split drag sensor this frame.
+///
+/// The sensor rects are built and hit-tested in `app_impl`, which sets the
+/// resize cursor before any pane renders. They are deliberately wider than
+/// the 1px border line they straddle, which means the pointer sits
+/// *geometrically inside* one of the two adjacent panes while *logically*
+/// over chrome. A pane must therefore abstain from writing the cursor icon
+/// here, or it overwrites the resize arrow for all but the hairline sliver
+/// that falls between the two pane rects (issue #462).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitBorderHover {
+    /// Pointer is over a split-border drag sensor; that chrome owns the icon.
+    Over,
+    /// Pointer is not over any split border.
+    Clear,
+}
+
 /// What the mouse pointer is over, for the purpose of choosing a cursor icon.
 ///
 /// Variants are listed in **descending precedence**: when several apply at
