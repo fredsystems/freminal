@@ -689,17 +689,35 @@ impl Buffer {
         }
     }
 
-    /// Reset an existing row at `row_idx` to a soft-wrap continuation and update
-    /// `image_cell_count` for the cells being discarded.
+    /// Mark an existing row at `row_idx` as a soft-wrap continuation of the
+    /// logical line above it.
     ///
-    /// Called from `insert_text` whenever a new wrap causes an already-populated
-    /// row to be recycled as a continuation line.
+    /// Called from [`Self::advance_row_for_wrap`] whenever autowrap moves the
+    /// cursor onto a row that already exists in the grid.
+    ///
+    /// This updates the row's logical-line metadata **only**. It deliberately
+    /// does not clear the row's cells: autowrap is defined as cursor movement,
+    /// so the destination row's existing content survives and is overwritten
+    /// one cell at a time by whatever is actually printed. Clearing here
+    /// destroyed cells the wrapping text never wrote to, which broke the
+    /// extremely common TUI idiom of repainting a wrapped line by touching a
+    /// few cells and using `CUF`/absolute positioning to skip the rest --
+    /// neovim redrawing a long soft-wrapped line writes one space at column 0,
+    /// `CSI 122 C`, then the final character, and relies on autowrap alone to
+    /// step to the next row. With the clear, every such row lost every cell
+    /// except the two it explicitly wrote (issue #491).
+    ///
+    /// `image_cell_count` is therefore left alone as well: no cells are
+    /// discarded here, so nothing has left the grid to account for. Image
+    /// cells that the wrapping text does overwrite are debited by the normal
+    /// write path.
     fn reuse_row_as_softwrap(&mut self, row_idx: usize) {
         let row = &mut self.rows[row_idx];
-        self.image_cell_count -= row.count_image_cells();
         row.origin = RowOrigin::SoftWrap;
         row.join = RowJoin::ContinueLogicalLine;
-        row.clear();
+        // Metadata changed: `join`/`origin` feed wrapped-URL grouping, so the
+        // cached flat representation of this row must be rebuilt even though
+        // the cells themselves are untouched.
         self.row_cache[row_idx] = None;
     }
 

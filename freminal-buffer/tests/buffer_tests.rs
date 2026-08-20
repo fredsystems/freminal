@@ -310,3 +310,90 @@ fn bce_default_tag_leaves_rows_sparse() {
         );
     }
 }
+
+//
+// ─── autowrap must not erase the row it wraps onto (issue #491) ──────────────
+//
+
+/// Read a row's cells as a `String`, blanks included.
+fn row_text(buf: &Buffer, row: usize, width: usize) -> String {
+    let row = &buf.rows()[row];
+    (0..width)
+        .map(|col| row.resolve_cell(col).tchar().to_string())
+        .collect()
+}
+
+/// Autowrap is defined as cursor movement. Moving onto an already-populated
+/// row must leave that row's cells alone; only the cells actually written to
+/// may change.
+///
+/// This previously cleared the whole destination row, which destroyed content
+/// the wrapping text never wrote to.
+#[test]
+fn autowrap_onto_existing_row_preserves_unwritten_cells() {
+    let mut buf = Buffer::new(5, 10);
+
+    // Row 0 = AAAAA (fills the row, leaving the cursor in pending wrap),
+    // row 1 = BBBBB.
+    buf.insert_text(&[ascii('A'); 5]);
+    buf.insert_text(&[ascii('B'); 5]);
+    assert_eq!(row_text(&buf, 0, 5), "AAAAA");
+    assert_eq!(row_text(&buf, 1, 5), "BBBBB");
+
+    // Put the cursor at the end of row 0 and write one character, which leaves
+    // the cursor in the pending-wrap state.
+    buf.set_cursor_pos(Some(4), Some(0));
+    buf.insert_text(&[ascii('Z')]);
+    assert_eq!(row_text(&buf, 0, 5), "AAAAZ");
+
+    // The next character autowraps onto row 1 and writes a single cell there.
+    buf.insert_text(&[ascii('Q')]);
+    assert_eq!(buf.cursor().pos.y, 1);
+    assert_eq!(buf.cursor().pos.x, 1);
+    assert_eq!(
+        row_text(&buf, 1, 5),
+        "QBBBB",
+        "autowrap must overwrite only the cell it writes, not clear the row"
+    );
+}
+
+/// The wrapped row is still marked as a continuation of the logical line
+/// above, even though its pre-existing cells survive.
+#[test]
+fn autowrap_onto_existing_row_still_marks_it_a_continuation() {
+    use freminal_buffer::row::{RowJoin, RowOrigin};
+
+    let mut buf = Buffer::new(5, 10);
+    buf.insert_text(&[ascii('A'); 5]);
+    buf.insert_text(&[ascii('B'); 5]);
+
+    // Row 1 was created by the first wrap, so reset it to a hard break to
+    // prove the second wrap is what re-marks it.
+    buf.set_cursor_pos(Some(4), Some(0));
+    buf.insert_text(&[ascii('Z')]);
+    buf.insert_text(&[ascii('Q')]);
+
+    let row = &buf.rows()[1];
+    assert_eq!(row.origin, RowOrigin::SoftWrap);
+    assert_eq!(row.join, RowJoin::ContinueLogicalLine);
+}
+
+/// Text that wraps and then keeps writing must still overwrite the cells it
+/// actually covers -- the fix must not turn wrapping into a no-op paint.
+#[test]
+fn autowrap_still_overwrites_cells_the_text_covers() {
+    let mut buf = Buffer::new(5, 10);
+    buf.insert_text(&[ascii('A'); 5]);
+    buf.insert_text(&[ascii('B'); 5]);
+
+    buf.set_cursor_pos(Some(0), Some(0));
+    // 8 characters: 5 fill row 0, the remaining 3 wrap onto row 1.
+    buf.insert_text(&[ascii('C'); 8]);
+
+    assert_eq!(row_text(&buf, 0, 5), "CCCCC");
+    assert_eq!(
+        row_text(&buf, 1, 5),
+        "CCCBB",
+        "the wrapped text overwrites the cells it covers and no more"
+    );
+}
