@@ -1131,7 +1131,18 @@ impl freminal_windowing::App for FreminalGui {
             );
         }
 
+        // Focus-follows-mouse turns pointer motion into a state change, so
+        // the gate must not suppress the frame that would apply it (#495).
+        // Narrow by construction: only motion that lands on a pane other than
+        // the active one qualifies, so moving around inside the focused pane
+        // still suppresses exactly as before.
+        let focus_change_pending = self.config.tabs.focus_follows_mouse
+            && pane_resolution
+                .resolved_pane
+                .is_some_and(|id| id != active_tab.active_pane);
+
         pointer_motion_needs_repaint_decision(
+            focus_change_pending,
             chrome_interactive,
             any_selecting,
             overlay_open,

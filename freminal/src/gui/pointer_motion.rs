@@ -199,6 +199,14 @@ pub(super) const fn animation_in_flight_composed(
 /// winit event loop).
 ///
 /// Returns `true` (a repaint is needed) if ANY of:
+///   - `focus_change_pending`: focus-follows-mouse is enabled and the pointer
+///     is over a pane that is not the active one, so this motion has a focus
+///     switch to apply. Without this term the switch is not applied until
+///     some unrelated event schedules the next frame -- in an otherwise idle
+///     terminal that is the ~500ms cursor-blink wake, which is what made
+///     hover-to-focus feel badly lagged. Suppression is preserved for motion
+///     within the already-active pane, which is the common case the gate
+///     exists to make cheap.
 ///   - `chrome_interactive`: `App::is_chrome_interactive_at` said so (menu
 ///     bar, tab bar, split-border drag sensor).
 ///   - `any_pane_selecting`: some pane in the active tab has an
@@ -222,13 +230,19 @@ pub(super) const fn animation_in_flight_composed(
 // allow for the same rationale.
 #[allow(clippy::fn_params_excessive_bools)]
 pub(super) const fn pointer_motion_needs_repaint_decision(
+    focus_change_pending: bool,
     chrome_interactive: bool,
     any_pane_selecting: bool,
     overlay_open: bool,
     pointer_pane_unresolved: bool,
     pane_signals: Option<PointerMotionPaneSignals>,
 ) -> bool {
-    if chrome_interactive || any_pane_selecting || overlay_open || pointer_pane_unresolved {
+    if focus_change_pending
+        || chrome_interactive
+        || any_pane_selecting
+        || overlay_open
+        || pointer_pane_unresolved
+    {
         return true;
     }
     match pane_signals {
@@ -298,6 +312,11 @@ pub(super) struct PaneResolution {
     /// See [`pane_hover_region_terms`]'s doc. `false` when `signals` is
     /// `None`.
     pub(super) gutter_active: bool,
+    /// Which pane the pointer resolved to, when one did.
+    ///
+    /// Needed by the focus-follows-mouse term: motion only matters for focus
+    /// if it lands on a pane that is not already the active one.
+    pub(super) resolved_pane: Option<panes::PaneId>,
 }
 
 impl PaneResolution {
@@ -312,6 +331,7 @@ impl PaneResolution {
             has_urls: false,
             scroll_offset_nonzero: false,
             gutter_active: false,
+            resolved_pane: None,
         }
     }
 }
@@ -407,6 +427,7 @@ pub(super) fn resolve_pane_under_pointer(
         has_urls,
         scroll_offset_nonzero,
         gutter_active,
+        resolved_pane: Some(pane_id),
     }
 }
 
@@ -553,35 +574,64 @@ mod tests {
     #[test]
     fn pointer_motion_needs_repaint_decision_all_clear_is_false() {
         assert!(!pointer_motion_needs_repaint_decision(
-            false, false, false, false, None
+            false, false, false, false, false, None
+        ));
+    }
+
+    /// Issue #495. With focus-follows-mouse on, motion onto a non-active pane
+    /// carries a pending focus switch, so the frame that applies it must not
+    /// be suppressed -- even over plain terminal content with every other
+    /// signal clear.
+    #[test]
+    fn pointer_motion_needs_repaint_decision_pending_focus_change_forces_true() {
+        assert!(pointer_motion_needs_repaint_decision(
+            true, false, false, false, false, None
+        ));
+    }
+
+    /// And the suppression this gate exists for is preserved: with no focus
+    /// switch pending (pointer inside the already-active pane) plain motion
+    /// still schedules nothing.
+    #[test]
+    fn pointer_motion_needs_repaint_decision_no_pending_focus_change_still_suppresses() {
+        assert!(!pointer_motion_needs_repaint_decision(
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(PointerMotionPaneSignals {
+                mouse_tracking_active: false,
+                hover_region_risk: false,
+            })
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_chrome_interactive_forces_true() {
         assert!(pointer_motion_needs_repaint_decision(
-            true, false, false, false, None
+            false, true, false, false, false, None
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_any_pane_selecting_forces_true() {
         assert!(pointer_motion_needs_repaint_decision(
-            false, true, false, false, None
+            false, false, true, false, false, None
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_overlay_open_forces_true() {
         assert!(pointer_motion_needs_repaint_decision(
-            false, false, true, false, None
+            false, false, false, true, false, None
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_unresolved_pane_forces_true() {
         assert!(pointer_motion_needs_repaint_decision(
-            false, false, false, true, None
+            false, false, false, false, true, None
         ));
     }
 
@@ -590,13 +640,14 @@ mod tests {
         // Pointer resolved to "no pane here" (e.g. inter-pane padding) --
         // NOT the same as unresolved; contributes false on its own.
         assert!(!pointer_motion_needs_repaint_decision(
-            false, false, false, false, None
+            false, false, false, false, false, None
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_mouse_tracking_active_forces_true() {
         assert!(pointer_motion_needs_repaint_decision(
+            false,
             false,
             false,
             false,
@@ -615,6 +666,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(PointerMotionPaneSignals {
                 mouse_tracking_active: false,
                 hover_region_risk: true,
@@ -625,6 +677,7 @@ mod tests {
     #[test]
     fn pointer_motion_needs_repaint_decision_pane_signals_both_false_is_false() {
         assert!(!pointer_motion_needs_repaint_decision(
+            false,
             false,
             false,
             false,
