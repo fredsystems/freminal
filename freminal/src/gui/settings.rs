@@ -984,12 +984,14 @@ impl SettingsModal {
 
         // --- Font Size slider ---
         ui.label("Font Size:");
-        ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5));
+        ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5))
+            .draggable();
         ui.add_space(8.0);
 
         // --- Line Height slider ---
         ui.label("Line Height:");
-        ui.add(Slider::new(&mut self.draft.font.line_height, 1.0..=2.0).step_by(0.01));
+        ui.add(Slider::new(&mut self.draft.font.line_height, 1.0..=2.0).step_by(0.01))
+            .draggable();
         ui.colored_label(
             ui.visuals().weak_text_color(),
             "Vertical spacing between rows (multiplier of the font's ascent + descent).",
@@ -1077,7 +1079,8 @@ impl SettingsModal {
                 ui.add(egui::Slider::new(
                     &mut self.draft.cursor.trail_duration_ms,
                     10..=500,
-                ));
+                ))
+                .draggable();
             });
         });
     }
@@ -1319,7 +1322,8 @@ impl SettingsModal {
         ui.add_space(4.0);
 
         ui.label("Background Opacity:");
-        ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05))
+            .draggable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1420,7 +1424,8 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         ui.label("Background Image Opacity:");
-        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05))
+            .draggable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),

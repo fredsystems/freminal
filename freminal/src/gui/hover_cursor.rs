@@ -58,6 +58,17 @@ pub trait HoverAffordance {
     /// Convenience for the common `add_enabled(cond, ...)` pattern, so callers
     /// do not have to branch at the call site.
     fn clickable_when(self, enabled: bool) -> Self;
+
+    /// Mark this widget as a draggable handle: open hand on hover, closed
+    /// hand while actually being dragged.
+    ///
+    /// For controls whose primary interaction is picking something up and
+    /// moving it -- sliders, in practice. Deliberately distinct from the
+    /// directional resize arrow used by pane dividers, where the drag *axis*
+    /// is the useful information, and from `egui::DragValue`'s
+    /// `ResizeEast`/`ResizeWest` arrows, which additionally signal when the
+    /// value is clamped at a limit.
+    fn draggable(self) -> Self;
 }
 
 impl HoverAffordance for Response {
@@ -74,6 +85,19 @@ impl HoverAffordance for Response {
             self.clickable()
         } else {
             self.disabled_affordance()
+        }
+    }
+
+    fn draggable(self) -> Self {
+        if self.dragged() {
+            // `on_hover_cursor` only fires while the pointer is inside the
+            // widget, and a drag routinely travels outside it -- past the end
+            // of a slider's rail, most obviously. Write directly so the closed
+            // hand survives the whole gesture.
+            self.ctx.set_cursor_icon(CursorIcon::Grabbing);
+            self
+        } else {
+            self.on_hover_cursor(CursorIcon::Grab)
         }
     }
 }

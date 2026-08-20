@@ -56,14 +56,18 @@ covered and each needs `.clickable()`:
 | Widget | Covered by `interact_cursor`? |
 | ------------------------- | ----- |
 | `ui.button` / `small_button` / `Button::new` | yes — do nothing |
-| `ui.menu_button`, `ComboBox` header | yes — do nothing |
+| `ui.menu_button` | yes — do nothing |
+| `ComboBox` header | **no** — `.show_ui(..).response.clickable()` |
 | `ui.selectable_value` | **no** — add `.clickable()` |
 | `ui.selectable_label` | **no** — add `.clickable()` |
 | `ui.checkbox` | **no** — add `.clickable()` |
 | `ui.radio` / `radio_value` | **no** — add `.clickable()` |
 | `ui.toggle_value` | **no** — add `.clickable()` |
 | `ui.hyperlink` / `hyperlink_to` / `link` | **no** — add `.clickable()` |
+| `Slider` | **no** — add `.draggable()` |
 | anything hand-rolled via `ui.interact(..)` | **no** — add `.clickable()` |
+| `DragValue` | n/a — egui sets its own arrows, leave it |
+| scrollbars (egui's and ours) | n/a — no cursor, by convention |
 
 Use the vocabulary in `freminal/src/gui/hover_cursor.rs`:
 
@@ -75,19 +79,29 @@ ui.selectable_value(&mut cfg.mode, ThemeMode::Dark, "Dark").clickable();
 ui.add_enabled(can_save, save_widget).clickable_when(can_save);
 ```
 
-Three methods, naming intent rather than appearance:
+Four methods, naming intent rather than appearance:
 
 - `.clickable()` — pointing hand. Anything that performs an action on click.
 - `.disabled_affordance()` — `NotAllowed`. Present but not actionable; a hand
   on something inert is a lie.
 - `.clickable_when(enabled)` — picks between the two. Pairs with `add_enabled`.
+- `.draggable()` — `Grab`, becoming `Grabbing` mid-drag. For handles you pick
+  up and move; sliders, in practice.
 
 ### What must NOT get a hand
 
 - **Text fields.** egui already gives `TextEdit` an I-beam, which correctly
   says "type here", not "click here". Leave it.
-- **Drag handles.** They get a directional resize cursor so the drag axis is
-  visible. See Part 3.
+- **Pane dividers.** They get a directional resize cursor so the drag axis is
+  visible. See Part 3. (Sliders are different: `.draggable()`, because the
+  axis is already obvious from the rail.)
+- **`DragValue`** — the number box beside a slider. egui gives it
+  `ResizeEast`/`ResizeHorizontal`/`ResizeWest`, which is truthful: dragging is
+  its primary interaction, and the east/west variants signal that the value is
+  clamped at a limit. It looks like a text field and invites an I-beam; do not
+  give it one, that would hide the drag entirely.
+- **Scrollbars**, egui's and freminal's own. GTK, macOS and browsers all keep
+  the plain arrow over a scrollbar; deviating makes freminal the odd one out.
 - **Plain labels.** Obviously.
 
 ---
