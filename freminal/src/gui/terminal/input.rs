@@ -1521,6 +1521,12 @@ fn finalize_selection_drag(
         // arrived on this same frame (defect 2,
         // Task 116.2).
         view_state.selection_committed_this_frame = true;
+        tracing::debug!(
+            target: "freminal::selection",
+            anchor = ?view_state.selection.anchor,
+            end = ?view_state.selection.end,
+            "selection committed on release"
+        );
     }
 }
 

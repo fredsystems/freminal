@@ -147,7 +147,32 @@ impl SelectionState {
     }
 
     /// Clear the selection entirely, including block mode.
-    pub const fn clear(&mut self) {
+    ///
+    /// Every path that drops a selection funnels through here -- the
+    /// content-changed auto-clear, the click-to-dismiss press, an interrupted
+    /// drag, a fold/unfold, a completed copy. When a selection vanishes
+    /// unexpectedly, the question is always *which* of those fired, and the
+    /// call sites are spread across three modules.
+    ///
+    /// So this logs the caller's source location whenever it actually discards
+    /// something. `#[track_caller]` makes that the real call site rather than
+    /// this line. Off by default; enable with:
+    ///
+    /// ```text
+    /// RUST_LOG=none,freminal::selection=debug freminal
+    /// ```
+    #[track_caller]
+    pub fn clear(&mut self) {
+        if self.anchor.is_some() || self.end.is_some() {
+            tracing::debug!(
+                target: "freminal::selection",
+                caller = %std::panic::Location::caller(),
+                anchor = ?self.anchor,
+                end = ?self.end,
+                is_selecting = self.is_selecting,
+                "selection cleared"
+            );
+        }
         self.anchor = None;
         self.end = None;
         self.is_selecting = false;
