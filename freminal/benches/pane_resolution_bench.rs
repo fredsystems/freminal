@@ -20,7 +20,9 @@
 //! rects, an inline linear rect-containment scan (`app_impl.rs:930-933`,
 //! the same work [`pane_at_pos`] does — it is inlined there only so the
 //! pane's rect is returned alongside its id) finds the hit pane, and
-//! [`PaneTree::find`] resolves that id back to a `&Pane`. The private O(1)
+//! [`PaneTree::find`] resolves that id back to a `&Pane`. The same
+//! predicate also calls [`PaneTree::iter_panes`] to collect every pane in
+//! the tree for its selection-in-progress check. The private O(1)
 //! predicates that consume the result are the cheap tail of this chain, not
 //! its cost.
 //!
@@ -45,7 +47,7 @@
 //! O(1) boolean compositions over already-resolved flags, so a wall-clock
 //! benchmark of them would measure Criterion's own harness overhead rather
 //! than freminal; they and the chain are covered by unit tests in
-//! `gui::pointer_motion`'s own test module instead. The five functions
+//! `gui::pointer_motion`'s own test module instead. The six functions
 //! benchmarked here are the ones that actually walk the tree or scan
 //! geometry.
 //!
@@ -56,11 +58,11 @@
 //! `log2(pane_count)`) — this is the shape produced by the "split evenly"
 //! interactive workflow most users actually build. A **chain**-shaped
 //! (right-leaning, depth `pane_count - 1`) 16-pane case is added for
-//! `layout` and `find` so the baseline records the second shape too. It is
-//! the degenerate case for `layout`, which recurses through every internal
-//! node; it is *not* expected to be worse for `find` — see
-//! [`build_chain_tree`] for why, and the recorded baseline for what was
-//! actually measured.
+//! `layout`, `find`, and `iter_panes` so the baseline records the second
+//! shape too. It is the degenerate case for `layout`, which recurses
+//! through every internal node; it is *not* expected to be worse for
+//! `find` — see [`build_chain_tree`] for why, and the recorded baseline
+//! for what was actually measured.
 //!
 //! `split_borders` is parameterised on a different axis instead — which pane
 //! is active, which determines how much failed subtree searching it does. See
@@ -72,9 +74,9 @@
 //! (`panes/mod.rs`) — a struct literal touching `pub(crate)` fields — is
 //! unavailable. [`make_bench_pane`] instead uses the public
 //! `Pane::from_channels` constructor with hand-built, disconnected
-//! `TabChannels`. This is safe because none of the five functions
+//! `TabChannels`. This is safe because none of the six functions
 //! benchmarked in this file send or receive on any channel — they only walk
-//! the pane tree and compute geometry — so a channel whose counterpart
+//! the pane tree or compute geometry — so a channel whose counterpart
 //! endpoint has already been dropped is indistinguishable, for this
 //! purpose, from a live one. `WindowPostRenderer::new()`
 //! (`renderer/gpu.rs:1867`) allocates no GPU resources — its own doc says
@@ -278,6 +280,34 @@ fn bench_layout(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_iter_panes
+// ---------------------------------------------------------------
+fn bench_iter_panes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("iter_panes");
+
+    for &count in &PANE_COUNTS {
+        let (tree, _leaves) = build_balanced_tree(count);
+        group.bench_function(BenchmarkId::new("balanced", count), |b| {
+            b.iter(|| {
+                let result = black_box(&tree).iter_panes();
+                black_box(result.unwrap_or_default());
+            });
+        });
+    }
+
+    // Degenerate chain shape, 16 panes: mirrors `bench_layout`'s chain case.
+    let (chain_tree, _chain_leaves) = build_chain_tree(16);
+    group.bench_function(BenchmarkId::new("chain", 16), |b| {
+        b.iter(|| {
+            let result = black_box(&chain_tree).iter_panes();
+            black_box(result.unwrap_or_default());
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_split_borders
 // ---------------------------------------------------------------
 fn bench_split_borders(c: &mut Criterion) {
@@ -460,6 +490,7 @@ criterion_group!(
     config = configure();
     targets =
         bench_layout,
+        bench_iter_panes,
         bench_split_borders,
         bench_find,
         bench_pane_at_pos,
