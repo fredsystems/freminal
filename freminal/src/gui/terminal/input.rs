@@ -1253,6 +1253,97 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
+/// Outcome of [`scroll_overlay_passthrough`].
+pub(super) struct ScrollPassthrough {
+    /// Sub-character-cell scroll remainder to carry into the next frame.
+    pub(super) carry: f32,
+    /// Whether the pane's scroll offset actually moved.
+    pub(super) scrolled: bool,
+}
+
+/// Apply mouse-wheel scrolling to the pane's scrollback while an overlay is
+/// open that otherwise suppresses every pane input event.
+///
+/// The search overlay is a *find in this pane's scrollback* tool, so blocking
+/// scroll makes it impossible to look around the matches it just found. The
+/// blanket input suppression that stops keystrokes leaking to the PTY (see
+/// `freminal-modal-input-suppression`) also swallowed wheel events, because
+/// scroll is handled inside [`write_input_to_terminal`], which that
+/// suppression bypasses wholesale.
+///
+/// This is deliberately **not** a general re-enable of input:
+///
+/// - Only wheel events are read; keys, clicks, drags and paste stay suppressed.
+/// - Only the **primary screen** scrolls. On the alternate screen
+///   [`handle_scroll_fallback`] translates scroll into arrow keys *sent to the
+///   PTY*, which is application input, not view movement -- injecting that
+///   while a modal holds focus would move the cursor in the running program.
+///   The alternate screen has no scrollback to look through anyway.
+/// - Nothing is reported to the terminal's mouse-tracking protocol, for the
+///   same reason.
+///
+/// Returns the carry remainder to store back on the pane cache, and whether
+/// the view moved (so the caller can request a repaint -- do that *outside*
+/// the `ui.input` closure, which holds a read lock on the egui context).
+pub(super) fn scroll_overlay_passthrough(
+    input: &egui::InputState,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+    view_state: &mut ViewState,
+    character_size_y: f32,
+    carry: f32,
+) -> ScrollPassthrough {
+    let mut scroll_amount = carry;
+
+    for event in &input.events {
+        if let Event::MouseWheel { delta, unit, .. } = event {
+            match unit {
+                egui::MouseWheelUnit::Point => scroll_amount += delta.y,
+                egui::MouseWheelUnit::Line => {
+                    scroll_amount = delta.y.mul_add(character_size_y, scroll_amount);
+                }
+                // Matches `write_input_to_terminal`: page-unit wheels are not
+                // produced by any backend freminal supports.
+                egui::MouseWheelUnit::Page => {}
+            }
+        }
+    }
+
+    // Below one cell of travel there is nothing to do yet; keep accumulating.
+    if scroll_amount.abs() < character_size_y {
+        return ScrollPassthrough {
+            carry: scroll_amount,
+            scrolled: false,
+        };
+    }
+
+    // `trunc()` rounds toward zero so the remainder keeps its sign, matching
+    // the main scroll path's trackpad-smoothing behaviour.
+    let scroll_amount_to_do = scroll_amount.trunc();
+    scroll_amount -= scroll_amount_to_do;
+
+    if snap.is_alternate_screen {
+        return ScrollPassthrough {
+            carry: scroll_amount,
+            scrolled: false,
+        };
+    }
+
+    let before = view_state.scroll_offset;
+    handle_scroll_fallback(
+        scroll_amount_to_do,
+        character_size_y,
+        snap,
+        input_tx,
+        view_state,
+    );
+
+    ScrollPassthrough {
+        carry: scroll_amount,
+        scrolled: view_state.scroll_offset != before,
+    }
+}
+
 /// Whether the pane [`write_input_to_terminal`] is processing input for is
 /// the currently-focused (active) pane.
 ///

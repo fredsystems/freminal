@@ -48,7 +48,10 @@ use super::{
         CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
         evaluate_frame_dirty_state,
     },
-    input::{InputCarryState, PaneFocus, WriteInputParams, write_input_to_terminal},
+    input::{
+        InputCarryState, PaneFocus, WriteInputParams, scroll_overlay_passthrough,
+        write_input_to_terminal,
+    },
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
@@ -2161,15 +2164,44 @@ impl FreminalTerminalWidget {
         // Set to `true` below iff a non-empty local selection is actually
         // copied to the system clipboard this frame (Subtask D3).
         let mut copied_to_clipboard = false;
-        if suppress_input
-            || context_menu_open
-            || view_state.search_state.is_open
-            || view_state.command_history.is_open
-            || cache.scrollbar_dragging
-        {
+        let pane_focus_now = if is_active_pane {
+            PaneFocus::Active
+        } else {
+            PaneFocus::Inactive
+        };
+        let suppressors = InputSuppressors {
+            modal_or_drag: suppress_input,
+            context_menu: context_menu_open,
+            search_overlay: view_state.search_state.is_open,
+            command_history: view_state.command_history.is_open,
+            scrollbar_drag: cache.scrollbar_dragging,
+        };
+        if suppressors.any() {
+            let request_scroll_repaint = if suppressors.scroll_passes_through(pane_focus_now) {
+                let result = ui.input(|input_state| {
+                    scroll_overlay_passthrough(
+                        input_state,
+                        snap,
+                        input_tx,
+                        view_state,
+                        logical_cell_h,
+                        cache.previous_scroll_amount,
+                    )
+                });
+                cache.previous_scroll_amount = result.carry;
+                result.scrolled
+            } else {
+                cache.previous_scroll_amount = 0.0;
+                false
+            };
+            // Must be outside the `ui.input` closure above, which holds a read
+            // lock on the egui context.
+            if request_scroll_repaint {
+                ui.ctx().request_repaint();
+            }
+
             cache.previous_key = None;
             cache.previous_mouse_state = None;
-            cache.previous_scroll_amount = 0.0;
             if border_drag_active {
                 // A pane-border drag geometrically overlaps the adjacent
                 // pane's `terminal_rect`; the same press+drag would
@@ -4605,6 +4637,208 @@ mod gutter_hover_trigger_tests {
             cell_h,
         );
         assert_eq!(rows, None);
+    }
+}
+
+/// The reasons pane input can be suppressed on a given frame.
+///
+/// Several can hold simultaneously (a modal open *and* a scrollbar drag in
+/// flight), and no combination is illegal, so this is the documented case
+/// where a set of independent bool signals is the correct representation
+/// rather than a single enum (`freminal-state-representation`).
+///
+/// Grouping them gives the suppression rule one place to live. It was
+/// previously spelled out twice -- once to decide whether to suppress, once
+/// to decide what may still get through -- which meant the two lists had to
+/// be kept in sync by hand.
+// Each field is a separate, independently-observed condition, and every
+// combination of them is legal and meaningful -- which is exactly the case
+// `freminal-state-representation` names as the correct use of bools rather
+// than an enum. Collapsing them into a state machine would assert an ordering
+// and mutual exclusion that does not exist (a modal can be open while a
+// scrollbar drag is in flight). `SearchState` carries the same allow for the
+// same reason.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InputSuppressors {
+    /// A modal/menu overlay or pane-border drag, including the deliberate
+    /// one-frame release tail that stops a dismiss-click leaking through.
+    pub(super) modal_or_drag: bool,
+    /// The right-click context menu is open.
+    pub(super) context_menu: bool,
+    /// The find-in-scrollback overlay is open.
+    pub(super) search_overlay: bool,
+    /// The command-history palette is open.
+    pub(super) command_history: bool,
+    /// A scrollbar drag is in progress.
+    pub(super) scrollbar_drag: bool,
+}
+
+impl InputSuppressors {
+    /// Whether anything at all is suppressing pane input this frame.
+    pub(super) const fn any(self) -> bool {
+        self.modal_or_drag
+            || self.context_menu
+            || self.search_overlay
+            || self.command_history
+            || self.scrollbar_drag
+    }
+
+    /// Whether mouse-wheel events should still reach the pane despite
+    /// suppression.
+    ///
+    /// True only when the search overlay is the *sole* reason input is
+    /// suppressed, and only for the active pane. Search finds matches in this
+    /// pane's scrollback, so swallowing the wheel leaves those matches
+    /// unreachable -- the user cannot look at what they just found. Every
+    /// other suppressor keeps the wheel blocked: a context menu or palette has
+    /// its own scrollable content, a scrollbar drag is already driving the
+    /// offset, and a modal's dismiss-click tail must not move the view.
+    ///
+    /// Note this governs *whether* wheel events are read at all; what they are
+    /// then allowed to do is further restricted in
+    /// [`super::input::scroll_overlay_passthrough`] (primary screen only, no
+    /// PTY writes, no mouse-tracking reports).
+    pub(super) const fn scroll_passes_through(self, pane_focus: PaneFocus) -> bool {
+        self.search_overlay
+            && matches!(pane_focus, PaneFocus::Active)
+            && !self.modal_or_drag
+            && !self.context_menu
+            && !self.command_history
+            && !self.scrollbar_drag
+    }
+}
+
+#[cfg(test)]
+mod input_suppressors_tests {
+    use super::{InputSuppressors, PaneFocus};
+
+    /// Nothing suppressing.
+    const CLEAR: InputSuppressors = InputSuppressors {
+        modal_or_drag: false,
+        context_menu: false,
+        search_overlay: false,
+        command_history: false,
+        scrollbar_drag: false,
+    };
+
+    #[test]
+    fn any_is_false_only_when_every_suppressor_is_clear() {
+        assert!(!CLEAR.any());
+        assert!(
+            InputSuppressors {
+                modal_or_drag: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                context_menu: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                search_overlay: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                command_history: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                scrollbar_drag: true,
+                ..CLEAR
+            }
+            .any()
+        );
+    }
+
+    /// The reported case: with only the search overlay open, the wheel must
+    /// still reach the active pane so the user can look at the matches.
+    #[test]
+    fn scroll_passes_through_for_search_overlay_on_the_active_pane() {
+        let s = InputSuppressors {
+            search_overlay: true,
+            ..CLEAR
+        };
+        assert!(s.any(), "search must still suppress everything else");
+        assert!(s.scroll_passes_through(PaneFocus::Active));
+    }
+
+    /// Scroll targets the active pane only, matching `write_input_to_terminal`.
+    #[test]
+    fn scroll_does_not_pass_through_on_an_inactive_pane() {
+        let s = InputSuppressors {
+            search_overlay: true,
+            ..CLEAR
+        };
+        assert!(!s.scroll_passes_through(PaneFocus::Inactive));
+    }
+
+    /// Any other suppressor present alongside search keeps the wheel blocked.
+    #[test]
+    fn any_other_suppressor_blocks_scroll_even_with_search_open() {
+        for s in [
+            InputSuppressors {
+                search_overlay: true,
+                modal_or_drag: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                context_menu: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                command_history: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                scrollbar_drag: true,
+                ..CLEAR
+            },
+        ] {
+            assert!(
+                !s.scroll_passes_through(PaneFocus::Active),
+                "search must not re-enable scroll while {s:?} also suppresses"
+            );
+        }
+    }
+
+    /// Overlays other than search keep the old behaviour: fully blocked.
+    #[test]
+    fn non_search_suppressors_never_pass_scroll_through() {
+        for s in [
+            InputSuppressors {
+                modal_or_drag: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                context_menu: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                command_history: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                scrollbar_drag: true,
+                ..CLEAR
+            },
+        ] {
+            assert!(!s.scroll_passes_through(PaneFocus::Active));
+        }
     }
 }
 
