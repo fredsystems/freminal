@@ -480,15 +480,18 @@ creating it closes that tracking gap rather than starting new work. Fourteen sub
 merged: 121.1–121.11 from that original run, plus the Group B bug fixes 121.12–121.14
 (PR #467), and 121.23 (the profiling methodology reference,
 `Documents/PROFILING.md`) and 121.26 landed directly. Outstanding: 121.15 (left to
-121.17, blocked behind Task 122), 121.16 (withdrawn), 121.17, issue #459's unactioned
-candidate list (121.18–121.22, 121.24), measurement debt (121.25, partly captured, plus
-121.27–121.28), and two items the Group B fixes themselves surfaced
-(121.29–121.31). The
+121.17, unblocked now that Task 122 merged), 121.16 (withdrawn), 121.17, issue #459's
+unactioned candidate list (121.18–121.22, 121.24), measurement debt (121.25, partly
+captured, plus 121.27–121.28), three items the Group B fixes themselves surfaced
+(121.29–121.31), and Group G, the beta.7 chrome-cache regression and its follow-ups
+(121.32–121.36): 121.32 is complete (chrome cache disabled by default), with 121.33,
+121.34 (the decision gate), 121.35 (deferred), and 121.36 (conditional) outstanding. The
 task is an umbrella, so several subtasks will outlive v0.12.0; the version does not gate on
 Task 121 reaching Complete. **Task 121 is not the egui-decoupling decision** —
 `Documents/DECOUPLING_FRAMEWORK.md` is the decision record for whether freminal should stop
-using egui for the main window, and its status is reopened and leaning against the rewrite.
-Task 121 is the performance work, and it stands either way.
+using egui for the main window, and its status is reopened and leaning against the rewrite —
+but `DECOUPLING_FRAMEWORK.md` §2A is the source of truth for Task 121's own Phase 0
+measurements. Task 121 is the performance work, and it stands either way.
 
 **Task 122 (v0.12.0, orchestration extraction):** decompose the GUI binary's god functions
 and give orchestration logic (event triage, view window, input encoding, frame decisions) a

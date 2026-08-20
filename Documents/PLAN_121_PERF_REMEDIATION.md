@@ -1,11 +1,15 @@
 # PLAN_121_PERF_REMEDIATION.md — Task 121 "Performance Remediation"
 
 > **STATUS: IN PROGRESS.** Fourteen subtasks have merged to `main` across six pull
-> requests (#458, #460, #461, #464, #465, #467), plus 121.23 and 121.26 landed
-> directly. The remainder — one bug blocked behind Task 122, one unifying improvement,
-> six unactioned issue #459 items, two-and-a-half pieces of measurement debt (121.25
-> is partly captured), and three items surfaced by the Group B work and its
-> measurement — are outstanding and unscheduled.
+> requests (#458, #460, #461, #464, #465, #467) — though **121.13 was subsequently
+> reverted**, so thirteen stand — plus 121.23, 121.26 and 121.32 landed directly.
+> The remainder — one bug now routed through 121.17 rather than blocked, one
+> unifying improvement (121.17, whose Task 122 dependency was discharged on
+> 2026-08-03 but whose measured numbers are stale), six unactioned issue #459 items
+> (of which 121.18 and 121.19 carry 2026-08-16 recon findings that re-scope them),
+> two-and-a-half pieces of measurement debt (121.25 is partly captured), three items
+> surfaced by the Group B work, and Group G's four open chrome-cache follow-ups
+> (121.33–121.36) — are outstanding and unscheduled.
 
 Task 121 is carried by v0.12.0. The version-level summary lives in
 `PLAN_VERSION_120.md` ("Task 121 — Performance Remediation"); this document is the
@@ -265,7 +269,8 @@ These were surfaced by Group A. 121.12, 121.13 and 121.14 were **merged to `main
 PR #467 (merge commit `f7dac216`, one atomic commit per subtask on `task-121/group-b`).
 **121.13 was subsequently reverted (2026-08-02) — it shipped a user-visible interaction
 regression in 0.12.0-beta.7; see 121.32.** 121.12 and 121.14 stand. 121.15 remains
-unfixed and is deliberately left to 121.17, which is blocked behind Task 122. 121.16 is
+unfixed and is deliberately left to 121.17, whose Task 122 dependency was discharged
+when that task merged on 2026-08-03. 121.16 is
 withdrawn.
 
 ### 121.12 — The 250 ms fallback makes blink-off slower than blink-on
@@ -468,7 +473,9 @@ the benefit it costs is nearly all of it.
 shipped without it. An interim narrowing here would mean adding a fifth round to the
 suppression predicate in its current shape — exactly what 121.17 warns is how the
 maintainability argument for the egui rewrite gets stronger for no good reason. It
-stays blocked behind Task 122 → 121.17.
+remains routed through 121.17 — the Task 122 dependency that once blocked both was
+discharged when that task merged on 2026-08-03, so what defers 121.15 now is the
+decision to fix it via 121.17 rather than separately, not a blocker.
 
 ### 121.16 — Config kill switch for the suppression (WITHDRAWN)
 
@@ -542,18 +549,28 @@ exactly what Task 122 builds a home for. §2A records that the suppression predi
 maintainability argument for the egui rewrite gets stronger for no good reason. Do
 Task 122 first.
 
-### 121.17 measured prize (harness, 2026-07-29)
+### 121.17 measured prize (harness, 2026-07-29) — STALE, see caveat above
+
+Refining the caveat at the top of this entry: these numbers predate 121.32
+disabling the chrome cache. The suppression
+percentages and veto counts are still indicative — they concern
+`pointer_motion_needs_repaint`, which 121.32 did not touch — but the `Replay %`
+column is now meaningless, because `ChromeMode::Replay` is never chosen. The
+whole table must be re-captured before it is used to justify a design.
 
 No longer an argument. Captured with `--features frame-profiling`, wiggling the
 pointer over terminal content in three scenarios, flushes differenced:
 
-| Scenario | checks | suppressed | veto firing | `Replay` % | µs/frame |
+| Scenario | checks | suppressed | veto firing | `Replay` % (void)² | µs/frame |
 | --- | --- | --- | --- | --- | --- |
 | Clean pane | 15,265 | **99.16%** | `overlay_open` 126 (0.8%) | 58.3% | 729¹ |
 | One OSC 8 URL on screen | 792 | **1.68%** | `has_urls` **792 (100%)** | 5.8% | 185 |
 | btop | 217 | **0%** | `mouse_tracking_active` **216 (99.5%)** | 40.4% | 521 |
 
 ¹ single flush, so warm-up is included; the others are differenced.
+² retained only as a record of what was observed while the chrome cache was
+live; `Replay` is never chosen since 121.32, so this column has no bearing on
+current behaviour.
 
 **A single hyperlink on screen takes suppression from 99.16% to 1.68%.** `has_urls`
 fired on 792 of 792 checks — total defeat. btop confirms `mouse_tracking_active` does

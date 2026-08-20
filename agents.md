@@ -282,12 +282,23 @@ decomposing.
 For tasks with ordered dependencies (e.g. multi-phase refactors):
 
 1. Read the entire task document before doing anything.
-2. Find the first incomplete step.
-3. Execute it. Keep its scope exactly as written.
-4. Run the verification suite -- confirm it passes.
-5. Update the tracking document: mark the step complete, add a brief
+2. Reconcile the document against git before trusting it: check the
+   current branch, whether it is pushed, and whether it is ahead of
+   or behind the target branch -- recent commits may already
+   implement steps the document still shows as open. A plan document
+   records intent; only git records what actually landed. Where they
+   disagree on *bookkeeping* -- a step done but still shown open --
+   git wins and the document gets corrected in passing (for
+   `MASTER_PLAN.md` specifically, `freminal-plan-status-lifecycle`
+   governs the status values). Where they disagree on *substance* --
+   the plan's technical premise no longer matches the code -- that is
+   an `autonomy-boundaries` hard stop, not a correction.
+3. Find the first incomplete step.
+4. Execute it. Keep its scope exactly as written.
+5. Run the verification suite -- confirm it passes.
+6. Update the tracking document: mark the step complete, add a brief
    note.
-6. Continue to the next step.
+7. Continue to the next step.
 
 Each step must leave `cargo test --all` passing before the next one
 starts -- a red suite is a full stop, not something to fix on the way
