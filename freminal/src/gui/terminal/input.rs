@@ -410,10 +410,24 @@ pub fn drain_pending_raw_keys(
         return;
     }
     let modes = InputModes::from_snapshot(snap);
+    // Kitty keyboard protocol: key *releases* are reported only when
+    // `REPORT_EVENT_TYPES` (bit 1) is set. Without it the encoder falls back
+    // to the legacy press encoding for a release, so forwarding one emits a
+    // second, byte-identical copy of the key and the application sees two
+    // presses. The egui key path already gates on exactly this
+    // (`kkp & 2 != 0`, see the release block in `write_input_to_terminal`);
+    // the raw-key path was missing the same guard.
+    let report_event_types = snap.kitty_keyboard_flags & 2 != 0;
     for (event, mods) in pending.drain(..) {
         let Some(codepoint) = kitty_keycode_to_codepoint(event.key_code) else {
             continue;
         };
+
+        // A release with no way to mark it as such would be indistinguishable
+        // from a press. Drop it rather than duplicate the key.
+        if !event.pressed && !report_event_types {
+            continue;
+        }
 
         let key_mods = raw_mods_to_key_modifiers(mods, super_pressed);
         let meta = if !event.pressed {
@@ -1253,6 +1267,97 @@ pub(super) fn handle_scroll_fallback(
     }
 }
 
+/// Outcome of [`scroll_overlay_passthrough`].
+pub(super) struct ScrollPassthrough {
+    /// Sub-character-cell scroll remainder to carry into the next frame.
+    pub(super) carry: f32,
+    /// Whether the pane's scroll offset actually moved.
+    pub(super) scrolled: bool,
+}
+
+/// Apply mouse-wheel scrolling to the pane's scrollback while an overlay is
+/// open that otherwise suppresses every pane input event.
+///
+/// The search overlay is a *find in this pane's scrollback* tool, so blocking
+/// scroll makes it impossible to look around the matches it just found. The
+/// blanket input suppression that stops keystrokes leaking to the PTY (see
+/// `freminal-modal-input-suppression`) also swallowed wheel events, because
+/// scroll is handled inside [`write_input_to_terminal`], which that
+/// suppression bypasses wholesale.
+///
+/// This is deliberately **not** a general re-enable of input:
+///
+/// - Only wheel events are read; keys, clicks, drags and paste stay suppressed.
+/// - Only the **primary screen** scrolls. On the alternate screen
+///   [`handle_scroll_fallback`] translates scroll into arrow keys *sent to the
+///   PTY*, which is application input, not view movement -- injecting that
+///   while a modal holds focus would move the cursor in the running program.
+///   The alternate screen has no scrollback to look through anyway.
+/// - Nothing is reported to the terminal's mouse-tracking protocol, for the
+///   same reason.
+///
+/// Returns the carry remainder to store back on the pane cache, and whether
+/// the view moved (so the caller can request a repaint -- do that *outside*
+/// the `ui.input` closure, which holds a read lock on the egui context).
+pub(super) fn scroll_overlay_passthrough(
+    input: &egui::InputState,
+    snap: &TerminalSnapshot,
+    input_tx: &Sender<InputEvent>,
+    view_state: &mut ViewState,
+    character_size_y: f32,
+    carry: f32,
+) -> ScrollPassthrough {
+    let mut scroll_amount = carry;
+
+    for event in &input.events {
+        if let Event::MouseWheel { delta, unit, .. } = event {
+            match unit {
+                egui::MouseWheelUnit::Point => scroll_amount += delta.y,
+                egui::MouseWheelUnit::Line => {
+                    scroll_amount = delta.y.mul_add(character_size_y, scroll_amount);
+                }
+                // Matches `write_input_to_terminal`: page-unit wheels are not
+                // produced by any backend freminal supports.
+                egui::MouseWheelUnit::Page => {}
+            }
+        }
+    }
+
+    // Below one cell of travel there is nothing to do yet; keep accumulating.
+    if scroll_amount.abs() < character_size_y {
+        return ScrollPassthrough {
+            carry: scroll_amount,
+            scrolled: false,
+        };
+    }
+
+    // `trunc()` rounds toward zero so the remainder keeps its sign, matching
+    // the main scroll path's trackpad-smoothing behaviour.
+    let scroll_amount_to_do = scroll_amount.trunc();
+    scroll_amount -= scroll_amount_to_do;
+
+    if snap.is_alternate_screen {
+        return ScrollPassthrough {
+            carry: scroll_amount,
+            scrolled: false,
+        };
+    }
+
+    let before = view_state.scroll_offset;
+    handle_scroll_fallback(
+        scroll_amount_to_do,
+        character_size_y,
+        snap,
+        input_tx,
+        view_state,
+    );
+
+    ScrollPassthrough {
+        carry: scroll_amount,
+        scrolled: view_state.scroll_offset != before,
+    }
+}
+
 /// Whether the pane [`write_input_to_terminal`] is processing input for is
 /// the currently-focused (active) pane.
 ///
@@ -1416,6 +1521,12 @@ fn finalize_selection_drag(
         // arrived on this same frame (defect 2,
         // Task 116.2).
         view_state.selection_committed_this_frame = true;
+        tracing::debug!(
+            target: "freminal::selection",
+            anchor = ?view_state.selection.anchor,
+            end = ?view_state.selection.end,
+            "selection committed on release"
+        );
     }
 }
 
@@ -3294,6 +3405,125 @@ mod raw_key_tests {
             rx.try_recv().is_err(),
             "no bytes should be sent when KKP is off"
         );
+    }
+
+    /// Kitty keyboard protocol: a release is reported only when
+    /// `REPORT_EVENT_TYPES` (bit 1) is set. Without it the encoder falls back
+    /// to the legacy press encoding, so forwarding the release emits a second
+    /// byte-identical copy and the application sees the key twice.
+    #[test]
+    fn drain_does_not_duplicate_a_key_when_event_types_are_not_reported() {
+        // Flag sets that enable KKP but leave bit 1 clear. Flag 1
+        // (disambiguate) on its own is the single most commonly requested
+        // configuration.
+        for flags in [1u32, 8, 9] {
+            let snap = snap_with_kkp_flags(flags);
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let mut pending = vec![
+                (
+                    RawKeyEvent {
+                        key_code: KeyCode::Numpad1,
+                        pressed: true,
+                        repeat: false,
+                    },
+                    RawKeyMods::default(),
+                ),
+                (
+                    RawKeyEvent {
+                        key_code: KeyCode::Numpad1,
+                        pressed: false,
+                        repeat: false,
+                    },
+                    RawKeyMods::default(),
+                ),
+            ];
+
+            drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
+
+            let mut sent = Vec::new();
+            while let Ok(InputEvent::Key(bytes)) = rx.try_recv() {
+                sent.push(bytes);
+            }
+            assert_eq!(
+                sent.len(),
+                1,
+                "flags {flags}: one press must produce exactly one report, got {sent:?}"
+            );
+        }
+    }
+
+    /// With `REPORT_EVENT_TYPES` set, the release IS reported -- and is
+    /// distinguishable from the press by its `:3` event-type field.
+    #[test]
+    fn drain_reports_a_distinguishable_release_when_event_types_are_on() {
+        let snap = snap_with_kkp_flags(3);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![
+            (
+                RawKeyEvent {
+                    key_code: KeyCode::Numpad1,
+                    pressed: true,
+                    repeat: false,
+                },
+                RawKeyMods::default(),
+            ),
+            (
+                RawKeyEvent {
+                    key_code: KeyCode::Numpad1,
+                    pressed: false,
+                    repeat: false,
+                },
+                RawKeyMods::default(),
+            ),
+        ];
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
+
+        let mut sent = Vec::new();
+        while let Ok(InputEvent::Key(bytes)) = rx.try_recv() {
+            sent.push(bytes);
+        }
+        assert_eq!(sent.len(), 2, "press and release are both reported");
+        assert_ne!(
+            sent[0], sent[1],
+            "the release must not be byte-identical to the press"
+        );
+        assert_eq!(sent[0], b"\x1b[57400u");
+        assert_eq!(sent[1], b"\x1b[57400;1:3u");
+    }
+
+    /// With KKP off entirely the legacy keypad byte is emitted once, on press
+    /// only -- the release has no legacy encoding.
+    #[test]
+    fn drain_emits_one_legacy_byte_per_keypad_press() {
+        let snap = snap_with_kkp_flags(0);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut pending = vec![
+            (
+                RawKeyEvent {
+                    key_code: KeyCode::Numpad1,
+                    pressed: true,
+                    repeat: false,
+                },
+                RawKeyMods::default(),
+            ),
+            (
+                RawKeyEvent {
+                    key_code: KeyCode::Numpad1,
+                    pressed: false,
+                    repeat: false,
+                },
+                RawKeyMods::default(),
+            ),
+        ];
+
+        drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
+
+        let mut sent = Vec::new();
+        while let Ok(InputEvent::Key(bytes)) = rx.try_recv() {
+            sent.push(bytes);
+        }
+        assert_eq!(sent, vec![b"1".to_vec()]);
     }
 
     #[test]

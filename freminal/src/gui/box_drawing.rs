@@ -106,11 +106,8 @@ fn fill_rect(buf: &mut [u8], w: usize, h: usize, x0: f32, y0: f32, x1: f32, y1: 
 
 /// Fill the whole cell with a uniform `alpha` (for the shade glyphs).
 fn fill_uniform(buf: &mut [u8], alpha: u8) {
-    for px in buf.chunks_exact_mut(BPP) {
-        px[0] = 255;
-        px[1] = 255;
-        px[2] = 255;
-        px[3] = alpha;
+    for px in buf.as_chunks_mut::<BPP>().0 {
+        *px = [255, 255, 255, alpha];
     }
 }
 
@@ -1109,7 +1106,7 @@ mod tests {
             let c = char::from_u32(cp).expect("valid codepoint");
             let buf = generate_alpha(c, w, h);
             assert!(
-                buf.chunks_exact(BPP).any(|px| px[3] > 0),
+                buf.as_chunks::<BPP>().0.iter().any(|px| px[3] > 0),
                 "{cp:#x} rendered fully transparent"
             );
         }

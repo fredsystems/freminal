@@ -147,7 +147,32 @@ impl SelectionState {
     }
 
     /// Clear the selection entirely, including block mode.
-    pub const fn clear(&mut self) {
+    ///
+    /// Every path that drops a selection funnels through here -- the
+    /// content-changed auto-clear, the click-to-dismiss press, an interrupted
+    /// drag, a fold/unfold, a completed copy. When a selection vanishes
+    /// unexpectedly, the question is always *which* of those fired, and the
+    /// call sites are spread across three modules.
+    ///
+    /// So this logs the caller's source location whenever it actually discards
+    /// something. `#[track_caller]` makes that the real call site rather than
+    /// this line. Off by default; enable with:
+    ///
+    /// ```text
+    /// RUST_LOG=none,freminal::selection=debug freminal
+    /// ```
+    #[track_caller]
+    pub fn clear(&mut self) {
+        if self.anchor.is_some() || self.end.is_some() {
+            tracing::debug!(
+                target: "freminal::selection",
+                caller = %std::panic::Location::caller(),
+                anchor = ?self.anchor,
+                end = ?self.end,
+                is_selecting = self.is_selecting,
+                "selection cleared"
+            );
+        }
         self.anchor = None;
         self.end = None;
         self.is_selecting = false;
@@ -291,6 +316,42 @@ impl SearchState {
         self.last_searched_query.clone_from(&self.query);
         self.last_searched_regex = self.regex_mode;
         self.last_searched_case_sensitive = self.case_sensitive;
+    }
+
+    /// A cheap fingerprint of everything that determines how the search
+    /// highlights should be drawn.
+    ///
+    /// The per-frame dirty check compares this against the previous frame's
+    /// value to decide whether the highlight geometry must be rebuilt. It
+    /// previously compared only `matches.len()` and `current_match`, which
+    /// misses any edit that changes *where* a match starts or ends without
+    /// changing how many there are — narrowing "day" to "days" over the same
+    /// single hit being the obvious case. The highlight quads then kept
+    /// drawing the old, shorter box until something unrelated (a scroll, new
+    /// output, a pane switch) forced a full rebuild (#463).
+    ///
+    /// The inputs are the `last_searched_*` fields rather than the live
+    /// `query`/`regex_mode`/`case_sensitive`, because those record what
+    /// actually produced the current `matches` — which is what gets rendered.
+    /// A query edit that has not been searched yet correctly does not move
+    /// this value; the frame that re-runs the search does.
+    ///
+    /// Deliberately does **not** hash the `matches` themselves: matches are a
+    /// pure function of (query, flags, corpus), corpus changes are already
+    /// covered by the snapshot's `content_changed`, and a broad search can
+    /// produce tens of thousands of spans that would then be re-hashed on
+    /// every single frame.
+    #[must_use]
+    pub fn render_epoch(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        self.is_open.hash(&mut h);
+        self.last_searched_query.hash(&mut h);
+        self.last_searched_regex.hash(&mut h);
+        self.last_searched_case_sensitive.hash(&mut h);
+        self.matches.len().hash(&mut h);
+        self.current_match.hash(&mut h);
+        h.finish()
     }
 
     /// Move to the next match, wrapping around.
@@ -2715,5 +2776,152 @@ mod tests {
             due > Duration::from_millis(0),
             "next_due must be positive, got {due:?}"
         );
+    }
+
+    // ─── SearchState::render_epoch (issue #463) ──────────────────────────────
+
+    /// Build a search state as it would be right after a search completed.
+    fn searched(query: &str, matches: Vec<MatchSpan>) -> SearchState {
+        let mut st = SearchState {
+            is_open: true,
+            query: query.to_owned(),
+            matches,
+            ..SearchState::default()
+        };
+        st.mark_fresh();
+        st
+    }
+
+    /// The reported case: narrowing "day" to "days" keeps a single match and
+    /// keeps the focused index at 0, but the highlight must still be rebuilt.
+    #[test]
+    fn render_epoch_changes_when_a_query_edit_keeps_the_match_count() {
+        let before = searched(
+            "day",
+            vec![MatchSpan {
+                row: 4,
+                col_start: 10,
+                col_end: 12,
+            }],
+        );
+        let after = searched(
+            "days",
+            vec![MatchSpan {
+                row: 4,
+                col_start: 10,
+                col_end: 13,
+            }],
+        );
+
+        assert_eq!(before.matches.len(), after.matches.len());
+        assert_eq!(before.current_match, after.current_match);
+        assert_ne!(
+            before.render_epoch(),
+            after.render_epoch(),
+            "an edit that only widens the match must still force a rebuild"
+        );
+    }
+
+    /// Stepping between matches must force a rebuild -- the focused match is
+    /// drawn in a different colour from the others.
+    #[test]
+    fn render_epoch_changes_when_the_focused_match_moves() {
+        let mut st = searched(
+            "x",
+            vec![
+                MatchSpan {
+                    row: 1,
+                    col_start: 0,
+                    col_end: 0,
+                },
+                MatchSpan {
+                    row: 2,
+                    col_start: 0,
+                    col_end: 0,
+                },
+            ],
+        );
+        let before = st.render_epoch();
+        st.next_match();
+        assert_ne!(before, st.render_epoch());
+    }
+
+    /// Toggling a search mode re-runs the search, so it must invalidate.
+    #[test]
+    fn render_epoch_changes_when_a_search_mode_is_toggled() {
+        let base = searched("abc", vec![]);
+        let mut regex = searched("abc", vec![]);
+        regex.regex_mode = true;
+        regex.mark_fresh();
+        assert_ne!(base.render_epoch(), regex.render_epoch());
+
+        let mut case = searched("abc", vec![]);
+        case.case_sensitive = true;
+        case.mark_fresh();
+        assert_ne!(base.render_epoch(), case.render_epoch());
+    }
+
+    /// Opening and closing the overlay changes whether highlights are drawn.
+    #[test]
+    fn render_epoch_changes_when_the_overlay_opens_or_closes() {
+        let mut st = searched("abc", vec![]);
+        let open = st.render_epoch();
+        st.is_open = false;
+        assert_ne!(open, st.render_epoch());
+    }
+
+    /// An unsettled edit -- typed but not yet searched -- must NOT invalidate:
+    /// `matches` still describes the previous query, and rebuilding would just
+    /// redraw the same geometry.
+    #[test]
+    fn render_epoch_is_stable_until_the_search_actually_reruns() {
+        let mut st = searched(
+            "day",
+            vec![MatchSpan {
+                row: 4,
+                col_start: 10,
+                col_end: 12,
+            }],
+        );
+        let settled = st.render_epoch();
+
+        st.query.push('s');
+        assert!(st.needs_refresh(), "the edit must be pending a re-search");
+        assert_eq!(
+            settled,
+            st.render_epoch(),
+            "a query edit alone must not invalidate; the re-search does"
+        );
+
+        st.matches = vec![MatchSpan {
+            row: 4,
+            col_start: 10,
+            col_end: 13,
+        }];
+        st.mark_fresh();
+        assert_ne!(settled, st.render_epoch());
+    }
+
+    /// Identical state must produce an identical fingerprint, or every frame
+    /// would rebuild.
+    #[test]
+    fn render_epoch_is_stable_for_unchanged_state() {
+        let a = searched(
+            "hello",
+            vec![MatchSpan {
+                row: 3,
+                col_start: 1,
+                col_end: 5,
+            }],
+        );
+        let b = searched(
+            "hello",
+            vec![MatchSpan {
+                row: 3,
+                col_start: 1,
+                col_end: 5,
+            }],
+        );
+        assert_eq!(a.render_epoch(), b.render_epoch());
     }
 }

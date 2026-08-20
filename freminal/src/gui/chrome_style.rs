@@ -290,6 +290,26 @@ pub fn build_visuals(
     // and selected elements use `selection.stroke` (OnAccent, set above).
     visuals.override_text_color = None;
 
+    // Give every clickable chrome widget a pointing-hand cursor (issue #493).
+    //
+    // egui leaves this `None` by default, on the grounds that native toolkits
+    // do not do it. freminal opts in: its chrome is flat and largely
+    // borderless, so without a cursor change there is frequently nothing to
+    // distinguish an actionable menu entry or button from a plain label.
+    //
+    // This covers every widget built on `egui::Button` -- menu entries, modal
+    // action buttons, the tab-strip close button -- which is the bulk of the
+    // chrome. It does NOT cover `SelectableLabel`, `Checkbox`, `RadioButton`,
+    // `Link`, `Slider`, `ComboBox`, or anything hand-rolled via `ui.interact`;
+    // egui only consults `interact_cursor` from `Button`'s own paint path.
+    // Those widgets opt in individually with `HoverAffordance::clickable`
+    // (see `crate::gui::hover_cursor`).
+    //
+    // Terminal content is unaffected: panes resolve their own cursor and only
+    // the pane under the pointer writes it (see `PointerHover` /
+    // `SplitBorderHover` in `crate::gui::terminal::widget`).
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+
     // ── Surface backgrounds ───────────────────────────────────────────────────
     //
     // These egui surfaces default to near-black in dark mode; left unset they

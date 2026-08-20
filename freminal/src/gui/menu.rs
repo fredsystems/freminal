@@ -8,6 +8,7 @@ use freminal_common::config::TabTitlePolicy;
 use freminal_common::keybindings::KeyAction;
 
 use super::TabBarAction;
+use super::hover_cursor::HoverAffordance;
 use super::icons::ChromeIcon;
 use super::tabs::Tab;
 use super::window::PerWindowState;
@@ -413,7 +414,8 @@ impl super::FreminalGui {
                     ui.hyperlink_to(
                         "Third-party attributions",
                         "https://github.com/fredsystems/freminal/blob/main/ATTRIBUTIONS.md",
-                    );
+                    )
+                    .clickable();
                     ui.add_space(10.0);
                     if ui.button("Close").clicked() {
                         self.about_window_open = false;

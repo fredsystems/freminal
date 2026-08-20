@@ -112,12 +112,9 @@ pub(super) struct DirtyTrackingOutcome {
     /// The selection translated into snapshot-row space, clamped to the
     /// flattened window, for the renderer.
     pub(super) screen_selection: Option<(usize, usize, usize, usize)>,
-    /// Number of search matches this frame (cached for next frame's
-    /// comparison).
-    pub(super) search_match_count: usize,
-    /// Current search match index this frame (cached for next frame's
-    /// comparison).
-    pub(super) search_current_match: usize,
+    /// Fingerprint of this frame's search-highlight state (cached for next
+    /// frame's comparison). See `SearchState::render_epoch`.
+    pub(super) search_epoch: u64,
     /// Command-block gutter hover-tint rendered-row range this frame.
     pub(super) command_block_hover_rows: Option<(usize, usize)>,
     /// Whether the cursor should actually be drawn this frame (DECTCEM,
@@ -343,10 +340,44 @@ pub(super) fn evaluate_frame_dirty_state(
     // that arrives on the same frame as the release would set
     // `snap.content_changed` and immediately wipe the
     // just-committed selection (defect 2, Task 116.2).
-    if snap.content_changed
+    // `snap.content_changed` is edge-triggered per *snapshot build*, but the
+    // GUI renders only a subset of the snapshots the PTY thread produces. A
+    // change that reverts before the next rendered frame -- a prompt clearing
+    // and rewriting its own line, say -- therefore arrives as
+    // `content_changed = true` on a snapshot whose text is identical to what
+    // this pane already drew:
+    //
+    //     snapshot A: text X                  -> rendered
+    //     snapshot B: text Y, changed = true  -> never rendered
+    //     snapshot C: text X, changed = true  -> rendered (Y != X at build C)
+    //
+    // Acting on that wiped selections for no reason, intermittently, whenever
+    // a mouse release happened to land across such a flicker (#470).
+    //
+    // So confirm against what was actually last rendered before discarding
+    // anything. This is a content comparison, deliberately not the
+    // `Arc::ptr_eq` check used for `content_changed` above: the PTY thread
+    // allocates a fresh Arc for cursor-blink dirty rows even when the text is
+    // byte-identical, so pointer identity would re-introduce the ~500ms
+    // clear-on-blink bug that `snap.content_changed` was chosen to avoid.
+    //
+    // Evaluated last so the O(visible_chars) comparison only runs on the rare
+    // frame where every cheap condition already passed.
+    // `has_selection()` first: with nothing selected the clear is a no-op, so
+    // this skips the comparison below on every frame of continuous PTY output.
+    // Equivalent, not merely cheaper -- a degenerate selection (`anchor ==
+    // end`, or `end == None`) reports `false` here and `clear()` would have
+    // done nothing to it either, so a later primary press still starts a
+    // fresh drag rather than being consumed dismissing a phantom.
+    if view_state.selection.has_selection()
+        && snap.content_changed
         && !snap.scroll_changed
         && !view_state.selection.is_selecting
         && !view_state.selection_committed_this_frame
+        && cache
+            .last_rendered_visible
+            .as_ref()
+            .is_none_or(|prev| prev.as_ref() != snap.visible_chars.as_ref())
     {
         view_state.selection.clear();
     }
@@ -359,10 +390,11 @@ pub(super) fn evaluate_frame_dirty_state(
     let selection_changed = current_selection != cache.previous_selection;
 
     // Check whether search highlight state has changed since last frame.
-    let search_match_count = view_state.search_state.matches.len();
-    let search_current_match = view_state.search_state.current_match;
-    let search_changed = search_match_count != cache.previous_search_match_count
-        || search_current_match != cache.previous_search_current_match;
+    // Compares a fingerprint of everything that determines the highlight
+    // geometry, not just the match count and focused index -- see
+    // `SearchState::render_epoch` and issue #463.
+    let search_epoch = view_state.search_state.render_epoch();
+    let search_changed = search_epoch != cache.previous_search_epoch;
 
     // Convert buffer-absolute selection coordinates to snapshot-row
     // space for the renderer.  `win_start` is the flattened window top
@@ -570,8 +602,7 @@ pub(super) fn evaluate_frame_dirty_state(
         },
         current_selection,
         screen_selection,
-        search_match_count,
-        search_current_match,
+        search_epoch,
         command_block_hover_rows: command_block_hover_rows_early,
         effective_show_cursor,
         cursor_pixel_pos,
@@ -596,6 +627,7 @@ mod evaluate_frame_dirty_state_tests {
     use super::super::widget::new_render_state;
     use super::*;
     use crate::gui::renderer::WindowPostRenderer;
+    use crate::gui::view_state::SearchState;
     use freminal_common::config::CommandBlocksConfig;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::{
@@ -632,8 +664,10 @@ mod evaluate_frame_dirty_state_tests {
         cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
         cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
         cache.previous_selection = None;
-        cache.previous_search_match_count = 0;
-        cache.previous_search_current_match = 0;
+        // These tests drive `ViewState::new()`, whose search state is
+        // default-constructed, so a settled cache is one that already agrees
+        // with that state's fingerprint.
+        cache.previous_search_epoch = SearchState::default().render_epoch();
         cache.previous_command_block_hover_rows = None;
         cache.previous_cursor_blink_on = cursor_blink_on;
         cache.previous_cursor_pos = snap.cursor_pos;
@@ -784,6 +818,107 @@ mod evaluate_frame_dirty_state_tests {
         assert!(outcome.observations.content_changed);
     }
 
+    // ── content-changed selection auto-clear (issue #470) ────────────────
+
+    /// Put a committed (not in-progress) selection on `view_state`.
+    fn with_committed_selection(view_state: &mut ViewState) {
+        view_state.selection.anchor = Some(CellCoord { col: 2, row: 1 });
+        view_state.selection.end = Some(CellCoord { col: 8, row: 3 });
+        view_state.selection.is_selecting = false;
+        view_state.selection_committed_this_frame = false;
+    }
+
+    /// The #470 regression. `content_changed` is edge-triggered per snapshot
+    /// build and the GUI renders only some snapshots, so a change that reverts
+    /// between rendered frames arrives as `content_changed = true` on a
+    /// snapshot identical to what was already drawn. That must not discard a
+    /// selection.
+    #[test]
+    fn spurious_content_changed_does_not_discard_a_selection() {
+        let mut snap = base_snapshot();
+        snap.content_changed = true;
+        snap.scroll_changed = false;
+        let cache = settled_cache(&snap, true, true);
+        // `settled_cache` records this exact buffer as last-rendered, so the
+        // text has demonstrably not moved since.
+        let mut view_state = ViewState::new();
+        with_committed_selection(&mut view_state);
+        let render_state = render_state_with_deco_verts(true);
+
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            view_state.selection.has_selection(),
+            "a content_changed flag contradicted by the rendered text must not \
+             clear the selection"
+        );
+    }
+
+    /// The behaviour being preserved: when the text really did move, a stale
+    /// highlight would sit over different content, so it is still discarded.
+    #[test]
+    fn genuine_content_change_still_discards_a_selection() {
+        let mut snap = base_snapshot();
+        snap.content_changed = true;
+        snap.scroll_changed = false;
+        let mut cache = settled_cache(&snap, true, true);
+        // Last-rendered text differs from the snapshot's.
+        cache.last_rendered_visible = Some(Arc::new(vec![
+            freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
+        ]));
+        let mut view_state = ViewState::new();
+        with_committed_selection(&mut view_state);
+        let render_state = render_state_with_deco_verts(true);
+
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            !view_state.selection.has_selection(),
+            "a real content change must still clear the selection"
+        );
+    }
+
+    /// A pure scroll never invalidates a selection: coordinates are
+    /// buffer-absolute, so the same text is still selected.
+    #[test]
+    fn scroll_change_does_not_discard_a_selection() {
+        let mut snap = base_snapshot();
+        snap.content_changed = true;
+        snap.scroll_changed = true;
+        let mut cache = settled_cache(&snap, true, true);
+        cache.last_rendered_visible = Some(Arc::new(vec![
+            freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
+        ]));
+        let mut view_state = ViewState::new();
+        with_committed_selection(&mut view_state);
+        let render_state = render_state_with_deco_verts(true);
+
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(view_state.selection.has_selection());
+    }
+
+    /// The Task 116 guarantee: output landing on the same frame as the mouse
+    /// release must not wipe the just-committed selection.
+    #[test]
+    fn selection_committed_this_frame_survives_a_genuine_content_change() {
+        let mut snap = base_snapshot();
+        snap.content_changed = true;
+        snap.scroll_changed = false;
+        let mut cache = settled_cache(&snap, true, true);
+        cache.last_rendered_visible = Some(Arc::new(vec![
+            freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
+        ]));
+        let mut view_state = ViewState::new();
+        with_committed_selection(&mut view_state);
+        view_state.selection_committed_this_frame = true;
+        let render_state = render_state_with_deco_verts(true);
+
+        let _ = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(view_state.selection.has_selection());
+    }
+
     #[test]
     fn search_change_beats_cursor_change() {
         // The search match count changed AND the cursor blinked: the tint
@@ -791,7 +926,9 @@ mod evaluate_frame_dirty_state_tests {
         // `search_changed` must veto it.
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, true);
-        cache.previous_search_match_count = 1;
+        // Any value that differs from this frame's epoch stands in for "the
+        // search state changed since the last rendered frame".
+        cache.previous_search_epoch = cache.previous_search_epoch.wrapping_add(1);
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 

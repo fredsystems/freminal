@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use super::font_manager;
+use super::hover_cursor::HoverAffordance;
 use super::icons::ChromeIcon;
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
@@ -573,24 +574,7 @@ impl SettingsModal {
                 let warn = ui.visuals().warn_fg_color;
                 ui.colored_label(warn, msg);
             }
-            ui.horizontal(|ui| {
-                let reset_btn = egui::Button::new("Reset to Defaults");
-                if ui.add_enabled(!is_read_only, reset_btn).clicked() {
-                    self.draft = Config::default();
-                    self.status_message = Some("Reset to defaults (not saved yet)".to_string());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let apply_btn = egui::Button::new("Apply");
-                    if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                        action = self.try_apply();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        // Route through the dirty-state guard so unsaved
-                        // edits surface a confirmation prompt.
-                        self.request_close();
-                    }
-                });
-            });
+            self.show_action_buttons(ui, is_read_only, &mut action);
             ui.add_space(4.0);
         });
 
@@ -749,27 +733,7 @@ impl SettingsModal {
                     ui.colored_label(warn, msg);
                 }
 
-                // --- Bottom buttons ---
-                ui.horizontal(|ui| {
-                    let reset_btn = egui::Button::new("Reset to Defaults");
-                    if ui.add_enabled(!is_read_only, reset_btn).clicked() {
-                        self.draft = Config::default();
-                        self.status_message = Some("Reset to defaults (not saved yet)".to_string());
-                    }
-
-                    // Right-align Apply and Cancel.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let apply_btn = egui::Button::new("Apply");
-                        if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                            action = self.try_apply();
-                        }
-                        if ui.button("Cancel").clicked() {
-                            // Route through the dirty-state guard so unsaved
-                            // edits surface a confirmation prompt.
-                            self.request_close();
-                        }
-                    });
-                });
+                self.show_action_buttons(ui, is_read_only, &mut action);
             });
 
         // Handle the X button on the window title bar.  When the user clicks
@@ -925,7 +889,8 @@ impl SettingsModal {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for tab in SettingsTab::ALL {
-                            ui.selectable_value(&mut self.active_tab, tab, tab.label());
+                            ui.selectable_value(&mut self.active_tab, tab, tab.label())
+                                .clickable();
                         }
                     });
                 });
@@ -972,19 +937,24 @@ impl SettingsModal {
                         &mut self.draft.font.family,
                         entry.value.clone(),
                         entry.label.as_str(),
-                    );
+                    )
+                    .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(8.0);
 
         // --- Font Size slider ---
         ui.label("Font Size:");
-        ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5));
+        ui.add(Slider::new(&mut self.draft.font.size, 4.0..=96.0).step_by(0.5))
+            .draggable();
         ui.add_space(8.0);
 
         // --- Line Height slider ---
         ui.label("Line Height:");
-        ui.add(Slider::new(&mut self.draft.font.line_height, 1.0..=2.0).step_by(0.01));
+        ui.add(Slider::new(&mut self.draft.font.line_height, 1.0..=2.0).step_by(0.01))
+            .draggable();
         ui.colored_label(
             ui.visuals().weak_text_color(),
             "Vertical spacing between rows (multiplier of the font's ascent + descent).",
@@ -992,7 +962,8 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         // --- Ligatures toggle ---
-        ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures");
+        ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures")
+            .clickable();
         ui.colored_label(
             ui.visuals().weak_text_color(),
             "Render multi-character ligatures (e.g. =>, !=, ->).",
@@ -1042,20 +1013,27 @@ impl SettingsModal {
                     &mut self.draft.cursor.shape,
                     CursorShapeConfig::Block,
                     "Block",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.cursor.shape,
                     CursorShapeConfig::Underline,
                     "Underline",
-                );
-                ui.selectable_value(&mut self.draft.cursor.shape, CursorShapeConfig::Bar, "Bar");
-            });
+                )
+                .clickable();
+                ui.selectable_value(&mut self.draft.cursor.shape, CursorShapeConfig::Bar, "Bar")
+                    .clickable();
+            })
+            .response
+            .clickable();
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink");
+        ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink")
+            .clickable();
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.cursor.trail, "Cursor Trail");
+        ui.checkbox(&mut self.draft.cursor.trail, "Cursor Trail")
+            .clickable();
         ui.add_space(4.0);
 
         ui.add_enabled_ui(self.draft.cursor.trail, |ui| {
@@ -1064,7 +1042,8 @@ impl SettingsModal {
                 ui.add(egui::Slider::new(
                     &mut self.draft.cursor.trail_duration_ms,
                     10..=500,
-                ));
+                ))
+                .draggable();
             });
         });
     }
@@ -1073,13 +1052,16 @@ impl SettingsModal {
         // ── Mode selector ──────────────────────────────────────────────────
         ui.label("Theme Mode:");
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Dark, "Dark");
-            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Light, "Light");
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Dark, "Dark")
+                .clickable();
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Light, "Light")
+                .clickable();
             ui.selectable_value(
                 &mut self.draft.theme.mode,
                 ThemeMode::Auto,
                 "Auto (follow OS)",
-            );
+            )
+            .clickable();
         });
         ui.add_space(4.0);
         if self.draft.theme.mode == ThemeMode::Auto {
@@ -1104,9 +1086,12 @@ impl SettingsModal {
                         &mut self.draft.theme.dark_name,
                         theme.slug.to_string(),
                         theme.name,
-                    );
+                    )
+                    .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         if let Some(theme) = themes::by_slug(&self.draft.theme.dark_name)
             && self.draft.theme.mode != ThemeMode::Light
@@ -1129,9 +1114,12 @@ impl SettingsModal {
                         &mut self.draft.theme.light_name,
                         theme.slug.to_string(),
                         theme.name,
-                    );
+                    )
+                    .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         if let Some(theme) = themes::by_slug(&self.draft.theme.light_name)
             && self.draft.theme.mode == ThemeMode::Light
@@ -1194,9 +1182,12 @@ impl SettingsModal {
             .selected_text(selected.as_str())
             .show_ui(ui, |ui| {
                 for level in &["trace", "debug", "info", "warn", "error"] {
-                    ui.selectable_value(&mut selected, (*level).to_string(), *level);
+                    ui.selectable_value(&mut selected, (*level).to_string(), *level)
+                        .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         // Persist choice into the draft config.
         self.draft.logging.level = if selected == "debug" {
             None // default — omit from TOML
@@ -1248,9 +1239,13 @@ impl SettingsModal {
                 StyleProfile::Retro => "Retro",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern");
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro");
-            });
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern")
+                    .clickable();
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro")
+                    .clickable();
+            })
+            .response
+            .clickable();
         if self.draft_profile != before {
             self.pending_preview_profile = Some(self.draft_profile);
             // Persist into the draft so Apply (which saves `self.draft`) writes
@@ -1266,7 +1261,8 @@ impl SettingsModal {
     }
 
     fn show_ui_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar");
+        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar")
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1289,7 +1285,8 @@ impl SettingsModal {
         ui.add_space(4.0);
 
         ui.label("Background Opacity:");
-        ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add(Slider::new(&mut self.draft.ui.background_opacity, 0.0..=1.0).step_by(0.05))
+            .draggable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1307,7 +1304,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.ui.auto_detect_urls,
             "Auto-detect URLs in terminal output",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1362,28 +1360,35 @@ impl SettingsModal {
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Fill,
                     "Fill (stretch, ignore aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Fit,
                     "Fit (letterbox, preserve aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Cover,
                     "Cover (crop, preserve aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Tile,
                     "Tile (repeat in both dimensions)",
-                );
-            });
+                )
+                .clickable();
+            })
+            .response
+            .clickable();
 
         ui.add_space(8.0);
 
         ui.label("Background Image Opacity:");
-        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05));
+        ui.add(Slider::new(&mut self.draft.ui.background_image_opacity, 0.0..=1.0).step_by(0.05))
+            .draggable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1424,7 +1429,8 @@ impl SettingsModal {
 
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader");
+        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader")
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1432,38 +1438,87 @@ impl SettingsModal {
         );
     }
 
-    fn show_tabs_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(
-            &mut self.draft.tabs.show_single_tab,
-            "Show Tab Bar With Single Tab",
-        );
-        ui.add_space(4.0);
-        ui.colored_label(
-            ui.visuals().weak_text_color(),
-            "When disabled, the tab bar only appears with multiple tabs.",
-        );
+    /// Replace the draft with a default config, as the "Reset to Defaults"
+    /// button does.
+    ///
+    /// `draft_profile` is the chrome-style picker's own copy of
+    /// `draft.chrome.profile`, kept separate so the picker can detect a change
+    /// and emit a live preview. It is synced on open and whenever the user
+    /// moves the picker -- but a reset moves `draft.chrome.profile` underneath
+    /// it without the picker being touched, so it must be re-synced here.
+    /// Otherwise the picker keeps displaying the pre-reset profile while Apply
+    /// writes the default one, and the change-detection in
+    /// `show_style_profile_picker` sees no difference to correct.
+    fn reset_draft_to_defaults(&mut self) {
+        self.draft = Config::default();
+        self.draft_profile = self.draft.chrome.profile;
+        self.status_message = Some("Reset to defaults (not saved yet)".to_string());
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        ui.label("Tab Bar Position:");
-        let current_label = tab_bar_position_label(self.draft.tabs.position);
-        ComboBox::from_id_salt("tab_bar_position")
-            .selected_text(current_label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.draft.tabs.position, TabBarPosition::Top, "Top");
-                ui.selectable_value(
-                    &mut self.draft.tabs.position,
-                    TabBarPosition::Bottom,
-                    "Bottom",
-                );
+    /// The dialog's action row: `[Reset to Defaults] ... [Cancel] [Apply] [OK]`.
+    ///
+    /// Shared by the standalone window and the inline modal, which previously
+    /// carried byte-identical copies of it.
+    ///
+    /// Right-to-left layout, so the buttons added first sit furthest right --
+    /// the conventional order, with the dismissing commit at the end. When the
+    /// config is read-only the three committing buttons are disabled and say
+    /// so with the cursor rather than inviting a click that cannot work.
+    ///
+    /// Writes through `action` only when a button is actually clicked, so an
+    /// action a caller already resolved this frame is left intact.
+    fn show_action_buttons(
+        &mut self,
+        ui: &mut Ui,
+        is_read_only: bool,
+        action: &mut SettingsAction,
+    ) {
+        ui.horizontal(|ui| {
+            let reset_btn = egui::Button::new("Reset to Defaults");
+            if ui
+                .add_enabled(!is_read_only, reset_btn)
+                .clickable_when(!is_read_only)
+                .clicked()
+            {
+                self.reset_draft_to_defaults();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let ok_btn = egui::Button::new("OK");
+                if ui
+                    .add_enabled(!is_read_only, ok_btn)
+                    .clickable_when(!is_read_only)
+                    .clicked()
+                {
+                    *action = self.try_apply();
+                }
+                // Apply commits without dismissing, so a change can be judged
+                // against a live terminal and then adjusted again without
+                // reopening the dialog (issue #452).
+                let apply_btn = egui::Button::new("Apply");
+                if ui
+                    .add_enabled(!is_read_only, apply_btn)
+                    .clickable_when(!is_read_only)
+                    .clicked()
+                {
+                    *action = self.apply_without_dismissing();
+                }
+                if ui.button("Cancel").clicked() {
+                    // Route through the dirty-state guard so unsaved edits
+                    // surface a confirmation prompt.
+                    self.request_close();
+                }
             });
+        });
+    }
 
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
+    /// Tab-title policy controls: how a tab combines the user's custom name
+    /// with the title the shell sets via OSC 0/1/2, plus the separator and a
+    /// live preview.
+    ///
+    /// Split out of [`Self::show_tabs_tab`], which covers three unrelated
+    /// groups (tab-bar visibility, tab titles, pane focus) and had outgrown
+    /// the 100-line limit.
+    fn show_tab_title_policy(&mut self, ui: &mut Ui) {
         ui.label("Tab Title Policy:");
         ui.add_space(2.0);
         ui.colored_label(
@@ -1487,9 +1542,12 @@ impl SettingsModal {
                         &mut self.draft.tab_title.policy,
                         policy,
                         tab_title_policy_label(policy),
-                    );
+                    )
+                    .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
 
         // The separator only applies to the combining policies.
         let separator_relevant = matches!(
@@ -1520,6 +1578,46 @@ impl SettingsModal {
             ui.visuals().weak_text_color(),
             format!("Preview:  {preview}"),
         );
+    }
+
+    fn show_tabs_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.tabs.show_single_tab,
+            "Show Tab Bar With Single Tab",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When disabled, the tab bar only appears with multiple tabs.",
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Tab Bar Position:");
+        let current_label = tab_bar_position_label(self.draft.tabs.position);
+        ComboBox::from_id_salt("tab_bar_position")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.draft.tabs.position, TabBarPosition::Top, "Top")
+                    .clickable();
+                ui.selectable_value(
+                    &mut self.draft.tabs.position,
+                    TabBarPosition::Bottom,
+                    "Bottom",
+                )
+                .clickable();
+            })
+            .response
+            .clickable();
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        self.show_tab_title_policy(ui);
 
         ui.add_space(8.0);
         ui.separator();
@@ -1530,7 +1628,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.tabs.focus_follows_mouse,
             "Focus follows mouse",
-        );
+        )
+        .clickable();
         ui.add_space(2.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1575,7 +1674,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.tabs.confirm_broadcast,
             "Confirm before enabling broadcast",
-        );
+        )
+        .clickable();
         ui.add_space(2.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1604,7 +1704,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.shell_integration.set_term_program,
             "Set TERM_PROGRAM=freminal",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1633,7 +1734,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.command_blocks.enabled,
             "Enable command block tracking",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1646,7 +1748,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.command_blocks.show_duration,
             "Show command duration",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1681,13 +1784,17 @@ impl SettingsModal {
                     &mut self.draft.command_blocks.gutter,
                     GutterPosition::Left,
                     "Left",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.command_blocks.gutter,
                     GutterPosition::Off,
                     "Off",
-                );
-            });
+                )
+                .clickable();
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1707,11 +1814,17 @@ impl SettingsModal {
                     &mut self.draft.bell.mode,
                     config::BellMode::Visual,
                     "Visual",
-                );
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio");
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both");
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None");
-            });
+                )
+                .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio")
+                    .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both")
+                    .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None")
+                    .clickable();
+            })
+            .response
+            .clickable();
 
         ui.add_space(4.0);
         ui.colored_label(
@@ -1725,7 +1838,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.bell.on_command_finished,
             "Ring bell on command completion",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1739,7 +1853,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.enabled,
             "Enable notifications",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1752,19 +1867,23 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.osc_9,
             "OSC 9 (iTerm2 / WezTerm text)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.osc_777,
             "OSC 777 (urxvt notify;TITLE;BODY)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.osc_99,
             "OSC 99 (kitty stateful notifications)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.on_command_finished,
             "Command finished (OSC 133 D)",
-        );
+        )
+        .clickable();
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -1829,7 +1948,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.bell.on_command_finished,
             "Ring bell on command completion",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1886,7 +2006,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.show_resize_overlay,
             "Show resize overlay (cols×rows while resizing)",
-        );
+        )
+        .clickable();
     }
 
     /// Render one labeled routing combo box. Extracted so the routing
@@ -1906,30 +2027,37 @@ impl SettingsModal {
                         routing,
                         config::NotificationRouting::Toast,
                         notification_routing_label(config::NotificationRouting::Toast),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::System,
                         notification_routing_label(config::NotificationRouting::System),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::Both,
                         notification_routing_label(config::NotificationRouting::Both),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::SystemWhenUnfocused,
                         notification_routing_label(
                             config::NotificationRouting::SystemWhenUnfocused,
                         ),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::Disabled,
                         notification_routing_label(config::NotificationRouting::Disabled),
-                    );
-                });
+                    )
+                    .clickable();
+                })
+                .response
+                .clickable();
         });
     }
 
@@ -1951,13 +2079,17 @@ impl SettingsModal {
                         routing,
                         config::FreminalToastRouting::Toast,
                         freminal_toast_routing_label(config::FreminalToastRouting::Toast),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::FreminalToastRouting::Disabled,
                         freminal_toast_routing_label(config::FreminalToastRouting::Disabled),
-                    );
-                });
+                    )
+                    .clickable();
+                })
+                .response
+                .clickable();
         });
     }
 
@@ -1965,7 +2097,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.security.allow_clipboard_read,
             "Allow Clipboard Read (OSC 52)",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1980,7 +2113,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.security.password_indicator,
             "Password Indicator",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -2011,7 +2145,8 @@ impl SettingsModal {
         );
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard");
+        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard")
+            .clickable();
 
         // The remaining toggles are only meaningful while the guard is on.
         ui.add_enabled_ui(self.draft.close_guard.enabled, |ui| {
@@ -2019,11 +2154,13 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.close_guard.unknown_blocks,
                 "Also guard panes with unknown status (no shell integration)",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.close_guard.guard_app_quit,
                 "Guard application quit",
-            );
+            )
+            .clickable();
         });
     }
 
@@ -2038,7 +2175,8 @@ impl SettingsModal {
         );
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.paste_guard.enabled, "Enable paste guard");
+        ui.checkbox(&mut self.draft.paste_guard.enabled, "Enable paste guard")
+            .clickable();
 
         // The per-trigger toggles are only meaningful while the guard is on.
         ui.add_enabled_ui(self.draft.paste_guard.enabled, |ui| {
@@ -2046,15 +2184,18 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.paste_guard.multiline,
                 "Confirm multi-line pastes",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.paste_guard.control_chars,
                 "Confirm pastes containing control characters",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.paste_guard.patterns,
                 "Confirm pastes matching dangerous patterns",
-            );
+            )
+            .clickable();
 
             // Pattern list editor — only relevant when pattern matching is on.
             ui.add_enabled_ui(self.draft.paste_guard.patterns, |ui| {
@@ -2508,14 +2649,26 @@ impl SettingsModal {
     //  Apply logic
     // -------------------------------------------------------------------------
 
-    fn try_apply(&mut self) -> SettingsAction {
+    /// Persist the draft and re-baseline, leaving the dialog open.
+    ///
+    /// Shared by both commit paths. On success the draft becomes the new
+    /// clean baseline, so a subsequent Cancel has nothing to revert and the
+    /// unsaved-changes guard stays quiet.
+    ///
+    /// Crucially this also re-baselines `original_theme_slug` /
+    /// `original_opacity`, the values the close path reverts a live preview
+    /// to. Once the user has committed, the committed appearance *is* the
+    /// original; without this, applying a new theme and then cancelling would
+    /// revert the terminal to the theme in force when the dialog was first
+    /// opened, silently undoing a change already written to disk.
+    fn commit_draft(&mut self) -> SettingsAction {
         match config::save_config(&self.draft, self.config_path.as_deref()) {
             Ok(()) => {
-                self.is_open = false;
                 self.status_message = None;
-                // Refresh baseline so any subsequent reopen sees the saved
-                // state as clean.
                 self.baseline_toml = Self::serialize_for_baseline(&self.draft);
+                self.original_theme_slug =
+                    self.draft.theme.active_slug(self.os_dark_mode).to_string();
+                self.original_opacity = self.draft.ui.background_opacity;
                 self.pending_close = PendingClose::None;
                 SettingsAction::Applied
             }
@@ -2524,6 +2677,29 @@ impl SettingsModal {
                 SettingsAction::None
             }
         }
+    }
+
+    /// Commit the draft and dismiss the dialog (the OK button).
+    fn try_apply(&mut self) -> SettingsAction {
+        let action = self.commit_draft();
+        if action == SettingsAction::Applied {
+            self.is_open = false;
+        }
+        action
+    }
+
+    /// Commit the draft and stay open (the Apply button, issue #452).
+    ///
+    /// Lets the user try a change against a live terminal and keep adjusting
+    /// without reopening the dialog for every iteration. A failed save leaves
+    /// the dialog open with the error in `status_message`, exactly as the OK
+    /// path does.
+    fn apply_without_dismissing(&mut self) -> SettingsAction {
+        let action = self.commit_draft();
+        if action == SettingsAction::Applied {
+            self.status_message = Some("Settings applied.".to_string());
+        }
+        action
     }
 
     // ── Startup tab ──────────────────────────────────────────────────────────
@@ -2539,7 +2715,8 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.startup.restore_last_session,
                 "Restore last session on startup",
-            );
+            )
+            .clickable();
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
@@ -2612,7 +2789,9 @@ impl SettingsModal {
                             &current,
                             configured_missing,
                         );
-                    });
+                    })
+                    .response
+                    .clickable();
             });
             ui.add_space(2.0);
             ui.label(
@@ -2656,7 +2835,11 @@ impl SettingsModal {
                 .as_deref()
                 .is_some_and(|n| n == current);
             let label = format!("{current}  (missing)");
-            if ui.selectable_label(is_selected, label).clicked() {
+            if ui
+                .selectable_label(is_selected, label)
+                .clickable()
+                .clicked()
+            {
                 self.draft.startup.layout = Some(current.to_string());
             }
         }
@@ -2671,7 +2854,11 @@ impl SettingsModal {
                 || layout.name.clone(),
                 |d| format!("{}  —  {d}", layout.name),
             );
-            if ui.selectable_label(is_selected, label).clicked() {
+            if ui
+                .selectable_label(is_selected, label)
+                .clickable()
+                .clicked()
+            {
                 self.draft.startup.layout = Some(layout.name.clone());
             }
         }
@@ -2989,9 +3176,36 @@ mod tests {
         live.font.size = 42.0;
         modal.open(&live, Vec::new(), false);
 
-        // Simulate clicking "Reset to Defaults" by resetting the draft.
-        modal.draft = Config::default();
+        // Call the real reset rather than re-implementing it here: an inline
+        // `modal.draft = Config::default()` is what let the profile-picker
+        // desync below go unnoticed.
+        modal.reset_draft_to_defaults();
         assert!((modal.draft.font.size - 12.0).abs() < f32::EPSILON);
+    }
+
+    /// The chrome-style picker keeps its own copy of `draft.chrome.profile`.
+    /// A reset moves the draft underneath it, and the picker's own
+    /// change-detection cannot notice, so the reset must re-sync it. Without
+    /// this the picker displays the pre-reset profile while Apply writes the
+    /// default one.
+    #[test]
+    fn reset_to_defaults_resyncs_the_style_profile_picker() {
+        use freminal_common::gui_theme::StyleProfile;
+
+        let mut modal = SettingsModal::new(None);
+        let mut live = Config::default();
+        // Open with a non-default profile so a reset has something to change.
+        live.chrome.profile = StyleProfile::Retro;
+        modal.open(&live, Vec::new(), false);
+        assert_eq!(modal.draft_profile, StyleProfile::Retro);
+
+        modal.reset_draft_to_defaults();
+
+        assert_eq!(
+            modal.draft_profile, modal.draft.chrome.profile,
+            "the picker must show what Apply would save"
+        );
+        assert_eq!(modal.draft_profile, Config::default().chrome.profile);
     }
 
     #[test]
@@ -3373,6 +3587,116 @@ mod tests {
         modal.draft.ui.background_opacity =
             (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
         assert!(modal.is_dirty(), "edited draft should be dirty");
+    }
+
+    // ── Apply without dismissing (issue #452) ────────────────────────────
+
+    /// Open a modal writing to a throwaway config path, so the commit paths
+    /// can be exercised without touching the user's real config.
+    fn modal_with_temp_config() -> (SettingsModal, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut modal = SettingsModal::new(Some(path));
+        modal.open(&Config::default(), Vec::new(), false);
+        modal.read_only_reason = None;
+        (modal, dir)
+    }
+
+    /// The point of #452: commit the draft and stay open, so the user can
+    /// judge the change against a live terminal and keep adjusting.
+    #[test]
+    fn apply_without_dismissing_commits_and_keeps_the_dialog_open() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        modal.draft.ui.background_opacity = 0.5;
+        assert!(modal.is_dirty());
+
+        let action = modal.apply_without_dismissing();
+
+        assert_eq!(action, SettingsAction::Applied, "config must be adopted");
+        assert!(modal.is_open, "Apply must NOT dismiss the dialog");
+        assert!(
+            !modal.is_dirty(),
+            "the committed draft becomes the new clean baseline"
+        );
+        assert!(modal.status_message.is_some(), "commit is acknowledged");
+    }
+
+    /// OK keeps its existing behaviour: commit and dismiss.
+    #[test]
+    fn ok_commits_and_dismisses() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        modal.draft.ui.background_opacity = 0.5;
+
+        let action = modal.try_apply();
+
+        assert_eq!(action, SettingsAction::Applied);
+        assert!(!modal.is_open, "OK dismisses the dialog");
+        assert!(!modal.is_dirty());
+    }
+
+    /// After an Apply, a later Cancel must revert to what was applied -- not
+    /// to whatever was live when the dialog was first opened. Otherwise
+    /// cancelling would silently undo a change already written to disk.
+    #[test]
+    fn apply_rebaselines_the_revert_target() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        let opened_with = modal.original_opacity;
+
+        modal.draft.ui.background_opacity = 0.25;
+        let _ = modal.apply_without_dismissing();
+
+        assert!(
+            (modal.original_opacity - 0.25).abs() < f32::EPSILON,
+            "the applied value is the new revert target, was {opened_with}"
+        );
+        assert_eq!(
+            modal.original_theme_slug,
+            modal.draft.theme.active_slug(modal.os_dark_mode),
+            "the applied theme is the new revert target"
+        );
+    }
+
+    /// Applying repeatedly is the expected workflow, and each commit
+    /// re-baselines cleanly.
+    #[test]
+    fn apply_can_be_used_repeatedly() {
+        let (mut modal, _dir) = modal_with_temp_config();
+
+        for opacity in [0.9_f32, 0.6, 0.3] {
+            modal.draft.ui.background_opacity = opacity;
+            assert!(modal.is_dirty());
+            assert_eq!(modal.apply_without_dismissing(), SettingsAction::Applied);
+            assert!(modal.is_open);
+            assert!(!modal.is_dirty());
+        }
+    }
+
+    /// A failed save must not dismiss, must not re-baseline, and must
+    /// surface the error -- the same contract the OK path has.
+    #[test]
+    fn a_failed_apply_keeps_the_dialog_open_and_stays_dirty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory where the config file should be: writing must fail.
+        let path = dir.path().join("unwritable");
+        std::fs::create_dir(&path).expect("create blocking dir");
+        let mut modal = SettingsModal::new(Some(path));
+        modal.open(&Config::default(), Vec::new(), false);
+        modal.read_only_reason = None;
+
+        modal.draft.ui.background_opacity = 0.5;
+        let action = modal.apply_without_dismissing();
+
+        assert_eq!(action, SettingsAction::None, "a failed save adopts nothing");
+        assert!(modal.is_open, "a failed save must not dismiss");
+        assert!(modal.is_dirty(), "a failed save must not re-baseline");
+        assert!(
+            modal
+                .status_message
+                .as_ref()
+                .is_some_and(|m| m.contains("Save failed")),
+            "the failure must be surfaced, got {:?}",
+            modal.status_message
+        );
     }
 
     #[test]

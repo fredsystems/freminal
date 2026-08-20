@@ -48,7 +48,10 @@ use super::{
         CursorFrameInputs, FrameDirtyContext, FrameDirtyGeometry, VertexRebuild,
         evaluate_frame_dirty_state,
     },
-    input::{InputCarryState, PaneFocus, WriteInputParams, write_input_to_terminal},
+    input::{
+        InputCarryState, PaneFocus, WriteInputParams, scroll_overlay_passthrough,
+        write_input_to_terminal,
+    },
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
@@ -1326,10 +1329,9 @@ pub struct PaneRenderCache {
     /// from `overlay_was_open_last_frame` so each latch tracks only its own
     /// cause.
     pub(super) border_drag_was_active_last_frame: bool,
-    /// Number of search matches from the most recently rendered frame.
-    pub(super) previous_search_match_count: usize,
-    /// Current match index from the most recently rendered frame.
-    pub(super) previous_search_current_match: usize,
+    /// Fingerprint of the search-highlight state from the most recently
+    /// rendered frame (see `SearchState::render_epoch`).
+    pub(super) previous_search_epoch: u64,
     /// The terminal cell `(col, row)` the mouse was hovering over in the
     /// previous frame.
     pub(super) previous_hover_cell: Option<(usize, usize)>,
@@ -1485,8 +1487,7 @@ impl PaneRenderCache {
             previous_text_blink_fast_visible: true,
             overlay_was_open_last_frame: false,
             border_drag_was_active_last_frame: false,
-            previous_search_match_count: 0,
-            previous_search_current_match: 0,
+            previous_search_epoch: 0,
             previous_hover_cell: None,
             previous_command_block_hover_rows: None,
             cached_hovered_url: None,
@@ -1881,6 +1882,7 @@ impl FreminalTerminalWidget {
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
         present_is_partial: &Arc<std::sync::atomic::AtomicBool>,
+        split_border_hover: SplitBorderHover,
     ) -> (bool, bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
 
@@ -2016,6 +2018,7 @@ impl FreminalTerminalWidget {
         // response is only used for the repaint wake-up and the hand cursor.
         // We also force one repaint on the frame the pointer leaves so the
         // clearing frame is guaranteed.
+        let mut gutter_hovered = false;
         if gutter_inset > 0.0 && command_blocks_config.enabled && !snap.is_alternate_screen {
             let gutter_hit_rect = egui::Rect::from_min_max(
                 pane_rect.min,
@@ -2038,9 +2041,13 @@ impl FreminalTerminalWidget {
                 pointer_in_window,
                 cache.pointer_in_gutter_last_frame,
             );
-            if effectively_hovered {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
+            // Recorded rather than applied here: every cursor-icon write in
+            // this frame is resolved once, at the end of `show`, by
+            // `PointerHover`. Setting it at this point had no visible effect
+            // at all, because the URL / OSC-22 block below unconditionally
+            // overwrote `output.cursor_icon` a few hundred lines later
+            // (issue #462).
+            gutter_hovered = effectively_hovered;
             if needs_repaint {
                 // 16ms, not `Duration::ZERO` (subtask 121.12, comment
                 // corrected per review NIT #10): scheduling is unchanged
@@ -2163,15 +2170,44 @@ impl FreminalTerminalWidget {
         // Set to `true` below iff a non-empty local selection is actually
         // copied to the system clipboard this frame (Subtask D3).
         let mut copied_to_clipboard = false;
-        if suppress_input
-            || context_menu_open
-            || view_state.search_state.is_open
-            || view_state.command_history.is_open
-            || cache.scrollbar_dragging
-        {
+        let pane_focus_now = if is_active_pane {
+            PaneFocus::Active
+        } else {
+            PaneFocus::Inactive
+        };
+        let suppressors = InputSuppressors {
+            modal_or_drag: suppress_input,
+            context_menu: context_menu_open,
+            search_overlay: view_state.search_state.is_open,
+            command_history: view_state.command_history.is_open,
+            scrollbar_drag: cache.scrollbar_dragging,
+        };
+        if suppressors.any() {
+            let request_scroll_repaint = if suppressors.scroll_passes_through(pane_focus_now) {
+                let result = ui.input(|input_state| {
+                    scroll_overlay_passthrough(
+                        input_state,
+                        snap,
+                        input_tx,
+                        view_state,
+                        logical_cell_h,
+                        cache.previous_scroll_amount,
+                    )
+                });
+                cache.previous_scroll_amount = result.carry;
+                result.scrolled
+            } else {
+                cache.previous_scroll_amount = 0.0;
+                false
+            };
+            // Must be outside the `ui.input` closure above, which holds a read
+            // lock on the egui context.
+            if request_scroll_repaint {
+                ui.ctx().request_repaint();
+            }
+
             cache.previous_key = None;
             cache.previous_mouse_state = None;
-            cache.previous_scroll_amount = 0.0;
             if border_drag_active {
                 // A pane-border drag geometrically overlaps the adjacent
                 // pane's `terminal_rect`; the same press+drag would
@@ -2197,11 +2233,6 @@ impl FreminalTerminalWidget {
         } else {
             let repeat_characters = snap.repeat_keys;
             let ctx = ui.ctx().clone();
-            let pane_focus = if is_active_pane {
-                PaneFocus::Active
-            } else {
-                PaneFocus::Inactive
-            };
             let result = ui.input(|input_state| {
                 write_input_to_terminal(WriteInputParams {
                     input: input_state,
@@ -2213,7 +2244,7 @@ impl FreminalTerminalWidget {
                     terminal_rect,
                     repeat_characters,
                     binding_map,
-                    pane_focus,
+                    pane_focus: pane_focus_now,
                     recording_ctx,
                     placeholder_rects: &cache.placeholder_hit_rects,
                     key_broadcast_targets,
@@ -2455,8 +2486,7 @@ impl FreminalTerminalWidget {
             let text_blink_changed = dirty.observations.text_blink_changed;
             let current_selection = dirty.current_selection;
             let screen_selection = dirty.screen_selection;
-            let search_match_count = dirty.search_match_count;
-            let search_current_match = dirty.search_current_match;
+            let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             effective_show_cursor = dirty.effective_show_cursor;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
@@ -2846,8 +2876,7 @@ impl FreminalTerminalWidget {
                         cache.previous_selection = current_selection;
                         cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                         cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
-                        cache.previous_search_match_count = search_match_count;
-                        cache.previous_search_current_match = search_current_match;
+                        cache.previous_search_epoch = search_epoch;
                         cache.previous_command_block_hover_rows = command_block_hover_rows_early;
                         cache.previous_term_width = snap.term_width;
                         cache.previous_term_height = snap.term_height;
@@ -3408,20 +3437,6 @@ impl FreminalTerminalWidget {
                     });
                 }
 
-                // Update cursor icon from cached URL state.
-                // URL hover (pointing hand) takes priority over OSC 22 shape.
-                // Must be set unconditionally every frame because egui resets
-                // output.cursor_icon to Default at the start of each frame.
-                let new_icon = if cache.cached_hovered_url.is_some() {
-                    CursorIcon::PointingHand
-                } else {
-                    pointer_shape_to_cursor_icon(snap.pointer_shape)
-                };
-
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = new_icon;
-                });
-
                 // Tooltip: show the target URL at the pointer so the user
                 // can verify before Ctrl+clicking. Suppressed while the
                 // user is actively dragging out a selection so it does
@@ -3467,35 +3482,59 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area — fall back to OSC 22 shape.
+                // Mouse left the terminal area. Only the URL-hover cache is
+                // cleared here; the icon itself is resolved once below.
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
-                let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-                ui.ctx().output_mut(|output| {
-                    output.cursor_icon = base_icon;
-                });
             }
         } else {
-            // No URLs — apply OSC 22 shape (or default if none set).
+            // No URLs in the visible window, so nothing can be URL-hovered.
             cache.previous_hover_cell = None;
             cache.cached_hovered_url = None;
-            let base_icon = pointer_shape_to_cursor_icon(snap.pointer_shape);
-            ui.ctx().output_mut(|output| {
-                output.cursor_icon = base_icon;
-            });
         }
 
-        // Fold placeholder hover: override the cursor icon to a pointing
-        // hand whenever the mouse is over a placeholder row, regardless
-        // of URL or OSC 22 shape state. Runs every frame because egui
-        // resets `output.cursor_icon` to Default at the start of each
-        // frame, so the override must be reapplied.
-        if !cache.placeholder_hit_rects.is_empty()
-            && let Some(mouse_position) = view_state.mouse_position
-            && hit_test_placeholder(&cache.placeholder_hit_rects, mouse_position).is_some()
-        {
+        // ── Cursor icon ──────────────────────────────────────────────
+        //
+        // Every source that wants a say in the pointer shape is gathered here
+        // and resolved by one explicit precedence rule, then written exactly
+        // once. This replaces four independent unconditional writes whose
+        // relative outcome was decided purely by which one happened to run
+        // last in `show` -- which silently discarded the command-block
+        // gutter's pointing-hand entirely (issue #462).
+        //
+        // The write is unconditional because egui resets
+        // `output.cursor_icon` to `Default` at the start of every frame.
+        let placeholder_hovered = !cache.placeholder_hit_rects.is_empty()
+            && view_state.mouse_position.is_some_and(|pos| {
+                hit_test_placeholder(&cache.placeholder_hit_rects, pos).is_some()
+            });
+
+        let pointer_hover = PointerHover {
+            command_block_gutter: gutter_hovered,
+            fold_placeholder: placeholder_hovered,
+            url: cache.cached_hovered_url.is_some(),
+        };
+
+        // Only the pane the pointer is actually over may set the icon.
+        //
+        // `output.cursor_icon` is a single window-wide field, and every pane
+        // runs this code every frame. Writing unconditionally therefore means
+        // the last pane to render decides the cursor for the entire window,
+        // clobbering whatever the pane under the pointer resolved. That made
+        // gutter and URL hover appear to work only in whichever pane happened
+        // to render last (the bottom of a vertical split), and it also
+        // overwrote the cursors egui sets for its own chrome -- the I-beam
+        // over a text field, resize arrows over a splitter -- because a pane
+        // would stamp its own icon over them after they were set.
+        //
+        // `rect_contains_pointer` respects layer and clip rect, so a modal
+        // drawn above the pane correctly keeps its own cursor. Split-border
+        // sensors are not a separate layer -- they overlap the pane
+        // geometrically -- so they are excluded explicitly.
+        if ui.rect_contains_pointer(pane_rect) && split_border_hover == SplitBorderHover::Clear {
+            let resolved_icon = cursor_icon_for(pointer_hover.resolve(), snap.pointer_shape);
             ui.ctx().output_mut(|output| {
-                output.cursor_icon = CursorIcon::PointingHand;
+                output.cursor_icon = resolved_icon;
             });
         }
 
@@ -3633,6 +3672,87 @@ impl FreminalTerminalWidget {
 ///
 /// [`PointerShape::Default`] and any value that has no direct egui equivalent
 /// both produce [`CursorIcon::Default`].
+/// Whether the pointer is over a pane-split drag sensor this frame.
+///
+/// The sensor rects are built and hit-tested in `app_impl`, which sets the
+/// resize cursor before any pane renders. They are deliberately wider than
+/// the 1px border line they straddle, which means the pointer sits
+/// *geometrically inside* one of the two adjacent panes while *logically*
+/// over chrome. A pane must therefore abstain from writing the cursor icon
+/// here, or it overwrites the resize arrow for all but the hairline sliver
+/// that falls between the two pane rects (issue #462).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitBorderHover {
+    /// Pointer is over a split-border drag sensor; that chrome owns the icon.
+    Over,
+    /// Pointer is not over any split border.
+    Clear,
+}
+
+/// What the mouse pointer is over, for the purpose of choosing a cursor icon.
+///
+/// Variants are listed in **descending precedence**: when several apply at
+/// once, the earliest wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerTarget {
+    /// The command-block gutter strip down the left edge of the pane. A
+    /// clickable chrome affordance that sits outside the terminal grid, so it
+    /// outranks anything the application asks for.
+    CommandBlockGutter,
+    /// A collapsed command-block fold placeholder row. Also chrome, also
+    /// clickable, and drawn over the grid.
+    FoldPlaceholder,
+    /// A hyperlink in the terminal grid.
+    Url,
+    /// Ordinary terminal content -- the application's OSC 22 pointer shape
+    /// applies, which is `Default` when it has not set one.
+    TerminalContent,
+}
+
+/// Which cursor-icon sources are active this frame.
+///
+/// These are independent simultaneous observations -- the pointer can be over
+/// a fold placeholder that happens to contain a URL -- so a set of bools is
+/// the right representation. The *precedence* between them, which is the part
+/// that was previously implicit and wrong, lives in [`Self::resolve`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PointerHover {
+    /// Pointer is over the command-block gutter strip.
+    pub(super) command_block_gutter: bool,
+    /// Pointer is over a collapsed fold placeholder row.
+    pub(super) fold_placeholder: bool,
+    /// Pointer is over a hyperlink.
+    pub(super) url: bool,
+}
+
+impl PointerHover {
+    /// Reduce the active sources to the single highest-precedence target.
+    pub(super) const fn resolve(self) -> PointerTarget {
+        if self.command_block_gutter {
+            PointerTarget::CommandBlockGutter
+        } else if self.fold_placeholder {
+            PointerTarget::FoldPlaceholder
+        } else if self.url {
+            PointerTarget::Url
+        } else {
+            PointerTarget::TerminalContent
+        }
+    }
+}
+
+/// The cursor icon for a resolved [`PointerTarget`].
+///
+/// Chrome affordances all use the pointing hand; only ordinary terminal
+/// content defers to the application's OSC 22 shape.
+const fn cursor_icon_for(target: PointerTarget, osc22_shape: PointerShape) -> CursorIcon {
+    match target {
+        PointerTarget::CommandBlockGutter | PointerTarget::FoldPlaceholder | PointerTarget::Url => {
+            CursorIcon::PointingHand
+        }
+        PointerTarget::TerminalContent => pointer_shape_to_cursor_icon(osc22_shape),
+    }
+}
+
 const fn pointer_shape_to_cursor_icon(shape: PointerShape) -> CursorIcon {
     match shape {
         PointerShape::Default => CursorIcon::Default,
@@ -4609,6 +4729,303 @@ mod gutter_hover_trigger_tests {
             cell_h,
         );
         assert_eq!(rows, None);
+    }
+}
+
+/// The reasons pane input can be suppressed on a given frame.
+///
+/// Several can hold simultaneously (a modal open *and* a scrollbar drag in
+/// flight), and no combination is illegal, so this is the documented case
+/// where a set of independent bool signals is the correct representation
+/// rather than a single enum (`freminal-state-representation`).
+///
+/// Grouping them gives the suppression rule one place to live. It was
+/// previously spelled out twice -- once to decide whether to suppress, once
+/// to decide what may still get through -- which meant the two lists had to
+/// be kept in sync by hand.
+// Each field is a separate, independently-observed condition, and every
+// combination of them is legal and meaningful -- which is exactly the case
+// `freminal-state-representation` names as the correct use of bools rather
+// than an enum. Collapsing them into a state machine would assert an ordering
+// and mutual exclusion that does not exist (a modal can be open while a
+// scrollbar drag is in flight). `SearchState` carries the same allow for the
+// same reason.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct InputSuppressors {
+    /// A modal/menu overlay or pane-border drag, including the deliberate
+    /// one-frame release tail that stops a dismiss-click leaking through.
+    pub(super) modal_or_drag: bool,
+    /// The right-click context menu is open.
+    pub(super) context_menu: bool,
+    /// The find-in-scrollback overlay is open.
+    pub(super) search_overlay: bool,
+    /// The command-history palette is open.
+    pub(super) command_history: bool,
+    /// A scrollbar drag is in progress.
+    pub(super) scrollbar_drag: bool,
+}
+
+impl InputSuppressors {
+    /// Whether anything at all is suppressing pane input this frame.
+    pub(super) const fn any(self) -> bool {
+        self.modal_or_drag
+            || self.context_menu
+            || self.search_overlay
+            || self.command_history
+            || self.scrollbar_drag
+    }
+
+    /// Whether mouse-wheel events should still reach the pane despite
+    /// suppression.
+    ///
+    /// True only when the search overlay is the *sole* reason input is
+    /// suppressed, and only for the active pane. Search finds matches in this
+    /// pane's scrollback, so swallowing the wheel leaves those matches
+    /// unreachable -- the user cannot look at what they just found. Every
+    /// other suppressor keeps the wheel blocked: a context menu or palette has
+    /// its own scrollable content, a scrollbar drag is already driving the
+    /// offset, and a modal's dismiss-click tail must not move the view.
+    ///
+    /// Note this governs *whether* wheel events are read at all; what they are
+    /// then allowed to do is further restricted in
+    /// [`super::input::scroll_overlay_passthrough`] (primary screen only, no
+    /// PTY writes, no mouse-tracking reports).
+    pub(super) const fn scroll_passes_through(self, pane_focus: PaneFocus) -> bool {
+        self.search_overlay
+            && matches!(pane_focus, PaneFocus::Active)
+            && !self.modal_or_drag
+            && !self.context_menu
+            && !self.command_history
+            && !self.scrollbar_drag
+    }
+}
+
+#[cfg(test)]
+mod pointer_target_tests {
+    use super::{
+        CursorIcon, PointerHover, PointerShape, PointerTarget, cursor_icon_for,
+        pointer_shape_to_cursor_icon,
+    };
+
+    /// Nothing hovered.
+    const NONE: PointerHover = PointerHover {
+        command_block_gutter: false,
+        fold_placeholder: false,
+        url: false,
+    };
+
+    #[test]
+    fn nothing_hovered_defers_to_the_application_shape() {
+        assert_eq!(NONE.resolve(), PointerTarget::TerminalContent);
+        assert_eq!(
+            cursor_icon_for(NONE.resolve(), PointerShape::Crosshair),
+            CursorIcon::Crosshair,
+            "ordinary terminal content must honour the OSC 22 shape"
+        );
+    }
+
+    /// The regression: hovering the gutter must actually produce a pointing
+    /// hand, even though the application has set its own OSC 22 shape. This
+    /// previously lost to the URL/OSC-22 write that ran later in `show`.
+    #[test]
+    fn gutter_hover_beats_the_application_shape() {
+        let hover = PointerHover {
+            command_block_gutter: true,
+            ..NONE
+        };
+        assert_eq!(hover.resolve(), PointerTarget::CommandBlockGutter);
+        assert_eq!(
+            cursor_icon_for(hover.resolve(), PointerShape::Text),
+            CursorIcon::PointingHand
+        );
+    }
+
+    /// Precedence is total and deterministic, not last-writer-wins.
+    #[test]
+    fn precedence_is_gutter_then_placeholder_then_url() {
+        let all = PointerHover {
+            command_block_gutter: true,
+            fold_placeholder: true,
+            url: true,
+        };
+        assert_eq!(all.resolve(), PointerTarget::CommandBlockGutter);
+
+        let no_gutter = PointerHover {
+            command_block_gutter: false,
+            ..all
+        };
+        assert_eq!(no_gutter.resolve(), PointerTarget::FoldPlaceholder);
+
+        let url_only = PointerHover { url: true, ..NONE };
+        assert_eq!(url_only.resolve(), PointerTarget::Url);
+    }
+
+    /// Every chrome affordance uses the same icon, so which one wins is not
+    /// visually observable -- but the rule must still be defined.
+    #[test]
+    fn all_chrome_targets_use_the_pointing_hand() {
+        for target in [
+            PointerTarget::CommandBlockGutter,
+            PointerTarget::FoldPlaceholder,
+            PointerTarget::Url,
+        ] {
+            assert_eq!(
+                cursor_icon_for(target, PointerShape::Wait),
+                CursorIcon::PointingHand,
+                "{target:?} must not defer to the application shape"
+            );
+        }
+    }
+
+    /// Terminal content maps straight through the OSC 22 table.
+    #[test]
+    fn terminal_content_matches_the_osc22_table() {
+        for shape in [
+            PointerShape::Default,
+            PointerShape::Text,
+            PointerShape::Wait,
+            PointerShape::Grab,
+            PointerShape::None,
+        ] {
+            assert_eq!(
+                cursor_icon_for(PointerTarget::TerminalContent, shape),
+                pointer_shape_to_cursor_icon(shape)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_suppressors_tests {
+    use super::{InputSuppressors, PaneFocus};
+
+    /// Nothing suppressing.
+    const CLEAR: InputSuppressors = InputSuppressors {
+        modal_or_drag: false,
+        context_menu: false,
+        search_overlay: false,
+        command_history: false,
+        scrollbar_drag: false,
+    };
+
+    #[test]
+    fn any_is_false_only_when_every_suppressor_is_clear() {
+        assert!(!CLEAR.any());
+        assert!(
+            InputSuppressors {
+                modal_or_drag: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                context_menu: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                search_overlay: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                command_history: true,
+                ..CLEAR
+            }
+            .any()
+        );
+        assert!(
+            InputSuppressors {
+                scrollbar_drag: true,
+                ..CLEAR
+            }
+            .any()
+        );
+    }
+
+    /// The reported case: with only the search overlay open, the wheel must
+    /// still reach the active pane so the user can look at the matches.
+    #[test]
+    fn scroll_passes_through_for_search_overlay_on_the_active_pane() {
+        let s = InputSuppressors {
+            search_overlay: true,
+            ..CLEAR
+        };
+        assert!(s.any(), "search must still suppress everything else");
+        assert!(s.scroll_passes_through(PaneFocus::Active));
+    }
+
+    /// Scroll targets the active pane only, matching `write_input_to_terminal`.
+    #[test]
+    fn scroll_does_not_pass_through_on_an_inactive_pane() {
+        let s = InputSuppressors {
+            search_overlay: true,
+            ..CLEAR
+        };
+        assert!(!s.scroll_passes_through(PaneFocus::Inactive));
+    }
+
+    /// Any other suppressor present alongside search keeps the wheel blocked.
+    #[test]
+    fn any_other_suppressor_blocks_scroll_even_with_search_open() {
+        for s in [
+            InputSuppressors {
+                search_overlay: true,
+                modal_or_drag: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                context_menu: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                command_history: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                search_overlay: true,
+                scrollbar_drag: true,
+                ..CLEAR
+            },
+        ] {
+            assert!(
+                !s.scroll_passes_through(PaneFocus::Active),
+                "search must not re-enable scroll while {s:?} also suppresses"
+            );
+        }
+    }
+
+    /// Overlays other than search keep the old behaviour: fully blocked.
+    #[test]
+    fn non_search_suppressors_never_pass_scroll_through() {
+        for s in [
+            InputSuppressors {
+                modal_or_drag: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                context_menu: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                command_history: true,
+                ..CLEAR
+            },
+            InputSuppressors {
+                scrollbar_drag: true,
+                ..CLEAR
+            },
+        ] {
+            assert!(!s.scroll_passes_through(PaneFocus::Active));
+        }
     }
 }
 

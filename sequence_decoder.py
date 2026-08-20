@@ -22,6 +22,8 @@
 #   python3 sequence_decoder.py --recording-path=path/to/file --summary          # v2 only
 #   python3 sequence_decoder.py --recording-path=path/to/file --pane 0           # v2 only
 #   python3 sequence_decoder.py --recording-path=path/to/file --events-only      # v2 only
+#   python3 sequence_decoder.py --recording-path=path/to/file --raw-pty=out.bin
+#   python3 sequence_decoder.py --recording-path=path/to/file --raw-pty=out.bin --framed
 
 import struct
 import sys
@@ -39,6 +41,7 @@ summary_only = False
 filter_pane = None
 events_only = False
 raw_pty_out = None
+raw_pty_framed = False
 
 for arg in sys.argv[1:]:
     if arg.startswith("--recording-path"):
@@ -51,6 +54,18 @@ for arg in sys.argv[1:]:
         if not raw_pty_out:
             print("Error: --raw-pty requires a value (e.g. --raw-pty=out.bin)")
             sys.exit(1)
+    elif arg == "--framed":
+        # Modifier for --raw-pty: preserve the original PTY read boundaries by
+        # length-prefixing each event's payload with a u32 LE byte count,
+        # instead of concatenating them into one undifferentiated stream.
+        #
+        # Boundaries matter: a terminal emulator's behaviour can legitimately
+        # differ depending on how a byte stream is split across reads (a batch
+        # of printable characters that fills a row exactly is a different
+        # input than the same characters split in two). Replaying a flat
+        # concatenation can therefore both hide real bugs and manufacture
+        # artificial ones.
+        raw_pty_framed = True
     elif arg == "--convert-escape":
         convert_escape = True
     elif arg == "--split-commands":
@@ -71,6 +86,12 @@ for arg in sys.argv[1:]:
                 sys.exit(1)
     elif arg == "--events-only":
         events_only = True
+
+# --framed only means anything as a modifier to --raw-pty. Fail loudly rather
+# than silently producing an unframed file the caller will misparse.
+if raw_pty_framed and not raw_pty_out:
+    print("Error: --framed is a modifier for --raw-pty and requires it")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Read file
@@ -335,6 +356,7 @@ event_num = 0
 
 if raw_pty_out is not None:
     collected = bytearray()
+    event_count = 0
     truncated = False
     decode_failures = []  # byte offsets of events whose payload failed to decode
     while pos + 13 <= end:
@@ -373,11 +395,20 @@ if raw_pty_out is not None:
         if isinstance(raw, list):
             raw = bytes(raw)
         if isinstance(raw, bytes):
+            if raw_pty_framed:
+                collected.extend(struct.pack("<I", len(raw)))
+                event_count += 1
             collected.extend(raw)
 
     with open(raw_pty_out, "wb") as out:
         out.write(collected)
-    print(f"Wrote {len(collected)} bytes of PtyOutput to {raw_pty_out}")
+    if raw_pty_framed:
+        print(
+            f"Wrote {len(collected)} bytes ({event_count} length-framed PtyOutput "
+            f"events) to {raw_pty_out}"
+        )
+    else:
+        print(f"Wrote {len(collected)} bytes of PtyOutput to {raw_pty_out}")
 
     # A partial export (truncated stream or undecodable payloads) must fail
     # loudly so callers never silently replay incomplete data.
