@@ -977,7 +977,9 @@ impl SettingsModal {
                     )
                     .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(8.0);
 
         // --- Font Size slider ---
@@ -1056,7 +1058,9 @@ impl SettingsModal {
                 .clickable();
                 ui.selectable_value(&mut self.draft.cursor.shape, CursorShapeConfig::Bar, "Bar")
                     .clickable();
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(8.0);
 
         ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink")
@@ -1119,7 +1123,9 @@ impl SettingsModal {
                     )
                     .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         if let Some(theme) = themes::by_slug(&self.draft.theme.dark_name)
             && self.draft.theme.mode != ThemeMode::Light
@@ -1145,7 +1151,9 @@ impl SettingsModal {
                     )
                     .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         if let Some(theme) = themes::by_slug(&self.draft.theme.light_name)
             && self.draft.theme.mode == ThemeMode::Light
@@ -1211,7 +1219,9 @@ impl SettingsModal {
                     ui.selectable_value(&mut selected, (*level).to_string(), *level)
                         .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
         // Persist choice into the draft config.
         self.draft.logging.level = if selected == "debug" {
             None // default — omit from TOML
@@ -1267,7 +1277,9 @@ impl SettingsModal {
                     .clickable();
                 ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro")
                     .clickable();
-            });
+            })
+            .response
+            .clickable();
         if self.draft_profile != before {
             self.pending_preview_profile = Some(self.draft_profile);
             // Persist into the draft so Apply (which saves `self.draft`) writes
@@ -1401,7 +1413,9 @@ impl SettingsModal {
                     "Tile (repeat in both dimensions)",
                 )
                 .clickable();
-            });
+            })
+            .response
+            .clickable();
 
         ui.add_space(8.0);
 
@@ -1490,7 +1504,9 @@ impl SettingsModal {
                     )
                     .clickable();
                 }
-            });
+            })
+            .response
+            .clickable();
 
         // The separator only applies to the combining policies.
         let separator_relevant = matches!(
@@ -1552,7 +1568,9 @@ impl SettingsModal {
                     "Bottom",
                 )
                 .clickable();
-            });
+            })
+            .response
+            .clickable();
 
         ui.add_space(8.0);
         ui.separator();
@@ -1733,7 +1751,9 @@ impl SettingsModal {
                     "Off",
                 )
                 .clickable();
-            });
+            })
+            .response
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1761,7 +1781,9 @@ impl SettingsModal {
                     .clickable();
                 ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None")
                     .clickable();
-            });
+            })
+            .response
+            .clickable();
 
         ui.add_space(4.0);
         ui.colored_label(
@@ -1992,7 +2014,9 @@ impl SettingsModal {
                         notification_routing_label(config::NotificationRouting::Disabled),
                     )
                     .clickable();
-                });
+                })
+                .response
+                .clickable();
         });
     }
 
@@ -2022,7 +2046,9 @@ impl SettingsModal {
                         freminal_toast_routing_label(config::FreminalToastRouting::Disabled),
                     )
                     .clickable();
-                });
+                })
+                .response
+                .clickable();
         });
     }
 
@@ -2687,7 +2713,9 @@ impl SettingsModal {
                             &current,
                             configured_missing,
                         );
-                    });
+                    })
+                    .response
+                    .clickable();
             });
             ui.add_space(2.0);
             ui.label(
