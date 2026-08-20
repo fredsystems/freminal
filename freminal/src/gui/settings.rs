@@ -4,6 +4,7 @@
 // https://opensource.org/licenses/MIT.
 
 use super::font_manager;
+use super::hover_cursor::HoverAffordance;
 use super::icons::ChromeIcon;
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
@@ -925,7 +926,8 @@ impl SettingsModal {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for tab in SettingsTab::ALL {
-                            ui.selectable_value(&mut self.active_tab, tab, tab.label());
+                            ui.selectable_value(&mut self.active_tab, tab, tab.label())
+                                .clickable();
                         }
                     });
                 });
@@ -972,7 +974,8 @@ impl SettingsModal {
                         &mut self.draft.font.family,
                         entry.value.clone(),
                         entry.label.as_str(),
-                    );
+                    )
+                    .clickable();
                 }
             });
         ui.add_space(8.0);
@@ -992,7 +995,8 @@ impl SettingsModal {
         ui.add_space(8.0);
 
         // --- Ligatures toggle ---
-        ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures");
+        ui.checkbox(&mut self.draft.font.ligatures, "Enable Ligatures")
+            .clickable();
         ui.colored_label(
             ui.visuals().weak_text_color(),
             "Render multi-character ligatures (e.g. =>, !=, ->).",
@@ -1042,20 +1046,25 @@ impl SettingsModal {
                     &mut self.draft.cursor.shape,
                     CursorShapeConfig::Block,
                     "Block",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.cursor.shape,
                     CursorShapeConfig::Underline,
                     "Underline",
-                );
-                ui.selectable_value(&mut self.draft.cursor.shape, CursorShapeConfig::Bar, "Bar");
+                )
+                .clickable();
+                ui.selectable_value(&mut self.draft.cursor.shape, CursorShapeConfig::Bar, "Bar")
+                    .clickable();
             });
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink");
+        ui.checkbox(&mut self.draft.cursor.blink, "Cursor Blink")
+            .clickable();
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.cursor.trail, "Cursor Trail");
+        ui.checkbox(&mut self.draft.cursor.trail, "Cursor Trail")
+            .clickable();
         ui.add_space(4.0);
 
         ui.add_enabled_ui(self.draft.cursor.trail, |ui| {
@@ -1073,13 +1082,16 @@ impl SettingsModal {
         // ── Mode selector ──────────────────────────────────────────────────
         ui.label("Theme Mode:");
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Dark, "Dark");
-            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Light, "Light");
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Dark, "Dark")
+                .clickable();
+            ui.selectable_value(&mut self.draft.theme.mode, ThemeMode::Light, "Light")
+                .clickable();
             ui.selectable_value(
                 &mut self.draft.theme.mode,
                 ThemeMode::Auto,
                 "Auto (follow OS)",
-            );
+            )
+            .clickable();
         });
         ui.add_space(4.0);
         if self.draft.theme.mode == ThemeMode::Auto {
@@ -1104,7 +1116,8 @@ impl SettingsModal {
                         &mut self.draft.theme.dark_name,
                         theme.slug.to_string(),
                         theme.name,
-                    );
+                    )
+                    .clickable();
                 }
             });
         ui.add_space(4.0);
@@ -1129,7 +1142,8 @@ impl SettingsModal {
                         &mut self.draft.theme.light_name,
                         theme.slug.to_string(),
                         theme.name,
-                    );
+                    )
+                    .clickable();
                 }
             });
         ui.add_space(4.0);
@@ -1194,7 +1208,8 @@ impl SettingsModal {
             .selected_text(selected.as_str())
             .show_ui(ui, |ui| {
                 for level in &["trace", "debug", "info", "warn", "error"] {
-                    ui.selectable_value(&mut selected, (*level).to_string(), *level);
+                    ui.selectable_value(&mut selected, (*level).to_string(), *level)
+                        .clickable();
                 }
             });
         // Persist choice into the draft config.
@@ -1248,8 +1263,10 @@ impl SettingsModal {
                 StyleProfile::Retro => "Retro",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern");
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro");
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern")
+                    .clickable();
+                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro")
+                    .clickable();
             });
         if self.draft_profile != before {
             self.pending_preview_profile = Some(self.draft_profile);
@@ -1266,7 +1283,8 @@ impl SettingsModal {
     }
 
     fn show_ui_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar");
+        ui.checkbox(&mut self.draft.ui.hide_menu_bar, "Hide Menu Bar")
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1307,7 +1325,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.ui.auto_detect_urls,
             "Auto-detect URLs in terminal output",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1362,22 +1381,26 @@ impl SettingsModal {
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Fill,
                     "Fill (stretch, ignore aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Fit,
                     "Fit (letterbox, preserve aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Cover,
                     "Cover (crop, preserve aspect ratio)",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.ui.background_image_mode,
                     BackgroundImageMode::Tile,
                     "Tile (repeat in both dimensions)",
-                );
+                )
+                .clickable();
             });
 
         ui.add_space(8.0);
@@ -1424,7 +1447,8 @@ impl SettingsModal {
 
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader");
+        ui.checkbox(&mut self.draft.shader.hot_reload, "Hot Reload Shader")
+            .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1432,38 +1456,14 @@ impl SettingsModal {
         );
     }
 
-    fn show_tabs_tab(&mut self, ui: &mut Ui) {
-        ui.checkbox(
-            &mut self.draft.tabs.show_single_tab,
-            "Show Tab Bar With Single Tab",
-        );
-        ui.add_space(4.0);
-        ui.colored_label(
-            ui.visuals().weak_text_color(),
-            "When disabled, the tab bar only appears with multiple tabs.",
-        );
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
-        ui.label("Tab Bar Position:");
-        let current_label = tab_bar_position_label(self.draft.tabs.position);
-        ComboBox::from_id_salt("tab_bar_position")
-            .selected_text(current_label)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.draft.tabs.position, TabBarPosition::Top, "Top");
-                ui.selectable_value(
-                    &mut self.draft.tabs.position,
-                    TabBarPosition::Bottom,
-                    "Bottom",
-                );
-            });
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-
+    /// Tab-title policy controls: how a tab combines the user's custom name
+    /// with the title the shell sets via OSC 0/1/2, plus the separator and a
+    /// live preview.
+    ///
+    /// Split out of [`Self::show_tabs_tab`], which covers three unrelated
+    /// groups (tab-bar visibility, tab titles, pane focus) and had outgrown
+    /// the 100-line limit.
+    fn show_tab_title_policy(&mut self, ui: &mut Ui) {
         ui.label("Tab Title Policy:");
         ui.add_space(2.0);
         ui.colored_label(
@@ -1487,7 +1487,8 @@ impl SettingsModal {
                         &mut self.draft.tab_title.policy,
                         policy,
                         tab_title_policy_label(policy),
-                    );
+                    )
+                    .clickable();
                 }
             });
 
@@ -1520,6 +1521,44 @@ impl SettingsModal {
             ui.visuals().weak_text_color(),
             format!("Preview:  {preview}"),
         );
+    }
+
+    fn show_tabs_tab(&mut self, ui: &mut Ui) {
+        ui.checkbox(
+            &mut self.draft.tabs.show_single_tab,
+            "Show Tab Bar With Single Tab",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When disabled, the tab bar only appears with multiple tabs.",
+        );
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        ui.label("Tab Bar Position:");
+        let current_label = tab_bar_position_label(self.draft.tabs.position);
+        ComboBox::from_id_salt("tab_bar_position")
+            .selected_text(current_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.draft.tabs.position, TabBarPosition::Top, "Top")
+                    .clickable();
+                ui.selectable_value(
+                    &mut self.draft.tabs.position,
+                    TabBarPosition::Bottom,
+                    "Bottom",
+                )
+                .clickable();
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        self.show_tab_title_policy(ui);
 
         ui.add_space(8.0);
         ui.separator();
@@ -1530,7 +1569,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.tabs.focus_follows_mouse,
             "Focus follows mouse",
-        );
+        )
+        .clickable();
         ui.add_space(2.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1575,7 +1615,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.tabs.confirm_broadcast,
             "Confirm before enabling broadcast",
-        );
+        )
+        .clickable();
         ui.add_space(2.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1604,7 +1645,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.shell_integration.set_term_program,
             "Set TERM_PROGRAM=freminal",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1633,7 +1675,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.command_blocks.enabled,
             "Enable command block tracking",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1646,7 +1689,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.command_blocks.show_duration,
             "Show command duration",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1681,12 +1725,14 @@ impl SettingsModal {
                     &mut self.draft.command_blocks.gutter,
                     GutterPosition::Left,
                     "Left",
-                );
+                )
+                .clickable();
                 ui.selectable_value(
                     &mut self.draft.command_blocks.gutter,
                     GutterPosition::Off,
                     "Off",
-                );
+                )
+                .clickable();
             });
         ui.add_space(4.0);
         ui.colored_label(
@@ -1707,10 +1753,14 @@ impl SettingsModal {
                     &mut self.draft.bell.mode,
                     config::BellMode::Visual,
                     "Visual",
-                );
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio");
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both");
-                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None");
+                )
+                .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Audio, "Audio")
+                    .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::Both, "Both")
+                    .clickable();
+                ui.selectable_value(&mut self.draft.bell.mode, config::BellMode::None, "None")
+                    .clickable();
             });
 
         ui.add_space(4.0);
@@ -1725,7 +1775,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.bell.on_command_finished,
             "Ring bell on command completion",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1739,7 +1790,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.enabled,
             "Enable notifications",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1752,19 +1804,23 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.osc_9,
             "OSC 9 (iTerm2 / WezTerm text)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.osc_777,
             "OSC 777 (urxvt notify;TITLE;BODY)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.osc_99,
             "OSC 99 (kitty stateful notifications)",
-        );
+        )
+        .clickable();
         ui.checkbox(
             &mut self.draft.notifications.on_command_finished,
             "Command finished (OSC 133 D)",
-        );
+        )
+        .clickable();
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -1829,7 +1885,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.bell.on_command_finished,
             "Ring bell on command completion",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1886,7 +1943,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.notifications.show_resize_overlay,
             "Show resize overlay (cols×rows while resizing)",
-        );
+        )
+        .clickable();
     }
 
     /// Render one labeled routing combo box. Extracted so the routing
@@ -1906,29 +1964,34 @@ impl SettingsModal {
                         routing,
                         config::NotificationRouting::Toast,
                         notification_routing_label(config::NotificationRouting::Toast),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::System,
                         notification_routing_label(config::NotificationRouting::System),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::Both,
                         notification_routing_label(config::NotificationRouting::Both),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::SystemWhenUnfocused,
                         notification_routing_label(
                             config::NotificationRouting::SystemWhenUnfocused,
                         ),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::NotificationRouting::Disabled,
                         notification_routing_label(config::NotificationRouting::Disabled),
-                    );
+                    )
+                    .clickable();
                 });
         });
     }
@@ -1951,12 +2014,14 @@ impl SettingsModal {
                         routing,
                         config::FreminalToastRouting::Toast,
                         freminal_toast_routing_label(config::FreminalToastRouting::Toast),
-                    );
+                    )
+                    .clickable();
                     ui.selectable_value(
                         routing,
                         config::FreminalToastRouting::Disabled,
                         freminal_toast_routing_label(config::FreminalToastRouting::Disabled),
-                    );
+                    )
+                    .clickable();
                 });
         });
     }
@@ -1965,7 +2030,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.security.allow_clipboard_read,
             "Allow Clipboard Read (OSC 52)",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1980,7 +2046,8 @@ impl SettingsModal {
         ui.checkbox(
             &mut self.draft.security.password_indicator,
             "Password Indicator",
-        );
+        )
+        .clickable();
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -2011,7 +2078,8 @@ impl SettingsModal {
         );
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard");
+        ui.checkbox(&mut self.draft.close_guard.enabled, "Enable close guard")
+            .clickable();
 
         // The remaining toggles are only meaningful while the guard is on.
         ui.add_enabled_ui(self.draft.close_guard.enabled, |ui| {
@@ -2019,11 +2087,13 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.close_guard.unknown_blocks,
                 "Also guard panes with unknown status (no shell integration)",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.close_guard.guard_app_quit,
                 "Guard application quit",
-            );
+            )
+            .clickable();
         });
     }
 
@@ -2038,7 +2108,8 @@ impl SettingsModal {
         );
         ui.add_space(8.0);
 
-        ui.checkbox(&mut self.draft.paste_guard.enabled, "Enable paste guard");
+        ui.checkbox(&mut self.draft.paste_guard.enabled, "Enable paste guard")
+            .clickable();
 
         // The per-trigger toggles are only meaningful while the guard is on.
         ui.add_enabled_ui(self.draft.paste_guard.enabled, |ui| {
@@ -2046,15 +2117,18 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.paste_guard.multiline,
                 "Confirm multi-line pastes",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.paste_guard.control_chars,
                 "Confirm pastes containing control characters",
-            );
+            )
+            .clickable();
             ui.checkbox(
                 &mut self.draft.paste_guard.patterns,
                 "Confirm pastes matching dangerous patterns",
-            );
+            )
+            .clickable();
 
             // Pattern list editor — only relevant when pattern matching is on.
             ui.add_enabled_ui(self.draft.paste_guard.patterns, |ui| {
@@ -2539,7 +2613,8 @@ impl SettingsModal {
             ui.checkbox(
                 &mut self.draft.startup.restore_last_session,
                 "Restore last session on startup",
-            );
+            )
+            .clickable();
             ui.add_space(2.0);
             ui.label(
                 egui::RichText::new(
@@ -2656,7 +2731,11 @@ impl SettingsModal {
                 .as_deref()
                 .is_some_and(|n| n == current);
             let label = format!("{current}  (missing)");
-            if ui.selectable_label(is_selected, label).clicked() {
+            if ui
+                .selectable_label(is_selected, label)
+                .clickable()
+                .clicked()
+            {
                 self.draft.startup.layout = Some(current.to_string());
             }
         }
@@ -2671,7 +2750,11 @@ impl SettingsModal {
                 || layout.name.clone(),
                 |d| format!("{}  —  {d}", layout.name),
             );
-            if ui.selectable_label(is_selected, label).clicked() {
+            if ui
+                .selectable_label(is_selected, label)
+                .clickable()
+                .clicked()
+            {
                 self.draft.startup.layout = Some(layout.name.clone());
             }
         }

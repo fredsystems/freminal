@@ -47,6 +47,7 @@ mod frame_damage;
 mod frame_drain;
 mod geometry_interop;
 mod hot_reload;
+pub mod hover_cursor;
 pub(crate) mod icons;
 mod layout_ops;
 mod menu;

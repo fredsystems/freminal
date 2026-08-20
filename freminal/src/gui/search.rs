@@ -30,6 +30,7 @@ use freminal_common::buffer_states::tchar::TChar;
 use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;
 
+use super::hover_cursor::HoverAffordance;
 use super::{
     panes::PaneId,
     renderer::MatchHighlight,
@@ -500,8 +501,10 @@ pub fn show_search_bar(
 
                     // ── Row 2: toggles + error ────────────────────────────
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut view_state.search_state.regex_mode, "Regex");
+                        ui.checkbox(&mut view_state.search_state.regex_mode, "Regex")
+                            .clickable();
                         ui.checkbox(&mut view_state.search_state.case_sensitive, "Aa")
+                            .clickable()
                             .on_hover_text("Match case");
                         if let Some(err) = error_msg {
                             let error_color = ui.visuals().error_fg_color;
