@@ -580,10 +580,20 @@ impl SettingsModal {
                     self.draft = Config::default();
                     self.status_message = Some("Reset to defaults (not saved yet)".to_string());
                 }
+                // Right-to-left layout, so these read [Cancel] [Apply] [OK]
+                // on screen -- the conventional order, with the dismissing
+                // commit furthest right.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ok_btn = egui::Button::new("OK");
+                    if ui.add_enabled(!is_read_only, ok_btn).clicked() {
+                        action = self.try_apply();
+                    }
+                    // Apply commits without dismissing, so a change can be
+                    // judged against a live terminal and then adjusted again
+                    // without reopening the dialog (issue #452).
                     let apply_btn = egui::Button::new("Apply");
                     if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                        action = self.try_apply();
+                        action = self.apply_without_dismissing();
                     }
                     if ui.button("Cancel").clicked() {
                         // Route through the dirty-state guard so unsaved
@@ -758,11 +768,17 @@ impl SettingsModal {
                         self.status_message = Some("Reset to defaults (not saved yet)".to_string());
                     }
 
-                    // Right-align Apply and Cancel.
+                    // Right-to-left layout, so these read
+                    // [Cancel] [Apply] [OK] on screen.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ok_btn = egui::Button::new("OK");
+                        if ui.add_enabled(!is_read_only, ok_btn).clicked() {
+                            action = self.try_apply();
+                        }
+                        // Commits without dismissing (issue #452).
                         let apply_btn = egui::Button::new("Apply");
                         if ui.add_enabled(!is_read_only, apply_btn).clicked() {
-                            action = self.try_apply();
+                            action = self.apply_without_dismissing();
                         }
                         if ui.button("Cancel").clicked() {
                             // Route through the dirty-state guard so unsaved
@@ -2613,14 +2629,26 @@ impl SettingsModal {
     //  Apply logic
     // -------------------------------------------------------------------------
 
-    fn try_apply(&mut self) -> SettingsAction {
+    /// Persist the draft and re-baseline, leaving the dialog open.
+    ///
+    /// Shared by both commit paths. On success the draft becomes the new
+    /// clean baseline, so a subsequent Cancel has nothing to revert and the
+    /// unsaved-changes guard stays quiet.
+    ///
+    /// Crucially this also re-baselines `original_theme_slug` /
+    /// `original_opacity`, the values the close path reverts a live preview
+    /// to. Once the user has committed, the committed appearance *is* the
+    /// original; without this, applying a new theme and then cancelling would
+    /// revert the terminal to the theme in force when the dialog was first
+    /// opened, silently undoing a change already written to disk.
+    fn commit_draft(&mut self) -> SettingsAction {
         match config::save_config(&self.draft, self.config_path.as_deref()) {
             Ok(()) => {
-                self.is_open = false;
                 self.status_message = None;
-                // Refresh baseline so any subsequent reopen sees the saved
-                // state as clean.
                 self.baseline_toml = Self::serialize_for_baseline(&self.draft);
+                self.original_theme_slug =
+                    self.draft.theme.active_slug(self.os_dark_mode).to_string();
+                self.original_opacity = self.draft.ui.background_opacity;
                 self.pending_close = PendingClose::None;
                 SettingsAction::Applied
             }
@@ -2629,6 +2657,29 @@ impl SettingsModal {
                 SettingsAction::None
             }
         }
+    }
+
+    /// Commit the draft and dismiss the dialog (the OK button).
+    fn try_apply(&mut self) -> SettingsAction {
+        let action = self.commit_draft();
+        if action == SettingsAction::Applied {
+            self.is_open = false;
+        }
+        action
+    }
+
+    /// Commit the draft and stay open (the Apply button, issue #452).
+    ///
+    /// Lets the user try a change against a live terminal and keep adjusting
+    /// without reopening the dialog for every iteration. A failed save leaves
+    /// the dialog open with the error in `status_message`, exactly as the OK
+    /// path does.
+    fn apply_without_dismissing(&mut self) -> SettingsAction {
+        let action = self.commit_draft();
+        if action == SettingsAction::Applied {
+            self.status_message = Some("Settings applied.".to_string());
+        }
+        action
     }
 
     // ── Startup tab ──────────────────────────────────────────────────────────
@@ -3489,6 +3540,116 @@ mod tests {
         modal.draft.ui.background_opacity =
             (modal.draft.ui.background_opacity - 0.25).clamp(0.0, 1.0);
         assert!(modal.is_dirty(), "edited draft should be dirty");
+    }
+
+    // ── Apply without dismissing (issue #452) ────────────────────────────
+
+    /// Open a modal writing to a throwaway config path, so the commit paths
+    /// can be exercised without touching the user's real config.
+    fn modal_with_temp_config() -> (SettingsModal, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let mut modal = SettingsModal::new(Some(path));
+        modal.open(&Config::default(), Vec::new(), false);
+        modal.read_only_reason = None;
+        (modal, dir)
+    }
+
+    /// The point of #452: commit the draft and stay open, so the user can
+    /// judge the change against a live terminal and keep adjusting.
+    #[test]
+    fn apply_without_dismissing_commits_and_keeps_the_dialog_open() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        modal.draft.ui.background_opacity = 0.5;
+        assert!(modal.is_dirty());
+
+        let action = modal.apply_without_dismissing();
+
+        assert_eq!(action, SettingsAction::Applied, "config must be adopted");
+        assert!(modal.is_open, "Apply must NOT dismiss the dialog");
+        assert!(
+            !modal.is_dirty(),
+            "the committed draft becomes the new clean baseline"
+        );
+        assert!(modal.status_message.is_some(), "commit is acknowledged");
+    }
+
+    /// OK keeps its existing behaviour: commit and dismiss.
+    #[test]
+    fn ok_commits_and_dismisses() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        modal.draft.ui.background_opacity = 0.5;
+
+        let action = modal.try_apply();
+
+        assert_eq!(action, SettingsAction::Applied);
+        assert!(!modal.is_open, "OK dismisses the dialog");
+        assert!(!modal.is_dirty());
+    }
+
+    /// After an Apply, a later Cancel must revert to what was applied -- not
+    /// to whatever was live when the dialog was first opened. Otherwise
+    /// cancelling would silently undo a change already written to disk.
+    #[test]
+    fn apply_rebaselines_the_revert_target() {
+        let (mut modal, _dir) = modal_with_temp_config();
+        let opened_with = modal.original_opacity;
+
+        modal.draft.ui.background_opacity = 0.25;
+        let _ = modal.apply_without_dismissing();
+
+        assert!(
+            (modal.original_opacity - 0.25).abs() < f32::EPSILON,
+            "the applied value is the new revert target, was {opened_with}"
+        );
+        assert_eq!(
+            modal.original_theme_slug,
+            modal.draft.theme.active_slug(modal.os_dark_mode),
+            "the applied theme is the new revert target"
+        );
+    }
+
+    /// Applying repeatedly is the expected workflow, and each commit
+    /// re-baselines cleanly.
+    #[test]
+    fn apply_can_be_used_repeatedly() {
+        let (mut modal, _dir) = modal_with_temp_config();
+
+        for opacity in [0.9_f32, 0.6, 0.3] {
+            modal.draft.ui.background_opacity = opacity;
+            assert!(modal.is_dirty());
+            assert_eq!(modal.apply_without_dismissing(), SettingsAction::Applied);
+            assert!(modal.is_open);
+            assert!(!modal.is_dirty());
+        }
+    }
+
+    /// A failed save must not dismiss, must not re-baseline, and must
+    /// surface the error -- the same contract the OK path has.
+    #[test]
+    fn a_failed_apply_keeps_the_dialog_open_and_stays_dirty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory where the config file should be: writing must fail.
+        let path = dir.path().join("unwritable");
+        std::fs::create_dir(&path).expect("create blocking dir");
+        let mut modal = SettingsModal::new(Some(path));
+        modal.open(&Config::default(), Vec::new(), false);
+        modal.read_only_reason = None;
+
+        modal.draft.ui.background_opacity = 0.5;
+        let action = modal.apply_without_dismissing();
+
+        assert_eq!(action, SettingsAction::None, "a failed save adopts nothing");
+        assert!(modal.is_open, "a failed save must not dismiss");
+        assert!(modal.is_dirty(), "a failed save must not re-baseline");
+        assert!(
+            modal
+                .status_message
+                .as_ref()
+                .is_some_and(|m| m.contains("Save failed")),
+            "the failure must be surfaced, got {:?}",
+            modal.status_message
+        );
     }
 
     #[test]
