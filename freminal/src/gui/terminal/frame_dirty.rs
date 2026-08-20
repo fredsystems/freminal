@@ -345,6 +345,25 @@ pub(super) fn evaluate_frame_dirty_state(
         && !view_state.selection.is_selecting
         && !view_state.selection_committed_this_frame
     {
+        // `snap.content_changed` conflates two different things: the visible
+        // text genuinely differing, and the snapshot cache merely having been
+        // invalidated (by an extra-row change, a resize, or an alt-screen
+        // swap) so there was nothing to compare against. This clear only
+        // wants the former. Log enough to tell them apart when a selection
+        // disappears unexpectedly (#470); this sits on the clear path, which
+        // is rare, not on the per-frame or per-snapshot path.
+        if view_state.selection.has_selection() {
+            tracing::debug!(
+                target: "freminal::selection",
+                total_rows = snap.total_rows,
+                term_width = snap.term_width,
+                term_height = snap.term_height,
+                window_extra_rows = snap.window_extra_rows,
+                scroll_offset = snap.scroll_offset,
+                visible_chars = snap.visible_chars.len(),
+                "content-changed auto-clear is about to discard a selection"
+            );
+        }
         view_state.selection.clear();
     }
     // Reset the per-frame edge flag unconditionally so it does not

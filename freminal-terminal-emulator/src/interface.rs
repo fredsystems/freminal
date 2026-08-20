@@ -752,7 +752,6 @@ impl TerminalEmulator {
         let scroll_changed = scroll_offset != self.previous_effective_scroll_offset;
         if scroll_changed {
             self.previous_visible_snap = None;
-            tracing::debug!(target: "freminal::selection", "snap cache invalidated: scroll offset changed");
             // The stashed other-buffer cache also covers a specific viewport.
             // A primary snapshot stashed while scrolled back must not be
             // restored after a scroll change (e.g. entering the alternate
@@ -770,7 +769,6 @@ impl TerminalEmulator {
         // reused.
         if extra_rows != self.previous_effective_extra_rows {
             self.previous_visible_snap = None;
-            tracing::debug!(target: "freminal::selection", "snap cache invalidated: extra flatten rows changed");
             // Same reasoning as the scroll-change case: the stashed cache
             // covers a specific flatten window and must not be restored across
             // an extra-row change.
@@ -788,7 +786,6 @@ impl TerminalEmulator {
         let current_size = (term_width, term_height);
         if current_size != self.previous_term_size {
             self.previous_visible_snap = None;
-            tracing::debug!(target: "freminal::selection", "snap cache invalidated: terminal size changed");
             // A resize applies to BOTH buffers, so the stashed other-buffer
             // cache is also the wrong dimensions and must not be restored on a
             // later buffer switch. Clear it too.
@@ -958,28 +955,6 @@ impl TerminalEmulator {
                 .previous_visible_snap
                 .as_ref()
                 .is_none_or(|(prev_chars, _, _, _)| prev_chars.as_ref() != vc.as_ref());
-
-            // Diagnostic for #470. `changed` conflates two very different
-            // things: the visible text actually differing, and the cache
-            // simply having been invalidated (by a scroll, an extra-row
-            // change, a resize, or an alt-screen swap) so there is nothing to
-            // compare against. Consumers that treat it as "the text moved" --
-            // notably the GUI's selection auto-clear -- care about the
-            // difference. Log which one it was.
-            if changed {
-                tracing::debug!(
-                    target: "freminal::selection",
-                    cache_was_invalidated = self.previous_visible_snap.is_none(),
-                    prev_len = self
-                        .previous_visible_snap
-                        .as_ref()
-                        .map_or(0, |(p, _, _, _)| p.len()),
-                    new_len = vc.len(),
-                    scroll_offset,
-                    extra_rows,
-                    "snapshot reports content_changed"
-                );
-            }
 
             self.previous_visible_snap = Some((
                 Arc::clone(&vc),
