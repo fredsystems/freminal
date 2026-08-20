@@ -2120,6 +2120,10 @@ impl freminal_windowing::App for FreminalGui {
             // split border. This must happen before the per-pane
             // `scope_builder` calls so that pointer events on the border
             // are consumed here instead of reaching the terminal widgets.
+            // Whether a split-border sensor owns the cursor icon this frame.
+            // Set from the very same condition that applies the resize cursor
+            // below, so the gate and the write can never disagree (#462).
+            let mut border_owns_cursor = false;
             if has_multiple_panes && zoomed_pane.is_none() && !ui_overlay_open {
                 let borders = win
                     .tabs
@@ -2168,12 +2172,23 @@ impl freminal_windowing::App for FreminalGui {
                         ui.interact(sensor_rect, sensor_id, egui::Sense::click_and_drag());
 
                     // Change cursor when hovering or dragging a border.
+                    //
+                    // `dragged()` matters as much as `hovered()`: the sensor
+                    // rects are built from `borders`, computed at the top of
+                    // this frame and therefore one frame behind the divider
+                    // that `resize_split` is currently moving. During a drag
+                    // the pointer routinely runs ahead of the stale rect, so
+                    // a hover-only test would drop out intermittently and let
+                    // the pane underneath reclaim the icon -- the cursor
+                    // flickering between the resize arrow and the normal
+                    // pointer while dragging.
                     if response.hovered() || response.dragged() {
                         let cursor = match border.direction {
                             panes::SplitDirection::Horizontal => egui::CursorIcon::ResizeHorizontal,
                             panes::SplitDirection::Vertical => egui::CursorIcon::ResizeVertical,
                         };
                         ctx.set_cursor_icon(cursor);
+                        border_owns_cursor = true;
                     }
 
                     // On drag start, record which border we're resizing.
@@ -2248,6 +2263,13 @@ impl freminal_windowing::App for FreminalGui {
                             }
                         }
                         win.border_drag = None;
+                        // The divider has just moved to its final position,
+                        // but this frame's sensor rects were built before that
+                        // move. Force one more frame so hover is re-evaluated
+                        // against the settled layout, otherwise the resize
+                        // cursor drops to the default arrow on mouse-up even
+                        // though the pointer is still over the divider (#462).
+                        ctx.request_repaint();
                     }
                 }
 
@@ -2280,32 +2302,25 @@ impl freminal_windowing::App for FreminalGui {
             // `win.terminal_widget` (issue #453).
             let border_drag_active = win.border_drag.is_some();
 
-            // Whether the pointer is over one of this frame's split-border
-            // drag sensors. Those sensors are wider than the border line they
-            // straddle, so the pointer is geometrically inside an adjacent
-            // pane while logically over chrome that has already set a resize
-            // cursor. Panes must abstain from writing `output.cursor_icon`
-            // there, or the resize arrow only survives in the hairline gap
-            // between the two pane rects -- the reported "clickable region is
-            // much larger than the region that shows the cursor" (#462).
+            // Whether a split-border sensor owns the cursor icon this frame.
             //
-            // Read from the rects just published above, so it reflects this
-            // frame's layout, and computed here to avoid holding a borrow of
-            // `win.published` across the mutable borrow of
-            // `win.terminal_widget` in the pane loop.
-            let split_border_hover = {
-                let pointer = ctx.input(|i| i.pointer.latest_pos());
-                let over = pointer.is_some_and(|pos| {
-                    win.published
-                        .chrome_border_rects()
-                        .iter()
-                        .any(|r| r.contains(pos))
-                });
-                if over {
-                    SplitBorderHover::Over
-                } else {
-                    SplitBorderHover::Clear
-                }
+            // Those sensors are wider than the 1px border they straddle, so
+            // the pointer sits geometrically inside an adjacent pane while
+            // logically over chrome. Panes must abstain from writing
+            // `output.cursor_icon` there, or the resize arrow survives only in
+            // the hairline gap between the two pane rects.
+            //
+            // Driven by the same `hovered() || dragged()` test that actually
+            // applies the cursor, rather than an independent hit-test of the
+            // published rects: those rects are a frame behind the divider
+            // during a drag, so a separate test would disagree with the write
+            // exactly when it matters. `border_drag_active` is folded in so an
+            // in-flight drag keeps the cursor even on a frame where the
+            // stale sensor rect has fallen behind the pointer entirely (#462).
+            let split_border_hover = if border_owns_cursor || border_drag_active {
+                SplitBorderHover::Over
+            } else {
+                SplitBorderHover::Clear
             };
 
             // ── Terminal band: shape-index range capture (#436.2a, range
