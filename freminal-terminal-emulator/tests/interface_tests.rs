@@ -411,3 +411,127 @@ fn test_sync_updates_timer_cleared_on_reset() {
         "skip_draw must remain false after timeout period when DontDraw was already reset"
     );
 }
+
+// ─── synchronized updates (?2026): change signals across skipped frames ──────
+//
+// Regression coverage for issue #490. `content_changed` / `scroll_changed` are
+// edge-triggered against the previous snapshot, but the GUI does not render
+// snapshots carrying `skip_draw = true`. Without deferral the edge reported by
+// a skipped frame is lost forever and the screen stays stale.
+
+/// The canonical #490 repro: a paint arrives inside a synchronized-output
+/// block and the closing `?2026l` lands in a *later* PTY read.
+///
+/// The frame carrying the new content is skipped, and the content is then
+/// byte-identical on the following (renderable) frame — so a naive diff
+/// reports no change. The renderable frame must still report
+/// `content_changed = true`, or the GUI never rebuilds its vertex buffers.
+#[test]
+fn test_sync_updates_content_change_survives_skipped_frame() {
+    let (mut emu, _rx) = make_emulator();
+
+    // Settle: consume the initial "everything is new" snapshot.
+    let _ = emu.build_snapshot();
+
+    // Read 1: BSU plus the entire paint. The ESU has not arrived yet.
+    emu.handle_incoming_data(b"\x1b[?2026h\x1b[HHELLO WORLD");
+    let skipped = emu.build_snapshot();
+    assert!(
+        skipped.skip_draw,
+        "precondition: the frame carrying the paint must be skipped by the GUI"
+    );
+
+    // Read 2: just the ESU. The visible content is unchanged since the frame
+    // the GUI was told to throw away.
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let rendered = emu.build_snapshot();
+    assert!(
+        !rendered.skip_draw,
+        "precondition: the frame after ?2026l must be renderable"
+    );
+    assert!(
+        rendered.content_changed,
+        "the first renderable frame after a skipped one must replay the skipped \
+         frame's content_changed edge, otherwise the GUI keeps showing stale pixels"
+    );
+}
+
+/// The deferred edge must survive an arbitrarily long run of skipped frames,
+/// not just one, and must be reported exactly once.
+#[test]
+fn test_sync_updates_content_change_survives_many_skipped_frames() {
+    let (mut emu, _rx) = make_emulator();
+    let _ = emu.build_snapshot();
+
+    emu.handle_incoming_data(b"\x1b[?2026h\x1b[Hthe paint");
+    for _ in 0..5 {
+        let snap = emu.build_snapshot();
+        assert!(
+            snap.skip_draw,
+            "frames inside the ?2026 block must be skipped"
+        );
+    }
+
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let rendered = emu.build_snapshot();
+    assert!(
+        rendered.content_changed,
+        "a content edge must survive any number of skipped frames"
+    );
+
+    // Debt paid: a subsequent idle frame must not keep re-reporting it, or the
+    // GUI would rebuild its vertex buffers on every frame forever.
+    let idle = emu.build_snapshot();
+    assert!(
+        !idle.content_changed,
+        "the deferred edge must be cleared once it has been delivered"
+    );
+}
+
+/// A skipped frame with genuinely no change must not manufacture one.
+#[test]
+fn test_sync_updates_skipped_frame_without_change_reports_none() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b[Hsettled");
+    let _ = emu.build_snapshot();
+
+    // Enter and leave the synchronized block without painting anything.
+    emu.handle_incoming_data(b"\x1b[?2026h");
+    let skipped = emu.build_snapshot();
+    assert!(skipped.skip_draw, "precondition: frame is skipped");
+
+    emu.handle_incoming_data(b"\x1b[?2026l");
+    let rendered = emu.build_snapshot();
+    assert!(
+        !rendered.content_changed,
+        "deferral must replay real edges only, never invent one"
+    );
+}
+
+/// The 200 ms auto-resume path is also a transition from skipped to rendered,
+/// so a content edge observed while `DontDraw` was stuck must be replayed on
+/// the frame the timeout releases.
+#[test]
+fn test_sync_updates_content_change_survives_timeout_resume() {
+    use std::time::Duration;
+
+    let (mut emu, _rx) = make_emulator();
+    let _ = emu.build_snapshot();
+
+    // A program that paints, sets DontDraw, and then crashes without resetting.
+    emu.handle_incoming_data(b"\x1b[?2026h\x1b[Horphaned paint");
+    let skipped = emu.build_snapshot();
+    assert!(skipped.skip_draw, "precondition: frame is skipped");
+
+    std::thread::sleep(Duration::from_millis(250));
+
+    let rendered = emu.build_snapshot();
+    assert!(
+        !rendered.skip_draw,
+        "precondition: the 200 ms timeout must have released rendering"
+    );
+    assert!(
+        rendered.content_changed,
+        "the timeout-released frame must replay the skipped frame's content edge"
+    );
+}

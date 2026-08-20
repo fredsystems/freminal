@@ -135,6 +135,66 @@ pub fn split_format_data_for_scrollback(
 /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for spec references.
 const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
 
+/// Change signals carried forward across snapshots the GUI will not render.
+///
+/// `content_changed` and `scroll_changed` are edge-triggered: each is computed
+/// by diffing the current snapshot against the *previous* one. That is only
+/// sound if the GUI renders every snapshot — and it does not. A snapshot with
+/// `skip_draw = true` (Synchronized Output, DEC `?2026`) is deliberately
+/// dropped by the GUI without inspecting its content, so the edge it reported
+/// is never acted on. The next snapshot then diffs against the dropped one,
+/// finds no *further* change, and reports `content_changed = false`.
+///
+/// The result is a permanently stale screen: an application that wraps a paint
+/// in `?2026h` … `?2026l` loses the whole update whenever a PTY read boundary
+/// falls between the content and the closing `?2026l`, and nothing redraws
+/// until an unrelated event forces a rebuild (issue #490).
+///
+/// This type closes that gap by making the signals **level-triggered across
+/// skipped frames**: an edge observed while `skip_draw` is set is accumulated
+/// here and replayed on the first snapshot the GUI will actually render.
+///
+/// Both flags are tracked independently because they are independent
+/// simultaneous signals — a frame can change content, scroll, both, or
+/// neither — and downstream consumers distinguish the two (a pure scroll must
+/// not clear the user's text selection).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DeferredChangeFlags {
+    /// A `content_changed` edge that has not yet reached a rendered snapshot.
+    content: bool,
+    /// A `scroll_changed` edge that has not yet reached a rendered snapshot.
+    scroll: bool,
+}
+
+impl DeferredChangeFlags {
+    /// Combine this frame's freshly computed edges with anything owed from
+    /// previously skipped frames, and return the values the snapshot should
+    /// actually carry.
+    ///
+    /// When the frame will be skipped the accumulated signal is retained, so
+    /// it survives an arbitrarily long run of skipped frames. When the frame
+    /// will be rendered the debt is paid and cleared.
+    const fn resolve_for_frame(
+        &mut self,
+        skip_draw: bool,
+        content_changed: bool,
+        scroll_changed: bool,
+    ) -> (bool, bool) {
+        let content = content_changed || self.content;
+        let scroll = scroll_changed || self.scroll;
+
+        if skip_draw {
+            self.content = content;
+            self.scroll = scroll;
+        } else {
+            self.content = false;
+            self.scroll = false;
+        }
+
+        (content, scroll)
+    }
+}
+
 pub struct TerminalEmulator {
     pub internal: TerminalState,
     /// PTY I/O layer (holds the terminfo `TempDir` and child-exit receiver).
@@ -216,6 +276,12 @@ pub struct TerminalEmulator {
     /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for the spec
     /// references.
     dont_draw_entered_at: Option<Instant>,
+    /// Change signals owed to the GUI from snapshots it was told to skip.
+    ///
+    /// See [`DeferredChangeFlags`] for why edge-triggered change detection is
+    /// unsound in the presence of `skip_draw`, and issue #490 for the user-
+    /// visible symptom.
+    deferred_changes: DeferredChangeFlags,
 }
 
 impl TerminalEmulator {
@@ -242,6 +308,7 @@ impl TerminalEmulator {
             previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
+            deferred_changes: DeferredChangeFlags::default(),
         }
     }
 
@@ -272,6 +339,7 @@ impl TerminalEmulator {
             previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
+            deferred_changes: DeferredChangeFlags::default(),
         };
         (emulator, write_rx)
     }
@@ -353,6 +421,7 @@ impl TerminalEmulator {
             previous_effective_extra_rows: 0,
             previous_term_size: (0, 0),
             dont_draw_entered_at: None,
+            deferred_changes: DeferredChangeFlags::default(),
         };
         Ok((ret, pty_rx))
     }
@@ -742,6 +811,17 @@ impl TerminalEmulator {
         self.apply_sync_updates_timeout();
 
         let mode_fields = self.collect_mode_fields();
+
+        // ── Carry change signals across frames the GUI will not render ───────
+        //
+        // Must run after `apply_sync_updates_timeout` and `collect_mode_fields`,
+        // because the timeout can flip `skip_draw` back to `false` and this
+        // decision depends on the *final* value the snapshot will carry.
+        let (content_changed, scroll_changed) = self.deferred_changes.resolve_for_frame(
+            mode_fields.skip_draw,
+            content_changed,
+            scroll_changed,
+        );
         let cursor_pos = self.internal.cursor_pos();
         // Hide the cursor when the user is scrolled back into history —
         // the live cursor line is not visible on screen.
