@@ -927,6 +927,40 @@ impl TerminalHandler {
         )
     }
 
+    /// Flatten the whole buffer -- scrollback followed by the visible window --
+    /// into a single corpus for scrollback search.
+    ///
+    /// Row `n` of the returned corpus is buffer row `n`: rows are separated by
+    /// exactly one [`TChar::NewLine`], **including at the scrollback/visible
+    /// seam**. That seam is the reason this method exists rather than callers
+    /// concatenating [`Self::data_and_format_data_for_gui`]'s two sections
+    /// themselves. Each section is flattened independently, and a flatten
+    /// deliberately emits no trailing separator after its own last row, so a
+    /// naive `scrollback.extend(visible)` fuses the last scrollback row and the
+    /// first visible row into one. Every row from the visible window onward
+    /// then counts one too low, which put search highlights a row above their
+    /// match and dropped matches on the first visible row entirely (#463).
+    ///
+    /// The separator is driven by the scrollback flatten's row count, not by
+    /// whether it produced any characters: a single blank scrollback row
+    /// flattens to zero characters but is still a row, and still needs a
+    /// separator after it.
+    ///
+    /// Pass `scroll_offset = 0` when calling from the PTY thread.
+    #[must_use]
+    pub fn search_corpus(&mut self, scroll_offset: usize) -> Vec<TChar> {
+        let (visible_chars, _, _, _) = self.buffer.visible_as_tchars_and_tags(scroll_offset);
+        let (scrollback_chars, _, scrollback_row_offsets, _) =
+            self.buffer.scrollback_as_tchars_and_tags(scroll_offset);
+
+        let mut corpus = scrollback_chars;
+        if !scrollback_row_offsets.is_empty() {
+            corpus.push(TChar::NewLine);
+        }
+        corpus.extend(visible_chars);
+        corpus
+    }
+
     /// Return the current cursor position in screen coordinates (0-indexed).
     ///
     /// This returns coordinates relative to the top of the visible window, so

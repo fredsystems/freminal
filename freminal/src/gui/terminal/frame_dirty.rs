@@ -112,12 +112,9 @@ pub(super) struct DirtyTrackingOutcome {
     /// The selection translated into snapshot-row space, clamped to the
     /// flattened window, for the renderer.
     pub(super) screen_selection: Option<(usize, usize, usize, usize)>,
-    /// Number of search matches this frame (cached for next frame's
-    /// comparison).
-    pub(super) search_match_count: usize,
-    /// Current search match index this frame (cached for next frame's
-    /// comparison).
-    pub(super) search_current_match: usize,
+    /// Fingerprint of this frame's search-highlight state (cached for next
+    /// frame's comparison). See `SearchState::render_epoch`.
+    pub(super) search_epoch: u64,
     /// Command-block gutter hover-tint rendered-row range this frame.
     pub(super) command_block_hover_rows: Option<(usize, usize)>,
     /// Whether the cursor should actually be drawn this frame (DECTCEM,
@@ -359,10 +356,11 @@ pub(super) fn evaluate_frame_dirty_state(
     let selection_changed = current_selection != cache.previous_selection;
 
     // Check whether search highlight state has changed since last frame.
-    let search_match_count = view_state.search_state.matches.len();
-    let search_current_match = view_state.search_state.current_match;
-    let search_changed = search_match_count != cache.previous_search_match_count
-        || search_current_match != cache.previous_search_current_match;
+    // Compares a fingerprint of everything that determines the highlight
+    // geometry, not just the match count and focused index -- see
+    // `SearchState::render_epoch` and issue #463.
+    let search_epoch = view_state.search_state.render_epoch();
+    let search_changed = search_epoch != cache.previous_search_epoch;
 
     // Convert buffer-absolute selection coordinates to snapshot-row
     // space for the renderer.  `win_start` is the flattened window top
@@ -570,8 +568,7 @@ pub(super) fn evaluate_frame_dirty_state(
         },
         current_selection,
         screen_selection,
-        search_match_count,
-        search_current_match,
+        search_epoch,
         command_block_hover_rows: command_block_hover_rows_early,
         effective_show_cursor,
         cursor_pixel_pos,
@@ -596,6 +593,7 @@ mod evaluate_frame_dirty_state_tests {
     use super::super::widget::new_render_state;
     use super::*;
     use crate::gui::renderer::WindowPostRenderer;
+    use crate::gui::view_state::SearchState;
     use freminal_common::config::CommandBlocksConfig;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::{
@@ -632,8 +630,10 @@ mod evaluate_frame_dirty_state_tests {
         cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
         cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
         cache.previous_selection = None;
-        cache.previous_search_match_count = 0;
-        cache.previous_search_current_match = 0;
+        // These tests drive `ViewState::new()`, whose search state is
+        // default-constructed, so a settled cache is one that already agrees
+        // with that state's fingerprint.
+        cache.previous_search_epoch = SearchState::default().render_epoch();
         cache.previous_command_block_hover_rows = None;
         cache.previous_cursor_blink_on = cursor_blink_on;
         cache.previous_cursor_pos = snap.cursor_pos;
@@ -791,7 +791,9 @@ mod evaluate_frame_dirty_state_tests {
         // `search_changed` must veto it.
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, true);
-        cache.previous_search_match_count = 1;
+        // Any value that differs from this frame's epoch stands in for "the
+        // search state changed since the last rendered frame".
+        cache.previous_search_epoch = cache.previous_search_epoch.wrapping_add(1);
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
 

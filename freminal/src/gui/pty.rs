@@ -783,10 +783,7 @@ fn spawn_pty_consumer_thread(
                             // be requested or the search result can stall while the
                             // terminal is otherwise idle and the cursor-blink wake
                             // is suppressed (classified Repaint, #459 review finding).
-                            let (chars, _tags) =
-                                emulator.internal.handler.data_and_format_data_for_gui(0);
-                            let mut combined = chars.scrollback;
-                            combined.extend(chars.visible);
+                            let combined = emulator.internal.handler.search_corpus(0);
                             let total_rows = emulator.internal.handler.buffer().rows().len();
                             let _ = search_buffer_tx.send((total_rows, combined));
                         }

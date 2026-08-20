@@ -1326,10 +1326,9 @@ pub struct PaneRenderCache {
     /// from `overlay_was_open_last_frame` so each latch tracks only its own
     /// cause.
     pub(super) border_drag_was_active_last_frame: bool,
-    /// Number of search matches from the most recently rendered frame.
-    pub(super) previous_search_match_count: usize,
-    /// Current match index from the most recently rendered frame.
-    pub(super) previous_search_current_match: usize,
+    /// Fingerprint of the search-highlight state from the most recently
+    /// rendered frame (see `SearchState::render_epoch`).
+    pub(super) previous_search_epoch: u64,
     /// The terminal cell `(col, row)` the mouse was hovering over in the
     /// previous frame.
     pub(super) previous_hover_cell: Option<(usize, usize)>,
@@ -1485,8 +1484,7 @@ impl PaneRenderCache {
             previous_text_blink_fast_visible: true,
             overlay_was_open_last_frame: false,
             border_drag_was_active_last_frame: false,
-            previous_search_match_count: 0,
-            previous_search_current_match: 0,
+            previous_search_epoch: 0,
             previous_hover_cell: None,
             previous_command_block_hover_rows: None,
             cached_hovered_url: None,
@@ -2455,8 +2453,7 @@ impl FreminalTerminalWidget {
             let text_blink_changed = dirty.observations.text_blink_changed;
             let current_selection = dirty.current_selection;
             let screen_selection = dirty.screen_selection;
-            let search_match_count = dirty.search_match_count;
-            let search_current_match = dirty.search_current_match;
+            let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
             effective_show_cursor = dirty.effective_show_cursor;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
@@ -2846,8 +2843,7 @@ impl FreminalTerminalWidget {
                         cache.previous_selection = current_selection;
                         cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                         cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
-                        cache.previous_search_match_count = search_match_count;
-                        cache.previous_search_current_match = search_current_match;
+                        cache.previous_search_epoch = search_epoch;
                         cache.previous_command_block_hover_rows = command_block_hover_rows_early;
                         cache.previous_term_width = snap.term_width;
                         cache.previous_term_height = snap.term_height;
