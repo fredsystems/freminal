@@ -1438,6 +1438,23 @@ impl SettingsModal {
         );
     }
 
+    /// Replace the draft with a default config, as the "Reset to Defaults"
+    /// button does.
+    ///
+    /// `draft_profile` is the chrome-style picker's own copy of
+    /// `draft.chrome.profile`, kept separate so the picker can detect a change
+    /// and emit a live preview. It is synced on open and whenever the user
+    /// moves the picker -- but a reset moves `draft.chrome.profile` underneath
+    /// it without the picker being touched, so it must be re-synced here.
+    /// Otherwise the picker keeps displaying the pre-reset profile while Apply
+    /// writes the default one, and the change-detection in
+    /// `show_style_profile_picker` sees no difference to correct.
+    fn reset_draft_to_defaults(&mut self) {
+        self.draft = Config::default();
+        self.draft_profile = self.draft.chrome.profile;
+        self.status_message = Some("Reset to defaults (not saved yet)".to_string());
+    }
+
     /// The dialog's action row: `[Reset to Defaults] ... [Cancel] [Apply] [OK]`.
     ///
     /// Shared by the standalone window and the inline modal, which previously
@@ -1463,8 +1480,7 @@ impl SettingsModal {
                 .clickable_when(!is_read_only)
                 .clicked()
             {
-                self.draft = Config::default();
-                self.status_message = Some("Reset to defaults (not saved yet)".to_string());
+                self.reset_draft_to_defaults();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let ok_btn = egui::Button::new("OK");
@@ -3160,9 +3176,36 @@ mod tests {
         live.font.size = 42.0;
         modal.open(&live, Vec::new(), false);
 
-        // Simulate clicking "Reset to Defaults" by resetting the draft.
-        modal.draft = Config::default();
+        // Call the real reset rather than re-implementing it here: an inline
+        // `modal.draft = Config::default()` is what let the profile-picker
+        // desync below go unnoticed.
+        modal.reset_draft_to_defaults();
         assert!((modal.draft.font.size - 12.0).abs() < f32::EPSILON);
+    }
+
+    /// The chrome-style picker keeps its own copy of `draft.chrome.profile`.
+    /// A reset moves the draft underneath it, and the picker's own
+    /// change-detection cannot notice, so the reset must re-sync it. Without
+    /// this the picker displays the pre-reset profile while Apply writes the
+    /// default one.
+    #[test]
+    fn reset_to_defaults_resyncs_the_style_profile_picker() {
+        use freminal_common::gui_theme::StyleProfile;
+
+        let mut modal = SettingsModal::new(None);
+        let mut live = Config::default();
+        // Open with a non-default profile so a reset has something to change.
+        live.chrome.profile = StyleProfile::Retro;
+        modal.open(&live, Vec::new(), false);
+        assert_eq!(modal.draft_profile, StyleProfile::Retro);
+
+        modal.reset_draft_to_defaults();
+
+        assert_eq!(
+            modal.draft_profile, modal.draft.chrome.profile,
+            "the picker must show what Apply would save"
+        );
+        assert_eq!(modal.draft_profile, Config::default().chrome.profile);
     }
 
     #[test]
