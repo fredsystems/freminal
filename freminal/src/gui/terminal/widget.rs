@@ -3518,10 +3518,27 @@ impl FreminalTerminalWidget {
             fold_placeholder: placeholder_hovered,
             url: cache.cached_hovered_url.is_some(),
         };
-        let resolved_icon = cursor_icon_for(pointer_hover.resolve(), snap.pointer_shape);
-        ui.ctx().output_mut(|output| {
-            output.cursor_icon = resolved_icon;
-        });
+
+        // Only the pane the pointer is actually over may set the icon.
+        //
+        // `output.cursor_icon` is a single window-wide field, and every pane
+        // runs this code every frame. Writing unconditionally therefore means
+        // the last pane to render decides the cursor for the entire window,
+        // clobbering whatever the pane under the pointer resolved. That made
+        // gutter and URL hover appear to work only in whichever pane happened
+        // to render last (the bottom of a vertical split), and it also
+        // overwrote the cursors egui sets for its own chrome -- the I-beam
+        // over a text field, resize arrows over a splitter -- because a pane
+        // would stamp its own icon over them after they were set.
+        //
+        // `rect_contains_pointer` respects layer and clip rect, so a modal
+        // drawn above the pane correctly keeps its own cursor.
+        if ui.rect_contains_pointer(pane_rect) {
+            let resolved_icon = cursor_icon_for(pointer_hover.resolve(), snap.pointer_shape);
+            ui.ctx().output_mut(|output| {
+                output.cursor_icon = resolved_icon;
+            });
+        }
 
         // ── Drag-and-drop ────────────────────────────────────────────
         handle_file_drop(ui, terminal_rect, input_tx);
