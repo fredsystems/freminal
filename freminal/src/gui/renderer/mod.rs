@@ -5,6 +5,8 @@
 
 //! Terminal rendering pipeline split into focused sub-modules.
 //!
+//! - [`gl_facade`] — the GL call boundary: the frozen `glow::HasContext` call
+//!   surface and (from 123.2) the `Gl` recording facade.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
 //! - [`shaders`] — GLSL source string constants for the four shader passes
@@ -21,6 +23,7 @@
 //!   module docs.
 
 pub mod errors;
+pub mod gl_facade;
 pub mod gpu;
 pub(super) mod shaders;
 pub mod toast_pass;

@@ -1,8 +1,10 @@
 # PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
 
-> **STATUS: PLANNED, NOT STARTED.** No subtask below has a branch or a commit
-> yet. This document is the full subtask breakdown, written at activation
-> time against the code as it stands on `main`.
+> **STATUS: IN PROGRESS** on `task-123/gl-measurement-harness`. This document
+> is the full subtask breakdown, written at activation time against the code
+> as it stands on `main`. Subtask 123.1's audit corrected several factual
+> claims made at activation time — see "Audit corrections (123.1)" below.
+> Those corrections are folded into the prose that follows them.
 
 Task 123 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
@@ -66,10 +68,11 @@ phases with very different infrastructure requirements:
 ### Why this is tractable with no new infrastructure
 
 - `RenderState` (`freminal/src/gui/terminal/widget.rs:1165-1215`) is
-  constructible with no GL context.
-- `GlyphAtlas::new` (`freminal/src/gui/renderer/atlas.rs:186`) takes no `gl`.
+  constructible with no GL context — via the free function
+  `new_render_state` (`widget.rs:1245`), not a `RenderState::new`.
+- `GlyphAtlas::new` (`freminal/src/gui/atlas.rs:186`) takes no `gl`.
 - Fonts are embedded via `include_bytes!`
-  (`freminal/src/gui/renderer/font_manager.rs:36-44`), and
+  (`freminal/src/gui/font_manager.rs:36-44`), and
   `FontManager::new` already runs headlessly at 7 call sites in
   `freminal/benches/render_loop_bench.rs`.
 - GL objects are created lazily via `renderer.init(gl)`, gated on
@@ -88,14 +91,17 @@ no context, no driver.
 not a design tradeoff to weigh. State this plainly in code comments and
 commit messages so nobody retries the trait-implementation approach.
 
-The trait has 396 methods and 12 associated types; freminal uses only **47
-distinct entry points** (enumerated below). freminal is monomorphic over a
-concrete `&glow::Context` throughout — call-site counts are
-`freminal/src/gui/renderer/gpu.rs` 266, `toast_pass.rs` 37,
-`toast_text_pass.rs` 37 — with roughly 40 parameters carrying that type and
-**zero generic bounds to rewire**. The single capture point in the GUI is
-`let gl = painter.gl();` at `freminal/src/gui/terminal/widget.rs:2955`; the
-context itself is stored as `Arc<glow::Context>`
+The trait has 396 methods and 12 associated types; freminal uses only **49
+distinct entry points** (enumerated below, and frozen in code at
+`freminal/src/gui/renderer/gl_facade/surface.rs`). freminal is monomorphic
+over a concrete `&glow::Context` throughout — call-site counts are
+`freminal/src/gui/renderer/gpu.rs` 268, `toast_pass.rs` 37,
+`toast_text_pass.rs` 37, `widget.rs` 4, `app_impl.rs` 5 — with 52 parameters
+carrying that type and **zero generic bounds to rewire**. There are two
+capture points in the GUI, not one: `let gl = painter.gl();` at
+`freminal/src/gui/terminal/widget.rs:2955` and the equivalent inside the
+`PaintCallback`s in `freminal/src/gui/app_impl.rs` (around `:2409` and
+`:3200`). The context itself is stored as `Arc<glow::Context>`
 (`freminal-windowing/src/gl_context.rs:191`) and created at `:284-286`.
 
 Handle types have **public tuple fields**, so a recording backend can
@@ -129,7 +135,7 @@ delegates directly to `glow::Context`; the `Recording` arm appends a
 call-record entry and returns a fabricated handle where one is expected.
 
 **Rationale to record in the code and in this document:** a trait would
-force generics at roughly 40 call sites across three files, widening every
+force generics at 52 parameter sites across five files, widening every
 one of those signatures. The enum keeps codegen monomorphic in the `Real`
 arm and makes the migration mechanical — a search-and-replace of the
 parameter type, not a redesign of call sites.
@@ -143,23 +149,26 @@ in a test, this facade's zero-cost claim for the default build must be
 **verified by a benchmark**, not merely asserted in a doc comment — see
 123.6.
 
-### The 47 entry points
+### The 49 entry points
 
-For sizing the facade and driving 123.1's guard:
+For sizing the facade and driving 123.1's guard. This list is frozen in code
+as `GL_CALL_SURFACE` in `freminal/src/gui/renderer/gl_facade/surface.rs`;
+that array is the source of truth and this block mirrors it.
 
 ```text
 active_texture, attach_shader, bind_buffer, bind_framebuffer, bind_texture,
 bind_vertex_array, buffer_data_size, buffer_data_u8_slice,
 buffer_sub_data_u8_slice, check_framebuffer_status, clear, clear_color,
-compile_shader, create_buffer, create_framebuffer, create_texture,
-create_vertex_array, delete_buffer, delete_framebuffer, delete_program,
-delete_shader, delete_texture, delete_vertex_array, disable, draw_arrays,
-draw_arrays_instanced, enable, enable_vertex_attrib_array,
-framebuffer_texture_2d, get_program_info_log, get_program_link_status,
-get_shader_compile_status, get_shader_info_log, get_uniform_location,
-link_program, pixel_store_i32, scissor, shader_source, tex_image_2d,
-tex_parameter_i32, tex_sub_image_2d, uniform_1_f32, uniform_1_i32,
-uniform_2_f32, use_program, vertex_attrib_divisor, vertex_attrib_pointer_f32
+compile_shader, create_buffer, create_framebuffer, create_program,
+create_shader, create_texture, create_vertex_array, delete_buffer,
+delete_framebuffer, delete_program, delete_shader, delete_texture,
+delete_vertex_array, disable, draw_arrays, draw_arrays_instanced, enable,
+enable_vertex_attrib_array, framebuffer_texture_2d, get_program_info_log,
+get_program_link_status, get_shader_compile_status, get_shader_info_log,
+get_uniform_location, link_program, pixel_store_i32, scissor, shader_source,
+tex_image_2d, tex_parameter_i32, tex_sub_image_2d, uniform_1_f32,
+uniform_1_i32, uniform_2_f32, use_program, vertex_attrib_divisor,
+vertex_attrib_pointer_f32
 ```
 
 Derived metric groups the recording log must be able to answer without a
@@ -170,6 +179,39 @@ second pass:
   `disable` / `scissor`
 - **uploads** = `buffer_data_*` / `buffer_sub_data_u8_slice` /
   `tex_image_2d` / `tex_sub_image_2d`
+
+`active_texture` is counted in the state-change group. The plan's original
+wording did not name it, but it is a texture-unit selector — a bind-family
+state change — and omitting it would undercount. All three groups are frozen
+in code as `DRAW_CALL_METHODS`, `STATE_CHANGE_METHODS` and `UPLOAD_METHODS`
+alongside `GL_CALL_SURFACE`.
+
+### Audit corrections (123.1)
+
+123.1's prohibition required that any discrepancy found during the audit be
+reported and this document corrected rather than silently absorbed. Five
+were found. Each is already folded into the prose above; they are itemised
+here so the correction is on the record and the original claim is not
+quietly rewritten out of history.
+
+| # | Claim at activation | Audited reality |
+| - | ------------------- | --------------- |
+| 1 | 47 distinct `HasContext` entry points | **49.** `create_program` (`gpu.rs:1614`) and `create_shader` (`gpu.rs:1643`) are written as multi-line method chains, so the activation-time grep missed them. Without them the facade cannot create a shader or a program at all. |
+| 2 | `gpu.rs` has 266 call sites | **268** — exactly the two missed multi-line chains. |
+| 3 | All GL calls live in `gpu.rs`, `toast_pass.rs`, `toast_text_pass.rs` | **Nine further production call sites** exist: `widget.rs` (`bind_framebuffer`, `enable`, `scissor`, `disable`) and `app_impl.rs` (`bind_framebuffer` ×3, `clear_color`, `clear`). See the scope note below. |
+| 4 | "roughly 40" `&glow::Context` parameters | **52** workspace-wide; 46 within the three originally-named files. |
+| 5 | `atlas.rs` / `font_manager.rs` live under `src/gui/renderer/` | They live at `freminal/src/gui/atlas.rs` and `freminal/src/gui/font_manager.rs`. The cited line numbers were correct; only the paths were wrong. |
+
+**Scope decision arising from correction 3 (maintainer, 2026-08-21).** The
+nine calls in `widget.rs` and `app_impl.rs` are **in scope** for the
+migration, and 123.1's guard therefore polices the **whole `freminal`
+crate**, not just `src/gui/renderer/` as 123.1 originally specified. Two
+reasons. First, both files already capture `let gl = painter.gl();` and must
+construct the facade regardless in order to call the migrated `gpu.rs`.
+Second, and decisively, `widget.rs`'s `enable`/`scissor`/`disable` calls are
+interleaved *between* calls into `gpu.rs` inside a single `PaintCallback` —
+leaving them raw would make the recording log's state-change metric silently
+undercount, which is precisely the measurement this task exists to produce.
 
 ---
 
@@ -262,12 +304,15 @@ blocking Phase 1's contribution (call-count findings).
 
 ### 123.1 — Enumerate and freeze the GL call surface, with a compile-time guard
 
-Scope: a new small module documenting the 47 entry points (candidate
+**Status: complete.** `freminal/src/gui/renderer/gl_facade/`
+(`mod.rs`, `surface.rs`) plus the module declaration in
+`freminal/src/gui/renderer/mod.rs`.
+
+Scope: a new small module documenting the entry points (candidate
 location: alongside the future `Gl` facade module under
 `freminal/src/gui/renderer/`), plus a lint or test that fails if a raw
-`gl.` call (on `glow::Context` directly) appears anywhere in
-`freminal/src/gui/renderer/` outside the facade module itself once 123.4 and
-123.5 land.
+`gl.` call (on `glow::Context` directly) appears anywhere in the `freminal`
+crate outside the facade module itself once 123.4 and 123.5 land.
 
 Deliverable: the frozen list (reproduced in this document above), and a
 guard — a `grep`-based test or a clippy-level check acceptable to
@@ -279,12 +324,26 @@ against a deliberately-introduced raw call in a scratch commit, then
 reverted before landing.
 
 Prohibitions: do not migrate any call site yet — that is 123.4 and 123.5.
-Do not add methods to the list beyond the 47 enumerated; if a 48th call site
-is found during the audit, report it and update this document rather than
-silently including it.
+Do not add methods to the list beyond those enumerated; if a further call
+site is found during the audit, report it and update this document rather
+than silently including it.
 
 Stop: report the frozen list and the guard's mechanism; await review before
 123.2.
+
+**As built.** The list was audited to 49, not 47 (see "Audit corrections"
+above). The guard is import-based rather than method-name-based: calling any
+`HasContext` method requires the trait in scope, so
+`has_context_use_sites_match_allowlist` walks every `.rs` file under
+`freminal/src/`, flags each non-comment line mentioning `HasContext`, and
+asserts the resulting file set equals a `NOT_YET_MIGRATED` allowlist **in
+both directions** — a new offender fails as unexpected, and a migrated file
+left behind fails as stale, so the allowlist cannot rot. The `gl_facade/`
+subtree is excluded at the walk level, because it is the migration target
+and its `Real` arm must reference the trait. The allowlist currently holds
+the five pre-migration files and shrinks to empty at 123.5. Two further
+tests pin the frozen list's sortedness/uniqueness and the metric groups'
+membership in it.
 
 ### 123.2 — Define the `Gl` facade and `RecordingState`
 
@@ -347,7 +406,7 @@ Stop: report handle-fabrication test results; await review before 123.4.
 
 Scope: `freminal/src/gui/renderer/gpu.rs`.
 
-What: change all 266 call sites from `gl: &glow::Context` to `gl: &Gl<'_>`,
+What: change all 268 call sites from `gl: &glow::Context` to `gl: &Gl<'_>`,
 and every `gl.<method>(...)` call to go through the facade. This is
 mechanical per the design's own rationale (monomorphic, no generics to
 rewire) but is the largest single-file diff in the task, so keep it its own
@@ -373,14 +432,21 @@ before 123.5.
 ### 123.5 — Migrate `toast_pass.rs` and `toast_text_pass.rs`
 
 Scope: `freminal/src/gui/renderer/toast_pass.rs`,
-`freminal/src/gui/renderer/toast_text_pass.rs`.
+`freminal/src/gui/renderer/toast_text_pass.rs`,
+`freminal/src/gui/terminal/widget.rs`, `freminal/src/gui/app_impl.rs`.
 
 What: the same mechanical migration as 123.4, applied to the remaining 37 +
-37 call sites.
+37 call sites in the two toast passes, and to the nine call sites in
+`widget.rs` and `app_impl.rs` that correction 3 above added to the task's
+scope. The latter two are also the **capture points**: each must construct
+the facade around the `&glow::Context` it gets from `painter.gl()` and pass
+`&Gl<'_>` onward into the migrated renderer, rather than passing the raw
+context.
 
-Deliverable: both files compiling and passing existing tests, zero raw
-`glow::Context` calls remaining anywhere in `freminal/src/gui/renderer/`
-per 123.1's guard — turn the guard on for real at the end of this subtask.
+Deliverable: all four files compiling and passing existing tests, zero raw
+`glow::Context` calls remaining anywhere in the `freminal` crate outside
+`gl_facade/` per 123.1's guard — empty the guard's `NOT_YET_MIGRATED`
+allowlist at the end of this subtask.
 
 Verification: standard suite, plus running 123.1's guard and confirming it
 now passes clean (no raw calls left) and still fails against a scratch
