@@ -23,7 +23,7 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete |
-| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–122          | In progress |
+| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–124          | In progress |
 | v0.13.0 | Kitty: Transfer, Cursors & Text | `PLAN_VERSION_130.md`                                                 | 102–104          | Planned  |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub     |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub     |
@@ -59,10 +59,21 @@ See `PLAN_VERSION_100.md`.
 
 **v0.12.0 is a bug-fix, performance and structural-cleanup release.** It ships no new protocol
 support and no new user-facing features: the scrollback-memory effort (Tasks 118–120), the CPU
-performance remediation umbrella (Task 121), and the orchestration extraction (Task 122), which
-is a no-behaviour-change refactor rather than a fix or an optimisation. Tasks 102 (Kitty File
-Transfer) and 103 (Multiple Cursors) were planned for v0.12.0 and **moved to v0.13.0** when it
-was redefined; their plan content moved unchanged. See `PLAN_VERSION_120.md`.
+performance remediation umbrella (Task 121, now closed), the orchestration extraction
+(Task 122), which is a no-behaviour-change refactor rather than a fix or an optimisation, and
+its two successors — the GL measurement harness (Task 123) and render efficiency remediation
+(Task 124). Tasks 102 (Kitty File Transfer) and 103 (Multiple Cursors) were planned for
+v0.12.0 and **moved to v0.13.0** when it was redefined; their plan content moved unchanged.
+See `PLAN_VERSION_120.md`.
+
+**Task 120 is the one open stub below Tasks 123 and 124, and that is a deliberate, recorded
+deviation.** The shared `plan-sequencing-discipline` skill holds that the completed set must
+be a contiguous prefix and that a plan may merge only when every lower-numbered plan is
+complete. freminal has never operated that invariant globally — task numbers here are
+**allocation order, not execution order** (Task 73 is a stub below completed 74–77; Tasks 18
+and 19 are pending below everything). Versions, not numbers, carry execution order. Tasks 123
+and 124 are therefore **not** blocked behind Task 120. Whether v0.12.0 ships before Task 120
+is built is an open maintainer decision, noted here so it is not mistaken for an oversight.
 
 **Full kitty protocol coverage (v0.11.0 and v0.13.0 + deferred DnD).** Freminal already ships
 the kitty keyboard protocol (Task 35) and a kitty graphics subset (Task 13). These two versions
@@ -197,8 +208,10 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 118 | Compact Cell Representation               | `PLAN_VERSION_120.md` (Task 118)              | Complete  | None                   |
 | 119 | Scrollback Compression (LZ4)              | `PLAN_VERSION_120.md` (Task 119)              | Complete  | Task 118               |
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
-| 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | In progress | None                 |
+| 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete  | None                   |
 | 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete  | None                   |
+| 123 | GL Pipeline Measurement Harness           | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Planned   | Task 122               |
+| 124 | Render Efficiency Remediation             | `PLAN_124_RENDER_EFFICIENCY.md`               | Stub      | Task 123               |
 
 ---
 
@@ -479,15 +492,20 @@ issue #459's real-workload profiling. It ran for five merged pull requests
 creating it closes that tracking gap rather than starting new work. Fourteen subtasks are
 merged: 121.1–121.11 from that original run, plus the Group B bug fixes 121.12–121.14
 (PR #467), and 121.23 (the profiling methodology reference,
-`Documents/PROFILING.md`) and 121.26 landed directly. Outstanding: 121.15 (left to
-121.17, unblocked now that Task 122 merged), 121.16 (withdrawn), 121.17, issue #459's
-unactioned candidate list (121.18–121.22, 121.24), measurement debt (121.25, partly
-captured, plus 121.27–121.28), three items the Group B fixes themselves surfaced
-(121.29–121.31), and Group G, the beta.7 chrome-cache regression and its follow-ups
-(121.32–121.36): 121.32 is complete (chrome cache disabled by default), with 121.33,
-121.34 (the decision gate), 121.35 (deferred), and 121.36 (conditional) outstanding. The
-task is an umbrella, so several subtasks will outlive v0.12.0; the version does not gate on
-Task 121 reaching Complete. **Task 121 is not the egui-decoupling decision** —
+`Documents/PROFILING.md`) and 121.26 landed directly.
+
+**Task 121 was CLOSED on 2026-08-20 by maintainer decision**, with its surviving work
+migrated to Tasks 123 and 124. It had grown to 36 subtasks across seven groups, executed out
+of sequence, with much of Groups F and G predicated on a chrome cache that is now disabled by
+default (121.32) and a candidate for outright deletion — it had stopped being usable as a
+work tracker. Closing it is bookkeeping, **not** a claim that rendering performance is
+solved. `PLAN_121_PERF_REMEDIATION.md` is now a historical record and carries the full
+migration map; do not resume work from it. Its most valuable single fix was 121.8
+(`RedrawRequested` had permanently disqualified `ChromeMode::Replay`, leaving the whole #436
+chrome-cache subsystem inert since it landed); its most valuable outcome was methodological,
+in that four of six issue #459 candidate items were refuted by their own verification step.
+
+**Task 121 is not the egui-decoupling decision** —
 `Documents/DECOUPLING_FRAMEWORK.md` is the decision record for whether freminal should stop
 using egui for the main window, and its status is reopened and leaning against the rewrite —
 but `DECOUPLING_FRAMEWORK.md` §2A is the source of truth for Task 121's own Phase 0
@@ -514,6 +532,26 @@ consumers, with no name, type or invariant. The breakdown therefore targets that
 demotes the two static targets to cleanup, declines to decompose
 `write_input_to_terminal` at all, and adds two gates §8 omitted (a benchmark for a hot path
 that has none, and `--features frame-profiling` verification).
+
+**Tasks 123 and 124 (v0.12.0, measure then fix):** the successors to Task 121, and the
+division between them is deliberate. **Task 123 builds the instrument and reports numbers; it
+changes no rendering behaviour.** Its Phase 1 is a call-recording harness — a 47-method facade
+over the concrete `&glow::Context` freminal already uses everywhere, with a recording backend
+that fabricates GL handles. It needs no GPU, no display server and no `flake.nix` change, and
+runs in the existing `cargo test` matrix on all four CI platforms. (Wrapping `glow::HasContext`
+directly is impossible: the trait is sealed. The facade exists because of that, not in spite of
+it.) Phase 2 is the pixel/readback harness that issue #440 and 121.28 have wanted since #436 —
+Linux-only, requiring `pkgs.mesa`, `mesa.llvmpipeHook` and `pkgs.xorg.xvfb` in `flake.nix` plus
+a new Nix-based CI job, because the existing test matrix runs on `dtolnay/rust-toolchain` and
+inherits nothing from the flake. **Task 124 does the fixing**, and no subtask in it may be
+implemented before 123 has quantified what it claims to fix — the direct lesson of Task 121's
+Group D, where four of six candidate items were refuted by measurement. The one exception is
+124.4 (replacing six positional bools in the pointer-motion predicate with a named-field
+struct), which is a `state-representation` fix with no expected performance effect. 124's
+leading hypothesis is 124.1: dirty-row `Arc` churn makes `frame_dirty.rs`'s `Arc::ptr_eq` test
+report `content_changed` on byte-identical content, forcing a full rebuild and full present on
+every tick of any workload that touches rows — which is workload-correlated, **not**
+alt-screen-specific, a distinction recon established on 2026-08-20.
 
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
 blocks, fractional scaling, custom width algorithm). It shares no seams with Tasks 102 and
@@ -725,8 +763,10 @@ Update this section as tasks complete:
 | 115  | 2026-07-08 | 2026-07-08 | 115.1-115.4 DECSCNM per-pane per-cell XOR swap; chrome decoupled; on v0.11.1     |
 | 118  | 2026-07-14 | 2026-07-14 | 118.1-118.9 compact repr + idle compaction; default 4k->10k; 118.10 -> Task 120  |
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
-| 121  | 2026-07-27 |            | 121.1-121.14 (PR #467), 121.23, 121.26 done; 121.25 partial; rest open           |
+| 121  | 2026-07-27 | 2026-08-20 | Closed as umbrella; survivors migrated to Tasks 123/124. See its migration map   |
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
+| 123  |            |            | Planned. GL call-recording harness (Phase 1) + pixel/llvmpipe harness (Phase 2)  |
+| 124  |            |            | Stub. Gated on 123's findings; 124.4 (bool-to-struct) is not gated               |
 
 ---
 
@@ -742,9 +782,11 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–122; 118–119 decomposed and complete, 120 a stub, 121 and 122 summaries)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122 complete, 123 planned, 124 a gated stub)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
-- `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation" full breakdown (121.1–121.31)
+- `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
+- `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
+- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Render Efficiency Remediation" (124.1–124.8; specified but gated on Task 123)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)

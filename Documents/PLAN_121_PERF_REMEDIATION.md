@@ -1,6 +1,62 @@
 # PLAN_121_PERF_REMEDIATION.md — Task 121 "Performance Remediation"
 
-> **STATUS: IN PROGRESS.** Fourteen subtasks have merged to `main` across six pull
+> **STATUS: COMPLETE (closed 2026-08-20 by maintainer decision). This document is
+> now a HISTORICAL RECORD. Do not add subtasks to it and do not resume work from
+> it.** Surviving work was migrated to two successor tasks:
+>
+> - **Task 123 — GL Pipeline Measurement Harness**
+>   (`PLAN_123_GL_MEASUREMENT_HARNESS.md`). Absorbs 121.28 (the never-built pixel
+>   harness) and 121.25 (measurement debt), and takes on the diagnosis half of
+>   121.31.
+> - **Task 124 — Render Efficiency Remediation** (`PLAN_124_RENDER_EFFICIENCY.md`).
+>   Absorbs 121.15 and 121.17 (cell-granular suppression), 121.19's two surviving
+>   levers, 121.20, 121.27, the fix half of 121.31, 121.29's bool-to-struct
+>   residue, and 121.34 with 121.30/121.33/121.35/121.36 folded into it.
+>
+> **Why it was closed rather than finished.** The task was an umbrella that
+> accumulated 36 subtasks across seven groups, executed out of sequence, with much
+> of Groups F and G predicated on a chrome cache that is now disabled by default
+> (121.32) and a candidate for deletion. The document had stopped being usable as a
+> work tracker. Closing it is a bookkeeping decision, not an assertion that
+> rendering performance is solved — that is precisely what Tasks 123 and 124 exist
+> to address.
+>
+> **What it achieved.** Thirteen subtasks merged (121.13 was reverted), plus 121.23,
+> 121.26, 121.32 and the Group D close-out. The most valuable single fix was 121.8:
+> `RedrawRequested` had permanently disqualified `ChromeMode::Replay`, meaning the
+> entire issue #436 chrome-cache subsystem had been inert since the day it landed.
+> The most valuable *outcome*, though, was methodological — see the Group D result
+> below, where four of six issue #459 candidate items were refuted by their own
+> verification step. That is the discipline Tasks 123 and 124 inherit.
+>
+> **Migration map — where each open subtask went:**
+>
+> | Subtask | Disposition |
+> | ------- | ----------- |
+> | 121.15, 121.17 | Task 124.3 (cell-granular pointer suppression) |
+> | 121.18 | Closed as framed; useful residue is Task 124.1 |
+> | 121.19 | Closed as framed; two surviving levers are Task 124.6 |
+> | 121.20 | Task 124.7, unblocked by Task 123 Phase 2 |
+> | 121.21, 121.22 | Closed — no freminal-side lever |
+> | 121.24 | Complete — measured and refuted |
+> | 121.25 | Task 123.14 (quantified findings report) |
+> | 121.27 | Task 124.8 |
+> | 121.28 | Task 123 Phase 2 |
+> | 121.29 | Proposal rejected; bool-to-struct residue is Task 124.4 |
+> | 121.30, 121.33, 121.35, 121.36 | Folded into Task 124.5 |
+> | 121.31 | Diagnosis to Task 123; fix to Task 124.2 |
+> | 121.34 | Task 124.5 (chrome-cache keep/delete decision) |
+>
+> **One finding surfaced after this document closed** and is recorded in Task 124.1
+> rather than here: dirty-row `Arc` churn in
+> `freminal-buffer/src/buffer/flatten.rs:530-533` mints a fresh `Arc` even when the
+> merged bytes are byte-identical, which makes `frame_dirty.rs`'s `Arc::ptr_eq`
+> test report `content_changed` and forces a full rebuild plus full present. It is
+> the leading candidate for the mouse-motion CPU cost that motivated the whole
+> investigation, and it is neither alt-screen-specific nor tracked anywhere in this
+> document.
+>
+> **Historical status line, as it read at close.** Fourteen subtasks merged to `main` across six pull
 > requests (#458, #460, #461, #464, #465, #467) — though **121.13 was subsequently
 > reverted**, so thirteen stand — plus 121.23, 121.26 and 121.32 landed directly.
 > The remainder — one bug now routed through 121.17 rather than blocked, one

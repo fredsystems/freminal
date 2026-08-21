@@ -25,11 +25,27 @@ hot, so it ships together):
 
 **Theme 2 — CPU performance remediation:**
 
-- **Task 121 — Performance Remediation** (in progress): the umbrella for all work arising
-  from issue #459's real-workload CPU profiling. Fourteen subtasks have merged, most recently
-  the Group B bug fixes 121.12–121.14 (PR #467); the remaining bug, issue #459's unactioned
-  candidate list, and three items the Group B fixes and their measurement surfaced are outstanding. Summarised below;
-  the full breakdown is in `PLAN_121_PERF_REMEDIATION.md`.
+- **Task 121 — Performance Remediation** (closed 2026-08-20): the umbrella for all work
+  arising from issue #459's real-workload CPU profiling. Thirteen subtasks merged (121.13 was
+  reverted), plus 121.23, 121.26, 121.32 and the Group D close-out. **Closed as an umbrella
+  rather than finished** — it had grown to 36 subtasks across seven groups, much of Groups F
+  and G predicated on a chrome cache now disabled by default, and had stopped working as a
+  tracker. `PLAN_121_PERF_REMEDIATION.md` is now a historical record carrying the migration
+  map. Summarised below.
+- **Task 123 — GL Pipeline Measurement Harness** (planned): the instrument Task 121 never
+  had. Phase 1 is a 47-method facade over `&glow::Context` with a recording backend —
+  deterministic, no GPU, no display server, runs in the existing CI matrix on all four
+  platforms. Phase 2 is the pixel/readback harness issue #440 has wanted since #436, which is
+  Linux-only and needs Mesa/llvmpipe/Xvfb added to `flake.nix` plus a new Nix CI job. It
+  changes no rendering behaviour. Broken down in
+  `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+- **Task 124 — Render Efficiency Remediation** (stub, gated on 123): the fixes. Carries the
+  surviving work from Task 121 — cell-granular pointer suppression, the full-present-on-motion
+  anomaly, the chrome-cache keep/delete decision, the shaping levers, GPU buffer orphaning —
+  plus its own leading hypothesis, that dirty-row `Arc` churn forces a full rebuild on
+  byte-identical content. **No subtask is implemented before 123 quantifies it**, except
+  124.4 (bool-to-struct), which has no expected performance effect. Broken down in
+  `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
 
 **Theme 3 — structural cleanup:**
 
@@ -62,8 +78,10 @@ before executing.
 | 118 | Compact Cell Representation       | Medium    | Complete    | None           |
 | 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
-| 121 | Performance Remediation           | Large     | In progress | None           |
+| 121 | Performance Remediation           | Large     | Complete    | None           |
 | 122 | Orchestration Extraction          | Large     | Complete    | None           |
+| 123 | GL Pipeline Measurement Harness   | Large     | Planned     | Task 122       |
+| 124 | Render Efficiency Remediation     | Large     | Stub        | Task 123       |
 
 ---
 
@@ -84,8 +102,10 @@ before executing.
 - **Task 120 is an enriched stub; 119 is fully decomposed.** Per `freminal-version-activation`,
   the large, subtle reflow task is decomposed at its own activation, not now; the compression
   core (119) is decomposed because its prerequisites (Task 118) are already merged.
-- **Task 121 is an umbrella, not a single deliverable.** Its subtasks are scheduled
-  individually and several will outlive v0.12.0. The version does not gate on Task 121
+- **Task 121 was an umbrella, not a single deliverable, and was closed as one.** Its
+  subtasks were scheduled individually; the survivors migrated to Tasks 123 and 124 on
+  2026-08-20 rather than outliving the version inside a tracker that no longer worked.
+  Tasks 123 and 124 replace it, and the version does not gate on Task 124
   reaching Complete; it gates on the completed subtasks being merged and the outstanding
   ones being tracked.
 - **Task 121 is not the egui-decoupling decision.** `Documents/DECOUPLING_FRAMEWORK.md` is
@@ -812,9 +832,11 @@ exists, per `freminal-version-activation`.
 
 ## Task 121 — Performance Remediation
 
-> **STATUS: IN PROGRESS.** Summary only. The full per-subtask breakdown lives in
-> `Documents/PLAN_121_PERF_REMEDIATION.md` — edit that document, not this section, when
-> subtask status changes.
+> **STATUS: COMPLETE — closed 2026-08-20 as an umbrella, not finished.** Summary only. The
+> full per-subtask breakdown and the migration map live in
+> `Documents/PLAN_121_PERF_REMEDIATION.md`, which is now a **historical record**. Surviving
+> work moved to **Task 123** (`PLAN_123_GL_MEASUREMENT_HARNESS.md`) and **Task 124**
+> (`PLAN_124_RENDER_EFFICIENCY.md`). Do not resume work from the Task 121 document.
 
 ### 121 Summary
 
@@ -968,3 +990,79 @@ Three findings changed the shape, and are recorded in full in the plan document:
   16; the 17th is `super_state`, from 101.2). It is **not** decomposed by Task 122 — its
   concerns are interleaved rather than separable by line range, and the apparent
   de-duplication win is a semantic trap (see cleanup entry 122.C1).
+
+---
+
+## Task 123 — GL Pipeline Measurement Harness
+
+> **STATUS: PLANNED.** Summary only. The full per-subtask breakdown (123.1–123.14) lives in
+> `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — edit that document, not this section,
+> when subtask status changes.
+
+### 123 Summary
+
+The instrument Task 121 never had. **Task 123 changes no rendering behaviour**: it builds a
+measurement harness and reports numbers, and every fix it justifies belongs to Task 124.
+It supersedes 121.28 (the pixel harness that never landed) and absorbs 121.25's outstanding
+measurement debt.
+
+**Phase 1 — call recording, no GPU, no new infrastructure.** `glow::HasContext` is sealed
+(`glow-0.17.0/src/lib.rs:142`, `__private::Sealed` at `:4845-4849`), so it cannot be
+implemented on a wrapper — that is a hard compile error, not a design tradeoff. It does not
+matter: freminal is monomorphic over the concrete `&glow::Context` at roughly 40 parameters
+with no generic bounds to rewire, and uses only **47** of the trait's 396 entry points. A
+concrete facade struct with a real backend and a recording backend therefore covers the whole
+surface, and glow's handle types have public tuple fields
+(`pub struct NativeBuffer(pub NonZeroU32)`, `native.rs:169`) so the recording backend can
+fabricate them. `RenderState`, `GlyphAtlas` and `FontManager` already construct headlessly —
+`render_loop_bench.rs` does it at seven call sites — so the whole render path can be driven
+with no window, no context and no driver, in the existing `cargo test` matrix on all four CI
+platforms.
+
+**Phase 2 — pixel readback, Linux-only, new infrastructure.** `GlState::new` is hard-wired to
+a winit `Window` and `WindowSurface`; glutin 0.32.3 does expose `PbufferSurface`, so an
+offscreen path is possible but is new code. `flake.nix` currently has **no Mesa driver** —
+`pkgs.libGL` is `libglvnd`, a dispatcher with no rendering backend — and no Xvfb, so
+`pkgs.mesa`, `mesa.llvmpipeHook` and `pkgs.xorg.xvfb` must be added, which per
+`flake-dev-shell-discipline` is a stop-and-wait-for-`nix develop` subtask. It also needs a
+**new Nix-based CI job**, because `ci.yml`'s existing test matrix runs on
+`dtolnay/rust-toolchain` and inherits nothing from the flake. llvmpipe output varies across
+Mesa versions, so the tolerance policy is decided up front and Phase 2 does not gate PRs until
+it has demonstrated stability — `flaky-tests-are-bugs` forbids retrofitting a tolerance to
+make a flaky golden pass.
+
+**Two diagnostic obligations** ride along: confirm or refute the dirty-row `Arc` churn
+hypothesis that is Task 124.1's premise, and diagnose the 121.31 anomaly
+(`frame_damage_full=120, frame_damage_partial=0` during pointer motion, versus 120/120
+partial at idle, never explained; `toast_active=48` from a startup toast is the recorded
+confound).
+
+---
+
+## Task 124 — Render Efficiency Remediation
+
+> **STATUS: STUB, gated on Task 123.** Summary only. The full breakdown (124.1–124.8) lives
+> in `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+
+### 124 Summary
+
+The fixes. **No subtask is implemented before Task 123 has quantified what it claims to
+fix** — the direct lesson of Task 121's Group D, where four of six issue #459 candidate items
+were refuted by their own verification step. The single exception is 124.4, a
+`state-representation` fix with no expected performance effect.
+
+It carries the surviving work from Task 121 — cell-granular pointer suppression (121.15 and
+121.17, whose measured prize was a 99.16% to 1.68% collapse in suppression from a single
+on-screen hyperlink), the full-present-on-pointer-motion anomaly (121.31's fix half), the
+chrome-cache keep-or-delete decision (121.34, with 121.30, 121.33, 121.35 and 121.36 folded
+in), the two surviving shaping levers (121.19), GPU buffer orphaning (121.20, unblocked by
+123's Phase 2), and the `DESIGN_DECISIONS.md` entry (121.27).
+
+Its own leading hypothesis is **124.1**: `rows_as_tchars_and_tags_incremental`
+(`freminal-buffer/src/buffer/flatten.rs:530-533`) mints a fresh `Arc` whenever any row is
+dirty, even when the merged bytes are byte-identical, so `frame_dirty.rs`'s `Arc::ptr_eq`
+test reports `content_changed` and forces a full vertex rebuild and a full present. Any
+workload that touches rows every tick pays that, whether or not a pixel changed. Recon on
+2026-08-20 established this is **workload-correlated, not alt-screen-specific** — every
+branch on `is_alternate_screen` in the render path *suppresses* work, and a primary-screen
+`watch` would behave identically.
