@@ -1,0 +1,784 @@
+# PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
+
+> **STATUS: PLANNED, NOT STARTED.** No subtask below has a branch or a commit
+> yet. This document is the full subtask breakdown, written at activation
+> time against the code as it stands on `main`.
+
+Task 123 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
+version summary and `Documents/MASTER_PLAN.md` for roadmap position.
+
+---
+
+## Relationship to other documents
+
+Task 123 **supersedes** Task 121 subtask 121.28 (the pixel / headless-GL
+harness that was scoped but never built) and **absorbs** 121.25's outstanding
+measurement debt (the typing and sustained-motion workloads that were never
+captured cleanly). Both subtasks stay recorded in
+`Documents/PLAN_121_PERF_REMEDIATION.md` with a pointer here rather than being
+deleted, per the numbering convention that document itself establishes.
+
+**Task 124 depends on Task 123.** `Documents/PLAN_124_RENDER_EFFICIENCY.md`
+is a stub for exactly this reason: per its own governing rule, no subtask
+there is implemented until this task has quantified the thing it claims to
+fix. 123 measures; 124 fixes. Concretely, 124.1's `Arc`-churn hypothesis and
+124.2's diagnosis obligation (migrated from 121.31) are both restated below
+as the two diagnostic obligations this task must discharge, because they are
+Task 124's first inputs.
+
+**Task 123 changes no rendering behaviour.** Every subtask here is
+instrumentation, harness construction, or reporting. Any behaviour change
+belongs to Task 124.
+
+### The lesson this task exists to avoid repeating
+
+Task 121 closed with four of its six issue #459 candidate items **refuted by
+their own verification step** (121.18, 121.19, 121.21, 121.22 — see
+`PLAN_121_PERF_REMEDIATION.md`). `DECOUPLING_FRAMEWORK.md` §12 records the
+same lesson from PR #461, and Task 121's Group G records it a second time for
+the chrome cache, where three code-reading hypotheses were falsified in
+sequence before the actual cause was found by measurement. A plausible
+finding derived from static reading is a hypothesis, not a work item, in this
+codebase specifically. Task 123 builds the instrument so that the next round
+of findings does not repeat the pattern.
+
+---
+
+## Goal
+
+Quantify freminal's rendering cost — draw calls, state changes, GPU uploads,
+and eventually pixels — so that Task 124's remediation is defined by
+measurement rather than hypothesis. The work splits into two independent
+phases with very different infrastructure requirements:
+
+- **Phase 1 — call-recording harness.** No GPU, no display server, runs in
+  the existing CI matrix unmodified.
+- **Phase 2 — pixel/readback harness.** Linux-only, needs new Nix and CI
+  infrastructure, and closes the gap `PROFILING.md` names as the single
+  biggest hole in the methodology: "there is no headless-GL or
+  pixel-readback harness... a regression that changes what is drawn, rather
+  than how often, is undetectable in CI."
+
+---
+
+## Phase 1 — call-recording harness
+
+### Why this is tractable with no new infrastructure
+
+- `RenderState` (`freminal/src/gui/terminal/widget.rs:1165-1215`) is
+  constructible with no GL context.
+- `GlyphAtlas::new` (`freminal/src/gui/renderer/atlas.rs:186`) takes no `gl`.
+- Fonts are embedded via `include_bytes!`
+  (`freminal/src/gui/renderer/font_manager.rs:36-44`), and
+  `FontManager::new` already runs headlessly at 7 call sites in
+  `freminal/benches/render_loop_bench.rs`.
+- GL objects are created lazily via `renderer.init(gl)`, gated on
+  `renderer.initialized()` (`widget.rs:2960-2965`).
+
+So a test can build `RenderState`, call `init` and the `draw_*` family
+against a recording `Gl`, and assert on the resulting call log — no window,
+no context, no driver.
+
+### The blocking fact: `glow::HasContext` is sealed
+
+`glow::HasContext` is **sealed**: `glow-0.17.0/src/lib.rs:142` declares
+`pub trait HasContext: __private::Sealed`, and `__private::Sealed`
+(`lib.rs:4845-4849`) is implemented only for glow's own `native::Context`
+(`native.rs:198`). Implementing it on a wrapper is a **hard compile error**,
+not a design tradeoff to weigh. State this plainly in code comments and
+commit messages so nobody retries the trait-implementation approach.
+
+The trait has 396 methods and 12 associated types; freminal uses only **47
+distinct entry points** (enumerated below). freminal is monomorphic over a
+concrete `&glow::Context` throughout — call-site counts are
+`freminal/src/gui/renderer/gpu.rs` 266, `toast_pass.rs` 37,
+`toast_text_pass.rs` 37 — with roughly 40 parameters carrying that type and
+**zero generic bounds to rewire**. The single capture point in the GUI is
+`let gl = painter.gl();` at `freminal/src/gui/terminal/widget.rs:2955`; the
+context itself is stored as `Arc<glow::Context>`
+(`freminal-windowing/src/gl_context.rs:191`) and created at `:284-286`.
+
+Handle types have **public tuple fields**, so a recording backend can
+fabricate its own handles without touching the real driver:
+`pub struct NativeBuffer(pub NonZeroU32)` (`glow-0.17.0/src/native.rs:169`);
+also `NativeShader` (`:163`), `NativeProgram` (`:166`),
+`NativeVertexArray` (`:172`), `NativeTexture` (`:175`),
+`NativeFramebuffer` (`:184`), and `NativeUniformLocation(pub GLuint)`
+(`:193`).
+
+### The design — specified, not open for re-litigation
+
+The maintainer has already chosen the shape. Subtasks implement it; they do
+not re-open it. A concrete facade struct, **not** a trait and **not**
+generics:
+
+```rust
+pub struct Gl<'a> {
+    inner: GlTarget<'a>,
+}
+
+enum GlTarget<'a> {
+    Real(&'a glow::Context),
+    Recording(RecordingState),
+}
+```
+
+Every renderer signature changes from `gl: &glow::Context` to
+`gl: &Gl<'_>`. All 47 methods live on `Gl` as thin dispatch: the `Real` arm
+delegates directly to `glow::Context`; the `Recording` arm appends a
+call-record entry and returns a fabricated handle where one is expected.
+
+**Rationale to record in the code and in this document:** a trait would
+force generics at roughly 40 call sites across three files, widening every
+one of those signatures. The enum keeps codegen monomorphic in the `Real`
+arm and makes the migration mechanical — a search-and-replace of the
+parameter type, not a redesign of call sites.
+
+**Recording must be feature-gated**, mirroring the existing
+`frame-profiling` precedent (`freminal/Cargo.toml`,
+`freminal-windowing/frame-profiling`), so that a production build compiles
+`Gl` down to direct delegation with no per-call branch. Unlike
+`frame-profiling`, which is instrumentation-only and never asserted against
+in a test, this facade's zero-cost claim for the default build must be
+**verified by a benchmark**, not merely asserted in a doc comment — see
+123.6.
+
+### The 47 entry points
+
+For sizing the facade and driving 123.1's guard:
+
+```text
+active_texture, attach_shader, bind_buffer, bind_framebuffer, bind_texture,
+bind_vertex_array, buffer_data_size, buffer_data_u8_slice,
+buffer_sub_data_u8_slice, check_framebuffer_status, clear, clear_color,
+compile_shader, create_buffer, create_framebuffer, create_texture,
+create_vertex_array, delete_buffer, delete_framebuffer, delete_program,
+delete_shader, delete_texture, delete_vertex_array, disable, draw_arrays,
+draw_arrays_instanced, enable, enable_vertex_attrib_array,
+framebuffer_texture_2d, get_program_info_log, get_program_link_status,
+get_shader_compile_status, get_shader_info_log, get_uniform_location,
+link_program, pixel_store_i32, scissor, shader_source, tex_image_2d,
+tex_parameter_i32, tex_sub_image_2d, uniform_1_f32, uniform_1_i32,
+uniform_2_f32, use_program, vertex_attrib_divisor, vertex_attrib_pointer_f32
+```
+
+Derived metric groups the recording log must be able to answer without a
+second pass:
+
+- **draw calls** = `draw_arrays` + `draw_arrays_instanced`
+- **state changes** = the `bind_*` family plus `use_program` / `enable` /
+  `disable` / `scissor`
+- **uploads** = `buffer_data_*` / `buffer_sub_data_u8_slice` /
+  `tex_image_2d` / `tex_sub_image_2d`
+
+---
+
+## Phase 2 — pixel/readback harness
+
+### Why this needs new infrastructure
+
+- `GlState::new` (`freminal-windowing/src/gl_context.rs:200-325`) is
+  hard-wired to a winit `Window` and `WindowSurface`:
+  `compatible_with_native_window` (`:210-214`) and
+  `SurfaceAttributesBuilder::<WindowSurface>` (`:258-262`). glutin 0.32.3
+  does provide `PbufferSurface` (`glutin-0.32.3/src/surface.rs:228`), so an
+  offscreen path is possible, but it is new code, not a config flag.
+- `flake.nix` has **no Mesa driver**. `pkgs.libGL` resolves to
+  `libglvnd-1.7.0`, a vendor-neutral **dispatcher with no rendering
+  backend**. `pkgs.mesa` (which ships `llvmpipe` and `softpipe`) is absent.
+  `pkgs.xorg.xvfb` is absent. winit 0.30.13 has no headless backend and
+  needs a real X11 or Wayland connection to construct a window at all.
+- Additions required: `pkgs.mesa`, `pkgs.mesa.llvmpipeHook` (sets
+  `LIBGL_ALWAYS_SOFTWARE`, `LIBGL_DRIVERS_PATH`, and the EGL vendor JSON),
+  and `pkgs.xorg.xvfb`. **Per `flake-dev-shell-discipline`, the subtask that
+  edits `flake.nix` must stop and wait for the maintainer to run
+  `nix develop`** before any later Phase 2 subtask can build against it.
+  This is an explicit stop condition on 123.10, not a suggestion.
+- **CI shape matters, and it is not what a casual read of `ci.yml` suggests.**
+  `.github/workflows/ci.yml`'s `test` job runs real test execution on
+  `[ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]` via
+  `dtolnay/rust-toolchain`, **not Nix**, so it inherits nothing from
+  `flake.nix`. Only `build-and-check` (the pre-commit job) and
+  `nightly.yml`'s `ci` job invoke `nix develop`. Phase 1 therefore lands in
+  the existing matrix with no CI change; Phase 2 needs a **new Nix-based
+  job**, because llvmpipe and Xvfb only exist inside the flake's dev shells.
+- **Linux-gating precedent already exists in this repo.**
+  `Documents/PROFILING.md` Tier 2 (`perf`) is Linux-only because `perf` is
+  `stdenv.isLinux`-gated in `flake.nix` (the `pkgs.perf` entry under the
+  Linux-only package list, alongside the Windows cross-check toolchain).
+  Phase 2 follows the same precedent rather than inventing a new one.
+- **Golden-file precedent exists, but only for the convention, not the
+  mechanism.** The vttest suite
+  (`freminal-terminal-emulator/tests/vttest_*.rs` plus
+  `freminal-terminal-emulator/tests/golden/`) uses `UPDATE_GOLDEN=1` to
+  regenerate golden files, documented at
+  `freminal-terminal-emulator/tests/vttest_common.rs:14, 183-208`. That
+  suite compares text/buffer state, not pixels, so it supplies the
+  regeneration convention (an env var, an explicit opt-in, a clear failure
+  message pointing at it) — Phase 2 must design its own comparison and
+  tolerance mechanism from scratch.
+
+### Flakiness is a first-class risk, not an afterthought
+
+llvmpipe's rasterization output can vary across Mesa versions, and
+`flaky-tests-are-bugs` forbids papering over that with retries, `#[ignore]`,
+or loosened tolerances discovered after the fact. Phase 2's tolerance policy
+must be decided and justified **before** any golden image is captured
+(123.11), and the new CI job must **not gate PRs** until it has demonstrated
+stability over an observation period — see 123.12's stop condition.
+
+---
+
+## Subtask summary
+
+| Subtask | Phase | Title                                                              |
+| ------- | ----- | ------------------------------------------------------------------ |
+| 123.1   | 1     | Enumerate and freeze the GL call surface, with a compile-time guard |
+| 123.2   | 1     | Define the `Gl` facade and `RecordingState`                        |
+| 123.3   | 1     | Handle fabrication for the recording backend                        |
+| 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
+| 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
+| 123.6   | 1     | Verify zero production overhead with a benchmark                    |
+| 123.7   | 1     | Headless render-path driver                                          |
+| 123.8   | 1     | Workload assertion tests against the recording log                  |
+| 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
+| 123.10  | 2     | `flake.nix`: Mesa, llvmpipe, Xvfb (STOP for `nix develop`)           |
+| 123.11  | 2     | Offscreen pbuffer GL context                                         |
+| 123.12  | 2     | Readback, golden storage, comparison, and tolerance policy           |
+| 123.13  | 2     | New Nix-based CI job for Phase 2                                     |
+| 123.14  | both  | Quantified findings report                                          |
+
+Ordering: 123.1 through 123.9 are Phase 1 and largely sequential (each
+migrates or depends on the previous). 123.10 through 123.13 are Phase 2 and
+depend on nothing in Phase 1 completing first, but in practice should follow
+Phase 1 so the facade Phase 2 measures through already exists. 123.14 depends
+on both phases having landed at least their Phase 1 half; Phase 2's
+contribution to 123.14 (pixel-level findings) may follow later without
+blocking Phase 1's contribution (call-count findings).
+
+---
+
+## Subtasks
+
+### 123.1 — Enumerate and freeze the GL call surface, with a compile-time guard
+
+Scope: a new small module documenting the 47 entry points (candidate
+location: alongside the future `Gl` facade module under
+`freminal/src/gui/renderer/`), plus a lint or test that fails if a raw
+`gl.` call (on `glow::Context` directly) appears anywhere in
+`freminal/src/gui/renderer/` outside the facade module itself once 123.4 and
+123.5 land.
+
+Deliverable: the frozen list (reproduced in this document above), and a
+guard — a `grep`-based test or a clippy-level check acceptable to
+`rust-best-practices` — that catches a new raw call being added later
+without going through `Gl`.
+
+Verification: `cargo test --all`. The guard must be demonstrated to fail
+against a deliberately-introduced raw call in a scratch commit, then
+reverted before landing.
+
+Prohibitions: do not migrate any call site yet — that is 123.4 and 123.5.
+Do not add methods to the list beyond the 47 enumerated; if a 48th call site
+is found during the audit, report it and update this document rather than
+silently including it.
+
+Stop: report the frozen list and the guard's mechanism; await review before
+123.2.
+
+### 123.2 — Define the `Gl` facade and `RecordingState`
+
+Scope: new module, `freminal/src/gui/renderer/gl_facade.rs` (or an
+equivalent name consistent with `freminal-module-cohesion` — one concept,
+"the GL call boundary", per module).
+
+What: the `Gl<'a>` struct and `GlTarget<'a>` enum exactly as specified
+above, with all 47 methods implemented as thin dispatch. `RecordingState`
+holds an append-only log of typed call records (one variant per method, or a
+single record type carrying an opcode plus fabricated-handle bookkeeping —
+either is acceptable; do not add fields the workload assertions in 123.8 do
+not need). Gate `GlTarget::Recording` and `RecordingState` behind a Cargo
+feature (name it consistently with the `frame-profiling` precedent, e.g.
+`gl-recording`).
+
+Deliverable: the facade compiling with no call sites migrated yet (dead code
+is expected and acceptable at this point since the module is not yet wired
+in — allow it locally with a dated TODO referencing 123.4, not a bare
+`#[allow(dead_code)]`, per the repo's no-dead-code-without-TODO rule).
+
+Verification: `cargo test --all`, `cargo test --all --features
+gl-recording`, `cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo machete`.
+
+Prohibitions: do not touch `gpu.rs`, `toast_pass.rs`, or
+`toast_text_pass.rs` yet. Do not use raw `as` casts in the dispatch bodies —
+`conv2` per `freminal-numeric-conversions`.
+
+Stop: report the module's public API; await review before 123.3.
+
+### 123.3 — Handle fabrication for the recording backend
+
+Scope: `freminal/src/gui/renderer/gl_facade.rs`.
+
+What: for each of the seven handle types (`NativeBuffer`, `NativeShader`,
+`NativeProgram`, `NativeVertexArray`, `NativeTexture`, `NativeFramebuffer`,
+`NativeUniformLocation`), give `RecordingState` a monotonic counter and
+construct a fabricated handle from it using the public tuple field. Ensure
+fabricated handles are distinguishable from real ones only by convention
+(the `Recording` arm never sees a real handle, so no collision is possible
+within one `Gl` instance).
+
+Deliverable: `create_buffer`, `create_shader` (via `compile_shader`'s
+internals if applicable), `create_program`, `create_vertex_array`,
+`create_texture`, `create_framebuffer`, and `get_uniform_location` all
+functional against `RecordingState` and returning fabricated handles that
+round-trip through `delete_*` and `bind_*` calls without panicking.
+
+Verification: unit tests exercising create/bind/delete sequences against
+`RecordingState` directly (no `RenderState`, no `RenderData` needed yet).
+Standard suite.
+
+Prohibitions: do not depend on `glow::Context` inside the `Recording` arm
+for anything — it must be fully independent of a real driver.
+
+Stop: report handle-fabrication test results; await review before 123.4.
+
+### 123.4 — Migrate `gpu.rs` to the `Gl` facade
+
+Scope: `freminal/src/gui/renderer/gpu.rs`.
+
+What: change all 266 call sites from `gl: &glow::Context` to `gl: &Gl<'_>`,
+and every `gl.<method>(...)` call to go through the facade. This is
+mechanical per the design's own rationale (monomorphic, no generics to
+rewire) but is the largest single-file diff in the task, so keep it its own
+commit separate from 123.5.
+
+Deliverable: `gpu.rs` compiling and passing existing tests unchanged in
+intent, with zero raw `glow::Context` calls remaining (verified by 123.1's
+guard).
+
+Verification: standard suite. Existing render-path tests and benches
+(`freminal/benches/render_loop_bench.rs`) must build and pass with no
+tolerance changes — a needed tolerance change here is a red flag per
+`agents.md`, not a fix.
+
+Prohibitions: do not change any GL call's arguments, ordering, or the
+sequence of state changes — this subtask changes the type signature only,
+never behaviour. Do not migrate `toast_pass.rs` or `toast_text_pass.rs` in
+this commit.
+
+Stop: report the diff size and that no test tolerance changed; await review
+before 123.5.
+
+### 123.5 — Migrate `toast_pass.rs` and `toast_text_pass.rs`
+
+Scope: `freminal/src/gui/renderer/toast_pass.rs`,
+`freminal/src/gui/renderer/toast_text_pass.rs`.
+
+What: the same mechanical migration as 123.4, applied to the remaining 37 +
+37 call sites.
+
+Deliverable: both files compiling and passing existing tests, zero raw
+`glow::Context` calls remaining anywhere in `freminal/src/gui/renderer/`
+per 123.1's guard — turn the guard on for real at the end of this subtask.
+
+Verification: standard suite, plus running 123.1's guard and confirming it
+now passes clean (no raw calls left) and still fails against a scratch
+reintroduction.
+
+Prohibitions: same as 123.4 — no behaviour change, no argument or ordering
+changes.
+
+Stop: report that the guard is now enforced repo-wide; await review before
+123.6.
+
+### 123.6 — Verify zero production overhead with a benchmark
+
+Scope: a new or extended Criterion bench under `freminal/benches/`
+(coordinate the exact file with `freminal-bench-table`; this subtask is
+also the point at which that skill's catalog should gain an entry for the
+new facade, since it now sits on every render call).
+
+What: benchmark the `Real` arm of `Gl` against calling `glow::Context`
+directly (pre-123.4 baseline captured from the same commit range, or from
+`main` if 123.4/123.5 have already merged) to substantiate the "no per-call
+branch in production" claim rather than asserting it in a doc comment.
+
+Deliverable: a benchmark ID demonstrating the delegation path has no
+measurable per-call cost versus the direct call, per
+`performance-benchmarks`'s before/after procedure and 15% threshold.
+
+Verification: `cargo bench --no-run --all` compiles; the benchmark run
+itself is reported per `performance-benchmarks` (not gated in CI, per the
+existing weekly-schedule precedent for `bench.yml`).
+
+Prohibitions: do not use this benchmark to justify skipping the facade
+entirely if it does show overhead — report the number and let the
+maintainer decide; do not silently redesign the dispatch to hide a cost.
+
+Stop: report the benchmark result; await review before 123.7.
+
+### 123.7 — Headless render-path driver
+
+Scope: new test-support module (candidate:
+`freminal/src/gui/renderer/test_support.rs` or a `tests/` helper,
+consistent with `freminal-module-cohesion`), reusing the existing headless
+pattern already proven at the 7 `FontManager::new` call sites in
+`freminal/benches/render_loop_bench.rs`.
+
+What: a driver that constructs `RenderState`, a `GlyphAtlas`, and a
+`FontManager` with no GL context, then calls `renderer.init(gl)` and the
+`draw_*` family against a `Gl` in `Recording` mode, producing a call log for
+a given synthetic frame (a fixed set of cells, cursor state, and optional
+toast).
+
+Deliverable: the driver function(s), callable from tests with a small,
+explicit synthetic workload description as input.
+
+Verification: standard suite. A smoke test confirming the driver produces a
+non-empty, well-formed call log for at least one trivial workload (e.g. a
+single-cell clear-and-cursor-draw).
+
+Prohibitions: do not attempt to reproduce full `App::update` orchestration
+here — this drives the renderer directly, below the GUI event layer. Do not
+add a GPU or window dependency; if one turns out to be unavoidable, stop and
+report rather than reaching for Phase 2's infrastructure prematurely.
+
+Stop: report the driver's API and the smoke test result; await review
+before 123.8.
+
+### 123.8 — Workload assertion tests against the recording log
+
+Scope: new test module(s) alongside 123.7's driver.
+
+What: for each of the workloads named in 123.14 that can be exercised
+without a real window (idle, pointer motion over inert content, pointer
+motion with a URL on screen, typing, full-screen TUI redraw, alt screen),
+construct the synthetic input and assert on the derived metrics — draw
+call count, state-change count, upload count and byte volume — using the
+groupings defined in the "Derived metric groups" section above.
+
+Deliverable: one test per workload, each asserting concrete numbers (not
+just "did not panic"), so a future regression that changes call counts is
+caught in CI without a GPU.
+
+Verification: standard suite. Document, next to each assertion, which real
+GUI code path it stands in for, so a future reader can tell the difference
+between "this is exactly what production does" and "this is a
+representative approximation" — do not overstate the fidelity of a
+synthetic driver.
+
+Prohibitions: do not assert on pixel content — that is Phase 2's job, not
+this subtask's. Do not invent numbers for workloads this driver cannot
+represent; if a workload genuinely needs Phase 2, say so explicitly rather
+than approximating it here.
+
+Stop: report per-workload assertion results; await review before 123.9.
+
+### 123.9 — Wire Phase 1 into the existing CI matrix
+
+Scope: `.github/workflows/ci.yml` (the `test` job only — no new job needed,
+per this task's own finding that Phase 1 requires no GPU or Nix).
+
+What: confirm the new tests run under the existing matrix
+(`[ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]`) with no
+platform-specific gating, since Phase 1 is pure Rust with no GL driver
+dependency. If any platform fails for a reason unrelated to the facade
+itself (e.g. a `conv2` cast difference), fix it in this subtask; if the
+failure implicates the facade design, stop and report rather than adding a
+platform-specific `#[cfg]` to route around it.
+
+Deliverable: green CI on all four platforms with Phase 1's tests included.
+
+Verification: the CI run itself; `cargo xtask check-windows` locally per
+`freminal-windows-crosscheck` before any PR, since this subtask touches CI
+configuration.
+
+Prohibitions: do not touch `nightly.yml` or `build-and-check` — those are
+Phase 2's concern (123.13). Do not weaken the existing matrix.
+
+Stop: report the green CI run; await review before starting Phase 2.
+
+### 123.10 — `flake.nix`: Mesa, llvmpipe, Xvfb
+
+Scope: `flake.nix` only.
+
+What: add `pkgs.mesa`, `pkgs.mesa.llvmpipeHook`, and `pkgs.xorg.xvfb` to the
+Linux-only package set, following the existing
+`pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ ... ]` pattern already
+used for `pkgs.perf` and the Windows cross-check toolchain. Wire
+`llvmpipeHook`'s environment (`LIBGL_ALWAYS_SOFTWARE`,
+`LIBGL_DRIVERS_PATH`, EGL vendor JSON) into the relevant dev shell(s).
+
+Deliverable: the `flake.nix` diff only.
+
+**Stop condition, mandatory per `flake-dev-shell-discipline`: this subtask
+stops here.** Do not proceed to 123.11 until the maintainer has run
+`nix develop` (or `direnv allow`) and confirmed the new tools are present.
+Do not work around the missing tools by installing them out-of-band or by
+changing application logic to avoid needing them.
+
+Verification: `nix flake check` if available in the environment; otherwise
+report the diff and wait.
+
+Prohibitions: do not add any non-Linux equivalent — Phase 2 is Linux-only by
+design, matching the `perf` precedent. Do not touch any `.rs` file in this
+subtask.
+
+Stop: report the diff; wait for `nix develop` confirmation before any
+further Phase 2 work.
+
+### 123.11 — Offscreen pbuffer GL context
+
+Scope: new module in `freminal-windowing/src/` (candidate:
+`gl_context_offscreen.rs`, named for the one concept — an offscreen context
+construction path — distinct from the windowed path in `gl_context.rs`).
+
+What: using glutin 0.32.3's `PbufferSurface`
+(`glutin-0.32.3/src/surface.rs:228`), build an offscreen GL context that
+does not require a winit `Window`, but does require Xvfb (for the X11
+connection glutin still needs to enumerate configs on Linux) and the
+llvmpipe software rasterizer from 123.10.
+
+Deliverable: a function that returns a working GL context and an offscreen
+framebuffer of a given pixel size, runnable under `xvfb-run` in the `default`
+Nix dev shell.
+
+Verification: a manual smoke test (clear to a known color, read back,
+assert the color) run locally under `nix develop` with `xvfb-run`. This
+subtask cannot be verified by `cargo test --all` alone until 123.13 wires
+CI, so report the manual run's output explicitly.
+
+Prohibitions: do not modify `gl_context.rs`'s windowed path — this is an
+additive, parallel construction path. Do not attempt to make this work on
+macOS or Windows; Phase 2 is Linux-only per the `perf` precedent, stated
+above.
+
+Stop: report the smoke-test readback result; await review before 123.12.
+
+### 123.12 — Readback, golden storage, comparison, and tolerance policy
+
+Scope: new test-support module for Phase 2 (candidate:
+`freminal/tests/` or a dedicated `freminal-windowing` test helper), plus a
+`Documents/` reference for the tolerance policy — this may be a section
+appended to `Documents/PROFILING.md` rather than a new file, since
+`PROFILING.md` already owns the profiling-methodology reference role; if a
+new file is judged necessary, stop and propose it rather than creating it
+unilaterally, per `no-summary-documents`.
+
+What: capture the offscreen framebuffer to an image, store golden images
+under a new `freminal/tests/golden_pixels/` (or equivalent) directory
+mirroring the `UPDATE_GOLDEN=1` convention from
+`freminal-terminal-emulator/tests/vttest_common.rs:14, 183-208`, and define
+a **decided-up-front** comparison tolerance (e.g. per-pixel channel
+difference bound plus an allowed-mismatched-pixel-count ceiling). The
+tolerance number and its justification must be written down before the
+first golden image is captured — not derived after a flaky run, which
+`flaky-tests-are-bugs` forbids.
+
+Deliverable: the capture/compare/regenerate mechanism, the documented
+tolerance policy with its rationale, and at least one golden image for a
+trivial synthetic scene (a single filled cell) as a proof of the mechanism.
+
+Verification: run the comparison twice in a row against the same golden
+image under `nix develop` and confirm bit-for-bit or within-tolerance
+stability across runs on the same machine, before considering
+cross-machine or cross-Mesa-version stability at all.
+
+Prohibitions: do not gate any existing CI job on this yet — that is 123.13,
+and only after a stability period. Do not choose a tolerance by running
+the test until it passes; the tolerance must be justified independently of
+any specific observed diff.
+
+Stop: report the mechanism, the tolerance and its rationale, and the
+stability-run results; await review before 123.13.
+
+### 123.13 — New Nix-based CI job for Phase 2
+
+Scope: a new job in `.github/workflows/nightly.yml` (following the existing
+`ci` job's `nix develop --impure .#ci` pattern) or a new dedicated workflow
+file if the maintainer prefers isolation from the nightly schedule — propose
+both options rather than picking silently, since this is a new recurring CI
+cost.
+
+What: wire 123.10 through 123.12 into a job that runs under `xvfb-run`
+inside the Nix `default` (or a new `gl-pixel`) dev shell, on the
+`nightly`/manual-dispatch cadence that `bench.yml` already established for
+similarly noise-sensitive checks, **not** on every push or PR.
+
+Deliverable: the workflow diff, plus a documented decision on whether this
+job blocks merges (default: it should not, until 123.12's stability period
+has run for long enough to be trusted — the same caution `bench.yml` applies
+to Criterion regressions).
+
+Verification: at least one green run of the new job in CI, observed over
+several runs before recommending it as a merge gate.
+
+Prohibitions: do not add this job to the `test` matrix in `ci.yml` — that
+matrix has no Nix and cannot host it (see the CI-shape finding above). Do
+not make this job a required check without the stability period.
+
+Stop: report the workflow diff and the observed run stability; await review
+before 123.14.
+
+### 123.14 — Quantified findings report
+
+Scope: this document (a new "Findings" section appended once the work below
+is done) and, if the maintainer requests it, an issue or discussion post —
+no other file changes.
+
+What: this is the task's actual product. Point the harness (Phase 1 for
+call-count and state-change metrics; Phase 2 for pixel-level checks, once
+it exists) at each of:
+
+- genuine idle,
+- pointer motion over inert content,
+- pointer motion with a URL on screen,
+- typing,
+- full-screen TUI redraw, and
+- the alt screen.
+
+Report frame rate and per-frame cost **as a pair** for every workload, per
+`PROFILING.md`'s reporting discipline — never a single CPU number, since
+total CPU is the product of the two and a single figure cannot distinguish
+"fewer frames" from "cheaper frames."
+
+**This subtask's output is what defines Task 124's subtask list.** Note
+explicitly, for the record, that Phase 1's metrics need no human sitting at
+the machine reproducing a gesture, because they are deterministic given a
+synthetic workload description — this is the harness's main advantage over
+the manual method Task 121 used throughout, and is why the two diagnostic
+obligations below should be the first things run once 123.8 lands, well
+before Phase 2 is complete.
+
+Deliverable: the Findings section, structured per workload with the metric
+pairs, and an explicit verdict (CONFIRMED / REFUTED / INCONCLUSIVE, per
+`PLAN_121_PERF_REMEDIATION.md`'s own verdict discipline) on each of the two
+diagnostic obligations below.
+
+Verification: no code change in the reporting half; any code fixes the
+report's obligations require belong to Task 124, not here.
+
+Prohibitions: do not report a number this task did not itself measure — no
+borrowing pre-123 informal observations as if they were harness output. Do
+not upgrade a finding beyond what was measured (e.g. "likely the cause" when
+the harness only showed correlation).
+
+Stop: report the Findings section in full; this is the task's closing
+subtask.
+
+---
+
+## Two diagnostic obligations
+
+These are restated here, in the language of what the harness must answer,
+because they are Task 124's first two inputs and 123.14 must not close
+without addressing them.
+
+### Obligation 1 — confirm or refute the always-new-`Arc` finding (Task 124.1's premise)
+
+`rows_as_tchars_and_tags_incremental` (`freminal-buffer/src/buffer/flatten.rs:530-533`
+and `:569-572`) wraps the merge result in a **brand-new `Arc` whenever any
+row is dirty, even when the merged bytes are byte-identical**; only the true
+no-op path (`:454-479`) returns the same `Arc`.
+`evaluate_frame_dirty_state` (`freminal/src/gui/terminal/frame_dirty.rs:301-311`)
+then tests `Arc::ptr_eq`, so a byte-identical re-flatten sets
+`content_changed`, forcing `ReevaluateFullRebuild`, then
+`PaneFrameDamage::Full`, then `FrameDamage::Full`. The module doc at
+`frame_dirty.rs:270-281` already acknowledges this for cursor blink.
+
+**Hypothesis to test with the Phase 1 harness:** full-screen-redraw
+workloads pay a full vertex rebuild and a full present every tick,
+regardless of whether anything visibly changed. 123.8's full-screen-TUI
+workload assertion is the direct test; 123.14 must report the draw-call and
+state-change counts for that workload against a control workload where the
+content is genuinely static, and state a verdict.
+
+### Obligation 2 — diagnose the 121.31 full-present-during-pointer-motion anomaly
+
+Migrated here from `PLAN_121_PERF_REMEDIATION.md` subtask 121.31 as a
+measurement obligation rather than a code fix (the fix, once diagnosed,
+belongs to Task 124.2). `frame_damage_full=120, frame_damage_partial=0` was
+observed during pointer motion versus `120/120` *partial* at idle, and was
+never diagnosed. `pointer_forces_full_present`
+(`freminal/src/gui/app_impl.rs:117-123`) is
+`pointer_moving && (pointer_over_chrome || border_drag_active)` and should
+not fire for motion over terminal content.
+
+**Confound recorded at the time of the original observation:**
+`toast_active=48` fired in every run (a startup toast present at launch),
+and `toast_active` is a separate short-circuit in `decide_frame_damage`
+(`freminal/src/gui/frame_damage.rs:86-88`) — so the 120/0 split may have
+been explained entirely by the toast, not by pointer motion at all.
+
+**What 123 must do:** re-run the equivalent workload with no startup toast
+present, using the Phase 1 harness's deterministic workload construction so
+the toast variable can be held fixed across runs rather than relying on
+timing. Report the full/partial split with and without a toast present, and
+state a verdict on whether `pointer_forces_full_present` itself is
+implicated once the toast confound is removed.
+
+---
+
+## Also record
+
+- Task 123 changes no rendering behaviour — instrumentation and measurement
+  only, end to end.
+- Task 121 left subtask 121.20 (GPU buffer-orphaning for small payloads)
+  open specifically because it needed a pixel harness to be exercised
+  safely. **Phase 2 of this task is that harness**, so 123 unblocks 121.20,
+  and the fix itself is carried forward as Task 124.7.
+
+---
+
+## Verification
+
+Standard for every subtask, per `agents.md`:
+
+1. `cargo test --all`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo machete`
+
+Additionally, per the pre-commit hook divergence recorded in
+`PLAN_122_ORCHESTRATION_EXTRACTION.md`, also run
+`cargo clippy --workspace --all-targets` and treat it as the primary gate,
+since it is what pre-commit actually enforces.
+
+Every Phase 1 subtask that touches the recording feature (123.2 through
+123.5) must also pass `cargo test --all --features gl-recording`.
+
+`cargo xtask check-windows` runs once before any PR touching `flake.nix` or
+CI workflow files, per `freminal-windows-crosscheck`.
+
+123.6 additionally requires a before/after capture per
+`performance-benchmarks`, coordinated with `freminal-bench-table`.
+
+---
+
+## References
+
+- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — the remediation task this
+  harness unblocks. 123 measures; 124 fixes.
+- `Documents/PLAN_121_PERF_REMEDIATION.md` — carries 121.20 (blocked on
+  Phase 2), 121.25 (measurement debt absorbed here), 121.28 (the harness
+  this task supersedes), and 121.31 (migrated here as Obligation 2), plus
+  the CONFIRMED/REFUTED verdict discipline this task's 123.14 follows.
+- `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — style template for
+  this document's subtask structure, and the source of the
+  documented-clippy-versus-pre-commit-hook divergence noted in
+  "Verification" above.
+- `Documents/PROFILING.md` — the frame-rate-plus-per-frame-cost reporting
+  discipline 123.14 follows, and the source of the "no headless-GL or
+  pixel-readback harness exists" gap this task closes.
+- `Documents/DECOUPLING_FRAMEWORK.md` — the decision record for whether
+  freminal should stop using egui for the main window; unaffected by this
+  task, but the source of the profiling-methodology precedent
+  `PROFILING.md` itself cites.
+- `agents.md` — `freminal-bench-table`, `freminal-numeric-conversions`,
+  `freminal-module-cohesion`, `flake-dev-shell-discipline`, and
+  `flaky-tests-are-bugs`, all directly load-bearing for this task's
+  subtasks.
+- Issue #440 — the missing pixel / headless-GL harness this task closes.
+- Issue #459 — the profiling findings whose refutation rate motivates this
+  task's existence.
+</content>
