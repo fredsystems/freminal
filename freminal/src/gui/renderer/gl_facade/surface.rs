@@ -128,11 +128,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Files that still call `glow::HasContext` methods directly, outside
-    /// the [`super`] facade, as of this audit (2026-08-21).
+    /// the [`super`] facade.
     ///
-    /// TODO(2026-08-21, 123.4/123.5): this allowlist shrinks to empty when
-    /// the migration lands. An empty list is the end state; do not add to
-    /// it.
+    /// This is **empty, and empty is the intended permanent state**: every
+    /// `glow::HasContext` call in the `freminal` crate goes through
+    /// [`gl_facade::Gl`](super::Gl). Adding an entry back means someone is
+    /// calling `glow::Context` directly again; that is what this guard
+    /// exists to stop, and it should be reviewed rather than accommodated.
     ///
     /// This guard deliberately covers the **whole `freminal` crate**, not
     /// just `src/gui/renderer/`, per the maintainer decision of
@@ -140,14 +142,12 @@ mod tests {
     /// `bind_framebuffer` / `enable` / `scissor` / `disable` /
     /// `clear_color` / `clear` calls *between* calls into `gpu.rs` inside
     /// the same `PaintCallback`, so leaving them raw would make the
-    /// recording log's state-change metric silently undercount.
-    const NOT_YET_MIGRATED: [&str; 5] = [
-        "src/gui/app_impl.rs",
-        "src/gui/renderer/gpu.rs",
-        "src/gui/renderer/toast_pass.rs",
-        "src/gui/renderer/toast_text_pass.rs",
-        "src/gui/terminal/widget.rs",
-    ];
+    /// recording log's state-change metric silently undercount. 123.4
+    /// migrated `gpu.rs`, `widget.rs`, and `app_impl.rs` together for
+    /// exactly that reason; that same rationale is why the two toast
+    /// passes (123.5) also had to go through the facade rather than stay
+    /// an accepted exception.
+    const NOT_YET_MIGRATED: [&str; 0] = [];
 
     /// The facade module is the one place in the crate that is *allowed* —
     /// and from 123.2, required — to reference `glow::HasContext` directly:

@@ -79,11 +79,6 @@ pub struct GlCall {
 /// locally — inside a single `PaintCallback` or a single test — and never
 /// shared across threads, so `RefCell`/`Cell` are correct and no `Sync`
 /// bound is needed or wanted.
-// TODO(2026-08-21, 123.4/123.5): `RecordingState`'s API is unused until the
-// renderer call sites are migrated and 123.7's headless driver exercises
-// it. Remove this allow when 123.5 empties
-// `surface::tests::NOT_YET_MIGRATED`.
-#[allow(dead_code)]
 pub struct RecordingState {
     calls: RefCell<Vec<GlCall>>,
     next_buffer: Cell<u32>,
@@ -101,7 +96,6 @@ impl Default for RecordingState {
     }
 }
 
-#[allow(dead_code)] // see the TODO on the struct definition above
 impl RecordingState {
     /// Build an empty recording state. All handle counters start at `1` —
     /// GL object names are non-zero, and the six handle types that wrap

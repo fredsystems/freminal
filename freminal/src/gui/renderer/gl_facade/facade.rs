@@ -116,10 +116,6 @@ impl<'a> Gl<'a> {
     }
 }
 
-// TODO(2026-08-21, 123.4/123.5): every method here is unused until the
-// renderer call sites are migrated. Remove this allow when 123.5 empties
-// `surface::tests::NOT_YET_MIGRATED`.
-#[allow(dead_code)]
 impl Gl<'_> {
     pub(crate) unsafe fn active_texture(&self, unit: u32) {
         match &self.inner {

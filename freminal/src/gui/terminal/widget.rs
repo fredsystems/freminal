@@ -36,7 +36,7 @@ use super::{
         renderer::{
             BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
             TerminalRenderer, WindowPostRenderer, build_background_instances,
-            build_cursor_verts_only, build_foreground_instances, build_image_verts,
+            build_cursor_verts_only, build_foreground_instances, build_image_verts, gl_facade::Gl,
         },
         search::{
             SearchBarAction, matches_to_highlights, run_search, scroll_to_match_and_send,
@@ -56,7 +56,6 @@ use super::{
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 use egui_glow::CallbackFn;
-use glow::HasContext;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::error;
@@ -2952,7 +2951,7 @@ impl FreminalTerminalWidget {
         ui.painter().add(egui::PaintCallback {
             rect,
             callback: Arc::new(CallbackFn::new(move |info, painter| {
-                let gl = painter.gl();
+                let gl = &Gl::real(painter.gl());
                 let vp = info.viewport_in_pixels();
                 let mut rs = render_state_for_cb
                     .lock()

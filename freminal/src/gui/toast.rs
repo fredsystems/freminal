@@ -37,6 +37,7 @@ use super::WindowId;
 use super::font_manager::FontManager;
 use super::icons::ChromeIcon;
 use super::renderer::ToastRenderState;
+use super::renderer::gl_facade::Gl;
 use crate::gui::panes::PaneId;
 
 // ---------------------------------------------------------------------------
@@ -1848,7 +1849,7 @@ impl ToastStack {
         layer_painter.add(egui::PaintCallback {
             rect: ctx.content_rect(),
             callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
-                let gl = painter.gl();
+                let gl = &Gl::real(painter.gl());
                 let vp = info.viewport_in_pixels();
                 let mut rs = render_state_cb
                     .lock()

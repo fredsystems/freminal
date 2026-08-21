@@ -472,6 +472,26 @@ changes.
 Stop: report that the guard is now enforced repo-wide; await review before
 123.6.
 
+**123.4 and 123.5 landed as one commit, and could not have landed as two.**
+The plan separated them on diff size, assuming `gpu.rs` and the two toast
+passes were independent. They are not: `toast_pass.rs` and
+`toast_text_pass.rs` import `compile_program`, `upload_verts`,
+`setup_fg_inst_attribs`, `gl_i32`, `gl_f32_i32` and `gl_i32_u32` **from**
+`gpu.rs`, so changing those helpers' `gl` parameter breaks both toast files
+in the same edit. `agents.md` requires every commit to leave
+`cargo test --all` green, and no ordering of the two subtasks satisfies both
+constraints without inventing transitional double-signature shims — which
+would be more code, and more risk, than the migration itself.
+
+The same coupling forced `widget.rs` and `app_impl.rs` (callers of
+`gpu.rs`) and `toast.rs` (caller of the toast passes) into the same commit.
+The resulting diff is nonetheless small — seven files, ~70 changed lines —
+because the facade's methods mirror `glow::HasContext`'s signatures exactly,
+so **not one call expression changed**. Only the 46 parameter types, six
+imports, and three `Gl::real(painter.gl())` construction sites did. Some
+multi-line signatures were reflowed onto one line by `rustfmt` purely
+because `&Gl<'_>` is shorter than `&glow::Context`.
+
 ### 123.6 — Verify zero production overhead with a benchmark
 
 Scope: a new or extended Criterion bench under `freminal/benches/`
