@@ -402,6 +402,20 @@ for anything — it must be fully independent of a real driver.
 
 Stop: report handle-fabrication test results; await review before 123.4.
 
+**Boundary shift, recorded at execution time.** As written, 123.2 and 123.3
+cannot be separated: the facade does not compile with the seven
+handle-returning methods' `Recording` arms absent, and each commit must
+leave `cargo test --all` green. Handle fabrication therefore landed in
+123.2, and **123.3 became the behavioural verification subtask** — the
+`recording_tests` module that drives the facade end to end and proves the
+`Recording` arm is a trustworthy driver stand-in. The split is still
+create-then-prove; only the line between "defined" and "demonstrated"
+moved. 123.3's substance is unchanged: the create/bind/delete round trips
+the original wording asked for are there, plus the assertion that every one
+of the 49 methods records itself under its *own* name (the copy-paste error
+the 123.2 structural check cannot see), and hand-derived expected values for
+each metric group, which is what 123.8's workload numbers rest on.
+
 ### 123.4 — Migrate `gpu.rs` to the `Gl` facade
 
 Scope: `freminal/src/gui/renderer/gpu.rs`.
