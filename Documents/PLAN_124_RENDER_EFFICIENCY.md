@@ -62,6 +62,7 @@ Keystrokes are the lesser concern — they do not arrive faster than the
 | 124.6   | Shaping-path levers                                         | Yes |
 | 124.7   | GPU buffer-orphaning for small payloads                     | Yes (Phase 2 harness) |
 | 124.8   | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | No |
+| 124.9   | `sync_atlas` re-uploads glyphs a full atlas upload already covered | No (already measured) |
 
 Subtask numbers are stable once assigned, matching the convention
 `PLAN_121_PERF_REMEDIATION.md` established: a withdrawn or absorbed
@@ -284,6 +285,49 @@ isolated and the failure mode is silent visual corruption.
 Must record the direction **and** the inconvenient numbers, including that
 Phase 0 weakened rather than strengthened the case for the egui rewrite,
 and that Task 121 closed with four of six candidate items refuted.
+
+### 124.9 — `sync_atlas` re-uploads glyphs a full atlas upload already covered
+
+*Surfaced by Task 123 subtask 123.8 on `task-123/gl-measurement-harness`.
+Unlike the rest of this document, this subtask is **not gated on further
+measurement** — 123.8 already measured it, and the test that measured it is
+committed.*
+
+**The defect.** `TerminalRenderer::sync_atlas`
+(`freminal/src/gui/renderer/gpu.rs`) branches on
+`GlyphAtlas::needs_full_reupload()`. The full-upload arm issues one
+`tex_image_2d` covering the entire atlas — but it never clears
+`GlyphAtlas::dirty_rects`. Only the delta arm consumes them, via
+`take_dirty_rects()`. Every glyph rasterised *before* a full upload
+therefore stays queued, and the next frame re-uploads each one
+individually with `tex_sub_image_2d`, despite the full upload having
+already contained all of them.
+
+**Impact, measured.** On an 80x24 first paint, frame 2 issues **30 upload
+calls against a steady-state 4**, roughly doubling that frame's total GL
+call count (104 versus ~52). It recurs on every event that sets
+`full_reupload`: atlas growth, a font or font-size change, and
+`RenderState::clear_atlas`. It is a first-paint and
+post-font-change cost, not a steady-state one, which is precisely why
+eyeball profiling never caught it.
+
+**Scope of fix.** One line: consume the queued rects in the full-upload
+arm, e.g. `drop(atlas.take_dirty_rects());` immediately after the
+`tex_image_2d` call. The rects are redundant by construction at that point
+— the full upload wrote the whole texture, including every region they
+describe.
+
+**Verification.**
+`freminal/src/gui/renderer/headless_workloads.rs::a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload`
+currently asserts the **buggy** behaviour deliberately, so the defect stays
+pinned and measurable until it is fixed. That test must be **inverted, not
+deleted**, when this subtask lands: after the fix, frame 2's upload count
+must be comparable to steady state rather than several times it. Deleting
+it would discard the only regression guard for this behaviour.
+
+**Why it is a Task 124 entry and not a Task 123 fix.** Task 123 measures;
+Task 124 fixes. The maintainer confirmed this split explicitly when the
+defect surfaced.
 
 ---
 

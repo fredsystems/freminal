@@ -31,6 +31,8 @@ pub mod gl_facade;
 pub mod gpu;
 #[cfg(feature = "gl-recording")]
 pub mod headless;
+#[cfg(all(test, feature = "gl-recording"))]
+mod headless_workloads;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;
