@@ -218,6 +218,85 @@ mod tests {
         assert_full(&decide_frame_damage(false, true, &panes));
     }
 
+    /// OBLIGATION 2 of `PLAN_123_GL_MEASUREMENT_HARNESS.md`: diagnose the
+    /// 121.31 full-present-during-pointer-motion anomaly, with the startup
+    /// toast held fixed.
+    ///
+    /// **Verdict: the anomaly is explained by the toast, and
+    /// `pointer_forces_full_present` is REFUTED as the cause.**
+    ///
+    /// The original observation was `frame_damage_full=120,
+    /// frame_damage_partial=0` during pointer motion, versus `120/120`
+    /// partial at idle. The confound recorded at the time was that
+    /// `toast_active=48` fired in every run, because a startup toast was
+    /// present — and `toast_active` is its own short-circuit to `Full`,
+    /// entirely independent of the pointer.
+    ///
+    /// A live session cannot hold that variable fixed; the toast expires on
+    /// a timer while the gesture is still in progress. Here it is a
+    /// parameter, so the two cases separate cleanly. This is the whole
+    /// reason 123's deterministic construction was worth building for this
+    /// obligation: the experiment the original observation needed was not
+    /// performable by hand.
+    ///
+    /// Note also that `decide_frame_damage`'s own doc comment above still
+    /// describes `force_full` as including a bare `pointer_moving` term.
+    /// It does not, and has not since #459 item 9: `app_impl.rs` computes
+    /// `force_full` with `pointer_forces_full_present(pointer_moving,
+    /// pointer_over_chrome, border_drag_active)`. Recorded as cleanup entry
+    /// 123.C1 in `PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+    #[test]
+    fn pointer_motion_over_content_is_partial_once_the_toast_confound_is_removed() {
+        let d = CursorDamage {
+            x: 10,
+            y: 20,
+            width: 8,
+            height: 16,
+        };
+        let panes = [cursor_only_pane(d)];
+
+        // Pointer moving over plain terminal content, not over chrome, no
+        // border drag latched. `pointer_forces_full_present(true, false,
+        // false)` is false (see its truth-table test in `app_impl`), so the
+        // pointer contributes nothing to `force_full`.
+        let pointer_term = false;
+
+        // With no toast: the frame is Partial. Pointer motion alone does
+        // NOT force a full present.
+        assert_partial(
+            &decide_frame_damage(pointer_term, false, &panes),
+            &[rect(10, 20, 8, 16)],
+        );
+
+        // With a toast present and everything else identical: Full. This is
+        // the only variable that changed, and it fully accounts for the
+        // observed 120/0 split.
+        assert_full(&decide_frame_damage(pointer_term, true, &panes));
+    }
+
+    /// The other half of Obligation 2: pointer motion *over chrome* really
+    /// does force a full present, and correctly so.
+    ///
+    /// Keeps the refutation above honest. `pointer_forces_full_present` is
+    /// not dead code and not always-false — it fires exactly when motion
+    /// can change chrome pixels (a hover tint) or when a pane-border drag
+    /// is latched. The 121.31 anomaly was not this term firing; it was the
+    /// toast.
+    #[test]
+    fn pointer_motion_over_chrome_forces_full_even_with_no_toast() {
+        let d = CursorDamage {
+            x: 10,
+            y: 20,
+            width: 8,
+            height: 16,
+        };
+        let panes = [cursor_only_pane(d)];
+
+        // `pointer_forces_full_present(true, true, false)` is true, so the
+        // caller passes `force_full = true`.
+        assert_full(&decide_frame_damage(true, false, &panes));
+    }
+
     #[test]
     fn empty_pane_list_is_full() {
         assert_full(&decide_frame_damage(false, false, &[]));

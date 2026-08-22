@@ -852,6 +852,41 @@ implicated once the toast confound is removed.
 
 ---
 
+## Cleanup entries surfaced during Task 123
+
+Per `agent-orchestration-protocol`, a pre-existing bug found mid-task
+becomes a numbered entry rather than an inline fix or a chat message.
+
+### 123.C1 — `decide_frame_damage`'s doc comment describes a `force_full` term that no longer exists
+
+Surfaced by 123.8 while discharging Obligation 2.
+
+`freminal/src/gui/frame_damage.rs`'s doc comment on `decide_frame_damage`
+states that the caller computes `force_full` as
+`ui_overlay_open || shader_recomposites || active_pane_changed ||
+pointer_moving`. The bare `pointer_moving` term has not been there since
+issue #459 item 9: `freminal/src/gui/app_impl.rs:285-292` computes it as
+`ui_overlay_open || shader_recomposites || active_pane_changed ||
+pointer_forces_full_present(pointer_moving, pointer_over_chrome,
+border_drag_active)`.
+
+This matters more than a typo would. The stale comment states exactly the
+behaviour Obligation 2 set out to investigate — "pointer motion forces a
+full present" — so a reader checking the hypothesis against the docs would
+have it confirmed by a comment that is wrong, and the code refutes it.
+
+Scope of fix: correct the doc comment to name
+`pointer_forces_full_present` and its three inputs. Documentation only, no
+behaviour change, no test change. Verification: `cargo test --all` plus the
+standard suite; the two Obligation 2 tests added in 123.8 already pin the
+real behaviour.
+
+Not fixed in Task 123 because Task 123 changes no behaviour and touches no
+file it is not measuring; this is a one-line docs correction better carried
+with Task 124's `frame_damage.rs` work (124.2/124.4 both touch this area).
+
+---
+
 ## Also record
 
 - Task 123 changes no rendering behaviour — instrumentation and measurement
