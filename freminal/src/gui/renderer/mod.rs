@@ -9,6 +9,10 @@
 //!   surface and (from 123.2) the `Gl` recording facade.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
+//! - `headless` (feature `gl-recording`) — drives [`TerminalRenderer`] and the
+//!   toast passes without a GUI event loop, for use with the GL recording
+//!   facade (Task 123); see its module docs for what it does and does not
+//!   represent.
 //! - [`shaders`] — GLSL source string constants for the four shader passes
 //!   (decoration, background, foreground, image).
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
@@ -25,6 +29,8 @@
 pub mod errors;
 pub mod gl_facade;
 pub mod gpu;
+#[cfg(feature = "gl-recording")]
+pub mod headless;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;
