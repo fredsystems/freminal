@@ -890,9 +890,16 @@ mod tests {
     }
 
     /// In a default build, `Gl` is `size_of`/`align_of`-identical to the
-    /// bare `&glow::Context` it replaces — a structural proof of "no
-    /// production overhead" in place of the benchmark 123.6 originally
-    /// asked for.
+    /// bare `&glow::Context` it replaces.
+    ///
+    /// **Scope of what this establishes, stated precisely.** This test
+    /// proves *memory-layout equivalence*. It does not execute a GL call
+    /// and it does not inspect generated code, so it is strictly weaker
+    /// than the runtime benchmark 123.6 originally asked for. The layout
+    /// result plus the single-variant reasoning below is strong evidence
+    /// that the dispatch is free, but "no per-call branch in the emitted
+    /// machine code" remains **unverified by measurement** until 123.6b.
+    /// Do not cite this test as if it were that measurement.
     ///
     /// Without the `gl-recording` feature, `GlTarget` has exactly one
     /// variant: `Real(&glow::Context)`. Rust lays out a single-variant enum
@@ -902,14 +909,15 @@ mod tests {
     /// observable consequence of that layout guarantee, and this test pins
     /// both.
     ///
-    /// The same single-variant fact is why every one of the 49 methods'
-    /// `match &self.inner { .. }` is *irrefutable*: with one variant there
-    /// is nothing to branch on, so the match lowers to a field access, not
-    /// a conditional. That is a property of the type the compiler must
-    /// honor, not an outcome the optimiser merely tends to produce, which
-    /// is why it can be asserted here rather than measured.
+    /// The same single-variant fact makes every one of the 49 methods'
+    /// `match &self.inner { .. }` *irrefutable*: with one variant there is
+    /// nothing to discriminate. A single-arm match over a single-variant
+    /// enum has no condition to test, so there is no branch for the
+    /// compiler to emit — but note that this is an argument from the
+    /// language's semantics, not something this test checks. Nothing here
+    /// reads the disassembly.
     ///
-    /// This replaces a benchmark, not just supplements one: the plan asked
+    /// This stands in for a benchmark rather than superseding one: the plan asked
     /// for the `Real` arm to be benchmarked against a direct
     /// `glow::Context` call, but that comparison needs a live GL context —
     /// a display server and a driver — which is exactly the infrastructure

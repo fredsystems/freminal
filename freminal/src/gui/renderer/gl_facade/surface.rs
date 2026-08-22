@@ -188,6 +188,24 @@ mod tests {
     /// [`FACADE_MODULE_DIR`] subtree (including this file) is excluded at
     /// the walk level in [`collect_rs_files`], not here, so this needle can
     /// stay a plain literal.
+    /// # What this guard does not catch
+    ///
+    /// It is a textual heuristic, not a semantic check, and its own
+    /// justification ("catches a new raw call added later") is broader than
+    /// a substring scan can deliver. Two known gaps, neither live today:
+    ///
+    /// - A re-export under a different name from inside the excluded
+    ///   `gl_facade` subtree (`pub use glow::HasContext as GlExt;`) would
+    ///   let a consuming file call trait methods on a raw `&glow::Context`
+    ///   without its text ever containing `HasContext`.
+    /// - It scans the `freminal` crate only. `freminal-windowing` calls
+    ///   `clear_color`/`clear` directly on its own `glow::Context`
+    ///   (`gl_context.rs`), and this guard is blind to it by construction.
+    ///   See the "disclosed gap" note in `PLAN_123`'s Findings.
+    ///
+    /// Both require deliberate action rather than an accident, which is why
+    /// the heuristic is judged worth having — but it should not be mistaken
+    /// for a completeness guarantee.
     fn references_has_context(contents: &str) -> bool {
         contents.lines().any(|line| {
             let trimmed = line.trim_start();

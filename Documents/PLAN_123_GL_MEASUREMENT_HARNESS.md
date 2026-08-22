@@ -532,12 +532,16 @@ the infrastructure 123.10 and 123.11 exist to build. A `Context` built from
 a stub loader holds null function pointers and segfaults on first call, so
 there is no headless shortcut.
 
-What *is* provable now is stronger than the benchmark would have been. In a
-default build `GlTarget` has exactly one variant, so Rust lays it out
-identically to `&glow::Context` with no discriminant, and the `match` in all
-49 methods is irrefutable — it lowers to a field access, not a branch. That
-is a property of the type, not a hope about the optimiser. Two tests in
-`facade.rs` pin it: `size_of::<Gl<'_>>()` equals `size_of::<&glow::Context>()`
+What is provable now is **narrower than the benchmark would have been, not
+stronger** — an earlier revision of this note claimed otherwise and
+overstated it. In a default build `GlTarget` has exactly one variant, so
+Rust lays it out identically to `&glow::Context` with no discriminant, and
+the `match` in all 49 methods is irrefutable: there is nothing to
+discriminate, so there is no condition to test. That is an argument from
+the language's semantics, and it is good evidence — but it is an argument,
+not a measurement. **No test here reads generated code, so "no per-call
+branch in the emitted machine code" stays unverified until 123.6b.** What
+the two tests in `facade.rs` actually pin is memory layout: `size_of::<Gl<'_>>()` equals `size_of::<&glow::Context>()`
 in a default build (measured: 8 and 8, with matching alignment), and is
 strictly greater under `gl-recording` (measured: 72), which is what keeps
 the first assertion from being vacuous. Unlike a Criterion benchmark, these
@@ -904,6 +908,50 @@ honestly:
   draws it identically. There is no renderer-level difference to report,
   and inventing one would be fabrication.
 
+Two workloads from 123.14's list **are** covered, but by rows that do not
+carry their name, so the mapping is stated explicitly rather than left to
+be inferred:
+
+- **Typing** maps to the "Full redraw, steady" row, and that is itself
+  Obligation 1's finding: because a one-cell edit produces a new
+  `visible_chars` `Arc`, a keystroke currently costs a *full* rebuild, not
+  an incremental one. There is no cheaper typing row to report because the
+  renderer has no cheaper typing path. If 124.1 lands, typing should move
+  to something nearer the cursor-only row, and that migration is the
+  measurable success criterion for 124.1.
+- **Genuine idle** is, at the renderer, *no row at all* — an idle terminal
+  draws no frame. The nearest thing with a cost is cursor blink, which is
+  the "Cursor-only, steady" row at roughly two frames per second. Reporting
+  idle as if it had a per-frame cost would misrepresent it; its cost is
+  a frame *rate* question, and rate is not measured here.
+
+### A disclosed gap in this accounting
+
+The table above covers the `freminal` crate only, and that is a real
+boundary rather than a complete picture. `freminal-windowing`'s
+`GlState::clear` (`freminal-windowing/src/gl_context.rs:350-357`) issues a
+raw `clear_color` + `clear` pair directly on its `glow::Context`, and
+`egui_integration.rs` calls it on **every full-damage frame**. Those two
+calls are in a different crate, so they are outside both 123.1's guard
+(which walks the `freminal` crate) and the recording harness (which drives
+the renderer, not the windowing layer).
+
+So every real `FrameDamage::Full` frame in production issues **two more
+calls — one more state change and one clear — than any row above shows**.
+The omission does not move the headline findings: `clear`/`clear_color`
+carry no bytes, so Obligation 1's bandwidth ratio is unaffected, and two
+calls against a 52-call frame is under 4%. But a document whose purpose is
+to be a trustworthy accounting instrument should not have an undisclosed
+boundary, and 123.5's "zero raw `glow::Context` calls remaining anywhere in
+the `freminal` crate" is true only because the crate boundary excludes this
+site.
+
+Extending the facade across the `freminal-windowing` boundary is a real
+piece of work — it means either exporting `Gl` from a lower crate or
+duplicating it — and is deliberately **not** done here, since Task 123
+changes no behaviour and this is a scope question for the maintainer.
+Recorded as an open question rather than silently absorbed.
+
 ### Verdicts on the two diagnostic obligations
 
 #### Obligation 1 — the always-new-`Arc` finding: **CONFIRMED**
@@ -1050,6 +1098,10 @@ guess.
 - **124.4** — unchanged; confirmed to have no expected performance effect.
 - **124.9** — new, measured, one-line fix, not gated on further work.
 - **123.C1** — new, documentation only.
+- **Open question for the maintainer** — whether to extend the `Gl` facade
+  across the `freminal-windowing` boundary so the two per-full-frame
+  `clear`/`clear_color` calls are recorded too. Not a Task 124 subtask
+  until that is decided; see the disclosed-gap note above.
 
 Nothing above is upgraded beyond what was measured, and no pre-123 informal
 observation is reported here as harness output.

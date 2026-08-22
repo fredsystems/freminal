@@ -204,6 +204,7 @@ frame-profiling = ["freminal-windowing/frame-profiling"]
 # measurement harness (a headless call-recording harness needing no GPU,
 # display server or driver). NOT enabled by default -- in a default build
 # `GlTarget` collapses to its single `Real` variant so `Gl` compiles down to
-# direct delegation with no per-call branch. 123.6 verifies that with a
-# benchmark rather than trusting this comment.
+# direct delegation with no per-call branch. 123.6 pins the layout half of
+# that claim with a `size_of` test; the runtime half is 123.6b, deferred to
+# Phase 2 because benchmarking the `Real` arm needs a live GL context.
 gl-recording = []
