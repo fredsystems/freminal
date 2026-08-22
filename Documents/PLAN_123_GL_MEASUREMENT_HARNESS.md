@@ -1,6 +1,10 @@
 # PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
 
-> **STATUS: IN PROGRESS** on `task-123/gl-measurement-harness`. This document
+> **STATUS: PHASE 1 COMPLETE, PHASE 2 BLOCKED ON `nix develop`** on
+> `task-123/gl-measurement-harness`. Subtasks 123.1-123.10 are committed;
+> 123.14's Phase 1 half is written below under Findings. 123.11-123.13 and
+> 123.6b wait on the maintainer running `nix develop` after 123.10's
+> `flake.nix` change, per `flake-dev-shell-discipline`. This document
 > is the full subtask breakdown, written at activation time against the code
 > as it stands on `main`. Subtask 123.1's audit corrected several factual
 > claims made at activation time — see "Audit corrections (123.1)" below.
@@ -847,6 +851,208 @@ the harness only showed correlation).
 
 Stop: report the Findings section in full; this is the task's closing
 subtask.
+
+---
+
+## Findings (123.14, Phase 1)
+
+> **Phase 1 only.** Every number here comes from the call-recording
+> harness (123.7) or from Criterion benchmarks, on `task-123/gl-measurement-harness`.
+> Phase 2's pixel-level contribution follows later and does not block this.
+> Reference platform for byte volumes and timings: x86_64 Linux, dev shell,
+> bundled CaskaydiaCove font at `pixels_per_point = 1.0`.
+
+### How to read these numbers, and what is deliberately missing
+
+`PROFILING.md` requires frame rate and per-frame cost to be reported **as a
+pair**, because total CPU is their product and a single figure cannot
+distinguish "fewer frames" from "cheaper frames".
+
+Phase 1 measures **per-frame cost only**. The harness drives the renderer
+directly, below the GUI event layer, so it has no opinion about how often a
+frame is drawn. Frame rate is therefore reported here as **not measured**,
+and no number below should be multiplied out into a "CPU during X" figure.
+That is a limitation of the instrument, stated rather than papered over.
+
+What Phase 1 does give, which the manual method Task 121 used throughout
+could not, is **determinism**: given a synthetic frame description the call
+log is byte-identical on every run, so a regression in per-frame cost is
+caught in CI with nobody sitting at the machine reproducing a gesture.
+
+### Per-workload GL cost, 80x24
+
+| Workload | Calls | Draws | State changes | Uploads | Bytes |
+| -------- | ----- | ----- | ------------- | ------- | ----- |
+| One-time init | 261 | 0 | 30 | 2 | 96 |
+| Full redraw, frame 1 | 53 | 2 | 21 | 5 | 4,394,272 |
+| Full redraw, frame 2 | 104 | 2 | 21 | 30 | ~209,000 |
+| Full redraw, steady | 52 | 2 | 21 | 4 | ~200,000 |
+| Cursor-only, steady | ~48 | 2 | ~19 | ~2 | ~576 |
+| Cursor hidden | 38 | 1 | 14 | 3 | 4,393,984 |
+| Toast present | 121 | 4 | 41 | 10 | 4,658,448 |
+
+Frame 1's 4.4 MB is the initial full glyph-atlas upload (a 1024x1024 RGBA
+texture). Frame 2 is inflated by defect 124.9, below. "Steady" is frame 3
+onward.
+
+Workloads **not** in this table, because the harness cannot represent them
+honestly:
+
+- **Pointer motion** (both variants). Not a renderer workload — see the
+  dedicated section below.
+- **Alt screen.** The buffer layer produces different content; the renderer
+  draws it identically. There is no renderer-level difference to report,
+  and inventing one would be fabrication.
+
+### Verdicts on the two diagnostic obligations
+
+#### Obligation 1 — the always-new-`Arc` finding: **CONFIRMED**
+
+A re-flatten that produces byte-identical content in a freshly-allocated
+`Arc` is reported as a content change and forces a full vertex rebuild.
+Pinned by
+`frame_dirty.rs::byte_identical_reflatten_in_a_new_arc_still_forces_a_full_rebuild`,
+which isolates the single variable — same bytes, new allocation, with
+`visible_line_widths`, theme, dimensions and fold epoch all held
+pointer-identical. A paired control confirms that re-observing the *same*
+`Arc` correctly reports no change, so the confirmation is not the
+degenerate "`content_changed` is always true".
+
+Upstream cause: `rows_as_tchars_and_tags_incremental`
+(`freminal-buffer/src/buffer/flatten.rs`) returns the cached `Arc`s only on
+its no-op path (`reuse_available` and no row in the window rebuilt). Both
+the incremental fast path and the full-merge fallback end in
+`Arc::new(...)` regardless of whether the merged bytes changed. One dirty
+row anywhere in the window is enough.
+
+**Cost of being wrong, quantified:** a needless full rebuild is ~52 GL
+calls and ~200 KB of buffer uploads, against a cursor-only frame's ~48
+calls and under a kilobyte. **The waste is overwhelmingly bandwidth, not
+call count** — roughly 350x the bytes for roughly 1.08x the calls. Task
+124.1 should be justified and measured on bandwidth, not on call counts.
+
+This is a correction to the intuition in the obligation as written, which
+framed the cost as "a full vertex rebuild and a full present every tick"
+without distinguishing the two.
+
+#### Obligation 2 — the pointer-motion full-present anomaly: **REFUTED** (as stated), explained by the toast
+
+`pointer_forces_full_present` is **not** implicated. With the toast
+confound removed, pointer motion over terminal content yields
+`FrameDamage::Partial`; with a toast present and everything else identical,
+`Full`. The toast alone accounts for the original `frame_damage_full=120,
+frame_damage_partial=0` observation, which was recorded at the time with
+`toast_active=48` firing in every run.
+
+Pinned by
+`frame_damage.rs::pointer_motion_over_content_is_partial_once_the_toast_confound_is_removed`,
+with a companion test confirming motion **over chrome** does still force
+`Full`, so the predicate is not dead code and the refutation is not an
+artefact of it never firing.
+
+This is the experiment the original observation needed and could not
+perform: in a live session the startup toast expires on a timer while the
+gesture is still in progress. As a function parameter it is trivially held
+fixed. That is the clearest single demonstration of why deterministic
+construction was worth building.
+
+**Task 124.2 should be re-scoped or closed.** Its premise — that every
+frame is a full present during pointer motion, caused by the pointer
+predicate — does not survive measurement. What remains true is narrower:
+*a visible toast* forces a full present on every frame for its lifetime,
+which is correct behaviour for an animating overlay but worth knowing is
+unconditional.
+
+### Pointer motion, treated honestly
+
+Pointer motion is freminal's worst interactive workload, and the reason is
+**event rate**, not per-event cost. macOS delivers pointer motion even to
+unfocused windows; Wayland is comparably chatty. Total CPU is per-event
+cost multiplied by that rate.
+
+The harness can measure the first term. It cannot observe the second, and
+**the rate is left here as an explicit, unmeasured multiplier** rather than
+folded into a single figure.
+
+Per-event decision-path cost, from `pane_resolution_bench`:
+
+| Stage | 1 pane | 4 panes | 16 panes | 16 deep (chain) |
+| ----- | ------ | ------- | -------- | --------------- |
+| `PaneTree::layout` | 33 ns | 85 ns | 362 ns | 423 ns |
+| `pane_at_pos` (worst case) | 4 ns | 7 ns | 17 ns | — |
+
+**The finding is that this is negligible, and that is itself the result.**
+A whole pointer-motion decision costs tens to a few hundred nanoseconds.
+Even at an aggressive 1 kHz event rate, 380 ns/event is under 0.04% of one
+core. Optimising the predicate would buy nothing measurable.
+
+Two things follow, and they matter for Task 124's shape:
+
+1. **What costs money is whether a motion event causes a repaint**, not
+   what the event handler computes. A repaint is ~52 GL calls and ~200 KB;
+   the decision that avoids it is ~380 ns. That is a ratio of roughly five
+   orders of magnitude in bytes moved. **Task 124.3 (cell-granular pointer
+   suppression) is therefore the right lever, and 124.4 (the bool-to-struct
+   readability fix) should not be expected to show any performance effect
+   at all** — consistent with how 124.4 is already scoped.
+2. **A minor, quantified inefficiency worth noting but not prioritising:**
+   `FreminalGui::pointer_motion_needs_repaint` (`app_impl.rs:1072-1078`)
+   calls `pane_tree.layout(central_rect)` on **every** pointer-motion event,
+   which walks the tree and heap-allocates a fresh
+   `Vec<(PaneId, Rect)>` each time. It dominates the per-event cost (10-25x
+   `pane_at_pos`) and the layout only changes on resize or a split/close.
+   Caching it is straightforward. At the measured magnitudes this is worth
+   perhaps 0.03% of a core at high event rates, so it is recorded for
+   completeness and explicitly **not** recommended as a priority.
+
+Anyone reporting a pointer-motion CPU figure should state the observed
+event rate alongside it. This document does not have one, and does not
+guess.
+
+### Other findings
+
+- **GL call count is independent of terminal grid size.** An 8x2 grid and
+  an 80x24 grid record byte-identical call sequences (53 calls, 2 draws, 21
+  state changes, 5 uploads). Only instance count (17 vs 1921) and byte
+  volume scale. This is the instanced renderer working as intended, and
+  `call_count_is_independent_of_grid_size` now fails if it ever stops being
+  true.
+- **The cursor-only "fast path" is a bandwidth optimisation, not a
+  call-count one.** ~48 calls against a full rebuild's ~52, the same two
+  draw calls — but under a kilobyte against ~200 KB. Reasoning about it as
+  "the cheap path" in call-count terms is mistaken, and any Task 124 work
+  that trades calls for bytes should be evaluated on that basis.
+- **One-time init is ~5x a steady frame** (261 calls vs 52). This is why
+  `record_steady_state` discards init, and why per-frame figures measured
+  without that separation would have been mostly setup.
+- **Defect 124.9 (new).** `sync_atlas`'s full-upload branch never clears
+  `GlyphAtlas::dirty_rects`, so every glyph rasterised before a full upload
+  is redundantly re-uploaded one `tex_sub_image_2d` at a time on the next
+  frame — 30 uploads against a steady-state 4, roughly doubling frame 2 of
+  a first paint. Recurs on atlas growth, font change and `clear_atlas`.
+  One-line fix, recorded in `PLAN_124_RENDER_EFFICIENCY.md`. Being a
+  first-paint cost is exactly why eyeball profiling never found it.
+- **Cleanup 123.C1 (new).** `decide_frame_damage`'s doc comment still
+  describes a `force_full` term (`pointer_moving`) removed by #459 item 9.
+  It states precisely the hypothesis Obligation 2 was testing, so a reader
+  checking the docs would get a false confirmation.
+
+### What this means for Task 124
+
+123.14's stated purpose is to define Task 124's subtask list. Concretely:
+
+- **124.1** — premise CONFIRMED, proceed. Justify and measure it on
+  **bandwidth**, not call count.
+- **124.2** — premise REFUTED. Re-scope to "a visible toast unconditionally
+  forces a full present" or close it.
+- **124.3** — unchanged, and now better supported: suppressing repaints is
+  where the money is.
+- **124.4** — unchanged; confirmed to have no expected performance effect.
+- **124.9** — new, measured, one-line fix, not gated on further work.
+- **123.C1** — new, documentation only.
+
+Nothing above is upgraded beyond what was measured, and no pre-123 informal
+observation is reported here as harness output.
 
 ---
 
