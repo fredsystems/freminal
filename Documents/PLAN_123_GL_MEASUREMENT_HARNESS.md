@@ -681,6 +681,34 @@ subtask.
 Stop: report the diff; wait for `nix develop` confirmation before any
 further Phase 2 work.
 
+**As built, with two deviations, both recorded rather than taken silently.**
+
+1. **`pkgs.xorg.xvfb` -> `pkgs.xvfb`.** The attribute this document named is
+   deprecated in the pinned nixpkgs, which emits
+   `the xorg package set has been deprecated, 'xorg.xvfb' has been renamed
+   to 'xvfb'` on evaluation. `pkgs.xvfb-run` is added alongside it, since
+   the wrapper is what a CI job and a local run actually invoke.
+
+2. **`pkgs.mesa.llvmpipeHook` was not used.** The three variables it would
+   set are set explicitly in a new `glPixelEnv` attrset instead. The hook's
+   contents cannot be inspected without building it, and a setup hook that
+   silently overrides an explicitly-set variable is action-at-a-distance
+   this file otherwise avoids. The explicit form also matches the
+   `windowsCheckEnv` idiom immediately above it. Both interpolated paths
+   (`${pkgs.mesa}/lib/dri` and
+   `${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json`) were verified to
+   exist in the `mesa` derivation before being written.
+
+`glPixelEnv` is merged into the **`default`** shell only, never `ci` —
+forcing software GL in the CI shell would silently slow every unrelated
+check. 123.13's job must therefore use the `default` shell (or a dedicated
+one), not `ci`.
+
+Verified without building: `nix eval .#devShells.x86_64-linux.default.drvPath`
+succeeds, and `nixfmt` / `statix check` / `deadnix --fail` are all clean.
+Actual availability of the tools is what the maintainer's `nix develop`
+confirms — that is the stop condition, and it has not been bypassed.
+
 ### 123.11 — Offscreen pbuffer GL context
 
 Scope: new module in `freminal-windowing/src/` (candidate:
