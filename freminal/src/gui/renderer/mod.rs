@@ -33,6 +33,10 @@ pub mod gpu;
 pub mod headless;
 #[cfg(all(test, feature = "gl-recording"))]
 mod headless_workloads;
+#[cfg(feature = "gl-pixel")]
+pub mod pixel_golden;
+#[cfg(feature = "gl-pixel")]
+pub mod pixel_harness;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;

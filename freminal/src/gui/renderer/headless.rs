@@ -216,7 +216,12 @@ impl HeadlessRenderer {
     }
 
     /// Pixel dimensions of `frame` at the current font metrics.
-    fn viewport_px(&self, frame: &SyntheticFrame) -> (i32, i32) {
+    ///
+    /// Public because the Phase 2 pixel harness must size its offscreen
+    /// pbuffer to match the viewport this driver will render into, and it
+    /// has to do so *before* creating the GL context. That ordering works
+    /// because [`Self::new`] touches no GL.
+    pub fn viewport_px(&self, frame: &SyntheticFrame) -> (i32, i32) {
         let w = frame
             .cols
             .saturating_mul(self.font_manager.cell_width().value_as().unwrap_or(0));

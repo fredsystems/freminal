@@ -149,6 +149,30 @@ mod tests {
     /// an accepted exception.
     const NOT_YET_MIGRATED: [&str; 0] = [];
 
+    /// Files that call `glow::HasContext` directly and are **deliberately
+    /// exempt**, because they are measuring instruments rather than
+    /// rendering code.
+    ///
+    /// This is kept separate from [`NOT_YET_MIGRATED`] on purpose. That
+    /// list means "has not been migrated yet" and its correct end state is
+    /// empty; this one means "must not be migrated", and an entry here is a
+    /// standing decision rather than debt.
+    ///
+    /// `pixel_harness.rs` (Task 123 Phase 2) calls `read_pixels`, `finish`
+    /// and `pixel_store_i32` on the raw context to capture the framebuffer
+    /// after a frame has been drawn. Routing those through [`super::Gl`]
+    /// would be wrong twice over:
+    ///
+    /// - `read_pixels` and `finish` are not production rendering calls and
+    ///   are deliberately absent from [`GL_CALL_SURFACE`]. Adding them
+    ///   would corrupt the frozen surface's meaning — it enumerates what
+    ///   *freminal draws with*, not what the test harness pokes at.
+    /// - If the pixel path were ever driven against a recording `Gl`, the
+    ///   instrument's own calls would land in the log and inflate the very
+    ///   counts 123.8 asserts on. An instrument must not appear in its own
+    ///   measurements.
+    const HARNESS_EXEMPT: [&str; 1] = ["src/gui/renderer/pixel_harness.rs"];
+
     /// The facade module is the one place in the crate that is *allowed* —
     /// and from 123.2, required — to reference `glow::HasContext` directly:
     /// its `Real` arm delegates straight to the driver. Excluding it from
@@ -232,8 +256,11 @@ mod tests {
             }
         }
 
-        let allowlist: BTreeSet<String> =
-            NOT_YET_MIGRATED.iter().map(|s| (*s).to_string()).collect();
+        let allowlist: BTreeSet<String> = NOT_YET_MIGRATED
+            .iter()
+            .chain(HARNESS_EXEMPT.iter())
+            .map(|s| (*s).to_string())
+            .collect();
 
         let unexpected: Vec<&String> = found.difference(&allowlist).collect();
         assert!(
@@ -248,9 +275,10 @@ mod tests {
         let stale: Vec<&String> = allowlist.difference(&found).collect();
         assert!(
             stale.is_empty(),
-            "stale NOT_YET_MIGRATED entry(ies): {stale:?} — these files no \
-             longer reference `glow::HasContext`. Remove them; the \
-             allowlist is meant to shrink to empty at 123.5."
+            "stale allowlist entry(ies): {stale:?} — these files no longer \
+             reference `glow::HasContext`. Remove them from \
+             NOT_YET_MIGRATED or HARNESS_EXEMPT as appropriate; a stale \
+             entry hides a future real one."
         );
     }
 

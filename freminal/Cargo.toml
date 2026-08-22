@@ -208,3 +208,9 @@ frame-profiling = ["freminal-windowing/frame-profiling"]
 # that claim with a `size_of` test; the runtime half is 123.6b, deferred to
 # Phase 2 because benchmarking the `Real` arm needs a live GL context.
 gl-recording = []
+# Task 123 Phase 2: the pixel/readback harness. Pulls in `gl-recording`
+# because it reuses 123.7's headless driver, and `freminal-windowing`'s
+# offscreen pbuffer context. Linux-only in practice (the offscreen module is
+# `target_os = "linux"`-gated) and needs Mesa plus a live $DISPLAY, so it is
+# NOT enabled by default and its tests skip when no context can be created.
+gl-pixel = ["gl-recording", "freminal-windowing/gl-offscreen"]
