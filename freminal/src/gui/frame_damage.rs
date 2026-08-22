@@ -274,6 +274,51 @@ mod tests {
         assert_full(&decide_frame_damage(pointer_term, true, &panes));
     }
 
+    /// OBLIGATION 2, the part the first two tests assumed away — and the
+    /// one that actually explains a full present during pointer motion.
+    ///
+    /// The tests above hold the *pane* damage fixed at
+    /// `CursorOnly(Some(rect))` and vary only `force_full` / `toast_active`.
+    /// That correctly refutes `pointer_forces_full_present` as a cause, but
+    /// it assumes the pane had a cursor rect to report. During pointer
+    /// motion over inert content it does not: nothing changed, so
+    /// `evaluate_frame_dirty_state` reports no observations,
+    /// `widget.rs` leaves `last_frame_cursor_damage` at
+    /// [`PaneFrameDamage::Unchanged`], and no rect is ever pushed.
+    ///
+    /// `decide_frame_damage` then falls through to `rects.is_empty()` and
+    /// returns [`FrameDamage::Full`]. So a frame in which **nothing
+    /// whatsoever changed** is presented as a full clear plus a full
+    /// present.
+    ///
+    /// This is the real mechanism behind the 121.31 observation, and it is
+    /// not the pointer predicate. It is structural: `FrameDamage` has only
+    /// `Full` and `Partial` variants, with `Full` as `#[default]`. There is
+    /// no way to say "nothing changed, present nothing", so any frame that
+    /// gets drawn at all while idle costs a full present.
+    ///
+    /// Cost, from Task 123's harness: a full present is a full clear plus
+    /// ~52 GL calls and ~200 KB of uploads, paid for a frame that is
+    /// pixel-identical to its predecessor.
+    ///
+    /// This test asserts the **current** behaviour so the defect stays
+    /// pinned. It must be revisited, not deleted, by Task 124.2.
+    #[test]
+    fn pointer_motion_over_inert_content_is_full_via_the_unchanged_fallback() {
+        // Pointer moving over terminal content: `pointer_forces_full_present`
+        // is false, so `force_full` is false. No toast. And the pane reports
+        // `Unchanged`, because motion over inert content changes nothing the
+        // dirty tracker observes.
+        let panes = [unchanged_pane()];
+
+        assert_full(&decide_frame_damage(false, false, &panes));
+
+        // The same holds for several settled panes -- it is not an artefact
+        // of the single-pane case.
+        let many = [unchanged_pane(), unchanged_pane(), unchanged_pane()];
+        assert_full(&decide_frame_damage(false, false, &many));
+    }
+
     /// The other half of Obligation 2: pointer motion *over chrome* really
     /// does force a full present, and correctly so.
     ///

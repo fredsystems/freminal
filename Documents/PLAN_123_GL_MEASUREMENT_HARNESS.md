@@ -983,7 +983,17 @@ This is a correction to the intuition in the obligation as written, which
 framed the cost as "a full vertex rebuild and a full present every tick"
 without distinguishing the two.
 
-#### Obligation 2 — the pointer-motion full-present anomaly: **REFUTED** (as stated), explained by the toast
+#### Obligation 2 — the pointer-motion full-present anomaly: **PARTIALLY REFUTED — the named cause is wrong, but the symptom is real**
+
+> **Correction, 2026-08-21.** An earlier revision of this section reported a
+> flat REFUTED and attributed the whole observation to the toast confound.
+> That was wrong, and it was wrong in the specific way this task exists to
+> prevent: the two tests backing it held pane damage fixed at
+> `CursorOnly(Some(rect))` and varied only `force_full` / `toast_active`,
+> which **assumed away** the mechanism that actually produces the full
+> present. The maintainer caught it. The corrected verdict follows; the
+> refutation of the *named* cause stands, the dismissal of the *symptom*
+> does not.
 
 `pointer_forces_full_present` is **not** implicated. With the toast
 confound removed, pointer motion over terminal content yields
@@ -1004,12 +1014,50 @@ gesture is still in progress. As a function parameter it is trivially held
 fixed. That is the clearest single demonstration of why deterministic
 construction was worth building.
 
-**Task 124.2 should be re-scoped or closed.** Its premise — that every
-frame is a full present during pointer motion, caused by the pointer
-predicate — does not survive measurement. What remains true is narrower:
-*a visible toast* forces a full present on every frame for its lifetime,
-which is correct behaviour for an animating overlay but worth knowing is
-unconditional.
+##### The actual mechanism: the `Unchanged` -> `Full` fallback
+
+Pointer motion over inert content changes nothing the dirty tracker
+observes. `evaluate_frame_dirty_state` reports no observations, so
+`widget.rs:2499` leaves `last_frame_cursor_damage` at
+`PaneFrameDamage::Unchanged` and **no damage rect is ever pushed**.
+`decide_frame_damage` then reaches `if rects.is_empty()` and returns
+`FrameDamage::Full`.
+
+So a frame in which *nothing whatsoever changed* is presented as a full
+clear plus a full present. This is structural, not a bug in any one
+predicate: `freminal_windowing::FrameDamage` has only `Full` and
+`Partial(Vec<DamageRect>)`, with `Full` as `#[default]`. **There is no way
+to express "nothing changed, present nothing."** Any frame that gets drawn
+at all while idle therefore costs a full present.
+
+Pinned by
+`frame_damage.rs::pointer_motion_over_inert_content_is_full_via_the_unchanged_fallback`.
+
+**Cost:** a full clear plus ~52 GL calls and ~200 KB of uploads, paid for a
+frame pixel-identical to its predecessor.
+
+##### Revised guidance for Task 124.2
+
+**Do not close it.** Its symptom statement — "every frame is a full present
+during pointer motion" — is correct. Only its *diagnosis* was wrong, and
+that matters because fixing `pointer_forces_full_present` would have
+changed nothing.
+
+The real question 124.2 has to answer is upstream of `decide_frame_damage`:
+**why is a frame being drawn at all when nothing changed?** Two candidate
+directions, neither yet measured:
+
+1. Suppress the repaint — if the motion gate can tell that nothing
+   observable changed, the frame should never be scheduled. This is
+   adjacent to 124.3 (cell-granular pointer suppression).
+2. Add a third `FrameDamage` state meaning "present nothing", so a frame
+   that is drawn but changed nothing does not pay a full clear and present.
+   This is a `freminal-windowing` API change and needs its own design
+   discussion.
+
+Also still true, and worth keeping: *a visible toast* forces a full present
+on every frame for its lifetime. Correct for an animating overlay, but
+unconditional, and it is what made the original 121.31 numbers unreadable.
 
 ### Pointer motion, treated honestly
 
@@ -1091,8 +1139,10 @@ guess.
 
 - **124.1** — premise CONFIRMED, proceed. Justify and measure it on
   **bandwidth**, not call count.
-- **124.2** — premise REFUTED. Re-scope to "a visible toast unconditionally
-  forces a full present" or close it.
+- **124.2** — symptom CONFIRMED, diagnosis REFUTED. Keep it, but re-point
+  it at the `Unchanged` -> `Full` fallback and at why an idle frame is
+  scheduled at all. Fixing the pointer predicate would have changed
+  nothing.
 - **124.3** — unchanged, and now better supported: suppressing repaints is
   where the money is.
 - **124.4** — unchanged; confirmed to have no expected performance effect.
