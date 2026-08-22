@@ -810,6 +810,38 @@ not make this job a required check without the stability period.
 Stop: report the workflow diff and the observed run stability; await review
 before 123.14.
 
+**As built, with the placement decision made explicitly.** 123.13 required
+both options to be proposed rather than one picked silently, since this is a
+new recurring CI cost. Both were considered:
+
+| Option | Verdict |
+| ------ | ------- |
+| A job inside `nightly.yml` | **Rejected.** `nightly.yml`'s `ci` job gates the artifact builds that follow it, so a rasteriser-sensitive check placed there could block a nightly release over a Mesa bump. Wrong blast radius. |
+| A dedicated workflow file | **Chosen.** `.github/workflows/gl-pixel.yml`, weekly on Monday 07:00 UTC plus manual dispatch — an hour after `bench.yml` so two noise-sensitive jobs do not contend for runners. Cadence and required-status can be changed independently while this proves itself, which is the same reasoning that gave `bench.yml` its own file. |
+
+Adding it to `ci.yml`'s `test` matrix was never an option and is explicitly
+prohibited: that matrix runs on `dtolnay/rust-toolchain`, not Nix, so it
+inherits nothing from `flake.nix` and cannot see Mesa or Xvfb at all.
+
+**A third dev shell, `gl-pixel`, was added** rather than reusing an existing
+one. `default` carries `devOnlyTools`, so CI would build `cargo-bundle` from
+source just to read back some pixels; `ci` is lean but deliberately does not
+get `glPixelEnv`, because forcing software GL there would silently slow every
+unrelated lint and test. `gl-pixel` is the `ci` toolchain plus `glPixelTools`
+and `glPixelEnv` — which is also why 123.10's tool list was refactored out of
+`devOnlyTools` into `glPixelTools`, shared by both shells.
+
+**Merge-gating decision: this job must NOT be a required check yet**, per
+123.13's own prohibition, and it is not wired as one. It stays advisory until
+it has demonstrated stability over an observation period. If it does prove
+flaky, `flaky-tests-are-bugs` governs: root-cause the nondeterminism. Do not
+add retries, and do not widen the tolerance — a Mesa-driven output change is
+handled by regenerating the golden so its `.renderer` sidecar records the new
+version, which keeps a real regression distinguishable from a toolchain move.
+
+Verified locally by running the job's exact commands inside
+`nix develop --impure .#gl-pixel`.
+
 ### 123.14 — Quantified findings report
 
 Scope: this document (a new "Findings" section appended once the work below
