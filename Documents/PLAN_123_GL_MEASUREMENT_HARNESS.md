@@ -631,6 +631,27 @@ Phase 2's concern (123.13). Do not weaken the existing matrix.
 
 Stop: report the green CI run; await review before starting Phase 2.
 
+**Outcome: no CI change was required, and the reason is worth recording**
+because it is not obvious and it is the thing that would silently break
+this. Every Phase 1 test added by 123.3, 123.7 and 123.8 is gated behind
+`#[cfg(feature = "gl-recording")]`, so a plain `cargo test --all` does not
+run any of them. They run in CI only because the `test` job invokes
+`cargo xtask test`, and `xtask`'s `test_libs`/`test_docs` pass
+`--all-features` — which picks up `gl-recording` along with everything
+else. The tests therefore execute on all four matrix platforms
+(`ubuntu-latest`, `windows-latest`, `macos-latest`, `ubuntu-24.04-arm`)
+with no platform-specific gating and no workflow edit.
+
+The fragility this creates should be understood by anyone touching
+`xtask`: **if `--all-features` is ever dropped from `test_libs`, the entire
+Phase 1 harness stops running in CI and nothing fails.** The suite would
+still be green; it would simply no longer be testing this. `xtask`'s
+`test_default_features` pass is the complement and correctly runs *without*
+the feature, which is what proves the default build is unaffected.
+
+Verified locally: `cargo xtask test` (the exact CI invocation) passes, and
+`cargo xtask check-windows` is clean, per `freminal-windows-crosscheck`.
+
 ### 123.10 — `flake.nix`: Mesa, llvmpipe, Xvfb
 
 Scope: `flake.nix` only.
