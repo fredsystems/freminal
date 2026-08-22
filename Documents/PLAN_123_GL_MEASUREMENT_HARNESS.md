@@ -280,7 +280,8 @@ stability over an observation period — see 123.12's stop condition.
 | 123.3   | 1     | Handle fabrication for the recording backend                        |
 | 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
 | 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
-| 123.6   | 1     | Verify zero production overhead with a benchmark                    |
+| 123.6   | 1     | Verify zero production overhead (static proof; see re-scope note)   |
+| 123.6b  | 2     | Benchmark the `Real` arm against a direct call (gated on 123.11)    |
 | 123.7   | 1     | Headless render-path driver                                          |
 | 123.8   | 1     | Workload assertion tests against the recording log                  |
 | 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
@@ -517,6 +518,37 @@ entirely if it does show overhead — report the number and let the
 maintainer decide; do not silently redesign the dispatch to hide a cost.
 
 Stop: report the benchmark result; await review before 123.7.
+
+**Re-scoped at execution time (maintainer decision, 2026-08-21): the static
+half lands here, the dynamic half becomes 123.6b in Phase 2.** As written,
+123.6 is not implementable in Phase 1 and the plan did not notice. The
+`Real` arm delegates to live GL function pointers, so benchmarking it needs
+a real `glow::Context` — which needs a display server and a driver, exactly
+the infrastructure 123.10 and 123.11 exist to build. A `Context` built from
+a stub loader holds null function pointers and segfaults on first call, so
+there is no headless shortcut.
+
+What *is* provable now is stronger than the benchmark would have been. In a
+default build `GlTarget` has exactly one variant, so Rust lays it out
+identically to `&glow::Context` with no discriminant, and the `match` in all
+49 methods is irrefutable — it lowers to a field access, not a branch. That
+is a property of the type, not a hope about the optimiser. Two tests in
+`facade.rs` pin it: `size_of::<Gl<'_>>()` equals `size_of::<&glow::Context>()`
+in a default build (measured: 8 and 8, with matching alignment), and is
+strictly greater under `gl-recording` (measured: 72), which is what keeps
+the first assertion from being vacuous. Unlike a Criterion benchmark, these
+run in the ordinary `cargo test` matrix on all four CI platforms and cannot
+go quiet the way an unwired benchmark can.
+
+### 123.6b — benchmark the `Real` arm against a direct `glow::Context` call
+
+Phase 2. **Gated on 123.11** (offscreen pbuffer context). Carries 123.6's
+original wording and its original prohibition: if the delegation does show
+measurable per-call cost, report the number and let the maintainer decide —
+do not silently redesign the dispatch to hide it, and do not use the result
+to argue the facade away. Coordinate the bench file with
+`freminal-bench-table` and follow `performance-benchmarks`'s before/after
+procedure and 15% threshold.
 
 ### 123.7 — Headless render-path driver
 

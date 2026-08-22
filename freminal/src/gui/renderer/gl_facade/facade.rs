@@ -863,6 +863,7 @@ impl Gl<'_> {
 #[cfg(test)]
 mod tests {
     use super::super::surface::GL_CALL_SURFACE;
+    use super::Gl;
 
     /// Every entry in the frozen call surface has a method on `Gl`.
     ///
@@ -885,6 +886,86 @@ mod tests {
             "surface entry(ies) {missing:?} have no method on `Gl` — the \
              facade is incomplete; every entry in `GL_CALL_SURFACE` must \
              have an identically-named method here"
+        );
+    }
+
+    /// In a default build, `Gl` is `size_of`/`align_of`-identical to the
+    /// bare `&glow::Context` it replaces — a structural proof of "no
+    /// production overhead" in place of the benchmark 123.6 originally
+    /// asked for.
+    ///
+    /// Without the `gl-recording` feature, `GlTarget` has exactly one
+    /// variant: `Real(&glow::Context)`. Rust lays out a single-variant enum
+    /// identically to its payload — there is nothing to discriminate, so no
+    /// discriminant is stored — which makes `Gl` the same size and
+    /// alignment as the reference alone. `size_of`/`align_of` are the
+    /// observable consequence of that layout guarantee, and this test pins
+    /// both.
+    ///
+    /// The same single-variant fact is why every one of the 49 methods'
+    /// `match &self.inner { .. }` is *irrefutable*: with one variant there
+    /// is nothing to branch on, so the match lowers to a field access, not
+    /// a conditional. That is a property of the type the compiler must
+    /// honor, not an outcome the optimiser merely tends to produce, which
+    /// is why it can be asserted here rather than measured.
+    ///
+    /// This replaces a benchmark, not just supplements one: the plan asked
+    /// for the `Real` arm to be benchmarked against a direct
+    /// `glow::Context` call, but that comparison needs a live GL context —
+    /// a display server and a driver — which is exactly the infrastructure
+    /// Phase 2 builds (123.10's offscreen context, 123.11's pixel
+    /// harness). Benchmarking the `Real` arm is re-scoped as **123.6b**,
+    /// gated on 123.11. The compensating advantage of doing it this way now:
+    /// unlike a Criterion benchmark, this check runs in the ordinary
+    /// `cargo test` matrix on all four CI platforms, and it cannot quietly
+    /// stop being checked the way a benchmark not wired into CI can.
+    ///
+    /// This test does **not** claim the `Recording` arm is free — it is
+    /// not, and it is not supposed to be. It claims only that a build
+    /// without `gl-recording` pays nothing for the facade existing.
+    #[test]
+    #[cfg(not(feature = "gl-recording"))]
+    fn default_build_gl_is_a_zero_overhead_newtype() {
+        let gl_size = size_of::<Gl<'_>>();
+        let gl_align = align_of::<Gl<'_>>();
+        let reference_size = size_of::<&glow::Context>();
+        let reference_align = align_of::<&glow::Context>();
+        assert_eq!(
+            gl_size, reference_size,
+            "Gl<'_> should be exactly as large as &glow::Context in a \
+             default build — GlTarget has one variant and stores no \
+             discriminant"
+        );
+        assert_eq!(
+            gl_align, reference_align,
+            "Gl<'_> should have the same alignment as &glow::Context in a \
+             default build"
+        );
+    }
+
+    /// Under `gl-recording`, `Gl` is strictly larger than a bare
+    /// `&glow::Context` — the counterpart to
+    /// `default_build_gl_is_a_zero_overhead_newtype` that makes that test's
+    /// assertion meaningful rather than vacuous.
+    ///
+    /// With the feature on, `GlTarget` genuinely has two variants
+    /// (`Real(&glow::Context)` and `Recording(RecordingState)`), so the
+    /// enum must carry a discriminant plus room for the larger payload
+    /// inline. It is necessarily bigger. Read together, the two tests show
+    /// the cost of the facade appears exactly when `gl-recording` is
+    /// enabled and nowhere else — which is also why the feature is off by
+    /// default and must stay that way.
+    #[test]
+    #[cfg(feature = "gl-recording")]
+    fn recording_build_gl_carries_its_state() {
+        let gl_size = size_of::<Gl<'_>>();
+        let reference_size = size_of::<&glow::Context>();
+        assert!(
+            gl_size > reference_size,
+            "Gl<'_> ({gl_size} bytes) should be larger than \
+             &glow::Context ({reference_size} bytes) under gl-recording — \
+             GlTarget has two variants and must carry a discriminant plus \
+             the inline RecordingState payload"
         );
     }
 }
