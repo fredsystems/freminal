@@ -580,6 +580,98 @@ fn bench_shaping_crossframe(c: &mut Criterion) {
         });
     });
 
+    // ── Subtask 124.16 ──────────────────────────────────────────────
+    //
+    // The bench above models a TUI whose content genuinely *changes* on
+    // half its rows. The two below model the workloads Task 124 actually
+    // exists for, neither of which was covered.
+
+    // (1) A full-screen redraw of IDENTICAL content — the full-screen TUI
+    // idiom of rewriting unchanged bytes every tick, which is the workload
+    // this whole task is named for. Against
+    // `shape_visible_persistent_fm_cache` (half the rows changed) this is
+    // the floor: every line is an `Arc` refcount bump.
+    //
+    // Finding, pinned by
+    // `gui::shaping::shaping_cache_hit_rate::identical_full_screen_redraw_is_a_total_hit`:
+    // shaping already handles this perfectly at a 100% hit rate. So shaping
+    // is NOT where that workload's cost lives, and 124.6 should not be
+    // justified on it.
+    {
+        let (chars, tags) = ligature_heavy_visible_chars(width, height);
+        group.bench_function("shape_visible_identical_redraw", |b| {
+            let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+            let mut cache = ShapingCache::new();
+            #[allow(clippy::cast_precision_loss)]
+            let cell_w = fm.cell_width() as f32;
+            let _ = cache.shape_visible(&chars, &tags, width, &mut fm, cell_w, false, &[]);
+
+            b.iter(|| {
+                std::hint::black_box(cache.shape_visible(
+                    &chars,
+                    &tags,
+                    width,
+                    &mut fm,
+                    cell_w,
+                    false,
+                    &[],
+                ));
+            });
+        });
+    }
+
+    // (2) A scroll by one line. `ShapingCache` is keyed by **line index**,
+    // so every line lands in a different slot and the whole cache misses,
+    // even though all but one line is byte-identical to a line shaped on
+    // the previous frame. This is the measured case for 124.6's first
+    // lever, a content-addressed run-level cache.
+    //
+    // Expect this to cost about the same as a cold full-screen shape, and
+    // roughly the reciprocal of `shape_visible_identical_redraw`. That gap
+    // is the prize.
+    {
+        use freminal_common::buffer_states::tchar::TChar;
+        let (tall_chars, tags) = ligature_heavy_visible_chars(width, height + 32);
+        let lines: Vec<Vec<TChar>> = tall_chars
+            .split(|c| matches!(c, TChar::NewLine))
+            .map(<[TChar]>::to_vec)
+            .collect();
+        let windows: Vec<Vec<TChar>> = (0..32)
+            .map(|top| {
+                let mut out = Vec::new();
+                for (i, line) in lines.iter().skip(top).take(height).enumerate() {
+                    if i > 0 {
+                        out.push(TChar::NewLine);
+                    }
+                    out.extend_from_slice(line);
+                }
+                out
+            })
+            .collect();
+
+        group.bench_function("shape_visible_scroll_by_one_line", |b| {
+            let mut fm = FontManager::new(&Config::default(), 1.0).unwrap();
+            let mut cache = ShapingCache::new();
+            #[allow(clippy::cast_precision_loss)]
+            let cell_w = fm.cell_width() as f32;
+            let mut idx = 0usize;
+
+            b.iter(|| {
+                let w = &windows[idx % windows.len()];
+                idx += 1;
+                std::hint::black_box(cache.shape_visible(
+                    w,
+                    &tags,
+                    width,
+                    &mut fm,
+                    cell_w,
+                    false,
+                    &[],
+                ));
+            });
+        });
+    }
+
     group.finish();
 }
 

@@ -125,6 +125,55 @@ pub struct ShapedLine {
 pub struct ShapingCache {
     /// Per-line cache: `(hash, shaped_line)`.
     entries: Vec<Option<(u64, Arc<ShapedLine>)>>,
+    /// Subtask 124.16: cumulative hit/miss tally across every
+    /// [`Self::shape_visible`] call since the last [`Self::reset_stats`].
+    stats: ShapingCacheStats,
+}
+
+/// Subtask 124.16: per-line shaping cache hit/miss tally.
+///
+/// [`ShapingCache::shape_visible`] already decides, per line, whether to
+/// reuse an `Arc<ShapedLine>` or re-shape from scratch, but it returned only
+/// `Vec<Arc<ShapedLine>>` — the outcome was computed and thrown away. That
+/// made it the fifth and last collapse point in the chain Task 124's
+/// defect table lists, and the reason 124.6's two levers could not be
+/// justified or sized. This surfaces it.
+///
+/// Counting only. Nothing here influences which branch is taken, and the
+/// counters are always compiled (not feature-gated) so a measurement can
+/// never diverge from the code path it claims to describe — the same
+/// rationale subtask 122.5 recorded for `PaneResolution`'s diagnostic terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShapingCacheStats {
+    /// Lines served by an `Arc` refcount bump.
+    pub hits: u64,
+    /// Lines re-segmented and re-shaped through rustybuzz.
+    pub misses: u64,
+}
+
+impl ShapingCacheStats {
+    /// Lines considered — `hits + misses`.
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.hits.saturating_add(self.misses)
+    }
+
+    /// Fraction of considered lines served from cache, or `None` when no
+    /// line has been considered yet.
+    ///
+    /// `None` rather than `0.0` deliberately: "no data" and "nothing hit"
+    /// are different findings, and a measurement that silently reports the
+    /// second when it means the first is worse than one that reports
+    /// nothing.
+    #[must_use]
+    pub fn hit_rate(self) -> Option<f64> {
+        let total = self.total();
+        if total == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.hits as f64 / total as f64)
+    }
 }
 
 impl Default for ShapingCache {
@@ -139,12 +188,31 @@ impl ShapingCache {
     pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
+            stats: ShapingCacheStats { hits: 0, misses: 0 },
         }
     }
 
     /// Invalidate the entire cache (e.g. on font change).
+    ///
+    /// Deliberately does **not** reset [`Self::stats`]: a font change is one
+    /// of the events a hit-rate measurement most wants to see the cost of,
+    /// and zeroing the tally here would hide it. Use [`Self::reset_stats`].
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Subtask 124.16: the cumulative hit/miss tally.
+    #[must_use]
+    pub const fn stats(&self) -> ShapingCacheStats {
+        self.stats
+    }
+
+    /// Subtask 124.16: zero the hit/miss tally, leaving cached lines intact.
+    ///
+    /// Separate from [`Self::clear`] so a measurement can prime the cache and
+    /// then count only the frames it cares about.
+    pub const fn reset_stats(&mut self) {
+        self.stats = ShapingCacheStats { hits: 0, misses: 0 };
     }
 
     /// Shape all visible lines, using cached results where possible.
@@ -208,9 +276,11 @@ impl ShapingCache {
                 .filter(|(h, _)| *h == line_hash)
             {
                 // Cache hit — reuse via Arc refcount bump.
+                self.stats.hits = self.stats.hits.saturating_add(1);
                 Arc::clone(shaped_line)
             } else {
                 // Cache miss — segment and shape.
+                self.stats.misses = self.stats.misses.saturating_add(1);
                 let runs = segment_line(
                     line_chars,
                     visible_tags,
@@ -1579,5 +1649,198 @@ mod tests {
             "emoji: shape_with_plan output must match the old rustybuzz::shape() \
              output exactly"
         );
+    }
+}
+
+/// Subtask 124.16: the shaping cache's hit rate on the four workloads that
+/// decide 124.6.
+///
+/// These are a **measurement**, kept as tests so the numbers cannot rot
+/// silently the way the 2026-07-29 pointer-motion table did. Each asserts
+/// the structural finding rather than a timing, so they are deterministic
+/// and platform-independent.
+///
+/// The headline results are recorded in 124.16's findings block in
+/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+#[cfg(test)]
+mod shaping_cache_hit_rate {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{FormatTag, ShapingCache, ShapingCacheStats};
+    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_common::config::Config;
+
+    use crate::gui::font_manager::FontManager;
+
+    /// A `width` x `height` grid of newline-separated ASCII, generated from
+    /// cell coordinates so every row is distinct and the content is
+    /// reproducible (the same property `SyntheticFrame` relies on in the
+    /// Task 123 harness — no randomness, so a hit count is exact).
+    /// No trailing newline: `split_into_lines` would read one as a final
+    /// empty line, giving `height + 1` lines and quietly shifting every hit
+    /// count in this module by one.
+    fn grid_chars(width: usize, height: usize) -> Vec<TChar> {
+        let mut out = Vec::with_capacity((width + 1) * height);
+        for row in 0..height {
+            if row > 0 {
+                out.push(TChar::NewLine);
+            }
+            for col in 0..width {
+                let b = b'a' + u8::try_from((row * 7 + col * 3) % 26).unwrap_or(0);
+                out.push(TChar::Ascii(b));
+            }
+        }
+        out
+    }
+
+    /// Drive one frame through a cache and return that frame's tally alone.
+    fn frame(
+        cache: &mut ShapingCache,
+        fm: &mut FontManager,
+        chars: &[TChar],
+        width: usize,
+    ) -> ShapingCacheStats {
+        let tags = vec![FormatTag {
+            start: 0,
+            end: chars.len(),
+            ..FormatTag::default()
+        }];
+        cache.reset_stats();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w = fm.cell_width() as f32;
+        let _ = cache.shape_visible(chars, &tags, width, fm, cell_w, false, &[]);
+        cache.stats()
+    }
+
+    fn fixture() -> (FontManager, ShapingCache) {
+        (
+            FontManager::new(&Config::default(), 1.0).unwrap(),
+            ShapingCache::new(),
+        )
+    }
+
+    /// A full-screen redraw of **identical** content costs nothing.
+    ///
+    /// This is the workload the whole of Task 124 exists for: a TUI that
+    /// rewrites unchanged bytes every tick. The shaping stage already
+    /// handles it correctly, which is a genuine finding — it means shaping
+    /// is *not* where that workload's cost lives.
+    #[test]
+    fn identical_full_screen_redraw_is_a_total_hit() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 24);
+
+        let cold = frame(&mut cache, &mut fm, &chars, 80);
+        assert_eq!(cold.hits, 0, "the first frame cannot hit");
+        assert_eq!(cold.misses, 24);
+
+        let warm = frame(&mut cache, &mut fm, &chars, 80);
+        assert_eq!(warm.misses, 0, "an identical redraw must re-shape nothing");
+        assert_eq!(warm.hit_rate(), Some(1.0));
+    }
+
+    /// A single-character edit re-shapes exactly one row.
+    ///
+    /// Note what this does *not* say. The row is the granule: one changed
+    /// character re-shapes every run on its line, which is 124.6's second
+    /// lever. But it does not spill into neighbouring rows.
+    #[test]
+    fn a_single_character_edit_reshapes_exactly_one_row() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 24);
+        let _ = frame(&mut cache, &mut fm, &chars, 80);
+
+        let mut edited = chars.clone();
+        let target = edited
+            .iter()
+            .position(|c| matches!(c, TChar::Ascii(_)))
+            .expect("an ascii cell");
+        edited[target] = TChar::Ascii(b'#');
+
+        let after = frame(&mut cache, &mut fm, &edited, 80);
+        assert_eq!(after.misses, 1, "exactly the edited row re-shapes");
+        assert_eq!(after.hits, 23);
+    }
+
+    /// **A scroll by one line cannot hit at all.**
+    ///
+    /// The finding 124.6's first lever rests on. `ShapingCache` is keyed by
+    /// **line index**, so scrolling by one row shifts every line's content
+    /// into a different slot and invalidates the entire cache even though
+    /// 23 of the 24 lines are byte-identical to lines already shaped.
+    ///
+    /// A content-addressed run-level cache would hit on those 23. This test
+    /// pins the current behaviour so that change is visible when it lands;
+    /// it asserts a **defect**, and 124.6 must invert it, not delete it.
+    #[test]
+    fn a_scroll_by_one_line_hits_nothing() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 25);
+
+        // Frame 1: rows 0..24 of the content.
+        let top = grid_chars_window(&chars, 0, 24);
+        let _ = frame(&mut cache, &mut fm, &top, 80);
+
+        // Frame 2: rows 1..25 — a one-line scroll. 23 of these 24 lines were
+        // shaped a moment ago, at a different index.
+        let scrolled = grid_chars_window(&chars, 1, 24);
+        let after = frame(&mut cache, &mut fm, &scrolled, 80);
+
+        assert_eq!(
+            after.hits,
+            0,
+            "keyed by line index, so a scroll invalidates everything; \
+             {} of the lines were byte-identical to already-shaped ones",
+            after.misses.saturating_sub(1)
+        );
+        assert_eq!(after.hit_rate(), Some(0.0));
+    }
+
+    /// Steady typing: one row changes per frame, the rest hit.
+    #[test]
+    fn steady_typing_hits_every_row_but_the_one_being_typed_on() {
+        let (mut fm, mut cache) = fixture();
+        let mut chars = grid_chars(80, 24);
+        let _ = frame(&mut cache, &mut fm, &chars, 80);
+
+        // Type five characters into the last row, one per frame.
+        let last_row_start = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, TChar::NewLine))
+            .map(|(i, _)| i)
+            .nth(22)
+            .expect("row boundary")
+            + 1;
+
+        let mut totals = ShapingCacheStats::default();
+        for k in 0..5 {
+            chars[last_row_start + k] = TChar::Ascii(b'z');
+            let s = frame(&mut cache, &mut fm, &chars, 80);
+            totals.hits += s.hits;
+            totals.misses += s.misses;
+        }
+
+        assert_eq!(totals.misses, 5, "one row re-shapes per keystroke");
+        assert_eq!(totals.hits, 5 * 23);
+    }
+
+    /// Take `count` lines starting at line `from` out of a newline-separated
+    /// char grid, as its own newline-separated grid.
+    fn grid_chars_window(chars: &[TChar], from: usize, count: usize) -> Vec<TChar> {
+        let mut out = Vec::new();
+        for (i, line) in chars
+            .split(|c| matches!(c, TChar::NewLine))
+            .skip(from)
+            .take(count)
+            .enumerate()
+        {
+            // No trailing newline, for the same reason `grid_chars` omits it.
+            if i > 0 {
+                out.push(TChar::NewLine);
+            }
+            out.extend_from_slice(line);
+        }
+        out
     }
 }
