@@ -240,6 +240,42 @@ fn a_toast_more_than_doubles_frame_cost() {
     );
 }
 
+/// Subtask 124.C2: the toast atlas must not replay its rasterisations
+/// either.
+///
+/// The single-frame assertion above could not see this defect and did not
+/// change when it was fixed. `sync_atlas_to_texture` takes the full-upload
+/// branch on the frame that first rasterises the toast's glyphs, so the
+/// stale-dirty-rect cost lands entirely on **frame 2** — which a one-frame
+/// workload never reaches. That is exactly how the duplicated copy in
+/// `toast_text_pass` survived 124.9.
+///
+/// Measured across the fix: frame 2's uploads went from 14 to 8 against a
+/// steady-state 7, and the three-frame total from 370 calls to 358.
+///
+/// The residual one upload above steady state is the decoration buffer's
+/// second double-buffer slot being sized for the first time, which is
+/// subtask 124.7's expected and permanent warm-up cost, not a replay.
+#[test]
+fn a_toast_does_not_replay_its_glyph_uploads_on_the_second_frame() {
+    let toast = standard().with_toast(ToastPresence::Present);
+    let one = Metrics::of(&record_steady_state(&toast, 1).expect("toast frame 1"));
+    let two = Metrics::of(&record_steady_state(&toast, 2).expect("toast frames 1-2"));
+    let three = Metrics::of(&record_steady_state(&toast, 3).expect("toast frames 1-3"));
+
+    let frame_two_uploads = two.uploads - one.uploads;
+    let frame_three_uploads = three.uploads - two.uploads;
+
+    assert_eq!(
+        frame_two_uploads,
+        frame_three_uploads + 1,
+        "frame 2 must cost steady state plus only the decoration buffer's \
+         one-off sizing orphan ({frame_two_uploads} versus \
+         {frame_three_uploads}); anything more is the toast atlas replaying \
+         glyphs its full upload already covered"
+    );
+}
+
 #[test]
 fn cursor_only_saves_bandwidth_not_call_count() {
     // Stands in for: the `is_cursor_only` fast path in the terminal

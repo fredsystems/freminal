@@ -746,70 +746,15 @@ impl TerminalRenderer {
         self.deco_vbo_index = 1 - self.deco_vbo_index;
     }
 
-    /// Synchronise the atlas CPU data to the GPU texture.
+    /// Synchronise the atlas CPU data to this renderer's GPU texture.
+    ///
+    /// A thin wrapper supplying `atlas_texture`; all the logic lives in
+    /// [`sync_atlas_to_texture`], which the toast text pass shares.
     fn sync_atlas(&self, gl: &Gl<'_>, atlas: &mut GlyphAtlas) {
         let Some(tex) = self.atlas_texture else {
             return;
         };
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        }
-
-        let size = gl_i32_u32(atlas.size());
-
-        if atlas.needs_full_reupload() {
-            // Full upload — create or replace the entire texture.
-            unsafe {
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA.cast_signed(),
-                    size,
-                    size,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(atlas.pixels())),
-                );
-            }
-
-            // The upload above covered every pixel of the atlas, so any rects
-            // queued before it are redundant by construction. Dropping them
-            // here is what stops the *next* frame re-uploading each of those
-            // glyphs individually with `tex_sub_image_2d` (Task 124.9).
-            drop(atlas.take_dirty_rects());
-        } else {
-            // Delta upload — only upload modified regions.
-            for rect in atlas.take_dirty_rects() {
-                let rx = gl_i32_u32(rect.x);
-                let ry = gl_i32_u32(rect.y);
-                let rw = gl_i32_u32(rect.width);
-                let rh = gl_i32_u32(rect.height);
-
-                // Build the sub-image pixel slice for this rect.
-                let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
-
-                unsafe {
-                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                    gl.tex_sub_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&sub_pixels)),
-                    );
-                }
-            }
-        }
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, None);
-        }
+        sync_atlas_to_texture(gl, tex, atlas);
     }
 
     /// Upload decoration vertex data, orphaning only when the payload is not
@@ -1699,6 +1644,84 @@ unsafe fn compile_shader(
 // ---------------------------------------------------------------------------
 //  GPU upload helpers
 // ---------------------------------------------------------------------------
+
+/// Synchronise `atlas`'s CPU-side pixel data to `texture` on the GPU.
+///
+/// The single implementation shared by every glyph atlas: the terminal
+/// renderer's via [`TerminalRenderer::sync_atlas`], and the toast text
+/// pass's, which owns a separate texture and atlas entirely.
+///
+/// Subtask 124.C2 collapsed those into this one function. There used to be a
+/// hand-maintained copy in `toast_text_pass`, whose own doc comment
+/// explained that it was "reproduced here (rather than reused) because that
+/// method is private to `TerminalRenderer` and bound to its own
+/// `atlas_texture` field". Parameterising on the texture removes that reason
+/// — and the copy had already drifted: 124.9 fixed the stale-dirty-rect
+/// defect in one copy and not the other. Fixing that bug twice would have
+/// left in place the thing that caused it.
+///
+/// Two upload modes:
+///
+/// - **Full** (`needs_full_reupload`), one `tex_image_2d` over the whole
+///   atlas. Because that covers every pixel, any rects queued beforehand are
+///   redundant by construction and are dropped here — omitting that was the
+///   124.9 defect, which made the *next* frame re-upload each of those
+///   glyphs individually.
+/// - **Delta**, one `tex_sub_image_2d` per queued dirty rect.
+pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: &mut GlyphAtlas) {
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    }
+
+    let size = gl_i32_u32(atlas.size());
+
+    if atlas.needs_full_reupload() {
+        unsafe {
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA.cast_signed(),
+                size,
+                size,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(atlas.pixels())),
+            );
+        }
+
+        // Redundant by construction: see this function's doc comment (124.9).
+        drop(atlas.take_dirty_rects());
+    } else {
+        for rect in atlas.take_dirty_rects() {
+            let rx = gl_i32_u32(rect.x);
+            let ry = gl_i32_u32(rect.y);
+            let rw = gl_i32_u32(rect.width);
+            let rh = gl_i32_u32(rect.height);
+
+            let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
+
+            unsafe {
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&sub_pixels)),
+                );
+            }
+        }
+    }
+
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, None);
+    }
+}
 
 /// Subtask 124.7: the payload size at or below which
 /// [`TerminalRenderer::upload_deco_verts`] reuses the slot's existing

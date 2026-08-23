@@ -67,10 +67,10 @@ use super::super::font_manager::{FontManager, GlyphStyle};
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
 use super::gl_facade::Gl;
 use super::gpu::{
-    compile_program, gl_f32_i32, gl_i32, gl_i32_u32, setup_fg_inst_attribs, upload_verts,
+    compile_program, gl_f32_i32, gl_i32, setup_fg_inst_attribs, sync_atlas_to_texture, upload_verts,
 };
 use super::shaders::{FG_FRAG_SRC, FG_VERT_SRC};
-use super::vertex::{FG_INSTANCE_FLOATS, extract_atlas_rect};
+use super::vertex::FG_INSTANCE_FLOATS;
 
 // ---------------------------------------------------------------------------
 //  Constants
@@ -553,7 +553,7 @@ impl ToastTextRenderer {
             return;
         };
 
-        sync_toast_atlas(gl, tex, &mut self.atlas);
+        sync_atlas_to_texture(gl, tex, &mut self.atlas);
 
         let buf_idx = self.inst_index;
         let Some(inst_vbo) = self.inst_vbo[buf_idx] else {
@@ -623,67 +623,6 @@ impl ToastTextRenderer {
 // ---------------------------------------------------------------------------
 //  GL upload helper (standalone, not a `TerminalRenderer` method)
 // ---------------------------------------------------------------------------
-
-/// Synchronise `atlas`'s CPU-side pixel data to `texture` on the GPU.
-///
-/// A standalone free function mirroring
-/// [`super::gpu::TerminalRenderer::sync_atlas`], reproduced here (rather
-/// than reused) because that method is private to `TerminalRenderer` and
-/// bound to its own `atlas_texture` field — this pass owns a separate
-/// texture and atlas entirely.
-fn sync_toast_atlas(gl: &Gl<'_>, texture: glow::Texture, atlas: &mut GlyphAtlas) {
-    unsafe {
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-    }
-
-    let size = gl_i32_u32(atlas.size());
-
-    if atlas.needs_full_reupload() {
-        // Full upload — create or replace the entire texture.
-        unsafe {
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA.cast_signed(),
-                size,
-                size,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(atlas.pixels())),
-            );
-        }
-    } else {
-        // Delta upload — only upload modified regions.
-        for rect in atlas.take_dirty_rects() {
-            let rx = gl_i32_u32(rect.x);
-            let ry = gl_i32_u32(rect.y);
-            let rw = gl_i32_u32(rect.width);
-            let rh = gl_i32_u32(rect.height);
-
-            let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
-
-            unsafe {
-                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                gl.tex_sub_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    rx,
-                    ry,
-                    rw,
-                    rh,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&sub_pixels)),
-                );
-            }
-        }
-    }
-
-    unsafe {
-        gl.bind_texture(glow::TEXTURE_2D, None);
-    }
-}
 
 // ---------------------------------------------------------------------------
 //  Pure CPU instance packing

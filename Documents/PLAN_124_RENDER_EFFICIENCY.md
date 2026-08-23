@@ -153,7 +153,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Planned |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
-| 124.10 | Per-row content epoch in `freminal-buffer` | **Blocked — see recon** |
+| 124.10 | Per-row content epoch in `freminal-buffer` | Revised, ready |
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
 | 124.13 | Re-measure pointer-motion suppression rates | Planned |
@@ -161,7 +161,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.15 | Measure chrome's per-frame cost | Planned |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Planned |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
-| 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Planned, ungated |
+| 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
 
 ### Execution model
 
@@ -523,52 +523,129 @@ discard the only regression guard for this behaviour.
 
 **Foundation. Nothing consumes it yet; that is deliberate.**
 
+> **REVISED 2026-08-23 (maintainer-approved).** The original entry put the
+> epoch on `RowCacheEntry`. Recon found that unsound in two ways — see the
+> recon block below, findings (c) and (d) — and the agreed resolution is to
+> move the epoch to the **merge output**. The recon block is retained
+> because it is the evidence for the change, but **this section, not that
+> one, is what to implement.**
+
 Scope: `freminal-buffer/src/buffer/flatten.rs`,
-`freminal-buffer/src/buffer/scroll.rs`, and their tests. Do not touch
-`freminal-terminal-emulator` or the GUI in this subtask.
+`freminal-buffer/src/buffer/scroll.rs`, `freminal-buffer/src/buffer/mod.rs`,
+and their tests. Do not touch `freminal-terminal-emulator` or the GUI in
+this subtask.
 
-What: add a `u64` content epoch to `RowCacheEntry` (`flatten.rs:76-104`). In
-`refresh_row_cache_and_refine_wrapped_urls` (`flatten.rs:1072-1166`), where a
-row cache entry is rebuilt because `row.dirty || cache[i].is_none()`, compare
-the newly-built entry's content against the entry it replaces and bump the
-epoch **only if it differs**. Add
-`Buffer::visible_row_epochs(scroll_offset, extra_rows) -> Vec<u64>`
-alongside the existing `visible_line_widths_extended` in `scroll.rs`.
+#### Why the merge output and not `RowCacheEntry`
 
-The distinction is the entire point and must be preserved by whoever
-implements this: **`Row::dirty` means "was written to"; the epoch means
-"actually changed".** Full-screen TUIs rewrite unchanged bytes by idiom, and
-that is the workload this task exists to stop charging for.
+`RowCacheEntry` is an **intermediate**. What is actually drawn is the merge
+output — `chars` plus `tags` *after* URL splicing — and `MergeCache`
+(`flatten.rs:210-224`) already stores exactly that, with `row_offsets[r]`
+giving each window row's boundary into it.
 
-The comparison basis is the `RowCacheEntry`'s rendered content — `chars`,
-`tags` and `line_width` — not the source `Row`. Anything that changes what
-is drawn must bump; anything that does not, must not. Note that `tags` are
-row-relative in the cache entry, so this comparison is position-independent
-by construction.
+Keying the epoch to the intermediate is what produced both soundness
+findings. Refinement is applied at merge time and never written back to the
+entries, so a clean row's rendered URL tags can change without its entry
+changing (finding (c)); and per-row counters over an absolute-indexed cache
+alias when the window slides (finding (d)).
 
-Epochs are **window-relative** by design. On a scroll or a resize every
-visible row genuinely does show different content, and that is correctly a
-full-screen change; `scroll_changed` and `dims_changed` already force a full
-rebuild for exactly that reason. Do not attempt to key epochs to row
-identity across scroll — that is a strictly larger design and it buys
-nothing here.
+Comparing the merge output dissolves both **by construction** rather than
+working around them:
 
-Deliverable: the epoch field, the bump-on-difference logic, the accessor,
-and unit tests covering: a row rewritten with identical bytes does **not**
-bump; a row rewritten with different bytes does; an SGR-only change does; a
-`line_width` change does; and a clean row is untouched.
+- Refinement is already applied by the time the comparison happens, so
+  there is nothing to propagate and no group logic to get wrong. This also
+  covers any *other* merge-time splicing, which a group-propagation fix
+  would not.
+- The comparison is "did the rendered content **at this screen position**
+  change", which is precisely the question the consumer is asking. It never
+  compares counters across a slid window, so aliasing cannot occur.
 
-Watch the debug-mode oracle cross-check (`flatten.rs:458-469, 515-521`),
-which asserts the fast path's output byte-equals a from-scratch full merge.
-Any new field on the fast path must be proven consistent with that oracle.
+It is also **cheaper than what it replaces.** `interface.rs`'s current
+`content_changed` diff is O(all visible chars) on every dirty frame; this is
+O(re-merged rows only), because the reused prefix carries its stamps
+forward untouched. The plan's "removes work rather than adding it" claim
+holds only in this form.
+
+#### What to build
+
+Add a single globally-monotonic `u64` counter to `Buffer` and a
+`row_epochs: Arc<Vec<u64>>` to `MergeCache`, populated on every merge path:
+
+- **No-op path** (`reuse_available && boundary.is_none()`): return the
+  cached epochs verbatim. Nothing changed, by definition.
+- **Incremental path**: rows `[0, boundary)` carry their previous stamps
+  unchanged — `build_reused_prefix` copies their merged bytes verbatim, so
+  their content is *provably* identical, not merely assumed to be. Rows
+  `[boundary, ..)` are compared against the previous merge's slice at the
+  same position; equal carries the old stamp, different takes a fresh one.
+- **Full-merge path**: compare against the previous merge's slice at the
+  same position where one exists, otherwise assign fresh stamps.
+
+Compare **regardless of whether the window fingerprint matches**. On an `fp`
+mismatch position *r* holds a different absolute row, but the question being
+answered is still "do these pixels need repainting", and identical rendered
+content at a position genuinely does not. This is what makes a buffer-slide
+correct without a special case.
+
+The per-row comparison basis is the row's merged `chars` slice
+(`row_offsets[r]..row_offsets[r+1]`, last row to `chars.len()`), the `tags`
+sub-slice intersecting that range with `start`/`end` clamped to it — the
+same clamping `build_reused_prefix` already does at the cut — and the row's
+`line_width`.
+
+`line_width` therefore **does** get captured onto `RowCacheEntry` at flatten
+time (it is available in `flatten_row`, and it is genuinely part of what a
+row renders as), but it is *compared* at the merge output with everything
+else. `merge_rows_range` holds `cache`, so it is in reach. This is what lets
+124.12 delete both `Arc::ptr_eq` terms instead of one.
+
+Also add `Buffer::visible_row_epochs(scroll_offset, extra_rows) -> Vec<u64>`
+alongside `visible_line_widths_extended` in `scroll.rs`.
+
+#### A monotonic stamp, deliberately not a content hash
+
+Each changed row takes a fresh, never-reused value from the `Buffer`
+counter. The stamp is only a **transport token**; all the meaning lives in
+the content comparison that decides whether to issue a new one.
+
+A 64-bit content hash would additionally handle the A -> B -> A case
+optimally (the monotonic stamp reports "changed" there, and repaints
+needlessly). **Reject it anyway.** A hash collision is an *under-report*,
+and an under-report of this signal is silent visual corruption. Monotonic
+stamps can only ever over-report. Today's `Arc::ptr_eq` also only
+over-reports, so that is the bar any replacement has to clear, and it is not
+negotiable for a performance win.
+
+#### The distinction that must survive
+
+**`Row::dirty` means "was written to"; the epoch means "actually
+changed".** Full-screen TUIs rewrite unchanged bytes by idiom, and that is
+the workload this whole task exists to stop charging for.
+
+Deliverable: the counter, the `MergeCache` field, the three population
+paths, the `line_width` capture, the accessor, and unit tests covering: a
+row rewritten with identical bytes does **not** bump; a row rewritten with
+different bytes does; an SGR-only change does; a `line_width` change does; a
+clean row is untouched; and a row whose *neighbour* changed such that
+wrapped-URL refinement alters this row's rendered tags **does** bump — that
+last one is finding (c) and is the test the `RowCacheEntry` design would
+have failed.
+
+**Only under-reporting is dangerous, so test it adversarially.** A test
+suite that only checks "unchanged content does not bump" can be passed by a
+stamp that never changes. Every case above needs its paired control.
+
+The debug oracle (`debug_verify_against_oracle`, `flatten.rs:602-623`)
+compares only the four merged output vectors and gives a new field **no**
+coverage. Extend it to compare epochs too, or state explicitly why not —
+the incremental path is a hand-maintained shortcut and the epoch is now part
+of what it must get right.
 
 Verification: `cargo test --all`;
 `cargo clippy --all-targets --all-features -- -D warnings`; `cargo machete`.
 
-Prohibitions: do NOT change the `Arc` allocation behaviour of
-`rows_as_tchars_and_tags_incremental` — that is 124.12's business and doing
-it here would confound the measurement. Do NOT add consumers. Do NOT touch
-`Row::dirty`'s existing semantics or call sites.
+Prohibitions: do NOT add consumers. Do NOT touch `Row::dirty`'s existing
+semantics or call sites. Do NOT substitute a content hash for the monotonic
+stamp.
 
 #### 124.10 recon (2026-08-23) — BLOCKED, four corrections needed
 
@@ -655,10 +732,19 @@ smaller — the toast atlas is only synced while a toast is on screen, and
 123's measurement shows a toast frame already costs 121 calls against a
 steady 52 — but leaving the two copies divergent is worse than either state.
 
-Scope of fix: one line, mirroring 124.9. Verification: the toast-present
-workload in `headless_workloads.rs`
-(`a_toast_more_than_doubles_frame_cost`) should be extended rather than
-merely kept passing, since it currently asserts a bound the fix moves.
+**Fix by deduplication, not by fixing the bug twice** (maintainer decision,
+2026-08-23). Applying 124.9's one-liner here a second time would leave
+intact the thing that caused the second bug: two hand-maintained copies of
+the same routine, which drifted once and would drift again. Extract a single
+free function taking `(gl, texture, atlas)` — the only reason the copy exists
+is that `sync_atlas` is a private method bound to `TerminalRenderer`'s own
+`atlas_texture` field, and a free function parameterised on the texture
+removes that reason entirely. `TerminalRenderer::sync_atlas` becomes a thin
+wrapper that supplies its own texture.
+
+Verification: the toast-present workload in `headless_workloads.rs`
+(`a_toast_more_than_doubles_frame_cost`) asserts a bound the fix moves, so
+extend it rather than merely keeping it passing.
 
 ### 124.11 — `row_epochs` on `TerminalSnapshot`; delete `content_changed`
 
@@ -677,6 +763,16 @@ a whole-window comparison rather than adding one.
 
 Note that `scroll_changed` stays. It answers a different question and its
 consumers are unaffected.
+
+**Correction carried from 124.10's recon (finding (b)).** The wording above,
+and the defect table at the top of this document, describe
+`content_changed` as "a true byte-level diff of the whole window". It is
+not: `interface.rs:955-958` compares `prev_chars` only, so `tags`,
+`row_offsets` and `url_tag_indices` are stored and never compared, and an
+SGR-only change is invisible to it. The epoch is therefore **strictly more
+informative** than what it replaces, not equivalent to it. Do not read
+"subsumes and then deletes" as parity — deleting `content_changed` removes a
+weaker signal, which is why no consumer needs a compatibility shim.
 
 Deliverable: the field, the population, the deletions, and the consequent
 updates to every `content_changed` reader in the emulator crate and its
@@ -706,6 +802,14 @@ Delete the `!Arc::ptr_eq(last_rendered_visible, snap.visible_chars)` and
 
 `theme_changed`, `dims_changed` and `folds_changed` keep forcing a
 whole-pane change and are unaffected — they are genuinely global.
+
+**Both** `Arc::ptr_eq` terms go, not just the `visible_chars` one. That is a
+consequence of 124.10's revision: `line_width` is captured onto
+`RowCacheEntry` and folded into the merge-output comparison, so the epoch
+vector already covers a double-width/double-height change and the separate
+`visible_line_widths` pointer test has nothing left to catch.
+`snap.visible_line_widths` itself stays — the renderer still needs it as
+*data* — it just stops being a change-detection input.
 
 The changed-row set is the input 124.14 consumes. In this subtask it may
 still collapse to a bool at the `VertexRebuild` boundary; the point of
