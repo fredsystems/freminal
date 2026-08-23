@@ -285,7 +285,7 @@ stability over an observation period — see 123.12's stop condition.
 | 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
 | 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
 | 123.6   | 1     | Verify zero production overhead (static proof; see re-scope note)   |
-| 123.6b  | 2     | Benchmark the `Real` arm against a direct call (gated on 123.11)    |
+| 123.6b  | 2     | Verify dispatch cost by reading emitted code (replaced benchmark)   |
 | 123.7   | 1     | Headless render-path driver                                          |
 | 123.8   | 1     | Workload assertion tests against the recording log                  |
 | 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
@@ -534,7 +534,9 @@ there is no headless shortcut.
 
 What is provable now is **narrower than the benchmark would have been, not
 stronger** — an earlier revision of this note claimed otherwise and
-overstated it. In a default build `GlTarget` has exactly one variant, so
+overstated it. (123.6b has since closed the gap properly by reading the
+emitted assembly; see below. The branch-free claim is now verified, and the
+"zero cost" claim corrected to "one pointer load".) In a default build `GlTarget` has exactly one variant, so
 Rust lays it out identically to `&glow::Context` with no discriminant, and
 the `match` in all 49 methods is irrefutable: there is nothing to
 discriminate, so there is no condition to test. That is an argument from
@@ -548,15 +550,88 @@ the first assertion from being vacuous. Unlike a Criterion benchmark, these
 run in the ordinary `cargo test` matrix on all four CI platforms and cannot
 go quiet the way an unwired benchmark can.
 
-### 123.6b — benchmark the `Real` arm against a direct `glow::Context` call
+### 123.6b — verify the dispatch cost by reading the emitted code
 
-Phase 2. **Gated on 123.11** (offscreen pbuffer context). Carries 123.6's
-original wording and its original prohibition: if the delegation does show
-measurable per-call cost, report the number and let the maintainer decide —
-do not silently redesign the dispatch to hide it, and do not use the result
-to argue the facade away. Coordinate the bench file with
-`freminal-bench-table` and follow `performance-benchmarks`'s before/after
-procedure and 15% threshold.
+**Re-scoped again, and this time away from benchmarking entirely. Complete.**
+
+123.6b was scoped as "benchmark the `Real` arm against a direct
+`glow::Context` call", gated on 123.11 providing a live context. With that
+context now available, the benchmark turns out to be **the wrong
+instrument, not merely a delayed one**, and running it would have produced
+a misleading result:
+
+- The facade adds at most a single pointer load. The cheapest real GL call
+  is an indirect jump into Mesa. The quantity of interest is two to three
+  orders of magnitude below the thing it would be measured against.
+- A benchmark could therefore only ever *fail to detect* a cost. It could
+  not refute the claim, and a "no measurable difference" headline would
+  read as far stronger evidence than it is — precisely the overclaiming
+  this task exists to stop.
+
+The question 123.6 actually left open was sharper: **is there a per-call
+branch in the emitted machine code?** That is answered by reading the code.
+Reading it is deterministic, needs no GPU or display, and gives a
+categorical answer instead of a statistical one.
+
+`freminal/src/gui/renderer/gl_facade/codegen_probe.rs` (feature
+`gl-codegen-probe`) exposes two pairs of `#[inline(never)]`
+`#[unsafe(no_mangle)]` wrappers differing only in whether they dispatch
+through `Gl`. `assets/ci/check-gl-dispatch-codegen.sh` builds them at
+`--release`, extracts each body from the emitted assembly, and fails if the
+facade version contains conditional control flow.
+
+**Result (x86_64, rustc 1.97.1, opt-level 3).** Two shapes were probed, and
+the difference between them is the whole finding.
+
+**The realistic shape — what production does.** `probe_site_facade` builds
+the facade once and makes several calls through it, mirroring `widget.rs`'s
+`let gl = &Gl::real(painter.gl());` followed by a run of draw calls. Against
+the same sequence made directly on `glow::Context`, the compiler emits:
+
+```text
+probe_site_facade = probe_site_direct
+```
+
+A symbol alias. LLVM proved the two functions byte-identical and folded them
+into the same code. **At a real call site the facade costs exactly nothing.**
+
+**The isolated shape — a deliberately pessimistic control.** A single
+`#[inline(never)]` call taking `&Gl` as a parameter emits one extra
+instruction, `movq (%rdi), %rdi`, and no branch:
+
+```text
+probe_dispatch_direct:  jmpq *<glow bind_buffer>@GOTPCREL(%rip)
+probe_dispatch_facade:  movq (%rdi), %rdi
+                        jmpq *<glow bind_buffer>@GOTPCREL(%rip)
+```
+
+**That `mov` is an artefact of the probe, not a property of the code.**
+`inline(never)` forces a call shape production never takes, in which the
+`&Gl` -> `&glow::Context` indirection cannot fold into the caller. The
+control is kept because it isolates the question the enum raises and
+answers it in the worst case.
+
+**Verdict: no branch in either shape, and zero cost in the shape that
+exists.** No `cmp`, no `test`, no conditional jump, no discriminant load —
+the single-variant `match` compiles away even when inlining is forbidden.
+This closes the "unverified until 123.6b" gap the adversarial review
+flagged.
+
+**A correction, recorded rather than deleted.** An earlier revision of this
+section reported the isolated `mov` as a correction to the "zero cost"
+claim. That was wrong: a pessimistic probe was mistaken for the real thing.
+The realistic shape is what describes production, and there the cost is
+zero. Two overclaims in opposite directions on the same question is worth
+leaving visible.
+
+**Why the check is a script rather than a `#[test]`.** It reads emitted
+assembly, so it is inherently toolchain- and architecture-specific; a test
+asserting x86_64 mnemonics would fail on the `ubuntu-24.04-arm` runner for
+reasons unrelated to the facade. Comparing function *addresses* at runtime
+was considered and rejected: it relies on linker identical-code-folding,
+which is not guaranteed, varies by linker, and does not fire in debug
+builds — a flaky test by construction. A reproducible script whose result
+is recorded here with its toolchain is the honest form.
 
 ### 123.7 — Headless render-path driver
 

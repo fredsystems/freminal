@@ -897,9 +897,12 @@ mod tests {
     /// and it does not inspect generated code, so it is strictly weaker
     /// than the runtime benchmark 123.6 originally asked for. The layout
     /// result plus the single-variant reasoning below is strong evidence
-    /// that the dispatch is free, but "no per-call branch in the emitted
-    /// machine code" remains **unverified by measurement** until 123.6b.
-    /// Do not cite this test as if it were that measurement.
+    /// that the dispatch is free. The stronger claim was verified
+    /// separately by 123.6b, which reads the emitted assembly: at a
+    /// realistic call site the facade and a direct `glow` call compile to
+    /// byte-identical code, folded into the same symbol. See
+    /// `gl_facade::codegen_probe`. Still, do not cite *this* test as if it
+    /// were that verification.
     ///
     /// Without the `gl-recording` feature, `GlTarget` has exactly one
     /// variant: `Real(&glow::Context)`. Rust lays out a single-variant enum

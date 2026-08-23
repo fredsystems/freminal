@@ -45,6 +45,12 @@
 //! ([`recording`]). Migrating the five call sites above onto `Gl` is still
 //! 123.4/123.5.
 
+// Task 123 subtask 123.6b: two pairs of `#[inline(never)]` wrappers whose
+// emitted assembly is compared by `assets/ci/check-gl-dispatch-codegen.sh`
+// to prove the facade adds no per-call branch. Feature-gated because
+// `#[no_mangle]` symbols have no business in a production build.
+#[cfg(feature = "gl-codegen-probe")]
+pub mod codegen_probe;
 mod facade;
 #[cfg(feature = "gl-recording")]
 pub mod recording;
