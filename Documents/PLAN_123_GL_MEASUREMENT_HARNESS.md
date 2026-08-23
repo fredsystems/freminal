@@ -1,14 +1,16 @@
 # PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
 
-> **STATUS: PHASE 1 COMPLETE, PHASE 2 BLOCKED ON `nix develop`** on
-> `task-123/gl-measurement-harness`. Subtasks 123.1-123.10 are committed;
-> 123.14's Phase 1 half is written below under Findings. 123.11-123.13 and
-> 123.6b wait on the maintainer running `nix develop` after 123.10's
-> `flake.nix` change, per `flake-dev-shell-discipline`. This document
-> is the full subtask breakdown, written at activation time against the code
-> as it stands on `main`. Subtask 123.1's audit corrected several factual
-> claims made at activation time — see "Audit corrections (123.1)" below.
-> Those corrections are folded into the prose that follows them.
+> **STATUS: COMPLETE.** All subtasks (123.1-123.14, including 123.6b) are
+> implemented and committed on `task-123/gl-measurement-harness`. Both
+> phases are built and both diagnostic obligations are discharged; the
+> Findings section below is the task's product and the input to Task 124's
+> activation.
+>
+> One item is deliberately left open for the maintainer rather than decided
+> here: whether to extend the `Gl` facade across the `freminal-windowing`
+> crate boundary so `GlState::clear`'s two per-full-frame calls are
+> recorded. See the disclosed-gap note in Findings; it moves no finding and
+> reorders no Task 124 priority.
 
 Task 123 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
@@ -1059,6 +1061,84 @@ duplicating it — and is deliberately **not** done here, since Task 123
 changes no behaviour and this is a scope question for the maintainer.
 Recorded as an open question rather than silently absorbed.
 
+### Phase 2 findings (pixel level)
+
+> Reference platform: `llvmpipe (LLVM 21.1.8, 256 bits)`, Mesa 26.2.0,
+> x86_64 Linux under `xvfb-run`, bundled `CaskaydiaCove` at
+> `pixels_per_point = 1.0`. A pixel result is only meaningful relative to
+> the rasteriser that produced it; goldens carry a `.renderer` sidecar for
+> this reason.
+
+**Set expectations first: this section is deliberately thin, and that is
+the honest outcome rather than an incomplete one.** Phase 2 is a
+*regression net*, not a discovery tool. Its value is that a future change
+altering what freminal draws now fails a test; it was never likely to
+surface an existing visual bug, and it did not. Two things it did
+establish are worth having.
+
+#### 1. A repaint of unchanged state produces byte-identical pixels
+
+The most useful thing Phase 2 contributes, and the one Phase 1 structurally
+could not.
+
+Phase 1 established that a frame in which nothing changed still costs a
+full clear and a full present — the `Unchanged` -> `Full` fallback in
+`decide_frame_damage`. But a call log can only show that the calls were
+*made*. It cannot show that they accomplished nothing.
+
+Rendering the same unchanged state twice produces **0 differing pixels at a
+channel bound of 0**. So the ~52 GL calls and ~200 KB of uploads that a
+no-change frame pays produce, provably, not one different pixel on screen.
+
+That converts Task 124.2's case from an argument about control flow into a
+measurement: the work is not merely redundant-looking, it is demonstrably
+without effect. Pinned by
+`pixel_harness.rs::repainting_unchanged_state_produces_identical_pixels`.
+
+#### 2. The default-background skip is real, and dominates the frame
+
+Task 34 established that the renderer deliberately skips cells with
+`DefaultBackground`, leaving those pixels untouched so the window
+background and any transparency show through. That has been an
+architectural claim with no direct verification since.
+
+Measured on a 40x10 grid of dense text (400x200 px, 80,000 pixels):
+
+| Property | Count | Share |
+| -------- | ----- | ----- |
+| Fully transparent (`alpha == 0`) | 56,157 | 70.2% |
+| Non-black RGB (glyph coverage) | 23,843 | 29.8% |
+| Fully opaque (`alpha == 255`) | 1,762 | 2.2% |
+
+The skip is real and accounts for most of the surface. The small opaque
+count relative to glyph coverage also shows how much of the text is
+anti-aliased edge rather than solid fill.
+
+**This constrains Task 124.** Any change to damage tracking or partial
+presents must preserve the untouched-background property. A "cheaper" path
+that began clearing to an opaque colour would silently break background
+transparency, and **no call-count test would catch it** — which is exactly
+the class of regression `PROFILING.md` said was undetectable before this
+harness existed. Pinned by
+`pixel_harness.rs::default_background_cells_are_left_untouched`.
+
+#### What Phase 2 did not find
+
+No existing visual defect. Stated explicitly so its absence is not later
+mistaken for a gap in the investigation: the harness was exercised against
+cursor-shown/hidden, toast present/absent, and repeated identical renders,
+and every difference observed was the difference that was supposed to be
+there. The instrument works; there was simply nothing broken in front of
+it.
+
+#### Determinism, as measured
+
+Three consecutive captures of a 400x200 frame containing 23,843 non-black
+pixels of shaped, rasterised text produced **0 differing pixels at bound
+0** — bit-identical, not merely close. This is what justifies the exact
+golden tolerance (see 123.12), and it was measured *before* any golden was
+captured, per `flaky-tests-are-bugs`.
+
 ### Verdicts on the two diagnostic obligations
 
 #### Obligation 1 — the always-new-`Arc` finding: **CONFIRMED**
@@ -1258,7 +1338,54 @@ guess.
 - **Open question for the maintainer** — whether to extend the `Gl` facade
   across the `freminal-windowing` boundary so the two per-full-frame
   `clear`/`clear_color` calls are recorded too. Not a Task 124 subtask
-  until that is decided; see the disclosed-gap note above.
+  until that is decided; see the disclosed-gap note above. Note that if
+  124.2 lands a "present nothing" state, those calls stop being issued on
+  skipped frames anyway, so the gap partly closes as a side effect of the
+  work it is not blocking.
+
+### A note on scope: this section is findings, not Task 124's task list
+
+123.14's remit is to report what was measured and state verdicts. It has
+done that, and the per-subtask guidance above is the direct output.
+
+**Decomposing Task 124 into subtasks is Task 124's own activation, not this
+section's job**, per `plan-decomposition`'s just-in-time rule — and that
+boundary matters more than usual here. The maintainer's architectural
+position, recorded during this task, reshapes 124 substantially rather than
+merely reprioritising it:
+
+- **A repaint should be PTY-driven.** Keystrokes echo to the PTY and return
+  as output; mouse motion should not repaint at all. The corollary is that
+  the grid is dirtied only by PTY bytes.
+- **Local view state is the legitimate exception**, and it is not small:
+  cursor blink, text blink (SGR 5/6), selection drag, scrollback scrolling
+  and URL hover all repaint without any PTY round trip. So the rule is
+  "only the PTY dirties the *grid*; local state may dirty a *bounded
+  region*" — not "only the PTY repaints".
+- **Two missing states, not one.** `FrameDamage` has no "nothing changed,
+  present nothing" (finding above), and `PaneFrameDamage` has no
+  `Region(rects)` — only `Unchanged`, `CursorOnly(rect)`, `Full`. The
+  cursor got a bounded-damage special case and nothing else did, so
+  selection, hover and scroll changes are all forced to `Full` because the
+  type cannot express "these cells". That second gap is arguably the larger
+  of the two: the first saves frames where nothing happened, the second
+  saves every frame where something small happened.
+- **Chrome caching should be removed unless retention is provably
+  beneficial.** 121.8 found `RedrawRequested` had permanently disqualified
+  `ChromeMode::Replay`, leaving the #436 subsystem inert since it landed;
+  121.32 then disabled it by default. The live question is therefore not
+  "is it beneficial" but "has it ever done anything", and deletion is the
+  null hypothesis. The deeper argument is that caching an immediate-mode
+  framework's output fights egui's design intent, and each workaround
+  compounds.
+- **Ordering caution.** If chrome caching is deleted *and* a "present
+  nothing" state is added, chrome becomes the thing forcing `Full` on
+  frames the grid would otherwise skip. Measure chrome's per-frame cost
+  before deleting, or the trade is invisible. Phase 2's harness can do
+  that.
+
+None of this is decided here. It is recorded so that Task 124's activation
+session starts from it rather than rediscovering it.
 
 Nothing above is upgraded beyond what was measured, and no pre-123 informal
 observation is reported here as harness output.

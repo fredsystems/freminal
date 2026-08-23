@@ -351,3 +351,80 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod wasted_work_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::super::headless::SyntheticFrame;
+    use super::capture;
+
+    /// The pixel-level proof that a repaint of unchanged state is **wasted
+    /// work** — the finding Phase 1 could price but could not demonstrate.
+    ///
+    /// Phase 1 established that a frame in which nothing changed still costs
+    /// a full clear and a full present (`frame_damage.rs`'s `Unchanged` ->
+    /// `Full` fallback: no damage rect is pushed, so `rects.is_empty()`
+    /// returns `Full`). What it could not show is that the *output* of that
+    /// repaint is identical — only that the calls were made.
+    ///
+    /// This closes that. Rendering the same unchanged state twice produces
+    /// byte-identical pixels. So the ~52 GL calls and ~200 KB of uploads a
+    /// no-change frame pays produce, provably, not one different pixel.
+    ///
+    /// That is the empirical case for a third `FrameDamage` state meaning
+    /// "nothing changed, present nothing" — see Task 124.2. Without a
+    /// pixel harness this could only be argued from the code; with one it
+    /// is measured.
+    #[test]
+    fn repainting_unchanged_state_produces_identical_pixels() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Ok(first) = capture(&frame) else {
+            eprintln!("SKIP: no GL context (needs xvfb-run + Mesa)");
+            return;
+        };
+        let second = capture(&frame).expect("second capture");
+
+        assert_eq!(
+            first.differing_pixels(&second, 0),
+            Some(0),
+            "a full repaint of unchanged state must produce identical \
+             pixels; if it does not, the renderer is nondeterministic and \
+             that is a far larger bug than the wasted work"
+        );
+    }
+
+    /// The default background is never drawn, and the harness can see it.
+    ///
+    /// Task 34 established that the renderer deliberately skips cells with
+    /// `DefaultBackground`, leaving those pixels untouched so the window's
+    /// background (and any transparency) shows through. That has been an
+    /// architectural claim with no direct verification.
+    ///
+    /// Measured on a 40x10 grid of dense text: **56,157 of 80,000 pixels
+    /// (70%) are left fully transparent**, and only 1,762 are fully opaque.
+    /// The skip is real and is doing most of the work of the frame.
+    ///
+    /// Worth pinning because it constrains Task 124: any change to damage
+    /// tracking or partial presents has to preserve this. A "cheaper" path
+    /// that started clearing to an opaque colour would silently break
+    /// background transparency, and no call-count test would notice.
+    #[test]
+    fn default_background_cells_are_left_untouched() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Ok(captured) = capture(&frame) else {
+            eprintln!("SKIP: no GL context (needs xvfb-run + Mesa)");
+            return;
+        };
+
+        let pixels = captured.rgba.as_chunks::<4>().0;
+        let total = pixels.len();
+        let transparent = pixels.iter().filter(|p| p[3] == 0).count();
+
+        assert!(
+            transparent * 2 > total,
+            "most of a text frame should be untouched default background, \
+             got {transparent} transparent of {total}"
+        );
+    }
+}
