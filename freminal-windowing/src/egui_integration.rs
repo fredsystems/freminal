@@ -8,6 +8,8 @@
 use std::sync::Arc;
 
 use conv2::ConvUtil;
+#[cfg(feature = "frame-profiling")]
+use conv2::ValueInto;
 use winit::window::Window;
 
 use crate::error::Error;
@@ -300,6 +302,35 @@ struct FrameProfile {
     /// reports `repaint: true` unconditionally for `CursorMoved`) but did
     /// not need to, per the app's own state.
     pointer_frames_suppressed: u64,
+
+    // ── 124.17: skip-clear + partial-present path attribution ───────────
+    //
+    // `decide_partial_present` (pure, unit-tested) attributes every frame to
+    // exactly one `PartialPresentDecision`, so these five counters are
+    // mutually exclusive and sum to `frame_counter`. Cumulative since window
+    // creation, like every other plain counter on this struct.
+    /// Frames where the app reported [`crate::FrameDamage::Full`].
+    present_partial_not_requested: u64,
+    /// Frames where the app reported `Partial` with an empty rect list.
+    present_partial_no_rects: u64,
+    /// Frames where the app reported `Partial` with rects, but the surface
+    /// cannot present a sub-region ([`PartialPresentSupport::Unsupported`]).
+    present_partial_blocked_surface: u64,
+    /// Frames where the app reported `Partial` with rects, the surface
+    /// supports partial present, but `buffer_age() != 1`.
+    present_partial_blocked_buffer_age: u64,
+    /// Frames where the skip-clear + partial-present path was actually
+    /// taken.
+    present_partial_taken: u64,
+    /// Histogram of the queried buffer age, bucketed by `min(age, 3)` (index
+    /// 3 means "3 or more"). Sampled **only** where the age was actually
+    /// queried — the app requested `Partial` with rects *and* the surface
+    /// supports partial present — so this histogram's total equals
+    /// `present_partial_blocked_buffer_age + present_partial_taken`, **not**
+    /// `frame_counter`: a frame that never reached the age query (`Full`,
+    /// empty rects, or a surface that cannot present a sub-region) is not
+    /// represented here at all.
+    buffer_age_histogram: [u64; 4],
 }
 
 #[cfg(feature = "frame-profiling")]
@@ -430,6 +461,17 @@ impl FrameProfile {
             Some(d) if d == std::time::Duration::MAX => "MAX".to_string(),
             Some(d) => format!("{}us", d.as_micros()),
         }
+    }
+
+    /// 124.17: record one queried buffer age into `buffer_age_histogram`,
+    /// bucketed by `min(age, 3)` (index 3 means "3 or more"). Called only
+    /// from the two [`PartialPresentDecision`] variants that actually
+    /// queried the age (`BlockedByBufferAge` and `Taken`) — see the field
+    /// doc on `buffer_age_histogram` for why its total is therefore NOT
+    /// `frame_counter`.
+    fn record_buffer_age(&mut self, age: u32) {
+        let bucket: usize = age.min(3).value_into().unwrap_or(3);
+        self.buffer_age_histogram[bucket] = self.buffer_age_histogram[bucket].saturating_add(1);
     }
 }
 
@@ -718,6 +760,101 @@ fn evaluate_chrome_gate(
         repaint_settled: chrome_repaint_settled(prev_repaint_delay, prev_terminal_requested_delay),
         damage_unchanged: prev_chrome_damage == crate::ChromeDamage::Unchanged,
         no_chrome_input: !chrome_input_this_frame,
+    }
+}
+
+/// Whether the surface can present a damaged sub-region at all. A static
+/// per-surface capability, probed once at surface creation
+/// (`GlState::supports_partial_present`) and re-read every frame here —
+/// cheap, since it is a stored `Option::is_some()` check, not a driver
+/// round trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialPresentSupport {
+    /// The surface can present only the damaged rectangles
+    /// (`eglSwapBuffersWithDamage` is available).
+    Supported,
+    /// The surface must always present the whole buffer (extension absent,
+    /// non-EGL backend, or an Apple platform with no EGL backend at all).
+    Unsupported,
+}
+
+impl From<bool> for PartialPresentSupport {
+    /// `GlState::supports_partial_present` returns a `bool` because it is a
+    /// direct read of `Option::is_some()` over a probed EGL extension. It is
+    /// converted to the named capability here, at the single point that
+    /// reads it, so nothing downstream — [`decide_partial_present`], its
+    /// tests, and the counters — ever handles a bare bool.
+    ///
+    /// Widening `GlState`'s own signature instead would put a present-path
+    /// decision type into the GL-context module, which is the wrong home for
+    /// it (`module-cohesion`), and would have to be duplicated across that
+    /// function's two `cfg`-gated definitions.
+    fn from(supported: bool) -> Self {
+        if supported {
+            Self::Supported
+        } else {
+            Self::Unsupported
+        }
+    }
+}
+
+/// Why a frame did or did not take the skip-clear + partial-present path
+/// (124.17). Exactly one variant per frame, so the derived
+/// `frame-profiling` counters sum to the frame count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartialPresentDecision {
+    /// The app reported [`crate::FrameDamage::Full`].
+    NotRequested,
+    /// The app reported `Partial` with an empty rect list.
+    RequestedWithNoRects,
+    /// The app reported `Partial` with rects, but the surface cannot
+    /// present a sub-region (damage extension absent, non-EGL backend, or
+    /// an Apple platform).
+    BlockedBySurface,
+    /// The app reported `Partial` with rects and the surface supports
+    /// partial present, but the back buffer does not hold the previous
+    /// frame's contents (`buffer_age() != 1`).
+    BlockedByBufferAge {
+        /// The queried buffer age that failed the `== 1` check.
+        age: u32,
+    },
+    /// Taken: the clear is skipped and only the damaged rects present.
+    Taken,
+}
+
+/// 124.17: decide whether this frame may skip the full clear and present
+/// only its damaged region. Pure and unit-testable — the single source of
+/// truth the `run_frame` call site consumes for both the `partial` value it
+/// has always computed and (feature-gated) the frame-profiling counters
+/// that attribute every frame to exactly one [`PartialPresentDecision`].
+///
+/// `buffer_age` is taken **lazily** (`impl FnOnce() -> u32`, not `u32`):
+/// today's gate short-circuits, so the EGL buffer-age query is never issued
+/// on a `Full` frame, an empty-rect `Partial` frame, or a `Partial` frame
+/// the surface cannot present a sub-region for. Taking it eagerly would add
+/// a per-frame driver round trip to every frame in the program — a
+/// behaviour change inside the very path this function only measures.
+fn decide_partial_present(
+    frame_damage: &crate::FrameDamage,
+    support: PartialPresentSupport,
+    buffer_age: impl FnOnce() -> u32,
+) -> PartialPresentDecision {
+    match frame_damage {
+        crate::FrameDamage::Full => PartialPresentDecision::NotRequested,
+        crate::FrameDamage::Partial(rects) => {
+            if rects.is_empty() {
+                PartialPresentDecision::RequestedWithNoRects
+            } else if support == PartialPresentSupport::Unsupported {
+                PartialPresentDecision::BlockedBySurface
+            } else {
+                let age = buffer_age();
+                if age == 1 {
+                    PartialPresentDecision::Taken
+                } else {
+                    PartialPresentDecision::BlockedByBufferAge { age }
+                }
+            }
+        }
     }
 }
 
@@ -1192,14 +1329,51 @@ impl EguiState {
         //      (`buffer_age() == 1`), and the surface can present a sub-region.
         // If either fails we fall back to the always-correct full path:
         // clear + full paint + full swap.
-        let partial = match frame_damage {
-            crate::FrameDamage::Partial(rects)
-                if !rects.is_empty()
-                    && gl_state.supports_partial_present()
-                    && gl_state.buffer_age() == 1 =>
-            {
-                Some(rects)
+        //
+        // 124.17: the gate itself lives in `decide_partial_present` (pure,
+        // unit-tested) so it can be measured without changing what `partial`
+        // evaluates to — see that function's doc for why `buffer_age` stays
+        // a lazy closure here rather than a plain `u32`.
+        let partial_present_decision = decide_partial_present(
+            &frame_damage,
+            PartialPresentSupport::from(gl_state.supports_partial_present()),
+            || gl_state.buffer_age(),
+        );
+        #[cfg(feature = "frame-profiling")]
+        match partial_present_decision {
+            PartialPresentDecision::NotRequested => {
+                self.frame_profile.present_partial_not_requested = self
+                    .frame_profile
+                    .present_partial_not_requested
+                    .saturating_add(1);
             }
+            PartialPresentDecision::RequestedWithNoRects => {
+                self.frame_profile.present_partial_no_rects = self
+                    .frame_profile
+                    .present_partial_no_rects
+                    .saturating_add(1);
+            }
+            PartialPresentDecision::BlockedBySurface => {
+                self.frame_profile.present_partial_blocked_surface = self
+                    .frame_profile
+                    .present_partial_blocked_surface
+                    .saturating_add(1);
+            }
+            PartialPresentDecision::BlockedByBufferAge { age } => {
+                self.frame_profile.present_partial_blocked_buffer_age = self
+                    .frame_profile
+                    .present_partial_blocked_buffer_age
+                    .saturating_add(1);
+                self.frame_profile.record_buffer_age(age);
+            }
+            PartialPresentDecision::Taken => {
+                self.frame_profile.present_partial_taken =
+                    self.frame_profile.present_partial_taken.saturating_add(1);
+                self.frame_profile.record_buffer_age(1);
+            }
+        }
+        let partial = match (frame_damage, partial_present_decision) {
+            (crate::FrameDamage::Partial(rects), PartialPresentDecision::Taken) => Some(rects),
             _ => None,
         };
 
@@ -1429,6 +1603,18 @@ impl EguiState {
                         p.pointer_frames_scheduled,
                         p.pointer_frames_suppressed
                     ),
+                    // 124.17: skip-clear + partial-present path attribution,
+                    // cumulative since window creation. Mutually exclusive
+                    // and sum to `frame_counter`. `buffer_age_histogram`'s
+                    // total is `present_partial_blocked_buffer_age +
+                    // present_partial_taken`, NOT `frame_counter` — see that
+                    // field's doc.
+                    present_partial_not_requested = p.present_partial_not_requested,
+                    present_partial_no_rects = p.present_partial_no_rects,
+                    present_partial_blocked_surface = p.present_partial_blocked_surface,
+                    present_partial_blocked_buffer_age = p.present_partial_blocked_buffer_age,
+                    present_partial_taken = p.present_partial_taken,
+                    buffer_age_histogram = ?p.buffer_age_histogram,
                     "windowing frame-profiling stats (task 121 harness): ChromeMode \
                      duty cycle, the windowing-owned phase_total/run_ui/tessellate/\
                      paint/swap wall-clock split over frame_counter drawn frames for \
@@ -1445,7 +1631,11 @@ impl EguiState {
                      pointer-motion-suppression-spike counters \
                      (pointer_frames_scheduled/pointer_frames_suppressed/\
                      pointer_suppressed_duty_cycle_pct, cumulative since window \
-                     creation)"
+                     creation), and the 124.17 skip-clear + partial-present path \
+                     attribution (present_partial_*, cumulative, mutually exclusive, \
+                     summing to frame_counter; buffer_age_histogram bucketed by \
+                     min(age, 3), summing to present_partial_blocked_buffer_age + \
+                     present_partial_taken instead)"
                 );
 
                 // Settle-gate value diagnostics and the repaint-cause
@@ -1762,11 +1952,35 @@ mod frame_profiling_tests {
              12x freminal/src/gui/terminal/widget.rs:1936 "
         );
     }
+
+    // ── 124.17: `FrameProfile::record_buffer_age` ────────────────────────
+
+    #[test]
+    fn record_buffer_age_buckets_ages_zero_one_two_exactly() {
+        let mut profile = FrameProfile::default();
+        profile.record_buffer_age(0);
+        profile.record_buffer_age(1);
+        profile.record_buffer_age(2);
+        assert_eq!(profile.buffer_age_histogram, [1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn record_buffer_age_buckets_three_and_above_into_index_three() {
+        let mut profile = FrameProfile::default();
+        profile.record_buffer_age(3);
+        profile.record_buffer_age(4);
+        profile.record_buffer_age(1000);
+        assert_eq!(profile.buffer_age_histogram, [0, 0, 0, 3]);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{atlas_grew, chrome_repaint_settled, evaluate_chrome_gate};
+    use super::{
+        PartialPresentDecision, PartialPresentSupport, atlas_grew, chrome_repaint_settled,
+        decide_partial_present, evaluate_chrome_gate,
+    };
+    use crate::{DamageRect, FrameDamage};
     use egui::ImageData;
     use egui::epaint::{ImageDelta, Primitive};
     use egui::{Color32, ColorImage, Rect, TextureId, TextureOptions, TexturesDelta, pos2, vec2};
@@ -2778,6 +2992,131 @@ mod tests {
             vec![preclear_rect, pane0_rect, pane1_rect, postshader_rect],
             "the whole-list tessellation must carry the same callbacks in the \
              same order the split does"
+        );
+    }
+
+    // ── 124.17: `decide_partial_present` ─────────────────────────────────
+
+    fn a_rect() -> DamageRect {
+        DamageRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        }
+    }
+
+    #[test]
+    fn not_requested_on_full_damage_and_never_queries_buffer_age() {
+        let decision =
+            decide_partial_present(&FrameDamage::Full, PartialPresentSupport::Supported, || {
+                panic!("buffer_age() must not be queried on a Full frame")
+            });
+        assert_eq!(decision, PartialPresentDecision::NotRequested);
+    }
+
+    #[test]
+    fn requested_with_no_rects_on_empty_partial_and_never_queries_buffer_age() {
+        let decision = decide_partial_present(
+            &FrameDamage::Partial(Vec::new()),
+            PartialPresentSupport::Supported,
+            || panic!("buffer_age() must not be queried when the rect list is empty"),
+        );
+        assert_eq!(decision, PartialPresentDecision::RequestedWithNoRects);
+    }
+
+    #[test]
+    fn blocked_by_surface_when_unsupported_and_never_queries_buffer_age() {
+        let decision = decide_partial_present(
+            &FrameDamage::Partial(vec![a_rect()]),
+            PartialPresentSupport::Unsupported,
+            || panic!("buffer_age() must not be queried when the surface can't present partially"),
+        );
+        assert_eq!(decision, PartialPresentDecision::BlockedBySurface);
+    }
+
+    #[test]
+    fn blocked_by_buffer_age_when_age_is_not_one() {
+        let decision = decide_partial_present(
+            &FrameDamage::Partial(vec![a_rect()]),
+            PartialPresentSupport::Supported,
+            || 2,
+        );
+        assert_eq!(
+            decision,
+            PartialPresentDecision::BlockedByBufferAge { age: 2 }
+        );
+    }
+
+    #[test]
+    fn blocked_by_buffer_age_when_age_is_zero() {
+        // Age 0 means "new or unknown" -- must NOT be treated as age 1.
+        let decision = decide_partial_present(
+            &FrameDamage::Partial(vec![a_rect()]),
+            PartialPresentSupport::Supported,
+            || 0,
+        );
+        assert_eq!(
+            decision,
+            PartialPresentDecision::BlockedByBufferAge { age: 0 }
+        );
+    }
+
+    #[test]
+    fn taken_requires_all_three_conditions_together() {
+        // All three hold: nonempty rects, surface supports partial present,
+        // buffer age == 1.
+        let taken = decide_partial_present(
+            &FrameDamage::Partial(vec![a_rect()]),
+            PartialPresentSupport::Supported,
+            || 1,
+        );
+        assert_eq!(taken, PartialPresentDecision::Taken);
+
+        // Drop each condition in turn -- each alone must prevent `Taken`.
+        assert_ne!(
+            decide_partial_present(&FrameDamage::Full, PartialPresentSupport::Supported, || 1),
+            PartialPresentDecision::Taken,
+            "Full damage alone must block Taken"
+        );
+        assert_ne!(
+            decide_partial_present(
+                &FrameDamage::Partial(Vec::new()),
+                PartialPresentSupport::Supported,
+                || 1
+            ),
+            PartialPresentDecision::Taken,
+            "an empty rect list alone must block Taken"
+        );
+        assert_ne!(
+            decide_partial_present(
+                &FrameDamage::Partial(vec![a_rect()]),
+                PartialPresentSupport::Unsupported,
+                || 1
+            ),
+            PartialPresentDecision::Taken,
+            "an unsupported surface alone must block Taken"
+        );
+        assert_ne!(
+            decide_partial_present(
+                &FrameDamage::Partial(vec![a_rect()]),
+                PartialPresentSupport::Supported,
+                || 2
+            ),
+            PartialPresentDecision::Taken,
+            "a buffer age other than 1 alone must block Taken"
+        );
+    }
+
+    #[test]
+    fn partial_present_support_from_bool() {
+        assert_eq!(
+            PartialPresentSupport::from(true),
+            PartialPresentSupport::Supported
+        );
+        assert_eq!(
+            PartialPresentSupport::from(false),
+            PartialPresentSupport::Unsupported
         );
     }
 }

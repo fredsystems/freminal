@@ -300,8 +300,9 @@ impl GlState {
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         if egl_damage.is_some() {
             tracing::info!(
-                "Present path: damage-aware (EGL swap-with-damage) — cursor-only \
-                 frames will skip the full clear and present only the changed region"
+                "Present path: damage-aware (EGL swap-with-damage available) — the \
+                 skip-clear + partial-present fast path is available for cursor-only \
+                 frames (see 124.17 for whether it is actually taken)"
             );
         } else {
             tracing::info!(

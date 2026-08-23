@@ -145,7 +145,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | Subtask | Title | Status |
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
-| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Planned |
+| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Blocked on 124.17** |
 | 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
@@ -157,11 +157,12 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Blocked on 124.17** |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
+| 124.17 | Does the skip-clear + partial-present path ever actually fire? | Planned |
 | 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned |
 
 ### Execution model
@@ -171,13 +172,21 @@ independent leaves (may run at any time, in parallel):
   124.4   124.7   124.9   124.8   124.C1
 
 the epoch chain (strictly sequential, the spine of this task):
-  124.10 -> 124.11 -> 124.12 -> 124.14 -> 124.2
+  124.10 -> 124.11 -> 124.12 -> [124.17] -> 124.14 -> 124.2
 
 measurement-then-decision pairs (each pair sequential; pairs parallel):
   124.13 -> 124.3
   124.15 -> 124.5
   124.16 -> 124.6
+  124.17 -> 124.14, 124.2   (inserted 2026-08-23; see 124.17)
 ```
+
+**124.17 was inserted into the spine on 2026-08-23, after 124.12 landed.**
+Recon for 124.14 could not verify that subtask's stated premise — that the
+shipped cursor-only path "already proves the mechanism" — and produced a
+contradiction the code alone cannot resolve. 124.14 and 124.2 both spend the
+skip-clear + partial-present path; neither may be built until 124.17 shows
+that path fires and is correct when it does. See 124.17.
 
 The epoch chain edits shared types in `freminal-buffer`,
 `freminal-terminal-emulator` and the GUI in sequence, so per
@@ -1423,6 +1432,257 @@ a **false confirmation** of a refuted diagnosis.
 
 Scope: the doc comment only. Documentation change; no test needed beyond the
 standard suite. May be folded into 124.2, which edits the same function.
+
+### 124.17 — Does the skip-clear + partial-present path ever actually fire?
+
+**Measurement only. Changes no behaviour. Gates 124.14 and 124.2.**
+
+*Added 2026-08-23 during 124.14's activation recon, which hit a hard stop.*
+
+#### Why this exists
+
+124.14's entry asserts that extending bounded damage from the cursor rect to
+a row-range rect set is safe because "the existing cursor-only path already
+proves the mechanism". **Recon could not verify that, and reading the code
+produces a contradiction.** Each link below is confirmed in the source:
+
+| Fact | Where |
+| ---- | ----- |
+| On a `Partial` frame the GL clear is skipped **entirely**, not scissored | `egui_integration.rs:1205` |
+| The head pass is "chrome painted before the terminal band — e.g. the `CentralPanel` background fill" | `egui_integration.rs:1046-1058` |
+| Head, band and tail are painted **unconditionally**, every frame, `Partial` or not | `egui_integration.rs:1258-1262` |
+| `panel_fill` is the palette background at `bg_opacity` alpha | `chrome_style.rs:214` |
+| `bg_opacity` defaults to **1.0**, i.e. fully opaque | `config.rs:359` |
+| The pane's scissor is applied **only** when `present_is_partial` — exactly when the clear was skipped | `widget.rs:3092-3100` |
+
+Composed, a `CursorOnly` partial frame at default config should: skip the
+clear, then paint an **opaque** `panel_fill` over the whole central area
+(erasing the previous frame's terminal content), then redraw the grid
+**clipped to the cursor rect**. Everything outside that rect would be left
+flat background. The screen would blank on every cursor blink.
+
+That is not observed. So either the model above is wrong somewhere not
+visible in the source, or **the partial path is effectively never taken**.
+Nobody has measured which, and the existing counters cannot tell us —
+`frame_stats.frame_damage_full` / `frame_damage_partial`
+(`app_impl.rs:3858-3868`) count the **app's request**, i.e.
+`win.pending_frame_damage`. The windowing layer then applies a *second*,
+entirely separate gate (`supports_partial_present() && buffer_age() == 1`)
+that decides whether the clear is actually skipped. 121.31's
+`frame_damage_partial=0` is an app-side number and says nothing about it.
+
+`buffer_age() == 1` is the suspicious term. It means "the back buffer holds
+the **immediately previous** frame". On a conventionally double-buffered
+surface the buffer about to be drawn into holds the frame from *two* frames
+ago, i.e. age 2, so the gate would never pass. Whether that is what happens
+here is unknown and is the single most valuable thing this subtask reports.
+
+#### Scope
+
+`freminal-windowing/src/egui_integration.rs` and
+`freminal-windowing/src/gl_context.rs` (one log-message correction only).
+No other crate.
+
+#### What to build for 124.17
+
+Extract the gate at `egui_integration.rs:1195-1203` into a pure, named,
+unit-testable function and attribute every frame to exactly one outcome.
+Two new types, per `state-representation` — no bool parameters, no bare
+bools:
+
+```rust
+/// Whether the surface can present a damaged sub-region at all. A static
+/// per-surface capability, probed once at surface creation.
+pub(crate) enum PartialPresentSupport { Supported, Unsupported }
+
+/// Why a frame did or did not take the skip-clear + partial-present path.
+/// Exactly one variant per frame, so the derived counters sum to the frame
+/// count.
+pub(crate) enum PartialPresentDecision {
+    /// The app reported `FrameDamage::Full`.
+    NotRequested,
+    /// The app reported `Partial` with an empty rect list.
+    RequestedWithNoRects,
+    /// The app reported `Partial`, but the surface cannot present a
+    /// sub-region (damage extension absent, non-EGL backend, Apple).
+    BlockedBySurface,
+    /// The app reported `Partial` and the surface supports it, but the
+    /// back buffer does not hold the previous frame's contents.
+    BlockedByBufferAge { age: u32 },
+    /// Taken: the clear is skipped and only the damaged rects present.
+    Taken,
+}
+```
+
+The decision function takes the buffer age **lazily**:
+
+```rust
+fn decide_partial_present(
+    frame_damage: &crate::FrameDamage,
+    support: PartialPresentSupport,
+    buffer_age: impl FnOnce() -> u32,
+) -> PartialPresentDecision
+```
+
+Laziness is not a style preference: today's `&&` chain short-circuits, so
+`buffer_age()` — an EGL query — is never issued on a `Full` frame. Taking it
+eagerly would add a per-frame driver round trip to every frame in the
+program, which is a behaviour change inside the very path being measured.
+
+#### Counters
+
+On the existing `FrameProfile`, feature-gated `frame-profiling`, mirroring
+the established `gate_blocked_*` pattern and flushed on the existing
+windowing `frame_profiling` tracing line:
+
+- `present_partial_not_requested`
+- `present_partial_no_rects`
+- `present_partial_blocked_surface`
+- `present_partial_blocked_buffer_age`
+- `present_partial_taken`
+- `buffer_age_histogram: [u64; 4]`, bucketed by `min(age, 3)` so index 3
+  means "3 or more".
+
+The histogram is sampled **only where the age was actually queried** (app
+requested `Partial` *and* the surface supports it), so its total equals
+`present_partial_blocked_buffer_age + present_partial_taken` and **not** the
+frame count. Say so in the field's doc comment; a histogram that silently
+covers a different denominator than its neighbours is how a measurement
+becomes a lie.
+
+#### One honesty fix, in scope
+
+`gl_context.rs:301-305` logs, at `info`, that "cursor-only frames **will**
+skip the full clear and present only the changed region". That is precisely
+the unverified premise, stated to the user as fact, and it is what a reader
+checking the logs would take as confirmation. Amend it to report the
+capability only — the extension is present and the fast path is *available*
+— not that it will be used. Do not touch the `else` arm or the Apple arm.
+
+#### Deliverable
+
+The two types, the extracted function, the counters, the log correction, and
+unit tests: one per decision variant; one proving the age closure is **not**
+called when the app reported `Full` (pass a closure that panics); and one
+proving `Taken` requires all three conditions together.
+
+Then **run it** and append a findings block reporting, from a real
+interactive session with `--features frame-profiling`: the five counts, the
+age histogram, the present-path line from startup, and — if
+`present_partial_taken > 0` — whether any visual corruption is observable.
+A live Wayland/X session is available, so this is measurable here rather
+than something to hand over.
+
+#### The three outcomes, and what each means for 124.14 and 124.2
+
+- **`present_partial_taken == 0`.** The subsystem is inert, exactly as the
+  chrome cache was before 121.8 found it. 124.14's prize is zero until
+  whatever blocks it is fixed, and 124.2's `FrameDamage::None` — which also
+  spends this path — needs re-deriving. Both entries get rewritten, not
+  implemented.
+- **`present_partial_taken > 0` and the display is correct.** The model
+  above is wrong somewhere; find where before building on it. The most
+  likely candidates, in order: the head pass does not in fact cover the
+  band's pixels; `panel_fill` is not opaque in the composited result; or
+  `buffer_age()` semantics differ from the doc comment.
+- **`present_partial_taken > 0` and corruption is observable.** A shipped
+  bug, filed and fixed before 124.14 adds a second consumer of the path.
+
+#### Prohibitions
+
+Do NOT change what `partial` evaluates to — for every input the computed
+value must be bit-identical to today's expression; this subtask is
+observation only. Do NOT touch the clear, the paint order, the scissor,
+`decide_frame_damage`, `PaneFrameDamage`, or anything in the `freminal`
+crate. Do NOT implement 124.14 or 124.2. Do NOT "fix" anything the counters
+reveal — report it.
+
+#### 124.17 findings (2026-08-23)
+
+**The path fires, it fires constantly, and the windowing-side gate is wide
+open. The bottleneck is entirely app-side.** That is the opposite of the
+hypothesis this subtask was written to test, and it makes 124.14 and 124.2
+*more* valuable and *more* dangerous at the same time.
+
+Measured on this workstation — Hyprland/Wayland, Mesa, EGL — over a 60 s
+interactive session with continuous PTY output, `--features
+frame-profiling`, 2280 drawn frames:
+
+| Counter | Value | Share |
+| ------- | ----- | ----- |
+| `frame_counter` | 2280 | — |
+| `present_partial_not_requested` (app said `Full`) | 2236 | 98.1% |
+| `present_partial_no_rects` | 0 | 0% |
+| `present_partial_blocked_surface` | 0 | 0% |
+| `present_partial_blocked_buffer_age` | 0 | 0% |
+| `present_partial_taken` | 44 | 1.9% |
+| `buffer_age_histogram` (`[age0, age1, age2, age3+]`) | `[0, 44, 0, 0]` | — |
+
+Read the two zeros in the middle of that table, because they are the
+finding. **Neither windowing-side condition has ever blocked a single
+frame.** `supports_partial_present()` is `true` (startup logs the
+damage-aware present path), and `buffer_age()` returned **1 on every one of
+the 44 occasions it was queried** — never 0, never 2. The
+double-buffering suspicion recorded in this subtask's premise is
+**REFUTED**: on this surface the back buffer does hold the immediately
+previous frame.
+
+So of the three conditions gating the skip-clear + partial-present path,
+two are permanently satisfied and the third — the app deciding `Partial` —
+fails 98.1% of the time. **Every frame 124.14 or 124.2 converts from `Full`
+to bounded damage converts directly into a taken partial present.** There
+is no second gate to absorb it.
+
+The 44 are also spread evenly across the session (1–3 per 120-frame flush
+window, from the first window to the last), not clustered at startup. This
+is live, steady-state behaviour, not a warm-up artefact.
+
+**What this does NOT settle, and what is now the blocking question.**
+124.14's recon (recorded above) predicted that a taken partial present
+should visibly corrupt the display: the clear is skipped, the head pass then
+paints an opaque `CentralPanel` `panel_fill` over the whole central area,
+and the band pass redraws the grid *scissored to the cursor rect*, which
+should leave everything outside that rect flat background. At 1–3 partial
+frames per two seconds that would be an unmissable strobe. It does not
+happen. **So the recon model is wrong somewhere, and 124.14 must not be
+built until it is known where** — its safety argument depends on the real
+mechanism, not on the current code happening to work.
+
+Two of the three candidate explanations offered by the recon are now
+eliminated:
+
+- **`buffer_age()` semantics differ from the doc comment** — refuted by the
+  histogram above.
+- **egui renders into an intermediate FBO, so the default framebuffer's
+  contents and the clear are not what the recon assumed** — refuted by
+  reading `egui_glow` 0.36.1: `Painter::intermediate_fbo` returns `None`
+  unconditionally, with the source comment "We don't currently ever render
+  to an offscreen buffer".
+
+That leaves the head-pass premise: either the `CentralPanel` fill is not
+painted, not opaque, or does not cover the band's pixels on these frames.
+Resolving it needs an observation below egui and above the renderer, which
+is precisely the gap between Task 123's two harnesses — Phase 1 sees no
+pixels, Phase 2 never runs egui.
+
+**A screenshot test was attempted and is reported as inconclusive rather
+than as evidence.** Forty full-screen `grim` captures at 4 Hz over an idle
+session showed no blanked terminal band — but an idle session drew fewer
+than 120 frames in 40 s (under 3 fps, the idle optimisation working as
+designed), so the flush threshold was never reached and there is no counter
+proving any of those frames took the partial path. At a 1.9% rate the
+sample may simply have missed every one. It is recorded so nobody repeats
+it expecting a result.
+
+**Recommendation.** 124.14 and 124.2 both stay blocked, but the reason has
+changed: not "the path may be inert" (it is not) but "the path is live,
+about to be used far more heavily, and its correctness under a skipped
+clear is unexplained". The cheapest honest next step is a Phase 3 app-level
+capture — one that runs egui's head/band/tail split against a real
+framebuffer and reads back pixels — which is the same instrument 124.14's
+own deliverable already requires for its "`Region` frame and `Full` frame of
+the same state produce identical pixels" test. Building it once serves
+124.2, 124.14 and this question together.
 
 ### 124.C3 — `merge_cache` has no per-buffer stash, so alt-screen round trips over-report
 
