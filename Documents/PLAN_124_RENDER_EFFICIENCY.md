@@ -414,6 +414,64 @@ precisely why this waited for a pixel harness. Use it.
 Note the boundary with Task 125: this subtask gates the *orphan*, it does
 not change the *layout*. Do not begin a relayout here.
 
+#### 124.7 findings (2026-08-23)
+
+**Landed, and the prize is smaller than the subtask implied. Recorded
+plainly so nobody re-derives a larger one.**
+
+Measured on the Task 123 Phase 1 recording harness, 80x24, before the fix:
+
+| Workload | Orphan calls / 3 frames | Orphan payload bytes |
+| -------- | ----------------------- | -------------------- |
+| Steady state | 6 | `144, 99840` per frame |
+| Cursor-only | 3 | `144` per frame |
+
+After gating the decoration buffer: steady 6 -> 5, cursor-only 3 -> 1.
+Total GL calls over three cursor-only frames, 144 -> 142.
+
+So the win is **one zero-byte GL call per gated upload, and no bytes at
+all** — roughly 2% of a cursor-only frame's ~48 calls. Per 123.14's
+correction the cost model is bandwidth, not call count, and by that measure
+this subtask scores **zero**. The real prize is driver-side allocator churn
+(a 144-byte store retired and reallocated every idle frame), which neither
+Phase 1 nor Phase 2 can observe. It is landed on the argument that it is
+nearly free and strictly less work, not on a measured improvement.
+
+Two things narrowed the risk from what the stub assumed:
+
+- `glBufferSubData` is **synchronous with respect to prior GL commands**, so
+  skipping the orphan cannot produce a stale or torn read. The worst case is
+  a pipeline stall — and `deco_vbo`'s independent double-buffer index
+  already means the slot being written was last drawn from two frames ago.
+- Issue #432's corruption was CPU-side offset bookkeeping (commit
+  `c76ae8d1`), not an unsynchronized GPU write. The orphan was secondary
+  hardening in that commit, as the stub already suspected.
+
+Verified against Phase 2 regardless, because the failure mode would have
+been silent:
+`pixel_harness.rs::reusing_a_decoration_allocation_changes_no_pixels`
+compares a cursor-only frame reached through allocation reuse against the
+same state reached through orphaning, and requires zero differing pixels at
+a channel bound of zero. This needed a new harness entry point,
+`capture_after_cursor_only_frames` — `capture` draws exactly one frame into
+a fresh renderer, so every upload in it orphans and it structurally cannot
+see a reuse defect.
+
+**Interaction, recorded because it looks like a loosened tolerance and is
+not.** 124.9's guard asserted frame 2's upload count equals steady state.
+Gating the orphan makes frame 3 exactly one call cheaper than frame 2, since
+`deco_vbo` is double-buffered and frames 1 and 2 each pay a one-off sizing
+orphan for their own slot. The assertion is now
+`frame_two_uploads == frame_three_uploads + 1`: still exact, still
+falsifiable, with the one named. The defect it guards was 30 versus 4.
+
+The 4 KiB threshold (`SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES`) is **not a
+measured optimum**. It is a bound comfortably above the decoration buffer's
+idle and light-decoration sizes and far below the bulk uploads where
+orphaning is unambiguously right. Only `deco_vbo` is gated; `bg_inst_vbo`,
+`fg_vbo` and `img_vbo` are not re-uploaded at all on a cursor-only frame,
+and their payloads are bulk.
+
 ### 124.8 — `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome
 
 *Migrated from 121.27. Documentation only.*

@@ -154,6 +154,47 @@ pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> 
     Ok(read_back(off.gl(), width, height))
 }
 
+/// Render `frame` once, then `cursor_only_frames` further **cursor-only**
+/// frames on the same renderer, and capture the last one.
+///
+/// Added by subtask 124.7. [`capture`] draws exactly one frame into a fresh
+/// renderer, which cannot see any defect that only appears once a GPU buffer
+/// is *reused* across frames — and buffer reuse is precisely what 124.7
+/// introduced by letting a small decoration payload skip the orphan when the
+/// slot's existing allocation is already large enough. The first upload into
+/// each `deco_vbo` slot still orphans (it has to, to size the storage), so a
+/// single-frame capture takes only the unchanged path.
+///
+/// Three cursor-only frames is the smallest count that exercises the gate on
+/// both double-buffer slots and then again on the first, which is where a
+/// stale-allocation bug would show.
+///
+/// # Errors
+///
+/// As [`capture`].
+pub fn capture_after_cursor_only_frames(
+    frame: &SyntheticFrame,
+    cursor_only_frames: usize,
+) -> Result<PixelFrame, PixelHarnessError> {
+    let mut driver = HeadlessRenderer::new()?;
+    let (vp_w, vp_h) = driver.viewport_px(frame);
+    let (width, height) = match (u32::try_from(vp_w), u32::try_from(vp_h)) {
+        (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
+        _ => return Err(PixelHarnessError::InvalidSize(vp_w, vp_h)),
+    };
+
+    let off = OffscreenGl::new(width, height)?;
+    let gl = Gl::real(off.gl());
+
+    driver.init(&gl)?;
+    driver.draw_frame(&gl, frame);
+    for _ in 0..cursor_only_frames {
+        driver.draw_cursor_only(&gl, frame);
+    }
+
+    Ok(read_back(off.gl(), width, height))
+}
+
 /// The GL renderer string of a freshly-created offscreen context.
 ///
 /// Reported alongside any pixel result: a golden image is only meaningful
@@ -440,7 +481,7 @@ mod wasted_work_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::super::headless::SyntheticFrame;
-    use super::capture;
+    use super::{capture, capture_after_cursor_only_frames};
     // Reuse the tests module's variant-aware guard rather than duplicating
     // it: an "any error is a skip" guard is exactly the bug this file was
     // reviewed for.
@@ -509,6 +550,39 @@ mod wasted_work_tests {
             transparent * 2 > total,
             "most of a text frame should be untouched default background, \
              got {transparent} transparent of {total}"
+        );
+    }
+
+    /// Subtask 124.7's correctness guard: reusing a decoration-buffer
+    /// allocation instead of orphaning it must not change a single pixel.
+    ///
+    /// 124.7 lets `upload_deco_verts` skip the orphan when the payload is
+    /// small and the slot is already big enough. The failure mode of getting
+    /// that wrong is **silent visual corruption** — the issue #432 class —
+    /// and no call-count test can see it, which is exactly why this subtask
+    /// waited for Phase 2.
+    ///
+    /// The comparison is a cursor-only frame reached by reuse against the
+    /// same state reached without it. `capture` draws one frame into a fresh
+    /// renderer, so every upload in it orphans; `capture_after_cursor_only_frames`
+    /// drives further cursor-only frames, and from the second onward the
+    /// decoration upload takes the gated no-orphan path. Identical pixels at
+    /// a channel bound of zero is the only acceptable result.
+    #[test]
+    fn reusing_a_decoration_allocation_changes_no_pixels() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Some(orphaned) = super::tests::capture_or_skip(&frame, "deco-orphan-baseline") else {
+            return;
+        };
+        let reused =
+            capture_after_cursor_only_frames(&frame, 3).expect("reused-allocation capture");
+
+        assert_eq!(
+            orphaned.differing_pixels(&reused, 0),
+            Some(0),
+            "skipping the decoration buffer's orphan must be invisible; any \
+             difference here is the silent-corruption class 124.7 was \
+             deliberately held back for a pixel harness to rule out"
         );
     }
 }

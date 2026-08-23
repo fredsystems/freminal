@@ -275,6 +275,44 @@ fn cursor_only_saves_bandwidth_not_call_count() {
     );
 }
 
+/// Subtask 124.7: the decoration buffer stops orphaning once its slot is
+/// already big enough for a small payload.
+///
+/// Stands in for: the idle cursor-blink frame, which re-uploads only
+/// `deco_verts` and whose floor is the cursor quad alone
+/// (`CURSOR_QUAD_FLOATS` = 36 floats = 144 bytes).
+///
+/// The honest size of this win is asserted here rather than described:
+/// **one zero-byte GL call per gated upload, and no bytes at all.** Per
+/// 123.14's correction the cost model is bandwidth, not call count, so this
+/// is deliberately not presented as a bandwidth improvement. The first
+/// upload into each of the two double-buffer slots still orphans, because
+/// it is what sizes the storage; only the reuses are gated.
+#[test]
+fn a_small_decoration_payload_reuses_its_allocation_instead_of_orphaning() {
+    let cursor = record_cursor_only(&standard(), 3).expect("cursor-only frames");
+
+    let orphans = cursor
+        .iter()
+        .filter(|c| c.method == "buffer_data_size")
+        .count();
+    let writes = cursor
+        .iter()
+        .filter(|c| c.method == "buffer_sub_data_u8_slice")
+        .count();
+
+    assert_eq!(
+        writes, 3,
+        "each of the three cursor-only frames still writes its decoration \
+         payload; the gate removes the orphan, never the write"
+    );
+    assert!(
+        orphans < writes,
+        "at least one cursor-only frame must reuse its slot's existing \
+         allocation, got {orphans} orphans for {writes} writes"
+    );
+}
+
 #[test]
 fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
     // REGRESSION GUARD FOR 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
@@ -298,11 +336,20 @@ fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
     let frame_two_uploads = two.uploads - one.uploads;
     let frame_three_uploads = three.uploads - two.uploads;
 
+    // Exactly one more than steady state, and the one is nameable: subtask
+    // 124.7 gates the decoration buffer's orphan on the slot already being
+    // large enough, and `deco_vbo` is double-buffered, so frames 1 and 2
+    // each pay a one-off sizing orphan for their own slot and frame 3 is the
+    // first to reuse one. That is a known interaction with a known cause,
+    // not a tolerance widened to make a red test green -- before 124.9 this
+    // difference was 30 versus 4.
     assert_eq!(
-        frame_two_uploads, frame_three_uploads,
-        "frame 2 must cost the same uploads as steady-state frame 3; the \
-         frame-1 full upload already covered every queued glyph \
-         ({frame_two_uploads} versus {frame_three_uploads})"
+        frame_two_uploads,
+        frame_three_uploads + 1,
+        "frame 2 must cost steady state plus only the second decoration \
+         slot's one-off sizing orphan; the frame-1 full atlas upload already \
+         covered every queued glyph ({frame_two_uploads} versus \
+         {frame_three_uploads})"
     );
 
     // The paired control: frame 1 genuinely does more work than frame 2, so
