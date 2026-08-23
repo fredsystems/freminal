@@ -148,8 +148,8 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Planned |
 | 124.3 | Cell-granular pointer suppression | Planned, after 124.13 |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
-| 124.5 | Decide and execute the chrome cache's fate | Planned, after 124.15 |
-| 124.6 | Shaping-path levers | Planned, after 124.16 |
+| 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
+| 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Planned |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
@@ -158,8 +158,8 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
 | 124.13 | Re-measure pointer-motion suppression rates | Planned |
 | 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
-| 124.15 | Measure chrome's per-frame cost | Planned |
-| 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Planned |
+| 124.15 | Measure chrome's per-frame cost | Complete |
+| 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
 
@@ -956,6 +956,67 @@ Deliverable: a findings block appended to this document.
 
 Prohibitions: do NOT delete or re-enable the chrome cache. That is 124.5.
 
+#### 124.15 findings (2026-08-23)
+
+**The headline reframes 124.5 rather than answering it on cost.**
+
+**Is `ChromeMode::Replay` reachable today?** Mechanically yes; in a shipped
+build, no. 121.8's fix (commit `7d483998`) genuinely worked — it removed the
+`RedrawRequested` self-disqualification and took the idle `Replay` duty
+cycle from 0/360 frames to 100%, chrome construction 69 us -> 10 us, total
+frame 434 us -> 376 us (-13.4%). 121.32 (commit `c3daa1be`) then turned the
+whole subsystem off **again**, behind `chrome_cache_enabled()`, which reads
+`FREMINAL_CHROME_CACHE` once via a `OnceLock` and defaults false. Nothing in
+the repo — no config key, CLI flag, `flake.nix` or CI job — ever sets that
+variable.
+
+So the honest answer to the subtask's question is sharper than "unreachable":
+**the cache is disabled for correctness, not for cost.** `ChromeMode::Replay`
+skips *constructing* chrome widgets, and egui resolves hit-testing against
+the previous pass's widget set, so unbuilt widgets are uninteractable — that
+shipped as a tab-click and pane-border-drag regression in 0.12.0-beta.7.
+
+**This means no cost measurement can authorise re-enabling it.** A faster
+build that drops tab clicks is not an option at any price. Measurement can
+only inform a different question: is the ceiling high enough to justify a
+*redesign* — caching the tessellated output while still constructing the
+widgets?
+
+**The numbers** (`freminal/benches/chrome_cost_bench.rs`, headless
+`egui::Context`, 1280x800, 4 tabs, 3 pane borders):
+
+| Measurement | Per frame |
+| ----------- | --------- |
+| Chrome construction (what `Replay` skips) | 32.9 us |
+| Chrome tessellation | 10.3 us |
+| Cache shape-vector clone | 0.65 us |
+| Cache primitive-vector clone | 0.64 us |
+
+Reported per frame with no implied rate, per `PROFILING.md`. Against 121.8's
+recorded 434 us total frame, chrome construction is roughly 8%.
+
+**121.35's live-waste claim is verified and is small.** With the cache
+disabled, `chrome_mode` is forced to `Full`, so that arm runs every frame and
+populates a `ChromeCache` no reachable code reads. Four of its six clones
+disappear with the cache (the two `to_vec()` slice copies feeding
+`tessellate` do not — it takes an owned `Vec`), so deletion returns roughly
+**2.6 us per frame, about 0.6% of a frame.** Real, and worth having, but not
+an argument on its own.
+
+**Recommendation to 124.5: delete.** Not because the cache is slow — the
+ceiling is a genuine 8% — but because the shipped design cannot be made
+correct without becoming a different design, deletion returns 0.6% and about
+600 lines immediately, and the 8% stays available to anyone who later wants
+to build the sound version (cache the output, keep constructing the widgets).
+Keeping ~600 lines of disabled, structurally-unsound machinery to preserve
+optionality on a redesign that shares none of its code is the worst of both.
+
+**Ordering still holds.** Per the caution carried from 123, chrome becomes
+the thing forcing `Full` on frames the grid would otherwise skip once
+`FrameDamage::None` (124.2) lands. These numbers are that baseline: 43.2 us
+of construct-plus-tessellate is what a `None` frame would still have to pay
+if chrome is not itself gated.
+
 ### 124.16 — Shaping cache instrumentation and a TUI-redraw benchmark
 
 **Measurement infrastructure. Gates 124.6.**
@@ -984,6 +1045,62 @@ Deliverable: the counters, the benchmark, and a findings block feeding
 
 Prohibitions: do NOT re-key the shaping cache. Do NOT implement either of
 124.6's levers.
+
+#### 124.16 findings (2026-08-23)
+
+**One lever is strongly supported, and the workload this task is named for
+turns out not to be a shaping problem at all.**
+
+`ShapingCacheStats` now surfaces the per-line hit/miss outcome
+`shape_visible` was computing and discarding. The counters are always
+compiled, not feature-gated, so a measurement cannot drift from the code
+path it describes.
+
+**Hit rates** (80x24, pinned as tests in
+`gui::shaping::shaping_cache_hit_rate` so they cannot rot the way the
+2026-07-29 pointer-motion table did):
+
+| Workload | Hit rate | Rows re-shaped |
+| -------- | -------- | -------------- |
+| Identical full-screen redraw | 100% | 0 of 24 |
+| Single-character edit | 96% | 1 of 24 |
+| Steady typing | 96% | 1 per keystroke |
+| **Scroll by one line** | **0%** | **24 of 24** |
+
+**Cost** (200x50, `shaping_crossframe` group):
+
+| Benchmark | Time |
+| --------- | ---- |
+| `shape_visible_identical_redraw` | 46.8 us |
+| `shape_visible_scroll_by_one_line` | 2.76 ms |
+| `shape_visible_persistent_fm_cache` (half the rows changed) | 2.86 ms |
+
+**A one-line scroll costs 59x an identical redraw, and 96% of what
+rewriting half the screen costs** — despite 23 of its 24 rows being
+byte-identical to rows shaped on the immediately preceding frame. The cache
+is keyed by **line index**, so scrolling shifts every line into a different
+slot and invalidates all of them. That is the measured case for 124.6's
+first lever (a content-addressed run-level cache keyed on
+`(face_id, ligatures, run text)`), and it is a strong one.
+
+`a_scroll_by_one_line_hits_nothing` asserts this **defect** deliberately, in
+the same idiom Task 123 used for 124.9 and 124.1. **124.6 must invert it,
+not delete it** — it is the only regression guard the behaviour has.
+
+**The inconvenient half, recorded because it cuts against 124.6's framing.**
+This document's opening argues that "full-screen TUIs rewrite unchanged
+bytes by idiom, which is precisely the workload that currently pays a full
+rebuild every tick". True at the *damage* layer — that is what the epoch
+chain fixes — but **not at the shaping layer**, which already handles it at
+a 100% hit rate for 46.8 us. Shaping is not that workload's bottleneck, and
+124.6 must not be justified on it. The scroll case, not the redraw case, is
+124.6's argument.
+
+**124.6's second lever is untouched by this and stays unsized.** "One
+changed character re-shapes every run on the row" is confirmed as
+*behaviour* by the single-character-edit test (1 row, not 1 run), but the
+per-run allocation reduction in `build_shaped_glyphs` has no measurement
+here and should not be assumed to matter.
 
 ### 124.C1 — `decide_frame_damage`'s doc comment describes a removed term
 
