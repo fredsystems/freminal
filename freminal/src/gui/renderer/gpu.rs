@@ -759,6 +759,12 @@ impl TerminalRenderer {
                     glow::PixelUnpackData::Slice(Some(atlas.pixels())),
                 );
             }
+
+            // The upload above covered every pixel of the atlas, so any rects
+            // queued before it are redundant by construction. Dropping them
+            // here is what stops the *next* frame re-uploading each of those
+            // glyphs individually with `tex_sub_image_2d` (Task 124.9).
+            drop(atlas.take_dirty_rects());
         } else {
             // Delta upload — only upload modified regions.
             for rect in atlas.take_dirty_rects() {

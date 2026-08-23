@@ -276,22 +276,21 @@ fn cursor_only_saves_bandwidth_not_call_count() {
 }
 
 #[test]
-fn a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload() {
-    // CHARACTERISES DEFECT 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
-    // This test asserts the buggy behaviour deliberately, so the defect is
-    // pinned and measurable; it must be INVERTED, not deleted, when 124.9
-    // lands.
+fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
+    // REGRESSION GUARD FOR 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
+    // This test was written by Task 123 to pin the *defect*, and inverted
+    // (not deleted) by 124.9, which is the only guard this behaviour has.
     //
     // Stands in for: the first two frames after a GL context is created,
     // and after any later event that sets the atlas's `full_reupload` flag
     // (atlas growth, a font change, `RenderState::clear_atlas`).
     //
     // `TerminalRenderer::sync_atlas` takes the full-reupload branch on the
-    // first frame and uploads the whole atlas with one `tex_image_2d` — but
-    // it never clears `GlyphAtlas::dirty_rects`. Every glyph rasterised
-    // before that upload therefore stays queued, and the *second* frame
-    // re-uploads each one individually with `tex_sub_image_2d`, even though
-    // the full upload already contained all of them.
+    // first frame and uploads the whole atlas with one `tex_image_2d`. That
+    // upload covers every pixel, so the rects queued before it are redundant
+    // by construction and are now dropped there. The *second* frame must
+    // therefore look like steady state, not like a per-glyph replay of the
+    // first frame's rasterisations.
     let one = Metrics::of(&record_steady_state(&standard(), 1).expect("frame 1"));
     let two = Metrics::of(&record_steady_state(&standard(), 2).expect("frames 1-2"));
     let three = Metrics::of(&record_steady_state(&standard(), 3).expect("frames 1-3"));
@@ -299,19 +298,24 @@ fn a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload() {
     let frame_two_uploads = two.uploads - one.uploads;
     let frame_three_uploads = three.uploads - two.uploads;
 
-    // The exact rect count depends on how many distinct glyphs the bundled
-    // font rasterises for the synthetic grid, so this asserts the shape of
-    // the defect rather than that incidental number — a deliberate,
-    // up-front choice, not a tolerance loosened after a flake.
+    assert_eq!(
+        frame_two_uploads, frame_three_uploads,
+        "frame 2 must cost the same uploads as steady-state frame 3; the \
+         frame-1 full upload already covered every queued glyph \
+         ({frame_two_uploads} versus {frame_three_uploads})"
+    );
+
+    // The paired control: frame 1 genuinely does more work than frame 2, so
+    // the assertion above is not the degenerate "every frame is identical".
     assert!(
-        frame_two_uploads > frame_three_uploads * 4,
-        "frame 2 redundantly re-uploads glyphs the frame-1 full upload \
-         already covered: {frame_two_uploads} uploads versus \
-         {frame_three_uploads} in steady state"
+        one.total > frame_two_uploads,
+        "frame 1 should still carry the one-off full-upload and setup cost \
+         ({} total calls) that later frames do not",
+        one.total
     );
     assert!(
-        two.total > one.total * 2,
-        "the redundant re-upload roughly doubles frame 2's GL call count \
+        two.total < one.total * 2,
+        "frame 2 must no longer roughly double the running GL call count \
          ({} for frames 1-2 versus {} for frame 1 alone)",
         two.total,
         one.total
