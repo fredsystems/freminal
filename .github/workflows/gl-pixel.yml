@@ -37,6 +37,15 @@ concurrency:
   group: gl-pixel
   cancel-in-progress: true
 
+env:
+  # This job -- and only this job -- provides Mesa's llvmpipe plus Xvfb, so
+  # here a missing GL context is a broken runner rather than a reason to
+  # skip. The harness keys its hard-failure path on this variable and NOT on
+  # `CI`, because GitHub sets `CI=true` on every job, including the ordinary
+  # test matrix, which runs the same tests via `--all-features` on runners
+  # that legitimately have no GL stack.
+  FREMINAL_REQUIRE_GL: "1"
+
 jobs:
   pixel-harness:
     name: Offscreen GL pixel harness

@@ -224,22 +224,32 @@ mod tests {
     ///    error (font loading, shader compilation, GL init) or an
     ///    `InvalidSize` is a genuine failure, and treating it as "skip"
     ///    meant a broken renderer would report success. Those now panic.
-    /// 2. **In CI, even a missing context is a hard failure.** The whole
-    ///    point of 123.13's job is that a context is guaranteed there, so a
-    ///    misconfigured runner (no Mesa, no `$DISPLAY`, Xvfb not started)
-    ///    must fail loudly rather than produce a false green.
+    /// 2. **Where a context is *promised*, a missing one is a hard
+    ///    failure.** 123.13's job guarantees Mesa and Xvfb, so a missing
+    ///    context there is a broken runner and must fail loudly rather than
+    ///    produce a false green.
     ///
-    /// Outside CI a missing context still skips, because a developer on
-    /// macOS or outside the Linux dev shell cannot have one, and a suite
+    /// The second condition keys on `FREMINAL_REQUIRE_GL`, which only the
+    /// `gl-pixel` workflow sets — **not** on `CI`. An earlier revision used
+    /// `CI`, which broke the ordinary `Test ubuntu-latest` job: GitHub sets
+    /// `CI=true` on every job, and `cargo xtask test` passes
+    /// `--all-features`, so these tests run there too — on a runner that
+    /// has neither Mesa nor Xvfb and was never meant to. "In CI" and "in
+    /// the job that provides a GL stack" are different predicates, and
+    /// conflating them turned a correct skip into six spurious failures.
+    ///
+    /// Everywhere else a missing context still skips, because a developer
+    /// on macOS or outside the Linux dev shell cannot have one, and a suite
     /// that always fails for them is a suite they learn to ignore.
     pub(super) fn capture_or_skip(frame: &SyntheticFrame, what: &str) -> Option<PixelFrame> {
         match capture(frame) {
             Ok(f) => Some(f),
             Err(PixelHarnessError::NoContext(e)) => {
                 assert!(
-                    !in_ci(),
-                    "{what}: no offscreen GL context in CI ({e}) -- the \
-                     gl-pixel job guarantees Mesa and Xvfb, so this is a \
+                    !gl_context_required(),
+                    "{what}: no offscreen GL context ({e}) despite \
+                     FREMINAL_REQUIRE_GL being set -- that variable means \
+                     this environment promised Mesa and Xvfb, so this is a \
                      broken runner, not a reason to skip"
                 );
                 eprintln!(
@@ -252,9 +262,13 @@ mod tests {
         }
     }
 
-    /// Whether this is a CI run. GitHub Actions sets `CI=true`.
-    pub(super) fn in_ci() -> bool {
-        std::env::var("CI").is_ok_and(|v| v != "false" && !v.is_empty())
+    /// Whether this environment has promised a working offscreen GL stack.
+    ///
+    /// Set only by `.github/workflows/gl-pixel.yml`. Deliberately not `CI`:
+    /// every GitHub Actions job sets that, including ones with no GL stack
+    /// that still run these tests via `cargo xtask test --all-features`.
+    pub(super) fn gl_context_required() -> bool {
+        std::env::var("FREMINAL_REQUIRE_GL").is_ok_and(|v| v != "0" && !v.is_empty())
     }
 
     /// `pixel` must reject out-of-range coordinates rather than silently

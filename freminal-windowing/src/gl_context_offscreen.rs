@@ -222,13 +222,16 @@ mod tests {
         let off = match OffscreenGl::new(64, 32) {
             Ok(off) => off,
             Err(e) => {
-                // GitHub Actions sets `CI=true`.
-                let in_ci = std::env::var("CI").is_ok_and(|v| v != "false" && !v.is_empty());
+                // Set only by the `gl-pixel` workflow, which provides Mesa
+                // and Xvfb. Not `CI`, which every GitHub Actions job sets.
+                let required =
+                    std::env::var("FREMINAL_REQUIRE_GL").is_ok_and(|v| v != "0" && !v.is_empty());
                 assert!(
-                    !in_ci,
-                    "no offscreen GL context in CI ({e}) -- the gl-pixel job \
-                     guarantees Mesa and Xvfb, so this is a broken runner, \
-                     not a reason to skip"
+                    !required,
+                    "no offscreen GL context ({e}) despite \
+                     FREMINAL_REQUIRE_GL being set -- that variable means \
+                     this environment promised Mesa and Xvfb, so this is a \
+                     broken runner, not a reason to skip"
                 );
                 eprintln!(
                     "skipping: no offscreen GL context ({e}) (needs Mesa + \
