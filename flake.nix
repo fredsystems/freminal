@@ -437,6 +437,31 @@
                 windowsCheck.cc
               ];
 
+              # Task 123 Phase 2 (pixel / readback harness). Linux-only by
+              # design, following the same `stdenv.isLinux` precedent as
+              # `pkgs.perf` and documented as Tier 2 in PROFILING.md.
+              #
+              # `pkgs.libGL` (in `libPkgs` below) is libglvnd — a
+              # vendor-neutral dispatcher with NO rendering backend. It can
+              # resolve GL symbols but cannot rasterise anything, which is why
+              # a headless pixel harness needs Mesa added explicitly rather
+              # than just reusing what is already here.
+              #
+              # `mesa` supplies the llvmpipe software rasteriser; `xvfb` and
+              # `xvfb-run` supply the X11 display EGL still needs to enumerate
+              # configs. See `glPixelEnv` for the variables that select
+              # llvmpipe at runtime.
+              #
+              # Kept separate from `devOnlyTools` so the `gl-pixel` shell can
+              # take these WITHOUT the heavy interactive extras (cargo-bundle
+              # builds from source), the same reason the lean `ci` shell
+              # exists.
+              glPixelTools = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.mesa
+                pkgs.xvfb
+                pkgs.xvfb-run
+              ];
+
               # Extra dev packages provided by mkCheck (includes rustToolchain)
               extraDev = chk.passthru.devPackages or [ ];
 
@@ -467,6 +492,35 @@
                 FREMINAL_WINDOWS_CARGO = "${windowsCheck.toolchain}/bin/cargo";
               };
 
+              # Task 123 Phase 2: point libglvnd at Mesa's software rasteriser
+              # so an offscreen GL context can be created with no GPU. Set only
+              # in the `default` shell on Linux, alongside `windowsCheckEnv` —
+              # the `ci` shell must not get these, since forcing software GL
+              # there would silently slow every other check.
+              #
+              # These are set explicitly rather than by adding
+              # `pkgs.mesa.llvmpipeHook` to the package list, which is what
+              # PLAN_123's 123.10 originally specified. The hook would set the
+              # same three variables, but its contents cannot be inspected
+              # without building it, and a setup hook that silently overrides
+              # an explicitly-set variable is exactly the kind of
+              # action-at-a-distance this file otherwise avoids. The explicit
+              # form also matches `windowsCheckEnv`'s existing idiom directly
+              # above, and both paths below were verified to exist in the
+              # `mesa` derivation.
+              #
+              # LIBGL_ALWAYS_SOFTWARE  — never pick a hardware driver.
+              # LIBGL_DRIVERS_PATH     — where llvmpipe's DRI module lives.
+              # __EGL_VENDOR_LIBRARY_FILENAMES — pin glvnd's EGL vendor to
+              #   Mesa, so an EGL path (Wayland, or a pbuffer surface) also
+              #   resolves to the software stack instead of failing to find a
+              #   vendor.
+              glPixelEnv = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                LIBGL_ALWAYS_SOFTWARE = "1";
+                LIBGL_DRIVERS_PATH = "${pkgs.mesa}/lib/dri";
+                __EGL_VENDOR_LIBRARY_FILENAMES = "${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json";
+              };
+
               # Shared shell builder.  `extraTools` and `extraEnv` are the only
               # axes on which the `default` and `ci` shells differ.
               mkFreminalShell =
@@ -494,12 +548,23 @@
               # Full interactive shell: lint/test tooling plus the dev-only
               # extras (cargo-bundle, profilers, vttest, ...) and the Windows
               # cross-check env.
-              default = mkFreminalShell devOnlyTools windowsCheckEnv;
+              default = mkFreminalShell (devOnlyTools ++ glPixelTools) (windowsCheckEnv // glPixelEnv);
 
               # Lean shell for CI lint/test gates.  Omits devOnlyTools so CI
               # never builds cargo-bundle from source, and gets no Windows
               # cross-check env/toolchain.  Used by nightly.yml.
               ci = mkFreminalShell [ ] { };
+
+              # Lean shell for the Task 123 Phase 2 pixel harness: the `ci`
+              # shell's toolchain plus Mesa/Xvfb and the llvmpipe env, and
+              # none of `devOnlyTools`. CI must not build cargo-bundle from
+              # source just to read back some pixels.
+              #
+              # Deliberately separate from `ci` rather than folded into it:
+              # `glPixelEnv` forces software GL, and leaking that into the
+              # ordinary lint/test gate would silently slow every unrelated
+              # check.
+              gl-pixel = mkFreminalShell glPixelTools glPixelEnv;
             };
         }) systems
       );

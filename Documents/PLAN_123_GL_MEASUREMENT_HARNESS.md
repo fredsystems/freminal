@@ -1,8 +1,16 @@
 # PLAN_123_GL_MEASUREMENT_HARNESS.md — Task 123 "GL Pipeline Measurement Harness"
 
-> **STATUS: PLANNED, NOT STARTED.** No subtask below has a branch or a commit
-> yet. This document is the full subtask breakdown, written at activation
-> time against the code as it stands on `main`.
+> **STATUS: COMPLETE.** All subtasks (123.1-123.14, including 123.6b) are
+> implemented and committed on `task-123/gl-measurement-harness`. Both
+> phases are built and both diagnostic obligations are discharged; the
+> Findings section below is the task's product and the input to Task 124's
+> activation.
+>
+> One item is deliberately left open for the maintainer rather than decided
+> here: whether to extend the `Gl` facade across the `freminal-windowing`
+> crate boundary so `GlState::clear`'s two per-full-frame calls are
+> recorded. See the disclosed-gap note in Findings; it moves no finding and
+> reorders no Task 124 priority.
 
 Task 123 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.
@@ -66,10 +74,11 @@ phases with very different infrastructure requirements:
 ### Why this is tractable with no new infrastructure
 
 - `RenderState` (`freminal/src/gui/terminal/widget.rs:1165-1215`) is
-  constructible with no GL context.
-- `GlyphAtlas::new` (`freminal/src/gui/renderer/atlas.rs:186`) takes no `gl`.
+  constructible with no GL context — via the free function
+  `new_render_state` (`widget.rs:1245`), not a `RenderState::new`.
+- `GlyphAtlas::new` (`freminal/src/gui/atlas.rs:186`) takes no `gl`.
 - Fonts are embedded via `include_bytes!`
-  (`freminal/src/gui/renderer/font_manager.rs:36-44`), and
+  (`freminal/src/gui/font_manager.rs:36-44`), and
   `FontManager::new` already runs headlessly at 7 call sites in
   `freminal/benches/render_loop_bench.rs`.
 - GL objects are created lazily via `renderer.init(gl)`, gated on
@@ -88,14 +97,17 @@ no context, no driver.
 not a design tradeoff to weigh. State this plainly in code comments and
 commit messages so nobody retries the trait-implementation approach.
 
-The trait has 396 methods and 12 associated types; freminal uses only **47
-distinct entry points** (enumerated below). freminal is monomorphic over a
-concrete `&glow::Context` throughout — call-site counts are
-`freminal/src/gui/renderer/gpu.rs` 266, `toast_pass.rs` 37,
-`toast_text_pass.rs` 37 — with roughly 40 parameters carrying that type and
-**zero generic bounds to rewire**. The single capture point in the GUI is
-`let gl = painter.gl();` at `freminal/src/gui/terminal/widget.rs:2955`; the
-context itself is stored as `Arc<glow::Context>`
+The trait has 396 methods and 12 associated types; freminal uses only **49
+distinct entry points** (enumerated below, and frozen in code at
+`freminal/src/gui/renderer/gl_facade/surface.rs`). freminal is monomorphic
+over a concrete `&glow::Context` throughout — call-site counts are
+`freminal/src/gui/renderer/gpu.rs` 268, `toast_pass.rs` 37,
+`toast_text_pass.rs` 37, `widget.rs` 4, `app_impl.rs` 5 — with 52 parameters
+carrying that type and **zero generic bounds to rewire**. There are two
+capture points in the GUI, not one: `let gl = painter.gl();` at
+`freminal/src/gui/terminal/widget.rs:2955` and the equivalent inside the
+`PaintCallback`s in `freminal/src/gui/app_impl.rs` (around `:2409` and
+`:3200`). The context itself is stored as `Arc<glow::Context>`
 (`freminal-windowing/src/gl_context.rs:191`) and created at `:284-286`.
 
 Handle types have **public tuple fields**, so a recording backend can
@@ -129,7 +141,7 @@ delegates directly to `glow::Context`; the `Recording` arm appends a
 call-record entry and returns a fabricated handle where one is expected.
 
 **Rationale to record in the code and in this document:** a trait would
-force generics at roughly 40 call sites across three files, widening every
+force generics at 52 parameter sites across five files, widening every
 one of those signatures. The enum keeps codegen monomorphic in the `Real`
 arm and makes the migration mechanical — a search-and-replace of the
 parameter type, not a redesign of call sites.
@@ -143,23 +155,26 @@ in a test, this facade's zero-cost claim for the default build must be
 **verified by a benchmark**, not merely asserted in a doc comment — see
 123.6.
 
-### The 47 entry points
+### The 49 entry points
 
-For sizing the facade and driving 123.1's guard:
+For sizing the facade and driving 123.1's guard. This list is frozen in code
+as `GL_CALL_SURFACE` in `freminal/src/gui/renderer/gl_facade/surface.rs`;
+that array is the source of truth and this block mirrors it.
 
 ```text
 active_texture, attach_shader, bind_buffer, bind_framebuffer, bind_texture,
 bind_vertex_array, buffer_data_size, buffer_data_u8_slice,
 buffer_sub_data_u8_slice, check_framebuffer_status, clear, clear_color,
-compile_shader, create_buffer, create_framebuffer, create_texture,
-create_vertex_array, delete_buffer, delete_framebuffer, delete_program,
-delete_shader, delete_texture, delete_vertex_array, disable, draw_arrays,
-draw_arrays_instanced, enable, enable_vertex_attrib_array,
-framebuffer_texture_2d, get_program_info_log, get_program_link_status,
-get_shader_compile_status, get_shader_info_log, get_uniform_location,
-link_program, pixel_store_i32, scissor, shader_source, tex_image_2d,
-tex_parameter_i32, tex_sub_image_2d, uniform_1_f32, uniform_1_i32,
-uniform_2_f32, use_program, vertex_attrib_divisor, vertex_attrib_pointer_f32
+compile_shader, create_buffer, create_framebuffer, create_program,
+create_shader, create_texture, create_vertex_array, delete_buffer,
+delete_framebuffer, delete_program, delete_shader, delete_texture,
+delete_vertex_array, disable, draw_arrays, draw_arrays_instanced, enable,
+enable_vertex_attrib_array, framebuffer_texture_2d, get_program_info_log,
+get_program_link_status, get_shader_compile_status, get_shader_info_log,
+get_uniform_location, link_program, pixel_store_i32, scissor, shader_source,
+tex_image_2d, tex_parameter_i32, tex_sub_image_2d, uniform_1_f32,
+uniform_1_i32, uniform_2_f32, use_program, vertex_attrib_divisor,
+vertex_attrib_pointer_f32
 ```
 
 Derived metric groups the recording log must be able to answer without a
@@ -170,6 +185,39 @@ second pass:
   `disable` / `scissor`
 - **uploads** = `buffer_data_*` / `buffer_sub_data_u8_slice` /
   `tex_image_2d` / `tex_sub_image_2d`
+
+`active_texture` is counted in the state-change group. The plan's original
+wording did not name it, but it is a texture-unit selector — a bind-family
+state change — and omitting it would undercount. All three groups are frozen
+in code as `DRAW_CALL_METHODS`, `STATE_CHANGE_METHODS` and `UPLOAD_METHODS`
+alongside `GL_CALL_SURFACE`.
+
+### Audit corrections (123.1)
+
+123.1's prohibition required that any discrepancy found during the audit be
+reported and this document corrected rather than silently absorbed. Five
+were found. Each is already folded into the prose above; they are itemised
+here so the correction is on the record and the original claim is not
+quietly rewritten out of history.
+
+| # | Claim at activation | Audited reality |
+| - | ------------------- | --------------- |
+| 1 | 47 distinct `HasContext` entry points | **49.** `create_program` (`gpu.rs:1614`) and `create_shader` (`gpu.rs:1643`) are written as multi-line method chains, so the activation-time grep missed them. Without them the facade cannot create a shader or a program at all. |
+| 2 | `gpu.rs` has 266 call sites | **268** — exactly the two missed multi-line chains. |
+| 3 | All GL calls live in `gpu.rs`, `toast_pass.rs`, `toast_text_pass.rs` | **Nine further production call sites** exist: `widget.rs` (`bind_framebuffer`, `enable`, `scissor`, `disable`) and `app_impl.rs` (`bind_framebuffer` ×3, `clear_color`, `clear`). See the scope note below. |
+| 4 | "roughly 40" `&glow::Context` parameters | **52** workspace-wide; 46 within the three originally-named files. |
+| 5 | `atlas.rs` / `font_manager.rs` live under `src/gui/renderer/` | They live at `freminal/src/gui/atlas.rs` and `freminal/src/gui/font_manager.rs`. The cited line numbers were correct; only the paths were wrong. |
+
+**Scope decision arising from correction 3 (maintainer, 2026-08-21).** The
+nine calls in `widget.rs` and `app_impl.rs` are **in scope** for the
+migration, and 123.1's guard therefore polices the **whole `freminal`
+crate**, not just `src/gui/renderer/` as 123.1 originally specified. Two
+reasons. First, both files already capture `let gl = painter.gl();` and must
+construct the facade regardless in order to call the migrated `gpu.rs`.
+Second, and decisively, `widget.rs`'s `enable`/`scissor`/`disable` calls are
+interleaved *between* calls into `gpu.rs` inside a single `PaintCallback` —
+leaving them raw would make the recording log's state-change metric silently
+undercount, which is precisely the measurement this task exists to produce.
 
 ---
 
@@ -238,7 +286,8 @@ stability over an observation period — see 123.12's stop condition.
 | 123.3   | 1     | Handle fabrication for the recording backend                        |
 | 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
 | 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
-| 123.6   | 1     | Verify zero production overhead with a benchmark                    |
+| 123.6   | 1     | Verify zero production overhead (static proof; see re-scope note)   |
+| 123.6b  | 2     | Verify dispatch cost by reading emitted code (replaced benchmark)   |
 | 123.7   | 1     | Headless render-path driver                                          |
 | 123.8   | 1     | Workload assertion tests against the recording log                  |
 | 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
@@ -262,12 +311,15 @@ blocking Phase 1's contribution (call-count findings).
 
 ### 123.1 — Enumerate and freeze the GL call surface, with a compile-time guard
 
-Scope: a new small module documenting the 47 entry points (candidate
+**Status: complete.** `freminal/src/gui/renderer/gl_facade/`
+(`mod.rs`, `surface.rs`) plus the module declaration in
+`freminal/src/gui/renderer/mod.rs`.
+
+Scope: a new small module documenting the entry points (candidate
 location: alongside the future `Gl` facade module under
 `freminal/src/gui/renderer/`), plus a lint or test that fails if a raw
-`gl.` call (on `glow::Context` directly) appears anywhere in
-`freminal/src/gui/renderer/` outside the facade module itself once 123.4 and
-123.5 land.
+`gl.` call (on `glow::Context` directly) appears anywhere in the `freminal`
+crate outside the facade module itself once 123.4 and 123.5 land.
 
 Deliverable: the frozen list (reproduced in this document above), and a
 guard — a `grep`-based test or a clippy-level check acceptable to
@@ -279,12 +331,26 @@ against a deliberately-introduced raw call in a scratch commit, then
 reverted before landing.
 
 Prohibitions: do not migrate any call site yet — that is 123.4 and 123.5.
-Do not add methods to the list beyond the 47 enumerated; if a 48th call site
-is found during the audit, report it and update this document rather than
-silently including it.
+Do not add methods to the list beyond those enumerated; if a further call
+site is found during the audit, report it and update this document rather
+than silently including it.
 
 Stop: report the frozen list and the guard's mechanism; await review before
 123.2.
+
+**As built.** The list was audited to 49, not 47 (see "Audit corrections"
+above). The guard is import-based rather than method-name-based: calling any
+`HasContext` method requires the trait in scope, so
+`has_context_use_sites_match_allowlist` walks every `.rs` file under
+`freminal/src/`, flags each non-comment line mentioning `HasContext`, and
+asserts the resulting file set equals a `NOT_YET_MIGRATED` allowlist **in
+both directions** — a new offender fails as unexpected, and a migrated file
+left behind fails as stale, so the allowlist cannot rot. The `gl_facade/`
+subtree is excluded at the walk level, because it is the migration target
+and its `Real` arm must reference the trait. The allowlist currently holds
+the five pre-migration files and shrinks to empty at 123.5. Two further
+tests pin the frozen list's sortedness/uniqueness and the metric groups'
+membership in it.
 
 ### 123.2 — Define the `Gl` facade and `RecordingState`
 
@@ -343,11 +409,25 @@ for anything — it must be fully independent of a real driver.
 
 Stop: report handle-fabrication test results; await review before 123.4.
 
+**Boundary shift, recorded at execution time.** As written, 123.2 and 123.3
+cannot be separated: the facade does not compile with the seven
+handle-returning methods' `Recording` arms absent, and each commit must
+leave `cargo test --all` green. Handle fabrication therefore landed in
+123.2, and **123.3 became the behavioural verification subtask** — the
+`recording_tests` module that drives the facade end to end and proves the
+`Recording` arm is a trustworthy driver stand-in. The split is still
+create-then-prove; only the line between "defined" and "demonstrated"
+moved. 123.3's substance is unchanged: the create/bind/delete round trips
+the original wording asked for are there, plus the assertion that every one
+of the 49 methods records itself under its *own* name (the copy-paste error
+the 123.2 structural check cannot see), and hand-derived expected values for
+each metric group, which is what 123.8's workload numbers rest on.
+
 ### 123.4 — Migrate `gpu.rs` to the `Gl` facade
 
 Scope: `freminal/src/gui/renderer/gpu.rs`.
 
-What: change all 266 call sites from `gl: &glow::Context` to `gl: &Gl<'_>`,
+What: change all 268 call sites from `gl: &glow::Context` to `gl: &Gl<'_>`,
 and every `gl.<method>(...)` call to go through the facade. This is
 mechanical per the design's own rationale (monomorphic, no generics to
 rewire) but is the largest single-file diff in the task, so keep it its own
@@ -373,14 +453,21 @@ before 123.5.
 ### 123.5 — Migrate `toast_pass.rs` and `toast_text_pass.rs`
 
 Scope: `freminal/src/gui/renderer/toast_pass.rs`,
-`freminal/src/gui/renderer/toast_text_pass.rs`.
+`freminal/src/gui/renderer/toast_text_pass.rs`,
+`freminal/src/gui/terminal/widget.rs`, `freminal/src/gui/app_impl.rs`.
 
 What: the same mechanical migration as 123.4, applied to the remaining 37 +
-37 call sites.
+37 call sites in the two toast passes, and to the nine call sites in
+`widget.rs` and `app_impl.rs` that correction 3 above added to the task's
+scope. The latter two are also the **capture points**: each must construct
+the facade around the `&glow::Context` it gets from `painter.gl()` and pass
+`&Gl<'_>` onward into the migrated renderer, rather than passing the raw
+context.
 
-Deliverable: both files compiling and passing existing tests, zero raw
-`glow::Context` calls remaining anywhere in `freminal/src/gui/renderer/`
-per 123.1's guard — turn the guard on for real at the end of this subtask.
+Deliverable: all four files compiling and passing existing tests, zero raw
+`glow::Context` calls remaining anywhere in the `freminal` crate outside
+`gl_facade/` per 123.1's guard — empty the guard's `NOT_YET_MIGRATED`
+allowlist at the end of this subtask.
 
 Verification: standard suite, plus running 123.1's guard and confirming it
 now passes clean (no raw calls left) and still fails against a scratch
@@ -391,6 +478,26 @@ changes.
 
 Stop: report that the guard is now enforced repo-wide; await review before
 123.6.
+
+**123.4 and 123.5 landed as one commit, and could not have landed as two.**
+The plan separated them on diff size, assuming `gpu.rs` and the two toast
+passes were independent. They are not: `toast_pass.rs` and
+`toast_text_pass.rs` import `compile_program`, `upload_verts`,
+`setup_fg_inst_attribs`, `gl_i32`, `gl_f32_i32` and `gl_i32_u32` **from**
+`gpu.rs`, so changing those helpers' `gl` parameter breaks both toast files
+in the same edit. `agents.md` requires every commit to leave
+`cargo test --all` green, and no ordering of the two subtasks satisfies both
+constraints without inventing transitional double-signature shims — which
+would be more code, and more risk, than the migration itself.
+
+The same coupling forced `widget.rs` and `app_impl.rs` (callers of
+`gpu.rs`) and `toast.rs` (caller of the toast passes) into the same commit.
+The resulting diff is nonetheless small — seven files, ~70 changed lines —
+because the facade's methods mirror `glow::HasContext`'s signatures exactly,
+so **not one call expression changed**. Only the 46 parameter types, six
+imports, and three `Gl::real(painter.gl())` construction sites did. Some
+multi-line signatures were reflowed onto one line by `rustfmt` purely
+because `&Gl<'_>` is shorter than `&glow::Context`.
 
 ### 123.6 — Verify zero production overhead with a benchmark
 
@@ -417,6 +524,118 @@ entirely if it does show overhead — report the number and let the
 maintainer decide; do not silently redesign the dispatch to hide a cost.
 
 Stop: report the benchmark result; await review before 123.7.
+
+**Re-scoped at execution time (maintainer decision, 2026-08-21): the static
+half lands here, the dynamic half becomes 123.6b in Phase 2.** As written,
+123.6 is not implementable in Phase 1 and the plan did not notice. The
+`Real` arm delegates to live GL function pointers, so benchmarking it needs
+a real `glow::Context` — which needs a display server and a driver, exactly
+the infrastructure 123.10 and 123.11 exist to build. A `Context` built from
+a stub loader holds null function pointers and segfaults on first call, so
+there is no headless shortcut.
+
+What is provable now is **narrower than the benchmark would have been, not
+stronger** — an earlier revision of this note claimed otherwise and
+overstated it. (123.6b has since closed the gap properly by reading the
+emitted assembly; see below. The branch-free claim is verified, and the
+zero-cost claim holds at the shape production uses: facade and direct call
+compile to byte-identical code. The single extra pointer load appears only
+in a deliberately pessimistic `inline(never)` control.) In a default build `GlTarget` has exactly one variant, so
+Rust lays it out identically to `&glow::Context` with no discriminant, and
+the `match` in all 49 methods is irrefutable: there is nothing to
+discriminate, so there is no condition to test. That is an argument from
+the language's semantics, and it is good evidence — but it is an argument,
+not a measurement. **No test here reads generated code, so "no per-call
+branch in the emitted machine code" stays unverified until 123.6b.** What
+the two tests in `facade.rs` actually pin is memory layout: `size_of::<Gl<'_>>()` equals `size_of::<&glow::Context>()`
+in a default build (measured: 8 and 8, with matching alignment), and is
+strictly greater under `gl-recording` (measured: 72), which is what keeps
+the first assertion from being vacuous. Unlike a Criterion benchmark, these
+run in the ordinary `cargo test` matrix on all four CI platforms and cannot
+go quiet the way an unwired benchmark can.
+
+### 123.6b — verify the dispatch cost by reading the emitted code
+
+**Re-scoped again, and this time away from benchmarking entirely. Complete.**
+
+123.6b was scoped as "benchmark the `Real` arm against a direct
+`glow::Context` call", gated on 123.11 providing a live context. With that
+context now available, the benchmark turns out to be **the wrong
+instrument, not merely a delayed one**, and running it would have produced
+a misleading result:
+
+- The facade adds at most a single pointer load. The cheapest real GL call
+  is an indirect jump into Mesa. The quantity of interest is two to three
+  orders of magnitude below the thing it would be measured against.
+- A benchmark could therefore only ever *fail to detect* a cost. It could
+  not refute the claim, and a "no measurable difference" headline would
+  read as far stronger evidence than it is — precisely the overclaiming
+  this task exists to stop.
+
+The question 123.6 actually left open was sharper: **is there a per-call
+branch in the emitted machine code?** That is answered by reading the code.
+Reading it is deterministic, needs no GPU or display, and gives a
+categorical answer instead of a statistical one.
+
+`freminal/src/gui/renderer/gl_facade/codegen_probe.rs` (feature
+`gl-codegen-probe`) exposes two pairs of `#[inline(never)]`
+`#[unsafe(no_mangle)]` wrappers differing only in whether they dispatch
+through `Gl`. `assets/ci/check-gl-dispatch-codegen.sh` builds them at
+`--release`, extracts each body from the emitted assembly, and fails if the
+facade version contains conditional control flow.
+
+**Result (x86_64, rustc 1.97.1, opt-level 3).** Two shapes were probed, and
+the difference between them is the whole finding.
+
+**The realistic shape — what production does.** `probe_site_facade` builds
+the facade once and makes several calls through it, mirroring `widget.rs`'s
+`let gl = &Gl::real(painter.gl());` followed by a run of draw calls. Against
+the same sequence made directly on `glow::Context`, the compiler emits:
+
+```text
+probe_site_facade = probe_site_direct
+```
+
+A symbol alias. LLVM proved the two functions byte-identical and folded them
+into the same code. **At a real call site the facade costs exactly nothing.**
+
+**The isolated shape — a deliberately pessimistic control.** A single
+`#[inline(never)]` call taking `&Gl` as a parameter emits one extra
+instruction, `movq (%rdi), %rdi`, and no branch:
+
+```text
+probe_dispatch_direct:  jmpq *<glow bind_buffer>@GOTPCREL(%rip)
+probe_dispatch_facade:  movq (%rdi), %rdi
+                        jmpq *<glow bind_buffer>@GOTPCREL(%rip)
+```
+
+**That `mov` is an artefact of the probe, not a property of the code.**
+`inline(never)` forces a call shape production never takes, in which the
+`&Gl` -> `&glow::Context` indirection cannot fold into the caller. The
+control is kept because it isolates the question the enum raises and
+answers it in the worst case.
+
+**Verdict: no branch in either shape, and zero cost in the shape that
+exists.** No `cmp`, no `test`, no conditional jump, no discriminant load —
+the single-variant `match` compiles away even when inlining is forbidden.
+This closes the "unverified until 123.6b" gap the adversarial review
+flagged.
+
+**A correction, recorded rather than deleted.** An earlier revision of this
+section reported the isolated `mov` as a correction to the "zero cost"
+claim. That was wrong: a pessimistic probe was mistaken for the real thing.
+The realistic shape is what describes production, and there the cost is
+zero. Two overclaims in opposite directions on the same question is worth
+leaving visible.
+
+**Why the check is a script rather than a `#[test]`.** It reads emitted
+assembly, so it is inherently toolchain- and architecture-specific; a test
+asserting x86_64 mnemonics would fail on the `ubuntu-24.04-arm` runner for
+reasons unrelated to the facade. Comparing function *addresses* at runtime
+was considered and rejected: it relies on linker identical-code-folding,
+which is not guaranteed, varies by linker, and does not fire in debug
+builds — a flaky test by construction. A reproducible script whose result
+is recorded here with its toolchain is the honest form.
 
 ### 123.7 — Headless render-path driver
 
@@ -499,6 +718,27 @@ Phase 2's concern (123.13). Do not weaken the existing matrix.
 
 Stop: report the green CI run; await review before starting Phase 2.
 
+**Outcome: no CI change was required, and the reason is worth recording**
+because it is not obvious and it is the thing that would silently break
+this. Every Phase 1 test added by 123.3, 123.7 and 123.8 is gated behind
+`#[cfg(feature = "gl-recording")]`, so a plain `cargo test --all` does not
+run any of them. They run in CI only because the `test` job invokes
+`cargo xtask test`, and `xtask`'s `test_libs`/`test_docs` pass
+`--all-features` — which picks up `gl-recording` along with everything
+else. The tests therefore execute on all four matrix platforms
+(`ubuntu-latest`, `windows-latest`, `macos-latest`, `ubuntu-24.04-arm`)
+with no platform-specific gating and no workflow edit.
+
+The fragility this creates should be understood by anyone touching
+`xtask`: **if `--all-features` is ever dropped from `test_libs`, the entire
+Phase 1 harness stops running in CI and nothing fails.** The suite would
+still be green; it would simply no longer be testing this. `xtask`'s
+`test_default_features` pass is the complement and correctly runs *without*
+the feature, which is what proves the default build is unaffected.
+
+Verified locally: `cargo xtask test` (the exact CI invocation) passes, and
+`cargo xtask check-windows` is clean, per `freminal-windows-crosscheck`.
+
 ### 123.10 — `flake.nix`: Mesa, llvmpipe, Xvfb
 
 Scope: `flake.nix` only.
@@ -527,6 +767,34 @@ subtask.
 
 Stop: report the diff; wait for `nix develop` confirmation before any
 further Phase 2 work.
+
+**As built, with two deviations, both recorded rather than taken silently.**
+
+1. **`pkgs.xorg.xvfb` -> `pkgs.xvfb`.** The attribute this document named is
+   deprecated in the pinned nixpkgs, which emits
+   `the xorg package set has been deprecated, 'xorg.xvfb' has been renamed
+   to 'xvfb'` on evaluation. `pkgs.xvfb-run` is added alongside it, since
+   the wrapper is what a CI job and a local run actually invoke.
+
+2. **`pkgs.mesa.llvmpipeHook` was not used.** The three variables it would
+   set are set explicitly in a new `glPixelEnv` attrset instead. The hook's
+   contents cannot be inspected without building it, and a setup hook that
+   silently overrides an explicitly-set variable is action-at-a-distance
+   this file otherwise avoids. The explicit form also matches the
+   `windowsCheckEnv` idiom immediately above it. Both interpolated paths
+   (`${pkgs.mesa}/lib/dri` and
+   `${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json`) were verified to
+   exist in the `mesa` derivation before being written.
+
+`glPixelEnv` is merged into the **`default`** shell only, never `ci` —
+forcing software GL in the CI shell would silently slow every unrelated
+check. 123.13's job must therefore use the `default` shell (or a dedicated
+one), not `ci`.
+
+Verified without building: `nix eval .#devShells.x86_64-linux.default.drvPath`
+succeeds, and `nixfmt` / `statix check` / `deadnix --fail` are all clean.
+Actual availability of the tools is what the maintainer's `nix develop`
+confirms — that is the stop condition, and it has not been bypassed.
 
 ### 123.11 — Offscreen pbuffer GL context
 
@@ -621,6 +889,38 @@ not make this job a required check without the stability period.
 Stop: report the workflow diff and the observed run stability; await review
 before 123.14.
 
+**As built, with the placement decision made explicitly.** 123.13 required
+both options to be proposed rather than one picked silently, since this is a
+new recurring CI cost. Both were considered:
+
+| Option | Verdict |
+| ------ | ------- |
+| A job inside `nightly.yml` | **Rejected.** `nightly.yml`'s `ci` job gates the artifact builds that follow it, so a rasteriser-sensitive check placed there could block a nightly release over a Mesa bump. Wrong blast radius. |
+| A dedicated workflow file | **Chosen.** `.github/workflows/gl-pixel.yml`, weekly on Monday 07:00 UTC plus manual dispatch — an hour after `bench.yml` so two noise-sensitive jobs do not contend for runners. Cadence and required-status can be changed independently while this proves itself, which is the same reasoning that gave `bench.yml` its own file. |
+
+Adding it to `ci.yml`'s `test` matrix was never an option and is explicitly
+prohibited: that matrix runs on `dtolnay/rust-toolchain`, not Nix, so it
+inherits nothing from `flake.nix` and cannot see Mesa or Xvfb at all.
+
+**A third dev shell, `gl-pixel`, was added** rather than reusing an existing
+one. `default` carries `devOnlyTools`, so CI would build `cargo-bundle` from
+source just to read back some pixels; `ci` is lean but deliberately does not
+get `glPixelEnv`, because forcing software GL there would silently slow every
+unrelated lint and test. `gl-pixel` is the `ci` toolchain plus `glPixelTools`
+and `glPixelEnv` — which is also why 123.10's tool list was refactored out of
+`devOnlyTools` into `glPixelTools`, shared by both shells.
+
+**Merge-gating decision: this job must NOT be a required check yet**, per
+123.13's own prohibition, and it is not wired as one. It stays advisory until
+it has demonstrated stability over an observation period. If it does prove
+flaky, `flaky-tests-are-bugs` governs: root-cause the nondeterminism. Do not
+add retries, and do not widen the tolerance — a Mesa-driven output change is
+handled by regenerating the golden so its `.renderer` sidecar records the new
+version, which keeps a real regression distinguishable from a toolchain move.
+
+Verified locally by running the job's exact commands inside
+`nix develop --impure .#gl-pixel`.
+
 ### 123.14 — Quantified findings report
 
 Scope: this document (a new "Findings" section appended once the work below
@@ -666,6 +966,434 @@ the harness only showed correlation).
 
 Stop: report the Findings section in full; this is the task's closing
 subtask.
+
+---
+
+## Findings (123.14)
+
+> **Both phases.** The call-count, timing and verdict material below comes
+> from the Phase 1 call-recording harness (123.7) and Criterion benchmarks;
+> the "Phase 2 findings (pixel level)" subsection reports the pixel
+> harness's results. Reference platform for byte volumes and timings:
+> x86_64 Linux, dev shell, bundled CaskaydiaCove font at
+> `pixels_per_point = 1.0`.
+
+### Phase 1 findings (call counts, timings, verdicts)
+
+#### How to read these numbers, and what is deliberately missing
+
+`PROFILING.md` requires frame rate and per-frame cost to be reported **as a
+pair**, because total CPU is their product and a single figure cannot
+distinguish "fewer frames" from "cheaper frames".
+
+Phase 1 measures **per-frame cost only**. The harness drives the renderer
+directly, below the GUI event layer, so it has no opinion about how often a
+frame is drawn. Frame rate is therefore reported here as **not measured**,
+and no number below should be multiplied out into a "CPU during X" figure.
+That is a limitation of the instrument, stated rather than papered over.
+
+What Phase 1 does give, which the manual method Task 121 used throughout
+could not, is **determinism**: given a synthetic frame description the call
+log is byte-identical on every run, so a regression in per-frame cost is
+caught in CI with nobody sitting at the machine reproducing a gesture.
+
+### Per-workload GL cost, 80x24
+
+| Workload | Calls | Draws | State changes | Uploads | Bytes |
+| -------- | ----- | ----- | ------------- | ------- | ----- |
+| One-time init | 261 | 0 | 30 | 2 | 96 |
+| Full redraw, frame 1 | 53 | 2 | 21 | 5 | 4,394,272 |
+| Full redraw, frame 2 | 104 | 2 | 21 | 30 | ~209,000 |
+| Full redraw, steady | 52 | 2 | 21 | 4 | ~200,000 |
+| Cursor-only, steady | ~48 | 2 | ~19 | ~2 | ~576 |
+| Cursor hidden | 38 | 1 | 14 | 3 | 4,393,984 |
+| Toast present | 121 | 4 | 41 | 10 | 4,658,448 |
+
+Frame 1's 4.4 MB is the initial full glyph-atlas upload (a 1024x1024 RGBA
+texture). Frame 2 is inflated by defect 124.9, below. "Steady" is frame 3
+onward.
+
+Workloads **not** in this table, because the harness cannot represent them
+honestly:
+
+- **Pointer motion** (both variants). Not a renderer workload — see the
+  dedicated section below.
+- **Alt screen.** The buffer layer produces different content; the renderer
+  draws it identically. There is no renderer-level difference to report,
+  and inventing one would be fabrication.
+
+Two workloads from 123.14's list **are** covered, but by rows that do not
+carry their name, so the mapping is stated explicitly rather than left to
+be inferred:
+
+- **Typing** maps to the "Full redraw, steady" row, and that is itself
+  Obligation 1's finding: because a one-cell edit produces a new
+  `visible_chars` `Arc`, a keystroke currently costs a *full* rebuild, not
+  an incremental one. There is no cheaper typing row to report because the
+  renderer has no cheaper typing path. If 124.1 lands, typing should move
+  to something nearer the cursor-only row, and that migration is the
+  measurable success criterion for 124.1.
+- **Genuine idle** is, at the renderer, *no row at all* — an idle terminal
+  draws no frame. The nearest thing with a cost is cursor blink, which is
+  the "Cursor-only, steady" row at roughly two frames per second. Reporting
+  idle as if it had a per-frame cost would misrepresent it; its cost is
+  a frame *rate* question, and rate is not measured here.
+
+### A disclosed gap in this accounting
+
+The table above covers the `freminal` crate only, and that is a real
+boundary rather than a complete picture. `freminal-windowing`'s
+`GlState::clear` (`freminal-windowing/src/gl_context.rs:350-357`) issues a
+raw `clear_color` + `clear` pair directly on its `glow::Context`, and
+`egui_integration.rs` calls it on **every full-damage frame**. Those two
+calls are in a different crate, so they are outside both 123.1's guard
+(which walks the `freminal` crate) and the recording harness (which drives
+the renderer, not the windowing layer).
+
+So every real `FrameDamage::Full` frame in production issues **two more
+calls — one more state change and one clear — than any row above shows**.
+The omission does not move the headline findings: `clear`/`clear_color`
+carry no bytes, so Obligation 1's bandwidth ratio is unaffected, and two
+calls against a 52-call frame is under 4%. But a document whose purpose is
+to be a trustworthy accounting instrument should not have an undisclosed
+boundary, and 123.5's "zero raw `glow::Context` calls remaining anywhere in
+the `freminal` crate" is true only because the crate boundary excludes this
+site.
+
+Extending the facade across the `freminal-windowing` boundary is a real
+piece of work — it means either exporting `Gl` from a lower crate or
+duplicating it — and is deliberately **not** done here, since Task 123
+changes no behaviour and this is a scope question for the maintainer.
+Recorded as an open question rather than silently absorbed.
+
+### Phase 2 findings (pixel level)
+
+> Reference platform: `llvmpipe (LLVM 21.1.8, 256 bits)`, Mesa 26.2.0,
+> x86_64 Linux under `xvfb-run`, bundled `CaskaydiaCove` at
+> `pixels_per_point = 1.0`. A pixel result is only meaningful relative to
+> the rasteriser that produced it; goldens carry a `.renderer` sidecar for
+> this reason.
+
+**Set expectations first: this section is deliberately thin, and that is
+the honest outcome rather than an incomplete one.** Phase 2 is a
+*regression net*, not a discovery tool. Its value is that a future change
+altering what freminal draws now fails a test; it was never likely to
+surface an existing visual bug, and it did not. Two things it did
+establish are worth having.
+
+#### 1. A repaint of unchanged state produces byte-identical pixels
+
+The most useful thing Phase 2 contributes, and the one Phase 1 structurally
+could not.
+
+Phase 1 established that a frame in which nothing changed still costs a
+full clear and a full present — the `Unchanged` -> `Full` fallback in
+`decide_frame_damage`. But a call log can only show that the calls were
+*made*. It cannot show that they accomplished nothing.
+
+Rendering the same unchanged state twice produces **0 differing pixels at a
+channel bound of 0**. So the ~52 GL calls and ~200 KB of uploads that a
+no-change frame pays produce, provably, not one different pixel on screen.
+
+That converts Task 124.2's case from an argument about control flow into a
+measurement: the work is not merely redundant-looking, it is demonstrably
+without effect. Pinned by
+`pixel_harness.rs::repainting_unchanged_state_produces_identical_pixels`.
+
+#### 2. The default-background skip is real, and dominates the frame
+
+Task 34 established that the renderer deliberately skips cells with
+`DefaultBackground`, leaving those pixels untouched so the window
+background and any transparency show through. That has been an
+architectural claim with no direct verification since.
+
+Measured on a 40x10 grid of dense text (400x200 px, 80,000 pixels):
+
+| Property | Count | Share |
+| -------- | ----- | ----- |
+| Fully transparent (`alpha == 0`) | 56,157 | 70.2% |
+| Non-black RGB (glyph coverage) | 23,843 | 29.8% |
+| Fully opaque (`alpha == 255`) | 1,762 | 2.2% |
+
+The skip is real and accounts for most of the surface. The small opaque
+count relative to glyph coverage also shows how much of the text is
+anti-aliased edge rather than solid fill.
+
+**This constrains Task 124.** Any change to damage tracking or partial
+presents must preserve the untouched-background property. A "cheaper" path
+that began clearing to an opaque colour would silently break background
+transparency, and **no call-count test would catch it** — which is exactly
+the class of regression `PROFILING.md` said was undetectable before this
+harness existed. Pinned by
+`pixel_harness.rs::default_background_cells_are_left_untouched`.
+
+#### What Phase 2 did not find
+
+No existing visual defect. Stated explicitly so its absence is not later
+mistaken for a gap in the investigation: the harness was exercised against
+cursor-shown/hidden, toast present/absent, and repeated identical renders,
+and every difference observed was the difference that was supposed to be
+there. The instrument works; there was simply nothing broken in front of
+it.
+
+#### Determinism, as measured
+
+Three consecutive captures of a 400x200 frame containing 23,843 non-black
+pixels of shaped, rasterised text produced **0 differing pixels at bound
+0** — bit-identical, not merely close. This is what justifies the exact
+golden tolerance (see 123.12), and it was measured *before* any golden was
+captured, per `flaky-tests-are-bugs`.
+
+### Verdicts on the two diagnostic obligations
+
+#### Obligation 1 — the always-new-`Arc` finding: **CONFIRMED**
+
+A re-flatten that produces byte-identical content in a freshly-allocated
+`Arc` is reported as a content change and forces a full vertex rebuild.
+Pinned by
+`frame_dirty.rs::byte_identical_reflatten_in_a_new_arc_still_forces_a_full_rebuild`,
+which isolates the single variable — same bytes, new allocation, with
+`visible_line_widths`, theme, dimensions and fold epoch all held
+pointer-identical. A paired control confirms that re-observing the *same*
+`Arc` correctly reports no change, so the confirmation is not the
+degenerate "`content_changed` is always true".
+
+Upstream cause: `rows_as_tchars_and_tags_incremental`
+(`freminal-buffer/src/buffer/flatten.rs`) returns the cached `Arc`s only on
+its no-op path (`reuse_available` and no row in the window rebuilt). Both
+the incremental fast path and the full-merge fallback end in
+`Arc::new(...)` regardless of whether the merged bytes changed. One dirty
+row anywhere in the window is enough.
+
+**Cost of being wrong, quantified:** a needless full rebuild is ~52 GL
+calls and ~200 KB of buffer uploads, against a cursor-only frame's ~48
+calls and under a kilobyte. **The waste is overwhelmingly bandwidth, not
+call count** — roughly 350x the bytes for roughly 1.08x the calls. Task
+124.1 should be justified and measured on bandwidth, not on call counts.
+
+This is a correction to the intuition in the obligation as written, which
+framed the cost as "a full vertex rebuild and a full present every tick"
+without distinguishing the two.
+
+#### Obligation 2 — the pointer-motion full-present anomaly: **PARTIALLY REFUTED — the named cause is wrong, but the symptom is real**
+
+> **Correction, 2026-08-21.** An earlier revision of this section reported a
+> flat REFUTED and attributed the whole observation to the toast confound.
+> That was wrong, and it was wrong in the specific way this task exists to
+> prevent: the two tests backing it held pane damage fixed at
+> `CursorOnly(Some(rect))` and varied only `force_full` / `toast_active`,
+> which **assumed away** the mechanism that actually produces the full
+> present. The maintainer caught it. The corrected verdict follows; the
+> refutation of the *named* cause stands, the dismissal of the *symptom*
+> does not.
+
+`pointer_forces_full_present` is **not** implicated. With the toast
+confound removed, pointer motion over terminal content yields
+`FrameDamage::Partial`; with a toast present and everything else identical,
+`Full`. The toast alone accounts for the original `frame_damage_full=120,
+frame_damage_partial=0` observation, which was recorded at the time with
+`toast_active=48` firing in every run.
+
+Pinned by
+`frame_damage.rs::pointer_motion_over_content_is_partial_once_the_toast_confound_is_removed`,
+with a companion test confirming motion **over chrome** does still force
+`Full`, so the predicate is not dead code and the refutation is not an
+artefact of it never firing.
+
+This is the experiment the original observation needed and could not
+perform: in a live session the startup toast expires on a timer while the
+gesture is still in progress. As a function parameter it is trivially held
+fixed. That is the clearest single demonstration of why deterministic
+construction was worth building.
+
+##### The actual mechanism: the `Unchanged` -> `Full` fallback
+
+Pointer motion over inert content changes nothing the dirty tracker
+observes. `evaluate_frame_dirty_state` reports no observations, so
+`widget.rs:2499` leaves `last_frame_cursor_damage` at
+`PaneFrameDamage::Unchanged` and **no damage rect is ever pushed**.
+`decide_frame_damage` then reaches `if rects.is_empty()` and returns
+`FrameDamage::Full`.
+
+So a frame in which *nothing whatsoever changed* is presented as a full
+clear plus a full present. This is structural, not a bug in any one
+predicate: `freminal_windowing::FrameDamage` has only `Full` and
+`Partial(Vec<DamageRect>)`, with `Full` as `#[default]`. **There is no way
+to express "nothing changed, present nothing."** Any frame that gets drawn
+at all while idle therefore costs a full present.
+
+Pinned by
+`frame_damage.rs::pointer_motion_over_inert_content_is_full_via_the_unchanged_fallback`.
+
+**Cost:** a full clear plus ~52 GL calls and ~200 KB of uploads, paid for a
+frame pixel-identical to its predecessor.
+
+##### Revised guidance for Task 124.2
+
+**Do not close it.** Its symptom statement — "every frame is a full present
+during pointer motion" — is correct. Only its *diagnosis* was wrong, and
+that matters because fixing `pointer_forces_full_present` would have
+changed nothing.
+
+The real question 124.2 has to answer is upstream of `decide_frame_damage`:
+**why is a frame being drawn at all when nothing changed?** Two candidate
+directions, neither yet measured:
+
+1. Suppress the repaint — if the motion gate can tell that nothing
+   observable changed, the frame should never be scheduled. This is
+   adjacent to 124.3 (cell-granular pointer suppression).
+2. Add a third `FrameDamage` state meaning "present nothing", so a frame
+   that is drawn but changed nothing does not pay a full clear and present.
+   This is a `freminal-windowing` API change and needs its own design
+   discussion.
+
+Also still true, and worth keeping: *a visible toast* forces a full present
+on every frame for its lifetime. Correct for an animating overlay, but
+unconditional, and it is what made the original 121.31 numbers unreadable.
+
+### Pointer motion, treated honestly
+
+Pointer motion is freminal's worst interactive workload, and the reason is
+**event rate**, not per-event cost. macOS delivers pointer motion even to
+unfocused windows; Wayland is comparably chatty. Total CPU is per-event
+cost multiplied by that rate.
+
+The harness can measure the first term. It cannot observe the second, and
+**the rate is left here as an explicit, unmeasured multiplier** rather than
+folded into a single figure.
+
+Per-event decision-path cost, from `pane_resolution_bench`:
+
+| Stage | 1 pane | 4 panes | 16 panes | 16 deep (chain) |
+| ----- | ------ | ------- | -------- | --------------- |
+| `PaneTree::layout` | 33 ns | 85 ns | 362 ns | 423 ns |
+| `pane_at_pos` (worst case) | 4 ns | 7 ns | 17 ns | — |
+
+**The finding is that this is negligible, and that is itself the result.**
+A whole pointer-motion decision costs tens to a few hundred nanoseconds.
+Even at an aggressive 1 kHz event rate, 380 ns/event is under 0.04% of one
+core. Optimising the predicate would buy nothing measurable.
+
+Two things follow, and they matter for Task 124's shape:
+
+1. **What costs money is whether a motion event causes a repaint**, not
+   what the event handler computes. A repaint is ~52 GL calls and ~200 KB;
+   the decision that avoids it is ~380 ns. That is a ratio of roughly five
+   orders of magnitude in bytes moved. **Task 124.3 (cell-granular pointer
+   suppression) is therefore the right lever, and 124.4 (the bool-to-struct
+   readability fix) should not be expected to show any performance effect
+   at all** — consistent with how 124.4 is already scoped.
+2. **A minor, quantified inefficiency worth noting but not prioritising:**
+   `FreminalGui::pointer_motion_needs_repaint` (`app_impl.rs:1072-1078`)
+   calls `pane_tree.layout(central_rect)` on **every** pointer-motion event,
+   which walks the tree and heap-allocates a fresh
+   `Vec<(PaneId, Rect)>` each time. It dominates the per-event cost (10-25x
+   `pane_at_pos`) and the layout only changes on resize or a split/close.
+   Caching it is straightforward. At the measured magnitudes this is worth
+   perhaps 0.03% of a core at high event rates, so it is recorded for
+   completeness and explicitly **not** recommended as a priority.
+
+Anyone reporting a pointer-motion CPU figure should state the observed
+event rate alongside it. This document does not have one, and does not
+guess.
+
+### Other findings
+
+- **GL call count is independent of terminal grid size.** An 8x2 grid and
+  an 80x24 grid record byte-identical call sequences (53 calls, 2 draws, 21
+  state changes, 5 uploads). Only instance count (17 vs 1921) and byte
+  volume scale. This is the instanced renderer working as intended, and
+  `call_count_is_independent_of_grid_size` now fails if it ever stops being
+  true.
+- **The cursor-only "fast path" is a bandwidth optimisation, not a
+  call-count one.** ~48 calls against a full rebuild's ~52, the same two
+  draw calls — but under a kilobyte against ~200 KB. Reasoning about it as
+  "the cheap path" in call-count terms is mistaken, and any Task 124 work
+  that trades calls for bytes should be evaluated on that basis.
+- **One-time init is ~5x a steady frame** (261 calls vs 52). This is why
+  `record_steady_state` discards init, and why per-frame figures measured
+  without that separation would have been mostly setup.
+- **Defect 124.9 (new).** `sync_atlas`'s full-upload branch never clears
+  `GlyphAtlas::dirty_rects`, so every glyph rasterised before a full upload
+  is redundantly re-uploaded one `tex_sub_image_2d` at a time on the next
+  frame — 30 uploads against a steady-state 4, roughly doubling frame 2 of
+  a first paint. Recurs on atlas growth, font change and `clear_atlas`.
+  One-line fix, recorded in `PLAN_124_RENDER_EFFICIENCY.md`. Being a
+  first-paint cost is exactly why eyeball profiling never found it.
+- **Cleanup 123.C1 (new).** `decide_frame_damage`'s doc comment still
+  describes a `force_full` term (`pointer_moving`) removed by #459 item 9.
+  It states precisely the hypothesis Obligation 2 was testing, so a reader
+  checking the docs would get a false confirmation.
+
+### What this means for Task 124
+
+123.14's stated purpose is to define Task 124's subtask list. Concretely:
+
+- **124.1** — premise CONFIRMED, proceed. Justify and measure it on
+  **bandwidth**, not call count.
+- **124.2** — symptom CONFIRMED, diagnosis REFUTED. Keep it, but re-point
+  it at the `Unchanged` -> `Full` fallback and at why an idle frame is
+  scheduled at all. Fixing the pointer predicate would have changed
+  nothing.
+- **124.3** — unchanged, and now better supported: suppressing repaints is
+  where the money is.
+- **124.4** — unchanged; confirmed to have no expected performance effect.
+- **124.9** — new, measured, one-line fix, not gated on further work.
+- **123.C1** — new, documentation only.
+- **Open question for the maintainer** — whether to extend the `Gl` facade
+  across the `freminal-windowing` boundary so the two per-full-frame
+  `clear`/`clear_color` calls are recorded too. Not a Task 124 subtask
+  until that is decided; see the disclosed-gap note above. Note that if
+  124.2 lands a "present nothing" state, those calls stop being issued on
+  skipped frames anyway, so the gap partly closes as a side effect of the
+  work it is not blocking.
+
+### A note on scope: this section is findings, not Task 124's task list
+
+123.14's remit is to report what was measured and state verdicts. It has
+done that, and the per-subtask guidance above is the direct output.
+
+**Decomposing Task 124 into subtasks is Task 124's own activation, not this
+section's job**, per `plan-decomposition`'s just-in-time rule — and that
+boundary matters more than usual here. The maintainer's architectural
+position, recorded during this task, reshapes 124 substantially rather than
+merely reprioritising it:
+
+- **A repaint should be PTY-driven.** Keystrokes echo to the PTY and return
+  as output; mouse motion should not repaint at all. The corollary is that
+  the grid is dirtied only by PTY bytes.
+- **Local view state is the legitimate exception**, and it is not small:
+  cursor blink, text blink (SGR 5/6), selection drag, scrollback scrolling
+  and URL hover all repaint without any PTY round trip. So the rule is
+  "only the PTY dirties the *grid*; local state may dirty a *bounded
+  region*" — not "only the PTY repaints".
+- **Two missing states, not one.** `FrameDamage` has no "nothing changed,
+  present nothing" (finding above), and `PaneFrameDamage` has no
+  `Region(rects)` — only `Unchanged`, `CursorOnly(rect)`, `Full`. The
+  cursor got a bounded-damage special case and nothing else did, so
+  selection, hover and scroll changes are all forced to `Full` because the
+  type cannot express "these cells". That second gap is arguably the larger
+  of the two: the first saves frames where nothing happened, the second
+  saves every frame where something small happened.
+- **Chrome caching should be removed unless retention is provably
+  beneficial.** 121.8 found `RedrawRequested` had permanently disqualified
+  `ChromeMode::Replay`, leaving the #436 subsystem inert since it landed;
+  121.32 then disabled it by default. The live question is therefore not
+  "is it beneficial" but "has it ever done anything", and deletion is the
+  null hypothesis. The deeper argument is that caching an immediate-mode
+  framework's output fights egui's design intent, and each workaround
+  compounds.
+- **Ordering caution.** If chrome caching is deleted *and* a "present
+  nothing" state is added, chrome becomes the thing forcing `Full` on
+  frames the grid would otherwise skip. Measure chrome's per-frame cost
+  before deleting, or the trade is invisible. Phase 2's harness can do
+  that.
+
+None of this is decided here. It is recorded so that Task 124's activation
+session starts from it rather than rediscovering it.
+
+Nothing above is upgraded beyond what was measured, and no pre-123 informal
+observation is reported here as harness output.
 
 ---
 
@@ -717,6 +1445,41 @@ the toast variable can be held fixed across runs rather than relying on
 timing. Report the full/partial split with and without a toast present, and
 state a verdict on whether `pointer_forces_full_present` itself is
 implicated once the toast confound is removed.
+
+---
+
+## Cleanup entries surfaced during Task 123
+
+Per `agent-orchestration-protocol`, a pre-existing bug found mid-task
+becomes a numbered entry rather than an inline fix or a chat message.
+
+### 123.C1 — `decide_frame_damage`'s doc comment describes a `force_full` term that no longer exists
+
+Surfaced by 123.8 while discharging Obligation 2.
+
+`freminal/src/gui/frame_damage.rs`'s doc comment on `decide_frame_damage`
+states that the caller computes `force_full` as
+`ui_overlay_open || shader_recomposites || active_pane_changed ||
+pointer_moving`. The bare `pointer_moving` term has not been there since
+issue #459 item 9: `freminal/src/gui/app_impl.rs:285-292` computes it as
+`ui_overlay_open || shader_recomposites || active_pane_changed ||
+pointer_forces_full_present(pointer_moving, pointer_over_chrome,
+border_drag_active)`.
+
+This matters more than a typo would. The stale comment states exactly the
+behaviour Obligation 2 set out to investigate — "pointer motion forces a
+full present" — so a reader checking the hypothesis against the docs would
+have it confirmed by a comment that is wrong, and the code refutes it.
+
+Scope of fix: correct the doc comment to name
+`pointer_forces_full_present` and its three inputs. Documentation only, no
+behaviour change, no test change. Verification: `cargo test --all` plus the
+standard suite; the two Obligation 2 tests added in 123.8 already pin the
+real behaviour.
+
+Not fixed in Task 123 because Task 123 changes no behaviour and touches no
+file it is not measuring; this is a one-line docs correction better carried
+with Task 124's `frame_damage.rs` work (124.2/124.4 both touch this area).
 
 ---
 

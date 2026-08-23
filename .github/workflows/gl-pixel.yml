@@ -1,0 +1,97 @@
+# Task 123 Phase 2 — headless GL pixel / readback harness.
+#
+# WHY THIS IS ITS OWN WORKFLOW, AND NOT A JOB IN ci.yml OR nightly.yml
+#
+#   * `ci.yml`'s `test` matrix runs on `dtolnay/rust-toolchain`, NOT Nix, so
+#     it inherits nothing from `flake.nix` and cannot see Mesa or Xvfb. It
+#     structurally cannot host this job.
+#   * `nightly.yml`'s `ci` job gates the artifact builds that follow it. A
+#     rasteriser-sensitive check wired in there could block a nightly
+#     release over a Mesa bump, which is the wrong blast radius.
+#   * A dedicated file lets cadence and required-status be changed
+#     independently, which matters while this is still proving itself.
+#     `bench.yml` set that precedent for noise-sensitive checks.
+#
+# THIS JOB MUST NOT BE A REQUIRED CHECK YET.
+#
+# Per subtask 123.13, it stays advisory until it has demonstrated stability
+# over an observation period. `flaky-tests-are-bugs` forbids reaching for
+# retries or a looser tolerance if it proves flaky — the correct response is
+# to root-cause the nondeterminism. The comparison tolerance is exact (zero
+# channel difference, zero mismatched pixels); if llvmpipe output shifts
+# because Mesa moved, the golden gets regenerated and its `.renderer`
+# sidecar records the new version. The tolerance does not get widened.
+name: GL Pixel Harness
+
+on:
+  schedule:
+    # Weekly, Monday 07:00 UTC — an hour after `bench.yml`, so two
+    # noise-sensitive jobs do not contend for the same runners.
+    - cron: "0 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gl-pixel
+  cancel-in-progress: true
+
+env:
+  # This job -- and only this job -- provides Mesa's llvmpipe plus Xvfb, so
+  # here a missing GL context is a broken runner rather than a reason to
+  # skip. The harness keys its hard-failure path on this variable and NOT on
+  # `CI`, because GitHub sets `CI=true` on every job, including the ordinary
+  # test matrix, which runs the same tests via `--all-features` on runners
+  # that legitimately have no GL stack.
+  FREMINAL_REQUIRE_GL: "1"
+
+jobs:
+  pixel-harness:
+    name: Offscreen GL pixel harness
+    # Linux only, by design. Phase 2 needs Mesa's llvmpipe plus an X server;
+    # the same `stdenv.isLinux` precedent as `pkgs.perf`.
+    runs-on: ubuntu-latest
+    # A software rasteriser under Xvfb that wedges would otherwise hold a
+    # runner for the default six hours.
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # This job only reads source; there is nothing to push. Leaving the
+          # job token in .git/config would be credential persistence for no
+          # benefit.
+          persist-credentials: false
+
+      - name: Set up Determinate Nix
+        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
+
+      - name: Use Determinate Cache
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+        with:
+          use-flakehub: false
+          use-gha-cache: false
+
+      # `.#gl-pixel` rather than `.#ci`: it carries Mesa, Xvfb and the
+      # llvmpipe environment without `devOnlyTools`. `.#default` would work
+      # too but would build cargo-bundle from source for no reason.
+      - name: Report the rasteriser under test
+        run: |
+          nix develop --impure .#gl-pixel --command bash -e -c '
+            set -euxo pipefail
+            # A golden image is only meaningful relative to the rasteriser
+            # that produced it, so record which one this run used. A change
+            # here is the first thing to check if the comparison fails.
+            xvfb-run -a cargo test -p freminal-windowing \
+              --features gl-offscreen gl_context_offscreen -- --nocapture
+          '
+
+      - name: Run the pixel harness
+        run: |
+          nix develop --impure .#gl-pixel --command bash -e -c '
+            set -euxo pipefail
+            xvfb-run -a cargo test -p freminal --features gl-pixel \
+              pixel_harness -- --nocapture
+          '

@@ -33,6 +33,13 @@ pub mod error;
 mod egui_integration;
 mod event_loop;
 mod gl_context;
+// Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
+// builds entirely, and `target_os = "linux"` because the Mesa + Xvfb stack it
+// needs is Linux-only by design (the same precedent as `pkgs.perf` being
+// `stdenv.isLinux`-gated in `flake.nix`). `--all-features` on macOS or
+// Windows therefore still compiles, it just compiles nothing.
+#[cfg(all(target_os = "linux", feature = "gl-offscreen"))]
+pub mod gl_context_offscreen;
 mod modifier_tracker;
 
 pub use error::Error;

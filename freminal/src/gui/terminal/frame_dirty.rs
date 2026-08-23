@@ -753,6 +753,108 @@ mod evaluate_frame_dirty_state_tests {
         assert!(!outcome.observations.hover_changed);
     }
 
+    /// OBLIGATION 1 of `PLAN_123_GL_MEASUREMENT_HARNESS.md`: confirm or
+    /// refute the always-new-`Arc` finding that is Task 124.1's premise.
+    ///
+    /// **Verdict: CONFIRMED.** A re-flatten that produces byte-identical
+    /// content in a freshly-allocated `Arc` is reported as a content
+    /// change, and forces a full vertex rebuild.
+    ///
+    /// This test isolates the single variable. It starts from a settled
+    /// frame, then swaps in a `visible_chars` `Arc` whose *contents* are
+    /// equal by value but whose allocation differs, holding every other
+    /// input — including `visible_line_widths`, theme, dimensions and fold
+    /// epoch — pointer-identical to the settled cache. The only thing that
+    /// changed is the allocation.
+    ///
+    /// The upstream cause is in `freminal-buffer`:
+    /// `rows_as_tchars_and_tags_incremental` returns the cached `Arc`s
+    /// unchanged **only** on its no-op path (`reuse_available` and no row
+    /// in the window needed rebuilding). Both the incremental fast path and
+    /// the full-merge fallback finish with `Arc::new(chars)`, a fresh
+    /// allocation, regardless of whether the merged bytes are identical to
+    /// the previous merge. So any dirty row anywhere in the window — a
+    /// cursor blink repainting its cell, a row rewritten with the same
+    /// text — produces a new pointer here.
+    ///
+    /// This is deliberately asserting the **current** behaviour, defect
+    /// included, so the premise stays pinned and measurable until 124.1
+    /// addresses it. When it does, this test must be **inverted, not
+    /// deleted** — it is the only regression guard for the distinction.
+    ///
+    /// What this costs, per Task 123's harness: a full rebuild is ~52 GL
+    /// calls and ~200 KB of buffer uploads per frame at 80x24, versus a
+    /// cursor-only frame's ~48 calls and under a kilobyte. The waste is
+    /// overwhelmingly bandwidth, not call count.
+    #[test]
+    fn byte_identical_reflatten_in_a_new_arc_still_forces_a_full_rebuild() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        // Re-flatten: same bytes, new allocation. Everything else is held
+        // pointer-identical to what the cache recorded.
+        let mut reflattened = snap.clone();
+        reflattened.visible_chars = Arc::new((*snap.visible_chars).clone());
+
+        assert_eq!(
+            reflattened.visible_chars, snap.visible_chars,
+            "precondition: the re-flatten must be byte-identical"
+        );
+        assert!(
+            !Arc::ptr_eq(&reflattened.visible_chars, &snap.visible_chars),
+            "precondition: the re-flatten must be a different allocation"
+        );
+        assert!(
+            Arc::ptr_eq(&reflattened.visible_line_widths, &snap.visible_line_widths),
+            "precondition: line widths must be held fixed, or they would \
+             confound the result"
+        );
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(
+            &reflattened,
+            &mut view_state,
+            &cache,
+            &render_state,
+            true,
+            true,
+        );
+
+        assert!(
+            outcome.observations.content_changed,
+            "CONFIRMED: a byte-identical re-flatten is reported as a content \
+             change purely because the `Arc` allocation differs"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "and that observation forces a full vertex rebuild"
+        );
+    }
+
+    /// The control for the test above: re-observing the *same* `Arc`
+    /// correctly reports no content change.
+    ///
+    /// Without this, the confirmation above would be consistent with
+    /// "`content_changed` is simply always true", which would be a
+    /// different and much larger bug. Pairing them shows the detection
+    /// works and is specifically pointer-sensitive.
+    #[test]
+    fn re_observing_the_same_arc_reports_no_content_change() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            !outcome.observations.content_changed,
+            "the same allocation must not be reported as changed"
+        );
+    }
+
     #[test]
     fn cursor_blink_change_alone_takes_the_fast_path() {
         // Everything else settled; only the cursor blink phase flipped, and

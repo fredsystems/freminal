@@ -199,3 +199,22 @@ validation = []
 # Enables `freminal-windowing/frame-profiling` so one flag turns on both
 # crates' instrumentation.
 frame-profiling = ["freminal-windowing/frame-profiling"]
+# Enables the `Recording` arm of `gui::renderer::gl_facade::Gl` (Task 123),
+# which logs each GL call instead of issuing it, for the Task 123
+# measurement harness (a headless call-recording harness needing no GPU,
+# display server or driver). NOT enabled by default -- in a default build
+# `GlTarget` collapses to its single `Real` variant so `Gl` compiles down to
+# direct delegation with no per-call branch. 123.6 pins the layout half of
+# that claim with a `size_of` test; the runtime half is 123.6b, deferred to
+# Phase 2 because benchmarking the `Real` arm needs a live GL context.
+# Task 123 subtask 123.6b: exposes `#[no_mangle]` codegen probes so the
+# facade's dispatch can be compared against a direct `glow` call in the
+# emitted assembly. Build-inspection only -- never enable in a real build.
+gl-codegen-probe = []
+gl-recording = []
+# Task 123 Phase 2: the pixel/readback harness. Pulls in `gl-recording`
+# because it reuses 123.7's headless driver, and `freminal-windowing`'s
+# offscreen pbuffer context. Linux-only in practice (the offscreen module is
+# `target_os = "linux"`-gated) and needs Mesa plus a live $DISPLAY, so it is
+# NOT enabled by default and its tests skip when no context can be created.
+gl-pixel = ["gl-recording", "freminal-windowing/gl-offscreen"]

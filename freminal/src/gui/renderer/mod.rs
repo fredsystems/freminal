@@ -5,8 +5,14 @@
 
 //! Terminal rendering pipeline split into focused sub-modules.
 //!
+//! - [`gl_facade`] — the GL call boundary: the frozen `glow::HasContext` call
+//!   surface and (from 123.2) the `Gl` recording facade.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
+//! - `headless` (feature `gl-recording`) — drives [`TerminalRenderer`] and the
+//!   toast passes without a GUI event loop, for use with the GL recording
+//!   facade (Task 123); see its module docs for what it does and does not
+//!   represent.
 //! - [`shaders`] — GLSL source string constants for the four shader passes
 //!   (decoration, background, foreground, image).
 //! - [`vertex`] — CPU-side vertex/instance builders, `FgRenderOptions`, and helpers.
@@ -21,7 +27,24 @@
 //!   module docs.
 
 pub mod errors;
+pub mod gl_facade;
 pub mod gpu;
+#[cfg(feature = "gl-recording")]
+pub mod headless;
+#[cfg(all(test, feature = "gl-recording"))]
+mod headless_workloads;
+// Phase 2 is Linux-only, and the `target_os` gate is load-bearing rather
+// than tidiness: these modules depend on
+// `freminal_windowing::gl_context_offscreen`, which is itself
+// `#[cfg(all(target_os = "linux", feature = "gl-offscreen"))]`. Gating only
+// on the feature made `--all-features` fail to compile on macOS and Windows.
+// `cargo xtask check-windows` does pass `--all-features` and would have
+// caught it; it simply was not re-run after the pixel harness landed. Both
+// gates must stay in step with the windowing crate's.
+#[cfg(all(target_os = "linux", feature = "gl-pixel"))]
+pub mod pixel_golden;
+#[cfg(all(target_os = "linux", feature = "gl-pixel"))]
+pub mod pixel_harness;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;

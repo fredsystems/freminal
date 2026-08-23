@@ -16,11 +16,11 @@
 //! functions that are fully testable without a GL context.
 
 use conv2::{ApproxFrom, ConvUtil, ValueFrom};
-use glow::{self, HasContext};
 use tracing::error;
 
 use super::super::atlas::GlyphAtlas;
 use super::errors::{BufferAllocError, GpuInitError, ShaderCompileError, TextureUploadError};
+use super::gl_facade::Gl;
 use super::shaders::{
     BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
     DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC, IMG_FRAG_SRC, IMG_VERT_SRC, POST_PASSTHROUGH_FRAG_SRC,
@@ -278,7 +278,7 @@ impl TerminalRenderer {
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
     /// GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         self.init_bg_inst_pass(gl)?;
         self.init_deco_pass(gl)?;
         self.init_fg_pass(gl)?;
@@ -292,7 +292,7 @@ impl TerminalRenderer {
 
     /// Initialise the instanced background pass (shader, VAO, unit-quad VBO,
     /// double-buffered instance VBOs).
-    fn init_bg_inst_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_bg_inst_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_INST_VERT_SRC, BG_INST_FRAG_SRC, "bg_instanced")?;
 
         self.bg_inst_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -345,7 +345,7 @@ impl TerminalRenderer {
     }
 
     /// Initialise the decoration pass (shader, VAO, double-buffered VBOs).
-    fn init_deco_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_deco_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, DECO_VERT_SRC, DECO_FRAG_SRC, "decoration")?;
 
         self.deco_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -381,7 +381,7 @@ impl TerminalRenderer {
     ///
     /// Reuses the shared unit-quad VBO from the instanced background pass
     /// (must be initialised first via [`init_bg_inst_pass`]).
-    fn init_fg_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_fg_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "foreground")?;
 
         self.fg_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -422,7 +422,7 @@ impl TerminalRenderer {
     }
 
     /// Create and configure the glyph-atlas texture.
-    fn init_atlas_texture(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_atlas_texture(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let texture = unsafe {
             gl.create_texture()
                 .map_err(|e| TextureUploadError::CreateTexture {
@@ -462,7 +462,7 @@ impl TerminalRenderer {
     }
 
     /// Initialise the image-pass GL resources (shader, VAO, double-buffered VBOs).
-    fn init_image_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let img_program = compile_program(gl, IMG_VERT_SRC, IMG_FRAG_SRC, "image")?;
 
         let img_u_viewport = unsafe { gl.get_uniform_location(img_program, "u_viewport_size") };
@@ -501,7 +501,7 @@ impl TerminalRenderer {
     ///
     /// No texture is uploaded here — images are loaded on demand via
     /// [`Self::update_background_image`].
-    fn init_bg_image_pass(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    fn init_bg_image_pass(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, BG_IMG_VERT_SRC, BG_IMG_FRAG_SRC, "bg_image")?;
 
         self.bg_img_u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -547,7 +547,7 @@ impl TerminalRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_verts(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         atlas: &mut GlyphAtlas,
         bg_instances: &[f32],
         deco_verts: &[f32],
@@ -657,7 +657,7 @@ impl TerminalRenderer {
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with_cursor_only_update(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         atlas: &mut GlyphAtlas,
         deco_verts: &[f32],
         bg_inst_total_floats: usize,
@@ -733,7 +733,7 @@ impl TerminalRenderer {
     }
 
     /// Synchronise the atlas CPU data to the GPU texture.
-    fn sync_atlas(&self, gl: &glow::Context, atlas: &mut GlyphAtlas) {
+    fn sync_atlas(&self, gl: &Gl<'_>, atlas: &mut GlyphAtlas) {
         let Some(tex) = self.atlas_texture else {
             return;
         };
@@ -793,7 +793,7 @@ impl TerminalRenderer {
     }
 
     /// Upload decoration vertex data via orphan-then-write.
-    fn upload_deco_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+    fn upload_deco_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
         let Some(vbo) = self.deco_vbo[buf_idx] else {
             return;
         };
@@ -801,7 +801,7 @@ impl TerminalRenderer {
     }
 
     /// Upload instanced background instance data via orphan-then-write.
-    fn upload_bg_instances(&self, gl: &glow::Context, instances: &[f32], buf_idx: usize) {
+    fn upload_bg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) {
         let Some(vbo) = self.bg_inst_vbo[buf_idx] else {
             return;
         };
@@ -809,7 +809,7 @@ impl TerminalRenderer {
     }
 
     /// Upload foreground instance data via orphan-then-write.
-    fn upload_fg_instances(&self, gl: &glow::Context, instances: &[f32], buf_idx: usize) {
+    fn upload_fg_instances(&self, gl: &Gl<'_>, instances: &[f32], buf_idx: usize) {
         let Some(vbo) = self.fg_vbo[buf_idx] else {
             return;
         };
@@ -817,7 +817,7 @@ impl TerminalRenderer {
     }
 
     /// Upload image vertex data via orphan-then-write.
-    fn upload_img_verts(&self, gl: &glow::Context, verts: &[f32], buf_idx: usize) {
+    fn upload_img_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
         let Some(vbo) = self.img_vbo[buf_idx] else {
             return;
         };
@@ -837,7 +837,7 @@ impl TerminalRenderer {
     ///   or by deleting and recreating the texture when dimensions differ.
     fn sync_image_textures(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         snap_images: &std::collections::HashMap<u64, InlineImage>,
     ) {
         // Delete textures for images no longer in the visible snapshot.
@@ -884,13 +884,7 @@ impl TerminalRenderer {
 
     /// Re-upload a changed frame's pixels into an existing, same-dimensioned
     /// texture via `tex_sub_image_2d` (animation frame swap — Task 100.2c).
-    fn reupload_image_texture(
-        &mut self,
-        gl: &glow::Context,
-        id: u64,
-        img: &InlineImage,
-        cur_ptr: usize,
-    ) {
+    fn reupload_image_texture(&mut self, gl: &Gl<'_>, id: u64, img: &InlineImage, cur_ptr: usize) {
         let w = gl_i32_u32(img.width_px);
         let h = gl_i32_u32(img.height_px);
         if let Some(existing) = self.image_textures.get_mut(&id) {
@@ -916,13 +910,7 @@ impl TerminalRenderer {
 
     /// Delete any stale texture for `id`, then create and upload a fresh GL
     /// texture for `img`, recording its pixel-`Arc` identity and dimensions.
-    fn create_image_texture(
-        &mut self,
-        gl: &glow::Context,
-        id: u64,
-        img: &InlineImage,
-        cur_ptr: usize,
-    ) {
+    fn create_image_texture(&mut self, gl: &Gl<'_>, id: u64, img: &InlineImage, cur_ptr: usize) {
         let w = gl_i32_u32(img.width_px);
         let h = gl_i32_u32(img.height_px);
 
@@ -1000,7 +988,7 @@ impl TerminalRenderer {
     #[allow(clippy::too_many_arguments)]
     fn draw_images(
         &self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         vert_floats: usize,
         image_draw_order: &[ImageDrawEntry],
         vp_w: f32,
@@ -1079,7 +1067,7 @@ impl TerminalRenderer {
     #[allow(clippy::too_many_arguments)]
     fn draw_background_instanced(
         &self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         instance_floats: usize,
         vp_w: f32,
         vp_h: f32,
@@ -1129,7 +1117,7 @@ impl TerminalRenderer {
     /// selection highlights).
     fn draw_decorations(
         &self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         vert_floats: usize,
         vp_w: f32,
         vp_h: f32,
@@ -1164,7 +1152,7 @@ impl TerminalRenderer {
     /// Execute the instanced foreground draw call.
     fn draw_foreground(
         &self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         instance_floats: usize,
         vp_w: f32,
         vp_h: f32,
@@ -1217,7 +1205,7 @@ impl TerminalRenderer {
     /// a GL texture object cannot be created.
     pub fn update_background_image(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         path: &std::path::Path,
     ) -> Result<(), GpuInitError> {
         // Delete any previously-loaded texture.
@@ -1292,7 +1280,7 @@ impl TerminalRenderer {
     ///
     /// After this call, [`draw_background_image`](Self::draw_background_image)
     /// is a no-op until a new image is loaded.
-    pub fn clear_background_image(&mut self, gl: &glow::Context) {
+    pub fn clear_background_image(&mut self, gl: &Gl<'_>) {
         if let Some(tex) = self.bg_img_texture.take() {
             unsafe { gl.delete_texture(tex) };
         }
@@ -1310,7 +1298,7 @@ impl TerminalRenderer {
     /// Skips if no texture is loaded (`bg_img_texture` is `None`).
     fn draw_background_image(
         &self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         vp_w: f32,
         vp_h: f32,
         opacity: f32,
@@ -1382,7 +1370,7 @@ impl TerminalRenderer {
     /// Free all GPU resources.
     ///
     /// Should be called when the widget is destroyed.
-    pub fn destroy(&mut self, gl: &glow::Context) {
+    pub fn destroy(&mut self, gl: &Gl<'_>) {
         if !self.initialized {
             return;
         }
@@ -1477,7 +1465,7 @@ impl TerminalRenderer {
 /// - Location 1: `vec2 a_cell_pos`  (col, row)       — divisor 1
 /// - Location 2: `vec4 a_bg_color`  (r, g, b, a)     — divisor 1
 unsafe fn setup_bg_inst_attribs(
-    gl: &glow::Context,
+    gl: &Gl<'_>,
     unit_quad_vbo: glow::Buffer,
     instance_vbo: glow::Buffer,
 ) {
@@ -1510,7 +1498,7 @@ unsafe fn setup_bg_inst_attribs(
 /// Stride = `DECO_VERTEX_FLOATS * 4` bytes.
 ///
 /// Used for underlines, strikethrough, cursor, and selection highlight quads.
-unsafe fn setup_deco_attribs(gl: &glow::Context) {
+unsafe fn setup_deco_attribs(gl: &Gl<'_>) {
     let stride = gl_i32(DECO_VERTEX_FLOATS * size_of::<f32>());
     let offset_c2 = gl_i32(2 * size_of::<f32>());
     unsafe {
@@ -1538,7 +1526,7 @@ unsafe fn setup_deco_attribs(gl: &glow::Context) {
 /// this same instanced foreground shader) can reuse this attribute binder
 /// instead of duplicating it.
 pub(super) unsafe fn setup_fg_inst_attribs(
-    gl: &glow::Context,
+    gl: &Gl<'_>,
     unit_quad_vbo: glow::Buffer,
     instance_vbo: glow::Buffer,
 ) {
@@ -1581,7 +1569,7 @@ pub(super) unsafe fn setup_fg_inst_attribs(
 ///
 /// Layout: `location 0 = vec2 pos, location 1 = vec2 uv`.
 /// Stride = `IMG_VERTEX_FLOATS * 4` bytes.
-unsafe fn setup_img_attribs(gl: &glow::Context) {
+unsafe fn setup_img_attribs(gl: &Gl<'_>) {
     let stride = gl_i32(IMG_VERTEX_FLOATS * size_of::<f32>());
     let f = gl_i32(size_of::<f32>());
     unsafe {
@@ -1601,7 +1589,7 @@ unsafe fn setup_img_attribs(gl: &glow::Context) {
 /// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
 /// can reuse the same compile/link error handling instead of duplicating it.
 pub(super) fn compile_program(
-    gl: &glow::Context,
+    gl: &Gl<'_>,
     vert_src: &str,
     frag_src: &str,
     label: &'static str,
@@ -1633,7 +1621,7 @@ pub(super) fn compile_program(
 
 /// Compile a single GLSL shader stage.
 unsafe fn compile_shader(
-    gl: &glow::Context,
+    gl: &Gl<'_>,
     shader_type: u32,
     src: &str,
     label: &'static str,
@@ -1662,7 +1650,7 @@ unsafe fn compile_shader(
 ///
 /// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
 /// can reuse the same orphan-then-write upload instead of duplicating it.
-pub(super) fn upload_verts(gl: &glow::Context, vbo: glow::Buffer, verts: &[f32]) {
+pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
     if verts.is_empty() {
         return;
     }
@@ -1908,7 +1896,7 @@ impl WindowPostRenderer {
     /// # Errors
     ///
     /// Returns [`GpuInitError`] if shader compilation or any GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(
             gl,
             POST_VERT_SRC,
@@ -1963,7 +1951,7 @@ impl WindowPostRenderer {
     ///
     /// Creates or recreates the FBO when missing or resized.  No-op when the
     /// size has not changed.
-    pub fn ensure_fbo(&mut self, gl: &glow::Context, w: i32, h: i32) {
+    pub fn ensure_fbo(&mut self, gl: &Gl<'_>, w: i32, h: i32) {
         if self.fbo_size == Some((w, h)) {
             return;
         }
@@ -2070,7 +2058,7 @@ impl WindowPostRenderer {
     /// Returns [`GpuInitError`] if shader compilation or linking fails.
     pub fn update_shader(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         frag_src: &str,
         vp_w: i32,
         vp_h: i32,
@@ -2097,7 +2085,7 @@ impl WindowPostRenderer {
     ///
     /// After this call [`is_active`](Self::is_active) returns `false` and panes
     /// render directly to egui's framebuffer.
-    pub fn clear_shader(&mut self, gl: &glow::Context) {
+    pub fn clear_shader(&mut self, gl: &Gl<'_>) {
         // Destroy FBO + texture.
         if let Some(fbo) = self.fbo.take() {
             unsafe { gl.delete_framebuffer(fbo) };
@@ -2140,7 +2128,7 @@ impl WindowPostRenderer {
     /// before this call and restoring state afterwards.
     ///
     /// Advances `self.time` by `delta_seconds`.
-    pub fn draw_post_pass(&mut self, gl: &glow::Context, vp_w: f32, vp_h: f32, delta_seconds: f32) {
+    pub fn draw_post_pass(&mut self, gl: &Gl<'_>, vp_w: f32, vp_h: f32, delta_seconds: f32) {
         let (Some(prog), Some(vao), Some(tex)) = (self.program, self.vao, self.fbo_texture) else {
             return;
         };
@@ -2174,7 +2162,7 @@ impl WindowPostRenderer {
     ///
     /// Should be called when the application exits or when the GL context is
     /// destroyed.
-    pub fn destroy(&mut self, gl: &glow::Context) {
+    pub fn destroy(&mut self, gl: &Gl<'_>) {
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);

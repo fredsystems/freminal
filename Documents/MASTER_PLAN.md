@@ -210,7 +210,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 | 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete  | None                   |
 | 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete  | None                   |
-| 123 | GL Pipeline Measurement Harness           | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Planned   | Task 122               |
+| 123 | GL Pipeline Measurement Harness           | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Pending merge | Task 122           |
 | 124 | Render Efficiency Remediation             | `PLAN_124_RENDER_EFFICIENCY.md`               | Stub      | Task 123               |
 
 ---
@@ -765,7 +765,7 @@ Update this section as tasks complete:
 | 119  | 2026-07-20 | 2026-07-20 | 119.1-119.6 LZ4 block compression + idle-driven; ~13-22x vs cell; merged PR #419 |
 | 121  | 2026-07-27 | 2026-08-20 | Closed as umbrella; survivors migrated to Tasks 123/124. See its migration map   |
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
-| 123  |            |            | Planned. GL call-recording harness (Phase 1) + pixel/llvmpipe harness (Phase 2)  |
+| 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged       |
 | 124  |            |            | Stub. Gated on 123's findings; 124.4 (bool-to-struct) is not gated               |
 
 ---

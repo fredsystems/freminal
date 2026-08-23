@@ -24,10 +24,10 @@
 //! [`ToastRenderer::init`], [`ToastRenderer::draw`], and
 //! [`ToastRenderer::destroy`].
 
-use glow::{self, HasContext};
 use tracing::error;
 
 use super::errors::{BufferAllocError, GpuInitError};
+use super::gl_facade::Gl;
 use super::gpu::{compile_program, gl_f32_i32, gl_i32, upload_verts};
 use super::shaders::{TOAST_FRAG_SRC, TOAST_VERT_SRC};
 use super::vertex::VERTS_PER_QUAD;
@@ -142,7 +142,7 @@ impl ToastRenderer {
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if any
     /// GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, TOAST_VERT_SRC, TOAST_FRAG_SRC, "toast")?;
 
         let u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -184,13 +184,7 @@ impl ToastRenderer {
     ///
     /// No-op (with a logged error) if [`Self::init`] has not been called yet.
     /// No-op (silently) if `quads` is empty.
-    pub fn draw(
-        &mut self,
-        gl: &glow::Context,
-        quads: &[ToastQuad],
-        viewport_w: i32,
-        viewport_h: i32,
-    ) {
+    pub fn draw(&mut self, gl: &Gl<'_>, quads: &[ToastQuad], viewport_w: i32, viewport_h: i32) {
         if !self.initialized {
             error!("ToastRenderer::draw() called before init()");
             return;
@@ -234,7 +228,7 @@ impl ToastRenderer {
     ///
     /// Should be called when the widget/renderer is destroyed. Mirrors
     /// [`super::gpu::TerminalRenderer::destroy`]'s shape.
-    pub fn destroy(&mut self, gl: &glow::Context) {
+    pub fn destroy(&mut self, gl: &Gl<'_>) {
         if !self.initialized {
             return;
         }
@@ -266,7 +260,7 @@ impl ToastRenderer {
 /// location 6 = vec4 a_border_color, location 7 = float a_border_width,
 /// location 8 = vec4 a_accent, location 9 = float a_opacity`.
 /// Stride = `TOAST_VERTEX_FLOATS * size_of::<f32>()` = 100 bytes.
-unsafe fn setup_toast_attribs(gl: &glow::Context) {
+unsafe fn setup_toast_attribs(gl: &Gl<'_>) {
     let stride = gl_i32(TOAST_VERTEX_FLOATS * size_of::<f32>());
     let f = gl_i32(size_of::<f32>());
 

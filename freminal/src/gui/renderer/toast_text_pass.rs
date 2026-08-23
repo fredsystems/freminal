@@ -60,12 +60,12 @@
 //! [`ToastTextRenderer::destroy`].
 
 use conv2::{ApproxFrom, RoundToNearest, ValueFrom};
-use glow::{self, HasContext};
 use tracing::{error, warn};
 
 use super::super::atlas::{GlyphAtlas, GlyphKey};
 use super::super::font_manager::{FontManager, GlyphStyle};
 use super::errors::{BufferAllocError, GpuInitError, TextureUploadError};
+use super::gl_facade::Gl;
 use super::gpu::{
     compile_program, gl_f32_i32, gl_i32, gl_i32_u32, setup_fg_inst_attribs, upload_verts,
 };
@@ -230,7 +230,7 @@ impl ToastTextRenderer {
     ///
     /// Returns [`GpuInitError`] if shader compilation/linking fails or if
     /// any GL object creation fails.
-    pub fn init(&mut self, gl: &glow::Context) -> Result<(), GpuInitError> {
+    pub fn init(&mut self, gl: &Gl<'_>) -> Result<(), GpuInitError> {
         let program = compile_program(gl, FG_VERT_SRC, FG_FRAG_SRC, "toast_text")?;
 
         let u_viewport = unsafe { gl.get_uniform_location(program, "u_viewport_size") };
@@ -531,7 +531,7 @@ impl ToastTextRenderer {
     /// yet. No-op (silently) if `instances` is empty.
     pub fn upload_and_draw(
         &mut self,
-        gl: &glow::Context,
+        gl: &Gl<'_>,
         instances: &[f32],
         viewport_w: i32,
         viewport_h: i32,
@@ -591,7 +591,7 @@ impl ToastTextRenderer {
     ///
     /// Should be called when the widget/renderer is destroyed. Mirrors
     /// [`super::gpu::TerminalRenderer::destroy`]'s shape.
-    pub fn destroy(&mut self, gl: &glow::Context) {
+    pub fn destroy(&mut self, gl: &Gl<'_>) {
         if !self.initialized {
             return;
         }
@@ -631,7 +631,7 @@ impl ToastTextRenderer {
 /// than reused) because that method is private to `TerminalRenderer` and
 /// bound to its own `atlas_texture` field — this pass owns a separate
 /// texture and atlas entirely.
-fn sync_toast_atlas(gl: &glow::Context, texture: glow::Texture, atlas: &mut GlyphAtlas) {
+fn sync_toast_atlas(gl: &Gl<'_>, texture: glow::Texture, atlas: &mut GlyphAtlas) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
     }

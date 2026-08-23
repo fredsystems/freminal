@@ -15,7 +15,6 @@ use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::io::InputEvent;
 use freminal_windowing::WindowId;
-use glow::HasContext;
 use tracing::{debug, error, trace, warn};
 
 use super::chrome_damage;
@@ -30,7 +29,7 @@ use super::pointer_motion::{
     PaneResolution, PaneSnapshotInputs, animation_in_flight_composed,
     pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
 };
-use super::renderer::WindowPostRenderer;
+use super::renderer::{WindowPostRenderer, gl_facade::Gl};
 use super::rendering;
 use super::tabs::{Tab, TabManager};
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
@@ -2406,7 +2405,7 @@ impl freminal_windowing::App for FreminalGui {
                     ui.painter().add(egui::PaintCallback {
                         rect: available_rect,
                         callback: Arc::new(CallbackFn::new(move |info, painter| {
-                            let gl = painter.gl();
+                            let gl = &Gl::real(painter.gl());
                             let vp = info.viewport_in_pixels();
                             let mut wpr = wpr_for_clear
                                 .lock()
@@ -3195,7 +3194,7 @@ impl freminal_windowing::App for FreminalGui {
                     ui.painter().add(egui::PaintCallback {
                         rect: available_rect,
                         callback: Arc::new(CallbackFn::new(move |info, painter| {
-                            let gl = painter.gl();
+                            let gl = &Gl::real(painter.gl());
                             let vp = info.viewport_in_pixels();
                             let mut wpr = wpr_for_post
                                 .lock()

@@ -32,6 +32,12 @@ default = []
 # frames per window. NOT enabled by default -- see the identical rationale
 # on the `freminal` crate's `frame-profiling` feature, which enables this one.
 frame-profiling = []
+# Offscreen pbuffer GL context for the Task 123 Phase 2 pixel/readback
+# harness. NOT enabled by default -- it is test infrastructure, needs Mesa
+# and an X server present, and has no place in a production build. Also
+# `target_os = "linux"`-gated at the module, so enabling it elsewhere is a
+# no-op rather than a compile error.
+gl-offscreen = []
 
 [[example]]
 name = "hello"
