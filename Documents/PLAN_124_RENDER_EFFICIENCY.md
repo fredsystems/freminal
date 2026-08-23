@@ -147,20 +147,21 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Planned |
 | 124.3 | Cell-granular pointer suppression | Planned, after 124.13 |
-| 124.4 | Named-field struct for the pointer-motion predicate | Planned, ungated |
+| 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Planned, after 124.15 |
 | 124.6 | Shaping-path levers | Planned, after 124.16 |
-| 124.7 | GPU buffer-orphaning for small payloads | Planned, ungated |
+| 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Planned |
-| 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Planned, ungated |
-| 124.10 | Per-row content epoch in `freminal-buffer` | Planned |
+| 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
+| 124.10 | Per-row content epoch in `freminal-buffer` | **Blocked — see recon** |
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
 | 124.13 | Re-measure pointer-motion suppression rates | Planned |
 | 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
 | 124.15 | Measure chrome's per-frame cost | Planned |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Planned |
-| 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Planned |
+| 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
+| 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Planned, ungated |
 
 ### Execution model
 
@@ -568,6 +569,96 @@ Prohibitions: do NOT change the `Arc` allocation behaviour of
 `rows_as_tchars_and_tags_incremental` — that is 124.12's business and doing
 it here would confound the measurement. Do NOT add consumers. Do NOT touch
 `Row::dirty`'s existing semantics or call sites.
+
+#### 124.10 recon (2026-08-23) — BLOCKED, four corrections needed
+
+**Do not implement this subtask as written.** Read-only recon against
+`flatten.rs`, `scroll.rs`, `row.rs` and `interface.rs` found four places
+where the entry above does not match the code. Two are bookkeeping; two are
+soundness, and implementing the literal text would make the damage signal
+**under-report**, which is a visual-corruption regression rather than a
+missed optimisation. Today's `Arc::ptr_eq` can only over-report, so any
+replacement must clear that bar.
+
+**(a) `line_width` is not on `RowCacheEntry`, so the stated comparison basis
+cannot be written.** The entry's six fields are `chars`, `tags`, `bytes`,
+`byte_to_char`, `auto_urls`, `tail_could_be_wrapped_scheme`
+(`flatten.rs:76-104`). `line_width` is a `Row` field (`row.rs:135`) that
+reaches the snapshot by a wholly separate path,
+`Buffer::visible_line_widths_extended` (`scroll.rs:46-53`), which reads
+`r.line_width` straight off each `Row` and never consults the cache. The GUI
+compares it with its own second `Arc::ptr_eq`
+(`frame_dirty.rs:309-311`). Either the entry gains a `line_width` field
+captured at flatten time, or `line_width` stays a separate whole-pane term.
+`set_cursor_line_width` does set `row.dirty` (`cursor.rs:44-52`), so the
+rebuild will fire; the question is only where the value is compared.
+
+**(b) `content_changed` compares `chars` only — not the whole window.** The
+defect table at the top of this document calls it "a true byte-level diff of
+the whole window". It is `prev_chars.as_ref() != vc.as_ref()`
+(`interface.rs:955-958`); `tags`, `row_offsets` and `url_tag_indices` are
+stored but never compared. An SGR-only change is invisible to it. This makes
+the epoch *more* informative than what it replaces, which is fine — but the
+"subsumes and then deletes" framing should not be read as parity.
+
+**(c) Cross-row URL refinement can change a clean row's rendered output.**
+`redetect_urls_for_group` (`flatten.rs:1527`) recomputes URL ranges over a
+whole `RowJoin::ContinueLogicalLine` group and returns them in a separate
+`refined_auto_urls` vector that is **applied at merge time and never written
+back into the cache entries**. So row R's rendered URL tags can change
+because a *neighbouring* row changed, while R itself is clean and its own
+entry is byte-identical. A per-row epoch keyed solely on R's rebuilt entry
+misses it.
+
+The cheapest sound fix is **group propagation**: if any row in a logical-line
+group bumps, bump every row in that group. It is conservative, cheap, and
+the group boundaries are already computed in the same loop. This needs
+deciding before implementation, not during.
+
+**(d) Per-row counters alias across a sliding window.** The entry says
+epochs are "window-relative by design" and leans on `scroll_changed` and
+`dims_changed` to cover the shift. They do not cover the common case: when
+new output pushes rows into scrollback the visible window slides while
+`scroll_offset` stays 0, so `scroll_changed` is **false**. `row_cache` is
+indexed by **absolute** row (`buffer/mod.rs:126`), so window position *i*
+then holds a different row's epoch — and with independent per-row counters
+those two values can coincide, reporting "unchanged" for changed content.
+
+Fix: make the epoch a **single globally-monotonic stamp** on `Buffer`, with
+each changed row stamped with a fresh never-reused value. Two distinct rows
+can then never share a stamp, so a slid window always reports changed
+(conservative, correct) and a genuinely untouched row still reports
+unchanged. Cost is one `u64` field. This still satisfies everything the
+entry asks for; it is just not the literal reading of "bump the epoch".
+
+Also note for whoever implements: `RowCacheEntry` derives only
+`Debug, Clone` (`flatten.rs:75`) — the comparison needs `PartialEq` on it or
+a hand-written field-wise compare. And the debug oracle
+(`debug_verify_against_oracle`, `flatten.rs:602-623`) compares only the four
+*merged* output vectors, never `RowCacheEntry` values, so it gives a new
+entry field **no coverage**. The entry's instruction to "prove the new field
+consistent with that oracle" therefore needs its own mechanism.
+
+### 124.C2 — `sync_toast_atlas` carries the same defect as 124.9
+
+*Surfaced by 124.9. Cleanup entry per `agent-orchestration-protocol`.*
+
+`toast_text_pass.rs::sync_toast_atlas` (`:641-656`) is a documented
+standalone mirror of `TerminalRenderer::sync_atlas` — reproduced rather than
+reused because the method is private to `TerminalRenderer` and bound to its
+own `atlas_texture`. It has the identical bug 124.9 fixed: the full-upload
+arm never consumes `GlyphAtlas::dirty_rects`, so every glyph rasterised
+before a full upload is re-uploaded individually on the next frame.
+
+Not fixed inline with 124.9, whose stated scope is `gpu.rs`. Impact is
+smaller — the toast atlas is only synced while a toast is on screen, and
+123's measurement shows a toast frame already costs 121 calls against a
+steady 52 — but leaving the two copies divergent is worse than either state.
+
+Scope of fix: one line, mirroring 124.9. Verification: the toast-present
+workload in `headless_workloads.rs`
+(`a_toast_more_than_doubles_frame_cost`) should be extended rather than
+merely kept passing, since it currently asserts a bound the fix moves.
 
 ### 124.11 — `row_epochs` on `TerminalSnapshot`; delete `content_changed`
 
