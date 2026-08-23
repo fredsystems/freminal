@@ -1044,3 +1044,242 @@ mod tests {
         assert_eq!(resolution, PaneResolution::unresolved());
     }
 }
+
+/// Subtask 124.13: the pointer-motion gate's suppression rate, per scenario.
+///
+/// **Measurement, not behaviour.** Nothing here changes a decision; it
+/// drives the existing pure chain (`resolve_pane_under_pointer` ->
+/// `PointerMotionInputs` -> `pointer_motion_needs_repaint_decision`) over a
+/// deterministic sweep of pointer positions and counts what comes out.
+///
+/// It replaces the 2026-07-29 table, which predates the chrome cache being
+/// disabled (121.32) and could not be refreshed by Task 123 — pointer motion
+/// is not a renderer workload, and the Phase 1 harness drives the renderer
+/// directly. Kept as tests rather than prose specifically so these numbers
+/// cannot go stale unnoticed the way that table did.
+///
+/// # What is NOT measured here, stated rather than guessed
+///
+/// The **pointer event rate**. A suppression rate is a fraction of checks;
+/// turning it into a CPU figure needs an events-per-second the compositor
+/// determines and this harness cannot observe. Task 123 declined to guess
+/// it and so does this. Per `PROFILING.md`, any CPU claim downstream of
+/// these numbers must carry the rate it assumed.
+///
+/// Full results are in 124.13's findings block in
+/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+#[cfg(test)]
+mod suppression_rates {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use freminal_common::geometry::{Rect, point};
+
+    use super::{
+        PaneResolution, PaneSnapshotInputs, PointerMotionInputs,
+        pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
+    };
+    use crate::gui::panes::PaneIdGenerator;
+
+    /// A window whose central (terminal) area is 1200x700 at (40, 60) —
+    /// leaving a chrome band above it, so the sweep below covers both
+    /// over-pane and over-chrome positions the way a real session does.
+    const CENTRAL: Rect = Rect {
+        min: point(40.0, 60.0),
+        max: point(1240.0, 760.0),
+    };
+
+    /// The gutter's total inset in logical points, matching
+    /// `PublishedFrameState::cached_gutter_inset_logical`'s order of
+    /// magnitude.
+    const GUTTER_INSET: f32 = 18.0;
+
+    /// One scenario's outcome.
+    struct Outcome {
+        checks: u32,
+        suppressed: u32,
+    }
+
+    impl Outcome {
+        fn rate(&self) -> f64 {
+            f64::from(self.suppressed) / f64::from(self.checks)
+        }
+    }
+
+    /// Sweep a deterministic lattice of pointer positions over the whole
+    /// window and count how many motion checks the gate suppresses.
+    ///
+    /// The lattice spans beyond `CENTRAL` on all sides, so positions over
+    /// chrome (which resolve to no pane) are included at their natural
+    /// proportion rather than being excluded to flatter the number.
+    fn sweep(
+        inputs: PaneSnapshotInputs,
+        gutter_config_active: bool,
+        any_pane_selecting: bool,
+    ) -> Outcome {
+        let mut ids = PaneIdGenerator::default();
+        let pane_id = ids.next_id();
+        let layout = [(pane_id, CENTRAL)];
+
+        let mut checks = 0_u32;
+        let mut suppressed = 0_u32;
+
+        // 64 x 40 lattice over a region wider and taller than CENTRAL.
+        for iy in 0..40 {
+            for ix in 0..64 {
+                let x = f64::from(ix) * 20.0;
+                let y = f64::from(iy) * 20.0;
+                #[allow(clippy::cast_possible_truncation)]
+                let pos = point(x as f32, y as f32);
+
+                let resolution: PaneResolution = resolve_pane_under_pointer(
+                    pos,
+                    CENTRAL,
+                    None,
+                    &layout,
+                    gutter_config_active,
+                    GUTTER_INSET,
+                    |_| Some(inputs),
+                );
+
+                let needs_repaint = pointer_motion_needs_repaint_decision(PointerMotionInputs {
+                    focus_change_pending: false,
+                    chrome_interactive: false,
+                    any_pane_selecting,
+                    overlay_open: false,
+                    pointer_pane_unresolved: false,
+                    pane_signals: resolution.signals,
+                });
+
+                checks += 1;
+                if !needs_repaint {
+                    suppressed += 1;
+                }
+            }
+        }
+
+        Outcome { checks, suppressed }
+    }
+
+    const CLEAN: PaneSnapshotInputs = PaneSnapshotInputs {
+        mouse_tracking_active: false,
+        has_urls: false,
+        scroll_offset: 0,
+        is_alternate_screen: false,
+        command_blocks_non_empty: false,
+    };
+
+    /// Baseline: nothing hover-sensitive on screen. Every check suppresses.
+    #[test]
+    fn a_clean_pane_suppresses_everything() {
+        let out = sweep(CLEAN, false, false);
+        assert_eq!(
+            out.suppressed, out.checks,
+            "with no veto active, motion anywhere must suppress"
+        );
+    }
+
+    /// **The finding 124.3 rests on.** One hyperlink anywhere on screen
+    /// takes suppression to exactly zero for every position inside the pane.
+    ///
+    /// `has_urls` is a **pane-wide, position-independent** veto: the precise
+    /// cell-to-hyperlink hit test is render-pass-only state, so
+    /// `pane_hover_region_risk` approximates "motion might enter or leave a
+    /// URL span" as "motion anywhere in this pane". Nothing about where the
+    /// pointer actually is can rescue it.
+    ///
+    /// The residual suppression is entirely positions **outside** the pane,
+    /// which resolve to no pane at all.
+    #[test]
+    fn one_hyperlink_defeats_suppression_everywhere_inside_the_pane() {
+        let inputs = PaneSnapshotInputs {
+            has_urls: true,
+            ..CLEAN
+        };
+        let clean = sweep(CLEAN, false, false);
+        let urls = sweep(inputs, false, false);
+
+        assert!(
+            urls.rate() < 0.25,
+            "one hyperlink should collapse suppression, got {:.2}%",
+            urls.rate() * 100.0
+        );
+        assert!(
+            clean.rate() > urls.rate() * 3.0,
+            "clean {:.2}% versus one-hyperlink {:.2}%",
+            clean.rate() * 100.0,
+            urls.rate() * 100.0
+        );
+    }
+
+    /// Scrollback offset is the second pane-wide veto, for the same reason:
+    /// the scrollbar is interactive whenever scrolled back, and its track
+    /// rect is render-pass-only state.
+    #[test]
+    fn a_nonzero_scroll_offset_is_also_a_pane_wide_veto() {
+        let inputs = PaneSnapshotInputs {
+            scroll_offset: 1,
+            ..CLEAN
+        };
+        let scrolled = sweep(inputs, false, false);
+        let urls = sweep(
+            PaneSnapshotInputs {
+                has_urls: true,
+                ..CLEAN
+            },
+            false,
+            false,
+        );
+        assert_eq!(
+            scrolled.suppressed, urls.suppressed,
+            "both vetoes are pane-wide, so they suppress identically"
+        );
+    }
+
+    /// Mouse tracking defeats suppression too — and **correctly**. A
+    /// terminal application receiving mouse reports must be sent every
+    /// motion, so this one is not a target for 124.3.
+    #[test]
+    fn mouse_tracking_defeats_suppression_and_should() {
+        let inputs = PaneSnapshotInputs {
+            mouse_tracking_active: true,
+            ..CLEAN
+        };
+        let out = sweep(inputs, false, false);
+        let clean = sweep(CLEAN, false, false);
+        assert!(out.suppressed < clean.suppressed);
+    }
+
+    /// An active selection drag suppresses nothing anywhere — the veto is
+    /// window-level, not per-pane, so even positions over chrome lose.
+    #[test]
+    fn an_active_selection_drag_suppresses_nothing_at_all() {
+        let out = sweep(CLEAN, false, true);
+        assert_eq!(
+            out.suppressed, 0,
+            "any_pane_selecting is a window-level veto with no positional term"
+        );
+    }
+
+    /// The gutter is the one veto that is already positional (the Task 121
+    /// fix), so it costs only the strip itself rather than the whole pane.
+    /// This is the shape 124.3 proposes to give the other two.
+    #[test]
+    fn the_gutter_veto_is_positional_and_therefore_cheap() {
+        let inputs = PaneSnapshotInputs {
+            command_blocks_non_empty: true,
+            ..CLEAN
+        };
+        let out = sweep(inputs, true, false);
+        let clean = sweep(CLEAN, false, false);
+
+        assert!(
+            out.suppressed < clean.suppressed,
+            "the strip does cost some"
+        );
+        assert!(
+            out.rate() > 0.9,
+            "but only the strip: expected >90% still suppressed, got {:.2}%",
+            out.rate() * 100.0
+        );
+    }
+}

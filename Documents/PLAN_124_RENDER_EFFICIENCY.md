@@ -146,7 +146,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Planned |
-| 124.3 | Cell-granular pointer suppression | Planned, after 124.13 |
+| 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
@@ -156,7 +156,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.10 | Per-row content epoch in `freminal-buffer` | Revised, ready |
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
-| 124.13 | Re-measure pointer-motion suppression rates | Planned |
+| 124.13 | Re-measure pointer-motion suppression rates | Complete |
 | 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
@@ -873,6 +873,68 @@ or say it was not measured.
 Deliverable: a findings block appended to this document, feeding 124.3.
 
 Prohibitions: do NOT change any suppression logic. Do NOT implement 124.3.
+
+#### 124.13 findings (2026-08-23)
+
+**The 2026-07-29 table's headline is confirmed, and the mechanism turns out
+to be structural rather than statistical — which makes 124.3's case stronger
+than a percentage would.**
+
+Measured by driving the existing pure chain (`resolve_pane_under_pointer` ->
+`PointerMotionInputs` -> `pointer_motion_needs_repaint_decision`) over a
+deterministic 64x40 lattice of pointer positions across a window whose
+central terminal area is 1200x700 at (40, 60). Pinned as tests in
+`gui::pointer_motion::suppression_rates` so these numbers cannot go stale
+unnoticed the way the 2026-07-29 table did.
+
+| Scenario | Suppression | Veto that fired |
+| -------- | ----------- | --------------- |
+| Clean pane | 100.00% | none |
+| One OSC 8 hyperlink | 17.97% | `has_urls` (pane-wide) |
+| Scrollback offset > 0 | 17.97% | `scroll_offset_nonzero` (pane-wide) |
+| Mouse-tracking application | 17.97% | `mouse_tracking_active` (pane-wide) |
+| Active selection drag | 0.00% | `any_pane_selecting` (window-wide) |
+| Gutter active, blocks present | 98.63% | `gutter_active` (**positional**) |
+
+**Read the 17.97% correctly.** It is *not* a residual benefit — it is
+exactly the 460 of 2560 lattice positions that fall **outside** the pane and
+so resolve to no pane at all. **For motion inside the pane, suppression is
+exactly 0%.** The precise figure therefore depends on the lattice's geometry
+and should not be quoted as a session number; the structural fact behind it
+does not depend on anything and should be.
+
+That is the whole point. `has_urls` and `scroll_offset > 0` are
+**position-independent** vetoes. `pane_hover_region_risk` approximates
+"motion might enter or leave a URL span" as "motion anywhere in this pane",
+because the precise cell-to-hyperlink hit test is render-pass-only state.
+No amount of knowing where the pointer actually is can rescue a check once
+either is set — which is why the 2026-07-29 session measurement saw
+99.16% collapse to 1.68% from a single hyperlink, and why re-measuring it
+produces a cliff rather than a curve.
+
+**The gutter is the counter-example, and the template.** It is the one veto
+that already carries a positional term (the Task 121 fix), and it costs
+98.63% -> only the strip, not the pane. 124.3 proposes giving the other two
+the same shape. This table is the before-picture for that.
+
+**Not a target for 124.3:** `mouse_tracking_active`. It defeats suppression
+for the same pane-wide reason, but correctly — an application receiving
+mouse reports must be sent every motion event. `any_pane_selecting` is worth
+noting separately: it is window-level with no positional term at all, so it
+suppresses *nothing anywhere*, including over chrome.
+
+**Not measured, stated rather than guessed:** the pointer **event rate**. A
+suppression rate is a fraction of checks; converting it to a CPU figure
+needs an events-per-second the compositor determines and no harness here can
+observe. Task 123 declined to guess it and so does this. Per
+`PROFILING.md`, any CPU claim derived from these numbers must carry the rate
+it assumed.
+
+**Interaction with 124.2, carried forward for 124.3.** `FrameDamage::None`
+will make an unsuppressed motion frame nearly free at the *present* layer,
+but it still costs a whole GUI frame walk. 124.15 measured that walk's
+chrome portion at 43.2 us of construct-plus-tessellate. Suppression remains
+worth having; its prize is now that figure rather than a full present.
 
 ### 124.14 — `PaneFrameDamage::Region` and `VertexRebuild::Rows`
 
