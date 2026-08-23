@@ -125,13 +125,6 @@ pub struct TerminalSnapshot {
     /// used by `SelectionState`.
     pub total_rows: usize,
 
-    /// Set to `true` when the visible content changed since the previous
-    /// snapshot.
-    ///
-    /// The GUI uses this flag to reset `ViewState::scroll_offset` to 0 when
-    /// the user is scrolled back and new output arrives.
-    pub content_changed: bool,
-
     /// `true` when at least one visible format tag has a non-`None` blink state.
     ///
     /// The GUI uses this to drive the blink timer — when no visible text is
@@ -168,11 +161,13 @@ pub struct TerminalSnapshot {
     /// the epoch it last rendered for that row, not by comparing against a
     /// fixed baseline.
     ///
-    /// Unlike a `bool` edge (see `content_changed`), a monotonic stamp is
-    /// level-triggered rather than edge-triggered, so it survives the many
-    /// snapshots the GUI never renders: a change made between two rendered
-    /// frames still shows up as a differing epoch on the next one the GUI
-    /// actually consumes, instead of being silently lost.
+    /// Unlike a `bool` edge, a monotonic stamp is level-triggered rather than
+    /// edge-triggered, so it survives the many snapshots the GUI never
+    /// renders: a change made between two rendered frames still shows up as a
+    /// differing epoch on the next one the GUI actually consumes, instead of
+    /// being silently lost. This replaced a sticky `content_changed: bool`
+    /// field (deleted by Task 124.12) that went stale across exactly those
+    /// unrendered snapshots.
     pub row_epochs: Arc<[u64]>,
 
     /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
@@ -390,7 +385,6 @@ impl TerminalSnapshot {
             term_width: 0,
             term_height: 0,
             total_rows: 0,
-            content_changed: false,
             has_blinking_text: false,
             has_urls: false,
             row_offsets: Arc::new(Vec::new()),

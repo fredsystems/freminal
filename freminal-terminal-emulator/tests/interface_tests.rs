@@ -17,6 +17,8 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 use freminal_common::pty_write::PtyWrite;
 use freminal_terminal_emulator::interface::TerminalEmulator;
 
@@ -414,24 +416,41 @@ fn test_sync_updates_timer_cleared_on_reset() {
 
 // ─── synchronized updates (?2026): change signals across skipped frames ──────
 //
-// Regression coverage for issue #490. `content_changed` / `scroll_changed` are
-// edge-triggered against the previous snapshot, but the GUI does not render
-// snapshots carrying `skip_draw = true`. Without deferral the edge reported by
-// a skipped frame is lost forever and the screen stays stale.
+// Regression coverage for issue #490. `scroll_changed` is edge-triggered
+// against the previous snapshot, but the GUI does not render snapshots
+// carrying `skip_draw = true`. Without deferral the edge reported by a
+// skipped frame is lost forever and the screen stays stale.
+//
+// The content half of #490 used to be covered by the same deferral mechanism
+// (a `content_changed` bool accumulated across skipped frames). Task 124.12
+// deleted `content_changed` and its deferral entirely:
+// `TerminalSnapshot::row_epochs` (Task 124.11) is a monotonic per-row stamp
+// compared against a baseline the *consumer* holds, not an edge diffed
+// against the previous snapshot, so a skipped frame cannot lose it — there
+// is nothing left to defer. The content tests below now pin that property
+// directly instead of pinning the deferral that used to be needed for it.
 
 /// The canonical #490 repro: a paint arrives inside a synchronized-output
 /// block and the closing `?2026l` lands in a *later* PTY read.
 ///
 /// The frame carrying the new content is skipped, and the content is then
 /// byte-identical on the following (renderable) frame — so a naive diff
-/// reports no change. The renderable frame must still report
-/// `content_changed = true`, or the GUI never rebuilds its vertex buffers.
+/// against the *previous* snapshot would report no change. `row_epochs`
+/// avoids that failure mode by a different route than the deleted
+/// `content_changed` deferral did: it survives here because the GUI compares
+/// against the baseline it last rendered (the settled snapshot, captured
+/// below) rather than against the immediately preceding snapshot, so the
+/// change is still visible no matter how many unrendered snapshots came
+/// between them.
 #[test]
 fn test_sync_updates_content_change_survives_skipped_frame() {
     let (mut emu, _rx) = make_emulator();
 
-    // Settle: consume the initial "everything is new" snapshot.
-    let _ = emu.build_snapshot();
+    // Settle: consume the initial "everything is new" snapshot. This is the
+    // baseline the GUI would be holding — it is the last snapshot the GUI
+    // actually rendered.
+    let settled = emu.build_snapshot();
+    let baseline = Arc::clone(&settled.row_epochs);
 
     // Read 1: BSU plus the entire paint. The ESU has not arrived yet.
     emu.handle_incoming_data(b"\x1b[?2026h\x1b[HHELLO WORLD");
@@ -449,19 +468,21 @@ fn test_sync_updates_content_change_survives_skipped_frame() {
         !rendered.skip_draw,
         "precondition: the frame after ?2026l must be renderable"
     );
-    assert!(
-        rendered.content_changed,
-        "the first renderable frame after a skipped one must replay the skipped \
-         frame's content_changed edge, otherwise the GUI keeps showing stale pixels"
+    assert_ne!(
+        baseline, rendered.row_epochs,
+        "the first renderable frame after a skipped one must carry row_epochs \
+         differing from the last-rendered baseline, otherwise the GUI keeps \
+         showing stale pixels"
     );
 }
 
-/// The deferred edge must survive an arbitrarily long run of skipped frames,
-/// not just one, and must be reported exactly once.
+/// The signal must survive an arbitrarily long run of skipped frames, not
+/// just one, and must remain stable (not keep changing) once delivered.
 #[test]
 fn test_sync_updates_content_change_survives_many_skipped_frames() {
     let (mut emu, _rx) = make_emulator();
-    let _ = emu.build_snapshot();
+    let settled = emu.build_snapshot();
+    let baseline = Arc::clone(&settled.row_epochs);
 
     emu.handle_incoming_data(b"\x1b[?2026h\x1b[Hthe paint");
     for _ in 0..5 {
@@ -474,22 +495,27 @@ fn test_sync_updates_content_change_survives_many_skipped_frames() {
 
     emu.handle_incoming_data(b"\x1b[?2026l");
     let rendered = emu.build_snapshot();
-    assert!(
-        rendered.content_changed,
-        "a content edge must survive any number of skipped frames"
+    assert_ne!(
+        baseline, rendered.row_epochs,
+        "row_epochs must differ from the last-rendered baseline no matter how \
+         many skipped frames came in between"
     );
 
-    // Debt paid: a subsequent idle frame must not keep re-reporting it, or the
-    // GUI would rebuild its vertex buffers on every frame forever.
+    // Debt paid: a subsequent idle frame must carry the SAME row_epochs as
+    // `rendered`, not keep re-stamping, or the GUI would rebuild its vertex
+    // buffers on every frame forever. Unlike the deleted `content_changed`
+    // bool, there is no separate "deliver and clear" step — the epoch is
+    // simply stable once nothing further changes.
     let idle = emu.build_snapshot();
-    assert!(
-        !idle.content_changed,
-        "the deferred edge must be cleared once it has been delivered"
+    assert_eq!(
+        rendered.row_epochs, idle.row_epochs,
+        "row_epochs must not keep changing once the edge has been observed"
     );
 }
 
-/// `scroll_changed` is deferred by the same mechanism as `content_changed`
-/// and needs its own coverage.
+/// `scroll_changed` is the one signal `DeferredChangeFlags` still defers
+/// (Task 124.12 removed the `content_changed` half), so it needs its own
+/// coverage.
 ///
 /// The block is left via the 200 ms auto-resume rather than `?2026l`, because
 /// `?2026l` is itself PTY output and new output auto-resets the scroll offset
@@ -536,14 +562,15 @@ fn test_sync_updates_scroll_change_survives_skipped_frame() {
     assert!(!idle.scroll_changed);
 }
 
-/// The two deferred flags are tracked independently: a content-only change
-/// must not manufacture a scroll that never happened. This matters because
-/// the GUI's selection auto-clear keys off exactly that distinction -- a pure
-/// scroll leaves a selection alone, a content change does not.
+/// A content-only change must not manufacture a scroll that never happened.
+/// This matters because the GUI's selection auto-clear keys off exactly that
+/// distinction -- a pure scroll leaves a selection alone, a content change
+/// does not.
 #[test]
 fn test_sync_updates_content_change_does_not_imply_scroll_change() {
     let (mut emu, _rx) = make_emulator();
-    let _ = emu.build_snapshot();
+    let settled = emu.build_snapshot();
+    let baseline = Arc::clone(&settled.row_epochs);
 
     emu.handle_incoming_data(b"\x1b[?2026h\x1b[Hcontent only");
     let skipped = emu.build_snapshot();
@@ -551,7 +578,10 @@ fn test_sync_updates_content_change_does_not_imply_scroll_change() {
 
     emu.handle_incoming_data(b"\x1b[?2026l");
     let rendered = emu.build_snapshot();
-    assert!(rendered.content_changed, "the content edge is replayed");
+    assert_ne!(
+        baseline, rendered.row_epochs,
+        "the content edge is reflected in row_epochs"
+    );
     assert!(
         !rendered.scroll_changed,
         "a content change must not be reported as a scroll"
@@ -563,7 +593,8 @@ fn test_sync_updates_content_change_does_not_imply_scroll_change() {
 fn test_sync_updates_skipped_frame_without_change_reports_none() {
     let (mut emu, _rx) = make_emulator();
     emu.handle_incoming_data(b"\x1b[Hsettled");
-    let _ = emu.build_snapshot();
+    let settled = emu.build_snapshot();
+    let baseline = Arc::clone(&settled.row_epochs);
 
     // Enter and leave the synchronized block without painting anything.
     emu.handle_incoming_data(b"\x1b[?2026h");
@@ -572,21 +603,23 @@ fn test_sync_updates_skipped_frame_without_change_reports_none() {
 
     emu.handle_incoming_data(b"\x1b[?2026l");
     let rendered = emu.build_snapshot();
-    assert!(
-        !rendered.content_changed,
-        "deferral must replay real edges only, never invent one"
+    assert_eq!(
+        baseline, rendered.row_epochs,
+        "toggling ?2026 alone, with nothing painted, must never invent a \
+         row_epochs change"
     );
 }
 
 /// The 200 ms auto-resume path is also a transition from skipped to rendered,
-/// so a content edge observed while `DontDraw` was stuck must be replayed on
-/// the frame the timeout releases.
+/// so a content edge observed while `DontDraw` was stuck must still be
+/// visible on the frame the timeout releases.
 #[test]
 fn test_sync_updates_content_change_survives_timeout_resume() {
     use std::time::Duration;
 
     let (mut emu, _rx) = make_emulator();
-    let _ = emu.build_snapshot();
+    let settled = emu.build_snapshot();
+    let baseline = Arc::clone(&settled.row_epochs);
 
     // A program that paints, sets DontDraw, and then crashes without resetting.
     emu.handle_incoming_data(b"\x1b[?2026h\x1b[Horphaned paint");
@@ -600,8 +633,9 @@ fn test_sync_updates_content_change_survives_timeout_resume() {
         !rendered.skip_draw,
         "precondition: the 200 ms timeout must have released rendering"
     );
-    assert!(
-        rendered.content_changed,
-        "the timeout-released frame must replay the skipped frame's content edge"
+    assert_ne!(
+        baseline, rendered.row_epochs,
+        "the timeout-released frame must carry row_epochs differing from the \
+         last-rendered baseline, reflecting the skipped frame's paint"
     );
 }

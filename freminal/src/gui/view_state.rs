@@ -338,7 +338,7 @@ impl SearchState {
     ///
     /// Deliberately does **not** hash the `matches` themselves: matches are a
     /// pure function of (query, flags, corpus), corpus changes are already
-    /// covered by the snapshot's `content_changed`, and a broad search can
+    /// covered by the snapshot's `row_epochs`, and a broad search can
     /// produce tens of thousands of spans that would then be re-hashed on
     /// every single frame.
     #[must_use]

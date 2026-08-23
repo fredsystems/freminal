@@ -1051,8 +1051,10 @@ mod basic_tests {
     #[test]
     fn primary_insert_text_does_not_auto_reset_offset() {
         // scroll_offset is now owned by ViewState; insert_text no longer resets it.
-        // The GUI is responsible for resetting ViewState::scroll_offset when
-        // content_changed is true.
+        // `TerminalEmulator::handle_incoming_data` is what resets the scroll
+        // offset back to the live bottom when new output arrives while the user
+        // is scrolled back; the next snapshot then carries scroll_offset = 0 and
+        // the GUI's ViewState is synced from it.
         let mut buf = Buffer::new(10, 5);
 
         // Just verify insert_text doesn't panic and content is written correctly.

@@ -154,14 +154,15 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
 | 124.10 | Per-row content epoch in `freminal-buffer` | Complete |
-| 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Partial — field landed, deletion deferred to 124.12 |
-| 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
+| 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
+| 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
 | 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
+| 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned |
 
 ### Execution model
 
@@ -945,6 +946,151 @@ the Phase 1 recording harness; `cargo xtask check-windows` before the PR.
 Prohibitions: do NOT add `PaneFrameDamage::Region` here — that is 124.14. Do
 NOT touch `decide_frame_damage`.
 
+#### 124.12 implementation notes (2026-08-23)
+
+**Landed in two commits, 124.12a and 124.12b.** 124.12a built the epoch diff
+and switched the rebuild decision onto it; 124.12b deleted
+`TerminalSnapshot::content_changed` and its last three readers. The split is
+not cosmetic: 124.11's entry required `content_changed` to survive until its
+last reader went, because every commit on this branch must leave
+`cargo test --all` passing, and 124.12a's scope (`frame_dirty.rs` plus
+`widget.rs`) does not reach the third reader.
+
+**The entry's scope was short by one file, exactly as 124.11's notes
+predicted.** `app_impl.rs`'s repaint scheduler held
+`content_wants_repaint = is_new_snapshot && pane_snap.content_changed`, so
+the deletion could not land without it. `observe_visible_snapshot` became
+`observe_row_epochs` (an `Arc::ptr_eq` on `visible_chars` becoming a value
+comparison on `row_epochs`), and the `&& pane_snap.content_changed` conjunct
+went with it.
+
+**That conjunct's removal is an equivalence, and it was checked case by case
+rather than asserted.** Its stated purpose (issue #439 fix #4) was to
+suppress the case where `is_new_snapshot` was `true` merely because
+`flatten_visible` had allocated a fresh `Arc` holding identical bytes. The
+epoch-based `is_new_snapshot` does not report that case at all, so the
+conjunct has nothing left to veto. Enumerated:
+
+| Case | Old `is_new && content_changed` | New `is_new` |
+| ---- | ------------------------------- | ------------ |
+| Nothing changed (clean path, same `Arc`) | false | false |
+| Real content change | true | true |
+| Byte-identical re-flatten, fresh `Arc` | false (the conjunct's job) | false (the epoch's job) |
+| SGR-only change | **false** | **true** |
+| Alt-screen round trip, identical content | false | **true** |
+
+The two divergences both go the safe way — an extra scheduled repaint, never
+a lost one — and the SGR-only row is arguably a fix: `content_changed`
+compared `chars` only (124.10 recon finding (b)), so an SGR-only change was
+invisible to it, and the frame still rebuilt via the pointer test but armed
+no follow-up repaint. There is no case where the old expression was `true`
+and the new one is `false`; that direction would require the epoch to
+under-report, which is the failure mode 124.10 was designed and tested
+against.
+
+**`DeferredChangeFlags` lost its content half and now defers `scroll` only.**
+`resolve_for_frame` drops two parameters and returns a `bool` instead of a
+`(bool, bool)` tuple. The scroll arm is unchanged line for line. This is not
+a regression of issue #490's content case: the content case was fixed by
+deleting the bool that needed deferring. A monotonic per-row stamp compared
+against a baseline the *consumer* holds cannot be lost by a frame the
+consumer skipped, so there is nothing to accumulate. The GUI half of that
+argument is structural and was verified rather than assumed —
+`evaluate_frame_dirty_state` and the whole rebuild path sit inside
+`if !snap.skip_draw` (`widget.rs:2479`), so `last_rendered_row_epochs` only
+ever advances on a frame that was actually drawn.
+
+**Five tests in `snapshot_build.rs` were deleted, not rewritten.** Each was
+checked individually against the 124.11 epoch test claimed to subsume it,
+because a deletion justified by a subsumption that does not hold is lost
+coverage:
+
+| Deleted | Subsumed by | Verdict |
+| ------- | ----------- | ------- |
+| `first_snapshot_reports_content_changed_true` | `the_first_snapshot_stamps_every_row_distinctly` | Covered, with a caveat below |
+| `second_snapshot_with_no_new_data_reports_content_changed_false` | `a_snapshot_with_no_new_data_carries_identical_row_epochs` | Stronger (all rows, not one bool) |
+| `new_data_after_snapshot_causes_content_changed_true` | `new_pty_data_bumps_only_the_affected_rows_epoch` | Strictly stronger |
+| `cursor_only_move_does_not_set_content_changed` | `a_cursor_only_move_bumps_no_row_epoch` | Same test, epoch-valued |
+| `alt_screen_enter_invalidates_cache` | `entering_the_alternate_screen_changes_row_epochs` | Same test, epoch-valued |
+
+The caveat on the first row: "the first snapshot is a change" has no
+emulator-side analogue, because with no baseline there is nothing to
+compare. Its epoch-side content — that the first snapshot stamps every row
+freshly rather than leaving zeros — is what the replacement asserts, and the
+consumer-side half ("no baseline means treat everything as changed") is
+pinned separately by `diff_row_epochs`'s `no_recorded_epochs_reports_every_row_changed`
+and by `observe_row_epochs_reports_new_only_on_genuine_change`'s first
+assertion.
+
+**`a_change_survives_the_snapshots_the_gui_never_renders` kept only its epoch
+half, and that is a real loss, recorded rather than papered over.** The test
+asserted a two-sided contrast: the bool goes stale by snapshot E, the epoch
+does not. The bool half is not restatable once the field is gone. What
+survives still pins something falsifiable — that four snapshots after a
+change, the changed row's stamp still differs from the pre-change baseline,
+which fails immediately if anything re-introduces edge-triggered semantics —
+but it no longer demonstrates *why* the epoch exists. The comment in the
+test says so explicitly rather than leaving a reader to assume the weaker
+assertion was always the point.
+
+**The #490 tests in `interface_tests.rs` were re-pointed at a
+consumer-held baseline.** Each now captures `settled.row_epochs` before the
+synchronized block and asserts the post-`?2026l` snapshot differs from *that*,
+which is the shape the GUI actually uses. Three tests beyond the two the
+brief named were touched for the same reason
+(`..._does_not_imply_scroll_change`, `..._without_change_reports_none`,
+`..._survives_timeout_resume`); the scroll-deferral test itself is unchanged
+except for a stale doc line.
+
+#### 124.12 measurement debt — a Phase 1 capture is not feasible, and why
+
+The Verification section requires a before/after capture for 124.12 measured
+on bandwidth. **It cannot be taken on the Task 123 Phase 1 harness, and this
+is a property of the harness rather than an excuse.** `headless.rs` drives
+`HeadlessRenderer::draw_frame` / `draw_cursor_only` directly from a
+`SyntheticFrame` description. It never constructs a `TerminalSnapshot`, never
+calls `evaluate_frame_dirty_state`, and the choice between the full-rebuild
+and cursor-only paths is made *by the test*, not by the damage decision.
+124.12 changes nothing about what either path costs; it changes **which path
+a given frame takes**. The harness is blind to exactly that variable.
+
+The capture is therefore composed from two measurements that do exist, both
+already pinned by tests:
+
+- **The path change**, by `frame_dirty.rs::byte_identical_reflatten_in_a_new_arc_is_no_longer_a_content_change`,
+  which asserts `VertexRebuild::CursorOnly` on a frame that previously took
+  the full rebuild, with `a_changed_row_epoch_is_reported_as_exactly_that_row`
+  as the control proving the diff is still change-sensitive.
+- **The per-path cost**, by 123.14's per-workload table: ~200,000 bytes and
+  52 calls for "Full redraw, steady" against ~576 bytes and ~48 calls for
+  "Cursor-only, steady" at 80x24 — roughly 350x the bytes for roughly 1.08x
+  the calls.
+
+So the win, stated in the units 123 mandated, is **~199,400 bytes per
+migrated frame**, on the frames where the emulator re-flattens and the
+rendered content is unchanged.
+
+**A correction to 123.14's own framing, since it named the criterion.** 123
+wrote that "typing should move to something nearer the cursor-only row, and
+that migration is the measurable success criterion for 124.1". Typing does
+**not** migrate and must not: a keystroke genuinely changes a row's rendered
+content, its epoch bumps, and a full rebuild is the correct answer. What
+migrates is the byte-identical re-flatten — a full-screen TUI rewriting
+unchanged bytes by idiom, or any site that sets `Row::dirty` without changing
+content. That is the workload this task's opening paragraph names, and it is
+the one 123's own Obligation 1 test was built from.
+
+**What an end-to-end capture would need, recorded so 124.14 inherits a
+decision rather than re-deriving it.** A harness that builds a real
+`TerminalSnapshot` (via `TerminalEmulator::new_headless`), drives
+`evaluate_frame_dirty_state` against a `PaneRenderCache`, and feeds the
+resulting `VertexRebuild` into the headless renderer to select the draw path.
+That is a new harness — effectively a Phase 3 — and building it inside a
+subtask whose scope is `frame_dirty.rs` plus three readers would be scope
+creep. 124.14 carries the same capture requirement and the same obstacle;
+it should either commission that harness as its own subtask or compose its
+number the same way and say so.
+
 ### 124.13 — Re-measure pointer-motion suppression rates
 
 **Measurement only. Changes no behaviour.**
@@ -1277,6 +1423,65 @@ a **false confirmation** of a refuted diagnosis.
 
 Scope: the doc comment only. Documentation change; no test needed beyond the
 standard suite. May be folded into 124.2, which edits the same function.
+
+### 124.C3 — `merge_cache` has no per-buffer stash, so alt-screen round trips over-report
+
+*Surfaced by 124.12. Cleanup entry per `agent-orchestration-protocol`.
+**Not** in scope for 124.14 — see the boundary below.*
+
+`Buffer` holds exactly one `merge_cache`, keyed to one window. Anything that
+replaces `row_cache` wholesale clears it, and `visible_row_epochs` then takes
+its "no cached merge covers this window" fallback and issues every row a
+fresh stamp. Two sites reach that today:
+
+- **Alt-screen round trips.** `enter_alternate`
+  (`resize_and_alt.rs:1215`) and `leave_alternate` (`:1255`) both set
+  `merge_cache = None` unconditionally, and `SavedPrimary` (`:220`) has no
+  `merge_cache` field to stash one in. So `row_epochs` re-stamps every row on
+  every round trip **even when the restored content is byte-identical and
+  `visible_chars` is provably reused**. This partially undoes issue #405's
+  "alt/primary one-frame tax" optimisation, which fixed exactly this shape
+  for the emulator's own `previous_visible_snap` by giving it a per-buffer
+  stash.
+- **`TerminalHandler::search_corpus`** (Ctrl-F, via `gui/pty.rs`), already
+  recorded in 124.11's notes: any other caller of
+  `Buffer::visible_as_tchars_and_tags*` evicts the frame path's cache.
+
+Confirmed empirically, not assumed:
+`interface.rs::build_snapshot_return_to_primary_unchanged_content_reuses_visible_chars_arc`
+now asserts both halves — the `visible_chars` `Arc` **is** reused and the
+`row_epochs` **do** re-stamp — so the over-report is pinned as known
+behaviour rather than latent.
+
+**Cost is one full rebuild per round trip**, on a user-initiated and
+infrequent event (entering or leaving `vim`, `less`, a TUI). It is an
+over-report, which is the safe direction: the bar 124.10 set is that a
+replacement may only ever over-report, and this clears it.
+
+**Why this is a separate subtask and not a rider on 124.14.** The fix lives
+in `freminal-buffer`'s alt-screen save/restore, which is a different crate
+and a different concept from 124.14's GUI damage model, and it is not a
+one-liner: stashing a `merge_cache` per buffer means the restored cache must
+be provably valid against the restored `row_cache` and the current window, and
+getting that wrong is an **under**-report, i.e. silent visual corruption. It
+needs its own tests, including the adversarial pairing 124.10 used. Folding it
+into 124.14 would put a correctness-critical buffer change inside a subtask
+whose verification is aimed at the renderer.
+
+Scope when taken: `freminal-buffer/src/buffer/resize_and_alt.rs`
+(`SavedPrimary`, `enter_alternate`, `leave_alternate`) and
+`freminal-buffer/src/buffer/flatten.rs`. Deliverable: the per-buffer stash,
+plus a test that an alt-screen round trip over byte-identical primary content
+carries **unchanged** row epochs, paired with a control proving a round trip
+over genuinely changed content still re-stamps. The three
+`interface.rs` tests that currently assert the over-report must be inverted,
+not deleted.
+
+**Undecided and left to the maintainer:** whether this is worth doing at all.
+One repaint per TUI entry and exit is close to unmeasurable, and the fix
+carries real corruption risk. Closing this entry unexecuted is a legitimate
+outcome; it is recorded so the behaviour is known rather than rediscovered as
+a bug.
 
 ---
 

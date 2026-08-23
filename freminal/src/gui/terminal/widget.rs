@@ -1357,28 +1357,42 @@ pub struct PaneRenderCache {
     /// Pointer identity of the `visible_chars` `Arc` used for the last URL
     /// hover lookup.
     pub(super) hover_snap_ptr: usize,
-    /// The `visible_chars` `Arc` this pane observed on the previous frame
+    /// The `row_epochs` `Arc` this pane observed on the previous frame
     /// (issue #439 fix #4).
     ///
     /// The PTY thread only publishes a new `Arc<TerminalSnapshot>` when real
     /// output arrives (~a few times/sec under a settled full-screen TUI), but
     /// the GUI reads the currently-published snapshot on *every* frame
-    /// (~60fps). `TerminalSnapshot::content_changed` is a flag baked into the
-    /// snapshot at build time, so re-reading the *same* published `Arc` sees a
-    /// stale `content_changed == true` on every frame between real updates.
-    ///
-    /// Comparing the current `visible_chars` `Arc` against this field via
-    /// `Arc::ptr_eq` tells us whether *this* frame is the first observation of
-    /// a genuinely-new snapshot. It gates the content-driven 16ms repaint
+    /// (~60fps). Comparing the current `row_epochs` `Arc` against this field
+    /// tells us whether *this* frame is the first observation of a
+    /// genuinely-new snapshot. It gates the content-driven 16ms repaint
     /// scheduling in `app_impl` so an already-drawn snapshot does not
     /// perpetually re-arm a 60fps wake for pixels that are not changing.
     ///
-    /// Distinct from [`Self::last_rendered_visible`], which tracks the last
+    /// This used to compare `visible_chars` `Arc` pointers instead. Task
+    /// 124.12 switched it to `row_epochs` because the pointer test reported
+    /// "new" for a byte-identical re-flatten in a fresh `Arc` — a cursor-blink
+    /// repaint, for example, allocates a fresh `Arc<Vec<TChar>>` with
+    /// unchanged bytes — which re-armed a 16ms wake for pixels that were not
+    /// changing. Comparing epochs suppresses that too: two `Arc`s with
+    /// content-equal `row_epochs` are treated as the same observation even
+    /// when they are different allocations. This is the same direction issue
+    /// #439 fix #4 was already going, taken further.
+    ///
+    /// A skipped (`skip_draw`) frame does not corrupt this baseline: repaint
+    /// *scheduling* is not the vertex-rebuild trigger. The rebuild decision
+    /// uses [`Self::last_rendered_row_epochs`], which only advances on an
+    /// actual full rebuild, so a skipped frame updating this field cannot
+    /// cause a change to be lost — every `build_snapshot` is independently
+    /// paired with its own `request_repaint_after` (see the comment at this
+    /// field's call site in `app_impl.rs`).
+    ///
+    /// Distinct from [`Self::last_rendered_row_epochs`], which tracks the last
     /// *full rebuild* (conditionally updated inside the render path); this
     /// tracks the last *observation* (updated unconditionally every frame,
     /// before the widget draws). An owned `Arc` (not a bare address) is stored
     /// to avoid the ABA hazard of a freed allocation reusing an old address.
-    pub(super) last_observed_visible: Option<Arc<Vec<TChar>>>,
+    pub(super) last_observed_row_epochs: Option<Arc<[u64]>>,
     /// Per-pane shaping cache for text layout.
     pub(crate) shaping_cache: crate::gui::shaping::ShapingCache,
     /// Whether the user is currently dragging the scrollbar thumb.
@@ -1505,7 +1519,7 @@ impl PaneRenderCache {
             previous_command_block_hover_rows: None,
             cached_hovered_url: None,
             hover_snap_ptr: 0,
-            last_observed_visible: None,
+            last_observed_row_epochs: None,
             shaping_cache: crate::gui::shaping::ShapingCache::new(),
             scrollbar_dragging: false,
             pointer_in_gutter_last_frame: false,
@@ -1547,28 +1561,31 @@ impl PaneRenderCache {
         self.cached_hovered_url.is_some()
     }
 
-    /// Record that this pane observed `visible_chars` this frame and report
+    /// Record that this pane observed `row_epochs` this frame and report
     /// whether it is the first observation of a genuinely-new snapshot
-    /// allocation (issue #439 fix #4).
+    /// (issue #439 fix #4).
     ///
-    /// Returns `true` only when `visible_chars` is a different `Arc`
-    /// allocation from the one observed on the previous call — i.e. the PTY
-    /// thread published a new snapshot since last frame. Returns `false` when
-    /// the same published snapshot is being re-read (the ~14 idle frames
-    /// between real updates under a settled full-screen TUI).
+    /// Returns `true` only when `row_epochs` differs (element-for-element)
+    /// from the one observed on the previous call — i.e. the PTY thread
+    /// published a snapshot with genuinely different content since last
+    /// frame. Returns `false` when the same published snapshot is being
+    /// re-read (the ~14 idle frames between real updates under a settled
+    /// full-screen TUI) AND when a fresh `Arc` carries content-identical
+    /// `row_epochs` (e.g. a cursor-blink repaint's byte-identical re-flatten;
+    /// see this field's doc comment).
     ///
     /// Always updates the stored `Arc` (a cheap refcount bump), so it must be
     /// called exactly once per pane per frame, before the content-driven
-    /// repaint decision. `last_observed_visible` is `pub(super)`
+    /// repaint decision. `last_observed_row_epochs` is `pub(super)`
     /// (render-pipeline internal); this narrow accessor lets `app_impl.rs`'s
     /// repaint scheduler consult it without widening the field's visibility,
     /// mirroring [`Self::super_pressed`] / [`Self::hover_tooltip_active`].
-    pub(crate) fn observe_visible_snapshot(&mut self, visible_chars: &Arc<Vec<TChar>>) -> bool {
+    pub(crate) fn observe_row_epochs(&mut self, row_epochs: &Arc<[u64]>) -> bool {
         let is_new = self
-            .last_observed_visible
+            .last_observed_row_epochs
             .as_ref()
-            .is_none_or(|prev| !Arc::ptr_eq(prev, visible_chars));
-        self.last_observed_visible = Some(Arc::clone(visible_chars));
+            .is_none_or(|prev| *prev != *row_epochs);
+        self.last_observed_row_epochs = Some(Arc::clone(row_epochs));
         is_new
     }
 
@@ -4418,48 +4435,49 @@ mod subtask_1_7_tests {
     }
 
     #[test]
-    fn observe_visible_snapshot_reports_new_only_on_first_observation() {
-        // Issue #439 fix #4: the repaint scheduler gates the content-driven
-        // 16ms wake on this returning `true` only when a genuinely-new
-        // snapshot allocation is observed. Re-observing the SAME `Arc` (the
-        // idle frames between real PTY updates) must return `false` so the
-        // wake is not re-armed.
-        use freminal_common::buffer_states::tchar::TChar;
-
+    fn observe_row_epochs_reports_new_only_on_genuine_change() {
+        // Issue #439 fix #4 (Task 124.12 revision): the repaint scheduler
+        // gates the content-driven 16ms wake on this returning `true` only
+        // when a genuinely-new snapshot is observed. Re-observing the SAME
+        // `Arc` (the idle frames between real PTY updates) must return
+        // `false` so the wake is not re-armed.
         let mut cache = PaneRenderCache::new();
-        let snap_a = Arc::new(vec![TChar::Ascii(b'A'), TChar::Ascii(b'B')]);
-        let snap_b = Arc::new(vec![TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+        let epochs_a: Arc<[u64]> = Arc::from([1_u64, 2]);
+        let epochs_b: Arc<[u64]> = Arc::from([3_u64, 4]);
 
         // First ever observation of any snapshot is new.
         assert!(
-            cache.observe_visible_snapshot(&snap_a),
+            cache.observe_row_epochs(&epochs_a),
             "first observation of a snapshot must report new"
         );
         // Re-observing the SAME Arc is NOT new (the idle re-read case).
         assert!(
-            !cache.observe_visible_snapshot(&snap_a),
+            !cache.observe_row_epochs(&epochs_a),
             "re-observing the same Arc must report not-new"
         );
         assert!(
-            !cache.observe_visible_snapshot(&snap_a),
+            !cache.observe_row_epochs(&epochs_a),
             "still not-new on a third re-read of the same Arc"
         );
-        // A different allocation is new again.
+        // A different allocation with different epoch values is new again.
         assert!(
-            cache.observe_visible_snapshot(&snap_b),
-            "observing a different Arc allocation must report new"
+            cache.observe_row_epochs(&epochs_b),
+            "observing row_epochs with different values must report new"
         );
         assert!(
-            !cache.observe_visible_snapshot(&snap_b),
-            "re-observing the new Arc must then report not-new"
+            !cache.observe_row_epochs(&epochs_b),
+            "re-observing the new row_epochs must then report not-new"
         );
-        // A byte-identical but distinct allocation is still "new" (ptr
-        // identity, not value equality) — matching how `flatten_visible`
-        // allocates a fresh Arc whenever it re-flattens dirty rows.
-        let snap_b_clone_bytes = Arc::new(vec![TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
+        // A value-identical but distinct allocation is NOT "new" — this is
+        // the fix over the old `Arc::ptr_eq`-based `visible_chars` test:
+        // comparing epoch *values* (not pointer identity) suppresses the
+        // spurious repaint a byte-identical re-flatten in a fresh Arc used
+        // to cause (e.g. a cursor-blink repaint).
+        let epochs_b_clone_values: Arc<[u64]> = Arc::from([3_u64, 4]);
         assert!(
-            cache.observe_visible_snapshot(&snap_b_clone_bytes),
-            "a distinct allocation with identical bytes is a new observation"
+            !cache.observe_row_epochs(&epochs_b_clone_values),
+            "a distinct allocation with identical epoch values is NOT a new \
+             observation"
         );
     }
 }

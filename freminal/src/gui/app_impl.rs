@@ -2553,17 +2553,14 @@ impl freminal_windowing::App for FreminalGui {
                 // when real output arrives (a few times/sec under a settled
                 // full-screen TUI like btop), but this `update()` runs every
                 // frame (~60fps) and re-reads whatever snapshot is currently
-                // published. `pane_snap.content_changed` is baked into the
-                // snapshot at build time, so on the ~14 frames between real
-                // updates it reads a stale `true`, which used to re-arm a 16ms
-                // content repaint every frame — a self-perpetuating 60fps wake
-                // for pixels that are not changing.
+                // published.
                 //
-                // Compare the current `visible_chars` `Arc` against the one
+                // Compare the current `row_epochs` `Arc` against the one
                 // observed last frame: `is_new_snapshot` is `true` only on the
-                // first frame a genuinely-new snapshot appears. We update the
-                // cache unconditionally (every frame, before the widget draws)
-                // — distinct from `last_rendered_visible`, which the widget
+                // first frame a genuinely-new snapshot's row_epochs differ
+                // from the previous observation. We update the cache
+                // unconditionally (every frame, before the widget draws) —
+                // distinct from `last_rendered_row_epochs`, which the widget
                 // updates only on a full rebuild. Missing a real update is
                 // impossible: every `build_snapshot` in the PTY thread is
                 // paired with its own `request_repaint_after` (min-merged into
@@ -2571,9 +2568,19 @@ impl freminal_windowing::App for FreminalGui {
                 // one wake independent of this gate; the gate only suppresses
                 // the redundant self-scheduled repaints of already-drawn
                 // content.
-                let is_new_snapshot = pane
-                    .render_cache
-                    .observe_visible_snapshot(&pane_snap.visible_chars);
+                //
+                // Task 124.12 switched this from an `Arc::ptr_eq` test on
+                // `visible_chars` to a value comparison on `row_epochs`. The
+                // pointer test reported "new" for a byte-identical re-flatten
+                // in a fresh `Arc` (e.g. a cursor-blink repaint), which
+                // re-armed a 16ms wake for pixels that were not changing;
+                // comparing epoch values suppresses that too. A skipped
+                // (`skip_draw`) frame cannot desync this from the rebuild
+                // decision either — see this method's `is_new_snapshot`
+                // caller and `PaneRenderCache::observe_row_epochs`'s doc
+                // comment for why repaint scheduling is independent of the
+                // vertex-rebuild trigger.
+                let is_new_snapshot = pane.render_cache.observe_row_epochs(&pane_snap.row_epochs);
 
                 // OSC 1338 HISTFILE reload trigger (Task 72.15).  When the
                 // shell-integration scripts publish a new HISTFILE path
@@ -2900,12 +2907,15 @@ impl freminal_windowing::App for FreminalGui {
                     is_active,
                     is_echo_off,
                 );
-                // Honour `content_changed` only on the first observation of a
+                // Honour a content change only on the first observation of a
                 // genuinely-new snapshot (issue #439 fix #4). Re-reading the
                 // same published `Arc` on a later frame sees the same
                 // (byte-identical) pixels, so scheduling another content
                 // repaint buys nothing and only perpetuates the 60fps wake.
-                let content_wants_repaint = is_new_snapshot && pane_snap.content_changed;
+                // `is_new_snapshot` (a `row_epochs` value comparison, Task
+                // 124.12) already IS the content-changed signal, so there is
+                // nothing further to AND it against.
+                let content_wants_repaint = is_new_snapshot;
                 // Diagnostic: count the ~2Hz phantom wakes the `show_cursor`
                 // gate now suppresses — a blink-STYLE cursor on the active
                 // pane, content unchanged, no blinking text, but the cursor
@@ -4004,7 +4014,7 @@ impl freminal_windowing::App for FreminalGui {
         // Setting `predicted_dt = 0` disables the subtraction, so our delays
         // are honoured exactly:
         //   - 8 ms  (PTY thread after each batch)  → ~120 FPS cap
-        //   - 16 ms (GUI on content_changed)        → ~60 FPS cap
+        //   - 16 ms (GUI on a content change)       → ~60 FPS cap
         //   - 500 ms (cursor blink)                 → ~2 FPS
         //   - no request (true idle, steady cursor)  → 0 FPS
         raw_input.predicted_dt = 0.0;

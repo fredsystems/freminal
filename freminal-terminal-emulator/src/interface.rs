@@ -23,13 +23,12 @@ type VisibleSnap = Option<(
 )>;
 
 /// Result of flattening visible rows:
-/// `(chars, tags, row_offsets, url_tag_indices, content_changed)`.
+/// `(chars, tags, row_offsets, url_tag_indices)`.
 type FlattenResult = (
     Arc<Vec<TChar>>,
     Arc<Vec<FormatTag>>,
     Arc<Vec<usize>>,
     Arc<Vec<usize>>,
-    bool,
 );
 
 /// Image data collected from the visible window for a snapshot.
@@ -135,63 +134,53 @@ pub fn split_format_data_for_scrollback(
 /// See `freminal-common/src/buffer_states/modes/sync_updates.rs` for spec references.
 const SYNC_UPDATES_TIMEOUT_MS: u64 = 200;
 
-/// Change signals carried forward across snapshots the GUI will not render.
+/// Change signal carried forward across snapshots the GUI will not render.
 ///
-/// `content_changed` and `scroll_changed` are edge-triggered: each is computed
-/// by diffing the current snapshot against the *previous* one. That is only
-/// sound if the GUI renders every snapshot — and it does not. A snapshot with
-/// `skip_draw = true` (Synchronized Output, DEC `?2026`) is deliberately
-/// dropped by the GUI without inspecting its content, so the edge it reported
-/// is never acted on. The next snapshot then diffs against the dropped one,
-/// finds no *further* change, and reports `content_changed = false`.
+/// `scroll_changed` is edge-triggered: it is computed by diffing the current
+/// snapshot against the *previous* one. That is only sound if the GUI renders
+/// every snapshot — and it does not. A snapshot with `skip_draw = true`
+/// (Synchronized Output, DEC `?2026`) is deliberately dropped by the GUI
+/// without inspecting its content, so the edge it reported is never acted on.
+/// The next snapshot then diffs against the dropped one, finds no *further*
+/// change, and reports `scroll_changed = false`.
 ///
-/// The result is a permanently stale screen: an application that wraps a paint
-/// in `?2026h` … `?2026l` loses the whole update whenever a PTY read boundary
-/// falls between the content and the closing `?2026l`, and nothing redraws
-/// until an unrelated event forces a rebuild (issue #490).
+/// The result is a permanently stale screen: an application that wraps a
+/// scroll in `?2026h` … `?2026l` loses the whole update whenever a PTY read
+/// boundary falls between the scroll and the closing `?2026l`, and nothing
+/// redraws until an unrelated event forces a rebuild (issue #490).
 ///
-/// This type closes that gap by making the signals **level-triggered across
+/// This type closes that gap by making the signal **level-triggered across
 /// skipped frames**: an edge observed while `skip_draw` is set is accumulated
 /// here and replayed on the first snapshot the GUI will actually render.
 ///
-/// Both flags are tracked independently because they are independent
-/// simultaneous signals — a frame can change content, scroll, both, or
-/// neither — and downstream consumers distinguish the two (a pure scroll must
-/// not clear the user's text selection).
+/// This type used to carry a parallel `content` flag for the equivalent
+/// `content_changed` bool. Task 124.12 deleted both `content_changed` and
+/// this deferral for it: `TerminalSnapshot::row_epochs` (Task 124.11) is a
+/// monotonic per-row stamp compared against a baseline the *consumer* holds,
+/// not an edge diffed against the previous snapshot, so a skipped frame
+/// cannot lose it — there is nothing left to defer. The #490 content case is
+/// not an oversight here; it was fixed by removing the bool that needed
+/// deferring, not by extending the deferral.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct DeferredChangeFlags {
-    /// A `content_changed` edge that has not yet reached a rendered snapshot.
-    content: bool,
     /// A `scroll_changed` edge that has not yet reached a rendered snapshot.
     scroll: bool,
 }
 
 impl DeferredChangeFlags {
-    /// Combine this frame's freshly computed edges with anything owed from
-    /// previously skipped frames, and return the values the snapshot should
-    /// actually carry.
+    /// Combine this frame's freshly computed scroll edge with anything owed
+    /// from previously skipped frames, and return the value the snapshot
+    /// should actually carry.
     ///
     /// When the frame will be skipped the accumulated signal is retained, so
     /// it survives an arbitrarily long run of skipped frames. When the frame
     /// will be rendered the debt is paid and cleared.
-    const fn resolve_for_frame(
-        &mut self,
-        skip_draw: bool,
-        content_changed: bool,
-        scroll_changed: bool,
-    ) -> (bool, bool) {
-        let content = content_changed || self.content;
+    const fn resolve_for_frame(&mut self, skip_draw: bool, scroll_changed: bool) -> bool {
         let scroll = scroll_changed || self.scroll;
 
-        if skip_draw {
-            self.content = content;
-            self.scroll = scroll;
-        } else {
-            self.content = false;
-            self.scroll = false;
-        }
+        self.scroll = if skip_draw { scroll } else { false };
 
-        (content, scroll)
+        scroll
     }
 }
 
@@ -212,11 +201,11 @@ pub struct TerminalEmulator {
     ///
     /// On a primary↔alternate switch we cannot reuse the active
     /// `previous_visible_snap` (it holds the other buffer's content), but we
-    /// also must not report a spurious `content_changed = true` when returning
-    /// to a buffer whose restored content is byte-identical to what we last
-    /// rendered on it. So instead of dropping the cache on a switch, we **swap**
-    /// it with the stashed cache for the buffer we are switching *to* (issue
-    /// #405, alt/primary one-frame tax). The very next flatten then compares
+    /// also must not force a needless re-flatten when returning to a buffer
+    /// whose restored content is byte-identical to what we last rendered on
+    /// it. So instead of dropping the cache on a switch, we **swap** it with
+    /// the stashed cache for the buffer we are switching *to* (issue #405,
+    /// alt/primary one-frame tax). The very next flatten then compares
     /// against the correct same-buffer baseline, and `leave_alternate` restoring
     /// byte-identical primary rows no longer forces a full-flatten redraw.
     ///
@@ -684,8 +673,9 @@ impl TerminalEmulator {
     /// This is cheap to call: the visible content is flattened here on the
     /// PTY thread so the GUI render path never has to do it.
     ///
-    /// `content_changed` is `true` only when the visible flat content differs
-    /// from the previous snapshot.  Cursor-only moves do not set it because
+    /// `row_epochs` carries per-row content-change information (bumped only
+    /// when a row's merged content actually differs, not merely when it was
+    /// written to). Cursor-only moves do not bump any row's epoch because
     /// cursor position is carried separately in the snapshot struct.
     #[must_use]
     #[allow(clippy::too_many_lines)] // Struct literal dominates line count; logic is linear and clear
@@ -729,9 +719,9 @@ impl TerminalEmulator {
         //
         // The active `previous_visible_snap` holds the OTHER buffer's content
         // after a switch, so it must not be reused directly. But dropping it
-        // outright makes the next flatten report `content_changed = true` even
-        // when the buffer we switched *to* was restored byte-identical to what
-        // we last rendered on it (the common `leave_alternate` case). Instead we
+        // outright forces the next flatten to needlessly re-run even when the
+        // buffer we switched *to* was restored byte-identical to what we last
+        // rendered on it (the common `leave_alternate` case). Instead we
         // swap the active cache with the stashed cache for the buffer we are
         // switching to: `previous_visible_snap` becomes that buffer's last-seen
         // baseline (or `None` if we've never rendered it), and the buffer we
@@ -799,12 +789,12 @@ impl TerminalEmulator {
             .handler
             .any_visible_dirty_extended(scroll_offset, extra_rows);
 
-        // ── Produce (visible_chars, visible_tags, content_changed) ───────
+        // ── Produce (visible_chars, visible_tags, row_offsets, url_tag_indices) ──
         //
         // Only flatten the *visible* rows (plus any fold-requested extra rows
         // above them) — scrollback below the window is not part of the
         // snapshot.
-        let (visible_chars, visible_tags, row_offsets, url_tag_indices, content_changed) =
+        let (visible_chars, visible_tags, row_offsets, url_tag_indices) =
             self.flatten_visible(any_dirty, scroll_offset, extra_rows);
 
         // ── Remaining cheap reads ────────────────────────────────────────────
@@ -812,16 +802,14 @@ impl TerminalEmulator {
 
         let mode_fields = self.collect_mode_fields();
 
-        // ── Carry change signals across frames the GUI will not render ───────
+        // ── Carry the scroll change signal across frames the GUI will not render ──
         //
         // Must run after `apply_sync_updates_timeout` and `collect_mode_fields`,
         // because the timeout can flip `skip_draw` back to `false` and this
         // decision depends on the *final* value the snapshot will carry.
-        let (content_changed, scroll_changed) = self.deferred_changes.resolve_for_frame(
-            mode_fields.skip_draw,
-            content_changed,
-            scroll_changed,
-        );
+        let scroll_changed = self
+            .deferred_changes
+            .resolve_for_frame(mode_fields.skip_draw, scroll_changed);
         let cursor_pos = self.internal.cursor_pos();
         // Hide the cursor when the user is scrolled back into history —
         // the live cursor line is not visible on screen.
@@ -922,7 +910,6 @@ impl TerminalEmulator {
             term_width,
             term_height,
             total_rows,
-            content_changed,
             has_blinking_text,
             has_urls,
             row_offsets,
@@ -958,7 +945,7 @@ impl TerminalEmulator {
     }
 
     /// Flatten the visible rows into
-    /// `(chars, tags, row_offsets, url_tag_indices, content_changed)`, using the
+    /// `(chars, tags, row_offsets, url_tag_indices)`, using the
     /// snapshot-level cache to avoid work when no visible row is dirty.
     ///
     /// The `row_offsets` contains per-row flat-index offsets into the chars vec
@@ -978,22 +965,13 @@ impl TerminalEmulator {
                 .buffer_mut()
                 .visible_as_tchars_and_tags_extended_arc(scroll_offset, extra_rows);
 
-            // `content_changed` is true when the flat content actually differs
-            // from the previous snapshot (guards against spurious redraws from
-            // dirty flags set on rows that were ultimately written with the same
-            // bytes, e.g. cursor-blink redraws).
-            let changed = self
-                .previous_visible_snap
-                .as_ref()
-                .is_none_or(|(prev_chars, _, _, _)| prev_chars.as_ref() != vc.as_ref());
-
             self.previous_visible_snap = Some((
                 Arc::clone(&vc),
                 Arc::clone(&vt),
                 Arc::clone(&vr),
                 Arc::clone(&vu),
             ));
-            (vc, vt, vr, vu, changed)
+            (vc, vt, vr, vu)
         } else if let Some((prev_chars, prev_tags, prev_row_offsets, prev_url_indices)) =
             &self.previous_visible_snap
         {
@@ -1003,7 +981,6 @@ impl TerminalEmulator {
                 Arc::clone(prev_tags),
                 Arc::clone(prev_row_offsets),
                 Arc::clone(prev_url_indices),
-                false,
             )
         } else {
             // First-ever snapshot and nothing is marked dirty yet (e.g. the
@@ -1019,7 +996,7 @@ impl TerminalEmulator {
                 Arc::clone(&vr),
                 Arc::clone(&vu),
             ));
-            (vc, vt, vr, vu, true)
+            (vc, vt, vr, vu)
         }
     }
 
@@ -1260,27 +1237,31 @@ mod tests {
     // ── build_snapshot: cache invalidation ────────────────────────────────────
 
     #[test]
-    fn build_snapshot_first_call_returns_content_changed_true() {
+    fn build_snapshot_first_call_stamps_fresh_row_epochs() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"hello");
         let snap = emu.build_snapshot();
-        // First-ever snapshot must report content_changed = true.
-        assert!(
-            snap.content_changed,
-            "first snapshot should have content_changed=true"
+        // First-ever snapshot must stamp every row with a distinct epoch —
+        // there is no prior cache to compare against, so every row is
+        // treated as freshly changed.
+        let unique: std::collections::HashSet<u64> = snap.row_epochs.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            snap.row_epochs.len(),
+            "first snapshot should stamp every row with a distinct epoch"
         );
     }
 
     #[test]
-    fn build_snapshot_second_call_no_data_is_not_changed() {
+    fn build_snapshot_second_call_no_data_has_unchanged_row_epochs() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"hello");
-        let _ = emu.build_snapshot();
-        // Second snapshot with no new data: content should not have changed.
+        let first = emu.build_snapshot();
+        // Second snapshot with no new data: row_epochs should be unchanged.
         let snap2 = emu.build_snapshot();
-        assert!(
-            !snap2.content_changed,
-            "second snapshot with no new data should have content_changed=false"
+        assert_eq!(
+            first.row_epochs, snap2.row_epochs,
+            "second snapshot with no new data should carry identical row_epochs"
         );
     }
 
@@ -1301,9 +1282,9 @@ mod tests {
         // Move scroll offset by 1 — cache should be invalidated.
         emu.set_requested_scroll_offset(1);
         let snap2 = emu.build_snapshot();
-        assert!(
-            snap2.content_changed,
-            "scroll offset change should invalidate the cache"
+        assert_ne!(
+            snap1.row_epochs, snap2.row_epochs,
+            "scroll offset change should invalidate the cache and re-stamp row_epochs"
         );
     }
 
@@ -1311,7 +1292,7 @@ mod tests {
     fn build_snapshot_size_change_invalidates_cache() {
         let (mut emu, rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"hello");
-        let _ = emu.build_snapshot();
+        let snap1 = emu.build_snapshot();
 
         // Resize terminal — this should invalidate the cache.
         let (w, h) = emu.internal.win_size();
@@ -1320,9 +1301,10 @@ mod tests {
         while rx.try_recv().is_ok() {}
 
         let snap2 = emu.build_snapshot();
-        assert!(
-            snap2.content_changed,
-            "terminal resize should invalidate the visible snap cache"
+        assert_ne!(
+            snap1.row_epochs, snap2.row_epochs,
+            "terminal resize should invalidate the visible snap cache and \
+             re-stamp row_epochs"
         );
     }
 
@@ -1500,35 +1482,42 @@ mod tests {
     fn build_snapshot_alternate_screen_switch_invalidates_cache() {
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"primary content");
-        let _ = emu.build_snapshot();
+        let primary_snap = emu.build_snapshot();
 
         // Switch to alternate screen — the active cache holds primary content,
         // which must not be reused; the blank alt screen differs, so this is a
         // genuine change.
         emu.handle_incoming_data(b"\x1b[?1049h");
         let snap = emu.build_snapshot();
-        assert!(
-            snap.content_changed,
-            "switching to alternate screen should mark content_changed"
+        assert_ne!(
+            primary_snap.row_epochs, snap.row_epochs,
+            "switching to alternate screen should re-stamp row_epochs"
         );
     }
 
     #[test]
-    fn build_snapshot_return_to_primary_unchanged_content_is_not_changed() {
+    fn build_snapshot_return_to_primary_unchanged_content_reuses_visible_chars_arc() {
         // Issue #405 alt/primary one-frame tax: returning to the primary screen
-        // with byte-identical restored content must NOT report content_changed.
-        // The per-buffer cache swap preserves the primary baseline across the
-        // alt-screen excursion.
+        // with byte-identical restored content must reuse the SAME
+        // `visible_chars` Arc allocation (proving the per-buffer cache swap in
+        // `interface.rs` preserves the primary baseline across the alt-screen
+        // excursion), even though `row_epochs` cannot make the same claim —
+        // `enter_alternate`/`leave_alternate` unconditionally clear
+        // `freminal_buffer::Buffer::merge_cache`, an independent cache with no
+        // per-buffer stash, so `row_epochs` conservatively takes the "no
+        // cached merge covers this window" fallback and re-stamps every row.
+        // That is the documented over-report cost, not a bug: see
+        // `TerminalEmulator::build_snapshot`'s "Per-row content epochs" comment.
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"primary content");
         let primary_snap = emu.build_snapshot();
-        assert!(
-            primary_snap.content_changed,
-            "first primary snapshot is a change"
-        );
         // A second primary snapshot with no changes is stable.
         let stable = emu.build_snapshot();
-        assert!(!stable.content_changed, "idle primary is unchanged");
+        assert_eq!(
+            primary_snap.row_epochs, stable.row_epochs,
+            "idle primary must have unchanged row_epochs"
+        );
+        let primary_arc = Arc::clone(&stable.visible_chars);
 
         // Enter the alternate screen and render it (writes some alt content).
         emu.handle_incoming_data(b"\x1b[?1049h");
@@ -1539,7 +1528,8 @@ mod tests {
         // Leave the alternate screen — `leave_alternate` restores the primary
         // rows exactly as they were. The restored content is byte-identical to
         // what we last rendered on primary, so the returning snapshot must
-        // report content_changed == false (the fix; previously always true).
+        // reuse the same `visible_chars` Arc (the fix; previously verified via
+        // the now-deleted sticky `content_changed` bool instead).
         emu.handle_incoming_data(b"\x1b[?1049l");
         let returned = emu.build_snapshot();
         assert!(
@@ -1547,17 +1537,23 @@ mod tests {
             "should be back on the primary screen"
         );
         assert!(
-            !returned.content_changed,
-            "returning to a byte-identical primary screen must not report \
-             content_changed (issue #405 one-frame tax fix)"
+            Arc::ptr_eq(&returned.visible_chars, &primary_arc),
+            "returning to a byte-identical primary screen must reuse the same \
+             visible_chars Arc (issue #405 one-frame tax fix)"
+        );
+        assert_ne!(
+            stable.row_epochs, returned.row_epochs,
+            "row_epochs is expected to re-stamp on an alt-screen round trip \
+             (merge_cache has no per-buffer stash), even though visible_chars \
+             is reused — this pins the known over-report, not a regression"
         );
     }
 
     #[test]
     fn build_snapshot_idle_rebuild_reuses_same_visible_chars_arc() {
         // Issue #439 fix #4 relies EXCLUSIVELY on `Arc::ptr_eq` of
-        // `visible_chars` (not the sticky `content_changed` flag) to decide
-        // whether the GUI must rebuild. That is only sound if an idle
+        // `visible_chars` (not the deleted sticky `content_changed` flag) to
+        // decide whether the GUI must rebuild. That is only sound if an idle
         // `build_snapshot` (nothing dirty) returns the *same* `Arc`
         // allocation, not a fresh clone with identical bytes. Assert the
         // pointer identity directly so the invariant is guarded by a test, not
@@ -1566,9 +1562,9 @@ mod tests {
         emu.handle_incoming_data(b"stable content");
         let first = emu.build_snapshot();
         let second = emu.build_snapshot();
-        assert!(
-            !second.content_changed,
-            "an idle rebuild must not report content_changed"
+        assert_eq!(
+            first.row_epochs, second.row_epochs,
+            "an idle rebuild must not re-stamp row_epochs"
         );
         assert!(
             Arc::ptr_eq(&first.visible_chars, &second.visible_chars),
@@ -1581,18 +1577,24 @@ mod tests {
     fn build_snapshot_repeated_primary_alt_bounce_without_writes_reuses_arc() {
         // Issue #439 fix #4 adversarial-review follow-up: walk
         // primary -> alt -> primary -> alt (2nd time) with NO writes to the
-        // alt buffer, and assert the returning primary snapshot both reports
-        // `!content_changed` AND reuses the byte-identical `visible_chars`
-        // Arc. This exercises the per-buffer cache-swap stash across a REPEATED
-        // bounce (the existing tests only do a single round trip), which is the
-        // path the reviewer flagged as relied-on-but-untested now that the raw
-        // `content_changed` flag no longer backs up the ptr_eq check on the
+        // alt buffer, and assert the returning primary snapshot reuses the
+        // byte-identical `visible_chars` Arc. This exercises the per-buffer
+        // cache-swap stash across a REPEATED bounce (the existing tests only
+        // do a single round trip), which is the path the reviewer flagged as
+        // relied-on-but-untested now that the raw `content_changed` flag
+        // (deleted by Task 124.12) no longer backs up the ptr_eq check on the
         // GUI side.
+        //
+        // `row_epochs` is asserted to re-stamp on every bounce rather than
+        // asserted unchanged: `enter_alternate`/`leave_alternate`
+        // unconditionally clear `freminal_buffer::Buffer::merge_cache`
+        // (an independent cache with no per-buffer stash), so the epoch
+        // conservatively over-reports change on every alt-screen round trip
+        // even when `visible_chars` itself is proven byte-identical and reused.
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"primary baseline");
         let _ = emu.build_snapshot();
         let primary_stable = emu.build_snapshot();
-        assert!(!primary_stable.content_changed, "idle primary is stable");
         let primary_arc = Arc::clone(&primary_stable.visible_chars);
 
         // First excursion: enter alt (no writes), render, leave.
@@ -1604,9 +1606,9 @@ mod tests {
             !returned_once.is_alternate_screen,
             "back on primary after first excursion"
         );
-        assert!(
-            !returned_once.content_changed,
-            "returning to byte-identical primary must not report content_changed"
+        assert_ne!(
+            primary_stable.row_epochs, returned_once.row_epochs,
+            "row_epochs is expected to re-stamp on the first round trip"
         );
         assert!(
             Arc::ptr_eq(&returned_once.visible_chars, &primary_arc),
@@ -1622,9 +1624,9 @@ mod tests {
             !returned_twice.is_alternate_screen,
             "back on primary after second excursion"
         );
-        assert!(
-            !returned_twice.content_changed,
-            "second return to byte-identical primary must not report content_changed"
+        assert_ne!(
+            returned_once.row_epochs, returned_twice.row_epochs,
+            "row_epochs is expected to re-stamp on the second round trip too"
         );
         assert!(
             Arc::ptr_eq(&returned_twice.visible_chars, &primary_arc),
@@ -1695,23 +1697,24 @@ mod tests {
     }
 
     #[test]
-    fn build_snapshot_return_to_primary_with_changed_content_is_changed() {
+    fn build_snapshot_return_to_primary_with_changed_content_has_changed_row_epochs() {
         // Guard the other direction: if the primary content genuinely differs
         // when we return (e.g. output arrived on primary via the alt buffer's
-        // exit sequence), content_changed must still be reported true. Here we
-        // change the primary AFTER leaving alt to force a real diff.
+        // exit sequence), row_epochs must still differ from the pre-excursion
+        // baseline. Here we change the primary AFTER leaving alt to force a
+        // real diff.
         let (mut emu, _rx) = TerminalEmulator::new_headless(None);
         emu.handle_incoming_data(b"primary content");
-        let _ = emu.build_snapshot();
+        let baseline = emu.build_snapshot();
         emu.handle_incoming_data(b"\x1b[?1049h");
         let _ = emu.build_snapshot();
         emu.handle_incoming_data(b"\x1b[?1049l");
         // New output on the restored primary screen.
         emu.handle_incoming_data(b" plus more");
         let returned = emu.build_snapshot();
-        assert!(
-            returned.content_changed,
-            "genuinely changed primary content must report content_changed"
+        assert_ne!(
+            baseline.row_epochs, returned.row_epochs,
+            "genuinely changed primary content must re-stamp row_epochs"
         );
     }
 
