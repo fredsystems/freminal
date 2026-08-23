@@ -544,9 +544,11 @@ that fabricates GL handles. It needs no GPU, no display server and no `flake.nix
 runs in the existing `cargo test` matrix on all four CI platforms. (Wrapping `glow::HasContext`
 directly is impossible: the trait is sealed. The facade exists because of that, not in spite of
 it.) Phase 2 is the pixel/readback harness that issue #440 and 121.28 have wanted since #436 —
-Linux-only, requiring `pkgs.mesa`, `mesa.llvmpipeHook` and `pkgs.xorg.xvfb` in `flake.nix` plus
+Linux-only, requiring `pkgs.mesa`, `pkgs.xvfb` and an explicit llvmpipe env in `flake.nix` plus
 a new Nix-based CI job, because the existing test matrix runs on `dtolnay/rust-toolchain` and
-inherits nothing from the flake. **Task 124 does the fixing.** 123 merged on 2026-08-23 and
+inherits nothing from the flake. That env lives in the dedicated `gl-pixel` dev shell **only** —
+it was briefly in `default`, where it forced every interactively-run freminal onto the CPU
+rasteriser at ~100x idle CPU (see 123.C2). **Task 124 does the fixing.** 123 merged on 2026-08-23 and
 its Findings section (123.14) discharged both diagnostic obligations: 124.1's premise was
 **CONFIRMED** (a byte-identical re-flatten in a fresh `Arc` does force a full rebuild), and
 124.2's was **PARTIALLY REFUTED** — its symptom is real but `pointer_forces_full_present` is

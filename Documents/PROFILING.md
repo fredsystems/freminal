@@ -208,6 +208,40 @@ There is no `cargo xtask` profiling subcommand.
 
 ## Reporting discipline
 
+**Check the rasteriser before you record a single number.** The `gl-pixel`
+dev shell deliberately sets `LIBGL_ALWAYS_SOFTWARE=1` (plus
+`LIBGL_DRIVERS_PATH` and `__EGL_VENDOR_LIBRARY_FILENAMES`) so the Phase 2
+pixel harness runs deterministically on Mesa's llvmpipe. Those variables are
+inherited by **every process launched from that shell**, freminal included,
+and they move idle CPU by roughly **100x** — measured at 0.10% of a core on
+the GPU against 11.3% on llvmpipe, same binary, same content. A run on
+llvmpipe is not a slower version of the real thing; it is a different
+program's cost profile, dominated by 32 `llvmpipe-*` rasteriser threads that
+have nothing to do with the code under test.
+
+Before measuring:
+
+```bash
+echo "${LIBGL_ALWAYS_SOFTWARE:-<unset>}"   # must print <unset>
+```
+
+If it prints `1`, you are in `gl-pixel` (or a stale shell predating the
+123.C2 fix). Re-enter `nix develop` / `direnv reload`, or launch with
+`env -u LIBGL_ALWAYS_SOFTWARE`. A quick confirmation that a live process is
+on the GPU:
+
+```bash
+ls /proc/<pid>/task/*/comm | xargs cat | grep -c llvmpipe   # must be 0
+```
+
+This is not a hypothetical footgun. It shipped in the `default` shell from
+`2d917ffc` until 2026-08-23, was reported as a product CPU regression, and
+cost a full bisect plus a session of invalidated agent measurements before
+anyone looked at the environment. Worse, it is invisible to A/B comparison:
+both endpoints are equally affected, so the ~12% floor simply swamps
+whatever is under test. See 123.C2 in
+`PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+
 **Always report frame rate and per-frame cost as a pair, never a single CPU
 number.** Total CPU is the product of the two, so a single figure cannot
 distinguish "we draw fewer frames" from "each frame is cheaper" — and work on

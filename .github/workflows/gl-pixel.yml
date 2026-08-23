@@ -74,9 +74,12 @@ jobs:
           use-flakehub: false
           use-gha-cache: false
 
-      # `.#gl-pixel` rather than `.#ci`: it carries Mesa, Xvfb and the
-      # llvmpipe environment without `devOnlyTools`. `.#default` would work
-      # too but would build cargo-bundle from source for no reason.
+      # `.#gl-pixel` rather than `.#ci` or `.#default`: it is the only shell
+      # carrying the llvmpipe environment, and it carries Mesa and Xvfb
+      # without `devOnlyTools`. `.#default` deliberately does NOT set
+      # `LIBGL_ALWAYS_SOFTWARE` — it once did, and that forced every
+      # interactively-run freminal onto the CPU rasteriser (~100x idle CPU).
+      # See `glPixelEnv` in flake.nix.
       - name: Report the rasteriser under test
         run: |
           nix develop --impure .#gl-pixel --command bash -e -c '

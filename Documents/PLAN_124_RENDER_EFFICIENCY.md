@@ -145,7 +145,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | Subtask | Title | Status |
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
-| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Blocked on 124.17** |
+| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Needs re-deriving** — see 124.17 GPU re-take |
 | 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
@@ -157,12 +157,12 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Blocked on 124.17** |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Prize is zero at present** — see 124.17 GPU re-take |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
-| 124.17 | Does the skip-clear + partial-present path ever actually fire? | Planned |
+| 124.17 | Does the skip-clear + partial-present path ever actually fire? | Complete — re-taken on GPU; answer is **no** |
 | 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned |
 
 ### Execution model
@@ -1597,7 +1597,100 @@ observation only. Do NOT touch the clear, the paint order, the scissor,
 crate. Do NOT implement 124.14 or 124.2. Do NOT "fix" anything the counters
 reveal — report it.
 
-#### 124.17 findings (2026-08-23)
+#### 124.17 findings — GPU re-take (2026-08-23), AUTHORITATIVE
+
+**On real hardware the partial-present path is never taken. Not once in
+8,160 frames across three runs.** This inverts the llvmpipe result below on
+its single most important term, and it resolves — rather than deepens — the
+contradiction that blocked 124.14.
+
+Measured on this workstation, Hyprland/Wayland, **AMD GPU, no llvmpipe**
+(`llvmpipe_threads=0` asserted at the start of every run), release build with
+`--features frame-profiling`, continuous PTY output plus pointer motion over
+the grid, 1264x680:
+
+| Counter | Run 1 | Run 2 | Run 3 |
+| ------- | ----- | ----- | ----- |
+| `frame_counter` | 3120 | 2520 | 2520 |
+| `present_partial_not_requested` | 3100 | 2503 | 2501 |
+| `present_partial_no_rects` | 0 | 0 | 0 |
+| `present_partial_blocked_surface` | 0 | 0 | 0 |
+| `present_partial_blocked_buffer_age` | **20** | **17** | **19** |
+| `present_partial_taken` | **0** | **0** | **0** |
+| `buffer_age_histogram` `[0,1,2,3+]` | `[0,0,20,0]` | `[0,0,17,0]` | `[0,0,19,0]` |
+
+Two things changed against the llvmpipe run, and they are the same thing:
+
+- **`buffer_age()` returns 2, on every single query, in every run.** Never 1.
+- **Therefore `buffer_age() == 1` blocks 100% of requested partial frames**,
+  and `present_partial_taken` is exactly zero.
+
+**The original run's central refutation was a software-rendering artefact.**
+This subtask's premise recorded a suspicion in as many words: *"On a
+conventionally double-buffered surface the buffer about to be drawn into
+holds the frame from two frames ago, i.e. age 2, so the gate would never
+pass."* The llvmpipe session reported age 1 on all 44 queries and recorded
+that suspicion as **REFUTED**. On the GPU the suspicion is **CONFIRMED** —
+the surface is conventionally double-buffered and behaves exactly as
+predicted. llvmpipe's swapchain is not the hardware's.
+
+**This resolves the blocking question, and the answer is the reassuring
+one.** 124.14's recon predicted that a taken partial present *should* visibly
+corrupt the display (clear skipped, opaque `panel_fill` painted over the
+central area by the head pass, band redrawn scissored to the cursor rect) and
+observed that it manifestly does not. Three candidate explanations were
+offered; two were eliminated, leaving the head-pass premise in doubt. The
+GPU numbers supply a fourth and much simpler explanation that the llvmpipe
+data had excluded:
+
+> **The display does not corrupt because the partial path never runs.**
+
+The recon model was most likely correct all along. It was never exercised on
+real hardware, so it was never falsified by one.
+
+**Consequence: this is outcome 1 of the three this subtask enumerated.** Per
+that enumeration — *"`present_partial_taken == 0`. The subsystem is inert,
+exactly as the chrome cache was before 121.8 found it. 124.14's prize is zero
+until whatever blocks it is fixed, and 124.2's `FrameDamage::None` — which
+also spends this path — needs re-deriving. Both entries get rewritten, not
+implemented."*
+
+That is now the operative instruction for both. Specifically:
+
+- **124.14's prize on this hardware is currently zero.** Converting frames
+  from `Full` to `Region` converts them into *requests* that the
+  `buffer_age() == 1` gate then rejects. The vertex-rebuild savings survive;
+  the present savings do not.
+- **124.2 is affected differently and less.** `FrameDamage::None` skips the
+  clear, the paint and the swap *in the app*, upstream of this gate, so its
+  saving does not depend on the partial-present path. Its `buffer_age()`
+  interaction — already flagged in its entry as "the correctness crux" —
+  now has a concrete answer: age is 2 in steady state, so a subsequent
+  `Partial` frame is declined and falls back to a full clear, which is the
+  safe direction.
+- **The `buffer_age() == 1` condition itself is now the highest-value open
+  question in this task.** Whether it is correct to require age 1, or whether
+  the damage-rect set should be unioned across `buffer_age()` frames (the
+  conventional `EGL_EXT_buffer_age` idiom, and what the extension exists
+  for), is a real design question that 124.17 was not scoped to answer.
+  Requiring age 1 on a double-buffered surface is equivalent to disabling
+  the feature.
+
+**Do not re-derive the llvmpipe numbers as a cross-check.** They describe
+Mesa's software swapchain and have no bearing on shipped behaviour. They are
+retained below only because the contrast is what identified the defect.
+
+#### 124.17 findings (2026-08-23) — SUPERSEDED, llvmpipe only
+
+> **INVALIDATED 2026-08-23 by 123.C2.** The session below was run from the
+> `default` dev shell, which at the time exported `LIBGL_ALWAYS_SOFTWARE=1`
+> (see `PLAN_123_GL_MEASUREMENT_HARNESS.md`, 123.C2). It therefore measured
+> **Mesa llvmpipe's** EGL implementation, not the GPU's — and this subtask's
+> two central results are `supports_partial_present()` and `buffer_age()`,
+> which are precisely the properties most likely to differ between a
+> software surface and a real one. The numbers below are retained as the
+> llvmpipe data point; they must not be used to unblock 124.14 or 124.2.
+> The GPU re-take above is authoritative.
 
 **The path fires, it fires constantly, and the windowing-side gate is wide
 open. The bottleneck is entirely app-side.** That is the opposite of the
