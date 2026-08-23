@@ -877,6 +877,36 @@ impl TerminalEmulator {
                 .visible_line_widths_extended(scroll_offset, extra_rows),
         );
 
+        // ── Per-row content epochs (Task 124.11) ─────────────────────────────
+        //
+        // Must run after `flatten_visible` above and with the same
+        // `(scroll_offset, extra_rows)`. `visible_row_epochs` reads the
+        // buffer's merge cache; when no cached merge covers the window it
+        // conservatively re-stamps every row as changed, which is safe (an
+        // over-report costs one repaint) but throws away the whole point.
+        //
+        // Ordering makes that fallback rare rather than normal.
+        // `flatten_visible` has, just above, either merged over exactly this
+        // window — leaving a matching cache — or reused the previous
+        // snapshot precisely *because* nothing in this window was dirty, in
+        // which case the merge cached by the earlier flatten still matches.
+        // So the fallback fires only where an invalidation site cleared
+        // `merge_cache` without dirtying a row.
+        //
+        // The non-obvious way to break this: `merge_cache` holds one window,
+        // so any *other* caller of `Buffer::visible_as_tchars_and_tags*` on
+        // this buffer overwrites it. Today the only one is
+        // `TerminalHandler::search_corpus` (Ctrl-F), which is occasional and
+        // costs a single spurious full repaint. A per-frame caller using a
+        // different window would silently defeat this and every downstream
+        // damage optimisation with it.
+        let row_epochs: Arc<[u64]> = Arc::from(
+            self.internal
+                .handler
+                .buffer_mut()
+                .visible_row_epochs(scroll_offset, extra_rows),
+        );
+
         TerminalSnapshot {
             visible_chars,
             visible_tags,
@@ -896,6 +926,7 @@ impl TerminalEmulator {
             has_blinking_text,
             has_urls,
             row_offsets,
+            row_epochs,
             url_tag_indices,
             scroll_changed,
             bracketed_paste: mode_fields.bracketed_paste,

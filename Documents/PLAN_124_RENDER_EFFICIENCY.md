@@ -154,7 +154,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
 | 124.10 | Per-row content epoch in `freminal-buffer` | Complete |
-| 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
+| 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Partial — field landed, deletion deferred to 124.12 |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
 | 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | Planned |
@@ -843,6 +843,48 @@ Verification: `cargo test --all`;
 
 Prohibitions: do NOT change `frame_dirty.rs`. Do NOT change the snapshot's
 other fields.
+
+#### 124.11 implementation notes (2026-08-23)
+
+**`row_epochs` landed; `content_changed` did not go.** This entry's own
+fallback applies — *"if they land separately, keep `content_changed` until
+124.12 removes its last reader"* — because every commit on this branch has to
+leave `cargo test --all` passing, so a deliberate GUI compile break is not
+available. The deletion moves into 124.12.
+
+**The entry under-counts the readers.** It says "Any GUI reader is 124.12's
+problem", with 124.12's scope listed as `frame_dirty.rs` plus the
+`PaneRenderCache` fields in `widget.rs`. There is a second reader outside that
+scope: `app_impl.rs`'s `content_wants_repaint = is_new_snapshot &&
+pane_snap.content_changed`, which drives *repaint scheduling*, not vertex
+rebuilds. 124.12's scope therefore has to include `app_impl.rs`, or
+`content_changed` cannot be deleted at all.
+
+Note also that `frame_dirty.rs`'s surviving `snap.content_changed` reader is
+the **selection auto-clear**, which deliberately does *not* use the
+`Arc::ptr_eq`-augmented signal and already backstops itself with an
+`O(visible_chars)` comparison against `last_rendered_visible` (the #470 fix).
+The epoch diff answers that question directly and more cheaply, so 124.12
+subsumes it rather than having to preserve it.
+
+**One hazard worth knowing before 124.12 relies on this.** `Buffer` holds
+exactly one `merge_cache`, keyed to one window, and `visible_row_epochs` falls
+back to re-stamping every row when it does not match. Any *other* caller of
+`Buffer::visible_as_tchars_and_tags*` therefore evicts it. Audited: the only
+non-test, non-bench caller is `TerminalHandler::search_corpus` (Ctrl-F, via
+`gui/pty.rs`), which is occasional and costs one spurious full repaint.
+`TerminalHandler::data_and_format_data_for_gui` also calls it but has **no
+production callers at all** — benches only. Recorded rather than fixed: it is
+a Task 31 dead-code question, not this task's.
+
+Tests: seven in `snapshot_build.rs`. The one that matters is
+`a_change_survives_the_snapshots_the_gui_never_renders`, which asserts *both*
+halves of the contrast in a single test — that `content_changed` is `true` on
+the snapshot right after a change and has gone stale (`false`) three
+unrendered snapshots later, while the epoch still differs from the pre-change
+baseline. Verified empirically, not assumed: the stale-bool half reproduces.
+That test is the justification for the whole type change and must not be
+reduced to its epoch half.
 
 ### 124.12 — GUI consumes epochs; delete the `Arc::ptr_eq` content test
 

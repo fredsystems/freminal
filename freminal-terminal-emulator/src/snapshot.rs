@@ -156,6 +156,25 @@ pub struct TerminalSnapshot {
     /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
     pub row_offsets: Arc<Vec<usize>>,
 
+    /// Per-row content epoch for the visible window, parallel to `row_offsets`.
+    ///
+    /// One entry per visible window row, top to bottom — `row_epochs[r]`
+    /// addresses the same row as `row_offsets[r]`. The value changes exactly
+    /// when that row's rendered content changed since the previous flatten of
+    /// the window (merged characters, merged format tags, and the row's
+    /// [`freminal_buffer::row::LineWidth`]); a row merely *written to* with
+    /// identical bytes does not bump. Stamps are globally monotonic and never
+    /// reused, so the consumer detects change by comparing each entry against
+    /// the epoch it last rendered for that row, not by comparing against a
+    /// fixed baseline.
+    ///
+    /// Unlike a `bool` edge (see `content_changed`), a monotonic stamp is
+    /// level-triggered rather than edge-triggered, so it survives the many
+    /// snapshots the GUI never renders: a change made between two rendered
+    /// frames still shows up as a differing epoch on the next one the GUI
+    /// actually consumes, instead of being silently lost.
+    pub row_epochs: Arc<[u64]>,
+
     /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
     ///
     /// The GUI uses this to iterate only URL-bearing tags during hover
@@ -375,6 +394,7 @@ impl TerminalSnapshot {
             has_blinking_text: false,
             has_urls: false,
             row_offsets: Arc::new(Vec::new()),
+            row_epochs: Arc::from([]),
             url_tag_indices: Arc::new(Vec::new()),
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),
