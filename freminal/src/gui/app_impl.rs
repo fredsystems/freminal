@@ -26,7 +26,7 @@ use super::frame_drain::{
 use super::geometry_interop;
 use super::panes;
 use super::pointer_motion::{
-    PaneResolution, PaneSnapshotInputs, animation_in_flight_composed,
+    PaneResolution, PaneSnapshotInputs, PointerMotionInputs, animation_in_flight_composed,
     pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
 };
 use super::renderer::{WindowPostRenderer, gl_facade::Gl};
@@ -1140,14 +1140,14 @@ impl freminal_windowing::App for FreminalGui {
                 .resolved_pane
                 .is_some_and(|id| id != active_tab.active_pane);
 
-        pointer_motion_needs_repaint_decision(
+        pointer_motion_needs_repaint_decision(PointerMotionInputs {
             focus_change_pending,
             chrome_interactive,
-            any_selecting,
+            any_pane_selecting: any_selecting,
             overlay_open,
             pointer_pane_unresolved,
-            pane_resolution.signals,
-        )
+            pane_signals: pane_resolution.signals,
+        })
     }
 
     fn take_frame_damage(&mut self, window_id: WindowId) -> freminal_windowing::FrameDamage {

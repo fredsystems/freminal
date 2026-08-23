@@ -224,31 +224,68 @@ pub(super) const fn animation_in_flight_composed(
 /// pane (e.g. over inter-pane padding not covered by a chrome-border
 /// sensor), that is NOT `pointer_pane_unresolved` — it is a legitimate "no
 /// pane, so no pane-specific signal applies" case, contributing `false`.
-// Each bool is an independent, unrelated forcing condition (chrome
-// interactivity, selection drag, overlay presence, pane-resolution
-// failure) -- not a state machine; see `pane_hover_region_risk`'s matching
-// allow for the same rationale.
-#[allow(clippy::fn_params_excessive_bools)]
-pub(super) const fn pointer_motion_needs_repaint_decision(
-    focus_change_pending: bool,
-    chrome_interactive: bool,
-    any_pane_selecting: bool,
-    overlay_open: bool,
-    pointer_pane_unresolved: bool,
-    pane_signals: Option<PointerMotionPaneSignals>,
-) -> bool {
-    if focus_change_pending
-        || chrome_interactive
-        || any_pane_selecting
-        || overlay_open
-        || pointer_pane_unresolved
+///
+/// Subtask 124.4: the five window-level terms arrive as the named fields of
+/// [`PointerMotionInputs`] rather than as five positional `bool` parameters.
+/// `freminal-state-representation` forbids bool *parameters* outright, and
+/// PR #496 flagged the old signature in both its body and commit `b17c5709`
+/// as "a real hazard" — five same-typed positional arguments whose order is
+/// unenforceable, called from one site and eleven tests. There is **no
+/// expected performance effect**; this is a readability and safety fix and
+/// must not be presented as anything else.
+pub(super) const fn pointer_motion_needs_repaint_decision(inputs: PointerMotionInputs) -> bool {
+    if inputs.focus_change_pending
+        || inputs.chrome_interactive
+        || inputs.any_pane_selecting
+        || inputs.overlay_open
+        || inputs.pointer_pane_unresolved
     {
         return true;
     }
-    match pane_signals {
+    match inputs.pane_signals {
         Some(s) => s.mouse_tracking_active || s.hover_region_risk,
         None => false,
     }
+}
+
+/// Subtask 124.4: the window-level inputs to
+/// [`pointer_motion_needs_repaint_decision`].
+///
+/// See that function's doc comment for what each term means and why it
+/// forces a repaint. This type exists so those terms are named at the call
+/// site; it carries no logic of its own.
+///
+/// [`Default`] is `all-clear` — every term `false`, no pane resolved — which
+/// is the "plain motion over the already-active pane's terminal content"
+/// case the gate exists to suppress. Tests construct the interesting cases
+/// with struct-update syntax off it, so each test names only the one term it
+/// is about.
+// struct_excessive_bools: each field is an INDEPENDENT forcing condition
+// that can be true simultaneously with any other (chrome interactivity,
+// selection drag, overlay presence, pane-resolution failure, pending focus
+// switch) -- the "independent simultaneous signals" case in
+// `state-representation`, not a state machine masquerading as bools. This
+// mirrors `PaneSnapshotInputs` and `window.rs`'s
+// `PointerMotionConditionFlags`, which carry the allow for the same reason.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct PointerMotionInputs {
+    /// Focus-follows-mouse is enabled and the pointer is over a pane that is
+    /// not the active one, so this motion has a focus switch to apply.
+    pub(super) focus_change_pending: bool,
+    /// `App::is_chrome_interactive_at` said so (menu bar, tab bar,
+    /// split-border drag sensor).
+    pub(super) chrome_interactive: bool,
+    /// Some pane in the active tab has an in-progress selection drag.
+    pub(super) any_pane_selecting: bool,
+    /// Some UI overlay/popup/tooltip/context menu is open this window.
+    pub(super) overlay_open: bool,
+    /// The pane under the pointer could not be determined at all —
+    /// conservative "unknown", distinct from "no pane here".
+    pub(super) pointer_pane_unresolved: bool,
+    /// The resolved pane's signals, or `None` when the pointer is over no
+    /// pane at all. `None` is NOT `pointer_pane_unresolved`.
+    pub(super) pane_signals: Option<PointerMotionPaneSignals>,
 }
 
 /// Subtask 122.5: the per-pane values [`resolve_pane_under_pointer`] needs
@@ -436,9 +473,9 @@ mod tests {
     use freminal_common::geometry::{Rect, point};
 
     use super::{
-        PaneResolution, PaneSnapshotInputs, PointerMotionPaneSignals, animation_in_flight_composed,
-        pane_hover_region_risk, pane_hover_region_terms, pointer_in_gutter_strip,
-        pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
+        PaneResolution, PaneSnapshotInputs, PointerMotionInputs, PointerMotionPaneSignals,
+        animation_in_flight_composed, pane_hover_region_risk, pane_hover_region_terms,
+        pointer_in_gutter_strip, pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
     };
     use crate::gui::panes::PaneIdGenerator;
 
@@ -574,7 +611,7 @@ mod tests {
     #[test]
     fn pointer_motion_needs_repaint_decision_all_clear_is_false() {
         assert!(!pointer_motion_needs_repaint_decision(
-            false, false, false, false, false, None
+            PointerMotionInputs::default()
         ));
     }
 
@@ -584,9 +621,10 @@ mod tests {
     /// signal clear.
     #[test]
     fn pointer_motion_needs_repaint_decision_pending_focus_change_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            true, false, false, false, false, None
-        ));
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            focus_change_pending: true,
+            ..PointerMotionInputs::default()
+        }));
     }
 
     /// And the suppression this gate exists for is preserved: with no focus
@@ -595,44 +633,46 @@ mod tests {
     #[test]
     fn pointer_motion_needs_repaint_decision_no_pending_focus_change_still_suppresses() {
         assert!(!pointer_motion_needs_repaint_decision(
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(PointerMotionPaneSignals {
-                mouse_tracking_active: false,
-                hover_region_risk: false,
-            })
+            PointerMotionInputs {
+                pane_signals: Some(PointerMotionPaneSignals {
+                    mouse_tracking_active: false,
+                    hover_region_risk: false,
+                }),
+                ..PointerMotionInputs::default()
+            }
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_chrome_interactive_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false, true, false, false, false, None
-        ));
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            chrome_interactive: true,
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_any_pane_selecting_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false, false, true, false, false, None
-        ));
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            any_pane_selecting: true,
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_overlay_open_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false, false, false, true, false, None
-        ));
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            overlay_open: true,
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_unresolved_pane_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false, false, false, false, true, None
-        ));
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            pointer_pane_unresolved: true,
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
@@ -640,53 +680,61 @@ mod tests {
         // Pointer resolved to "no pane here" (e.g. inter-pane padding) --
         // NOT the same as unresolved; contributes false on its own.
         assert!(!pointer_motion_needs_repaint_decision(
-            false, false, false, false, false, None
+            PointerMotionInputs {
+                pane_signals: None,
+                ..PointerMotionInputs::default()
+            }
         ));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_mouse_tracking_active_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(PointerMotionPaneSignals {
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            pane_signals: Some(PointerMotionPaneSignals {
                 mouse_tracking_active: true,
                 hover_region_risk: false,
-            })
-        ));
+            }),
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_hover_region_risk_forces_true() {
-        assert!(pointer_motion_needs_repaint_decision(
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(PointerMotionPaneSignals {
+        assert!(pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            pane_signals: Some(PointerMotionPaneSignals {
                 mouse_tracking_active: false,
                 hover_region_risk: true,
-            })
-        ));
+            }),
+            ..PointerMotionInputs::default()
+        }));
     }
 
     #[test]
     fn pointer_motion_needs_repaint_decision_pane_signals_both_false_is_false() {
         assert!(!pointer_motion_needs_repaint_decision(
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(PointerMotionPaneSignals {
-                mouse_tracking_active: false,
-                hover_region_risk: false,
-            })
+            PointerMotionInputs {
+                pane_signals: Some(PointerMotionPaneSignals {
+                    mouse_tracking_active: false,
+                    hover_region_risk: false,
+                }),
+                ..PointerMotionInputs::default()
+            }
         ));
+    }
+
+    /// 124.4's own guard: the struct's `Default` must be the all-clear case,
+    /// since every test above builds its scenario with struct-update syntax
+    /// off it. If a future field defaulted to `true`, those tests would all
+    /// silently stop testing what they name.
+    #[test]
+    fn pointer_motion_inputs_default_is_all_clear() {
+        let d = PointerMotionInputs::default();
+        assert!(!d.focus_change_pending);
+        assert!(!d.chrome_interactive);
+        assert!(!d.any_pane_selecting);
+        assert!(!d.overlay_open);
+        assert!(!d.pointer_pane_unresolved);
+        assert!(d.pane_signals.is_none());
     }
 
     // ── resolve_pane_under_pointer (subtask 122.5) ──────────────────
