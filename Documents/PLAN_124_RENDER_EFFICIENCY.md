@@ -151,7 +151,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
-| 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Planned |
+| 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
 | 124.10 | Per-row content epoch in `freminal-buffer` | Revised, ready |
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
