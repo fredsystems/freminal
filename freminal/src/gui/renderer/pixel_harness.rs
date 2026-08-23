@@ -76,12 +76,25 @@ pub struct PixelFrame {
 }
 
 impl PixelFrame {
-    /// The RGBA quadruple at `(x, y)`, top-left origin.
+    /// The RGBA quadruple at `(x, y)`, top-left origin, or `None` if either
+    /// coordinate is outside the image.
+    ///
+    /// `x` is bounds-checked against `width` explicitly, and that check is
+    /// load-bearing rather than defensive: without it, an out-of-range `x`
+    /// still lands inside `rgba` and silently resolves to a pixel on a
+    /// later row — `pixel(width, 0)` would return `(0, 1)`. A wrong pixel
+    /// is worse than no pixel in a comparison harness.
     #[must_use]
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
-        let idx = (y as usize)
-            .checked_mul(self.width as usize)?
-            .checked_add(x as usize)?
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let width: usize = self.width.value_as().ok()?;
+        let idx = y
+            .value_as::<usize>()
+            .ok()?
+            .checked_mul(width)?
+            .checked_add(x.value_as::<usize>().ok()?)?
             .checked_mul(4)?;
         let slice = self.rgba.get(idx..idx.checked_add(4)?)?;
         Some([slice[0], slice[1], slice[2], slice[3]])
@@ -199,26 +212,82 @@ mod tests {
     use super::super::pixel_golden::{
         GoldenComparison, compare, recorded_renderer, update_requested, write_golden,
     };
-    use super::super::pixel_harness::{PixelFrame, capture, renderer_string};
+    use super::super::pixel_harness::{PixelFrame, PixelHarnessError, capture, renderer_string};
 
-    /// Capture `frame`, or return `None` when no GL context exists.
+    /// Capture `frame`, returning `None` **only** when no GL context exists
+    /// and we are not running in CI.
     ///
-    /// Skipping is deliberate: these tests need Mesa and a live `$DISPLAY`,
-    /// which a developer outside the Linux dev shell will not have. A hard
-    /// failure there would train people to ignore the suite. 123.13's CI job
-    /// is what stops the skip path hiding a real break, because there a
-    /// context is guaranteed.
-    fn capture_or_skip(frame: &SyntheticFrame, what: &str) -> Option<PixelFrame> {
+    /// Two distinctions matter here, and an earlier version of this helper
+    /// collapsed both:
+    ///
+    /// 1. **Only [`PixelHarnessError::NoContext`] is skippable.** A `Driver`
+    ///    error (font loading, shader compilation, GL init) or an
+    ///    `InvalidSize` is a genuine failure, and treating it as "skip"
+    ///    meant a broken renderer would report success. Those now panic.
+    /// 2. **In CI, even a missing context is a hard failure.** The whole
+    ///    point of 123.13's job is that a context is guaranteed there, so a
+    ///    misconfigured runner (no Mesa, no `$DISPLAY`, Xvfb not started)
+    ///    must fail loudly rather than produce a false green.
+    ///
+    /// Outside CI a missing context still skips, because a developer on
+    /// macOS or outside the Linux dev shell cannot have one, and a suite
+    /// that always fails for them is a suite they learn to ignore.
+    pub(super) fn capture_or_skip(frame: &SyntheticFrame, what: &str) -> Option<PixelFrame> {
         match capture(frame) {
             Ok(f) => Some(f),
-            Err(e) => {
+            Err(PixelHarnessError::NoContext(e)) => {
+                assert!(
+                    !in_ci(),
+                    "{what}: no offscreen GL context in CI ({e}) -- the \
+                     gl-pixel job guarantees Mesa and Xvfb, so this is a \
+                     broken runner, not a reason to skip"
+                );
                 eprintln!(
-                    "SKIP {what}: {e}\n  (run under `xvfb-run -a cargo test -p freminal \
-                     --features gl-pixel`)"
+                    "SKIP {what}: no GL context ({e})\n  (run under `xvfb-run -a \
+                     cargo test -p freminal --features gl-pixel`)"
                 );
                 None
             }
+            Err(other) => panic!("{what}: pixel harness failed: {other}"),
         }
+    }
+
+    /// Whether this is a CI run. GitHub Actions sets `CI=true`.
+    pub(super) fn in_ci() -> bool {
+        std::env::var("CI").is_ok_and(|v| v != "false" && !v.is_empty())
+    }
+
+    /// `pixel` must reject out-of-range coordinates rather than silently
+    /// returning a pixel from elsewhere in the image.
+    ///
+    /// Needs no GL context — it constructs a `PixelFrame` directly, so it
+    /// runs everywhere. Regression test for the bug where `x` was not
+    /// checked against `width`, so `pixel(width, 0)` returned `(0, 1)`.
+    #[test]
+    fn pixel_rejects_out_of_range_coordinates() {
+        // 2x2, each pixel tagged with a distinct red channel.
+        let frame = PixelFrame {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                10, 0, 0, 255, // (0,0)
+                20, 0, 0, 255, // (1,0)
+                30, 0, 0, 255, // (0,1)
+                40, 0, 0, 255, // (1,1)
+            ],
+        };
+
+        assert_eq!(frame.pixel(0, 0), Some([10, 0, 0, 255]));
+        assert_eq!(frame.pixel(1, 0), Some([20, 0, 0, 255]));
+        assert_eq!(frame.pixel(0, 1), Some([30, 0, 0, 255]));
+        assert_eq!(frame.pixel(1, 1), Some([40, 0, 0, 255]));
+
+        // The bug: `x == width` used to wrap onto the next row and return
+        // (0, 1) -- a plausible-looking but wrong pixel.
+        assert_eq!(frame.pixel(2, 0), None, "x == width must be rejected");
+        assert_eq!(frame.pixel(99, 0), None);
+        assert_eq!(frame.pixel(0, 2), None, "y == height must be rejected");
+        assert_eq!(frame.pixel(2, 2), None);
     }
 
     /// The stability check 123.12 requires **before** golden comparison is
@@ -358,6 +427,9 @@ mod wasted_work_tests {
 
     use super::super::headless::SyntheticFrame;
     use super::capture;
+    // Reuse the tests module's variant-aware guard rather than duplicating
+    // it: an "any error is a skip" guard is exactly the bug this file was
+    // reviewed for.
 
     /// The pixel-level proof that a repaint of unchanged state is **wasted
     /// work** — the finding Phase 1 could price but could not demonstrate.
@@ -379,8 +451,7 @@ mod wasted_work_tests {
     #[test]
     fn repainting_unchanged_state_produces_identical_pixels() {
         let frame = SyntheticFrame::new(40, 10);
-        let Ok(first) = capture(&frame) else {
-            eprintln!("SKIP: no GL context (needs xvfb-run + Mesa)");
+        let Some(first) = super::tests::capture_or_skip(&frame, "unchanged-repaint") else {
             return;
         };
         let second = capture(&frame).expect("second capture");
@@ -412,8 +483,7 @@ mod wasted_work_tests {
     #[test]
     fn default_background_cells_are_left_untouched() {
         let frame = SyntheticFrame::new(40, 10);
-        let Ok(captured) = capture(&frame) else {
-            eprintln!("SKIP: no GL context (needs xvfb-run + Mesa)");
+        let Some(captured) = super::tests::capture_or_skip(&frame, "default-background") else {
             return;
         };
 

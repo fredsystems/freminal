@@ -662,6 +662,6 @@ fn pixel_unpack_buffer_offset_records_zero_bytes() {
 /// context would be its own unsound shortcut). This test therefore pins
 /// only the `Recording` half.
 #[test]
-fn real_arm_reports_no_recording_state() {
+fn a_recording_gl_exposes_its_recording_state() {
     assert!(Gl::recording().recorded().is_some());
 }

@@ -537,8 +537,10 @@ there is no headless shortcut.
 What is provable now is **narrower than the benchmark would have been, not
 stronger** — an earlier revision of this note claimed otherwise and
 overstated it. (123.6b has since closed the gap properly by reading the
-emitted assembly; see below. The branch-free claim is now verified, and the
-"zero cost" claim corrected to "one pointer load".) In a default build `GlTarget` has exactly one variant, so
+emitted assembly; see below. The branch-free claim is verified, and the
+zero-cost claim holds at the shape production uses: facade and direct call
+compile to byte-identical code. The single extra pointer load appears only
+in a deliberately pessimistic `inline(never)` control.) In a default build `GlTarget` has exactly one variant, so
 Rust lays it out identically to `&glow::Context` with no discriminant, and
 the `match` in all 49 methods is irrefutable: there is nothing to
 discriminate, so there is no condition to test. That is an argument from
@@ -967,15 +969,18 @@ subtask.
 
 ---
 
-## Findings (123.14, Phase 1)
+## Findings (123.14)
 
-> **Phase 1 only.** Every number here comes from the call-recording
-> harness (123.7) or from Criterion benchmarks, on `task-123/gl-measurement-harness`.
-> Phase 2's pixel-level contribution follows later and does not block this.
-> Reference platform for byte volumes and timings: x86_64 Linux, dev shell,
-> bundled CaskaydiaCove font at `pixels_per_point = 1.0`.
+> **Both phases.** The call-count, timing and verdict material below comes
+> from the Phase 1 call-recording harness (123.7) and Criterion benchmarks;
+> the "Phase 2 findings (pixel level)" subsection reports the pixel
+> harness's results. Reference platform for byte volumes and timings:
+> x86_64 Linux, dev shell, bundled CaskaydiaCove font at
+> `pixels_per_point = 1.0`.
 
-### How to read these numbers, and what is deliberately missing
+### Phase 1 findings (call counts, timings, verdicts)
+
+#### How to read these numbers, and what is deliberately missing
 
 `PROFILING.md` requires frame rate and per-frame cost to be reported **as a
 pair**, because total CPU is their product and a single figure cannot

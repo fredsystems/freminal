@@ -211,18 +211,32 @@ mod tests {
     /// the Linux `default` dev shell this cannot pass, so it skips rather
     /// than fails when no context can be created — a test that hard-failed
     /// on a developer's machine for want of an X server would teach people
-    /// to ignore it. The Phase 2 CI job (123.13) is what makes the skip
-    /// path impossible to hide behind, because there the context creation
-    /// is guaranteed to succeed.
+    /// to ignore it.
+    ///
+    /// **In CI it does not skip, it fails.** The Phase 2 job (123.13)
+    /// guarantees Mesa and Xvfb, so a missing context there means a broken
+    /// runner, and silently skipping would turn that into a false green —
+    /// the exact failure the skip path is otherwise designed to avoid.
     #[test]
     fn clear_and_readback_round_trips() {
-        let Ok(off) = OffscreenGl::new(64, 32) else {
-            eprintln!(
-                "skipping: no offscreen GL context (needs Mesa + $DISPLAY, \
-                 e.g. `xvfb-run -a cargo test -p freminal-windowing \
-                 --features gl-offscreen`)"
-            );
-            return;
+        let off = match OffscreenGl::new(64, 32) {
+            Ok(off) => off,
+            Err(e) => {
+                // GitHub Actions sets `CI=true`.
+                let in_ci = std::env::var("CI").is_ok_and(|v| v != "false" && !v.is_empty());
+                assert!(
+                    !in_ci,
+                    "no offscreen GL context in CI ({e}) -- the gl-pixel job \
+                     guarantees Mesa and Xvfb, so this is a broken runner, \
+                     not a reason to skip"
+                );
+                eprintln!(
+                    "skipping: no offscreen GL context ({e}) (needs Mesa + \
+                     $DISPLAY, e.g. `xvfb-run -a cargo test -p \
+                     freminal-windowing --features gl-offscreen`)"
+                );
+                return;
+            }
         };
 
         assert_eq!(off.size(), (64, 32));

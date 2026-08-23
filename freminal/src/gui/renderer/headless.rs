@@ -12,13 +12,19 @@
 //! given that a frame is drawn** — they say nothing about *how often* a
 //! frame is drawn, which for event-driven workloads is the dominant term.
 //!
-//! Pointer motion is the case where this distinction matters most: the
-//! per-event CPU work measured here is real and worth fixing, but what makes
-//! pointer motion a worst case in practice is the **rate** at which
-//! compositors deliver events — macOS delivers motion events even to
-//! unfocused windows, and Wayland is comparably chatty. This harness
-//! supplies per-event cost; it cannot supply the delivery rate. The two must
-//! always be reported as a pair and never fused into a single figure.
+//! Pointer motion is the case where this distinction matters most, and it
+//! is worth being precise about what this module does *not* do: it never
+//! executes the pointer-event path and measures no CPU time. It records GL
+//! calls after a frame has already been selected for drawing. The cost of
+//! the pointer decision itself is measured separately by
+//! `freminal/benches/pane_resolution_bench.rs`.
+//!
+//! What makes pointer motion a worst case in practice is the **rate** at
+//! which compositors deliver events — macOS delivers motion even to
+//! unfocused windows, and Wayland is comparably chatty — multiplied by
+//! whether each event causes a repaint. This module can price the repaint.
+//! It cannot supply the rate, and nothing here should be fused with a rate
+//! into a single CPU figure.
 //!
 //! 123.7's original plan text describes the driver as constructing
 //! `RenderState`. It cannot: `RenderState`'s fields are `pub(super)` within

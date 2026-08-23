@@ -33,9 +33,17 @@ pub mod gpu;
 pub mod headless;
 #[cfg(all(test, feature = "gl-recording"))]
 mod headless_workloads;
-#[cfg(feature = "gl-pixel")]
+// Phase 2 is Linux-only, and the `target_os` gate is load-bearing rather
+// than tidiness: these modules depend on
+// `freminal_windowing::gl_context_offscreen`, which is itself
+// `#[cfg(all(target_os = "linux", feature = "gl-offscreen"))]`. Gating only
+// on the feature made `--all-features` fail to compile on macOS and Windows.
+// `cargo xtask check-windows` does pass `--all-features` and would have
+// caught it; it simply was not re-run after the pixel harness landed. Both
+// gates must stay in step with the windowing crate's.
+#[cfg(all(target_os = "linux", feature = "gl-pixel"))]
 pub mod pixel_golden;
-#[cfg(feature = "gl-pixel")]
+#[cfg(all(target_os = "linux", feature = "gl-pixel"))]
 pub mod pixel_harness;
 pub(super) mod shaders;
 pub mod toast_pass;

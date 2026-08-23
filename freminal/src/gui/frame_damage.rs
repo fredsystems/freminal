@@ -222,8 +222,18 @@ mod tests {
     /// 121.31 full-present-during-pointer-motion anomaly, with the startup
     /// toast held fixed.
     ///
-    /// **Verdict: the anomaly is explained by the toast, and
-    /// `pointer_forces_full_present` is REFUTED as the cause.**
+    /// **Verdict: `pointer_forces_full_present` is REFUTED as the cause.
+    /// The toast confounded the original observation — but it is not the
+    /// whole story, and this test alone does not show that it is.**
+    ///
+    /// This test varies only `force_full` and `toast_active`, holding pane
+    /// damage fixed at `CursorOnly(Some(rect))`. That is enough to refute
+    /// the *named* cause, and no more. The mechanism that actually produces
+    /// a full present during motion over inert content is the
+    /// `PaneFrameDamage::Unchanged` fallback, which this fixture assumes
+    /// away by supplying a rect — see
+    /// [`pointer_motion_over_inert_content_is_full_via_the_unchanged_fallback`]
+    /// below.
     ///
     /// The original observation was `frame_damage_full=120,
     /// frame_damage_partial=0` during pointer motion, versus `120/120`

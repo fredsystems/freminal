@@ -43,10 +43,18 @@ jobs:
     # Linux only, by design. Phase 2 needs Mesa's llvmpipe plus an X server;
     # the same `stdenv.isLinux` precedent as `pkgs.perf`.
     runs-on: ubuntu-latest
+    # A software rasteriser under Xvfb that wedges would otherwise hold a
+    # runner for the default six hours.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # This job only reads source; there is nothing to push. Leaving the
+          # job token in .git/config would be credential persistence for no
+          # benefit.
+          persist-credentials: false
 
       - name: Set up Determinate Nix
         uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
