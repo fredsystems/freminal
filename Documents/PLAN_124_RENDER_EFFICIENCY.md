@@ -153,7 +153,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
-| 124.10 | Per-row content epoch in `freminal-buffer` | Revised, ready |
+| 124.10 | Per-row content epoch in `freminal-buffer` | Complete |
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Planned |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Planned |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
@@ -646,6 +646,64 @@ Verification: `cargo test --all`;
 Prohibitions: do NOT add consumers. Do NOT touch `Row::dirty`'s existing
 semantics or call sites. Do NOT substitute a content hash for the monotonic
 stamp.
+
+#### 124.10 implementation notes (2026-08-23)
+
+**Landed as specified in the revised section above.** Four things the entry
+did not say, recorded so the next reader is not surprised by the diff.
+
+**`MergeCache` needed a second new field, `row_line_widths`.** The entry
+specifies capturing `line_width` onto `RowCacheEntry` (done) and comparing it
+at the merge output (done) — but comparing needs the *previous* merge's value
+and nothing stored one. `RowCacheEntry` holds only the current value, and
+`Buffer::visible_line_widths_extended` reads live `Row`s. So `MergeCache`
+carries a plain `Vec<LineWidth>` alongside `row_epochs`. Plain, not `Arc`: it
+is never handed out.
+
+**`visible_row_epochs` lives in `flatten.rs`, not `scroll.rs`.** The entry
+says "alongside `visible_line_widths_extended` in `scroll.rs`". That neighbour
+reads live `Row`s; this accessor reads `MergeCache`, whose fields — including
+`MergeWindowFp` — are private to `flatten.rs`. Placing it in `scroll.rs` would
+mean widening that visibility to serve one caller, which `module-cohesion`
+explicitly declines. The window-bounds computation it shares with its intended
+neighbour is one line.
+
+**The accessor is `&mut self`.** When no cached merge covers the requested
+window — nothing flattened yet, or an explicit `merge_cache = None`
+invalidation site fired — there is no per-row answer, and the only safe one is
+"every row changed", expressed by issuing every row a fresh stamp. That
+advances the counter, hence `&mut`. On the snapshot path the fallback is a
+safety net: `build_snapshot` calls this immediately after flattening the same
+window.
+
+**The debug oracle is a new, separate mechanism, not an extension of
+`debug_verify_against_oracle`.** The entry offered "extend it, or state
+explicitly why not"; this is the why-not. That oracle recomputes a full merge
+*from scratch*, and epochs are history-dependent by construction, so a
+from-scratch recomputation has no epoch values to compare against — it would
+have to be given the previous merge, at which point it is a different check.
+`debug_verify_epochs` is that check: for every row whose stamp was carried
+forward, assert the row really does render identically to the previous merge.
+It deliberately tests **only the carrying direction**, because only an
+under-report is dangerous. Its load-bearing case is the incremental fast
+path's reused prefix, where the stamp is carried on the *assumption* that
+`build_reused_prefix` reproduced those rows byte-for-byte and that nothing
+outside the merge moved under them.
+
+Cost, since the entry claims this removes work rather than adding it: the
+no-op path is a refcount bump on `Arc<Vec<u64>>` and compares nothing; the
+incremental path walks the window once but does content comparison only for
+rows at or after `boundary`; the full path compares every row. That is
+O(re-merged rows), against the O(all visible chars) whole-window diff in
+`interface.rs` that 124.11 deletes.
+
+Tests: `flatten.rs::row_epoch_tests`, 11 tests. Every "does not bump" case is
+paired with a "does bump" control, because a stamp that never advances passes
+the negative cases trivially. The load-bearing one is
+`wrapped_url_refinement_bumps_a_clean_rows_epoch` — finding (c), the test the
+`RowCacheEntry`-keyed design would have failed — and it asserts its own setup
+really did change the clean row's rendered URL tags before asserting the
+epoch bumped.
 
 #### 124.10 recon (2026-08-23) — BLOCKED, four corrections needed
 

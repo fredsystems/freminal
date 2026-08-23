@@ -50,6 +50,7 @@ impl Buffer {
             rows,
             row_cache,
             merge_cache: None,
+            row_epoch_counter: 0,
             width,
             height,
             cursor: CursorState::default(),

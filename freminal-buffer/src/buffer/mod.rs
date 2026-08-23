@@ -206,6 +206,38 @@ pub struct Buffer {
     /// a full merge is forced without an explicit `None`.
     pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
+    /// Task 124.10: source of the per-row **content epoch** stamps stored in
+    /// [`flatten::MergeCache::row_epochs`].
+    ///
+    /// Every time a merged window row's *rendered* content is found to differ
+    /// from the content at the same window position in the previous merge,
+    /// that row is stamped with a fresh value taken from here. The consumer
+    /// (the GUI, via `TerminalSnapshot::row_epochs`) compares the stamp it
+    /// last rendered against the stamp it is handed: unequal means "repaint
+    /// this row".
+    ///
+    /// Two properties this counter must keep, both load-bearing:
+    ///
+    /// - **Globally monotonic, never reused.** A stamp is only ever a
+    ///   transport token; all the meaning lives in the content comparison
+    ///   that decides whether to issue a fresh one. Because two distinct
+    ///   rows can therefore never share a stamp, a window that *slides*
+    ///   (new output pushes rows into scrollback while `scroll_offset`
+    ///   stays 0) always reports "changed" for the rows that moved —
+    ///   conservative and correct. Per-row counters would alias here and
+    ///   report "unchanged" for changed content.
+    /// - **Never reset.** Not by [`Buffer::full_reset`], not by an
+    ///   alternate-screen switch, not by a resize. Restarting at 0 would let
+    ///   a fresh stamp collide with one the GUI is still holding as its
+    ///   last-rendered value, which is an *under-report* — i.e. silent
+    ///   visual corruption. Over-reporting is free; under-reporting is not.
+    ///
+    /// Deliberately **not** a content hash: a hash collision is an
+    /// under-report, and today's `Arc::ptr_eq` content test (which this
+    /// replaces) can only ever over-report. That is the bar a replacement
+    /// has to clear.
+    pub(in crate::buffer) row_epoch_counter: u64,
+
     /// Width and height of the terminal grid.
     pub(in crate::buffer) width: usize,
     pub(in crate::buffer) height: usize,

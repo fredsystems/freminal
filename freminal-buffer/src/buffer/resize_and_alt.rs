@@ -221,6 +221,12 @@ impl Buffer {
             // is no stale merge to invalidate — it starts `None` like any
             // other freshly constructed `Buffer`.
             merge_cache: None,
+            // Nothing ever flattens this throwaway buffer, so no epoch stamp
+            // is ever issued from it and it cannot collide with the real
+            // buffer's counter. (`Buffer::row_epoch_counter`'s never-reset
+            // rule is about the *live* buffer; this one has no history to
+            // preserve.)
+            row_epoch_counter: 0,
             width: old_width,
             height: old_height,
             cursor: saved.cursor,
