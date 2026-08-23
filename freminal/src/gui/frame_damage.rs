@@ -51,9 +51,21 @@ pub struct PaneDamageInput {
 ///
 /// Semantics (preserved exactly from the original `'damage:` block):
 ///
-/// 1. `force_full` (`ui_overlay_open || shader_recomposites ||
-///    active_pane_changed || pointer_moving`, computed by the caller)
-///    short-circuits to [`FrameDamage::Full`].
+/// 1. `force_full` short-circuits to [`FrameDamage::Full`]. The caller
+///    composes it as `ui_overlay_open || shader_recomposites ||
+///    active_pane_changed || pointer_forces_full_present(..) ||
+///    unresolved_pane`.
+///
+///    The bare `pointer_moving` term this comment used to name was
+///    **removed by issue #459 item 9** and replaced by
+///    `pointer_forces_full_present`, which forces `Full` only when the
+///    motion is over a chrome-interactive region or a pane-border drag is
+///    in progress. Motion purely over terminal content does not. The
+///    correction is recorded here because Task 123's Obligation 2
+///    investigated exactly that hypothesis: a reader trusting the old
+///    wording would have taken a **false confirmation** of a diagnosis
+///    that 123 refuted (see 124.C1 in
+///    `Documents/PLAN_124_RENDER_EFFICIENCY.md`).
 /// 2. Otherwise, `toast_active` short-circuits to `Full`.
 /// 3. Otherwise, `per_pane_damage` is walked in order (this must be the
 ///    same order as `pane_layout`, i.e. only the panes actually rendered
