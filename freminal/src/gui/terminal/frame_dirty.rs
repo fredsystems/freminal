@@ -94,6 +94,91 @@ pub(super) enum VertexRebuild {
     ReevaluateFullRebuild,
 }
 
+/// Which window rows differ from the last full vertex rebuild's rendered
+/// content, as computed by [`diff_row_epochs`].
+///
+/// The asymmetry that governs every branch of this type (and of
+/// [`diff_row_epochs`]) is deliberate: **over-reporting costs one needless
+/// repaint of a row that did not actually change; under-reporting is
+/// silent visual corruption** (a stale glyph left on screen with no event
+/// left to correct it). Every conservative branch — recorded here as
+/// [`Self::All`] — is chosen on that basis rather than by guessing.
+///
+/// This is a named type per `freminal-state-representation` rather than a
+/// bare `Vec<usize>`: `None` and `All` are not degenerate lists, they are
+/// distinct answers to "what changed" that a caller must not confuse with
+/// "exactly zero/all rows, coincidentally".
+///
+/// Currently only [`Self::any`] is consumed, collapsing this back to a
+/// `bool` at the [`VertexRebuild`] boundary. That collapse is deliberate
+/// for this subtask (124.12): it lets the epoch-diff chain's correctness be
+/// proven on its own before the damage-model change (Task 124.14) layers
+/// `PaneFrameDamage::Region` on top and starts consuming the row list in
+/// [`Self::Rows`] directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ChangedRows {
+    /// No row's rendered content differs from the last full rebuild.
+    None,
+    /// Exactly these window-row indices differ from the last full rebuild.
+    /// Ascending order, no duplicates.
+    Rows(Vec<usize>),
+    /// Treat the whole pane as changed. Reached when there is no
+    /// previous-epoch baseline to diff against (the first-ever rebuild, or
+    /// `PaneRenderCache::invalidate_content` cleared it), or when the epoch
+    /// vector's length no longer matches this frame's window (the visible
+    /// row count changed) — in both cases a per-row diff is not meaningful,
+    /// so the conservative whole-pane answer is returned instead of
+    /// guessing at a partial one.
+    All,
+}
+
+impl ChangedRows {
+    /// Whether any row changed at all — `true` for a non-empty
+    /// [`Self::Rows`] (by construction, see [`diff_row_epochs`]) and for
+    /// [`Self::All`].
+    pub(super) const fn any(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Compare this frame's per-row content epochs against the epochs recorded
+/// at the last full vertex rebuild, producing the minimal set of window
+/// rows whose rendered content actually changed.
+///
+/// See [`ChangedRows`] for the asymmetry that governs the conservative
+/// branches below: over-reporting is cheap (one needless repaint),
+/// under-reporting is a correctness bug (silent visual corruption), so
+/// every branch that cannot prove "these specific rows" falls back to
+/// [`ChangedRows::All`] rather than guessing.
+fn diff_row_epochs(previous: Option<&Arc<[u64]>>, current: &Arc<[u64]>) -> ChangedRows {
+    let Some(previous) = previous else {
+        // No baseline recorded yet: the first-ever rebuild, or
+        // `invalidate_content` cleared it. There is nothing to diff
+        // against, so treat everything as changed rather than assuming
+        // "nothing changed".
+        return ChangedRows::All;
+    };
+    if previous.len() != current.len() {
+        // The window's row count no longer matches the baseline (a resize
+        // or a fold-layout change altered the flattened window height).
+        // `dims_changed`/`folds_changed` already force a full rebuild in
+        // this case in practice, but this keeps the function correct
+        // standalone rather than relying on that coincidence.
+        return ChangedRows::All;
+    }
+    let changed: Vec<usize> = previous
+        .iter()
+        .zip(current.iter())
+        .enumerate()
+        .filter_map(|(i, (prev, cur))| (prev != cur).then_some(i))
+        .collect();
+    if changed.is_empty() {
+        ChangedRows::None
+    } else {
+        ChangedRows::Rows(changed)
+    }
+}
+
 /// Everything [`evaluate_frame_dirty_state`] computes that the rest of
 /// [`FreminalTerminalWidget::show`] needs afterward: the selected
 /// vertex-rebuild path, the individual damage observations, and the derived
@@ -106,6 +191,31 @@ pub(super) struct DirtyTrackingOutcome {
     /// The individual `*_changed` observations the decision was derived
     /// from.
     pub(super) observations: FrameDirtyObservations,
+    /// Exactly which window rows differ from the last full vertex rebuild,
+    /// as computed by [`diff_row_epochs`]. `observations.content_changed`
+    /// collapses this (and the theme/dims/folds triggers) to a `bool`;
+    /// this field keeps the row-level detail so Task 124.14 can build
+    /// `PaneFrameDamage::Region` from it instead of forcing a full-pane
+    /// repaint for a single changed row. Not consumed by anything in this
+    /// subtask beyond [`ChangedRows::any`] — kept on the outcome now so its
+    /// correctness is provable before that consumer exists.
+    ///
+    /// TODO(124.14): drop the attribute below when `PaneFrameDamage::Region`
+    /// consumes this.
+    ///
+    /// `expect` rather than `allow` deliberately: it fails the build the
+    /// moment a real reader appears, so this scaffolding cannot quietly
+    /// outlive its purpose. Scoped to `not(test)` because the tests below
+    /// *do* read the field — under `cfg(test)` the expectation would be
+    /// unfulfilled, which is itself an error.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "computed and tested by 124.12; the first production reader arrives in 124.14"
+        )
+    )]
+    pub(super) changed_rows: ChangedRows,
     /// The normalised selection for this frame (buffer-absolute rows),
     /// after the content-change auto-clear rule has been applied.
     pub(super) current_selection: Option<(CellCoord, CellCoord)>,
@@ -259,26 +369,38 @@ pub(super) fn evaluate_frame_dirty_state(
 
     let row_map = &layout.row_map;
 
-    // Detect content changes via `Arc::ptr_eq` — this is immune to the
-    // race where the PTY thread overwrites a "changed" snapshot with a
-    // "clean" one before the GUI wakes up.  If the `visible_chars` arc
-    // is a different allocation from the one we last rendered, the
-    // content has changed regardless of the `content_changed` flag.
+    // ── History: why this used to be an `Arc::ptr_eq` test ──────────
     //
-    // We deliberately do NOT OR in the snapshot's `content_changed`
-    // flag here (issue #439 fix #4). That flag is baked into the
-    // published snapshot at build time, so when the GUI re-reads the
-    // SAME `Arc` on the ~14 frames between real PTY updates it reads a
-    // stale `true` and forces a full vertex rebuild every frame — a
-    // ~60fps rebuild for a screen changing a few times/sec. The
-    // `Arc::ptr_eq` check below already detects every genuine change:
-    // whenever real content changes, `flatten_visible` allocates a NEW
-    // `visible_chars` `Arc` (so ptr_eq fails and we rebuild), and a
-    // cursor-blink re-flatten that produces a byte-identical-but-new
-    // `Arc` also fails ptr_eq and rebuilds. Re-observing the same `Arc`
-    // correctly reports "unchanged". So the raw flag is redundant here
-    // and, worse, sticky — dropping it is what lets an idle screen fall
-    // through to the cheap cursor-only / no-op path.
+    // Before Task 124.12, content changes were detected via `Arc::ptr_eq`
+    // against `cache.last_rendered_visible` / `cache.last_rendered_line_widths`
+    // rather than the snapshot's own `content_changed` flag (issue #439
+    // fix #4). The reason was that `content_changed` is a **sticky bool**
+    // baked into the published snapshot at build time: it cannot survive
+    // the ~14 unrendered snapshots the PTY thread publishes between the GUI
+    // frames that actually get drawn. Re-reading the SAME published `Arc`
+    // on each of those idle frames read a stale `true` and forced a full
+    // vertex rebuild every frame — a ~60fps rebuild for a screen changing a
+    // few times/sec.
+    //
+    // `Arc::ptr_eq` "fixed" the staleness (a settled screen re-observes the
+    // same allocation and correctly reports "unchanged") but introduced its
+    // own defect, confirmed by Task 123's measurement: `flatten_visible`
+    // allocates a fresh `Arc` on *every* re-flatten, including one that
+    // reproduces byte-identical content (e.g. a cursor-blink repaint, or a
+    // TUI redrawing an unchanged line by idiom). Pointer inequality then
+    // reports "changed" for a frame that changed nothing, forcing a full
+    // rebuild — roughly 350x the bytes for roughly 1.08x the calls versus a
+    // cursor-only frame.
+    //
+    // The fix is not a better predicate over the same two types (a sticky
+    // bool, an allocation pointer) — it is a third type that is neither: a
+    // per-row content epoch (`TerminalSnapshot::row_epochs`, Tasks
+    // 124.10-124.11), a globally-monotonic stamp bumped only when a row's
+    // *merged* content actually differs from what it replaced. It is
+    // level-triggered like the pointer test (so it survives unrendered
+    // snapshots, unlike the bool) but does not bump on a byte-identical
+    // re-flatten (so it does not false-positive on a fresh allocation,
+    // unlike the pointer test). `diff_row_epochs` below is that comparison.
     //
     // Also force a full rebuild when the theme palette changes, since
     // foreground/background colors are baked into the vertex buffers.
@@ -298,26 +420,21 @@ pub(super) fn evaluate_frame_dirty_state(
     // the cached background/foreground vertex buffers are stale even
     // if `visible_chars` is byte-identical.
     let folds_changed = fold_epoch != cache.previous_fold_epoch;
-    let content_changed = theme_changed
-        || dims_changed
-        || folds_changed
-        || cache
-            .last_rendered_visible
-            .as_ref()
-            .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_chars))
-        || cache
-            .last_rendered_line_widths
-            .as_ref()
-            .is_none_or(|prev| !Arc::ptr_eq(prev, &snap.visible_line_widths));
+    // The primary content-change signal (Task 124.12): diff this frame's
+    // per-row epochs against the epochs recorded at the last full rebuild.
+    // `theme_changed`, `dims_changed` and `folds_changed` stay separate ORs
+    // because they are genuinely global triggers, not row-level content —
+    // deliberately NOT folded into `rows_changed` itself.
+    let rows_changed = diff_row_epochs(cache.last_rendered_row_epochs.as_ref(), &snap.row_epochs);
+    let content_changed = theme_changed || dims_changed || folds_changed || rows_changed.any();
 
     // Clear the selection when actual terminal text content changes so
-    // stale highlights don't linger over shifted text.  We use
-    // `snap.content_changed` here (NOT the `Arc::ptr_eq`-augmented
-    // `content_changed`) because the PTY thread may re-flatten and
-    // allocate a new Arc for cursor-blink dirty rows even when the
-    // visible text is byte-identical.  Using the broader check would
-    // clear the selection within ~500 ms of mouse release (on every
-    // cursor blink), making copy impossible.
+    // stale highlights don't linger over shifted text. We use
+    // `rows_changed.any()` here (Task 124.12; previously `snap.content_changed`)
+    // as the cheap pre-filter, then confirm against a chars-only comparison
+    // before actually discarding anything — see below for why the
+    // confirmation step still exists and still deliberately ignores the
+    // epoch.
     //
     // We also exclude scroll events (`scroll_changed`) — when the
     // visible window moves (user scrolling OR auto-scroll-to-bottom on
@@ -338,28 +455,38 @@ pub(super) fn evaluate_frame_dirty_state(
     // time we get here `selection.is_selecting` is already `false`
     // for a just-completed selection. Without this flag, PTY output
     // that arrives on the same frame as the release would set
-    // `snap.content_changed` and immediately wipe the
-    // just-committed selection (defect 2, Task 116.2).
-    // `snap.content_changed` is edge-triggered per *snapshot build*, but the
-    // GUI renders only a subset of the snapshots the PTY thread produces. A
-    // change that reverts before the next rendered frame -- a prompt clearing
-    // and rewriting its own line, say -- therefore arrives as
-    // `content_changed = true` on a snapshot whose text is identical to what
-    // this pane already drew:
+    // `rows_changed.any()` and immediately wipe the just-committed
+    // selection (defect 2, Task 116.2).
+    //
+    // Before Task 124.12 the pre-filter was the sticky `snap.content_changed`
+    // bool, which is edge-triggered per *snapshot build* while the GUI
+    // renders only a subset of the snapshots the PTY thread produces. A
+    // change that reverted before the next rendered frame -- a prompt
+    // clearing and rewriting its own line, say -- therefore arrived as
+    // `content_changed = true` on a snapshot whose text was identical to
+    // what this pane already drew:
     //
     //     snapshot A: text X                  -> rendered
     //     snapshot B: text Y, changed = true  -> never rendered
     //     snapshot C: text X, changed = true  -> rendered (Y != X at build C)
     //
     // Acting on that wiped selections for no reason, intermittently, whenever
-    // a mouse release happened to land across such a flicker (#470).
+    // a mouse release happened to land across such a flicker (#470). The
+    // confirmation comparison below existed to catch exactly this, and it
+    // still does — `rows_changed` inherits the same false-positive shape
+    // (it is level-triggered against the last *rendered* frame, so it
+    // reports "changed" whenever the PTY-side content differs from what
+    // this pane drew, even if it later reverts before the *next* rendered
+    // frame) and needs the same backstop.
     //
-    // So confirm against what was actually last rendered before discarding
-    // anything. This is a content comparison, deliberately not the
-    // `Arc::ptr_eq` check used for `content_changed` above: the PTY thread
-    // allocates a fresh Arc for cursor-blink dirty rows even when the text is
-    // byte-identical, so pointer identity would re-introduce the ~500ms
-    // clear-on-blink bug that `snap.content_changed` was chosen to avoid.
+    // The confirmation stays a **chars-only** comparison. The epoch
+    // deliberately folds in format tags and `LineWidth`, so switching this
+    // to the epoch alone would start clearing the user's selection on an
+    // SGR-only repaint -- a program redrawing identical text in a
+    // different colour. Selection is about where text *is*, not how it
+    // looks. `rows_changed` replaces `snap.content_changed` purely as the
+    // cheap pre-filter it always was; the confirmation's job and mechanism
+    // are unchanged.
     //
     // Evaluated last so the O(visible_chars) comparison only runs on the rare
     // frame where every cheap condition already passed.
@@ -370,7 +497,7 @@ pub(super) fn evaluate_frame_dirty_state(
     // done nothing to it either, so a later primary press still starts a
     // fresh drag rather than being consumed dismissing a phantom.
     if view_state.selection.has_selection()
-        && snap.content_changed
+        && rows_changed.any()
         && !snap.scroll_changed
         && !view_state.selection.is_selecting
         && !view_state.selection_committed_this_frame
@@ -600,6 +727,7 @@ pub(super) fn evaluate_frame_dirty_state(
             image_pixels_changed,
             text_blink_changed,
         },
+        changed_rows: rows_changed,
         current_selection,
         screen_selection,
         search_epoch,
@@ -638,11 +766,18 @@ mod evaluate_frame_dirty_state_tests {
     /// origin, no command blocks, no blinking text — chosen so the cursor
     /// is always visible (no folds, no scrolled-off rows) and the
     /// command-block hover lookup always short-circuits to `None`.
+    ///
+    /// `row_epochs` carries one distinct, non-zero stamp per row (rather
+    /// than the all-empty default from `TerminalSnapshot::empty()`) so
+    /// tests can mutate a single entry to simulate exactly one row
+    /// changing, and so a length mismatch (a resize) is distinguishable
+    /// from "no epochs recorded at all".
     fn base_snapshot() -> TerminalSnapshot {
         let mut snap = TerminalSnapshot::empty();
         snap.term_width = 10;
         snap.term_height = 5;
         snap.total_rows = 5;
+        snap.row_epochs = Arc::from(vec![1_u64, 2, 3, 4, 5]);
         snap
     }
 
@@ -662,7 +797,7 @@ mod evaluate_frame_dirty_state_tests {
         cache.previous_term_height = snap.term_height;
         cache.previous_fold_epoch = 0;
         cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
-        cache.last_rendered_line_widths = Some(Arc::clone(&snap.visible_line_widths));
+        cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
         cache.previous_selection = None;
         // These tests drive `ViewState::new()`, whose search state is
         // default-constructed, so a settled cache is one that already agrees
@@ -753,21 +888,25 @@ mod evaluate_frame_dirty_state_tests {
         assert!(!outcome.observations.hover_changed);
     }
 
-    /// OBLIGATION 1 of `PLAN_123_GL_MEASUREMENT_HARNESS.md`: confirm or
-    /// refute the always-new-`Arc` finding that is Task 124.1's premise.
-    ///
-    /// **Verdict: CONFIRMED.** A re-flatten that produces byte-identical
-    /// content in a freshly-allocated `Arc` is reported as a content
-    /// change, and forces a full vertex rebuild.
+    /// OBLIGATION 1 of `PLAN_123_GL_MEASUREMENT_HARNESS.md` confirmed the
+    /// always-new-`Arc` finding that was Task 124.1's premise: a re-flatten
+    /// that produces byte-identical content in a freshly-allocated `Arc`
+    /// used to be reported as a content change, forcing a full vertex
+    /// rebuild. Tasks 124.10-124.12 fixed it, and this test — inverted, not
+    /// deleted, per this subtask's mandate — is now the regression guard
+    /// for the fix.
     ///
     /// This test isolates the single variable. It starts from a settled
     /// frame, then swaps in a `visible_chars` `Arc` whose *contents* are
     /// equal by value but whose allocation differs, holding every other
-    /// input — including `visible_line_widths`, theme, dimensions and fold
-    /// epoch — pointer-identical to the settled cache. The only thing that
-    /// changed is the allocation.
+    /// input — theme, dimensions, fold epoch, and (crucially) `row_epochs`
+    /// — value-identical to the settled cache. That last point is what
+    /// "byte-identical" now means under the new mechanism: the merged
+    /// bytes did not change, so neither did the per-row epoch stamped from
+    /// them. The only thing that changed is the `visible_chars` allocation.
     ///
-    /// The upstream cause is in `freminal-buffer`:
+    /// The upstream cause is unchanged, and still un-fixed by this task
+    /// (that is the bandwidth half, Task 125): in `freminal-buffer`,
     /// `rows_as_tchars_and_tags_incremental` returns the cached `Arc`s
     /// unchanged **only** on its no-op path (`reuse_available` and no row
     /// in the window needed rebuilding). Both the incremental fast path and
@@ -775,24 +914,34 @@ mod evaluate_frame_dirty_state_tests {
     /// allocation, regardless of whether the merged bytes are identical to
     /// the previous merge. So any dirty row anywhere in the window — a
     /// cursor blink repainting its cell, a row rewritten with the same
-    /// text — produces a new pointer here.
+    /// text — still produces a new `visible_chars` pointer every time.
     ///
-    /// This is deliberately asserting the **current** behaviour, defect
-    /// included, so the premise stays pinned and measurable until 124.1
-    /// addresses it. When it does, this test must be **inverted, not
-    /// deleted** — it is the only regression guard for the distinction.
+    /// What changed is the *consumption* side: the GUI no longer diffs that
+    /// pointer at all. It diffs `TerminalSnapshot::row_epochs` instead, a
+    /// per-row monotonic stamp that only bumps when the merged content
+    /// actually differs, so a fresh allocation with identical bytes now
+    /// correctly reports no change. The proof used here is that the
+    /// cursor-only fast path — previously vetoed by the pointer-based
+    /// `content_changed` on every such frame — is now reachable: changing
+    /// only the cursor-blink phase on top of the byte-identical re-flatten
+    /// takes [`VertexRebuild::CursorOnly`], which was impossible before
+    /// this fix (see [`re_observing_the_same_arc_reports_no_content_change`]
+    /// for the same-`Arc` control, and
+    /// [`a_changed_row_epoch_is_reported_as_exactly_that_row`] for the
+    /// paired control proving this is not "nothing ever changes").
     ///
-    /// What this costs, per Task 123's harness: a full rebuild is ~52 GL
+    /// What this saves, per Task 123's harness: a full rebuild is ~52 GL
     /// calls and ~200 KB of buffer uploads per frame at 80x24, versus a
-    /// cursor-only frame's ~48 calls and under a kilobyte. The waste is
-    /// overwhelmingly bandwidth, not call count.
+    /// cursor-only frame's ~48 calls and under a kilobyte. The waste
+    /// avoided is overwhelmingly bandwidth, not call count.
     #[test]
-    fn byte_identical_reflatten_in_a_new_arc_still_forces_a_full_rebuild() {
+    fn byte_identical_reflatten_in_a_new_arc_is_no_longer_a_content_change() {
         let snap = base_snapshot();
         let cache = settled_cache(&snap, true, true);
 
-        // Re-flatten: same bytes, new allocation. Everything else is held
-        // pointer-identical to what the cache recorded.
+        // Re-flatten: same bytes, new allocation. `row_epochs` is untouched
+        // by the clone (same allocation, same values) — that IS what
+        // "byte-identical" means under the epoch-based mechanism.
         let mut reflattened = snap.clone();
         reflattened.visible_chars = Arc::new((*snap.visible_chars).clone());
 
@@ -804,32 +953,152 @@ mod evaluate_frame_dirty_state_tests {
             !Arc::ptr_eq(&reflattened.visible_chars, &snap.visible_chars),
             "precondition: the re-flatten must be a different allocation"
         );
-        assert!(
-            Arc::ptr_eq(&reflattened.visible_line_widths, &snap.visible_line_widths),
-            "precondition: line widths must be held fixed, or they would \
-             confound the result"
+        assert_eq!(
+            reflattened.row_epochs, snap.row_epochs,
+            "precondition: byte-identical content means the per-row epoch \
+             did not bump either"
         );
 
         let mut view_state = ViewState::new();
         let render_state = render_state_with_deco_verts(true);
+        // Only the cursor-blink phase differs from the settled cache
+        // (`true`); everything else -- including the reflattened, freshly
+        // allocated `visible_chars` -- matches.
         let outcome = call(
             &reflattened,
             &mut view_state,
             &cache,
             &render_state,
-            true,
+            false,
             true,
         );
 
         assert!(
-            outcome.observations.content_changed,
-            "CONFIRMED: a byte-identical re-flatten is reported as a content \
-             change purely because the `Arc` allocation differs"
+            !outcome.observations.content_changed,
+            "FIXED: a byte-identical re-flatten in a fresh `Arc` must not be \
+             reported as a content change -- the epoch, not the pointer, is \
+             now the signal"
         );
         assert_eq!(
             outcome.rebuild,
-            VertexRebuild::ReevaluateFullRebuild,
-            "and that observation forces a full vertex rebuild"
+            VertexRebuild::CursorOnly,
+            "with content genuinely unchanged, a cursor-blink change alone \
+             must take the cheap fast path -- previously impossible, since \
+             the pointer-based `content_changed` vetoed it on every such \
+             frame"
+        );
+    }
+
+    /// The paired control for the test above: a *genuine* single-row epoch
+    /// change (as opposed to a byte-identical re-flatten) is reported as
+    /// exactly that row, and does force a content change. Without this,
+    /// the fixed behaviour above would be equally consistent with the
+    /// degenerate "nothing ever changes" — this proves the epoch diff is
+    /// still change-sensitive, not merely permissive.
+    #[test]
+    fn a_changed_row_epoch_is_reported_as_exactly_that_row() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        let mut epochs = (*changed.row_epochs).to_vec();
+        epochs[2] += 1;
+        changed.row_epochs = Arc::from(epochs);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            outcome.changed_rows,
+            ChangedRows::Rows(vec![2]),
+            "exactly row 2 differs, so the changed-row set must name only it"
+        );
+        assert!(outcome.observations.content_changed);
+    }
+
+    /// [`diff_row_epochs`] with no recorded baseline (first rebuild, or
+    /// `invalidate_content`) must conservatively report every row changed
+    /// rather than guessing "nothing changed".
+    #[test]
+    fn no_recorded_epochs_reports_every_row_changed() {
+        let current: Arc<[u64]> = Arc::from(vec![1_u64, 2, 3]);
+        assert_eq!(diff_row_epochs(None, &current), ChangedRows::All);
+    }
+
+    /// [`diff_row_epochs`] with a length mismatch (the window's row count
+    /// changed) must conservatively report every row changed, since a
+    /// per-row index comparison across different lengths is not meaningful.
+    #[test]
+    fn an_epoch_vector_length_change_reports_every_row_changed() {
+        let previous: Arc<[u64]> = Arc::from(vec![1_u64, 2, 3]);
+        let current: Arc<[u64]> = Arc::from(vec![1_u64, 2, 3, 4]);
+        assert_eq!(diff_row_epochs(Some(&previous), &current), ChangedRows::All);
+    }
+
+    /// [`diff_row_epochs`] with identical epoch vectors reports no change.
+    #[test]
+    fn identical_epochs_report_no_change() {
+        let epochs: Arc<[u64]> = Arc::from(vec![1_u64, 2, 3]);
+        assert_eq!(diff_row_epochs(Some(&epochs), &epochs), ChangedRows::None);
+    }
+
+    /// The justification for deleting `last_rendered_line_widths` (Task
+    /// 124.12): a line-width-only change (e.g. a DECDWL/DECDHL toggle) is
+    /// folded into the epoch, so it is still caught even when
+    /// `visible_chars` stays pointer-identical to what was last rendered —
+    /// no separate pointer test is needed.
+    #[test]
+    fn a_line_width_change_is_caught_by_the_epoch_without_a_separate_pointer_test() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap.clone();
+        let mut epochs = (*changed.row_epochs).to_vec();
+        epochs[1] += 1;
+        changed.row_epochs = Arc::from(epochs);
+
+        assert!(
+            Arc::ptr_eq(&changed.visible_chars, &snap.visible_chars),
+            "precondition: visible_chars pointer is unchanged, isolating the \
+             epoch as the only differing signal"
+        );
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.content_changed,
+            "a line-width-only change must still be caught via the epoch, \
+             even though visible_chars is pointer-identical"
+        );
+    }
+
+    /// Item 4 of Task 124.12's scope: the selection auto-clear's
+    /// confirmation stays a chars-only comparison, so an SGR-only repaint
+    /// (identical text, different attributes) must not clear a committed
+    /// selection even though the epoch — which deliberately folds in
+    /// format tags — reports a change.
+    #[test]
+    fn an_sgr_only_change_does_not_clear_the_selection() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+        changed.scroll_changed = false;
+
+        let mut view_state = ViewState::new();
+        with_committed_selection(&mut view_state);
+        let render_state = render_state_with_deco_verts(true);
+
+        let _ = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            view_state.selection.has_selection(),
+            "an epoch change unaccompanied by a visible_chars byte change \
+             (an SGR-only repaint) must not clear the selection"
         );
     }
 
@@ -930,19 +1199,37 @@ mod evaluate_frame_dirty_state_tests {
         view_state.selection_committed_this_frame = false;
     }
 
-    /// The #470 regression. `content_changed` is edge-triggered per snapshot
-    /// build and the GUI renders only some snapshots, so a change that reverts
-    /// between rendered frames arrives as `content_changed = true` on a
-    /// snapshot identical to what was already drawn. That must not discard a
-    /// selection.
+    /// Bump exactly one entry of `snap.row_epochs`, simulating "this row's
+    /// rendered content differs from whatever baseline the caller already
+    /// captured" without touching `visible_chars` at all. Callers capture
+    /// the baseline (typically via `settled_cache`) *before* calling this,
+    /// so the bump is visible only to the epoch comparison, not to
+    /// whichever `last_rendered_visible` the cache already recorded.
+    fn bump_one_row_epoch(snap: &mut TerminalSnapshot) {
+        let mut epochs = (*snap.row_epochs).to_vec();
+        epochs[0] += 1;
+        snap.row_epochs = Arc::from(epochs);
+    }
+
+    /// The #470 regression, re-expressed against the epoch-based pre-filter
+    /// (Task 124.12) that replaced the old sticky `content_changed` bool as
+    /// the auto-clear's trigger. `rows_changed` is level-triggered against
+    /// the last *rendered* frame, so — like the bool it replaced — a row
+    /// epoch that differs does not by itself prove the *rendered* text
+    /// moved: a change that reverts before the next rendered frame still
+    /// shows up as "changed" here. That must not discard a selection; the
+    /// confirmation comparison against `last_rendered_visible` (unchanged
+    /// by this subtask, see item 4 of its scope) is what actually decides.
     #[test]
-    fn spurious_content_changed_does_not_discard_a_selection() {
+    fn spurious_row_epoch_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
-        snap.content_changed = true;
-        snap.scroll_changed = false;
         let cache = settled_cache(&snap, true, true);
-        // `settled_cache` records this exact buffer as last-rendered, so the
-        // text has demonstrably not moved since.
+        // Bump the epoch *after* `settled_cache` captured the baseline, so
+        // the pre-filter fires even though `last_rendered_visible` still
+        // equals `snap.visible_chars` — the text has demonstrably not
+        // moved since.
+        bump_one_row_epoch(&mut snap);
+        snap.scroll_changed = false;
         let mut view_state = ViewState::new();
         with_committed_selection(&mut view_state);
         let render_state = render_state_with_deco_verts(true);
@@ -951,8 +1238,8 @@ mod evaluate_frame_dirty_state_tests {
 
         assert!(
             view_state.selection.has_selection(),
-            "a content_changed flag contradicted by the rendered text must not \
-             clear the selection"
+            "a row-epoch change contradicted by identical rendered text must \
+             not clear the selection"
         );
     }
 
@@ -961,9 +1248,9 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn genuine_content_change_still_discards_a_selection() {
         let mut snap = base_snapshot();
-        snap.content_changed = true;
-        snap.scroll_changed = false;
         let mut cache = settled_cache(&snap, true, true);
+        bump_one_row_epoch(&mut snap);
+        snap.scroll_changed = false;
         // Last-rendered text differs from the snapshot's.
         cache.last_rendered_visible = Some(Arc::new(vec![
             freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
@@ -985,9 +1272,9 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn scroll_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
-        snap.content_changed = true;
-        snap.scroll_changed = true;
         let mut cache = settled_cache(&snap, true, true);
+        bump_one_row_epoch(&mut snap);
+        snap.scroll_changed = true;
         cache.last_rendered_visible = Some(Arc::new(vec![
             freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
         ]));
@@ -1005,9 +1292,9 @@ mod evaluate_frame_dirty_state_tests {
     #[test]
     fn selection_committed_this_frame_survives_a_genuine_content_change() {
         let mut snap = base_snapshot();
-        snap.content_changed = true;
-        snap.scroll_changed = false;
         let mut cache = settled_cache(&snap, true, true);
+        bump_one_row_epoch(&mut snap);
+        snap.scroll_changed = false;
         cache.last_rendered_visible = Some(Arc::new(vec![
             freminal_common::buffer_states::tchar::TChar::Ascii(b'z'),
         ]));

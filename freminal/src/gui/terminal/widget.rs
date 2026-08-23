@@ -1299,13 +1299,27 @@ pub struct PaneRenderCache {
     pub(super) previous_cursor_color_override: Option<(u8, u8, u8)>,
     /// The `visible_chars` arc from the last full vertex rebuild.
     ///
-    /// Used to detect content changes via `Arc::ptr_eq` — immune to the race
-    /// where a later snapshot overwrites `content_changed` before the GUI wakes.
+    /// As of Task 124.12 this is **not** the primary content-change signal
+    /// any more — that is [`Self::last_rendered_row_epochs`]. Its one
+    /// surviving use is the selection auto-clear's confirmation comparison
+    /// in `frame_dirty.rs`: a byte-value comparison against
+    /// `snap.visible_chars` that deliberately stays chars-only (not
+    /// epoch-based), so an SGR-only repaint (a program redrawing identical
+    /// text in a different colour) does not clear the user's selection. See
+    /// that call site's comment for the full rationale.
     pub(super) last_rendered_visible: Option<Arc<Vec<TChar>>>,
-    /// Line-width data from the last full vertex rebuild.  When line widths
-    /// change (e.g. DECDWL/DECDHL toggle), we must force a full rebuild so
-    /// glyph scaling is re-applied.
-    pub(super) last_rendered_line_widths: Option<Arc<Vec<freminal_terminal_emulator::LineWidth>>>,
+    /// Per-row content epochs from the last full vertex rebuild, parallel to
+    /// [`freminal_terminal_emulator::snapshot::TerminalSnapshot::row_epochs`].
+    ///
+    /// This is the baseline `diff_row_epochs` (`frame_dirty.rs`) diffs the
+    /// current frame's epochs against to compute
+    /// [`super::frame_dirty::ChangedRows`] — the primary content-change
+    /// signal since Task 124.12. It replaces the two `Arc::ptr_eq` tests
+    /// that used to run against `last_rendered_visible` and the
+    /// now-deleted `last_rendered_line_widths`: the epoch already folds in
+    /// merged characters, merged format tags, and each row's `LineWidth`,
+    /// so a separate line-width pointer test has nothing left to catch.
+    pub(super) last_rendered_row_epochs: Option<Arc<[u64]>>,
     /// Theme pointer from the last full vertex rebuild.  When this changes,
     /// we must force a full rebuild so foreground/background vertex colors
     /// are re-resolved against the new palette.
@@ -1479,7 +1493,7 @@ impl PaneRenderCache {
             previous_show_cursor: false,
             previous_cursor_color_override: None,
             last_rendered_visible: None,
-            last_rendered_line_widths: None,
+            last_rendered_row_epochs: None,
             previous_theme: None,
             previous_selection: None,
             previous_text_blink_slow_visible: true,
@@ -1565,10 +1579,10 @@ impl PaneRenderCache {
     }
 
     /// Force a full vertex rebuild on the next frame by clearing the cached
-    /// `visible_chars` and `line_widths` pointers.
+    /// `visible_chars` pointer and the recorded row epochs.
     pub fn invalidate_content(&mut self) {
         self.last_rendered_visible = None;
-        self.last_rendered_line_widths = None;
+        self.last_rendered_row_epochs = None;
         self.shaping_cache.clear();
         self.last_rendered_image_pixel_ptrs.clear();
     }
@@ -2866,11 +2880,13 @@ impl FreminalTerminalWidget {
                         rs_ref.bg_image_mode = bg_image_mode;
                         drop(rs);
 
-                        // Remember which `visible_chars` allocation we rendered, so
-                        // the next frame can detect changes via `Arc::ptr_eq`.
+                        // Remember what we just rendered: `visible_chars` for the
+                        // selection auto-clear's chars-only confirmation comparison
+                        // (`frame_dirty.rs`), and `row_epochs` as the baseline the
+                        // next frame's `diff_row_epochs` diffs against -- the
+                        // primary content-change signal since Task 124.12.
                         cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
-                        cache.last_rendered_line_widths =
-                            Some(Arc::clone(&snap.visible_line_widths));
+                        cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
                         cache.previous_theme = Some(snap.theme);
                         cache.previous_selection = current_selection;
                         cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
