@@ -32,6 +32,7 @@ pub mod error;
 
 mod egui_integration;
 mod event_loop;
+mod frame_paint;
 mod gl_context;
 // Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
 // builds entirely, and `target_os = "linux"` because the Mesa + Xvfb stack it
