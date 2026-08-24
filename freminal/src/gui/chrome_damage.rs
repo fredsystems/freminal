@@ -46,8 +46,8 @@ use crate::gui::tabs::TabId;
 /// Number of frames after window creation during which chrome is always
 /// forced `Changed` (#436 §7 warm-up). The font atlas, layout, and
 /// `PanelState` id-maps settle over the first 1-2 frames; giving a small
-/// margin (3) is cheap insurance against a REPLAY being permitted before
-/// steady state.
+/// margin (3) is cheap insurance against a `Partial` present being taken
+/// (see `compose_with_chrome_damage`) before steady state.
 pub const WARMUP_FRAMES: u32 = 3;
 
 /// Whether a window is still in its startup warm-up window (#436 §7): the

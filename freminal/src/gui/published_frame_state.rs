@@ -25,16 +25,15 @@ use super::window::ResizeOverlayState;
 /// section for the line-by-line inventory this type was built from. It is a
 /// **wrapper, not a redesign**: every field keeps its pre-existing type,
 /// including `chrome_head_rects`'s `Option<Vec<egui::Rect>>` — that
-/// `None`/`Some(vec![])` distinction is semantic (no `Full` frame has
-/// rendered yet, vs. one rendered and produced no head rects) and must not
-/// be conflated with its two plain-`Vec` siblings.
+/// `None`/`Some(vec![])` distinction is semantic (no frame has rendered
+/// yet, vs. one rendered and produced no head rects) and must not be
+/// conflated with its two plain-`Vec` siblings.
 ///
 /// # Publish discipline
 ///
 /// Each field is written **at most once per successfully-completing
 /// `App::update`**, at a fixed point in that function, and from nowhere
-/// else — `chrome_head_rects` only on a `ChromeMode::Full` frame, the other
-/// six unconditionally once that point is reached.
+/// else — all seven fields unconditionally once that point is reached.
 ///
 /// Reads happen **exclusively** from two predicates on `FreminalGui`:
 /// `is_chrome_interactive_at` and `pointer_motion_needs_repaint`, both in
@@ -62,9 +61,9 @@ use super::window::ResizeOverlayState;
 ///
 /// The decisive detail is ordering: the two paths that actually hold a
 /// `PerWindowState` (last-tab-close and no-active-pane) both `return`
-/// *before* the `ChromeMode::Full` vs `Replay` branch opens, and that branch
-/// contains the earliest write in this type (`chrome_head_rects`). Every
-/// other write site is later still. So on both paths the `PerWindowState` —
+/// *before* chrome construction begins, which contains the earliest write
+/// in this type (`chrome_head_rects`). Every other write site is later
+/// still. So on both paths the `PerWindowState` —
 /// and this type inside it — is reinserted into `self.windows` completely
 /// untouched, layering an early-return staleness on top of the ordinary
 /// one-frame staleness above. The other two paths are vacuous: the
@@ -78,8 +77,8 @@ use super::window::ResizeOverlayState;
 /// rely on each being either freshly written or correctly still-stale by
 /// the time they read it within the same frame:
 ///
-/// 1. `chrome_head_rects` — `Full`-frame-only, published early, inside the
-///    menu/tab-bar construction branch.
+/// 1. `chrome_head_rects` — published early, inside the menu/tab-bar
+///    construction.
 /// 2. `chrome_border_rects` — published inside the `central_body` closure,
 ///    or cleared there when no drag sensors were built that frame.
 /// 3. `chrome_toast_rects` — pre-cleared, then republished if the toast
@@ -92,20 +91,18 @@ use super::window::ResizeOverlayState;
 /// before the border rects are known) would have the same effect.
 #[derive(Debug, Default)]
 pub(super) struct PublishedFrameState {
-    /// The `CentralPanel` content rect captured on the most recent FULL
-    /// frame. On a REPLAY frame `App::update` skips building the menu bar,
-    /// tab bar, and `CentralPanel` (all cached chrome), so there is no
-    /// fresh `available_rect` to read the terminal band's content rect
-    /// from — this cached value is used to construct an equivalent `Ui`
-    /// directly, in the same background layer chrome uses.
+    /// The `CentralPanel` content rect captured on the most recent frame.
+    /// Read by the out-of-frame pointer-motion predicates (which have no
+    /// live `available_rect` to compute it from) and by the toast-rendering
+    /// block, which renders outside `central_body`.
     cached_central_rect: Option<egui::Rect>,
     /// The command-block gutter's total inset in logical points, cached
     /// each frame so the out-of-frame predicates can hit-test the gutter
     /// strip without `pixels_per_point` (which is only known inside a
     /// frame).
     cached_gutter_inset_logical: f32,
-    /// Menu-bar + tab-bar rects, captured on FULL frames only. `None` until
-    /// the first FULL frame renders — see the type doc for why this stays
+    /// Menu-bar + tab-bar rects, captured every frame. `None` until the
+    /// first frame renders — see the type doc for why this stays
     /// `Option<Vec<_>>` rather than unifying with its two siblings below.
     chrome_head_rects: Option<Vec<egui::Rect>>,
     /// Split-border drag-sensor rects, rebuilt every frame; explicitly
@@ -159,8 +156,8 @@ impl PublishedFrameState {
         Self::default()
     }
 
-    /// The `CentralPanel` content rect cached on the most recent FULL
-    /// frame, or `None` before the first one has rendered.
+    /// The `CentralPanel` content rect cached on the most recent frame,
+    /// or `None` before the first one has rendered.
     pub(super) const fn cached_central_rect(&self) -> Option<egui::Rect> {
         self.cached_central_rect
     }
@@ -181,13 +178,13 @@ impl PublishedFrameState {
         self.cached_gutter_inset_logical = inset;
     }
 
-    /// The menu-bar + tab-bar rects from the most recent FULL frame, or
-    /// `None` if no FULL frame has rendered yet.
+    /// The menu-bar + tab-bar rects from the most recent frame, or
+    /// `None` if no frame has rendered yet.
     pub(super) fn chrome_head_rects(&self) -> Option<&[egui::Rect]> {
         self.chrome_head_rects.as_deref()
     }
 
-    /// Publish this FULL frame's menu-bar + tab-bar rects.
+    /// Publish this frame's menu-bar + tab-bar rects.
     pub(super) fn publish_chrome_head_rects(&mut self, rects: Vec<egui::Rect>) {
         self.chrome_head_rects = Some(rects);
     }
@@ -221,7 +218,7 @@ impl PublishedFrameState {
 
     /// Pre-clear the toast pill hit-rects before deciding whether the toast
     /// stack actually renders this frame — see the type doc's write-ordering
-    /// section for why this must happen unconditionally on every FULL frame.
+    /// section for why this must happen unconditionally on every frame.
     pub(super) fn clear_chrome_toast_rects(&mut self) {
         self.chrome_toast_rects.clear();
     }
@@ -381,9 +378,9 @@ mod tests {
     }
 
     /// Pin 3: the invariant this type exists to carry. A frame that
-    /// early-returns, or completes only partially (a `ChromeMode::Replay`
-    /// frame), leaves every field it did not write holding the previous
-    /// frame's value for the next out-of-frame read.
+    /// early-returns, or completes only partially, leaves every field it
+    /// did not write holding the previous frame's value for the next
+    /// out-of-frame read.
     #[test]
     fn frame_that_does_not_write_a_field_leaves_the_previous_value() {
         let mut state = PublishedFrameState::new();
@@ -403,12 +400,16 @@ mod tests {
         let hud = overlay(120, 40);
         state.start_resize_overlay(hud);
 
-        // "Frame 2" is a `ChromeMode::Replay` frame: it reaches the
-        // `central_body` writes but NOT the `Full`-only branch that
-        // publishes `chrome_head_rects`. This is the realistic partial-write
-        // case, and it is what makes this test falsifiable — asserting after
-        // a frame that wrote nothing would hold for any struct with plain
-        // getters and could not fail.
+        // "Frame 2" is a synthetic partial write — it does not correspond
+        // to any real `update()` frame today (every field is written
+        // unconditionally once chrome construction begins), but an
+        // early-return path (settings-window dispatch, dead-window
+        // cleanup, no-active-pane) leaves every field untouched, and this
+        // is the general form of that: a frame that writes SOME fields but
+        // not others must still leave the rest holding the previous
+        // frame's value. This is also what makes this test falsifiable —
+        // asserting after a frame that wrote nothing would hold for any
+        // struct with plain getters and could not fail.
         state.publish_cached_central_rect(rect(6.0, 6.0));
         state.publish_chrome_border_rects(vec![rect(11.0, 11.0)]);
 
@@ -417,10 +418,10 @@ mod tests {
         assert_eq!(state.chrome_border_rects(), [rect(11.0, 11.0)].as_slice());
 
         // ...and every field frame 2 did NOT write still holds frame 1's
-        // value. `chrome_head_rects` in particular survives a Replay frame:
-        // that is the documented reason it is the one field written
-        // `Full`-only, and the reason it is `Option` rather than a plain
-        // `Vec` (see the type's doc comment).
+        // value, including `chrome_head_rects` — the reason it is `Option`
+        // rather than a plain `Vec` (see the type's doc comment) is exactly
+        // so a field that has never been written is distinguishable from
+        // one written and empty.
         assert_eq!(state.chrome_head_rects(), Some([rect(0.0, 0.0)].as_slice()));
         assert_eq!(state.chrome_toast_rects(), [rect(20.0, 20.0)].as_slice());
         assert!((state.cached_gutter_inset_logical() - 8.0).abs() < f32::EPSILON);
@@ -495,8 +496,8 @@ mod tests {
     }
 
     /// Pin 5: `chrome_head_rects`'s `None` vs `Some(vec![])` distinction is
-    /// preserved — these are different states (no `Full` frame yet, vs. a
-    /// `Full` frame that built no head rects) and must not be conflated.
+    /// preserved — these are different states (no frame yet, vs. a frame
+    /// that built no head rects) and must not be conflated.
     #[test]
     fn chrome_head_rects_none_and_some_empty_are_distinct() {
         let mut state = PublishedFrameState::new();

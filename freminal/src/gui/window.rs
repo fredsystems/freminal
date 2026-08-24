@@ -462,15 +462,17 @@ pub(super) struct PerWindowState {
     pub(super) chrome_frames_rendered: u32,
 
     /// The delay `update()` itself requested via `ctx.request_repaint_after`
-    /// on the most recent frame (#436.4b §3.1 amendment), drained by
+    /// on the most recent frame, drained by
     /// `App::take_terminal_requested_delay`.
     ///
     /// Set at the end of each `update()` from `shortest_repaint_delay` (the
     /// shortest interval any rendered pane needed — cursor blink, content
-    /// update, or shader animation). Compared against egui's own requested
-    /// repaint delay by `egui_integration::chrome_repaint_settled` to decide
-    /// whether a REPLAY is permitted: a REPLAY requires that nothing OTHER
-    /// than this frame's own request also wants a wake. Defaults to `None`.
+    /// update, or shader animation). Consumed by
+    /// `event_loop::effective_repaint_delay`'s suppressed-pointer-motion
+    /// substitution (Task 121): when the only thing that happened since the
+    /// previous frame was pointer motion the app classified as needing no
+    /// frame, this value stands in for egui's own (zero) requested delay so
+    /// the window does not busy-loop. Defaults to `None`.
     pub(super) pending_terminal_requested_delay: Option<std::time::Duration>,
 
     /// Per-frame render attribution counters (diagnostic), flushed to a
@@ -505,14 +507,6 @@ pub(super) struct FrameStats {
     // build must not carry so much as an extra counter increment in the
     // frame path, since timing calls there would perturb the very thing
     // being measured. See `agents.md` / the `freminal-bench-table` skill.
-    /// Frames where `App::update` received `ChromeMode::Full`.
-    #[cfg(feature = "frame-profiling")]
-    pub(super) chrome_mode_full: u64,
-    /// Frames where `App::update` received `ChromeMode::Replay`. Answers
-    /// "does Replay ever actually engage in a live session, and at what
-    /// duty cycle" — no counter for this existed anywhere before Task 121.
-    #[cfg(feature = "frame-profiling")]
-    pub(super) chrome_mode_replay: u64,
     /// Frames where every rendered pane reported `PaneFrameDamage::Unchanged`
     /// (and no bell/toast/force-full override applied) yet the frame was
     /// still presented. `decide_frame_damage` has no representation for "no
@@ -689,28 +683,6 @@ impl FrameStats {
 
 #[cfg(feature = "frame-profiling")]
 impl FrameStats {
-    /// Percentage of `(chrome_mode_full + chrome_mode_replay)` frames that
-    /// were `Replay`. Pure so it's unit-testable without constructing a
-    /// window or an egui frame. `0.0` when no frames have been counted yet
-    /// (rather than dividing by zero).
-    ///
-    /// Deliberately duplicated in `freminal_windowing::egui_integration::FrameProfile`
-    /// rather than shared (reviewed and accepted) -- keep the two in sync by
-    /// eye if either changes.
-    pub(super) fn chrome_replay_duty_cycle_pct(full: u64, replay: u64) -> f64 {
-        let total = full.saturating_add(replay);
-        if total == 0 {
-            return 0.0;
-        }
-        // `u64 -> f64` is lossy for very large counts (beyond 2^53), but a
-        // live session's frame counters never approach that range; `approx_as`
-        // is the established lossy-conversion idiom in this codebase (see
-        // e.g. `egui_integration.rs`'s `scale_factor().approx_as::<f32>()`).
-        let replay_f: f64 = conv2::ConvUtil::approx_as(replay).unwrap_or(0.0);
-        let total_f: f64 = conv2::ConvUtil::approx_as(total).unwrap_or(1.0);
-        (replay_f / total_f) * 100.0
-    }
-
     /// Mean of a cumulative `Duration` sum over `count` samples, as a
     /// `Duration`. Returns `Duration::ZERO` for `count == 0` rather than
     /// dividing by zero. Pure so it's unit-testable in isolation.
@@ -868,28 +840,6 @@ mod frame_profiling_tests {
     /// `pointer_condition_counts`) precisely so no parallel arrays exist there.
     fn pairs<'a, const N: usize>(names: &[&'a str; N], counts: &[u64; N]) -> [(&'a str, u64); N] {
         std::array::from_fn(|i| (names[i], counts[i]))
-    }
-
-    #[test]
-    fn duty_cycle_is_zero_with_no_frames() {
-        assert!((FrameStats::chrome_replay_duty_cycle_pct(0, 0) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn duty_cycle_is_zero_when_replay_never_engages() {
-        assert!((FrameStats::chrome_replay_duty_cycle_pct(120, 0) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn duty_cycle_is_100_when_always_replay() {
-        let pct = FrameStats::chrome_replay_duty_cycle_pct(0, 120);
-        assert!((pct - 100.0).abs() < 0.001, "pct was {pct}");
-    }
-
-    #[test]
-    fn duty_cycle_is_75_for_1_full_3_replay() {
-        let pct = FrameStats::chrome_replay_duty_cycle_pct(30, 90);
-        assert!((pct - 75.0).abs() < 0.001, "pct was {pct}");
     }
 
     #[test]

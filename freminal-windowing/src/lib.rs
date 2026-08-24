@@ -100,42 +100,25 @@ pub enum FrameDamage {
 /// Whether the static chrome changed on the frame just rendered.
 ///
 /// "Chrome" is the menu bar, tab bar, pane borders, broadcast label, and all
-/// overlays (modals/toasts/tooltips/popups) — the #436 decision input for
-/// whether a frame may REPLAY cached chrome primitives or must do a FULL
-/// chrome rebuild.
+/// overlays (modals/toasts/tooltips/popups). This is the partial-present
+/// correctness input consumed by `compose_with_chrome_damage`: a frame that
+/// changed chrome pixels must not be presented `Partial`, since anything
+/// outside the damage rect would be left showing stale chrome.
 ///
 /// The default is [`ChromeDamage::Changed`]: the conservative,
 /// always-correct behavior. An app that does not opt in (or has not yet
-/// wired up the #436 §3.3/§3.5 signals) always reports `Changed`, so a
-/// consumer of this signal (436.4) never mistakenly REPLAYs stale chrome.
+/// wired up the chrome-damage signals) always reports `Changed`, so a
+/// consumer of this signal never mistakenly presents a `Partial` frame over
+/// changed chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromeDamage {
-    /// Chrome changed (or we can't prove it didn't) — the next frame must be FULL.
+    /// Chrome changed (or we can't prove it didn't) — the frame must be
+    /// composed as [`FrameDamage::Full`].
     #[default]
     Changed,
-    /// Chrome provably did not change this frame — a REPLAY is permitted
-    /// (subject to the other #436 gates in §3.4).
+    /// Chrome provably did not change this frame — the frame's own
+    /// [`FrameDamage`] decision is left untouched.
     Unchanged,
-}
-
-/// Whether the app should rebuild chrome widgets this frame or may reuse
-/// cached chrome primitives from a previous frame (#436.4a scaffolding).
-///
-/// The default, [`ChromeMode::Full`], is the always-correct behavior: the
-/// app re-records and re-tessellates every widget, exactly as it always
-/// has. [`ChromeMode::Replay`] is not yet produced by `run_frame` — 436.4b
-/// wires up the decision (chrome-damage + cache-validity gates) that flips
-/// this to `Replay` for eligible frames. An app that has not been updated
-/// to consult this parameter may simply ignore it; doing so is always safe
-/// because the windowing layer only passes `Full` until then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ChromeMode {
-    /// Rebuild chrome widgets this frame (re-record + re-tessellate).
-    #[default]
-    Full,
-    /// Reuse cached chrome primitives; skip chrome-widget construction.
-    /// (Not yet produced by `run_frame` — 436.4b flips this on.)
-    Replay,
 }
 
 /// Per-frame signals drained from the [`App`] immediately after
@@ -153,18 +136,9 @@ pub struct FrameSignals {
     /// `paint_primitives` call, byte-identical to the pre-#436.4a
     /// single-call path.
     pub band_range: std::ops::Range<usize>,
-    /// Whether static chrome changed this frame (#436.3/#436.4b) — mirrors
-    /// [`App::take_chrome_damage`]. Consulted, together with cache validity
-    /// and the §3.1 settle gate, to decide next frame's [`ChromeMode`].
-    pub chrome_damage: ChromeDamage,
     /// The delay the app itself requested via `ctx.request_repaint_after`
-    /// during this frame's `update()` (#436.4b §3.1 amendment), if any.
-    /// `None` when the app made no such request this frame. Compared
-    /// against egui's own requested repaint delay (returned by `run_frame`)
-    /// to distinguish "only our own blink/content scheduling wants a wake"
-    /// from "something egui-internal (hover fade, menu animation, a
-    /// focused `TextEdit`'s cursor blink) also wants one" — see
-    /// `egui_integration::chrome_repaint_settled`.
+    /// during this frame's `update()`, if any. `None` when the app made no
+    /// such request this frame.
     pub terminal_requested_delay: Option<std::time::Duration>,
 }
 
@@ -192,20 +166,12 @@ pub trait App {
     ///
     /// `handle` allows queuing window operations (title, close, repaint, etc.)
     /// that are executed after this callback returns.
-    ///
-    /// `chrome_mode` is the #436.4a scaffold for chrome-primitive replay: the
-    /// app should skip chrome-widget construction (menu bar, tab bar, and
-    /// other static chrome) when it is [`ChromeMode::Replay`], rebuilding
-    /// only the terminal band. As of this subtask the windowing layer always
-    /// passes [`ChromeMode::Full`] — 436.4b is what starts passing `Replay`
-    /// — so an implementer may ignore this parameter for now.
     fn update(
         &mut self,
         window_id: WindowId,
         ctx: &egui::Context,
         gl: &glow::Context,
         handle: &WindowHandle<'_>,
-        chrome_mode: ChromeMode,
     );
 
     /// Called when a window is created.
@@ -279,27 +245,14 @@ pub trait App {
         0..0
     }
 
-    /// Drain the chrome-damage decision computed during `update()` for this
-    /// window (#436). Called once per frame after `update()` returns, mirroring
-    /// `take_frame_damage`. Default returns `ChromeDamage::Changed` (always safe:
-    /// forces a FULL frame). Reset-on-read: the app leaves `Changed` behind so a
-    /// stale `Unchanged` can never be reused by a frame that didn't recompute it.
-    fn take_chrome_damage(&mut self, _window_id: WindowId) -> ChromeDamage {
-        ChromeDamage::Changed
-    }
-
     /// Drain the delay the app itself requested via `ctx.request_repaint_after`
-    /// during this frame's `update()` (#436.4b §3.1 amendment), for this
-    /// window. Called once per frame after `update()` returns, mirroring
-    /// `take_frame_damage`/`take_chrome_damage`/`take_terminal_band_range`.
+    /// during this frame's `update()`, for this window. Called once per
+    /// frame after `update()` returns, mirroring
+    /// `take_frame_damage`/`take_terminal_band_range`.
     ///
     /// The default returns `None` — the conservative, always-correct
-    /// behavior: paired with `chrome_repaint_settled`'s `None` branch (which
-    /// requires egui's own `repaint_delay` to be exactly `Duration::MAX`),
-    /// an app that does not opt in never falsely reports "settled" while it
-    /// is still driving its own blink/content repaint schedule under the
-    /// hood some other way. Reset-on-read: the app leaves `None` behind so a
-    /// stale delay can never be reused by a frame that didn't recompute it.
+    /// behavior. Reset-on-read: the app leaves `None` behind so a stale
+    /// delay can never be reused by a frame that didn't recompute it.
     fn take_terminal_requested_delay(&mut self, _window_id: WindowId) -> Option<Duration> {
         None
     }
@@ -331,12 +284,14 @@ pub trait App {
         None
     }
 
-    /// #436.8: whether `pos` (egui LOGICAL points, top-left origin) is over a
-    /// chrome-interactive region of this window (menu bar, tab bar, split-border
-    /// drag sensors) — the region-aware pointer gate. Pointer motion over such a
-    /// region forces `ChromeMode::Full`; motion purely over terminal content does
-    /// not. Default `true` (conservative: an app that hasn't wired this up keeps
-    /// the pre-436.8 "any pointer event forces Full" behavior).
+    /// Whether `pos` (egui LOGICAL points, top-left origin) is over a
+    /// chrome-interactive region of this window (menu bar, tab bar,
+    /// split-border drag sensors) — the region-aware pointer gate. Consulted
+    /// by [`App::pointer_motion_needs_repaint`]'s `chrome_interactive` term
+    /// and by the app's own frame-damage staging (`pointer_over_chrome`) to
+    /// decide whether pointer motion over such a region should force a full
+    /// present. Default `true` (conservative: an app that hasn't wired this
+    /// up treats every position as chrome-interactive).
     fn is_chrome_interactive_at(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
         true
     }
@@ -630,11 +585,9 @@ mod tests {
     /// `pub(crate)` visibility onto this struct) can exercise BOTH the
     /// conservative trait defaults (`true`/`true` — `Default::default()`,
     /// matching `App::pointer_motion_needs_repaint`/`is_chrome_interactive_at`'s
-    /// own bodies at `lib.rs:355`/`332`) and a suppressing app (`false`)
-    /// against the real `event_loop.rs` dispatch functions
-    /// (`should_schedule_cursor_moved`, `should_force_chrome_full_for_pointer`)
-    /// instead of re-implementing their boolean expressions inline in a
-    /// test.
+    /// own bodies) and a suppressing app (`false`) against the real
+    /// `event_loop.rs` dispatch function (`should_schedule_cursor_moved`)
+    /// instead of re-implementing its boolean expression inline in a test.
     ///
     /// State-representation note: these are named fields set via struct-update
     /// syntax at the call site (`DummyApp { pointer_motion_needs_repaint:
@@ -669,7 +622,6 @@ mod tests {
             _ctx: &egui::Context,
             _gl: &glow::Context,
             _handle: &WindowHandle<'_>,
-            _chrome_mode: ChromeMode,
         ) {
         }
 
@@ -713,27 +665,9 @@ mod tests {
         assert_eq!(app.take_terminal_band_range(window_id), 0..0);
     }
 
-    /// Pins the default behavior of `App::take_chrome_damage` (#436.3) —
+    /// Pins the default behavior of `App::take_terminal_requested_delay`,
     /// mirroring the `take_frame_damage`/`take_terminal_band_range` default
-    /// discipline above — using the same `DummyApp` (real `FreminalGui`
-    /// windows are keyed by a real winit `WindowId`, impractical headlessly).
-    #[test]
-    fn take_chrome_damage_default_is_changed_and_reset_on_read() {
-        let mut app = DummyApp::default();
-        let window_id = WindowId(winit::window::WindowId::dummy());
-
-        // Conservative default: `Changed` (no `update()` has run / default
-        // trait body), so a consumer never mistakenly REPLAYs stale chrome.
-        assert_eq!(app.take_chrome_damage(window_id), ChromeDamage::Changed);
-
-        // Reset-on-read: a second call still returns `Changed`, never a
-        // stale `Unchanged` a prior frame might have left behind.
-        assert_eq!(app.take_chrome_damage(window_id), ChromeDamage::Changed);
-    }
-
-    /// Pins the default behavior of `App::take_terminal_requested_delay`
-    /// (#436.4b) — mirroring the `take_chrome_damage` default discipline
-    /// above, using the same `DummyApp`.
+    /// discipline above, using the same `DummyApp`.
     #[test]
     fn take_terminal_requested_delay_default_is_none_and_reset_on_read() {
         let mut app = DummyApp::default();

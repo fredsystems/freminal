@@ -228,17 +228,13 @@ struct FrameDamageObservations {
 /// threaded into a future revision of this function, do not reach for that
 /// method; hit-test `win`'s own published chrome rects directly, as below.
 ///
-/// ## Feature-gated duty-cycle counters — NOT computed here
+/// ## Feature-gated duty-cycle counter — NOT computed here
 ///
-/// The Task 121 `chrome_mode` duty-cycle and `zero_change_presented`
-/// counters read this function's outputs but are recorded by the caller
-/// under its own `#[cfg(feature = "frame-profiling")]` block, not inside
-/// this function (Subtask 122.5's contract: return what the counters need
-/// and gate only the recording). `chrome_mode` is already a parameter of
-/// `App::update` itself, so `central_body` has it in scope without this
-/// function re-accepting it — threading it through here just to gate on it
-/// internally would be the "the whole function behind `#[cfg]`" shape this
-/// contract exists to avoid.
+/// The Task 121 `zero_change_presented` counter reads this function's
+/// outputs but is recorded by the caller under its own
+/// `#[cfg(feature = "frame-profiling")]` block, not inside this function
+/// (Subtask 122.5's contract: return what the counter needs and gate only
+/// the recording).
 fn stage_frame_damage(
     win: &PerWindowState,
     ctx: &egui::Context,
@@ -920,9 +916,9 @@ impl freminal_windowing::App for FreminalGui {
                 // `PublishedFrameState`'s doc for the staleness discipline.
                 // Hovering a toast DOES change chrome pixels (close-button
                 // highlight, hover-pauses-expiry), so this correctly, as a
-                // consequence, also makes `should_force_chrome_full_for_pointer`
-                // (in `freminal-windowing`, which calls this method) force
-                // `ChromeMode::Full` while the pointer is over a toast.
+                // consequence, also makes `pointer_motion_needs_repaint`'s
+                // `chrome_interactive` term `true` while the pointer is
+                // over a toast.
                 win.published.chrome_toast_rects(),
             )
         })
@@ -1173,20 +1169,6 @@ impl freminal_windowing::App for FreminalGui {
         })
     }
 
-    fn take_chrome_damage(&mut self, window_id: WindowId) -> freminal_windowing::ChromeDamage {
-        // Drain the chrome-damage decision computed during `update()` for
-        // this window, leaving `Changed` behind so a stale `Unchanged` can
-        // never be reused by a later frame that does not recompute it.
-        self.windows
-            .get_mut(&window_id)
-            .map_or(freminal_windowing::ChromeDamage::Changed, |win| {
-                std::mem::replace(
-                    &mut win.pending_chrome_damage,
-                    freminal_windowing::ChromeDamage::Changed,
-                )
-            })
-    }
-
     fn take_terminal_requested_delay(
         &mut self,
         window_id: WindowId,
@@ -1210,7 +1192,6 @@ impl freminal_windowing::App for FreminalGui {
         ctx: &egui::Context,
         _gl: &glow::Context,
         handle: &freminal_windowing::WindowHandle<'_>,
-        chrome_mode: freminal_windowing::ChromeMode,
     ) {
         trace!("Starting new frame");
         let now = std::time::Instant::now();
@@ -1647,82 +1628,58 @@ impl freminal_windowing::App for FreminalGui {
             }
         }
 
-        // ── #436.4b: FULL vs REPLAY chrome construction ──────────────────────
+        // Build the root Ui, menu bar, and tab bar; `CentralPanel` reserves
+        // the remaining space for `central_body` below.
         //
-        // On `ChromeMode::Full` the root Ui, menu bar, and tab bar are built
-        // exactly as before, and `CentralPanel` reserves the remaining space
-        // for `central_body` below. On `ChromeMode::Replay` the windowing
-        // layer has already proven chrome (including window size) is
-        // unchanged since the last FULL frame, so none of that is rebuilt —
-        // `central_body` runs directly against a `Ui` constructed at the
-        // cached content rect instead, in the SAME background layer chrome
-        // uses (so the terminal band's shapes land exactly where `run_frame`
-        // expects them). `any_menu_open` (read inside `central_body` to
-        // compute `ui_overlay_open`) is `false` on Replay: with no menu bar
-        // built, no menu can be open.
-        let (any_menu_open, chrome_root_ui): (bool, Option<egui::Ui>) = if chrome_mode
-            == freminal_windowing::ChromeMode::Full
-        {
-            // Create a root Ui covering the full available area.  Panels
-            // reserve space from this Ui via `show` (the non-deprecated
-            // API; `show_inside` was renamed to `show` in egui 0.35).
-            let mut root_ui = egui::Ui::new(
-                ctx.clone(),
-                egui::Id::new("freminal_root"),
-                egui::UiBuilder::default(),
-            );
+        // Create a root Ui covering the full available area.  Panels
+        // reserve space from this Ui via `show` (the non-deprecated API;
+        // `show_inside` was renamed to `show` in egui 0.35).
+        let mut chrome_root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("freminal_root"),
+            egui::UiBuilder::default(),
+        );
 
-            // #436.8: menu-bar / tab-bar rects, captured for the
-            // region-aware pointer chrome-gate (`is_chrome_interactive_at`).
-            // Only ever populated on a FULL frame — a REPLAY frame builds
-            // neither panel, so `win.published`'s head rects are left
-            // untouched (stale-but-still-correct: chrome hasn't moved since
-            // the FULL frame that last set them, by the same invariant that
-            // makes REPLAY safe at all).
-            let mut head_rects: Vec<egui::Rect> = Vec::new();
+        // Menu-bar / tab-bar rects, captured for the region-aware pointer
+        // chrome-gate (`is_chrome_interactive_at`).
+        let mut head_rects: Vec<egui::Rect> = Vec::new();
 
-            // Menu bar at the top of the window.
-            let menu_open = if self.config.ui.hide_menu_bar {
-                false
-            } else {
-                let menu_response = Panel::top("menu_bar").show(&mut root_ui, |ui| {
-                    self.show_menu_bar(ui, &mut win, window_id)
-                });
-                head_rects.push(menu_response.response.rect);
-                let (menu_action, menu_open) = menu_response.inner;
-                self.dispatch_tab_bar_action(menu_action, &mut win);
-                menu_open
-            };
-
-            // Tab bar: shown when multiple tabs are open, or when the
-            // config option `tabs.show_single_tab` is enabled.
-            let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
-
-            if show_tab_bar {
-                let panel = match self.config.tabs.position {
-                    freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
-                    freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
-                };
-                let tab_response = panel.show(&mut root_ui, |ui| self.show_tab_bar(&mut win, ui));
-                head_rects.push(tab_response.response.rect);
-                let tab_action = tab_response.inner;
-                self.dispatch_tab_bar_action(tab_action, &mut win);
-            }
-
-            win.published.publish_chrome_head_rects(head_rects);
-
-            (menu_open, Some(root_ui))
+        // Menu bar at the top of the window.
+        let any_menu_open = if self.config.ui.hide_menu_bar {
+            false
         } else {
-            (false, None)
+            let menu_response = Panel::top("menu_bar").show(&mut chrome_root_ui, |ui| {
+                self.show_menu_bar(ui, &mut win, window_id)
+            });
+            head_rects.push(menu_response.response.rect);
+            let (menu_action, menu_open) = menu_response.inner;
+            self.dispatch_tab_bar_action(menu_action, &mut win);
+            menu_open
         };
+
+        // Tab bar: shown when multiple tabs are open, or when the
+        // config option `tabs.show_single_tab` is enabled.
+        let show_tab_bar = win.tabs.tab_count() > 1 || self.config.tabs.show_single_tab;
+
+        if show_tab_bar {
+            let panel = match self.config.tabs.position {
+                freminal_common::config::TabBarPosition::Top => Panel::top("tab_bar"),
+                freminal_common::config::TabBarPosition::Bottom => Panel::bottom("tab_bar"),
+            };
+            let tab_response =
+                panel.show(&mut chrome_root_ui, |ui| self.show_tab_bar(&mut win, ui));
+            head_rects.push(tab_response.response.rect);
+            let tab_action = tab_response.inner;
+            self.dispatch_tab_bar_action(tab_action, &mut win);
+        }
+
+        win.published.publish_chrome_head_rects(head_rects);
 
         // Help menu → "Keybindings..." routes here.  Opens the Settings
         // Modal with the Keybindings tab preselected, or focuses the
         // existing settings window if one is already open.  Mirrors the
         // Settings menu item in `show_menu_bar`, but jumps to the
-        // Keybindings tab instead of the default Font tab. Independent of
-        // `chrome_mode`: it only mutates modal-open state (no painting), so
-        // it runs every frame regardless of whether chrome was rebuilt.
+        // Keybindings tab instead of the default Font tab.
         if self.pending_open_keybindings {
             self.pending_open_keybindings = false;
             if self.settings_window_id.is_some() {
@@ -1743,19 +1700,6 @@ impl freminal_windowing::App for FreminalGui {
                 self.pending_settings_window = true;
             }
         }
-
-        // Copy the cached content rect (`egui::Rect` is `Copy`) out of `win`
-        // BEFORE `central_body` captures `win` by mutable reference below —
-        // reading `win.published`'s cached central rect after that point
-        // (e.g. inside the REPLAY arm further down) would conflict with the
-        // closure's borrow. Only actually used on a REPLAY frame; harmless
-        // (and cheap) to compute unconditionally otherwise. Falls back to
-        // egui's own content rect in the unreachable case described where it
-        // is used.
-        let cached_central_rect_for_replay = win
-            .published
-            .cached_central_rect()
-            .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
 
         // Task 121 frame-profiling harness: `central_body` (below) hands its
         // two measured phase durations OUT through these captured locals
@@ -1778,13 +1722,11 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(feature = "frame-profiling")]
         let mut phase_panes_out = std::time::Duration::ZERO;
 
-        // The terminal band + (on Full only) chrome dialogs/overlays. Shared
-        // between the FULL path (called via `CentralPanel::show`, below) and
-        // the REPLAY path (called directly against a `Ui` built at the
-        // cached content rect) so the band's rendering logic — the per-pane
-        // loop, borders, broadcast label, band-range capture, chrome-damage
-        // signal staging, and repaint scheduling — is defined exactly once.
-        let mut central_body = |ui: &mut egui::Ui| {
+        // The terminal band + chrome dialogs/overlays: the per-pane loop,
+        // borders, broadcast label, band-range capture, chrome-damage
+        // signal staging, and repaint scheduling, called via
+        // `CentralPanel::show` below.
+        let central_body = |ui: &mut egui::Ui| {
             // Task 121 frame-profiling harness: wall-clock start of this
             // whole closure. At the end of the closure this is used, minus
             // the accumulated per-pane `phase_panes_this_frame`, to derive
@@ -1968,135 +1910,124 @@ impl freminal_windowing::App for FreminalGui {
 
             let mut all_deferred_actions = Vec::new();
 
-            // ── #436.4b: chrome dialogs/overlays — FULL only ──────────────
+            // ── Chrome dialogs/overlays ───────────────────────────────────
             //
             // These are all cached TAIL chrome (each uses its own
             // `egui::Window`/`Area`, a distinct layer from the terminal
-            // band's `LayerId::background()`). A REPLAY frame is only ever
-            // entered when the PREVIOUS frame proved `ui_overlay_open` was
-            // `false` (any dialog open forces `ChromeDamage::Changed` every
-            // frame it is — see `ChromeSignals::any_fired`) and no chrome
-            // input landed this frame, so by construction none of these can
-            // be open (or becoming open) on a REPLAY frame. Skipping their
-            // `.show()` calls is therefore safe; running them would be
-            // wasted work whose freshly-painted shapes `run_frame` would
-            // discard anyway (REPLAY reuses the cached tail primitives, not
-            // this frame's own tail shapes).
-            if chrome_mode == freminal_windowing::ChromeMode::Full {
-                // Floating "Save Layout" name-entry prompt.  Shown whenever the
-                // user clicked "Save Layout" in the Layouts menu.  Returns true
-                // exactly once (the frame the user confirms), at which point we
-                // enqueue the SaveLayout action for dispatch.
-                if self.show_save_layout_prompt(ctx) {
-                    all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
-                }
+            // band's `LayerId::background()`).
+            // Floating "Save Layout" name-entry prompt.  Shown whenever the
+            // user clicked "Save Layout" in the Layouts menu.  Returns true
+            // exactly once (the frame the user confirms), at which point we
+            // enqueue the SaveLayout action for dispatch.
+            if self.show_save_layout_prompt(ctx) {
+                all_deferred_actions.push(freminal_common::keybindings::KeyAction::SaveLayout);
+            }
 
-                // Smart paste guard confirm dialog (Task 77).  Shown whenever a
-                // flagged paste is pending for this window.  On confirm, the
-                // resolved (possibly edited) payload is sent to the active pane;
-                // on cancel the paste is discarded.
-                match win.paste_dialog.show(ctx) {
-                    super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
-                        // Route to the pane captured when the dialog opened, not
-                        // the currently-active pane: focus-follows-mouse can change
-                        // the active pane when the cursor moves onto the dialog
-                        // buttons (Task 106 bug).
-                        Self::send_paste_to_target(&mut win, target, payload);
-                    }
-                    super::paste_guard::PasteDialogOutcome::Cancelled => {
-                        self.route_freminal_toast(
-                            freminal_common::config::FreminalToastCategory::PasteBlocked,
-                            crate::gui::toast::ToastKind::Warning,
-                            "Paste blocked",
-                            None,
-                            crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
+            // Smart paste guard confirm dialog (Task 77).  Shown whenever a
+            // flagged paste is pending for this window.  On confirm, the
+            // resolved (possibly edited) payload is sent to the active pane;
+            // on cancel the paste is discarded.
+            match win.paste_dialog.show(ctx) {
+                super::paste_guard::PasteDialogOutcome::Paste { payload, target } => {
+                    // Route to the pane captured when the dialog opened, not
+                    // the currently-active pane: focus-follows-mouse can change
+                    // the active pane when the cursor moves onto the dialog
+                    // buttons (Task 106 bug).
+                    Self::send_paste_to_target(&mut win, target, payload);
+                }
+                super::paste_guard::PasteDialogOutcome::Cancelled => {
+                    self.route_freminal_toast(
+                        freminal_common::config::FreminalToastCategory::PasteBlocked,
+                        crate::gui::toast::ToastKind::Warning,
+                        "Paste blocked",
+                        None,
+                        crate::gui::toast::ToastPlacement::WINDOW_CENTERED,
+                    );
+                }
+                super::paste_guard::PasteDialogOutcome::Idle => {}
+            }
+
+            // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
+            // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
+            // On confirm, broadcast is enabled on the dialog's target tab.
+            match win.broadcast_dialog.show(ctx) {
+                super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
+                    if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
+                        tab.broadcast_input = true;
+                        let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
+                        self.push_info_toast(
+                            "Broadcast input enabled",
+                            Some(format!(
+                                "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
+                            )),
                         );
                     }
-                    super::paste_guard::PasteDialogOutcome::Idle => {}
                 }
-
-                // Broadcast-input confirm dialog (Task 74.5).  Shown when the user
-                // tried to enable broadcast and `[tabs] confirm_broadcast` is set.
-                // On confirm, broadcast is enabled on the dialog's target tab.
-                match win.broadcast_dialog.show(ctx) {
-                    super::broadcast_guard::BroadcastDialogOutcome::Confirmed(tab_id) => {
-                        if let Some(tab) = win.tabs.iter_mut().find(|t| t.id == tab_id) {
-                            tab.broadcast_input = true;
-                            let pane_count = tab.pane_tree.iter_panes().map_or(1, |p| p.len());
-                            self.push_info_toast(
-                                "Broadcast input enabled",
-                                Some(format!(
-                                    "Keyboard input is now sent to all {pane_count} pane(s) in this tab."
-                                )),
-                            );
-                        }
-                    }
-                    super::broadcast_guard::BroadcastDialogOutcome::Cancelled
-                    | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
-                }
-
-                // Close-on-running-command guard dialog (Task 98).  Shown while a
-                // pane / tab / window close is suspended pending confirmation.  On
-                // Force Close the original close is executed with the guard
-                // bypassed; on Cancel the close is abandoned.
-                // A pending ForceClose key action resolves an open close-guard
-                // dialog as Force Close; harmless no-op when nothing is open.
-                let force_close_requested = std::mem::take(&mut win.pending_force_close);
-                if let Some(scope) = win.close_dialog.scope() {
-                    let outcome = if force_close_requested {
-                        win.close_dialog.force_close_now();
-                        super::close_guard::CloseDialogOutcome::ForceClose
-                    } else {
-                        win.close_dialog.show(ctx)
-                    };
-                    match outcome {
-                        super::close_guard::CloseDialogOutcome::ForceClose => match scope {
-                            super::close_guard::CloseScope::Pane => {
-                                Self::close_focused_pane(ui, &mut win);
-                            }
-                            super::close_guard::CloseScope::Tab(index) => {
-                                win.close_tab(index);
-                            }
-                            super::close_guard::CloseScope::Window => {
-                                // Mark this window as user-confirmed so the
-                                // on_close_requested guard lets the resulting
-                                // ViewportCommand::Close through without re-prompting.
-                                self.force_close_windows.insert(window_id);
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                            super::close_guard::CloseScope::WindowUnsavedSettings => {
-                                // User chose to discard the unsaved settings
-                                // edits. Close the settings OS window directly —
-                                // `handle` is available right here, unlike in
-                                // `on_close_requested` — then re-issue this
-                                // window's close. Clearing `settings_owner` here
-                                // (rather than a separate "confirmed" flag) is
-                                // what makes the retry's `on_close_requested`
-                                // call see `is_owner == false` and skip the
-                                // guard without re-prompting (issue #401).
-                                self.settings_modal.is_open = false;
-                                self.settings_owner = None;
-                                if let Some(sid) = self.settings_window_id.take() {
-                                    handle.close_window(sid);
-                                }
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                        },
-                        super::close_guard::CloseDialogOutcome::Cancelled
-                        | super::close_guard::CloseDialogOutcome::Idle => {}
-                    }
-                }
-
-                // Floating "About Freminal" dialog.  Shown whenever the user
-                // clicked "About Freminal" in the Help menu.  Self-dismissing
-                // via its own Close button or title-bar X.
-                self.show_about_window(ctx);
-
-                // First-run welcome overlay (subtask 71.20).  Opened on first
-                // launch or from Help -> Show Welcome; persists
-                // `first_run_complete = true` on dismissal.
-                self.show_welcome_overlay(ctx);
+                super::broadcast_guard::BroadcastDialogOutcome::Cancelled
+                | super::broadcast_guard::BroadcastDialogOutcome::Idle => {}
             }
+
+            // Close-on-running-command guard dialog (Task 98).  Shown while a
+            // pane / tab / window close is suspended pending confirmation.  On
+            // Force Close the original close is executed with the guard
+            // bypassed; on Cancel the close is abandoned.
+            // A pending ForceClose key action resolves an open close-guard
+            // dialog as Force Close; harmless no-op when nothing is open.
+            let force_close_requested = std::mem::take(&mut win.pending_force_close);
+            if let Some(scope) = win.close_dialog.scope() {
+                let outcome = if force_close_requested {
+                    win.close_dialog.force_close_now();
+                    super::close_guard::CloseDialogOutcome::ForceClose
+                } else {
+                    win.close_dialog.show(ctx)
+                };
+                match outcome {
+                    super::close_guard::CloseDialogOutcome::ForceClose => match scope {
+                        super::close_guard::CloseScope::Pane => {
+                            Self::close_focused_pane(ui, &mut win);
+                        }
+                        super::close_guard::CloseScope::Tab(index) => {
+                            win.close_tab(index);
+                        }
+                        super::close_guard::CloseScope::Window => {
+                            // Mark this window as user-confirmed so the
+                            // on_close_requested guard lets the resulting
+                            // ViewportCommand::Close through without re-prompting.
+                            self.force_close_windows.insert(window_id);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        super::close_guard::CloseScope::WindowUnsavedSettings => {
+                            // User chose to discard the unsaved settings
+                            // edits. Close the settings OS window directly —
+                            // `handle` is available right here, unlike in
+                            // `on_close_requested` — then re-issue this
+                            // window's close. Clearing `settings_owner` here
+                            // (rather than a separate "confirmed" flag) is
+                            // what makes the retry's `on_close_requested`
+                            // call see `is_owner == false` and skip the
+                            // guard without re-prompting (issue #401).
+                            self.settings_modal.is_open = false;
+                            self.settings_owner = None;
+                            if let Some(sid) = self.settings_window_id.take() {
+                                handle.close_window(sid);
+                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    },
+                    super::close_guard::CloseDialogOutcome::Cancelled
+                    | super::close_guard::CloseDialogOutcome::Idle => {}
+                }
+            }
+
+            // Floating "About Freminal" dialog.  Shown whenever the user
+            // clicked "About Freminal" in the Help menu.  Self-dismissing
+            // via its own Close button or title-bar X.
+            self.show_about_window(ctx);
+
+            // First-run welcome overlay (subtask 71.20).  Opened on first
+            // launch or from Help -> Show Welcome; persists
+            // `first_run_complete = true` on dismissal.
+            self.show_welcome_overlay(ctx);
 
             // Drain pending menu actions (Edit menu clicks: Copy, Paste,
             // Select All, Find...).  These were queued during
@@ -3029,12 +2960,8 @@ impl freminal_windowing::App for FreminalGui {
             let per_pane_damage = damage_obs.per_pane_damage;
             let active_pane_damage = damage_obs.active_pane_damage;
 
-            // Task 121 frame-profiling harness (feature-gated): chrome-mode
-            // duty cycle and zero-pixel-change-but-presented counters.
-            //
-            // `chrome_mode` answers "does `ChromeMode::Replay` ever actually
-            // engage in a live session, and at what duty cycle" -- no
-            // counter for this existed anywhere before this harness.
+            // Task 121 frame-profiling harness (feature-gated):
+            // zero-pixel-change-but-presented counter.
             //
             // `zero_change_presented` counts frames where every pane in
             // `per_pane_damage` reported `Unchanged` (no bell) and neither
@@ -3053,14 +2980,6 @@ impl freminal_windowing::App for FreminalGui {
             #[cfg(feature = "frame-profiling")]
             {
                 let stats = &mut win.frame_stats;
-                match chrome_mode {
-                    freminal_windowing::ChromeMode::Full => {
-                        stats.chrome_mode_full = stats.chrome_mode_full.saturating_add(1);
-                    }
-                    freminal_windowing::ChromeMode::Replay => {
-                        stats.chrome_mode_replay = stats.chrome_mode_replay.saturating_add(1);
-                    }
-                }
                 let all_panes_unchanged = !damage_obs.force_full
                     && !damage_obs.unresolved_pane
                     && !toast_active
@@ -3605,12 +3524,12 @@ impl freminal_windowing::App for FreminalGui {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title(win.last_window_title.clone()));
             }
 
-            // Stash this frame's own repaint request for #436.4b's
-            // `chrome_repaint_settled` gate (drained by
-            // `App::take_terminal_requested_delay`): the NEXT frame's replay
-            // decision needs to know what delay THIS frame itself asked for,
-            // to distinguish "only our own blink/content scheduling wants a
-            // wake" from "something egui-internal also wants one sooner".
+            // Stash this frame's own repaint request (drained by
+            // `App::take_terminal_requested_delay`): the windowing layer's
+            // `effective_repaint_delay` (Task 121) uses it to stand in for
+            // egui's own requested delay when the only thing that happened
+            // since the previous frame was pointer motion the app
+            // classified as needing no frame.
             win.pending_terminal_requested_delay = shortest_repaint_delay;
 
             // Schedule a repaint at the shortest interval needed by any pane.
@@ -3641,140 +3560,96 @@ impl freminal_windowing::App for FreminalGui {
             }
         };
 
-        if let Some(mut root_ui) = chrome_root_ui {
-            let _panel_response = CentralPanel::default().show(&mut root_ui, central_body);
-        } else {
-            // REPLAY: construct the band's `Ui` directly at the cached
-            // content rect, in the SAME background layer chrome uses, so the
-            // terminal band's shapes land where a FULL frame's `CentralPanel`
-            // content would have put them. The id is NOT the same, though:
-            // this uses `Id::new("freminal_root")` directly (the root Ui's
-            // own id), while the FULL path's `CentralPanel::show` allocates
-            // its content `Ui` via `root_ui.new_child(..)` with no explicit
-            // id salt, which egui auto-derives from `root_ui`'s id plus a
-            // per-frame child-index counter — a different, and not
-            // necessarily stable, id. This is a known accepted limitation:
-            // any widget that keys persistent state off its `Ui`-derived id
-            // (e.g. collapsing-header open state) could in principle churn
-            // that state across a Full<->Replay mode toggle. In practice
-            // this is inert, because real user interaction with such a
-            // widget forces `ChromeMode::Full` on the same frame (via
-            // `ui_overlay_open`/pointer-motion/etc.), so REPLAY is only ever
-            // entered while nothing is interacting with mismatched-id
-            // widgets. Tracked as a follow-up if a concrete widget is ever
-            // found to rely on cross-mode id stability.
-            // `decide_chrome_mode` only chooses `Replay` when the chrome
-            // cache is valid at this frame's size/ppp, which is only ever
-            // populated on a FULL frame — and every FULL frame publishes
-            // `win.published`'s cached central rect (via `central_body`)
-            // before that cache is populated — so falling back to egui's
-            // own content rect (`cached_central_rect_for_replay`'s
-            // fallback, computed above) should be unreachable in practice.
-            let mut band_ui = egui::Ui::new(
-                ctx.clone(),
-                egui::Id::new("freminal_root"),
-                egui::UiBuilder::new()
-                    .layer_id(egui::LayerId::background())
-                    .max_rect(cached_central_rect_for_replay),
-            );
-            central_body(&mut band_ui);
-        }
+        let _panel_response = CentralPanel::default().show(&mut chrome_root_ui, central_body);
 
         // Render the app-level toast stack as an overlay on top of all panels.
         // Toasts are shared across every window, so they appear consistently
-        // regardless of which window the user is looking at. TAIL chrome
-        // (#436.4b): skipped on REPLAY for the same reason as the dialogs
-        // above — a toast being visible forces `ChromeDamage::Changed` every
-        // frame it is (`ChromeSignals::toast_active`), so a REPLAY frame can
-        // only ever be entered while the stack is provably empty, making
-        // `.show()` a no-op here anyway.
-        if chrome_mode == freminal_windowing::ChromeMode::Full {
-            // Review item 2 follow-up to 121.14: `win.published`'s toast
-            // rects must be written on EVERY `Full` frame reaching this
-            // point, not only when the block below actually runs
-            // `stack.show()` — see `PublishedFrameState`'s doc for why (an
-            // emptied stack would otherwise leave stale rects behind
-            // forever). Default to cleared; the inner block below
-            // overwrites with fresh rects when it runs.
-            win.published.clear_chrome_toast_rects();
+        // regardless of which window the user is looking at. TAIL chrome.
+        // Review item 2 follow-up to 121.14: `win.published`'s toast
+        // rects must be written on EVERY `Full` frame reaching this
+        // point, not only when the block below actually runs
+        // `stack.show()` — see `PublishedFrameState`'s doc for why (an
+        // emptied stack would otherwise leave stale rects behind
+        // forever). Default to cleared; the inner block below
+        // overwrites with fresh rects when it runs.
+        win.published.clear_chrome_toast_rects();
 
-            if let Ok(mut stack) = self.toasts.try_borrow_mut()
-                && !stack.is_empty()
-            {
-                // Rebuild the same geometry `central_body` used to populate
-                // `win.published`'s cached central rect / the pane layout —
-                // `win` is a local variable here (removed from
-                // `self.windows` above, reinserted below), so this cannot
-                // reuse `central_body`'s own locals (`pane_layout`,
-                // `available_rect`), which are scoped to that closure.
-                let content_rect = win
-                    .published
-                    .cached_central_rect()
-                    .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
-                // Pre-resolve the active tab's pane layout into owned locals so
-                // the `resolve_pane_rect` closure below does not borrow `win`
-                // (it only captures `Copy`/owned data) — it needs to coexist
-                // with the `win.terminal_widget.font_manager_mut()` borrow
-                // passed alongside it to `stack.show`.
-                let active_tab = win.tabs.active_tab();
-                let zoomed_pane = active_tab.zoomed_pane;
-                let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
-                    .pane_tree
-                    .layout(geometry_interop::rect_from_egui(content_rect))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
-                    .collect();
-                let resolve_pane_rect =
-                    move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
-                        if let Some(zoomed_id) = zoomed_pane {
-                            return (zoomed_id == pane_id).then_some(content_rect);
-                        }
-                        pane_layout
-                            .iter()
-                            .find(|(id, _)| *id == pane_id)
-                            .map(|(_, r)| *r)
-                    };
-                let pixels_per_point = ctx.pixels_per_point();
-                let resources = super::toast::ToastFrameResources {
-                    render_state: &win.toast_render_state,
-                    font_manager: win.terminal_widget.font_manager_mut(),
+        if let Ok(mut stack) = self.toasts.try_borrow_mut()
+            && !stack.is_empty()
+        {
+            // Rebuild the same geometry `central_body` used to populate
+            // `win.published`'s cached central rect / the pane layout —
+            // `win` is a local variable here (removed from
+            // `self.windows` above, reinserted below), so this cannot
+            // reuse `central_body`'s own locals (`pane_layout`,
+            // `available_rect`), which are scoped to that closure.
+            let content_rect = win
+                .published
+                .cached_central_rect()
+                .unwrap_or_else(|| ctx.input(egui::InputState::content_rect));
+            // Pre-resolve the active tab's pane layout into owned locals so
+            // the `resolve_pane_rect` closure below does not borrow `win`
+            // (it only captures `Copy`/owned data) — it needs to coexist
+            // with the `win.terminal_widget.font_manager_mut()` borrow
+            // passed alongside it to `stack.show`.
+            let active_tab = win.tabs.active_tab();
+            let zoomed_pane = active_tab.zoomed_pane;
+            let pane_layout: Vec<(crate::gui::panes::PaneId, egui::Rect)> = active_tab
+                .pane_tree
+                .layout(geometry_interop::rect_from_egui(content_rect))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(id, r)| (id, geometry_interop::rect_to_egui(r)))
+                .collect();
+            let resolve_pane_rect =
+                move |pane_id: crate::gui::panes::PaneId| -> Option<egui::Rect> {
+                    if let Some(zoomed_id) = zoomed_pane {
+                        return (zoomed_id == pane_id).then_some(content_rect);
+                    }
+                    pane_layout
+                        .iter()
+                        .find(|(id, _)| *id == pane_id)
+                        .map(|(_, r)| *r)
                 };
-                let outcome = stack.show(
-                    ctx,
-                    content_rect,
-                    window_id,
-                    resolve_pane_rect,
-                    resources,
-                    pixels_per_point,
+            let pixels_per_point = ctx.pixels_per_point();
+            let resources = super::toast::ToastFrameResources {
+                render_state: &win.toast_render_state,
+                font_manager: win.terminal_widget.font_manager_mut(),
+            };
+            let outcome = stack.show(
+                ctx,
+                content_rect,
+                window_id,
+                resolve_pane_rect,
+                resources,
+                pixels_per_point,
+            );
+
+            // Subtask 121.14 (review item 2 follow-up): the laid-out
+            // toast pill rects go into their own dedicated slot, not
+            // `chrome_border_rects` — see `PublishedFrameState`'s doc
+            // for the full staleness-discipline reasoning and why a
+            // dedicated field replaced the original
+            // append-to-border-rects approach.
+            win.published.publish_chrome_toast_rects(outcome.rects);
+
+            // Subtask 121.12: `ToastStack::show` returns its wanted delay
+            // rather than calling `ctx.request_repaint_after()` itself. This
+            // runs AFTER `central_body` already published
+            // `win.pending_terminal_requested_delay` (~3768 above), so it is
+            // a second aggregation point — the toast stack renders outside
+            // `central_body`, once per window, after the per-window local
+            // aggregate has already been folded and published. Fold it into
+            // that published field too (so `effective_repaint_delay`'s
+            // suppressed-pointer substitution sees it) and schedule it
+            // directly, since `central_body`'s own scheduling call has
+            // already run and will not run again this frame.
+            if let Some(delay) = outcome.repaint_delay {
+                win.pending_terminal_requested_delay = Some(
+                    win.pending_terminal_requested_delay
+                        .map_or(delay, |prev| prev.min(delay)),
                 );
-
-                // Subtask 121.14 (review item 2 follow-up): the laid-out
-                // toast pill rects go into their own dedicated slot, not
-                // `chrome_border_rects` — see `PublishedFrameState`'s doc
-                // for the full staleness-discipline reasoning and why a
-                // dedicated field replaced the original
-                // append-to-border-rects approach.
-                win.published.publish_chrome_toast_rects(outcome.rects);
-
-                // Subtask 121.12: `ToastStack::show` returns its wanted delay
-                // rather than calling `ctx.request_repaint_after()` itself. This
-                // runs AFTER `central_body` already published
-                // `win.pending_terminal_requested_delay` (~3768 above), so it is
-                // a second aggregation point — the toast stack renders outside
-                // `central_body`, once per window, after the per-window local
-                // aggregate has already been folded and published. Fold it into
-                // that published field too (so `chrome_repaint_settled`'s
-                // suppressed-pointer / next-frame comparisons see it) and
-                // schedule it directly, since `central_body`'s own scheduling
-                // call has already run and will not run again this frame.
-                if let Some(delay) = outcome.repaint_delay {
-                    win.pending_terminal_requested_delay = Some(
-                        win.pending_terminal_requested_delay
-                            .map_or(delay, |prev| prev.min(delay)),
-                    );
-                    ctx.request_repaint_after(delay);
-                }
+                ctx.request_repaint_after(delay);
             }
         }
 
@@ -3894,13 +3769,6 @@ impl freminal_windowing::App for FreminalGui {
                     target: "freminal::frame_profiling",
                     window_id = ?window_id,
                     frames_drawn = stats.frames_drawn,
-                    chrome_mode_full = stats.chrome_mode_full,
-                    chrome_mode_replay = stats.chrome_mode_replay,
-                    chrome_replay_duty_cycle_pct =
-                        super::window::FrameStats::chrome_replay_duty_cycle_pct(
-                            stats.chrome_mode_full,
-                            stats.chrome_mode_replay
-                        ),
                     zero_change_presented = stats.zero_change_presented,
                     frame_damage_full = stats.frame_damage_full,
                     frame_damage_partial = stats.frame_damage_partial,
@@ -3956,8 +3824,8 @@ impl freminal_windowing::App for FreminalGui {
                         %super::window::FrameStats::format_nonzero_counts(
                             &stats.pointer_condition_counts()
                         ),
-                    "app-side frame-profiling stats (task 121 harness): chrome-mode \
-                     duty cycle, zero-pixel-change-but-presented frames, the \
+                    "app-side frame-profiling stats (task 121 harness): \
+                     zero-pixel-change-but-presented frames, the \
                      freminal-owned phase_app_update/phase_orchestration/phase_panes \
                      wall-clock split (phase_app_update = the whole productive body of \
                      update(); phase_orchestration = central_body total minus the \

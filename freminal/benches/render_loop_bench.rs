@@ -1248,18 +1248,34 @@ fn bench_build_image_verts(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
-// bench_chrome_frame_record — "replay frame" chrome-only cost (Issue #436)
+// bench_chrome_frame_record — per-frame chrome construct + tessellate cost
 // ---------------------------------------------------------------
 //
-// Issue #436 caches egui chrome primitives and skips `run_ui` + `tessellate`
-// on a REPLAY frame (chrome unchanged, only terminal content/cursor changed).
-// This benchmark measures the CPU cost that a REPLAY frame *avoids*: running
-// the egui UI closure and tessellating the resulting shapes for a
-// representative chrome layout (menu bar + tab bar + empty central area), with
-// NO GL paint callbacks and NO terminal content.
+// This benchmark measures what it costs, every frame, to run the egui UI
+// closure and tessellate the resulting shapes for a representative chrome
+// layout (menu bar + tab bar + empty central area), with NO GL paint
+// callbacks and NO terminal content.
 //
-// It mirrors `freminal-windowing`'s frame path — `EguiState::new` constructs a
-// bare `egui::Context::default()` (no GL), and `run_frame` does
+// HISTORY, because the framing changed and the numbers did not. It was
+// written for issue #436, which cached egui chrome primitives and skipped
+// `run_ui` + `tessellate` on a `ChromeMode::Replay` frame; it measured the
+// cost such a frame *avoided*. **That machinery was deleted in Task 124
+// subtask 124.5** — it was structurally unsound (egui resolves hit-testing
+// against the previous frame's widget set, so unbuilt widgets are
+// uninteractable) and had been disabled by default since 121.32. There is
+// no REPLAY path any more, and this bench no longer measures an avoided
+// cost.
+//
+// It measures a cost that is now always paid, which is why it is kept
+// rather than deleted. That figure is a live input to Task 124: once
+// `FrameDamage::None` (124.2) lands, chrome construction becomes the thing
+// forcing a full frame on frames the terminal grid would otherwise skip
+// entirely, so this is the baseline that trade is judged against. 124.15
+// measured the same quantity through a different harness at 43.2 us
+// (32.9 construct + 10.3 tessellate); this bench is the repeatable form.
+//
+// It mirrors `freminal-windowing`'s frame path — `EguiState::new` constructs
+// a bare `egui::Context::default()` (no GL), and `run_frame` does
 // `ctx.run_ui(raw_input, ...)` then `ctx.tessellate(shapes, ppp)`. Only the
 // `egui_glow::Painter` needs a GL context; `run_ui`/`tessellate` are pure CPU
 // and run headless (like every other bench in this file).
@@ -1269,8 +1285,7 @@ fn bench_build_image_verts(c: &mut Criterion) {
 // on the non-`pub` `FreminalGui`/`PerWindowState` and cannot be reached from a
 // bench. It uses the same egui panel/widget shape (`Panel::top` menu row,
 // `Panel::top` tab row, `CentralPanel`) so the tessellation cost is
-// directionally representative of the cost a REPLAY frame elides. After #436,
-// the REPLAY path performs none of this work.
+// directionally representative.
 //
 // The `egui::Context` is warmed once (outside the timed region) so the
 // steady-state recurring per-frame cost is measured, not the one-time

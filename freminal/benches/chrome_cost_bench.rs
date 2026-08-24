@@ -3,13 +3,19 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-//! Task 124 subtask 124.15: what does freminal's chrome cost per frame, and
-//! what does the **disabled** #436 chrome cache still waste?
+//! What does freminal's chrome cost per frame?
 //!
 //! # Why this bench exists
 //!
-//! 124.15 gates 124.5 (the chrome cache's fate). Neither Task 123 harness
-//! can answer it: Phase 1 records GL calls from the terminal renderer, which
+//! Originated as Task 124 subtask 124.15, which gated 124.5 -- the decision
+//! (since executed) to delete the #436 chrome cache as structurally unsound:
+//! `ChromeMode::Replay` skipped constructing chrome widgets, but egui
+//! resolves hit-testing and click validity against the previous frame's
+//! widget set, so unbuilt widgets were uninteractable. With the cache gone,
+//! chrome construction and tessellation happen on every single frame -- this
+//! bench now measures that **actual permanent per-frame cost**, not a
+//! ceiling on a hypothetical caching saving. Neither Task 123 harness can
+//! answer it: Phase 1 records GL calls from the terminal renderer, which
 //! never sees chrome, and Phase 2 captures pixels from that same renderer.
 //! Chrome is painted by egui, so it needs an egui-level measurement.
 //!
@@ -24,13 +30,6 @@
 //! `freminal_windowing::WindowId` has no public constructor outside the real
 //! winit event loop (the same obstacle `pointer_motion.rs` documents).
 //!
-//! The `cache_*` benches are **not** a stand-in. They measure the exact
-//! clone operations `egui_integration.rs`'s `ChromeMode::Full` arm performs
-//! every frame to populate `ChromeCache` — including on the ~100% of frames
-//! that take that arm because the cache is disabled by default (121.32), and
-//! where nothing ever reads what they produce. That is subtask 121.35's
-//! "live waste", migrated into 124.5.
-//!
 //! Per `PROFILING.md`, per-frame costs here are reported without an implied
 //! frame rate: a cost per frame only becomes a CPU share once multiplied by
 //! a rate this bench does not observe.
@@ -41,12 +40,12 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 /// Build a chrome-shaped UI into `ctx` and return this frame's shapes.
 ///
-/// Mirrors the structure of `App::update`'s `ChromeMode::Full` arm
-/// (`app_impl.rs:1663-1717`): a root `Ui`, a `Panel::top("menu_bar")`
-/// carrying the menu bar, a `Panel::top("tab_bar")` carrying the tab strip,
-/// and a `CentralPanel` into which the per-pane border strokes are painted
-/// (`app_impl.rs:3331`). Same panel ids and same nesting, so the layout and
-/// id-allocation work egui does is representative.
+/// Mirrors the structure of `App::update`'s chrome construction
+/// (`app_impl.rs`): a root `Ui`, a `Panel::top("menu_bar")` carrying the
+/// menu bar, a `Panel::top("tab_bar")` carrying the tab strip, and a
+/// `CentralPanel` into which the per-pane border strokes are painted. Same
+/// panel ids and same nesting, so the layout and id-allocation work egui
+/// does is representative.
 fn run_chrome_frame(
     ctx: &egui::Context,
     tabs: usize,
@@ -101,34 +100,17 @@ fn chrome_benches(c: &mut Criterion) {
 
     let ppp = 1.0_f32;
     let shapes = run_chrome_frame(&ctx, 4, 3);
-    let primitives = ctx.tessellate(shapes.clone(), ppp);
 
     let mut group = c.benchmark_group("chrome");
 
-    // Constructing chrome widgets: what `ChromeMode::Replay` skips, and
-    // therefore the ceiling on what any correct chrome cache could save.
+    // Constructing chrome widgets: paid on every single frame.
     group.bench_function("construct_4tabs_3borders", |b| {
         b.iter(|| black_box(run_chrome_frame(&ctx, black_box(4), black_box(3))));
     });
 
-    // Tessellating chrome: paid on every `Full` frame, and on `Replay`
-    // frames only via the atlas-grew self-heal path.
+    // Tessellating chrome: paid on every single frame.
     group.bench_function("tessellate", |b| {
         b.iter(|| black_box(ctx.tessellate(black_box(shapes.clone()), ppp)));
-    });
-
-    // ── The disabled cache's live waste (121.35 -> 124.5) ──
-    //
-    // With `chrome_cache_enabled()` false, `chrome_mode` is forced to
-    // `Full`, so this arm runs every frame and populates a cache no code
-    // path can ever read. Deleting the cache removes exactly these clones;
-    // the `to_vec()` slice copies feeding `tessellate` are NOT removable
-    // (it takes an owned `Vec`) and so are excluded here.
-    group.bench_function("cache_shape_clone", |b| {
-        b.iter(|| black_box(black_box(&shapes).clone()));
-    });
-    group.bench_function("cache_primitive_clone", |b| {
-        b.iter(|| black_box(black_box(&primitives).clone()));
     });
 
     group.finish();

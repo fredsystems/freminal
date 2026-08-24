@@ -1549,13 +1549,15 @@ impl PaneRenderCache {
         self.super_state.any()
     }
 
-    /// Whether a URL-hover tooltip is currently displayed for this pane
-    /// (#436.4b). `cached_hovered_url` is `pub(super)` (render-pipeline
-    /// internal); this narrow accessor lets `app_impl.rs`'s chrome-damage
-    /// aggregation know the `Order::Tooltip` URL tooltip is on screen —
-    /// TAIL chrome that must force `ChromeDamage::Changed` so a REPLAY frame
-    /// does not discard it. Mirrors [`Self::super_pressed`]'s pattern rather
-    /// than widening the field's visibility.
+    /// Whether a URL-hover tooltip is currently displayed for this pane.
+    /// `cached_hovered_url` is `pub(super)` (render-pipeline internal); this
+    /// narrow accessor lets `app_impl.rs`'s chrome-damage aggregation know
+    /// the `Order::Tooltip` URL tooltip is on screen — TAIL chrome that must
+    /// force `ChromeDamage::Changed`, which composes into
+    /// `FrameDamage::Full` (see `compose_with_chrome_damage`), so a frame
+    /// with the tooltip visible is never presented `Partial`. Mirrors
+    /// [`Self::super_pressed`]'s pattern rather than widening the field's
+    /// visibility.
     #[must_use]
     pub(crate) const fn hover_tooltip_active(&self) -> bool {
         self.cached_hovered_url.is_some()
@@ -2079,23 +2081,11 @@ impl FreminalTerminalWidget {
             // (issue #462).
             gutter_hovered = effectively_hovered;
             if needs_repaint {
-                // 16ms, not `Duration::ZERO` (subtask 121.12, comment
-                // corrected per review NIT #10): scheduling is unchanged
-                // (`clamp_repaint_delay` already floors any delay, including
-                // a bare `request_repaint()`, at `MIN_REPAINT_INTERVAL` =
-                // 16ms). The reason it must not be `Duration::ZERO` is NOT
-                // that zero would flip `chrome_repaint_settled`'s outcome on
-                // THIS frame — `repaint_delay >= terminal_requested_delay`
-                // is trivially true for equal values regardless of which one
-                // is used. The real reason: an app-side ask of EXACTLY
-                // `Duration::ZERO` makes that settle check permanently
-                // vacuous — nothing can ever be detected as wanting a
-                // repaint sooner than "immediate", so the gate loses its
-                // ability to notice a coincidental concurrent egui-internal
-                // want on any LATER frame where this need recurs. 16ms
-                // preserves that discriminating power, and is
-                // scheduling-equivalent because `clamp_repaint_delay` floors
-                // everything at `MIN_REPAINT_INTERVAL` = 16ms anyway.
+                // 16ms, not `Duration::ZERO` (subtask 121.12): scheduling is
+                // unchanged either way (`clamp_repaint_delay` already floors
+                // any delay, including a bare `request_repaint()`, at
+                // `MIN_REPAINT_INTERVAL` = 16ms), so this value is
+                // scheduling-equivalent to zero.
                 cache.request_repaint_after(std::time::Duration::from_millis(16));
             }
             cache.pointer_in_gutter_last_frame = effectively_hovered;
@@ -3187,11 +3177,9 @@ impl FreminalTerminalWidget {
         };
         if scrollbar_damage_decision(current_scrollbar_state, previous_scrollbar_state) {
             // 16ms, not `Duration::ZERO` (subtask 121.12) — see the
-            // gutter-hover comment above for the corrected reasoning:
-            // scheduling is unchanged (already floored at 16ms by
-            // `clamp_repaint_delay`), but a zero app-side ask would make
-            // `chrome_repaint_settled`'s check permanently vacuous rather
-            // than merely changing this frame's outcome.
+            // gutter-hover comment above: scheduling is unchanged (already
+            // floored at 16ms by `clamp_repaint_delay`), so this value is
+            // scheduling-equivalent to zero.
             cache.request_repaint_after(std::time::Duration::from_millis(16));
             cache.last_frame_cursor_damage = crate::gui::renderer::PaneFrameDamage::Full;
         }
