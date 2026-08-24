@@ -163,6 +163,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
 | 124.17 | Does the skip-clear + partial-present path ever actually fire? | Complete — re-taken on GPU; answer is **no** |
+| 124.18 | Make partial present actually work (gate + clipping) | Planned — blocks 124.14 and 124.2 |
 | 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned |
 
 ### Execution model
@@ -172,21 +173,24 @@ independent leaves (may run at any time, in parallel):
   124.4   124.7   124.9   124.8   124.C1
 
 the epoch chain (strictly sequential, the spine of this task):
-  124.10 -> 124.11 -> 124.12 -> [124.17] -> 124.14 -> 124.2
+  124.10 -> 124.11 -> 124.12 -> [124.17] -> [124.18] -> 124.14 -> 124.2
 
 measurement-then-decision pairs (each pair sequential; pairs parallel):
   124.13 -> 124.3
   124.15 -> 124.5
   124.16 -> 124.6
-  124.17 -> 124.14, 124.2   (inserted 2026-08-23; see 124.17)
+  124.17 -> 124.18 -> 124.14, 124.2   (see 124.18)
 ```
 
-**124.17 was inserted into the spine on 2026-08-23, after 124.12 landed.**
-Recon for 124.14 could not verify that subtask's stated premise — that the
-shipped cursor-only path "already proves the mechanism" — and produced a
-contradiction the code alone cannot resolve. 124.14 and 124.2 both spend the
-skip-clear + partial-present path; neither may be built until 124.17 shows
-that path fires and is correct when it does. See 124.17.
+**124.18 was inserted into the spine on 2026-08-23, after 124.17's GPU
+re-take.** 124.17 was written to ask whether the skip-clear +
+partial-present path ever fires. Re-measured on real hardware, the answer is
+**no — not once in 8,160 frames** — because the gate requires
+`buffer_age() == 1` and a double-buffered surface reports 2. Forcing it open
+by hand then corrupted the display, confirming a second, independent defect:
+a partial frame still paints unclipped opaque chrome over the whole surface.
+124.14 and 124.2 both spend this path, so neither may be built until it
+works. See 124.18.
 
 The epoch chain edits shared types in `freminal-buffer`,
 `freminal-terminal-emulator` and the GUI in sequence, so per
@@ -1776,6 +1780,155 @@ framebuffer and reads back pixels — which is the same instrument 124.14's
 own deliverable already requires for its "`Region` frame and `Full` frame of
 the same state produce identical pixels" test. Building it once serves
 124.2, 124.14 and this question together.
+
+### 124.18 — Make partial present actually work
+
+**Blocks 124.14 and 124.2. Both spend this path; today it is inert, and the
+one time it was forced open by hand it corrupted the display.**
+
+*Added 2026-08-23, after 124.17's GPU re-take. This is squarely in this
+task's remit — "Task 124 stops doing work that produces no pixels; it is the
+frame-count and present win" — because without it there is no present win at
+all, on any machine.*
+
+#### The two defects, and why neither can land alone
+
+**(a) The gate demands a swapchain depth almost nothing has.**
+`decide_partial_present` takes the path only when `buffer_age() == 1`.
+`EGL_EXT_buffer_age` returns *how many frames ago the back buffer's contents
+were defined*: `0` means undefined (glutin documents this — "you must redraw
+the entire buffer"), and `n` means the contents are those of the buffer `n`
+frames ago. A conventionally double-buffered surface therefore reports **2**
+in steady state, and 124.17's GPU re-take measured exactly that on every one
+of ~250 queries across 21 flush windows — never 1, never 3+. llvmpipe reports
+1, which is why the pre-123.C2 measurement saw the path firing constantly and
+concluded the gate was wide open.
+
+The extension exists precisely so a buffer that is `n` frames stale can be
+reused: keep a short damage history and redraw the union of the last `n`
+frames' damage. Requiring `age == 1` accepts only the degenerate case.
+`gl_context.rs`'s doc comment — "values `> 1` mean the buffer holds an older
+frame and is likewise unsafe to treat as 'last frame'" — is true as stated
+but draws the wrong conclusion: stale is not unusable, it is *repairable*.
+
+**(b) A partial frame still paints unclipped chrome over the whole surface.**
+On a taken partial present the clear is skipped, but head, band and tail are
+each painted unconditionally (`egui_integration.rs`, the three
+`paint_primitives` calls). The **head slice contains the `CentralPanel`
+background fill**, which is opaque at the default `bg_opacity = 1.0` and
+covers the entire central area. Only the band is clipped, and only because
+the app's paint callback sets its own scissor to the cursor rect. Everything
+else is erased.
+
+**(b) is confirmed empirically, by the maintainer, 2026-08-23.** Forcing the
+`Taken` branch at `age == 2` corrupted the display: the surface cleared and
+stayed blank until an event forced a `Full` frame (notably on focus loss,
+recovering on pointer re-entry), with possible flicker during use. That
+symptom is diagnostic — a missing damage union (defect (a)'s other half)
+would produce *small* artifacts such as cursor trails or stale glyph
+fragments, not a blank surface. A blank surface is the unclipped opaque fill.
+
+This also closes 124.14's long-open contradiction. The recon model was
+right; it was simply never exercised, because on real hardware the gate
+never opened. Both prior candidate explanations stay refuted, and the
+head-pass premise is now **CONFIRMED** rather than merely surviving.
+
+**Neither defect may be fixed alone.** Repairing the gate without the
+clipping turns an inert subsystem into visible corruption on most frames —
+which is precisely the experiment that was just run. Repairing the clipping
+without the gate changes nothing observable, because the path still never
+fires.
+
+#### The design
+
+The contract between the layers becomes:
+
+- **app -> windowing:** "these rects changed this frame" (`FrameDamage`).
+- **windowing -> app:** "redraw at least this region" — the damage union with
+  swapchain staleness already applied.
+
+Windowing owns the staleness arithmetic because windowing owns the
+swapchain. This is what keeps 124.14 simple: it emits rects and never learns
+what `buffer_age` is, carries no damage history, and reasons about no
+swapchain depth.
+
+1. **Damage history.** `EguiState` retains the damage rects of the last few
+   presented frames. On `buffer_age() == n`, the region that must be redrawn
+   is the union of the current frame's damage with the previous `n - 1`
+   frames'. `age == 0`, or `age` deeper than the retained history, falls back
+   to `Full` — unchanged, and still the always-correct path.
+
+2. **Clip everything, not just the band.** A partial present means *only
+   these pixels may change*, so every primitive must obey it. Each
+   `egui::ClippedPrimitive` carries its own `clip_rect`; intersect all three
+   slices' clip rects with the redraw region before painting. Verified
+   against `egui_glow` 0.36.1: `set_clip_rect` clamps `max` to `>= min`, so a
+   fully-clipped primitive scissors to zero area and draws nothing. The
+   opaque `CentralPanel` fill then cannot escape the region.
+
+3. **Hand the region to the band callback.** The band is a
+   `Primitive::Callback` and the app's callback sets its own scissor,
+   overriding egui's. So the published `present_is_partial` `AtomicBool` must
+   become a published *region*: the callback scissors to what windowing says
+   must be redrawn, rather than to its own cursor rect. This deletes the
+   current arrangement where band clipping is correct by coincidence.
+
+4. **Present the same region** via `swap_buffers_with_damage`. Whatever was
+   redrawn is what is declared damaged; the two must not diverge.
+
+**A bounding box is sufficient for v1, and is not a shortcut.** Redrawing
+more than the union is always safe — 123's Phase 2 proved redundant redraw of
+unchanged state yields zero differing pixels at a channel bound of zero — and
+one rect is exactly what the app's draw path already supports. Scattered
+multi-row damage collapsing to a large bbox is a *measurable performance*
+question, not a correctness one. Multi-rect scissoring, with one draw pass
+per rect, is a later optimisation to be justified by measurement.
+
+#### The verification problem, stated plainly
+
+**The Task 123 Phase 2 pixel harness cannot regression-test the shipped
+path.** It runs on llvmpipe, which reports `age == 1`, so it structurally
+cannot reproduce the `age == 2` case this subtask exists to fix. The
+offscreen pbuffer surface reports `0`.
+
+What each instrument can still do:
+
+- **Phase 2 / llvmpipe** *can* verify defect (b): it is the one environment
+  where a partial present is actually taken today, so the clipping fix is
+  testable there, and the untouched-background property (`DefaultBackground`
+  means "leave these pixels alone") can be pinned exactly as 123 pinned it.
+- **Unit tests** cover the staleness arithmetic completely — the union over
+  `n` frames of history is pure and needs no GL at all. Cover `age` of 0, 1,
+  2, history-depth, and deeper-than-history.
+- **Hardware observation plus the 124.17 counters** are the only check on the
+  age-2 path end to end. After the fix, `present_partial_taken` should become
+  the large majority of `Partial` requests and
+  `present_partial_blocked_buffer_age` should fall to near zero.
+
+That residual risk is real and belongs to a silent-corruption class of bug
+(issue #432's class). **Recorded so the choice is explicit: if that is judged
+insufficient, the defensible alternative is to leave partial present off.**
+It has never once worked in a shipped build, so disabling it deliberately
+costs nothing that is currently being had, and would be an honest outcome
+rather than a defeat.
+
+#### Scope for 124.18
+
+`freminal-windowing/src/egui_integration.rs` (the gate, the history, the clip
+intersection), `freminal-windowing/src/gl_context.rs` (the `buffer_age` doc
+comment, which currently asserts the wrong conclusion),
+`freminal-windowing/src/lib.rs` (the published-region type replacing the
+`AtomicBool`), and the app-side callback in
+`freminal/src/gui/terminal/widget.rs` that consumes it.
+
+Per `state-representation`, the published region is a named type, not a bare
+`Option<Vec<DamageRect>>` threaded positionally.
+
+#### Prohibitions for 124.18
+
+Do NOT change `decide_frame_damage` or `PaneFrameDamage` — that is 124.14 and
+124.2. Do NOT begin multi-rect scissoring. Do NOT touch the vertex layout.
+Do NOT weaken the `age == 0` fallback.
 
 ### 124.C3 — `merge_cache` has no per-buffer stash, so alt-screen round trips over-report
 
