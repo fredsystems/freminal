@@ -41,6 +41,16 @@ mod gl_context;
 // Windows therefore still compiles, it just compiles nothing.
 #[cfg(all(target_os = "linux", feature = "gl-offscreen"))]
 pub mod gl_context_offscreen;
+// Task 124.19b. An offscreen egui-level pixel harness that drives
+// `frame_paint::paint_frame` itself (not just raw GL calls) against a
+// pbuffer, so a test can see what egui actually painted -- the Task 123
+// Phase 2 harness never constructs an `egui::Context` at all and so cannot
+// see this class of bug. Double-gated identically to `gl_context_offscreen`,
+// the module it is built on, for the same reasons: test infrastructure only,
+// needs Mesa and an X server, and `target_os = "linux"` because that stack is
+// Linux-only by design.
+#[cfg(all(target_os = "linux", feature = "gl-offscreen"))]
+pub mod frame_paint_harness;
 mod modifier_tracker;
 
 pub use error::Error;

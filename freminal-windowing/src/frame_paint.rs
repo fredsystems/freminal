@@ -244,18 +244,19 @@ pub struct PaintFrameOutput {
     /// Why this frame did or did not take the skip-clear + partial-present
     /// path.
     ///
-    /// Gated because its only consumer today is the caller's frame-profiling
-    /// counters; in a default build nothing reads it, so it is compiled out
-    /// rather than carrying a dead-code suppression.
+    /// Gated because its consumers are the caller's frame-profiling counters
+    /// and (as of 124.19b) the offscreen frame-paint harness's tests; in a
+    /// default build nothing reads it, so it is compiled out rather than
+    /// carrying a dead-code suppression.
     ///
-    /// 124.19b's offscreen pixel harness will be a second consumer, and must
-    /// widen this `cfg` to
-    /// `any(feature = "frame-profiling", feature = "gl-offscreen")` when it
-    /// lands. It should assert on this rather than on `partial.is_some()` —
-    /// the two are equivalent as predicates, but a failure reporting
-    /// `BlockedByBufferAge { age: 0 }` names the cause, where `None` only
-    /// says "not taken".
-    #[cfg(feature = "frame-profiling")]
+    /// 124.19b's offscreen pixel harness (`frame_paint_harness.rs`) is that
+    /// second consumer, which is why this `cfg` is
+    /// `any(feature = "frame-profiling", feature = "gl-offscreen")` rather
+    /// than `frame-profiling` alone. Assert on this rather than on
+    /// `partial.is_some()` -- the two are equivalent as predicates, but a
+    /// failure reporting `BlockedByBufferAge { age: 0 }` names the cause,
+    /// where `None` only says "not taken".
+    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
     pub decision: PartialPresentDecision,
     /// The delay the app itself requested via `ctx.request_repaint_after`
     /// during this frame's `update()`, if any.
@@ -485,7 +486,7 @@ where
         platform_output: full_output.platform_output,
         viewport_output: full_output.viewport_output,
         partial,
-        #[cfg(feature = "frame-profiling")]
+        #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
         decision: partial_present_decision,
         terminal_requested_delay,
         #[cfg(feature = "frame-profiling")]

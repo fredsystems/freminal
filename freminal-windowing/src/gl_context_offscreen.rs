@@ -48,6 +48,7 @@
 //! can own an independent context.
 
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use glow::HasContext;
 use glutin::config::{Config, ConfigSurfaceTypes, ConfigTemplateBuilder};
@@ -68,7 +69,14 @@ use crate::error::Error;
 /// before `surface`, which is dropped before `display`.
 pub struct OffscreenGl {
     /// The glow context callers actually draw through.
-    gl: glow::Context,
+    ///
+    /// `Arc`-wrapped (Task 124.19b) so [`Self::gl_arc`] can hand out a second
+    /// owning reference for `egui_glow::Painter::new`, which takes
+    /// `Arc<glow::Context>` by value rather than a borrow. [`Self::gl`]
+    /// keeps its pre-124.19b borrow-based signature — the `Arc` is an
+    /// implementation detail existing callers (e.g. `freminal`'s pixel
+    /// harness) do not need to know about.
+    gl: Arc<glow::Context>,
     /// Kept alive for `gl`'s benefit; also the make-current token.
     _context: PossiblyCurrentContext,
     /// Kept alive for `gl`'s benefit.
@@ -139,9 +147,9 @@ impl OffscreenGl {
             .make_current(&surface)
             .map_err(|e| Error::MakeCurrent(format!("offscreen: {e}")))?;
 
-        let gl = unsafe {
+        let gl = Arc::new(unsafe {
             glow::Context::from_loader_function_cstr(|name| display.get_proc_address(name))
-        };
+        });
 
         Ok(Self {
             gl,
@@ -177,11 +185,31 @@ impl OffscreenGl {
     }
 
     /// The glow context to draw through.
-    pub const fn gl(&self) -> &glow::Context {
+    ///
+    /// No longer `const` as of Task 124.19b: `self.gl` became
+    /// `Arc<glow::Context>` so [`Self::gl_arc`] could exist, and returning
+    /// `&glow::Context` from it now goes through `Arc`'s `Deref` coercion
+    /// (the exact same pattern `GlState::glow` already uses over its own
+    /// `Arc<glow::Context>` field in `frame_paint.rs`) — `Deref::deref` is
+    /// not a `const fn`, so this accessor cannot be either.
+    #[must_use]
+    pub fn gl(&self) -> &glow::Context {
         &self.gl
     }
 
+    /// A clone of the shared glow context.
+    ///
+    /// Exists for [`egui_glow::Painter::new`], which takes ownership of an
+    /// `Arc<glow::Context>` rather than borrowing one — [`Self::gl`] cannot
+    /// serve that call. Task 124.19b's offscreen frame-paint harness is the
+    /// first (and, as of this writing, only) caller.
+    #[must_use]
+    pub fn gl_arc(&self) -> Arc<glow::Context> {
+        Arc::clone(&self.gl)
+    }
+
     /// Pixel dimensions of the pbuffer, as `(width, height)`.
+    #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -192,6 +220,7 @@ impl OffscreenGl {
     /// Worth recording alongside any pixel comparison: a golden image is
     /// only meaningful relative to the rasteriser that produced it, and
     /// llvmpipe's output can shift between Mesa releases.
+    #[must_use]
     pub fn renderer(&self) -> String {
         unsafe { self.gl.get_parameter_string(glow::RENDERER) }
     }
