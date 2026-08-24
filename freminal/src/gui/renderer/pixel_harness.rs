@@ -437,6 +437,51 @@ mod tests {
             return;
         }
 
+        // A pixel golden is only meaningful relative to the rasteriser that
+        // produced it -- this module's own header says so. Before 123.C2 the
+        // `default` dev shell exported `LIBGL_ALWAYS_SOFTWARE=1`, so every
+        // local run was llvmpipe and matched the recorded golden by
+        // accident. 123.C2 correctly confined that to the `gl-pixel` shell,
+        // which left this test comparing an llvmpipe golden against whatever
+        // GPU the developer has -- 9648/80000 pixels differ on a Radeon
+        // 7900 XTX. Since the pre-commit hook runs `cargo test
+        // --all-features`, that failure blocked EVERY commit on any machine
+        // with a real GPU.
+        //
+        // So: decline to compare two images that were never comparable.
+        // This is NOT a widened tolerance -- the comparison below is still
+        // exact, at zero differing pixels. It is a guard on whether the
+        // comparison means anything at all.
+        //
+        // The `gl_context_required()` split is load-bearing in the same way
+        // it is in `capture_or_skip`. In the dedicated `gl-pixel` CI job
+        // that variable is set and the renderer is pinned to llvmpipe by
+        // `glPixelEnv`, so a mismatch THERE cannot be a developer's GPU --
+        // it means the golden was regenerated under the wrong rasteriser,
+        // which would otherwise silently skip this test in CI forever.
+        // That must fail loudly, not skip.
+        if let Some(recorded) = recorded_renderer(name)
+            && recorded != renderer
+        {
+            assert!(
+                !gl_context_required(),
+                "golden {name} was captured under `{recorded}` but this \
+                 environment renders with `{renderer}`, despite \
+                 FREMINAL_REQUIRE_GL being set -- that variable means this \
+                 is the pinned-llvmpipe gl-pixel job, so the golden was \
+                 regenerated under the wrong rasteriser. Regenerate it \
+                 under `.#gl-pixel`, not from the `default` shell."
+            );
+            eprintln!(
+                "SKIP golden {name}: captured under `{recorded}`, this run \
+                 renders with `{renderer}`.\n  A pixel golden is only \
+                 meaningful against its own rasteriser. Compare it with:\n    \
+                 nix develop .#gl-pixel --command xvfb-run -a cargo test -p \
+                 freminal --features gl-pixel {name}"
+            );
+            return;
+        }
+
         match compare(name, &captured).expect("comparison ran") {
             GoldenComparison::Match => {}
             GoldenComparison::Missing { path } => {
