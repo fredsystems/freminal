@@ -32,6 +32,7 @@ use std::sync::Arc;
 use conv2::ConvUtil;
 use glow::HasContext;
 
+use crate::DamageRect;
 use crate::frame_paint::{
     DamageHistory, FrameSurface, PaintFrameRequest, PartialPresentDecision, PartialPresentSupport,
     paint_frame,
@@ -76,11 +77,19 @@ pub enum HarnessError {
 /// Also records whether [`FrameSurface::clear_to`] was called via a
 /// [`Cell<bool>`] -- the harness runs entirely on one thread, so a `Cell`
 /// is sufficient and avoids the ceremony of a `Mutex` for a single flag.
+///
+/// Separately records the region passed to the most recent
+/// [`FrameSurface::clear_region_to`] call (124.20), as a
+/// `Cell<Option<DamageRect>>` rather than a second bool: a test asserting
+/// the scissored clear fired needs to know *which* region it was given,
+/// not just that it was called, to catch a bug that scissors to the wrong
+/// rect.
 pub struct HarnessSurface {
     off: OffscreenGl,
     support: PartialPresentSupport,
     age: Cell<u32>,
     cleared: Cell<bool>,
+    scissor_cleared: Cell<Option<DamageRect>>,
 }
 
 impl HarnessSurface {
@@ -96,6 +105,7 @@ impl HarnessSurface {
             support,
             age: Cell::new(age),
             cleared: Cell::new(false),
+            scissor_cleared: Cell::new(None),
         }
     }
 
@@ -113,10 +123,19 @@ impl HarnessSurface {
         self.cleared.get()
     }
 
-    /// Clear the recorded flag before painting the next frame, so each
+    /// The region passed to [`FrameSurface::clear_region_to`] since the
+    /// last [`Self::reset_cleared`], or `None` if it was not called this
+    /// frame (124.20).
+    #[must_use]
+    pub const fn scissor_cleared_region(&self) -> Option<DamageRect> {
+        self.scissor_cleared.get()
+    }
+
+    /// Clear the recorded flags before painting the next frame, so each
     /// frame's result reflects only that frame's own clear decision.
     pub fn reset_cleared(&self) {
         self.cleared.set(false);
+        self.scissor_cleared.set(None);
     }
 
     /// A clone of the shared glow context, for [`egui_glow::Painter::new`].
@@ -149,6 +168,19 @@ impl FrameSurface for HarnessSurface {
                 .gl()
                 .clear_color(color[0], color[1], color[2], color[3]);
             self.off.gl().clear(glow::COLOR_BUFFER_BIT);
+        }
+    }
+
+    fn clear_region_to(&self, color: [f32; 4], region: DamageRect) {
+        self.scissor_cleared.set(Some(region));
+        // SAFETY: same rationale as `clear_to` above.
+        unsafe {
+            let gl = self.off.gl();
+            gl.enable(glow::SCISSOR_TEST);
+            gl.scissor(region.x, region.y, region.width, region.height);
+            gl.clear_color(color[0], color[1], color[2], color[3]);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.disable(glow::SCISSOR_TEST);
         }
     }
 }
@@ -231,6 +263,9 @@ pub struct HarnessFrameResult {
     pub decision: PartialPresentDecision,
     /// Whether [`FrameSurface::clear_to`] was called for this frame.
     pub cleared: bool,
+    /// The region [`FrameSurface::clear_region_to`] was called with for
+    /// this frame, or `None` if it was not called (124.20).
+    pub scissor_cleared: Option<DamageRect>,
 }
 
 /// Drives [`paint_frame`] against one [`HarnessSurface`], painting a
@@ -254,6 +289,10 @@ pub struct HarnessDriver {
     /// [`Self::set_surface_age`] between individual frames) and still have
     /// later frames see earlier ones' history.
     history: DamageHistory,
+    /// The GL clear color painted through [`PaintFrameRequest::clear_color`]
+    /// -- see [`Self::set_clear_color`] for why this is mutable rather than
+    /// fixed at construction.
+    clear_color: [f32; 4],
 }
 
 impl HarnessDriver {
@@ -293,7 +332,22 @@ impl HarnessDriver {
             width,
             height,
             history: DamageHistory::new(),
+            // Deliberately distinct from every colour a test paints by
+            // default -- see [`PaintFrameRequest::clear_color`]'s doc at
+            // the call site below. Tests that need a non-opaque clear
+            // colour (124.20) override this via [`Self::set_clear_color`].
+            clear_color: [0.0, 0.0, 0.0, 1.0],
         })
+    }
+
+    /// Change the GL clear color painted through subsequent frames.
+    /// Defaults to opaque black (see [`Self::new`]'s doc). 124.20 needs a
+    /// non-opaque clear color (mirroring `App::clear_color`'s
+    /// `[0.0, 0.0, 0.0, 0.0]` at `background_opacity < 1.0`), which the
+    /// harness cannot hardcode without breaking every other test's "a
+    /// stray clear paints an obviously wrong colour" property.
+    pub const fn set_clear_color(&mut self, color: [f32; 4]) {
+        self.clear_color = color;
     }
 
     /// Change the buffer age reported to frames painted from now on -- see
@@ -325,23 +379,28 @@ impl HarnessDriver {
             let request = PaintFrameRequest {
                 size_px: [self.width, self.height],
                 raw_input,
-                // Deliberately distinct from every colour a test paints, so
-                // a stray clear -- one that `was_cleared()` failed to
-                // catch, or an unwanted extra clear -- would show up as an
-                // obviously wrong pixel rather than blending in.
-                clear_color: [0.0, 0.0, 0.0, 1.0],
+                // Defaults to opaque black -- deliberately distinct from
+                // every colour a test paints, so a stray clear (one that
+                // `was_cleared()` failed to catch, or an unwanted extra
+                // clear) would show up as an obviously wrong pixel rather
+                // than blending in. 124.20's tests override this via
+                // `set_clear_color` because their whole premise is a
+                // non-opaque clear color.
+                clear_color: self.clear_color,
                 present_flag: None,
                 damage_history: &mut self.history,
             };
 
             let output = paint_frame(&self.surface, &self.ctx, &mut self.painter, request, ui_fn);
             let cleared = self.surface.was_cleared();
+            let scissor_cleared = self.surface.scissor_cleared_region();
             let readback = self.read_back();
 
             results.push(HarnessFrameResult {
                 readback,
                 decision: output.decision,
                 cleared,
+                scissor_cleared,
             });
         }
         results
@@ -942,5 +1001,195 @@ mod tests {
             .pixel(px, py)
             .expect("prev-damage pixel present in frame-3 readback");
         assert_eq!(pixel, prev_damage_color().to_srgba_unmultiplied());
+    }
+
+    // ── 124.20: scissor the clear to the redraw region ──────────────────
+    //
+    // Distinct geometry and its own non-opaque clear color -- the 124.18
+    // suite above deliberately uses an OPAQUE clear color and covers every
+    // `Taken` frame's redraw region with fully opaque paint after
+    // clipping, so it can never observe this defect: an opaque overwrite
+    // hides whatever was underneath regardless of whether the clear ran.
+    // This suite's whole premise is a semi-transparent fill blending
+    // against whatever is already in the framebuffer.
+
+    /// Non-opaque clear color, mirroring `App::clear_color`'s
+    /// `[0.0, 0.0, 0.0, 0.0]` at `background_opacity < 1.0`
+    /// (`freminal/src/gui/app_impl.rs:877-884`).
+    const BLEND_CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+    /// The declared-damage rect for the tests below, in egui's top-left
+    /// points. Covers both `blend_marker_rect` (stale opaque content) and
+    /// `BLEND_NO_MARKER_SAMPLE` (a point with no stale content at all).
+    fn blend_damage_rect() -> Rect {
+        Rect::from_min_size(pos2(16.0, 16.0), vec2(32.0, 32.0))
+    }
+
+    /// Opaque marker painted only on the baseline frame, fully inside
+    /// `blend_damage_rect` with a 4px margin on every side -- stands in for
+    /// "content a previous frame painted, which the coming `Taken` frame's
+    /// declared damage subsumes but does not repaint."
+    fn blend_marker_rect() -> Rect {
+        Rect::from_min_size(pos2(20.0, 20.0), vec2(12.0, 12.0))
+    }
+    fn blend_marker_color() -> Color32 {
+        Color32::from_rgb(200, 0, 0)
+    }
+    /// Sample point well inside `blend_marker_rect`'s interior (6px margin
+    /// on every side).
+    const BLEND_MARKER_SAMPLE: (u32, u32) = (26, 26);
+
+    /// Sample point well inside `blend_damage_rect` (8px margin from its
+    /// right/bottom edges) but outside `blend_marker_rect` (14px clear of
+    /// it on every axis) -- there was never any content here: frame 1's
+    /// `Full` clear set it to `BLEND_CLEAR_COLOR` and nothing was painted
+    /// over it. Control for "what the marker sample must read once the
+    /// clear correctly reaches it too."
+    const BLEND_NO_MARKER_SAMPLE: (u32, u32) = (40, 40);
+
+    /// The semi-transparent fill frame 2 paints over the whole
+    /// `blend_damage_rect` -- alpha clearly short of opaque, so its
+    /// blended result depends on what is already in the framebuffer.
+    fn blend_fill_color() -> Color32 {
+        Color32::from_rgba_unmultiplied(0, 200, 0, 128)
+    }
+
+    /// `blend_damage_rect`'s physical-pixel, bottom-left-origin
+    /// `DamageRect`, by the same y-flip construction as
+    /// [`declared_damage_rect`] above (`pixels_per_point == 1.0`, so points
+    /// and physical pixels coincide).
+    fn declared_blend_damage_rect() -> DamageRect {
+        let canvas: i32 = CANVAS.value_as().unwrap();
+        DamageRect {
+            x: 16,
+            y: canvas - (16 + 32),
+            width: 32,
+            height: 32,
+        }
+    }
+
+    /// Baseline frame for the 124.20 tests: paints only the opaque marker
+    /// (no whole-canvas background fill -- unlike the 124.18 suite, this
+    /// scene needs the untouched framebuffer outside the marker to stay at
+    /// exactly `BLEND_CLEAR_COLOR`, which only the `Full`-damage clear
+    /// below the marker paint provides).
+    fn blend_baseline_frame() -> FrameFn<'static> {
+        Box::new(|ctx: &egui::Context, _gl: &glow::Context| {
+            let painter = ctx.layer_painter(LayerId::background());
+            painter.rect_filled(blend_marker_rect(), 0.0, blend_marker_color());
+            FrameSignals {
+                frame_damage: FrameDamage::Full,
+                band_range: 0..0,
+                terminal_requested_delay: None,
+            }
+        })
+    }
+
+    /// Frame 2 for the 124.20 tests: paints ONLY the semi-transparent fill
+    /// over `blend_damage_rect`, and does NOT repaint the marker or any
+    /// opaque background -- mirroring `App::clear_color`'s
+    /// `background_opacity < 1.0` case, where the `CentralPanel` fill
+    /// itself is the non-opaque content and `DefaultBackground` terminal
+    /// cells emit no quad at all. Declares `Partial` with the one rect it
+    /// painted into.
+    fn blend_partial_frame() -> FrameFn<'static> {
+        Box::new(|ctx: &egui::Context, _gl: &glow::Context| {
+            let painter = ctx.layer_painter(LayerId::background());
+            painter.rect_filled(blend_damage_rect(), 0.0, blend_fill_color());
+            FrameSignals {
+                frame_damage: FrameDamage::Partial(vec![declared_blend_damage_rect()]),
+                band_range: 0..0,
+                terminal_requested_delay: None,
+            }
+        })
+    }
+
+    /// **Pins the fix (124.20).** A `Taken` frame's clear must be scissored
+    /// to the redraw region, not skipped entirely: a semi-transparent fill
+    /// painted over that region must blend against `clear_color`, not
+    /// against whatever stale, unrelated content a previous frame left
+    /// behind there.
+    ///
+    /// Before 124.20, this test asserted the OPPOSITE on purpose (assertion
+    /// 3 below was `assert_ne!`, pinning the defect): `paint_frame` skipped
+    /// the clear entirely whenever `partial.is_some()`
+    /// (`if partial.is_none() { surface.clear_to(clear_color); }`), so a
+    /// non-opaque fill painted into the redraw region blended against
+    /// whatever was already in the framebuffer there -- in this scene, an
+    /// opaque marker the previous frame painted, which the declared damage
+    /// region subsumes but never repaints. 124.20 replaces "skip the
+    /// clear" with "scissor the clear to the redraw region"
+    /// (`GlState::clear_scissored`, reached through
+    /// [`FrameSurface::clear_region_to`]), which is what turns this from a
+    /// defect pin into a fix pin. This inversion is mandatory, not a
+    /// rewrite of convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s
+    /// 124.20.
+    #[test]
+    fn a_taken_frame_scissors_the_clear_to_the_redraw_region() {
+        let Some(mut driver) =
+            new_driver_or_skip(PartialPresentSupport::Supported, 1, "scissored-clear-blend")
+        else {
+            return;
+        };
+        driver.set_clear_color(BLEND_CLEAR_COLOR);
+
+        let results = driver.run_frames(vec![blend_baseline_frame(), blend_partial_frame()]);
+        assert_eq!(results.len(), 2, "sanity: both frames painted");
+        let taken = &results[1];
+
+        // 1. The path under test actually fired -- otherwise this proves
+        // nothing about `Taken` specifically.
+        assert_eq!(
+            taken.decision,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_blend_damage_rect(),
+            },
+            "frame 2 must take the skip-clear + partial-present path for \
+             this test to mean anything; got {:?}",
+            taken.decision
+        );
+
+        // 2. THE FIX, part one: the scissored clear was called, with
+        // exactly the redraw region -- and the FULL clear was not (a full
+        // clear here would erase pixels outside the region that this
+        // frame never repaints, which is exactly what 124.17/124.18
+        // fixed).
+        assert!(
+            !taken.cleared,
+            "a Taken frame must not have done a full clear"
+        );
+        assert_eq!(
+            taken.scissor_cleared,
+            Some(declared_blend_damage_rect()),
+            "a Taken frame must scissor-clear exactly its redraw region"
+        );
+
+        // 3. THE FIX, part two: the sample over the former stale marker and
+        // the sample with no stale content at all are now byte-identical.
+        // Both are inside the SAME declared damage region, both received
+        // the exact same semi-transparent fill this frame, and -- now that
+        // the clear reaches the whole region -- both start from the same
+        // `BLEND_CLEAR_COLOR` underneath it. A regression back to "skip the
+        // clear" would make this fail exactly as the pre-fix test's
+        // `assert_ne!` proved it must.
+        let (mx, my) = BLEND_MARKER_SAMPLE;
+        let (nx, ny) = BLEND_NO_MARKER_SAMPLE;
+        let over_former_marker = taken
+            .readback
+            .pixel(mx, my)
+            .expect("marker-sample pixel present in frame-2 readback");
+        let over_nothing = taken
+            .readback
+            .pixel(nx, ny)
+            .expect("no-marker-sample pixel present in frame-2 readback");
+        assert_eq!(
+            over_former_marker, over_nothing,
+            "a Taken frame's scissored clear must reach every pixel in the \
+             redraw region equally, regardless of what a previous frame \
+             left there -- if this fails, the clear is once again being \
+             skipped (or scissored to the wrong rect) inside the declared \
+             damage region"
+        );
     }
 }

@@ -357,6 +357,44 @@ impl GlState {
         }
     }
 
+    /// Clear only `region` of the framebuffer to `color`, leaving every
+    /// pixel outside it untouched (124.20).
+    ///
+    /// `region` is in physical framebuffer pixels with a bottom-left
+    /// origin -- the same convention [`DamageRect`] documents and
+    /// `glScissor` uses directly, so no coordinate flip is needed.
+    ///
+    /// Restores the FULL scissor state (both the enable flag and the box)
+    /// exactly as found, not just the enable flag. `egui_glow::Painter`
+    /// does re-establish scissor state before every primitive it paints,
+    /// but this method must not rely on that -- it runs before any
+    /// primitive paints this frame, and this crate's own contract for a
+    /// GL-touching helper (see [`Self::clear`]'s callers) is to leave GL
+    /// state as it found it.
+    pub(crate) fn clear_scissored(&self, color: [f32; 4], region: DamageRect) {
+        unsafe {
+            let was_enabled = self.glow_context.is_enabled(glow::SCISSOR_TEST);
+            let mut prev_box = [0_i32; 4];
+            self.glow_context
+                .get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_box);
+
+            self.glow_context.enable(glow::SCISSOR_TEST);
+            self.glow_context
+                .scissor(region.x, region.y, region.width, region.height);
+            self.glow_context
+                .clear_color(color[0], color[1], color[2], color[3]);
+            self.glow_context.clear(glow::COLOR_BUFFER_BIT);
+
+            self.glow_context
+                .scissor(prev_box[0], prev_box[1], prev_box[2], prev_box[3]);
+            if was_enabled {
+                self.glow_context.enable(glow::SCISSOR_TEST);
+            } else {
+                self.glow_context.disable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+
     /// Age of the current back buffer.
     ///
     /// Returns `1` when the back buffer still holds the **previous** frame's

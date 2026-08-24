@@ -377,6 +377,27 @@ pub trait FrameSurface {
     /// Nothing in `cargo test --all` drives `GlState`, so the recursion
     /// would not be caught before shipping.
     fn clear_to(&self, color: [f32; 4]);
+
+    /// Clear only `region` of the framebuffer to `color`, leaving every
+    /// pixel outside it untouched (124.20).
+    ///
+    /// Used on a `Taken` frame instead of [`Self::clear_to`]: a partial
+    /// present's whole promise is that everything outside `region` is
+    /// unchanged from the previous frame, so a full clear there would
+    /// erase content the redraw never repaints — but skipping the clear
+    /// *inside* `region` entirely (124.17/124.18's original behaviour) is
+    /// also wrong, because a `DefaultBackground` terminal cell or a
+    /// `background_opacity < 1.0` chrome fill deliberately paints no
+    /// opaque quad there and needs the clear color underneath it, not
+    /// whatever a previous, unrelated frame left behind.
+    ///
+    /// `region` is in physical framebuffer pixels, bottom-left origin —
+    /// the same convention [`crate::DamageRect`] documents and `glScissor`
+    /// uses directly, so no coordinate flip is needed.
+    ///
+    /// Deliberately NOT named `clear_scissored`, for the same reason
+    /// [`Self::clear_to`] is not named `clear` — see that method's doc.
+    fn clear_region_to(&self, color: [f32; 4], region: DamageRect);
 }
 
 impl FrameSurface for GlState {
@@ -398,6 +419,10 @@ impl FrameSurface for GlState {
 
     fn clear_to(&self, color: [f32; 4]) {
         self.clear(color);
+    }
+
+    fn clear_region_to(&self, color: [f32; 4], region: DamageRect) {
+        self.clear_scissored(color, region);
     }
 }
 
@@ -740,8 +765,18 @@ where
     let partial = resolved.partial;
     let redraw_clip = resolved.redraw_clip;
 
-    if partial.is_none() {
-        surface.clear_to(clear_color);
+    // 124.20: a `Taken` frame's redraw region must be cleared, not skipped
+    // -- skipping it entirely left a `DefaultBackground` terminal cell or a
+    // `background_opacity < 1.0` chrome fill (both of which deliberately
+    // paint no opaque quad) blending against whatever a stale, unrelated
+    // previous frame left in the framebuffer instead of against
+    // `clear_color`. Clearing the WHOLE surface on a `Taken` frame would be
+    // just as wrong the other way -- it would erase content outside
+    // `region` that this frame never repaints -- so the clear is confined
+    // to exactly the region already computed for clipping above.
+    match partial {
+        Some(region) => surface.clear_region_to(clear_color, region),
+        None => surface.clear_to(clear_color),
     }
 
     // 124.18: a partial present means only `redraw_clip`'s pixels may
