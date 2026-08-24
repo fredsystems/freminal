@@ -145,10 +145,10 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | Subtask | Title | Status |
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
-| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Needs re-deriving** — see 124.17 GPU re-take |
+| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Ready — its `buffer_age` crux is answered by 124.18 |
 | 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
-| 124.5 | Decide and execute the chrome cache's fate | Ready — 124.15 recommends deletion |
+| 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
@@ -157,14 +157,17 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Prize is zero at present** — see 124.17 GPU re-take |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Ready — and its prize is no longer zero, see 124.18** |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
 | 124.C2 | `sync_toast_atlas` carries the same defect as 124.9 | Complete |
-| 124.17 | Does the skip-clear + partial-present path ever actually fire? | Complete — re-taken on GPU; answer is **no** |
-| 124.18 | Make partial present actually work (gate + clipping) | Planned — blocks 124.14 and 124.2 |
-| 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned |
+| 124.17 | Does the skip-clear + partial-present path ever actually fire? | Complete — re-taken on GPU; answer was **no** |
+| 124.18 | Make partial present actually work (gate + clipping) | **Complete** |
+| 124.19 | Phase 3: an egui-level offscreen pixel harness | **Complete** — 124.19a extraction, 124.19b harness |
+| 124.20 | Scissor the clear to the redraw region, don't skip it | **Complete** |
+| 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned — maintainer has not decided whether to execute |
+| 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
 
 ### Execution model
 
@@ -2039,3 +2042,142 @@ mandatory test inversion.
   Task 121's 121.1.
 - Issue #459 — the profiling findings and the candidate list Task 121's
   Group D drained.
+
+### 124.19 — Phase 3: an egui-level offscreen pixel harness
+
+**Complete (2026-08-24). Two commits: 124.19a `58ff02b9`, 124.19b `aff02068`.**
+
+*Added because 124.18's verification plan rested on a false premise.*
+
+124.18 recorded that "Phase 2 / llvmpipe *can* verify defect (b)". It cannot,
+for two independent reasons, and the residual risk the maintainer was asked
+to accept was therefore materially larger than what was described:
+
+- `pixel_harness.rs` drives `HeadlessRenderer` against an offscreen pbuffer
+  and **never constructs an `egui::Context`**. Defect (b) is about the
+  `CentralPanel` fill in the head slice, which that harness never paints.
+- `EguiState::run_frame` had exactly one caller — `event_loop.rs`, inside
+  the live event loop — so nothing could drive the paint path from a test
+  at all.
+
+The llvmpipe `age == 1` observation came from an *interactive* freminal run
+in a pre-123.C2 shell, not from the pbuffer harness, which reports age `0`.
+124.18's own text says so two lines earlier; the two statements contradict.
+
+**124.19a** extracted `frame_paint::paint_frame` — run_ui, the
+partial-present decision, the conditional clear, the head/band/tail
+tessellate-and-paint, texture housekeeping — leaving `run_frame` as the
+window-bound shell. Pure refactor, zero behaviour change.
+
+**124.19b** built the harness on it: a `FrameSurface` over an offscreen
+pbuffer with a **caller-chosen buffer age**, which is the load-bearing part.
+It can put the surface in the `age == 1` state a real double-buffered
+window never reports. Painting successive frames into one pbuffer with no
+intervening swap *is* "the back buffer holds the previous frame", so this
+models the shipped situation rather than faking it.
+
+It runs in the existing `gl-pixel` CI job. **No new CI job and no
+`flake.nix` change were needed** — `OffscreenGl` reaches EGL directly and
+needs no winit, so there is no once-per-process `EventLoop` limit.
+
+Measured, first automated reproduction of the defect: 512/4096 pixels
+differed, decomposing exactly into the 256px marker (erased — the defect)
+plus 256px of legitimately-new damage content. After 124.18: 256/4096.
+
+### 124.20 — Scissor the clear to the redraw region, don't skip it
+
+**Complete (2026-08-24), commit `7edfb480`.**
+
+*Surfaced during review of 124.18. A third defect neither 124.17 nor 124.18
+identified.*
+
+124.18 kept 124.17's behaviour of skipping the GL clear **entirely** on a
+`Taken` frame. That is wrong *inside* the redraw region. `DefaultBackground`
+cells deliberately emit no quad, and a `background_opacity < 1.0` chrome
+fill is semi-transparent — both need the clear colour underneath. With the
+clear skipped they blend against whatever an unrelated previous frame left:
+`a*fill + (1-a)*stale` rather than `a*fill + (1-a)*clear`.
+
+Confirmed empirically before fixing. Two points inside the **same** damage
+region, receiving the **same** paint, differed purely by what preceded them:
+
+| Sample | Pixel |
+| ------ | ----- |
+| Over a stale opaque marker | `[100, 100, 0, 255]` |
+| Over cleared background | `[0, 100, 0, 128]` |
+
+Exact blend arithmetic for `[200,0,0,255]` under `[0,200,0,128]` at alpha
+0.5, so stale content was provably bleeding through.
+
+**Bound on the defect, recorded so it is not overstated:** at the default
+`background_opacity == 1.0` the fill is opaque and covers the redraw region
+completely, so stale pixels are fully overwritten and nothing is visible.
+This bites transparency (Task 34) and anything else painting non-opaquely
+over the band.
+
+Neither extreme is right — a full clear on a `Taken` frame erases content
+outside the region (the bug 124.18 fixed); no clear leaves the region
+blending against stale pixels. The clear is now confined to exactly the
+region already used for clipping and for the present. **One region for all
+three** is the invariant that stops them diverging.
+
+Note none of the four pre-existing harness tests shifted. That is
+informative rather than reassuring: they paint fully opaque content across
+the whole clipped region, so a skipped clear and a scissored clear are
+indistinguishable to them. That is precisely why none caught this.
+
+### 124.C4 — A pixel golden must not be compared across rasterisers
+
+**Complete (2026-08-24), commit `26847dc0`.** *Cleanup entry.*
+
+`golden_round_trips_for_a_reference_frame` failed on any machine with a real
+GPU (9648/80000 pixels against a Radeon 7900 XTX), and since the pre-commit
+hook runs `cargo test --all-features`, **it blocked every commit on such a
+machine.**
+
+Fallout from 123.C2, and older than the symptom: before it, the `default`
+shell exported `LIBGL_ALWAYS_SOFTWARE=1`, so every local run was llvmpipe
+and matched the golden by accident. Confining that variable to the
+`gl-pixel` shell was correct, and left this test comparing an llvmpipe
+golden against whatever GPU the developer has.
+
+The test already *detected* the mismatch, printed "this is a Mesa change,
+NOT a regression", and then failed anyway. That was the bug. **Not a widened
+tolerance** — the comparison is still exact at zero differing pixels; the
+guard is on whether the comparison means anything. Under `FREMINAL_REQUIRE_GL`
+(the pinned-llvmpipe `gl-pixel` job) a mismatch still fails loudly, because
+there it means the golden was regenerated under the wrong rasteriser.
+
+### What can actually produce a `Partial` frame today
+
+Recorded because it is the honest measure of what 124.18 bought, and the
+direct case for 124.14.
+
+A pane reports `CursorOnly` only if **all** of these hold
+(`frame_dirty.rs`):
+
+```text
+!content_changed && !selection_changed && !text_blink_changed
+  && !search_changed && !hover_changed && !image_frame_changed
+  && !image_pixels_changed && cursor_state_changed && !deco_verts.is_empty()
+```
+
+| Produces `Partial` | Forces `Full` |
+| ------------------ | ------------- |
+| Cursor blink toggle | Text selection / highlighting |
+| Cursor move | Any content change (typing, output) |
+| Cursor show/hide | URL hover underline |
+| Cursor colour override | Search highlight |
+| Cursor trail animation | Blinking text; image frame/pixel changes |
+
+Plus window-level vetoes that each force `Full`: `ui_overlay_open`,
+`shader_recomposites`, `active_pane_changed`, `pointer_forces_full_present`,
+`toast_active`, `bell_active`, and `ChromeDamage::Changed`.
+
+**And a multi-pane killer:** `decide_frame_damage` walks every pane, and a
+single pane reporting `Full` does `rects.clear(); break;`. In a split with
+anything running in the other pane, partial present never fires at all.
+
+So 124.18 + 124.20 delivered the **mechanism**, not yet the **benefit**. Its
+only consumer today is a blinking cursor in an otherwise idle single pane.
+124.14 is what makes it pay.
