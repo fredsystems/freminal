@@ -33,7 +33,8 @@ use conv2::ConvUtil;
 use glow::HasContext;
 
 use crate::frame_paint::{
-    FrameSurface, PaintFrameRequest, PartialPresentDecision, PartialPresentSupport, paint_frame,
+    DamageHistory, FrameSurface, PaintFrameRequest, PartialPresentDecision, PartialPresentSupport,
+    paint_frame,
 };
 use crate::gl_context_offscreen::OffscreenGl;
 
@@ -66,19 +67,26 @@ pub enum HarnessError {
 /// the surface state [`decide_partial_present`](crate::frame_paint::decide_partial_present)
 /// needs, independent of how many frames have actually been painted.
 ///
+/// `age` is a [`Cell<u32>`], not a plain field: a 124.18 test needs
+/// different frames within the SAME `run_frames` sequence to report
+/// different ages (e.g. a `Full` baseline frame, then a `Partial` frame at
+/// `age == 1` to seed history, then a `Partial` frame at `age == 2` to
+/// exercise the union) -- see [`Self::set_age`].
+///
 /// Also records whether [`FrameSurface::clear_to`] was called via a
 /// [`Cell<bool>`] -- the harness runs entirely on one thread, so a `Cell`
 /// is sufficient and avoids the ceremony of a `Mutex` for a single flag.
 pub struct HarnessSurface {
     off: OffscreenGl,
     support: PartialPresentSupport,
-    age: u32,
+    age: Cell<u32>,
     cleared: Cell<bool>,
 }
 
 impl HarnessSurface {
-    /// Wrap `off` as a [`FrameSurface`] that always reports `support` and
-    /// `age` (see the type doc for why this can't be probed from `off`
+    /// Wrap `off` as a [`FrameSurface`] that reports `support` and, until
+    /// changed via [`Self::set_age`], `age` for every frame painted through
+    /// it (see the type doc for why this can't be probed from `off`
     /// itself). Per `freminal-state-representation`, this takes the named
     /// [`PartialPresentSupport`] rather than a bare `bool`.
     #[must_use]
@@ -86,9 +94,16 @@ impl HarnessSurface {
         Self {
             off,
             support,
-            age,
+            age: Cell::new(age),
             cleared: Cell::new(false),
         }
+    }
+
+    /// Change the buffer age this surface reports to subsequent frames.
+    /// Lets one [`HarnessDriver`] paint a sequence where different frames
+    /// need different ages (see the type doc).
+    pub fn set_age(&self, age: u32) {
+        self.age.set(age);
     }
 
     /// Whether [`FrameSurface::clear_to`] was called since the last
@@ -120,7 +135,7 @@ impl FrameSurface for HarnessSurface {
     }
 
     fn back_buffer_age(&self) -> u32 {
-        self.age
+        self.age.get()
     }
 
     fn clear_to(&self, color: [f32; 4]) {
@@ -233,6 +248,12 @@ pub struct HarnessDriver {
     painter: egui_glow::Painter,
     width: u32,
     height: u32,
+    /// This driver's record of recent frames' own declared damage (124.18)
+    /// -- owned here, not per-`run_frames`-call, so a test can call
+    /// [`Self::run_frames`] more than once (e.g. to change
+    /// [`Self::set_surface_age`] between individual frames) and still have
+    /// later frames see earlier ones' history.
+    history: DamageHistory,
 }
 
 impl HarnessDriver {
@@ -271,7 +292,18 @@ impl HarnessDriver {
             painter,
             width,
             height,
+            history: DamageHistory::new(),
         })
+    }
+
+    /// Change the buffer age reported to frames painted from now on -- see
+    /// [`HarnessSurface::set_age`]. Lets a test paint a sequence across
+    /// multiple [`Self::run_frames`] calls where different frames need
+    /// different ages (e.g. seed one frame of history at `age == 1`, then
+    /// exercise a union at `age == 2`), without which every frame in a
+    /// driver's lifetime would be stuck at the age passed to [`Self::new`].
+    pub fn set_surface_age(&self, age: u32) {
+        self.surface.set_age(age);
     }
 
     /// Paint each of `frames` in order into the same surface, returning one
@@ -299,6 +331,7 @@ impl HarnessDriver {
                 // obviously wrong pixel rather than blending in.
                 clear_color: [0.0, 0.0, 0.0, 1.0],
                 present_flag: None,
+                damage_history: &mut self.history,
             };
 
             let output = paint_frame(&self.surface, &self.ctx, &mut self.painter, request, ui_fn);
@@ -470,11 +503,12 @@ mod tests {
     /// coincide, so only the vertical flip is needed: `y_bl = CANVAS -
     /// (top_y + height)`.
     ///
-    /// This value is not actually consulted by anything in `paint_frame`
-    /// beyond "is the rect list non-empty" -- today's defect is precisely
-    /// that nothing scissors to it. It is still built to genuinely
-    /// correspond to `damage_paint_rect`, so this test reads as a realistic
-    /// app's damage report rather than an arbitrary placeholder.
+    /// Since 124.18 this value IS what every unclipped primitive gets
+    /// clipped to on a `Taken` frame (at `age == 1`, with no history, the
+    /// reconstructed region is exactly this rect). It is built to
+    /// genuinely correspond to `damage_paint_rect`, so this test reads as
+    /// a realistic app's damage report rather than an arbitrary
+    /// placeholder.
     fn declared_damage_rect() -> DamageRect {
         let canvas: i32 = CANVAS.value_as().unwrap();
         DamageRect {
@@ -482,6 +516,55 @@ mod tests {
             y: canvas - (40 + 16),
             width: 16,
             height: 16,
+        }
+    }
+
+    // ── Additional geometry for the age == 2 union test ─────────────────
+    //
+    // A third, distinct region ("prev") models content a PREVIOUS frame
+    // changed, which the CURRENT frame's own declared damage does not
+    // include (because, per `FrameDamage::Partial`'s contract, nothing
+    // changed there relative to the previous frame) but which
+    // `DamageHistory`'s union must still fold in when the back buffer is 2
+    // frames stale. Placed apart from the marker (top) and
+    // `damage_paint_rect` (bottom-left) so all three can never overlap.
+
+    fn prev_damage_rect() -> Rect {
+        Rect::from_min_size(pos2(44.0, 44.0), vec2(16.0, 16.0))
+    }
+    fn prev_damage_color() -> Color32 {
+        Color32::from_rgb(0, 0, 200)
+    }
+    /// Sample point well inside `prev_damage_rect`'s interior.
+    const PREV_SAMPLE: (u32, u32) = (52, 52);
+
+    /// `prev_damage_rect`'s `DamageRect`, by the same construction as
+    /// [`declared_damage_rect`].
+    fn declared_prev_rect() -> DamageRect {
+        let canvas: i32 = CANVAS.value_as().unwrap();
+        DamageRect {
+            x: 44,
+            y: canvas - (44 + 16),
+            width: 16,
+            height: 16,
+        }
+    }
+
+    /// The exact bounding-box union of [`declared_damage_rect`] and
+    /// [`declared_prev_rect`], computed by hand (not by calling production
+    /// code) so the test pins an independently-derived expected value.
+    fn declared_damage_and_prev_union() -> DamageRect {
+        let a = declared_damage_rect();
+        let b = declared_prev_rect();
+        let min_x = a.x.min(b.x);
+        let min_y = a.y.min(b.y);
+        let max_x = (a.x + a.width).max(b.x + b.width);
+        let max_y = (a.y + a.height).max(b.y + b.height);
+        DamageRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
         }
     }
 
@@ -543,21 +626,72 @@ mod tests {
         })
     }
 
-    /// **Pins the defect.** A taken partial present paints the unclipped
-    /// opaque chrome fill over the whole surface, wiping content
-    /// (`marker_rect`) that the declared damage region never touched and
-    /// that the skipped clear should have left alone.
+    /// Frame 2 of the age == 2 sequence: paints background + new content in
+    /// `prev_damage_rect`, and declares THAT rect as `Partial` damage. Does
+    /// NOT repaint the marker. This is "the previous frame" from the age
+    /// == 2 frame's point of view -- its own declared damage must still be
+    /// folded into a LATER frame's union when that later frame lands on a
+    /// back buffer stale enough to have missed this one.
+    fn partial_frame_prev_damage() -> FrameFn<'static> {
+        Box::new(|ctx: &egui::Context, _gl: &glow::Context| {
+            let painter = ctx.layer_painter(LayerId::background());
+            painter.rect_filled(background_fill_rect(), 0.0, background_color());
+            painter.rect_filled(prev_damage_rect(), 0.0, prev_damage_color());
+            FrameSignals {
+                frame_damage: FrameDamage::Partial(vec![declared_prev_rect()]),
+                band_range: 1..1,
+                terminal_requested_delay: None,
+            }
+        })
+    }
+
+    /// Frame 3 of the age == 2 sequence. Repaints background +
+    /// `prev_damage_rect` (the SAME content [`partial_frame_prev_damage`]
+    /// painted -- egui is immediate-mode, so a frame re-emits its whole
+    /// current visual state every pass, not just what changed) + NEW
+    /// content in `damage_paint_rect`. Declares `Partial` with ONLY its own
+    /// new rect (`declared_damage_rect`) -- per `FrameDamage::Partial`'s
+    /// contract, this is a truthful declaration precisely because nothing
+    /// changed in `prev_damage_rect` relative to frame 2. At `age == 2`,
+    /// `DamageHistory` must fold frame 2's OWN declared damage
+    /// (`declared_prev_rect`) into this frame's redraw region even though
+    /// this frame's own declaration never mentions it.
+    fn partial_frame_age2_union() -> FrameFn<'static> {
+        Box::new(|ctx: &egui::Context, _gl: &glow::Context| {
+            let painter = ctx.layer_painter(LayerId::background());
+            painter.rect_filled(background_fill_rect(), 0.0, background_color());
+            painter.rect_filled(prev_damage_rect(), 0.0, prev_damage_color());
+            painter.rect_filled(damage_paint_rect(), 0.0, damage_paint_color());
+            FrameSignals {
+                frame_damage: FrameDamage::Partial(vec![declared_damage_rect()]),
+                band_range: 1..1,
+                terminal_requested_delay: None,
+            }
+        })
+    }
+
+    /// **Pins the fix (124.18).** A taken partial present must leave every
+    /// pixel outside the declared damage region byte-identical to the
+    /// previous frame -- in particular `marker_rect`, which the declared
+    /// damage region never touches and which frame 2 never repaints.
     ///
-    /// This asserts TODAY'S BROKEN BEHAVIOUR on purpose. Task 124.18 fixes
-    /// `paint_frame` to scissor its unclipped slices to the damage region
-    /// on a `Taken` frame, and MUST invert assertion 3 below to "the marker
-    /// survives byte-identical", not delete this test.
+    /// Before 124.18, this test asserted the OPPOSITE on purpose (assertion
+    /// 3 below was `assert_ne!`, with a comment explaining that a taken
+    /// partial present painted the unclipped opaque chrome fill over the
+    /// whole surface, wiping the marker): `paint_frame` painted head, band,
+    /// and tail unclipped even when the clear was skipped, so the always
+    /// present `CentralPanel`-equivalent background fill erased everything
+    /// outside the declared rect. 124.18 makes `paint_frame` intersect
+    /// every primitive's `clip_rect` with the redraw region before
+    /// painting on a `Taken` frame, which is what turns this from a defect
+    /// pin into a fix pin. This inversion is mandatory, not a rewrite of
+    /// convenience -- see `PLAN_124_RENDER_EFFICIENCY.md`'s 124.18.
     #[test]
-    fn a_taken_partial_present_paints_opaque_chrome_over_the_whole_surface() {
+    fn a_taken_partial_present_preserves_pixels_outside_the_damage_region() {
         let Some(mut driver) = new_driver_or_skip(
             PartialPresentSupport::Supported,
             1,
-            "unclipped-chrome-defect",
+            "partial-present-clipping",
         ) else {
             return;
         };
@@ -571,9 +705,14 @@ mod tests {
         // proves nothing about `Taken` specifically -- a `BlockedBy*`
         // outcome would also paint everything again (via the full-clear
         // path) and could make assertion 3 pass for an unrelated reason.
+        // At `age == 1` with no prior history, the reconstructed region is
+        // exactly this frame's own declared rect.
         assert_eq!(
             taken.decision,
-            PartialPresentDecision::Taken,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_damage_rect(),
+            },
             "frame 2 must take the skip-clear + partial-present path for \
              this test to mean anything; got {:?}",
             taken.decision
@@ -585,12 +724,11 @@ mod tests {
             "a Taken frame must not have cleared the framebuffer"
         );
 
-        // 3. THE DEFECT: the marker -- outside the declared damage region,
-        // and never repainted by frame 2 -- differs from the baseline.
-        // Correct partial-present behaviour would leave it byte-identical;
-        // today's unclipped head/band/tail paint instead overwrites it with
-        // the frame's own (identical-looking, but freshly painted) chrome
-        // fill.
+        // 3. THE FIX: the marker -- outside the declared damage region, and
+        // never repainted by frame 2 -- is byte-identical to the baseline.
+        // Before 124.18, `paint_frame`'s unclipped head/band/tail paint
+        // overwrote it with the frame's own (identical-looking, but freshly
+        // painted) chrome fill even though the clear was skipped.
         let (mx, my) = MARKER_SAMPLE;
         let baseline_pixel = baseline
             .readback
@@ -600,28 +738,24 @@ mod tests {
             .readback
             .pixel(mx, my)
             .expect("marker pixel present in frame-2 readback");
-        assert_ne!(
+        assert_eq!(
             baseline_pixel, after_pixel,
-            "124.18 must invert this to assert_eq! once paint_frame scissors \
-             its unclipped slices to the damage region on a Taken frame -- \
-             until then this failing-to-differ would mean the maintainer's \
-             hardware observation and the source reading in 124.18 disagree"
+            "a Taken frame must leave every pixel outside the declared \
+             damage region byte-identical to the previous frame -- if this \
+             fails, `paint_frame` is once again painting unclipped chrome \
+             over a skipped clear"
         );
 
         // Diagnostic only (not asserted on): how much of the WHOLE surface
         // changed, not just the sampled marker pixel. Because the
         // background fill is byte-identical between the two frames (same
         // shape, same colour, deterministic paint -- see the sibling
-        // determinism-control test), repainting it unclipped changes
-        // nothing outside the two rects that genuinely differ: the marker
-        // (256px, erased -- the defect) and the damage paint rect (256px,
-        // legitimately new content). 512 total is therefore the FULL
-        // signature of today's bug on this scene, not a partial one -- a
-        // correct fix should shrink this to exactly the 256px inside the
-        // damage rect.
+        // determinism-control test) and is now clipped to the declared
+        // damage region, the only pixels that differ from the baseline are
+        // those genuinely inside the damage rect (256px = 16x16).
         let total_diff = baseline.readback.differing_pixels(&taken.readback);
         eprintln!(
-            "unclipped-chrome-defect: {total_diff}/{} pixels differ between \
+            "partial-present-clipping: {total_diff}/{} pixels differ between \
              baseline and the Taken frame (declared damage rect is only \
              16x16 = 256 px)",
             CANVAS * CANVAS
@@ -650,8 +784,11 @@ mod tests {
 
         assert_eq!(
             repainted.decision,
-            PartialPresentDecision::Taken,
-            "sanity: same gate as the defect test"
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_damage_rect(),
+            },
+            "sanity: same gate as the clipping test"
         );
 
         let (mx, my) = MARKER_SAMPLE;
@@ -667,10 +804,10 @@ mod tests {
     }
 
     /// Guards against a future "fix" that clips everything away (trivially
-    /// making the defect test's inverted form pass without actually
-    /// repainting the damage region). On a `Taken` frame, the pixels
-    /// INSIDE the declared damage region must reflect the new content that
-    /// frame painted there.
+    /// making the clipping test above pass without actually repainting the
+    /// damage region). On a `Taken` frame, the pixels INSIDE the declared
+    /// damage region must reflect the new content that frame painted
+    /// there.
     #[test]
     fn the_damage_region_itself_is_repainted_on_a_taken_frame() {
         let Some(mut driver) = new_driver_or_skip(
@@ -683,7 +820,13 @@ mod tests {
 
         let results = driver.run_frames(vec![baseline_frame(), partial_frame_without_marker()]);
         let taken = &results[1];
-        assert_eq!(taken.decision, PartialPresentDecision::Taken);
+        assert_eq!(
+            taken.decision,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_damage_rect(),
+            }
+        );
 
         let (dx, dy) = DAMAGE_SAMPLE;
         let pixel = taken
@@ -696,5 +839,108 @@ mod tests {
             "the declared damage region must show the new content painted \
              into it this frame"
         );
+    }
+
+    /// **This is the case the whole subtask exists for (124.18).** Before
+    /// this change, `age == 2` -- the common real-hardware case (124.17's
+    /// GPU re-take measured a conventionally double-buffered surface
+    /// reporting exactly this in steady state) -- was unconditionally
+    /// `BlockedByBufferAge`, so partial present never fired on any shipped
+    /// build. After this change it must be `Taken`, reconstructed as the
+    /// union of this frame's own declared damage with the immediately
+    /// previous frame's (`DamageHistory`).
+    ///
+    /// Sequence: a `Full` baseline (frame 1) establishes the marker; a
+    /// `Partial` frame at `age == 1` (frame 2, no history contribution)
+    /// declares and paints `prev_damage_rect`; a `Partial` frame at `age ==
+    /// 2` (frame 3) declares ONLY its own new rect (`damage_paint_rect`)
+    /// but -- being immediate-mode -- also repaints `prev_damage_rect`
+    /// with the SAME content frame 2 established. Frame 3's own decision
+    /// must fold frame 2's declared rect into its redraw region even
+    /// though frame 3 never mentions it.
+    #[test]
+    fn a_frame_at_age_two_unions_with_the_immediately_previous_frames_damage() {
+        let Some(mut driver) =
+            new_driver_or_skip(PartialPresentSupport::Supported, 1, "age-two-union")
+        else {
+            return;
+        };
+
+        let baseline = driver.run_frames(vec![baseline_frame()])[0].clone();
+
+        driver.set_surface_age(1);
+        let frame2 = driver.run_frames(vec![partial_frame_prev_damage()])[0].clone();
+        // Sanity: frame 2 itself took the narrow, no-history path -- if
+        // this doesn't hold the rest of the test doesn't mean what it
+        // claims to.
+        assert_eq!(
+            frame2.decision,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_prev_rect(),
+            },
+            "sanity: frame 2 must be Taken with its own rect only"
+        );
+
+        driver.set_surface_age(2);
+        let taken = driver.run_frames(vec![partial_frame_age2_union()])[0].clone();
+
+        // 1. The decision itself: `Taken`, reconstructed as the union of
+        // frame 3's own rect with frame 2's -- NOT `BlockedByBufferAge`
+        // (the pre-124.18 behaviour) and NOT narrowed to frame 3's own
+        // rect alone (which would silently drop frame 2's contribution).
+        assert_eq!(
+            taken.decision,
+            PartialPresentDecision::Taken {
+                age: 2,
+                region: declared_damage_and_prev_union(),
+            }
+        );
+
+        // 2. The clear was skipped.
+        assert!(
+            !taken.cleared,
+            "a Taken frame must not have cleared the framebuffer"
+        );
+
+        // 3. Preserves pixels outside the union: the marker was painted
+        // only on the baseline and lies outside the union of
+        // `prev_damage_rect`/`damage_paint_rect` on both axes checked
+        // together (see the geometry comment above the rect helpers). If
+        // the union were too permissive (e.g. a bug that always resolves
+        // to the whole surface), this would fail exactly as the original
+        // unclipped-chrome defect did.
+        let (mx, my) = MARKER_SAMPLE;
+        let baseline_pixel = baseline.readback.pixel(mx, my).expect("baseline marker");
+        let after_pixel = taken.readback.pixel(mx, my).expect("frame-3 marker sample");
+        assert_eq!(
+            baseline_pixel, after_pixel,
+            "a pixel outside the age-2 union must survive byte-identical"
+        );
+
+        // 4. Frame 3's OWN new content lands correctly. This is the
+        // discriminating check against a coordinate-conversion bug (e.g. a
+        // wrong physical<->points Y-flip): such a bug could shift the
+        // applied clip away from where the union actually sits even if the
+        // union's dimensions were computed correctly, which would leave
+        // this sample showing stale (pre-frame-3) content instead.
+        let (dx, dy) = DAMAGE_SAMPLE;
+        let pixel = taken
+            .readback
+            .pixel(dx, dy)
+            .expect("damage-region pixel present in frame-3 readback");
+        assert_eq!(pixel, damage_paint_color().to_srgba_unmultiplied());
+
+        // 5. Correctly repaints content that changed in the PREVIOUS
+        // frame: frame 3 does not declare `prev_damage_rect` as its own
+        // damage, but its repaint of it (immediate-mode) must still be
+        // allowed to land, since `DamageHistory`'s union is exactly what
+        // makes that safe on a 2-frames-stale buffer.
+        let (px, py) = PREV_SAMPLE;
+        let pixel = taken
+            .readback
+            .pixel(px, py)
+            .expect("prev-damage pixel present in frame-3 readback");
+        assert_eq!(pixel, prev_damage_color().to_srgba_unmultiplied());
     }
 }

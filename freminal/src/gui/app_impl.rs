@@ -705,9 +705,9 @@ impl freminal_windowing::App for FreminalGui {
                         pending_raw_keys: Vec::new(),
                         pending_frame_damage: freminal_windowing::FrameDamage::Full,
                         pending_terminal_band_range: 0..0,
-                        present_is_partial: std::sync::Arc::new(
-                            std::sync::atomic::AtomicBool::new(false),
-                        ),
+                        present_region: std::sync::Arc::new(std::sync::Mutex::new(
+                            freminal_windowing::PresentRegion::default(),
+                        )),
                         previous_active_pane_key: None,
                         pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
                         chrome_settle_pending: false,
@@ -899,10 +899,10 @@ impl freminal_windowing::App for FreminalGui {
     fn present_partial_flag(
         &self,
         window_id: WindowId,
-    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    ) -> Option<std::sync::Arc<std::sync::Mutex<freminal_windowing::PresentRegion>>> {
         self.windows
             .get(&window_id)
-            .map(|win| std::sync::Arc::clone(&win.present_is_partial))
+            .map(|win| std::sync::Arc::clone(&win.present_region))
     }
 
     fn is_chrome_interactive_at(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
@@ -2363,7 +2363,7 @@ impl freminal_windowing::App for FreminalGui {
             // loop, so each pane's `show()` can pass it into its PaintCallback
             // without re-borrowing `win` while `win` is mutably borrowed in
             // the loop (#435).
-            let present_is_partial_for_panes = std::sync::Arc::clone(&win.present_is_partial);
+            let present_region_for_panes = std::sync::Arc::clone(&win.present_region);
 
             // Resize overlay (issue #433): whether any pane's char grid
             // changed this frame (the debounced-resize check below). Only a
@@ -2634,7 +2634,7 @@ impl freminal_windowing::App for FreminalGui {
                             rec_ctx.as_ref(),
                             &mut pane.pending_copy,
                             &key_broadcast_targets,
-                            &present_is_partial_for_panes,
+                            &present_region_for_panes,
                             split_border_hover,
                         )
                     });
@@ -4277,7 +4277,9 @@ impl FreminalGui {
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
             pending_terminal_band_range: 0..0,
-            present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            present_region: std::sync::Arc::new(std::sync::Mutex::new(
+                freminal_windowing::PresentRegion::default(),
+            )),
             previous_active_pane_key: None,
             pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
             chrome_settle_pending: false,

@@ -724,7 +724,9 @@ impl FreminalGui {
             pending_raw_keys: Vec::new(),
             pending_frame_damage: freminal_windowing::FrameDamage::Full,
             pending_terminal_band_range: 0..0,
-            present_is_partial: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            present_region: std::sync::Arc::new(std::sync::Mutex::new(
+                freminal_windowing::PresentRegion::default(),
+            )),
             previous_active_pane_key: None,
             pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
             chrome_settle_pending: false,

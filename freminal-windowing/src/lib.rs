@@ -81,6 +81,35 @@ pub struct DamageRect {
     pub height: i32,
 }
 
+/// What the windowing layer requires the app's paint callback to redraw
+/// this frame, published once per frame via [`App::present_partial_flag`].
+///
+/// Replaces the earlier `present_is_partial: Arc<AtomicBool>` (124.18).
+/// A bare bool could only say "was the clear skipped"; it could not say
+/// *which* pixels the app's own paint callback is safe to leave untouched,
+/// which was unsound whenever the actual redraw region is a multi-frame
+/// damage union rather than just this frame's own declared damage (see
+/// `frame_paint::DamageHistory`) — a callback that scissored to its own
+/// narrower rect could skip repainting a pixel the windowing layer had
+/// already decided must change. Reading this enum instead of a bool means
+/// a callback's scissor can never disagree with what was actually redrawn.
+///
+/// Per `freminal-state-representation`, this is a named domain enum, not a
+/// bare `Option<DamageRect>` threaded positionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresentRegion {
+    /// The whole surface must be redrawn (the clear happened, or the
+    /// windowing layer could not prove a smaller region was safe). A
+    /// callback must not scissor its draw when it reads this.
+    #[default]
+    Full,
+    /// Only this region may change; every pixel outside it must be
+    /// preserved exactly. Physical framebuffer pixels, bottom-left origin
+    /// — see [`DamageRect`]'s own doc for the convention (it matches
+    /// `glScissor` directly, no coordinate flip needed).
+    Region(DamageRect),
+}
+
 /// Describes how much of a rendered frame actually changed, so the
 /// windowing layer can decide whether it may skip the full-framebuffer
 /// clear and present only the changed region.
@@ -91,10 +120,14 @@ pub struct DamageRect {
 /// pre-optimization path.
 ///
 /// [`FrameDamage::Partial`] is a *hint*, honored only when the platform can
-/// prove the previous frame's contents are still in the back buffer (via
-/// `buffer_age() == 1`). When that proof is unavailable (non-EGL backends,
-/// a rotated/aged buffer, a resize) the windowing layer falls back to a
-/// full frame regardless.
+/// reconstruct which pixels the back buffer is missing. The windowing layer
+/// tracks a short history of each recent frame's own declared damage and,
+/// when `buffer_age()` reports the buffer is `n` frames stale, unions the
+/// current damage with the previous `n - 1` frames' — see
+/// `frame_paint::DamageHistory` (124.18). When that reconstruction is
+/// unavailable (non-EGL backends, a buffer stale beyond the retained
+/// history, an unqueryable age, a resize) the windowing layer falls back to
+/// a full frame regardless.
 #[derive(Debug, Clone, Default)]
 pub enum FrameDamage {
     /// The entire surface changed. Clear + full redraw + full present.
@@ -268,30 +301,32 @@ pub trait App {
         None
     }
 
-    /// Shared flag through which the windowing layer publishes the
-    /// **authoritative** partial-present decision for each frame.
+    /// Shared cell through which the windowing layer publishes the
+    /// **authoritative** [`PresentRegion`] for each frame.
     ///
     /// Returning `Some(flag)` opts the window into damage-aware presentation.
     /// Each frame, after the windowing layer resolves the partial-present gate
-    /// (the app's [`FrameDamage`] *and* buffer-age *and* platform support) and
-    /// **before** the paint callbacks execute, it stores the result into this
-    /// flag with [`Ordering::Relaxed`](std::sync::atomic::Ordering::Relaxed):
-    /// `true` when only the damaged region is being presented (the full clear
-    /// was skipped), `false` for a normal full clear + present.
+    /// (the app's [`FrameDamage`], the buffer-age-driven damage union, and
+    /// platform support) and **before** the paint callbacks execute, it
+    /// stores the result into this cell: [`PresentRegion::Region`] when only
+    /// that region is being presented (the full clear was skipped), or
+    /// [`PresentRegion::Full`] for a normal full clear + present.
     ///
     /// This is the single source of truth. An app that scissors its own draws
-    /// to the damage region must read this same flag inside its paint
-    /// callbacks, so the scissor can never disagree with whether the clear was
-    /// actually skipped (the black-cell hazard). Because the callbacks run on
-    /// the same thread immediately after the store, `Relaxed` ordering is
-    /// sufficient.
+    /// must read this same published region inside its paint callbacks —
+    /// never a narrower rect it computed itself — so the scissor can never
+    /// disagree with what the windowing layer actually redrew (the
+    /// black-cell hazard this replaces `present_is_partial: AtomicBool`
+    /// to close; see [`PresentRegion`]'s doc). Because the callbacks run on
+    /// the same thread immediately after the store, an uncontended `Mutex`
+    /// lock is sufficient — no atomics needed.
     ///
     /// The default returns `None`: the window is presented fully every frame
-    /// and no flag is published.
+    /// and no region is published.
     fn present_partial_flag(
         &self,
         _window_id: WindowId,
-    ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    ) -> Option<std::sync::Arc<std::sync::Mutex<PresentRegion>>> {
         None
     }
 

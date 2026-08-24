@@ -1913,7 +1913,7 @@ impl FreminalTerminalWidget {
         recording_ctx: Option<&freminal_terminal_emulator::recording::RecordingContext<'_>>,
         pending_copy: &mut bool,
         key_broadcast_targets: &[Sender<InputEvent>],
-        present_is_partial: &Arc<std::sync::atomic::AtomicBool>,
+        present_region: &Arc<Mutex<freminal_windowing::PresentRegion>>,
         split_border_hover: SplitBorderHover,
     ) -> (bool, bool, Vec<freminal_common::keybindings::KeyAction>) {
         const BLINK_TICK_SECONDS: f64 = 0.50;
@@ -2408,10 +2408,6 @@ impl FreminalTerminalWidget {
         // read fresh by the closure — it is not captured here, so it always
         // reflects whatever was last written to it.
         let mut is_cursor_only = false;
-        // Damage rect (physical fb pixels, bottom-left origin) for the
-        // cursor-only path, used to scissor the GPU redraw to just the changed
-        // cell(s) (#435). `None` -> no scissor (draw the full grid).
-        let mut cursor_only_scissor: Option<crate::gui::renderer::CursorDamage> = None;
 
         // Suppress the cursor when:
         // - the terminal has hidden it (DECTCEM ?25l),
@@ -2592,7 +2588,6 @@ impl FreminalTerminalWidget {
                     );
                     cache.last_frame_cursor_damage =
                         crate::gui::renderer::PaneFrameDamage::CursorOnly(cursor_damage);
-                    cursor_only_scissor = cursor_damage;
 
                     let mut rs = render_state
                         .lock()
@@ -2963,11 +2958,13 @@ impl FreminalTerminalWidget {
         // is read from `RenderState::deco_verts` inside the closure, not
         // captured separately.
         let render_state_for_cb = Arc::clone(render_state);
-        // Authoritative partial-present flag (#435): the windowing layer sets
-        // it just before this callback runs. The cursor-only scissor is gated
-        // on it, so we never scissor a redraw on a frame where the full clear
-        // actually happened (which would black out the rest of the cell).
-        let present_is_partial_cb = Arc::clone(present_is_partial);
+        // Authoritative present region (124.18, formerly a
+        // `present_is_partial: AtomicBool`): the windowing layer publishes
+        // this just before this callback runs. The cursor-only scissor
+        // reads it directly, rather than scissoring to this pane's own
+        // narrower cursor-damage rect — see the scissor call site below for
+        // why that distinction matters.
+        let present_region_cb = Arc::clone(present_region);
         // The MutexGuard inside the callback intentionally lives through
         // `draw_with_verts` because the renderer and atlas are refs into it.
         #[allow(clippy::significant_drop_tightening)]
@@ -3058,36 +3055,43 @@ impl FreminalTerminalWidget {
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
 
-                    // Scissor the GPU redraw to just the changed cursor cell(s)
-                    // (#435). The rest of the framebuffer already holds the
-                    // previous (identical) frame — the windowing layer only
-                    // reaches this path when the whole frame is cursor-only and
-                    // `buffer_age() == 1`. Clipping the (still full-grid) draw
-                    // calls to the damage rect restricts the GPU's fragment/
-                    // fill + blend work to those cells. `CursorDamage` is in
-                    // physical framebuffer pixels, bottom-left origin — the
-                    // same convention as `glScissor`.
+                    // Scissor the GPU redraw to what the windowing layer
+                    // published as this frame's present region (124.18),
+                    // NOT to this pane's own cursor-damage rect (the earlier
+                    // `#435` design). The rest of the framebuffer already
+                    // holds the previous frame's contents, but on a stale
+                    // (`buffer_age() > 1`) back buffer the windowing layer's
+                    // region can be a union covering MORE than just this
+                    // frame's own cursor damage (e.g. a previous frame's
+                    // cursor position this buffer never received) —
+                    // scissoring to this pane's own narrower rect would
+                    // silently skip repainting pixels the union says still
+                    // need it. `PresentRegion::Region` is physical
+                    // framebuffer pixels, bottom-left origin — the same
+                    // convention as `glScissor`.
                     //
                     // egui disables `SCISSOR_TEST` after painting all
                     // primitives, and this callback is self-contained, so we
                     // enable it here and disable it again afterwards, leaving
                     // GL scissor state as egui expects.
                     //
-                    // Gate on the authoritative partial-present flag: only
-                    // scissor when the windowing layer actually SKIPPED the
-                    // full clear this frame. If the clear happened (full
-                    // present — e.g. buffer_age != 1, a shader recomposite, or
-                    // any other pane forcing a full frame), the whole grid
-                    // must be redrawn, so we must NOT scissor.
-                    let present_partial =
-                        present_is_partial_cb.load(std::sync::atomic::Ordering::Relaxed);
-                    let applied_scissor =
-                        cursor_only_scissor
-                            .filter(|_| present_partial)
-                            .map(|d| unsafe {
+                    // `PresentRegion::Full` means the windowing layer could
+                    // not prove a smaller region was safe (or the surface
+                    // doesn't support partial present at all) — the whole
+                    // grid must be redrawn, so we must NOT scissor.
+                    let region = *present_region_cb
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let applied_scissor = match region {
+                        freminal_windowing::PresentRegion::Region(d) => {
+                            unsafe {
                                 gl.enable(glow::SCISSOR_TEST);
                                 gl.scissor(d.x, d.y, d.width, d.height);
-                            });
+                            }
+                            Some(())
+                        }
+                        freminal_windowing::PresentRegion::Full => None,
+                    };
                     renderer.draw_with_cursor_only_update(
                         gl,
                         atlas,

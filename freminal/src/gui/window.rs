@@ -396,17 +396,23 @@ pub(super) struct PerWindowState {
     /// global blink cycle's current half. `None` before the first frame.
     pub(super) previous_active_pane_key: Option<(TabId, crate::gui::panes::PaneId)>,
 
-    /// Authoritative partial-present flag for this window (#435).
+    /// Authoritative published present region for this window (124.18,
+    /// formerly named `present_is_partial` and typed as an `AtomicBool`).
     ///
-    /// The windowing layer stores into this each frame — `true` when it
-    /// skipped the full clear and is presenting only the damage region,
-    /// `false` for a normal full clear + present — **before** the pane paint
-    /// callbacks run. The callbacks read it (a clone is captured into each)
-    /// to gate their scissor optimization, so a pane only scissors its redraw
-    /// when the clear was actually skipped. Shared via `Arc` because the pane
-    /// `PaintCallback` closures require `'static` captures; only ever touched
-    /// on the GUI thread, so `Relaxed` ordering suffices.
-    pub(super) present_is_partial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The windowing layer stores into this each frame, **before** the pane
+    /// paint callbacks run: [`freminal_windowing::PresentRegion::Region`]
+    /// when it skipped the full clear and is presenting only that region,
+    /// or [`freminal_windowing::PresentRegion::Full`] for a normal full
+    /// clear and present. The callbacks read it (a clone is captured into
+    /// each) and scissor to exactly what it says, rather than to a
+    /// narrower rect they compute themselves, so a pane's redraw can never
+    /// disagree with what the windowing layer actually redrew (see
+    /// [`freminal_windowing::PresentRegion`]'s doc for why a bare bool plus
+    /// the app's own rect was unsound). Shared via `Arc<Mutex<_>>` because
+    /// the pane `PaintCallback` closures require `Send + Sync + 'static`
+    /// captures; only ever touched on the GUI thread, so an uncontended
+    /// lock suffices.
+    pub(super) present_region: std::sync::Arc<std::sync::Mutex<freminal_windowing::PresentRegion>>,
 
     /// Chrome-damage decision for the most recent `update()` of this window
     /// (#436.3), drained by `App::take_chrome_damage`.

@@ -360,10 +360,19 @@ impl GlState {
     /// Age of the current back buffer.
     ///
     /// Returns `1` when the back buffer still holds the **previous** frame's
-    /// contents (so a skip-clear + partial redraw is safe), and `0` when the
-    /// buffer is new or its age is unknown (so the whole buffer must be
-    /// redrawn). Values `> 1` mean the buffer holds an older frame and is
-    /// likewise unsafe to treat as "last frame".
+    /// contents (so a skip-clear + partial redraw of just this frame's own
+    /// damage is safe), and `0` when the buffer is new or its age is unknown
+    /// (so the whole buffer must be redrawn — this case is never safe to
+    /// repair). Values `> 1` mean the buffer holds an *older* frame, which is
+    /// **not** the same as unsafe: it is *repairable* by unioning this
+    /// frame's own declared damage with the previous `age - 1` frames'
+    /// (see `frame_paint::DamageHistory`, 124.18). A conventionally
+    /// double-buffered surface reports `2` in steady state — measured on
+    /// real hardware across ~250 queries in 21 flush windows, never `1`,
+    /// never `3` or higher — so treating `> 1` as unconditionally unsafe (an
+    /// earlier revision of this doc did) means partial present never fires
+    /// on any shipped build; only `0` is the unconditional "must redraw
+    /// everything" case.
     ///
     /// On non-EGL backends and platforms without `EGL_EXT_buffer_age` this
     /// returns `0`, which correctly forces the full-frame path.

@@ -19,7 +19,12 @@
 //! those stay the caller's job in
 //! [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame).
 
+use std::collections::VecDeque;
+
+use conv2::ConvUtil;
+
 use crate::gl_context::GlState;
+use crate::{DamageRect, FrameDamage};
 
 /// Whether the surface can present a damaged sub-region at all. A static
 /// per-surface capability, probed once at surface creation
@@ -70,47 +75,264 @@ pub enum PartialPresentDecision {
     /// an Apple platform).
     BlockedBySurface,
     /// The app reported `Partial` with rects and the surface supports
-    /// partial present, but the back buffer does not hold the previous
-    /// frame's contents (`buffer_age() != 1`).
+    /// partial present, but no safe redraw region could be reconstructed
+    /// for the queried buffer age — either the age is `0` (buffer contents
+    /// unknown), or reconstructing it would require more history than
+    /// [`DamageHistory`] retains or has recorded yet (see
+    /// [`DamageHistory::redraw_region`]).
     BlockedByBufferAge {
-        /// The queried buffer age that failed the `== 1` check.
+        /// The queried buffer age that could not be safely reconstructed.
         age: u32,
     },
-    /// Taken: the clear is skipped and only the damaged rects present.
-    Taken,
+    /// Taken: the clear is skipped and only `region` presents.
+    Taken {
+        /// The queried buffer age this decision was taken for (`1` in the
+        /// common single-generation case, `> 1` when [`DamageHistory`]
+        /// reconstructed the redraw region from a stale buffer).
+        age: u32,
+        /// The region every unclipped primitive must be clipped to, and the
+        /// region presented via `swap_buffers_with_damage`. The union of
+        /// this frame's own declared damage with however many previous
+        /// frames' damage the stale buffer requires (bounding-box, not
+        /// multi-rect — see [`DamageHistory::redraw_region`]'s doc for why
+        /// one rect is sufficient for v1).
+        region: DamageRect,
+    },
 }
 
-/// 124.17: decide whether this frame may skip the full clear and present
-/// only its damaged region. Pure and unit-testable — the single source of
-/// truth the `run_frame` call site consumes for both the `partial` value it
-/// has always computed and (feature-gated) the frame-profiling counters
-/// that attribute every frame to exactly one [`PartialPresentDecision`].
+/// Bounded record of the last few *presented* frames' own declared
+/// [`FrameDamage`], used by [`decide_partial_present`] to reconstruct the
+/// redraw region a stale back buffer needs (124.18).
+///
+/// `EGL_EXT_buffer_age`'s `buffer_age() == n` means the back buffer's
+/// contents are those of the frame `n` renders ago. Every pixel outside a
+/// frame's own declared damage is byte-identical to the *previous* frame's
+/// (that is [`FrameDamage::Partial`]'s whole contract), so the union of the
+/// last `n` frames' own declared damage (this frame's, plus the previous
+/// `n - 1`) is exactly the set of pixels that differ between the stale
+/// buffer's contents and the frame about to be presented. A stored
+/// [`FrameDamage::Full`] entry contributes "the whole surface changed" to
+/// that union, since a full frame's own declared damage is, definitionally,
+/// everything.
+///
+/// Retains [`Self::MAX_DEPTH`] entries, most-recent-last. `age` values
+/// needing more history than that (or more than has been recorded since
+/// the window/harness was created) are not reconstructable — see
+/// [`Self::redraw_region`]'s doc for the resulting `None`.
+#[derive(Debug, Default)]
+pub struct DamageHistory {
+    entries: VecDeque<FrameDamage>,
+}
+
+impl DamageHistory {
+    /// How many past frames' own damage this history retains before
+    /// evicting the oldest. 124.17's GPU re-take measured a conventionally
+    /// double-buffered surface reporting `buffer_age() == 2` in steady
+    /// state (never `1`, never `3` or higher, across ~250 queries in 21
+    /// flush windows) — retaining 3 leaves headroom for one extra stale
+    /// generation (e.g. triple buffering, or a transient stall) before
+    /// falling back to a full frame.
+    pub const MAX_DEPTH: usize = 3;
+
+    /// A fresh, empty history — every window or test harness driver starts
+    /// with none recorded.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record `damage` as the most recently presented frame's own declared
+    /// damage, evicting the oldest entry once more than [`Self::MAX_DEPTH`]
+    /// are held. Call exactly once per frame, regardless of what
+    /// [`PartialPresentDecision`] that frame reached — every frame's own
+    /// damage is needed to reconstruct a LATER frame's union, even one that
+    /// itself fell back to a full present.
+    pub fn push(&mut self, damage: FrameDamage) {
+        self.entries.push_back(damage);
+        while self.entries.len() > Self::MAX_DEPTH {
+            self.entries.pop_front();
+        }
+    }
+
+    /// The redraw region required to safely treat a back buffer that is
+    /// `age` frames stale as up to date, given `current`'s own declared
+    /// damage for the frame about to present. `size_px` materialises a
+    /// whole-surface [`DamageRect`] for any [`FrameDamage::Full`] entry
+    /// folded into the union (this frame's own or a historical one).
+    ///
+    /// Returns `None` — the caller falls back to a full frame, unchanged
+    /// from the pre-124.18 gate — when:
+    /// - `age == 0`: the buffer's contents are unknown, never reconstructable.
+    /// - `age` requires more of the previous `age - 1` frames than
+    ///   [`Self::MAX_DEPTH`] retains, or than have been recorded yet (e.g.
+    ///   the first few frames after window creation).
+    #[must_use]
+    pub fn redraw_region(
+        &self,
+        current: &FrameDamage,
+        age: u32,
+        size_px: [u32; 2],
+    ) -> Option<DamageRect> {
+        if age == 0 {
+            return None;
+        }
+        // `age == 1` needs zero previous frames (just this one's own
+        // damage); `age == n` needs the previous `n - 1`.
+        let needed: usize = age.checked_sub(1)?.value_as().ok()?;
+        if needed > Self::MAX_DEPTH || needed > self.entries.len() {
+            return None;
+        }
+        let mut union = damage_bbox(current, size_px)?;
+        // `entries` is most-recent-last; the previous `needed` frames are
+        // the last `needed` entries, walked newest-first (order does not
+        // matter for a commutative union, but this reads as "closest
+        // history first").
+        for entry in self.entries.iter().rev().take(needed) {
+            if let Some(bbox) = damage_bbox(entry, size_px) {
+                union = union_rect(union, bbox);
+            }
+        }
+        Some(union)
+    }
+}
+
+#[cfg(test)]
+impl DamageHistory {
+    /// Test-only: number of entries currently retained. Lets a test assert
+    /// the eviction cap directly, independent of [`Self::redraw_region`]'s
+    /// own `needed > Self::MAX_DEPTH` bound (which limits how far back a
+    /// query looks regardless of how many entries are actually stored, and
+    /// so cannot by itself distinguish "eviction works" from "eviction is a
+    /// no-op but nothing ever asks past `MAX_DEPTH` anyway").
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// The bounding box a [`FrameDamage`] contributes to a union: the whole
+/// surface for [`FrameDamage::Full`], the bounding box of the rects for
+/// [`FrameDamage::Partial`] (`None` for an empty rect list — an
+/// empty-`Partial` frame changed nothing, so it must not force a wider
+/// union than its neighbours warrant).
+fn damage_bbox(damage: &FrameDamage, size_px: [u32; 2]) -> Option<DamageRect> {
+    match damage {
+        FrameDamage::Full => whole_surface_rect(size_px),
+        FrameDamage::Partial(rects) => bbox_of_rects(rects),
+    }
+}
+
+/// A [`DamageRect`] covering the entire surface at `size_px`, or `None` if
+/// the physical size cannot be represented losslessly as `i32` (never
+/// expected for a real window/framebuffer, but this module never panics
+/// production code on a conversion — see `freminal-numeric-conversions`).
+fn whole_surface_rect(size_px: [u32; 2]) -> Option<DamageRect> {
+    let width: i32 = size_px[0].value_as().ok()?;
+    let height: i32 = size_px[1].value_as().ok()?;
+    Some(DamageRect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    })
+}
+
+/// The bounding box of `rects`, or `None` if `rects` is empty.
+fn bbox_of_rects(rects: &[DamageRect]) -> Option<DamageRect> {
+    rects.iter().copied().reduce(union_rect)
+}
+
+/// The smallest [`DamageRect`] containing both `a` and `b`.
+fn union_rect(a: DamageRect, b: DamageRect) -> DamageRect {
+    let min_x = a.x.min(b.x);
+    let min_y = a.y.min(b.y);
+    let max_x = (a.x + a.width).max(b.x + b.width);
+    let max_y = (a.y + a.height).max(b.y + b.height);
+    DamageRect {
+        x: min_x,
+        y: min_y,
+        width: max_x - min_x,
+        height: max_y - min_y,
+    }
+}
+
+/// Convert a [`DamageRect`] (physical framebuffer pixels, bottom-left
+/// origin) to an [`egui::Rect`] (logical points, top-left origin), for
+/// intersecting against a [`egui::ClippedPrimitive::clip_rect`] (124.18).
+///
+/// `surface_height_px` is needed for the vertical flip: `DamageRect`
+/// measures `y` up from the bottom, `egui::Rect` measures down from the
+/// top. Returns `None` if any dimension cannot be losslessly converted to
+/// `f32` — never expected for a real window, but this module never panics
+/// production code on a conversion.
+fn damage_rect_to_egui_rect(
+    region: DamageRect,
+    pixels_per_point: f32,
+    surface_height_px: u32,
+) -> Option<egui::Rect> {
+    let ppp = if pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    };
+    let height_px: f32 = surface_height_px.approx_as().ok()?;
+    let x: f32 = region.x.approx_as().ok()?;
+    let y: f32 = region.y.approx_as().ok()?;
+    let width: f32 = region.width.approx_as().ok()?;
+    let height: f32 = region.height.approx_as().ok()?;
+
+    let min_x = x / ppp;
+    let max_x = (x + width) / ppp;
+    // Flip: `DamageRect`'s `y` is measured up from the bottom; egui's
+    // `Rect` is measured down from the top.
+    let top_px = height_px - (y + height);
+    let bottom_px = height_px - y;
+    let min_y = top_px / ppp;
+    let max_y = bottom_px / ppp;
+
+    Some(egui::Rect::from_min_max(
+        egui::Pos2::new(min_x, min_y),
+        egui::Pos2::new(max_x, max_y),
+    ))
+}
+
+/// 124.17/124.18: decide whether this frame may skip the full clear and
+/// present only a redraw region reconstructed from `history` plus this
+/// frame's own damage. Pure and unit-testable — the single source of truth
+/// the `run_frame` call site consumes for both the `partial` value it has
+/// always computed and (feature-gated) the frame-profiling counters that
+/// attribute every frame to exactly one [`PartialPresentDecision`].
 ///
 /// `buffer_age` is taken **lazily** (`impl FnOnce() -> u32`, not `u32`):
-/// today's gate short-circuits, so the EGL buffer-age query is never issued
-/// on a `Full` frame, an empty-rect `Partial` frame, or a `Partial` frame
-/// the surface cannot present a sub-region for. Taking it eagerly would add
-/// a per-frame driver round trip to every frame in the program — a
-/// behaviour change inside the very path this function only measures.
+/// the gate short-circuits, so the EGL buffer-age query is never issued on
+/// a `Full` frame, an empty-rect `Partial` frame, or a `Partial` frame the
+/// surface cannot present a sub-region for. Taking it eagerly would add a
+/// per-frame driver round trip to every frame in the program — a behaviour
+/// change inside the very path this function only measures.
+///
+/// Does NOT record `frame_damage` into `history` — the caller does that
+/// (see [`DamageHistory::push`]'s doc for why: this frame's own damage must
+/// still be visible to a LATER frame's reconstruction even when this
+/// frame's own decision fell back to a full present).
 pub fn decide_partial_present(
-    frame_damage: &crate::FrameDamage,
+    frame_damage: &FrameDamage,
     support: PartialPresentSupport,
+    history: &DamageHistory,
+    size_px: [u32; 2],
     buffer_age: impl FnOnce() -> u32,
 ) -> PartialPresentDecision {
     match frame_damage {
-        crate::FrameDamage::Full => PartialPresentDecision::NotRequested,
-        crate::FrameDamage::Partial(rects) => {
+        FrameDamage::Full => PartialPresentDecision::NotRequested,
+        FrameDamage::Partial(rects) => {
             if rects.is_empty() {
                 PartialPresentDecision::RequestedWithNoRects
             } else if support == PartialPresentSupport::Unsupported {
                 PartialPresentDecision::BlockedBySurface
             } else {
                 let age = buffer_age();
-                if age == 1 {
-                    PartialPresentDecision::Taken
-                } else {
-                    PartialPresentDecision::BlockedByBufferAge { age }
-                }
+                history.redraw_region(frame_damage, age, size_px).map_or(
+                    PartialPresentDecision::BlockedByBufferAge { age },
+                    |region| PartialPresentDecision::Taken { age, region },
+                )
             }
         }
     }
@@ -135,8 +357,8 @@ pub trait FrameSurface {
     fn partial_present_support(&self) -> PartialPresentSupport;
 
     /// Age of the current back buffer. See `GlState::buffer_age`'s doc for
-    /// the exact meaning of the returned value (`1` == "safe to treat as
-    /// last frame").
+    /// the exact meaning of the returned value (`0` == unusable; `n >= 1`
+    /// == reconstructable via [`DamageHistory`]).
     ///
     /// Deliberately NOT named `buffer_age`, to avoid colliding with
     /// `GlState`'s inherent method of that name — see [`Self::clear_to`].
@@ -195,10 +417,18 @@ pub struct PaintFrameRequest<'a> {
     pub raw_input: egui::RawInput,
     /// GL clear color for this window.
     pub clear_color: [f32; 4],
-    /// Shared flag through which the authoritative partial-present decision
+    /// Shared cell through which the authoritative [`crate::PresentRegion`]
     /// is published for this frame, mirroring
     /// `crate::App::present_partial_flag`.
-    pub present_flag: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub present_flag: Option<&'a std::sync::Arc<std::sync::Mutex<crate::PresentRegion>>>,
+    /// This window's (or test harness driver's) record of recent frames'
+    /// own declared damage, consumed and updated by [`paint_frame`] to
+    /// reconstruct the redraw region a stale back buffer needs — see
+    /// [`DamageHistory`] (124.18). Owned by the caller (`EguiState` in
+    /// production, `HarnessDriver` in the offscreen test harness) because
+    /// it must persist across frames, which this deliberately window-free,
+    /// per-frame function cannot do itself.
+    pub damage_history: &'a mut DamageHistory,
 }
 
 /// Frame-profiling-only phase timings and repaint-cause data collected by
@@ -238,9 +468,12 @@ pub struct PaintFrameOutput {
     /// `.get(&egui::ViewportId::ROOT)` out of this exactly as it read it out
     /// of `full_output.viewport_output` before this extraction.
     pub viewport_output: egui::OrderedViewportIdMap<egui::ViewportOutput>,
-    /// The damaged rects to present, if the skip-clear + partial-present
-    /// path was taken this frame.
-    pub partial: Option<Vec<crate::DamageRect>>,
+    /// The region to present, if the skip-clear + partial-present path was
+    /// taken this frame. A single bounding box (see
+    /// [`DamageHistory::redraw_region`]'s doc for why one rect is
+    /// sufficient for v1) — the same region every unclipped primitive was
+    /// clipped to before painting.
+    pub partial: Option<DamageRect>,
     /// Why this frame did or did not take the skip-clear + partial-present
     /// path.
     ///
@@ -264,6 +497,85 @@ pub struct PaintFrameOutput {
     /// Frame-profiling-only phase timings — see [`PaintFrameProfiling`].
     #[cfg(feature = "frame-profiling")]
     pub profiling: PaintFrameProfiling,
+}
+
+/// Everything [`paint_frame`] needs from the 124.17/124.18 skip-clear +
+/// partial-present gate for one frame: the decision itself, the single
+/// redraw-region bounding box to present (`None` if the full path was
+/// taken), and that region already converted to an egui clip rect
+/// (`None` alongside `partial: None`, or if the conversion failed).
+///
+/// Extracted out of [`paint_frame`] purely to keep that function under
+/// clippy's `too_many_lines` threshold, per `freminal-extend-or-extract` —
+/// not because this logic is reusable elsewhere.
+struct ResolvedPartialPresent {
+    /// Only read by [`Self::reported_decision`], which is `cfg`-gated
+    /// identically -- so this field is too, rather than existing unread
+    /// (and warning as dead code) in a default build.
+    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+    decision: PartialPresentDecision,
+    partial: Option<DamageRect>,
+    redraw_clip: Option<egui::Rect>,
+}
+
+impl ResolvedPartialPresent {
+    /// Resolve the gate for one frame, recording `frame_damage` into
+    /// `history` as a side effect (see [`DamageHistory::push`]'s doc for
+    /// why that happens regardless of what this frame's own decision came
+    /// out to).
+    fn resolve<S: FrameSurface>(
+        surface: &S,
+        frame_damage: FrameDamage,
+        history: &mut DamageHistory,
+        size_px: [u32; 2],
+        pixels_per_point: f32,
+    ) -> Self {
+        let decision = decide_partial_present(
+            &frame_damage,
+            surface.partial_present_support(),
+            history,
+            size_px,
+            || surface.back_buffer_age(),
+        );
+        history.push(frame_damage);
+
+        // `partial` and `redraw_clip` are downgraded to `None` together if
+        // the region can't be converted to an egui clip rect: painting
+        // unclipped chrome while having already decided to skip the clear
+        // is exactly the defect this subtask fixes, so there is no safe
+        // way to have one without the other.
+        let region_from_decision = match decision {
+            PartialPresentDecision::Taken { region, .. } => Some(region),
+            _ => None,
+        };
+        let redraw_clip = region_from_decision
+            .and_then(|region| damage_rect_to_egui_rect(region, pixels_per_point, size_px[1]));
+        let partial = redraw_clip.and(region_from_decision);
+
+        Self {
+            #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+            decision,
+            partial,
+            redraw_clip,
+        }
+    }
+
+    /// The decision to actually report to callers (frame-profiling
+    /// counters, the offscreen harness): stays truthful about what
+    /// happened even when [`Self::resolve`] downgraded `partial` back to
+    /// `None` after a clip-conversion failure -- a `Taken` decision would
+    /// be a lie in that case, since this frame took the full-clear path
+    /// exactly as if `redraw_region` itself had returned `None`.
+    #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
+    const fn reported_decision(&self) -> PartialPresentDecision {
+        if self.partial.is_some() {
+            self.decision
+        } else if let PartialPresentDecision::Taken { age, .. } = self.decision {
+            PartialPresentDecision::BlockedByBufferAge { age }
+        } else {
+            self.decision
+        }
+    }
 }
 
 /// Paint one egui frame into `surface`.
@@ -292,6 +604,7 @@ where
         raw_input,
         clear_color,
         present_flag,
+        damage_history,
     } = request;
     let mut ui_fn = ui_fn;
 
@@ -390,50 +703,82 @@ where
 
     // The band is tessellated from this frame's own shapes -- the
     // terminal band is rebuilt every frame.
-    let band_primitives = ctx.tessellate(band_shapes, pixels_per_point);
+    let mut band_primitives = ctx.tessellate(band_shapes, pixels_per_point);
 
     // Head/tail: re-tessellated from this frame's own shapes every
     // frame.
     let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
     let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
-    let head_primitives = ctx.tessellate(head_shapes, pixels_per_point);
-    let tail_primitives = ctx.tessellate(tail_shapes, pixels_per_point);
+    let mut head_primitives = ctx.tessellate(head_shapes, pixels_per_point);
+    let mut tail_primitives = ctx.tessellate(tail_shapes, pixels_per_point);
     #[cfg(feature = "frame-profiling")]
     let tessellate_elapsed = tessellate_start.elapsed();
 
-    // Decide whether this frame may skip the full clear and present only
-    // its damaged region. This is a two-part gate:
+    // Decide whether this frame may skip the full clear and present only a
+    // reconstructed redraw region. This is a two-part gate:
     //   1. The app reports the frame as `Partial` (only the listed rects
     //      changed; everything else is identical to the previous frame).
-    //   2. The back buffer still holds the previous frame's contents
-    //      (`buffer_age() == 1`), and the surface can present a sub-region.
+    //   2. `DamageHistory` can reconstruct a safe redraw region for the
+    //      queried buffer age (see [`DamageHistory::redraw_region`]), and
+    //      the surface can present a sub-region.
     // If either fails we fall back to the always-correct full path:
     // clear + full paint + full swap.
     //
-    // 124.17: the gate itself lives in `decide_partial_present` (pure,
-    // unit-tested) so it can be measured without changing what `partial`
-    // evaluates to — see that function's doc for why `buffer_age` stays
-    // a lazy closure here rather than a plain `u32`.
-    let partial_present_decision =
-        decide_partial_present(&frame_damage, surface.partial_present_support(), || {
-            surface.back_buffer_age()
-        });
-    let partial = match (frame_damage, partial_present_decision) {
-        (crate::FrameDamage::Partial(rects), PartialPresentDecision::Taken) => Some(rects),
-        _ => None,
-    };
+    // 124.17/124.18: the gate itself lives in `decide_partial_present`
+    // (pure, unit-tested), and its resolution into a redraw
+    // region/clip-rect pair lives in `ResolvedPartialPresent::resolve`
+    // (extracted solely to keep this function under clippy's
+    // `too_many_lines` threshold) -- see that function's doc for why
+    // `buffer_age` stays a lazy closure here rather than a plain `u32`.
+    let resolved = ResolvedPartialPresent::resolve(
+        surface,
+        frame_damage,
+        damage_history,
+        size_px,
+        pixels_per_point,
+    );
+    let partial = resolved.partial;
+    let redraw_clip = resolved.redraw_clip;
 
     if partial.is_none() {
         surface.clear_to(clear_color);
     }
 
-    // Publish the authoritative decision BEFORE the paint callbacks run
+    // 124.18: a partial present means only `redraw_clip`'s pixels may
+    // change, so every unclipped primitive -- head, band, and tail alike --
+    // must be clipped to it, or the always-opaque `CentralPanel` fill
+    // (painted in "head" every frame regardless of declared damage) erases
+    // everything outside it. Intersecting each primitive's own `clip_rect`
+    // is sufficient: a `Primitive::Callback`'s `clip_rect` becomes the GL
+    // scissor `egui_glow::Painter::paint_primitives` sets before invoking
+    // the callback, and `set_clip_rect` clamps `max` to `>= min` (verified
+    // against egui_glow 0.36.1), so a primitive fully outside the region
+    // scissors to zero area and draws nothing -- no separate zero-size
+    // check needed here.
+    if let Some(clip) = redraw_clip {
+        for primitives in [
+            &mut head_primitives,
+            &mut band_primitives,
+            &mut tail_primitives,
+        ] {
+            for clipped in primitives.iter_mut() {
+                clipped.clip_rect = clipped.clip_rect.intersect(clip);
+            }
+        }
+    }
+
+    // Publish the authoritative region BEFORE the paint callbacks run
     // (they execute inside the `paint_primitives` calls below), so any
-    // callback that scissors to the damage region gates on the same
-    // value that decided whether the clear was skipped. Same-thread store
-    // immediately before the reads -> `Relaxed` is sufficient.
+    // callback that scissors to the damage region reads the same value
+    // that decided whether the clear was skipped and whether the egui
+    // primitives were clipped. Same-thread lock immediately before the
+    // reads -> an uncontended `Mutex` is sufficient, no atomics needed.
     if let Some(flag) = present_flag {
-        flag.store(partial.is_some(), std::sync::atomic::Ordering::Relaxed);
+        let region = partial.map_or(crate::PresentRegion::Full, crate::PresentRegion::Region);
+        let mut guard = flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = region;
     }
 
     // Paint: set all textures, then three `paint_primitives` calls in
@@ -487,7 +832,7 @@ where
         viewport_output: full_output.viewport_output,
         partial,
         #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
-        decision: partial_present_decision,
+        decision: resolved.reported_decision(),
         terminal_requested_delay,
         #[cfg(feature = "frame-profiling")]
         profiling: PaintFrameProfiling {
@@ -501,8 +846,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{PartialPresentDecision, PartialPresentSupport, decide_partial_present};
+    use super::{
+        DamageHistory, PartialPresentDecision, PartialPresentSupport, decide_partial_present,
+    };
     use crate::{DamageRect, FrameDamage};
+
+    /// Surface size shared by every test in this module -- arbitrary but
+    /// fixed, so a `FrameDamage::Full` history entry's whole-surface
+    /// contribution is a known, exact value.
+    const SIZE_PX: [u32; 2] = [640, 480];
 
     fn a_rect() -> DamageRect {
         DamageRect {
@@ -513,20 +865,38 @@ mod tests {
         }
     }
 
+    /// A 10x10 rect at `x`, `y == 0` -- used to build non-overlapping rects
+    /// at known offsets so a union's exact bounding box is easy to predict.
+    fn rect_at(x: i32) -> DamageRect {
+        DamageRect {
+            x,
+            y: 0,
+            width: 10,
+            height: 10,
+        }
+    }
+
     #[test]
     fn not_requested_on_full_damage_and_never_queries_buffer_age() {
-        let decision =
-            decide_partial_present(&FrameDamage::Full, PartialPresentSupport::Supported, || {
-                panic!("buffer_age() must not be queried on a Full frame")
-            });
+        let history = DamageHistory::new();
+        let decision = decide_partial_present(
+            &FrameDamage::Full,
+            PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
+            || panic!("buffer_age() must not be queried on a Full frame"),
+        );
         assert_eq!(decision, PartialPresentDecision::NotRequested);
     }
 
     #[test]
     fn requested_with_no_rects_on_empty_partial_and_never_queries_buffer_age() {
+        let history = DamageHistory::new();
         let decision = decide_partial_present(
             &FrameDamage::Partial(Vec::new()),
             PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
             || panic!("buffer_age() must not be queried when the rect list is empty"),
         );
         assert_eq!(decision, PartialPresentDecision::RequestedWithNoRects);
@@ -534,19 +904,27 @@ mod tests {
 
     #[test]
     fn blocked_by_surface_when_unsupported_and_never_queries_buffer_age() {
+        let history = DamageHistory::new();
         let decision = decide_partial_present(
             &FrameDamage::Partial(vec![a_rect()]),
             PartialPresentSupport::Unsupported,
+            &history,
+            SIZE_PX,
             || panic!("buffer_age() must not be queried when the surface can't present partially"),
         );
         assert_eq!(decision, PartialPresentDecision::BlockedBySurface);
     }
 
     #[test]
-    fn blocked_by_buffer_age_when_age_is_not_one() {
+    fn blocked_by_buffer_age_when_history_cannot_reconstruct_the_age() {
+        // Age 2 needs one previous frame's damage; an empty history (e.g.
+        // one of the first frames after window creation) has none yet.
+        let history = DamageHistory::new();
         let decision = decide_partial_present(
             &FrameDamage::Partial(vec![a_rect()]),
             PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
             || 2,
         );
         assert_eq!(
@@ -557,10 +935,15 @@ mod tests {
 
     #[test]
     fn blocked_by_buffer_age_when_age_is_zero() {
-        // Age 0 means "new or unknown" -- must NOT be treated as age 1.
+        // Age 0 means "new or unknown" -- must NOT be reconstructable no
+        // matter how much history is available.
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
         let decision = decide_partial_present(
             &FrameDamage::Partial(vec![a_rect()]),
             PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
             || 0,
         );
         assert_eq!(
@@ -572,46 +955,95 @@ mod tests {
     #[test]
     fn taken_requires_all_three_conditions_together() {
         // All three hold: nonempty rects, surface supports partial present,
-        // buffer age == 1.
+        // buffer age == 1 (needs no history at all).
+        let history = DamageHistory::new();
         let taken = decide_partial_present(
             &FrameDamage::Partial(vec![a_rect()]),
             PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
             || 1,
         );
-        assert_eq!(taken, PartialPresentDecision::Taken);
+        assert_eq!(
+            taken,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: a_rect()
+            }
+        );
 
         // Drop each condition in turn -- each alone must prevent `Taken`.
-        assert_ne!(
-            decide_partial_present(&FrameDamage::Full, PartialPresentSupport::Supported, || 1),
-            PartialPresentDecision::Taken,
-            "Full damage alone must block Taken"
-        );
-        assert_ne!(
+        assert!(!matches!(
+            decide_partial_present(
+                &FrameDamage::Full,
+                PartialPresentSupport::Supported,
+                &history,
+                SIZE_PX,
+                || 1
+            ),
+            PartialPresentDecision::Taken { .. }
+        ));
+        assert!(!matches!(
             decide_partial_present(
                 &FrameDamage::Partial(Vec::new()),
                 PartialPresentSupport::Supported,
+                &history,
+                SIZE_PX,
                 || 1
             ),
-            PartialPresentDecision::Taken,
-            "an empty rect list alone must block Taken"
-        );
-        assert_ne!(
+            PartialPresentDecision::Taken { .. }
+        ));
+        assert!(!matches!(
             decide_partial_present(
                 &FrameDamage::Partial(vec![a_rect()]),
                 PartialPresentSupport::Unsupported,
+                &history,
+                SIZE_PX,
                 || 1
             ),
-            PartialPresentDecision::Taken,
-            "an unsupported surface alone must block Taken"
-        );
-        assert_ne!(
-            decide_partial_present(
-                &FrameDamage::Partial(vec![a_rect()]),
-                PartialPresentSupport::Supported,
-                || 2
+            PartialPresentDecision::Taken { .. }
+        ));
+        assert!(
+            !matches!(
+                decide_partial_present(
+                    &FrameDamage::Partial(vec![a_rect()]),
+                    PartialPresentSupport::Supported,
+                    &history,
+                    SIZE_PX,
+                    || 2
+                ),
+                PartialPresentDecision::Taken { .. }
             ),
-            PartialPresentDecision::Taken,
-            "a buffer age other than 1 alone must block Taken"
+            "an unreconstructable age (2, with no history to draw on) alone must block Taken"
+        );
+    }
+
+    #[test]
+    fn taken_at_age_two_unions_with_the_immediately_previous_frame() {
+        // The common real-hardware case (124.17's GPU re-take): a
+        // conventionally double-buffered surface reports `buffer_age() ==
+        // 2` in steady state. With one frame of history, this must now be
+        // `Taken`, not blocked.
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        let decision = decide_partial_present(
+            &FrameDamage::Partial(vec![rect_at(0)]),
+            PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
+            || 2,
+        );
+        assert_eq!(
+            decision,
+            PartialPresentDecision::Taken {
+                age: 2,
+                region: DamageRect {
+                    x: 0,
+                    y: 0,
+                    width: 30,
+                    height: 10,
+                },
+            }
         );
     }
 
@@ -624,6 +1056,146 @@ mod tests {
         assert_eq!(
             PartialPresentSupport::from(false),
             PartialPresentSupport::Unsupported
+        );
+    }
+
+    // ── `DamageHistory::redraw_region` (124.18) ──────────────────────────
+    //
+    // Pure arithmetic, no GL needed. Covers `age` 0, 1, 2, 3 (== `MAX_DEPTH`),
+    // exactly at the retained depth, and deeper than it -- per the plan's
+    // mandate that this arithmetic is fully unit-testable on its own.
+
+    #[test]
+    fn redraw_region_is_none_for_age_zero_regardless_of_history() {
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(history.redraw_region(&current, 0, SIZE_PX), None);
+
+        // Also true of a completely empty history.
+        let empty = DamageHistory::new();
+        assert_eq!(empty.redraw_region(&current, 0, SIZE_PX), None);
+    }
+
+    #[test]
+    fn redraw_region_at_age_one_uses_only_current_damage_ignoring_history() {
+        // `age == 1` needs zero previous frames. A decoy history entry far
+        // from `current` must NOT widen the result -- if it did, this
+        // would come back covering `rect_at(100)` too.
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(100)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(history.redraw_region(&current, 1, SIZE_PX), Some(a_rect()));
+    }
+
+    #[test]
+    fn redraw_region_at_age_two_unions_current_with_one_previous_frame() {
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(
+            history.redraw_region(&current, 2, SIZE_PX),
+            Some(DamageRect {
+                x: 0,
+                y: 0,
+                width: 30,
+                height: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn redraw_region_at_age_three_unions_current_with_two_previous_frames() {
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        history.push(FrameDamage::Partial(vec![rect_at(40)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(
+            history.redraw_region(&current, 3, SIZE_PX),
+            Some(DamageRect {
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn redraw_region_at_exactly_the_retained_depth_unions_every_entry() {
+        // `age == MAX_DEPTH + 1` needs `MAX_DEPTH` previous frames -- the
+        // deepest reconstructable case.
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        history.push(FrameDamage::Partial(vec![rect_at(40)]));
+        history.push(FrameDamage::Partial(vec![rect_at(60)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        let age = u32::try_from(DamageHistory::MAX_DEPTH + 1).unwrap_or(u32::MAX);
+        assert_eq!(
+            history.redraw_region(&current, age, SIZE_PX),
+            Some(DamageRect {
+                x: 0,
+                y: 0,
+                width: 70,
+                height: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn redraw_region_is_none_when_age_needs_more_than_the_retained_depth() {
+        // `age == MAX_DEPTH + 2` needs `MAX_DEPTH + 1` previous frames --
+        // one more than `DamageHistory` ever retains, regardless of how
+        // many entries happen to be stored.
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Partial(vec![rect_at(20)]));
+        history.push(FrameDamage::Partial(vec![rect_at(40)]));
+        history.push(FrameDamage::Partial(vec![rect_at(60)]));
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        let age = u32::try_from(DamageHistory::MAX_DEPTH + 2).unwrap_or(u32::MAX);
+        assert_eq!(history.redraw_region(&current, age, SIZE_PX), None);
+    }
+
+    #[test]
+    fn redraw_region_is_none_when_history_has_not_recorded_enough_frames_yet() {
+        // `age == 2` needs one previous frame -- distinct from the
+        // "deeper than MAX_DEPTH" case above: this is well within the
+        // retained depth, but nothing has been recorded yet (e.g. one of
+        // the first frames after window creation).
+        let history = DamageHistory::new();
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(history.redraw_region(&current, 2, SIZE_PX), None);
+    }
+
+    #[test]
+    fn redraw_region_folds_a_full_history_entry_into_a_whole_surface_union() {
+        let mut history = DamageHistory::new();
+        history.push(FrameDamage::Full);
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(
+            history.redraw_region(&current, 2, SIZE_PX),
+            Some(DamageRect {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            })
+        );
+    }
+
+    #[test]
+    fn push_evicts_the_oldest_entry_beyond_max_depth() {
+        let mut history = DamageHistory::new();
+        for i in 0..DamageHistory::MAX_DEPTH {
+            let x = i32::try_from(i).unwrap_or(0) * 20;
+            history.push(FrameDamage::Partial(vec![rect_at(x)]));
+        }
+        assert_eq!(history.len(), DamageHistory::MAX_DEPTH);
+        history.push(FrameDamage::Partial(vec![rect_at(1000)]));
+        assert_eq!(
+            history.len(),
+            DamageHistory::MAX_DEPTH,
+            "pushing beyond MAX_DEPTH must evict the oldest entry, not grow unbounded"
         );
     }
 }

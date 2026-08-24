@@ -15,7 +15,7 @@ use winit::window::Window;
 use crate::error::Error;
 #[cfg(feature = "frame-profiling")]
 use crate::frame_paint::PartialPresentDecision;
-use crate::frame_paint::{PaintFrameRequest, paint_frame};
+use crate::frame_paint::{DamageHistory, PaintFrameRequest, paint_frame};
 use crate::gl_context::GlState;
 use crate::modifier_tracker::ModifierTracker;
 
@@ -51,6 +51,10 @@ pub struct EguiState {
     /// on [`FrameProfile`] itself.
     #[cfg(feature = "frame-profiling")]
     frame_profile: FrameProfile,
+    /// This window's record of recent frames' own declared damage, used by
+    /// [`paint_frame`] to reconstruct the redraw region a stale back
+    /// buffer needs (124.18). See [`DamageHistory`]'s doc.
+    damage_history: DamageHistory,
 }
 
 /// Task 121 frame-profiling harness (feature-gated only -- see the
@@ -391,6 +395,7 @@ impl EguiState {
             modifier_tracker: ModifierTracker::default(),
             #[cfg(feature = "frame-profiling")]
             frame_profile: FrameProfile::default(),
+            damage_history: DamageHistory::new(),
         })
     }
 
@@ -461,7 +466,7 @@ impl EguiState {
         gl_state: &GlState,
         clear_color: [f32; 4],
         raw_input: egui::RawInput,
-        present_flag: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        present_flag: Option<&std::sync::Arc<std::sync::Mutex<crate::PresentRegion>>>,
         ui_fn: F,
     ) -> FrameOutput
     where
@@ -487,6 +492,7 @@ impl EguiState {
                 raw_input,
                 clear_color,
                 present_flag,
+                damage_history: &mut self.damage_history,
             },
             ui_fn,
         );
@@ -501,7 +507,7 @@ impl EguiState {
         let swap_start = std::time::Instant::now();
         let swap_result = paint_output.partial.as_ref().map_or_else(
             || gl_state.swap_buffers(),
-            |rects| gl_state.swap_buffers_with_damage(rects),
+            |region| gl_state.swap_buffers_with_damage(std::slice::from_ref(region)),
         );
         #[cfg(feature = "frame-profiling")]
         let swap_elapsed = swap_start.elapsed();
@@ -556,10 +562,15 @@ impl EguiState {
                     .saturating_add(1);
                 self.frame_profile.record_buffer_age(age);
             }
-            PartialPresentDecision::Taken => {
+            PartialPresentDecision::Taken { age, .. } => {
                 self.frame_profile.present_partial_taken =
                     self.frame_profile.present_partial_taken.saturating_add(1);
-                self.frame_profile.record_buffer_age(1);
+                // 124.18: record the REAL queried age (previously always
+                // `1`, back when `Taken` was only reachable at `age == 1`)
+                // -- the histogram exists precisely to show the actual
+                // hardware distribution, which 124.17's GPU re-take found
+                // is overwhelmingly `2`, not `1`.
+                self.frame_profile.record_buffer_age(age);
             }
         }
 
