@@ -171,7 +171,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
-| 124.23 | The full-draw paint arm ignores the published present region | Ready — **blocks all of 124.14**; reachable today at `bg_opacity < 1.0` |
+| 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2386,7 +2386,8 @@ the emulator crate. No experiment was run — the audit was read-only.
 
 ### 124.23 — The full-draw paint arm ignores the published present region
 
-**Blocks 124.14a, b, c and d — all four spend this path.** *Added
+**Complete (2026-08-24), commit `fab22611`. 124.14a, b, c and d are now
+unblocked.** *Added
 2026-08-24 by 124.14a's activation recon. Maintainer chose design (a),
 scissor the draw, on 2026-08-24.*
 
@@ -2497,6 +2498,44 @@ Do NOT add `PaneFrameDamage::Region` or touch `VertexRebuild` — that is
 124.14a and this entry exists so it can be built safely. Do NOT change
 `decide_frame_damage`. Do NOT touch the vertex layout or `upload_verts`. Do
 NOT widen the published region (that is design (b), declined).
+
+#### 124.23 implementation notes (2026-08-24)
+
+Landed as specified. Both arms share one `PresentRegion` read and one
+`draw_scissored_to_present_region` helper, so they cannot drift apart again
+— which was the actual failure mode, not the missing scissor per se.
+
+**Two residual gaps, recorded because neither is closed and both bear on
+124.14a's risk.**
+
+**(1) The blend-against-stale reproduction was not written, and cannot be
+in this harness.** Verified rather than assumed: neither `draw_with_verts`
+nor `HeadlessRenderer` issues a `glClear` anywhere, because the clear the
+defect skips belongs to the windowing layer — so there is no
+clear-happened-versus-clear-skipped distinction the app-level pixel harness
+can even pose. Independently, `headless.rs:334` passes a hardcoded `1.0`
+for `bg_opacity`, and the reproduction needs `< 1.0`. Both files were out
+of scope. So the *live* defect this entry fixes is pinned by reading and by
+the mechanism test, not by a reproduction. Closing that gap needs an
+instrument that spans egui, the app callback and the windowing clear at
+once — which is the same Phase 3-shaped gap 124.19 opened and did not
+fully close.
+
+**(2) The two pixel tests pin the mechanism, not the wiring.** They prove a
+scissored draw writes nothing outside its rect, and that the rect
+convention (physical pixels, bottom-left origin) is right. Nothing here
+drives the app's paint callback — the Phase 3 harness lives in
+`freminal-windowing` and cannot reach it — so "the full-draw arm actually
+scissors" rests on the structure being obviously right (one read, one
+helper, two call sites) rather than on a test. Stated so the coverage is
+not later read as larger than it was.
+
+**Why the `Full` no-op property has no direct test.** `PresentRegion::Full`
+makes the helper touch no GL state at all, so there is nothing observable
+to compare. The surviving test
+(`a_full_viewport_scissor_box_clips_nothing`) pins the *convention*
+instead, and its doc comment says so explicitly — an earlier draft
+justified it as the `Full` arm's no-op property, which it is not.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
