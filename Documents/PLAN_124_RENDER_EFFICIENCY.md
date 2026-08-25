@@ -145,7 +145,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | Subtask | Title | Status |
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
-| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | Ready — its `buffer_age` crux is answered by 124.18 |
+| 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Complete** — `03b8082a` |
 | 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
@@ -303,6 +303,79 @@ the Phase 2 pixel harness; `cargo xtask check-windows` before the PR.
 
 Prohibitions: do NOT modify `pointer_forces_full_present`. Do NOT change
 `FrameDamage`'s default. Do NOT touch the vertex layer.
+
+#### 124.2 implementation notes (commit `03b8082a`)
+
+**Landed.** `FrameDamage` gains a `None` variant; `Full` remains the
+`#[default]` fallback, unchanged from the entry above.
+`decide_frame_damage`'s `Unchanged`-or-no-rect case now resolves to `None`
+rather than falling through to `Full`, **unless an earlier `Full`
+short-circuit has already fired** — those short-circuits keep precedence
+exactly as specified. `ChromeDamage::Changed` upgrades a `None` decision to
+`Full`, so chrome activity is never silently dropped by the new state.
+
+A `None` frame still runs egui's UI pass and still computes damage and
+platform output, and still performs texture-delta bookkeeping — it is not a
+full early-return.
+What it skips is the work downstream of "there is nothing to paint": shape
+partitioning, tessellation, the framebuffer clear, primitive paint, the
+pre-present notification, and the swap itself. No `DamageHistory` entry is
+recorded for a `None` frame, because there is no swap to record one against.
+
+The presentation outcome is carried as a named type, `FramePresentation`,
+distinguishing `None`, `Full` and `Partial` rather than a bare bool or an
+overloaded reuse of `FrameDamage`. Profiling instrumentation separates four
+buckets rather than collapsing them: `None` decided before composition,
+`None` surviving to the final decision, `Full`, and `Partial` — so a `None`
+that gets upgraded by chrome activity is visible as a distinct count, not
+folded into either terminal state. Coverage spans both GL paths and is
+verified at exact-pixel granularity, not merely by call count.
+
+#### Post-124.2 GPU measurement (2026-08-25), AUTHORITATIVE
+
+Measured on this workstation — Hyprland/Wayland, AMD GPU
+(`LIBGL_ALWAYS_SOFTWARE` printed `<unset>`; the live process's llvmpipe
+thread count was 0) — release build with `--features frame-profiling`. The
+floating window was pinned to 1264x681 at `(-2400, 200)`; the pointer was
+held at `(-1800, 500)`. The continuous PTY workload was
+`sh -c 'while :; do seq 1 200; sleep 0.02; done'`. Steady state is frame 3720
+through frame 6120 — 2,400 frames over 39.838837s.
+
+| Metric | Value |
+| ---------------------------------------- | --------- |
+| fps | 60.24 |
+| total us/frame | 301.38 |
+| run_ui us/frame | 118.20 |
+| tessellate us/frame | 10.04 |
+| paint us/frame | 14.06 |
+| swap us/frame | 141.12 |
+| final `None` count | 281 |
+| `Partial` taken count | 2104 |
+| `Full` count | 15 |
+| buffer-age-blocked count | 0 |
+| `buffer_age_histogram` delta `[0,1,2,3+]` | `[0,0,2104,0]` |
+| pointer events | 537 |
+
+No visual corruption was observed.
+
+**Comparison against the post-124.14 output-only controls (runs 2 and 3 of
+that measurement, 329.02 and 406.57 us/frame total), recorded as
+observation, not causation:**
+
+- Total per-frame cost is lower with 124.2 landed: 301.38 us/frame here
+  against 329.02-406.57 us/frame in the post-124.14 output-only controls.
+- The zero-change component that the post-124.14 measurement reported as
+  `Full` (273-280 frames per run, in that measurement's terms) is reported
+  here as `FrameDamage::None` (281 frames) rather than `Full`.
+- `Partial` remains the dominant bounded path in this run, as it did in the
+  post-124.14 measurement.
+- `buffer_age()` again resolves to exactly 2 in every steady-state query
+  (`[0,0,2104,0]`), and every requested `Partial` frame is taken
+  (buffer-age-blocked count 0) — the same pattern the post-124.14
+  measurement recorded.
+
+These are the figures as measured; no stronger causal claim is drawn from a
+single run than what is stated above.
 
 ### 124.3 — Cell-granular pointer suppression
 
