@@ -171,6 +171,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
+| 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | Planned — mechanical rename; never fold into 124.14a |
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
@@ -2536,6 +2537,64 @@ to compare. The surviving test
 (`a_full_viewport_scissor_box_clips_nothing`) pins the *convention*
 instead, and its doc comment says so explicitly — an earlier draft
 justified it as the `Full` arm's no-op property, which it is not.
+
+#### 124.14a design decisions (2026-08-24, pre-implementation)
+
+Settled before delegating so the next session inherits them rather than
+re-deriving them. Both are choices the entry left open.
+
+**`Region(Vec<CursorDamage>)`, and `PaneFrameDamage` loses `Copy`.** A
+single bounding box per pane would keep `Copy` and is equivalent *today*,
+because windowing's `DamageHistory::redraw_region` bboxes anyway. Reject it:
+it is lossy exactly in this subtask's case — rows 3 and 40 changed would
+present the 37 rows between them — and 124.18 names multi-rect scissoring as
+a later optimisation to be justified by measurement. Collapsing at the
+source would have to be undone to get that back, which is the "correct but
+insufficient" trap 124.1 records for the `Arc`-reuse fix. The cost is a
+handful of `.clone()`s at `app_impl.rs:343` and `:347` and wherever else
+`last_frame_cursor_damage` is read by value; per pane, once per frame.
+
+**`CursorDamage` is reused as the rect type and becomes a misnomer.**
+Renaming it is mechanical but would land inside a behaviour diff and make
+that diff harder to review, which is where the risk actually is. Deferred to
+124.C7.
+
+**`VertexRebuild::Rows` means "full vertex rebuild, bounded damage".** It is
+not a bounded rebuild. The rebuild stays full and `upload_verts` stays a
+whole-buffer write; bounding the upload is Task 125 and needs the
+fixed-stride relayout. This is the boundary most likely to be crossed by
+accident.
+
+**Bound `rows_changed` only.** If `selection_changed`, `hover_changed`,
+`search_changed`, `image_frame_changed` or `image_pixels_changed` fired, the
+frame falls back to `ReevaluateFullRebuild`. Those are 124.14b, 124.14d and
+124.C5's constraint respectively, and each boundary should be pinned by a
+test so a later subtask cannot cross it silently.
+
+**An empty rect set reports `Full`, not an empty `Region`.** Every changed
+row can collapse into a fold. An empty `Region` would be a third way of
+spelling "nothing", and `decide_frame_damage` already carries one dead
+`RequestedWithNoRects` variant from the last time that happened (124.21
+finding 4).
+
+**Reuse `CursorDamage::from_cursor_cells` for the coordinate transform.** It
+already consumes top-left-origin viewport-relative pixels and performs the
+Y-flip, outward rounding, 1px pad and framebuffer clamp. A second hand-rolled
+transform is how these go wrong.
+
+### 124.C7 — `CursorDamage` is a misnomer once `Region` carries it
+
+*Deferred from 124.14a's design, 2026-08-24. Cleanup entry.*
+
+`PaneFrameDamage::Region` reuses `CursorDamage` (`renderer/mod.rs:129-139`)
+as its rect type, so the name now describes one of its two users. A rename
+to a neutral name is purely mechanical across `renderer/mod.rs`,
+`frame_damage.rs` and `widget.rs`.
+
+Held back deliberately rather than folded into 124.14a: a rename inflates a
+behaviour diff and the review risk in 124.14a is concentrated in the
+coordinate transform and the damage aggregation, which a rename would bury.
+Take it as its own commit, before or after 124.14a, never inside it.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
