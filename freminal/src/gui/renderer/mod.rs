@@ -101,15 +101,31 @@ use conv2::{ConvUtil, RoundToNearest};
 ///   path; the rect (if any) is the changed cursor region. `None` means the
 ///   pane's cursor region did not resolve to a valid rect (degenerate size);
 ///   the aggregator treats that as a full frame out of caution.
+/// - [`PaneFrameDamage::Region`] — the pane took a full rebuild (Task
+///   124.14: `VertexRebuild::Rows`), but the content change is provably
+///   bounded to these rects. Never empty (an empty rect set is reported as
+///   [`Self::Full`] instead — see [`CursorDamage::from_cursor_cells`]'s
+///   caller in `widget.rs`).
 /// - [`PaneFrameDamage::Unchanged`] — the pane re-drew its existing vertices
 ///   with no change at all (the common inactive-pane case); it contributes no
 ///   damage and does **not** force a full frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// This type deliberately is **not** [`Copy`] (Task 124.14a design
+/// decision): a single bounding box per pane would keep it `Copy` and is
+/// equivalent *today* (`windowing::DamageHistory::redraw_region` bboxes
+/// anyway), but it is lossy exactly in the case this variant exists for —
+/// two changed rows far apart would present every row between them. Callers
+/// that previously relied on an implicit copy now clone explicitly (a
+/// handful of `.clone()` calls, once per pane per frame).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PaneFrameDamage {
     /// The pane rebuilt its full content this frame.
     Full,
     /// The pane took the cursor-only fast path; carries the changed region.
     CursorOnly(Option<CursorDamage>),
+    /// The pane took a full rebuild whose damage is provably bounded to
+    /// these rects (Task 124.14). Never empty.
+    Region(Vec<CursorDamage>),
     /// The pane rendered no change (reused existing vertices).
     #[default]
     Unchanged,

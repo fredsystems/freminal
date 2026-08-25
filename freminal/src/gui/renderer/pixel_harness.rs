@@ -864,3 +864,101 @@ mod present_region_scissor_tests {
         );
     }
 }
+
+/// Subtask 124.14's own pixel test: the plan's mandated deliverable that a
+/// `Region` frame and a `Full` frame of the same state produce identical
+/// pixels ("124.14"'s "correctness argument that must be verified, not
+/// assumed" in `PLAN_124_RENDER_EFFICIENCY.md`).
+///
+/// Read the module doc above `present_region_scissor_tests` before reading
+/// this: this harness drives [`HeadlessRenderer`] directly and issues no
+/// `glClear` anywhere, and `bg_opacity` is hardcoded to `1.0`. That is why
+/// the test below is built the way it is, rather than actually invoking
+/// two different `PaneFrameDamage` variants (there is nothing in this
+/// renderer that reads that type at all -- it lives in `widget.rs` and
+/// `frame_damage.rs`, entirely above this harness).
+///
+/// What IS expressible, and what the property in the plan actually reduces
+/// to at this layer: [`capture_scissored_overdraw`] already models
+/// "render once (the `Full` frame), then render again on the SAME,
+/// never-cleared framebuffer restricted to a scissor rect (the `Region`
+/// frame's bounded present)". A `Region` frame's whole safety argument is
+/// that its content is byte-identical to what a `Full` rebuild of the same
+/// state would produce -- `VertexRebuild::Rows` runs the exact same
+/// full-rebuild code as `VertexRebuild::ReevaluateFullRebuild`
+/// (`frame_dirty.rs`'s doc on `VertexRebuild::Rows`), so the vertices fed
+/// to the second draw are identical to the first's. Passing the *same*
+/// [`SyntheticFrame`] as both `first` and `second` reproduces exactly that:
+/// "this frame's rebuild, presented in full" versus "this frame's
+/// identical rebuild, presented through a bounded scissor" -- of the same
+/// state, per the deliverable's own wording.
+#[cfg(test)]
+mod region_present_matches_full_present_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::super::headless::SyntheticFrame;
+    use super::capture_scissored_overdraw;
+
+    /// A `Region` present of unchanged state must be pixel-identical,
+    /// everywhere in the framebuffer (not merely inside the scissor rect),
+    /// to a `Full` present of that same state.
+    ///
+    /// Outside the scissor rect this is nearly definitional -- the second
+    /// draw cannot touch those pixels at all, so they are left exactly as
+    /// the first (`Full`) draw already rendered them, which is what
+    /// `scissored_full_draw_writes_no_pixels_outside_the_scissor_rect`
+    /// (`present_region_scissor_tests`) already pins for a *differing*
+    /// second frame. The property this test adds is the part that is NOT
+    /// definitional: *inside* the scissor rect, redrawing the identical
+    /// content a second time (no clear in between, and this renderer
+    /// enables no `GL_BLEND` anywhere -- verified by grep, not assumed)
+    /// must not perturb a single channel. If it did -- e.g. some
+    /// undiscovered blending or dithering path -- a `Region` frame would
+    /// be observably different from a `Full` one even though nothing in
+    /// the underlying state changed, which is exactly the silent
+    /// corruption class 124.14's correctness argument exists to rule out.
+    ///
+    /// The rect is deliberately a genuine interior sub-region (not the
+    /// full viewport, which `a_full_viewport_scissor_box_clips_nothing`
+    /// already covers, and not edge-aligned, so an off-by-one in either
+    /// bound would still land inside the checked area) -- a stand-in for
+    /// one of `build_row_range_damage`'s row-range rects.
+    #[test]
+    fn a_region_present_of_unchanged_state_matches_a_full_present_everywhere() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Some(baseline) =
+            super::tests::capture_or_skip(&frame, "region-present-matches-full-present")
+        else {
+            return;
+        };
+
+        let vp_w = i32::try_from(baseline.width).expect("viewport width fits i32");
+        let vp_h = i32::try_from(baseline.height).expect("viewport height fits i32");
+        assert!(
+            vp_w >= 4 && vp_h >= 4,
+            "viewport too small ({vp_w}x{vp_h}) to carve a non-trivial \
+             interior scissor rect out of it"
+        );
+        // An interior quarter of the viewport, offset from every edge.
+        let region = (vp_w / 4, vp_h / 4, vp_w / 2, vp_h / 2);
+
+        // `first` and `second` are the SAME frame: this stands in for "the
+        // state did not change between the Full rebuild and the Region
+        // rebuild", which is precisely the precondition that makes a
+        // Region frame safe to bound in production (124.14a's correctness
+        // argument: outside the rects, the previous frame's pixels remain
+        // valid because nothing there changed).
+        let (full, region_present) = capture_scissored_overdraw(&frame, &frame, region)
+            .expect("scissored overdraw capture of identical state");
+
+        assert_eq!(
+            full.differing_pixels(&region_present, 0),
+            Some(0),
+            "a Region frame (bounded redraw of unchanged state) must be \
+             pixel-identical to a Full frame of the same state, at every \
+             pixel -- any difference here means bounding the presented \
+             damage silently changed what got drawn, which is the exact \
+             hazard 124.14's correctness argument exists to rule out"
+        );
+    }
+}

@@ -340,11 +340,11 @@ fn stage_frame_damage(
             || pane.view_state.command_history.is_open
             || pane.render_cache.hover_tooltip_active();
         if *pane_id == active_pane_id {
-            active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage);
+            active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage.clone());
         }
         per_pane_damage.push(frame_damage::PaneDamageInput {
             bell_active: pane.view_state.bell_since.is_some(),
-            cursor_damage: pane.render_cache.last_frame_cursor_damage,
+            cursor_damage: pane.render_cache.last_frame_cursor_damage.clone(),
         });
     }
     let decided = frame_damage::decide_frame_damage(
@@ -2986,7 +2986,7 @@ impl freminal_windowing::App for FreminalGui {
                     && per_pane_damage.iter().all(|p| {
                         !p.bell_active
                             && matches!(
-                                p.cursor_damage,
+                                &p.cursor_damage,
                                 crate::gui::renderer::PaneFrameDamage::Unchanged
                             )
                     });
@@ -3019,7 +3019,18 @@ impl freminal_windowing::App for FreminalGui {
                     Some(crate::gui::renderer::PaneFrameDamage::CursorOnly(_)) => {
                         stats.cursor_only = stats.cursor_only.saturating_add(1);
                     }
-                    Some(crate::gui::renderer::PaneFrameDamage::Full) | None => {
+                    // A `Region` frame (Task 124.14) is still a full vertex
+                    // rebuild -- only its reported *damage* is bounded, per
+                    // `PaneFrameDamage::Region`'s own doc -- so it counts
+                    // alongside `Full` here, consistent with `stats.full`'s
+                    // doc ("a `Full` frame rebuilds the visible vertex
+                    // data"). Distinguishing the two is a `frame-profiling`
+                    // counter this subtask does not add.
+                    Some(
+                        crate::gui::renderer::PaneFrameDamage::Full
+                        | crate::gui::renderer::PaneFrameDamage::Region(_),
+                    )
+                    | None => {
                         stats.full = stats.full.saturating_add(1);
                     }
                 }

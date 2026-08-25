@@ -32,7 +32,7 @@ use crate::gui::renderer::PaneFrameDamage;
 /// by treating the whole frame as forced-full. See
 /// [`decide_frame_damage`]'s doc comment for why this preserves the
 /// original "unresolvable pane -> Full" semantics exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneDamageInput {
     /// `pane.view_state.bell_since.is_some()` for this pane.
     pub(crate) bell_active: bool,
@@ -72,6 +72,8 @@ pub struct PaneDamageInput {
 ///    this frame):
 ///    - `bell_active` -> clear any collected rects and stop -> `Full`.
 ///    - `cursor_damage == CursorOnly(Some(rect))` -> push `rect`.
+///    - `cursor_damage == Region(rects)` (Task 124.14) -> push every rect in
+///      `rects` (never empty by construction).
 ///    - `cursor_damage == CursorOnly(None)` or `Full` -> clear any
 ///      collected rects and stop -> `Full`.
 ///    - `cursor_damage == Unchanged` -> contributes nothing, continue.
@@ -105,7 +107,7 @@ pub fn decide_frame_damage(
             rects.clear();
             break;
         }
-        match pane.cursor_damage {
+        match &pane.cursor_damage {
             PaneFrameDamage::Unchanged => {}
             PaneFrameDamage::CursorOnly(Some(d)) => {
                 rects.push(freminal_windowing::DamageRect {
@@ -114,6 +116,14 @@ pub fn decide_frame_damage(
                     width: d.width,
                     height: d.height,
                 });
+            }
+            PaneFrameDamage::Region(region_rects) => {
+                rects.extend(region_rects.iter().map(|d| freminal_windowing::DamageRect {
+                    x: d.x,
+                    y: d.y,
+                    width: d.width,
+                    height: d.height,
+                }));
             }
             PaneFrameDamage::CursorOnly(None) | PaneFrameDamage::Full => {
                 rects.clear();
@@ -202,6 +212,15 @@ mod tests {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::CursorOnly(Some(d)),
+        }
+    }
+
+    /// A pane reporting [`PaneFrameDamage::Region`] (Task 124.14): a full
+    /// vertex rebuild whose damage is provably bounded to `rects`.
+    fn region_pane(rects: Vec<CursorDamage>) -> PaneDamageInput {
+        PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::Region(rects),
         }
     }
 
@@ -405,6 +424,114 @@ mod tests {
         let panes = [cursor_only_pane(d1), cursor_only_pane(d2)];
         let damage = decide_frame_damage(false, false, &panes);
         assert_partial(&damage, &[rect(0, 0, 8, 16), rect(100, 0, 8, 16)]);
+    }
+
+    // ── PaneFrameDamage::Region aggregation (Task 124.14) ────────────────
+
+    /// The base case: a single [`PaneFrameDamage::Region`] rect is
+    /// aggregated exactly like a `CursorOnly(Some(rect))` one.
+    #[test]
+    fn single_region_rect_is_partial() {
+        let d = CursorDamage {
+            x: 4,
+            y: 8,
+            width: 16,
+            height: 16,
+        };
+        let panes = [region_pane(vec![d])];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(4, 8, 16, 16)]);
+    }
+
+    /// The test that pins why `PaneFrameDamage::Region` carries a `Vec`
+    /// rather than a single bounding box (124.14a's design decision,
+    /// `PLAN_124_RENDER_EFFICIENCY.md` §124.14a: "rows 3 and 40 changed
+    /// would present the 37 rows between them").
+    ///
+    /// Two non-contiguous rects must both survive aggregation, in order,
+    /// rather than being collapsed into their enclosing bounding box. If a
+    /// later change collapsed `Region` to a single rect at the source or in
+    /// `decide_frame_damage`, this test would still see only one rect (or
+    /// one covering the gap) and fail.
+    #[test]
+    fn two_non_contiguous_region_rects_are_both_partial_in_order() {
+        let top = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 16,
+        };
+        let bottom = CursorDamage {
+            x: 0,
+            y: 640,
+            width: 80,
+            height: 16,
+        };
+        let panes = [region_pane(vec![top, bottom])];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(0, 0, 80, 16), rect(0, 640, 80, 16)]);
+    }
+
+    /// A `Region` pane alongside an `Unchanged` pane: the unchanged pane
+    /// contributes nothing, so the result is `Partial` with only the
+    /// `Region` pane's rects.
+    #[test]
+    fn region_plus_unchanged_pane_is_partial_with_only_region_rects() {
+        let d = CursorDamage {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let panes = [region_pane(vec![d]), unchanged_pane()];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(1, 2, 3, 4)]);
+    }
+
+    /// A `Region` pane followed by a `Full` pane: the `rects.clear();
+    /// break;` fan-out discards the region's rects entirely and the whole
+    /// frame is `Full`, exactly as it already does for `CursorOnly(Some)`
+    /// followed by `Full` (see `rects_cleared_when_a_later_pane_is_full`).
+    #[test]
+    fn region_plus_full_pane_discards_region_rects_and_is_full() {
+        let d = CursorDamage {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let panes = [
+            region_pane(vec![d]),
+            PaneDamageInput {
+                bell_active: false,
+                cursor_damage: PaneFrameDamage::Full,
+            },
+        ];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// A `Region` pane alongside another pane's `CursorOnly(Some(..))`:
+    /// both contribute rects, and both survive aggregation.
+    #[test]
+    fn region_plus_cursor_only_rect_is_partial_with_both() {
+        let region_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 16,
+        };
+        let cursor_rect = CursorDamage {
+            x: 100,
+            y: 50,
+            width: 8,
+            height: 16,
+        };
+        let panes = [
+            region_pane(vec![region_rect]),
+            cursor_only_pane(cursor_rect),
+        ];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(0, 0, 80, 16), rect(100, 50, 8, 16)]);
     }
 
     #[test]

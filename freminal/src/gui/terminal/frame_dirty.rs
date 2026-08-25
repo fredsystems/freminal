@@ -74,7 +74,7 @@ pub(super) struct FrameDirtyObservations {
 /// Which vertex-rebuild path [`FreminalTerminalWidget::show`] should take
 /// this frame, as decided by [`evaluate_frame_dirty_state`].
 ///
-/// This is a two-way switch on *what check runs next*, not a description of
+/// This is a switch on *what check runs next*, not a full description of
 /// what ultimately happens: `CursorOnly` fully determines the frame (patch
 /// the cursor quad, nothing else). `ReevaluateFullRebuild` means the cheap
 /// fast path does not apply — the caller must independently check
@@ -84,11 +84,39 @@ pub(super) struct FrameDirtyObservations {
 /// collapsing to a `CursorOnly`/`Full` binary) matters: not every
 /// non-cursor-only frame triggers a full rebuild — the common steady-state
 /// frame (nothing changed at all) takes neither branch.
+///
+/// [`Self::Rows`] (Task 124.14) means **"full vertex rebuild, bounded
+/// damage"**, not a bounded rebuild: the caller still runs the exact same
+/// full-rebuild code as [`Self::ReevaluateFullRebuild`] (`upload_verts`
+/// stays a whole-buffer write — bounding *that* is Task 125, gated on a
+/// fixed-stride vertex relayout that does not exist yet), but it may report
+/// [`crate::gui::renderer::PaneFrameDamage::Region`] instead of `Full` for
+/// the frame's damage, because the caller already knows content changed
+/// only within these rows and no other full-repaint-forcing trigger fired.
+/// This is produced only when the content change is attributable *purely*
+/// to [`ChangedRows::Rows`] — `ChangedRows::All`, `theme_changed`,
+/// `dims_changed`, `folds_changed`, and every other independently-global
+/// trigger (`selection_changed`, `text_blink_changed`, `search_changed`,
+/// `hover_changed`, `image_frame_changed`, `image_pixels_changed`) still
+/// yield [`Self::ReevaluateFullRebuild`] (124.21's exhaustive audit; the
+/// last five are 124.14b/d and 124.C5's boundary and must stay unbounded
+/// until those subtasks, if ever, extend them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VertexRebuild {
     /// Patch just the cursor quad in the existing decoration buffer
     /// ([`build_cursor_verts_only`]) — no re-shaping, no full rebuild.
     CursorOnly,
+    /// Not the cursor-only fast path; content changed, but *only* in the
+    /// window rows named by [`DirtyTrackingOutcome::changed_rows`] (which is
+    /// [`ChangedRows::Rows`] whenever this variant is produced — see
+    /// [`evaluate_frame_dirty_state`]), and no other full-repaint trigger
+    /// fired. The caller runs the exact same full rebuild as
+    /// [`Self::ReevaluateFullRebuild`] but may report a bounded
+    /// [`crate::gui::renderer::PaneFrameDamage::Region`] for it instead of
+    /// `Full`. Carries no payload of its own — deliberately, so this enum
+    /// stays `Copy` — the row list lives on the outcome precisely so both
+    /// this decision and any other reader can see it without a second copy.
+    Rows,
     /// Not the cursor-only fast path; the full-rebuild trigger flags must
     /// still be checked by the caller.
     ReevaluateFullRebuild,
@@ -109,12 +137,13 @@ pub(super) enum VertexRebuild {
 /// distinct answers to "what changed" that a caller must not confuse with
 /// "exactly zero/all rows, coincidentally".
 ///
-/// Currently only [`Self::any`] is consumed, collapsing this back to a
-/// `bool` at the [`VertexRebuild`] boundary. That collapse is deliberate
-/// for this subtask (124.12): it lets the epoch-diff chain's correctness be
-/// proven on its own before the damage-model change (Task 124.14) layers
-/// `PaneFrameDamage::Region` on top and starts consuming the row list in
-/// [`Self::Rows`] directly.
+/// [`Self::any`] is consumed to fold this into `content_changed`.
+/// [`Self::Rows`] is also consumed directly (Task 124.14), via
+/// [`DirtyTrackingOutcome::changed_rows`]: when a [`Self::Rows`] change is
+/// the *only* content trigger this frame, [`evaluate_frame_dirty_state`]
+/// selects [`VertexRebuild::Rows`], and the caller reads
+/// `changed_rows` off the same outcome to build a bounded
+/// [`crate::gui::renderer::PaneFrameDamage::Region`] instead of `Full`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChangedRows {
     /// No row's rendered content differs from the last full rebuild.
@@ -193,28 +222,16 @@ pub(super) struct DirtyTrackingOutcome {
     pub(super) observations: FrameDirtyObservations,
     /// Exactly which window rows differ from the last full vertex rebuild,
     /// as computed by [`diff_row_epochs`]. `observations.content_changed`
-    /// collapses this (and the theme/dims/folds triggers) to a `bool`;
-    /// this field keeps the row-level detail so Task 124.14 can build
-    /// `PaneFrameDamage::Region` from it instead of forcing a full-pane
-    /// repaint for a single changed row. Not consumed by anything in this
-    /// subtask beyond [`ChangedRows::any`] — kept on the outcome now so its
-    /// correctness is provable before that consumer exists.
+    /// collapses this (and the theme/dims/folds triggers) to a `bool`; this
+    /// field keeps the row-level detail so the caller can build
+    /// [`crate::gui::renderer::PaneFrameDamage::Region`] from it instead of
+    /// forcing a full-pane repaint for a bounded set of changed rows.
     ///
-    /// TODO(124.14): drop the attribute below when `PaneFrameDamage::Region`
-    /// consumes this.
-    ///
-    /// `expect` rather than `allow` deliberately: it fails the build the
-    /// moment a real reader appears, so this scaffolding cannot quietly
-    /// outlive its purpose. Scoped to `not(test)` because the tests below
-    /// *do* read the field — under `cfg(test)` the expectation would be
-    /// unfulfilled, which is itself an error.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "computed and tested by 124.12; the first production reader arrives in 124.14"
-        )
-    )]
+    /// Task 124.14: this is [`ChangedRows::Rows`] whenever
+    /// [`Self::rebuild`] is [`VertexRebuild::Rows`] — that variant is
+    /// selected below precisely because this field is exactly that shape
+    /// and no other full-repaint trigger fired — so the caller may read it
+    /// unconditionally in that branch.
     pub(super) changed_rows: ChangedRows,
     /// The normalised selection for this frame (buffer-absolute rows),
     /// after the content-change auto-clear rule has been applied.
@@ -698,6 +715,17 @@ pub(super) fn evaluate_frame_dirty_state(
         && (view_state.text_blink_slow_visible != cache.previous_text_blink_slow_visible
             || view_state.text_blink_fast_visible != cache.previous_text_blink_fast_visible);
 
+    // A pane whose decoration buffer was never populated has nothing on
+    // screen to preserve, so neither bounded path (cursor-only or
+    // row-bounded) may claim the rest of the pane is intact. 124.21 lists
+    // this among the eight genuinely-global triggers. Read once and shared
+    // by both decisions below rather than re-locking.
+    let deco_verts_empty = render_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .deco_verts
+        .is_empty();
+
     let cursor_only = !content_changed
         && !selection_changed
         && !text_blink_changed
@@ -706,15 +734,48 @@ pub(super) fn evaluate_frame_dirty_state(
         && !image_frame_changed
         && !image_pixels_changed
         && cursor_state_changed
-        && !render_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .deco_verts
-            .is_empty();
+        && !deco_verts_empty;
+
+    // Task 124.14: a full rebuild whose damage is provably bounded to
+    // `rows_changed`'s row list, rather than the whole pane. `content_changed`
+    // ORs four independent triggers together (`theme_changed`, `dims_changed`,
+    // `folds_changed`, `rows_changed.any()`); this frame's damage can only be
+    // named as "these rows" when `rows_changed` is the *sole* one that fired
+    // (a `ChangedRows::All` answer -- no baseline, or a window-size change --
+    // is not a row list at all) and none of the other seven full-repaint
+    // triggers this decision already checks for `cursor_only` fired either.
+    // Those are exactly 124.21's audit boundary: `selection_changed` and
+    // `hover_changed` are BOUNDABLE-NOW but not bounded by this subtask
+    // (124.14b/d); `search_changed`, `image_frame_changed` and
+    // `image_pixels_changed` are BOUNDABLE-WITH-WORK or explicitly excluded
+    // (124.C5). `text_blink_changed` has no per-row bitmap. All five stay
+    // full-repaint triggers here, deliberately.
+    //
+    // `deco_verts_empty` is included for the same reason it vetoes
+    // `cursor_only`: with no previously-populated decoration buffer there is
+    // nothing on screen for a bounded region to leave intact. In the normal
+    // flow that case already implies `ChangedRows::All` (a fresh
+    // `PaneRenderCache` starts with no epoch baseline), but that is an
+    // invariant spanning two independently-owned structures --
+    // `RenderState` is per-window, `PaneRenderCache` per-pane -- so it is
+    // asserted here rather than relied upon.
+    let rows_only_change = matches!(rows_changed, ChangedRows::Rows(_))
+        && !deco_verts_empty
+        && !theme_changed
+        && !dims_changed
+        && !folds_changed
+        && !selection_changed
+        && !text_blink_changed
+        && !search_changed
+        && !hover_changed
+        && !image_frame_changed
+        && !image_pixels_changed;
 
     DirtyTrackingOutcome {
         rebuild: if cursor_only {
             VertexRebuild::CursorOnly
+        } else if rows_only_change {
+            VertexRebuild::Rows
         } else {
             VertexRebuild::ReevaluateFullRebuild
         },
@@ -1153,6 +1214,324 @@ mod evaluate_frame_dirty_state_tests {
         let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    // ── VertexRebuild::Rows boundary (Task 124.14a) ──────────────────────
+
+    /// The base case `VertexRebuild::Rows` exists for: exactly one changed
+    /// row, nothing else different, must select the bounded-damage full
+    /// rebuild rather than `ReevaluateFullRebuild`, and the outcome's
+    /// `changed_rows` must still name exactly that row (the caller reads
+    /// it unconditionally in the `Rows` branch to build
+    /// `PaneFrameDamage::Region` — see `build_row_range_damage` in
+    /// `widget.rs`).
+    #[test]
+    fn a_single_bounded_row_change_alone_yields_rows_rebuild() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::Rows,
+            "a lone bounded row change (no other trigger) must take the \
+             bounded-damage full rebuild, not the unbounded one"
+        );
+        assert_eq!(
+            outcome.changed_rows,
+            ChangedRows::Rows(vec![0]),
+            "the caller reads changed_rows unconditionally when rebuild is \
+             Rows, so it must still name exactly the row that changed"
+        );
+    }
+
+    /// `ChangedRows::All` (no baseline recorded, or a length mismatch) must
+    /// never select `VertexRebuild::Rows` — `Rows` is not a row list at
+    /// all, so there is nothing to bound the damage to, and `rows_only_change`
+    /// in `evaluate_frame_dirty_state` explicitly matches only
+    /// `ChangedRows::Rows(_)`.
+    #[test]
+    fn changed_rows_all_does_not_yield_rows_rebuild() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        // No recorded baseline: `diff_row_epochs` conservatively reports
+        // every row changed (see `no_recorded_epochs_reports_every_row_changed`).
+        cache.last_rendered_row_epochs = None;
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            outcome.changed_rows,
+            ChangedRows::All,
+            "precondition: no baseline must report every row changed"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "ChangedRows::All must never select VertexRebuild::Rows -- \
+             Rows means a specific bounded row list, and All is not one"
+        );
+    }
+
+    /// 124.14b's boundary: a selection change alongside a genuine bounded
+    /// row change must still veto `VertexRebuild::Rows` and fall back to
+    /// `ReevaluateFullRebuild`. Selection highlighting is baked into
+    /// vertices outside the changed-row set (the anchor/end cells can sit
+    /// on rows that did not change epoch at all), so bounding the damage
+    /// to `changed_rows` here would leave a stale (or missing) highlight
+    /// on screen. Selection is BOUNDABLE-NOW (its extent is known at the
+    /// decision point) but not bounded until 124.14b actually does the
+    /// work -- this test is what stops that boundary being crossed
+    /// silently by a later, unrelated change.
+    #[test]
+    fn selection_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        view_state.selection.end = Some(CellCoord { col: 3, row: 0 });
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.selection_changed,
+            "precondition: the selection must actually be observed as changed"
+        );
+        assert!(
+            matches!(outcome.changed_rows, ChangedRows::Rows(_)),
+            "precondition: the row change must be a genuine bounded one, \
+             not All, or this test would not isolate the selection boundary"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "124.14b's boundary: selection_changed must veto \
+             VertexRebuild::Rows even when the row change is otherwise \
+             bounded -- selection extent is not yet folded into the bound"
+        );
+    }
+
+    /// 124.14b's other boundary: a command-block hover change alongside a
+    /// genuine bounded row change must still veto `VertexRebuild::Rows`.
+    /// The hover tint is baked into the background instance VBO for rows
+    /// outside `changed_rows` (the hovered command block need not overlap
+    /// the row whose epoch bumped), so bounding to `changed_rows` would
+    /// leave a stale hover tint on screen. Hover is BOUNDABLE-NOW but not
+    /// bounded until 124.14b does the work.
+    #[test]
+    fn hover_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        // `call()`'s fixed geometry (`gutter_inset: 0.0`) makes
+        // `compute_command_block_hover_rows` always return `None`, so
+        // recording a `Some` here as the previous frame's hover range is
+        // what makes it differ from this frame's `None`.
+        cache.previous_command_block_hover_rows = Some((0, 0));
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.hover_changed,
+            "precondition: the hover range must actually be observed as changed"
+        );
+        assert!(
+            matches!(outcome.changed_rows, ChangedRows::Rows(_)),
+            "precondition: the row change must be a genuine bounded one, \
+             not All, or this test would not isolate the hover boundary"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "124.14b's boundary: hover_changed must veto \
+             VertexRebuild::Rows even when the row change is otherwise \
+             bounded -- hover extent is not yet folded into the bound"
+        );
+    }
+
+    /// 124.14d's boundary: a search-highlight change alongside a genuine
+    /// bounded row change must still veto `VertexRebuild::Rows`.
+    /// `search_changed` is a fingerprint (`SearchState::render_epoch`), not
+    /// a location -- 124.21's audit classified it BOUNDABLE-WITH-WORK,
+    /// since the matched rows are not tracked as a set anywhere today.
+    /// Bounding to `changed_rows` here would leave stale (or missing)
+    /// search-match tinting on rows the search touches but the row-epoch
+    /// diff does not name.
+    #[test]
+    fn search_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        cache.previous_search_epoch = cache.previous_search_epoch.wrapping_add(1);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.search_changed,
+            "precondition: the search epoch must actually be observed as changed"
+        );
+        assert!(
+            matches!(outcome.changed_rows, ChangedRows::Rows(_)),
+            "precondition: the row change must be a genuine bounded one, \
+             not All, or this test would not isolate the search boundary"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "124.14d's boundary: search_changed must veto \
+             VertexRebuild::Rows even when the row change is otherwise \
+             bounded -- search-match extent is not tracked per-row yet"
+        );
+    }
+
+    /// 124.C5's boundary, image-pixels half: a store-level pixel mutation
+    /// alongside a genuine bounded row change must still veto
+    /// `VertexRebuild::Rows`.
+    ///
+    /// 124.C5 made row epochs sound for image *placement* damage (placing
+    /// an image over cells now bumps their row's epoch), but it did
+    /// **not** make them sound for image *pixel* damage: an animation
+    /// frame advancing, or a Kitty `a=c` compose overwriting a frame's
+    /// pixels in place, changes no cell, stamps no new placement, and
+    /// bumps no epoch. The image quad's geometry is unchanged; only its
+    /// texture contents differ. So `changed_rows` can name a completely
+    /// unrelated row while the image itself is invisible to it -- images
+    /// must not ride on `changed_rows` until their own bound exists, which
+    /// this subtask does not build.
+    #[test]
+    fn image_pixels_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+        let mut snap = base_snapshot();
+        let image = InlineImage {
+            id: 1,
+            pixels: Arc::new(vec![1u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: Vec::new(),
+            root_gap_ms: 0,
+            animation: AnimationControl::default(),
+        };
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, image);
+        snap.images = Arc::new(images);
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.image_pixels_changed,
+            "precondition: the pixel-mutation detector must actually fire"
+        );
+        assert!(
+            matches!(outcome.changed_rows, ChangedRows::Rows(_)),
+            "precondition: the row change must be a genuine bounded one, \
+             not All, or this test would not isolate the image boundary"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "124.C5's boundary: image_pixels_changed must veto \
+             VertexRebuild::Rows even when the row change is otherwise \
+             bounded -- pixel-only image damage bumps no row epoch"
+        );
+    }
+
+    /// 124.C5's boundary, image-frame half: an animated image's frame
+    /// advancing alongside a genuine bounded row change must still veto
+    /// `VertexRebuild::Rows`, for the same reason as the pixels test
+    /// above -- advancing a frame changes no cell and bumps no row epoch,
+    /// so `changed_rows` cannot be trusted to cover it.
+    #[test]
+    fn image_frame_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+        let mut snap = base_snapshot();
+        let frame2_pixels = Arc::new(vec![2u8; 4]);
+        let frame3_pixels = Arc::new(vec![3u8; 4]);
+        let image = InlineImage {
+            id: 1,
+            pixels: Arc::new(vec![1u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            display_cols: 1,
+            display_rows: 1,
+            size_mode: ImageSizeMode::NativePixels,
+            frames: vec![
+                ImageFrame {
+                    pixels: Arc::clone(&frame2_pixels),
+                    gap_ms: 40,
+                },
+                ImageFrame {
+                    pixels: Arc::clone(&frame3_pixels),
+                    gap_ms: 40,
+                },
+            ],
+            root_gap_ms: 40,
+            animation: AnimationControl {
+                run_mode: AnimationRunMode::Running,
+                loop_count: 1,
+                current_frame: 0,
+            },
+        };
+        let mut images = std::collections::HashMap::new();
+        images.insert(1, image);
+        snap.images = Arc::new(images);
+
+        let mut cache = settled_cache(&snap, true, true);
+        cache
+            .last_rendered_image_pixel_ptrs
+            .insert(1, Arc::as_ptr(&frame3_pixels).addr());
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+
+        let mut view_state = ViewState::new();
+        view_state.seed_anim_clock_for_test(1, 1, Duration::from_millis(100), 0);
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.image_frame_changed,
+            "precondition: the animation tick must actually advance a frame"
+        );
+        assert!(
+            matches!(outcome.changed_rows, ChangedRows::Rows(_)),
+            "precondition: the row change must be a genuine bounded one, \
+             not All, or this test would not isolate the image boundary"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::ReevaluateFullRebuild,
+            "124.C5's boundary: image_frame_changed must veto \
+             VertexRebuild::Rows even when the row change is otherwise \
+             bounded -- frame-advance image damage bumps no row epoch"
+        );
     }
 
     #[test]
