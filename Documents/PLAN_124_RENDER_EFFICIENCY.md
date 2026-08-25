@@ -157,7 +157,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Bounded` | In progress — a/b/c complete; d blocked by chrome forcing `Full` |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Bounded` | **Complete** — a/b/c/d landed; search expanded into unified surface damage |
 | 124.14a | Bound row-only damage | **Complete** — `eae76d1b` |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
@@ -176,7 +176,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
 | 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | **Complete** — `edf9e017`, `284ce253`; gutter hazard disproved |
 | 124.14c | Stop a busy pane forcing full damage on unchanged siblings | **Complete** — `058c2627` |
-| 124.14d | Bound search highlights and the search overlay | In progress — expanded into chrome damage by maintainer decision |
+| 124.14d | Bound search highlights and the search overlay | **Complete** — `ab275052` |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -1208,7 +1208,7 @@ but it still costs a whole GUI frame walk. 124.15 measured that walk's
 chrome portion at 43.2 us of construct-plus-tessellate. Suppression remains
 worth having; its prize is now that figure rather than a full present.
 
-### 124.14 — `PaneFrameDamage::Region` and `VertexRebuild::Rows`
+### 124.14 — `PaneFrameDamage::Region` and `VertexRebuild::Bounded`
 
 **The larger half of the damage-model fix.**
 
@@ -2776,6 +2776,58 @@ a `Region` variant to `ChromeDamage`: search geometry is composed into
 the local signal as the *unbounded* foreground-overlay set so excluding
 search is explicit rather than silently changing what "any foreground
 overlay" means.
+
+#### 124.14 implementation notes (complete 2026-08-25)
+
+Task 124.14 landed in four behaviour commits plus two prerequisite fixes:
+
+| Subtask | Commit | Result |
+| ------- | ------ | ------ |
+| 124.C5 | `74e94576` | Image placement joined the row-epoch render basis; the hard gate on row damage closed |
+| 124.23 | `fab22611` | Both paint arms obey one windowing-published region |
+| 124.14a | `eae76d1b` | Row-only changes report bounded pane damage |
+| 124.14b-i | `edf9e017` | Selection damage unions old/new screen rows |
+| 124.14b-ii | `284ce253` | Command-block hover damage unions old/new screen rows |
+| 124.14c | `058c2627` | A busy pane reports its own rect instead of forcing every sibling full |
+| 124.14d | `ab275052` | Search highlights and floating popup chrome join one bounded surface-damage decision |
+
+**The upload boundary held.** Every `VertexRebuild::Bounded` frame still
+runs the full vertex rebuild and `upload_verts` still writes whole buffers.
+Only clear/draw/present damage became bounded. Task 125 remains the fixed-
+stride upload-relayout question.
+
+**Old and new extents are always unioned.** Rows, selection, command-block
+hover, search highlights and the floating search popup all include the pixels
+drawn last frame as well as this frame. That is what erases shrinking or
+moving decoration instead of leaving stale pixels behind.
+
+**Search required crossing the old terminal/chrome split.** A first attempt
+would have built highlight geometry only to have
+`foreground_overlay_open -> ChromeDamage::Changed` erase it. The maintainer
+expanded 124.14d: the final framebuffer is one surface, so old/new highlight
+rows and old/new popup bounds join `FrameDamage` directly. Binary
+`ChromeDamage` remains unchanged for context menus, command history, URL
+tooltips and every other unbounded chrome source.
+
+**Search tooltip safety has a one-frame settle.** Prev/Next/Close/Aa tooltips
+can paint outside the popup rect. A hovered control forces `Full`, and the
+first frame after hover ends also forces `Full` to erase the old tooltip;
+then the state returns to bounded. Resetting immediately was caught during
+orchestrator review before commit.
+
+**Other review corrections:** the implementation's production lint
+suppression was removed rather than justified; tooltip safety uses one named
+domain enum end to end instead of private helper booleans; and the
+`zero_change_presented` profiler now excludes frames carrying search-popup
+damage, so the planned 124.17 re-measurement is not poisoned by the new
+damage source.
+
+**Verification:** the full 106-group workspace suite, both clippy commands,
+`cargo machete`, all warning-sensitive build configurations, the nine
+`gl-recording` headless workloads, the five-test windowing frame-paint
+harness and the 1,353-test `gl-pixel` run all passed. Mutation checks proved
+the search bounded-source decision, tooltip escape fallback and popup-only
+damage aggregation are each load-bearing.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
