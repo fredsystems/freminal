@@ -354,8 +354,15 @@ fn gutter_block_id_at_pos(
     }
 }
 
-/// Compute the rendered-row span (inclusive) of the command block whose
+/// Compute the **screen**-row span (inclusive) of the command block whose
 /// gutter the pointer is currently hovering, for the hover-tint overlay.
+///
+/// Despite the name, the returned span is screen-row space, not
+/// rendered-row space: the final step below converts through
+/// `layout.rendered_to_screen` before returning, because the caller
+/// consumes the result directly as an index into the screen-indexed
+/// `rendered_shaped_lines` array at the `widget.rs` call site (124.14b-ii
+/// recon) -- the same array `screen_selection_rendered` indexes.
 ///
 /// The **gutter strip is the sole hover trigger** (73.5): hovering a cell in
 /// the terminal output area does nothing block-related, so the tint no longer
@@ -1415,9 +1422,19 @@ pub struct PaneRenderCache {
     /// The terminal cell `(col, row)` the mouse was hovering over in the
     /// previous frame.
     pub(super) previous_hover_cell: Option<(usize, usize)>,
-    /// The command-block hover-tint rendered-row range from the previous
-    /// frame.  A hover change (different range, or appearing/disappearing)
-    /// forces a vertex rebuild so the tint is baked into the background VBO.
+    /// The command-block hover-tint row range from the previous frame,
+    /// compared against this frame's [`super::frame_dirty::DirtyTrackingOutcome::command_block_hover_rows`]
+    /// to detect a hover change (different range, or appearing/disappearing),
+    /// which forces a vertex rebuild so the tint is baked into the
+    /// background VBO.
+    ///
+    /// Despite its name, this is already **screen**-row space:
+    /// [`super::frame_dirty::compute_command_block_hover_rows`]'s final step
+    /// calls `FoldLayout::rendered_to_screen` before returning. So unlike
+    /// selection -- whose [`Self::previous_selection`] is buffer-absolute and
+    /// needed a dedicated screen-space companion -- this field is unioned
+    /// straight into [`build_bounded_damage`] with no conversion and no
+    /// second field (Task 124.14b-ii).
     pub(super) previous_command_block_hover_rows: Option<(usize, usize)>,
     /// Cached URL from the most recent URL hover lookup.
     pub(super) cached_hovered_url: Option<Arc<Url>>,
@@ -1821,8 +1838,9 @@ fn row_run_damage(
 enum FullRebuildDamage {
     /// Content changed only within known bounds -- the frame's
     /// `changed_rows` row list (Task 124.14a), the current/previous
-    /// selection's screen-row span (Task 124.14b-i), or both together -- and
-    /// no other full-repaint trigger fired. Build
+    /// selection's screen-row span (Task 124.14b-i), the current/previous
+    /// command-block hover span (Task 124.14b-ii), or any combination of
+    /// the three -- and no other full-repaint trigger fired. Build
     /// [`crate::gui::renderer::PaneFrameDamage::Region`] from it once the
     /// rebuild completes (or fall back to `Full` if every contributing row
     /// maps to nothing, e.g. collapsed inside a fold).
@@ -1832,26 +1850,56 @@ enum FullRebuildDamage {
     Full,
 }
 
+/// The current/previous screen-row span for each of [`build_bounded_damage`]'s
+/// selection and hover union sources. Every field is already screen-row
+/// space -- see the two Task 124.14b-ii fields' doc comments for why no
+/// further conversion happens inside [`build_bounded_damage`] itself.
+///
+/// Grouped into one `Copy` struct (mirroring `RowDamageGeometry`'s
+/// precedent) so adding the hover pair at Task 124.14b-ii did not push
+/// [`build_bounded_damage`] over clippy's `too_many_arguments` threshold.
+#[derive(Clone, Copy)]
+struct BoundedDamageSpans {
+    /// This frame's selection highlight (derived from
+    /// `screen_selection_rendered` at the call site, Task 124.14b-i).
+    current_selection: Option<(usize, usize)>,
+    /// Last frame's selection highlight
+    /// ([`PaneRenderCache::previous_selection_screen_rows`], Task
+    /// 124.14b-i).
+    previous_selection: Option<(usize, usize)>,
+    /// This frame's command-block hover tint (`command_block_hover_rows_early`
+    /// -- see [`super::frame_dirty::compute_command_block_hover_rows`]'s doc
+    /// for why no further conversion is needed here, unlike the selection
+    /// field above, Task 124.14b-ii).
+    current_hover: Option<(usize, usize)>,
+    /// Last frame's command-block hover tint
+    /// ([`PaneRenderCache::previous_command_block_hover_rows`], already
+    /// screen-space -- Task 124.14b-ii).
+    previous_hover: Option<(usize, usize)>,
+}
+
 /// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from every
 /// bounded damage source a [`VertexRebuild::Bounded`] outcome may carry,
 /// falling back to `Full` when no bound can be established (Task 124.14).
 ///
-/// Three sources are unioned into one row set before any rect is built:
+/// Five sources are unioned into one row set before any rect is built:
 ///
 /// - `changed_rows` (Task 124.14a) -- the window rows named by
 ///   [`super::frame_dirty::ChangedRows::Rows`], translated snapshot ->
 ///   rendered -> screen.
-/// - `current_selection_screen_rows` (Task 124.14b-i) -- this frame's
-///   selection highlight, already in screen-row space (derived from
-///   `screen_selection_rendered` at the call site, which performed the same
-///   two-step translation).
-/// - `previous_selection_screen_rows` (Task 124.14b-i) -- last frame's
-///   selection highlight, also already in screen-row space
-///   ([`PaneRenderCache::previous_selection_screen_rows`] — see that
-///   field's doc for why it is cached in screen space rather than
-///   translated on demand). Erasing the *old* highlight matters as much as
-///   drawing the *new* one: a selection that shrank or was cleared still
-///   left pixels on screen that only these rows will repaint.
+/// - `spans.current_selection` / `spans.previous_selection` (Task
+///   124.14b-i) -- the selection highlight's current and previous frame
+///   extent, both already in screen-row space. Erasing the *old* highlight
+///   matters as much as drawing the *new* one: a selection that shrank or
+///   was cleared still left pixels on screen that only these rows will
+///   repaint.
+/// - `spans.current_hover` / `spans.previous_hover` (Task 124.14b-ii) --
+///   the command-block hover tint's current and previous frame extent,
+///   also both already in screen-row space, for the same
+///   erase-the-old/draw-the-new reason as selection: moving the hover
+///   between two blocks (or off a block entirely) must repaint the
+///   previously-tinted rows or the stale tint lingers with no later event
+///   to correct it.
 ///
 /// `evaluate_frame_dirty_state` selects [`VertexRebuild::Bounded`] only when
 /// `changed_rows` is [`super::frame_dirty::ChangedRows::Rows`] or
@@ -1870,21 +1918,21 @@ enum FullRebuildDamage {
 /// `decide_frame_damage` already carries one dead `RequestedWithNoRects`
 /// variant from the last time that shape existed (124.21 finding 4).
 ///
-/// The three sources are merged into one sorted, deduplicated row set
+/// All five sources are merged into one sorted, deduplicated row set
 /// **before** run-merging runs, so overlapping sources (e.g. a changed row
-/// that sits inside the selection) collapse into one rect rather than two
-/// overlapping ones. Contiguous on-screen rows are merged into a single
-/// rect (a run) rather than emitted one rect per row, so a block of
-/// adjacent rows costs one [`crate::gui::renderer::CursorDamage`] rather
-/// than many — but non-contiguous rows (e.g. rows 3 and 40) stay separate
-/// rects rather than collapsing to their bounding box, which is the entire
-/// reason `PaneFrameDamage::Region` carries a `Vec` instead of one rect
-/// (124.14a's design decision: a single bbox would present the rows between
-/// them too).
+/// that sits inside the selection, or a hover span that overlaps either)
+/// collapse into one rect rather than several overlapping ones. Contiguous
+/// on-screen rows are merged into a single rect (a run) rather than
+/// emitted one rect per row, so a block of adjacent rows costs one
+/// [`crate::gui::renderer::CursorDamage`] rather than many — but
+/// non-contiguous rows (e.g. rows 3 and 40) stay separate rects rather
+/// than collapsing to their bounding box, which is the entire reason
+/// `PaneFrameDamage::Region` carries a `Vec` instead of one rect (124.14a's
+/// design decision: a single bbox would present the rows between them
+/// too).
 fn build_bounded_damage(
     changed_rows: &super::frame_dirty::ChangedRows,
-    current_selection_screen_rows: Option<(usize, usize)>,
-    previous_selection_screen_rows: Option<(usize, usize)>,
+    spans: BoundedDamageSpans,
     row_map: &RowMap,
     layout: &FoldLayout,
     geometry: RowDamageGeometry,
@@ -1903,17 +1951,24 @@ fn build_bounded_damage(
         }
     };
 
-    if let Some((start, end)) = current_selection_screen_rows {
+    if let Some((start, end)) = spans.current_selection {
         screen_rows.extend(start..=end);
     }
-    if let Some((start, end)) = previous_selection_screen_rows {
+    if let Some((start, end)) = spans.previous_selection {
+        screen_rows.extend(start..=end);
+    }
+    if let Some((start, end)) = spans.current_hover {
+        screen_rows.extend(start..=end);
+    }
+    if let Some((start, end)) = spans.previous_hover {
         screen_rows.extend(start..=end);
     }
 
-    // Merge all three sources into one sorted, deduplicated set BEFORE
+    // Merge all five sources into one sorted, deduplicated set BEFORE
     // run-merging, so a row contributed by more than one source (e.g. a
-    // changed row inside the selection) collapses to a single entry rather
-    // than emitting overlapping rects for it.
+    // changed row inside the selection, or a hover span overlapping either)
+    // collapses to a single entry rather than emitting overlapping rects
+    // for it.
     screen_rows.sort_unstable();
     screen_rows.dedup();
 
@@ -3195,6 +3250,12 @@ impl FreminalTerminalWidget {
                     cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                     cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
                     cache.previous_search_epoch = search_epoch;
+                    // Same capture-before-overwrite shape as selection above
+                    // (Task 124.14b-ii). No screen-space companion field is
+                    // needed here: this value is already screen-space, so
+                    // there is nothing to keep in lockstep and no pair that
+                    // could drift apart.
+                    let previous_hover_screen_rows = cache.previous_command_block_hover_rows;
                     cache.previous_command_block_hover_rows = command_block_hover_rows_early;
                     cache.previous_term_width = snap.term_width;
                     cache.previous_term_height = snap.term_height;
@@ -3211,8 +3272,12 @@ impl FreminalTerminalWidget {
                         FullRebuildDamage::Full => crate::gui::renderer::PaneFrameDamage::Full,
                         FullRebuildDamage::Bounded => build_bounded_damage(
                             &dirty.changed_rows,
-                            current_selection_screen_rows,
-                            previous_selection_screen_rows,
+                            BoundedDamageSpans {
+                                current_selection: current_selection_screen_rows,
+                                previous_selection: previous_selection_screen_rows,
+                                current_hover: command_block_hover_rows_early,
+                                previous_hover: previous_hover_screen_rows,
+                            },
                             row_map,
                             &layout,
                             RowDamageGeometry {
@@ -4931,15 +4996,16 @@ mod image_pixels_changed_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod build_bounded_damage_tests {
-    //! Task 124.14b-i: [`build_bounded_damage`] unions three damage
-    //! sources -- the changed-row list (124.14a), the current selection's
-    //! screen-row span, and the previous selection's screen-row span --
-    //! into one merged rect set. These tests exercise that union directly,
-    //! at the pure-function level, rather than through the full `show()`
-    //! pipeline (which needs a GL context). A no-fold, no-scroll-skip
-    //! `FoldLayout`/`RowMap` pair is used throughout so snapshot row ==
-    //! rendered row == screen row, isolating the union/merge logic from
-    //! the row-translation logic 124.14a's own tests already cover.
+    //! Task 124.14b-i introduced [`build_bounded_damage`]'s union of the
+    //! changed-row list (124.14a) with the selection's current/previous
+    //! screen-row span; Task 124.14b-ii adds the command-block hover's
+    //! current/previous screen-row span as a fourth and fifth source. These
+    //! tests exercise that union directly, at the pure-function level,
+    //! rather than through the full `show()` pipeline (which needs a GL
+    //! context). A no-fold, no-scroll-skip `FoldLayout`/`RowMap` pair is
+    //! used throughout so snapshot row == rendered row == screen row,
+    //! isolating the union/merge logic from the row-translation logic
+    //! 124.14a's own tests already cover.
     use super::*;
     use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
     use crate::gui::terminal::frame_dirty::ChangedRows;
@@ -4952,6 +5018,18 @@ mod build_bounded_damage_tests {
             flat_window_start: 0,
             row_map: RowMap::new(row_count, &[]),
             render_skip: 0,
+        }
+    }
+
+    /// [`BoundedDamageSpans`] with every source `None`, so each test below
+    /// only needs to name the one or two sources it actually exercises
+    /// rather than repeating all four `None`s at every call site.
+    const fn no_spans() -> BoundedDamageSpans {
+        BoundedDamageSpans {
+            current_selection: None,
+            previous_selection: None,
+            current_hover: None,
+            previous_hover: None,
         }
     }
 
@@ -5001,8 +5079,11 @@ mod build_bounded_damage_tests {
 
         let damage = build_bounded_damage(
             &ChangedRows::None,
-            Some((2, 2)),
-            Some((5, 5)),
+            BoundedDamageSpans {
+                current_selection: Some((2, 2)),
+                previous_selection: Some((5, 5)),
+                ..no_spans()
+            },
             &layout.row_map,
             &layout,
             geometry(),
@@ -5028,8 +5109,10 @@ mod build_bounded_damage_tests {
 
         let damage = build_bounded_damage(
             &ChangedRows::None,
-            None,
-            Some((1, 3)),
+            BoundedDamageSpans {
+                previous_selection: Some((1, 3)),
+                ..no_spans()
+            },
             &layout.row_map,
             &layout,
             geometry(),
@@ -5057,8 +5140,10 @@ mod build_bounded_damage_tests {
 
         let damage = build_bounded_damage(
             &ChangedRows::Rows(vec![3]),
-            Some((2, 4)),
-            None,
+            BoundedDamageSpans {
+                current_selection: Some((2, 4)),
+                ..no_spans()
+            },
             &layout.row_map,
             &layout,
             geometry(),
@@ -5070,6 +5155,131 @@ mod build_bounded_damage_tests {
             "row 3 sits inside the selection's [2, 4] span, so the union \
              must merge to exactly one rect spanning [2, 4] -- two \
              separate (and here, overlapping) rects would be a bug"
+        );
+    }
+
+    // ── Task 124.14b-ii: command-block hover spans ─────────────────────────
+
+    /// A hover-only change (no row change, no selection change) must still
+    /// produce bounded damage, and that damage must cover BOTH the current
+    /// hover's rows (drawing the new tint) and the previous hover's rows
+    /// (erasing the old one) -- the old-rows half is what moving the hover
+    /// from one command block to another needs to avoid leaving a stale
+    /// tint on the block the pointer just left. Uses two non-adjacent
+    /// single-row spans so the result is provably two separate rects, not
+    /// a bounding box spanning the rows between them (124.14a's design
+    /// decision, still load-bearing here).
+    #[test]
+    fn hover_only_change_damages_both_current_and_previous_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                current_hover: Some((2, 2)),
+                previous_hover: Some((5, 5)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 2), expected_run(5, 5)]),
+            "damage must name both the new hover's row (2) and the old \
+             hover's row (5) as two separate, non-contiguous rects"
+        );
+    }
+
+    /// The clearing case: the current hover is `None` (the pointer left the
+    /// gutter, or left the block entirely) but a previous hover was
+    /// recorded. The union must still damage the previous hover's rows --
+    /// if it did not, the just-cleared tint's pixels would never be
+    /// repainted and would linger on screen forever (nothing else would
+    /// ever touch those rows again).
+    #[test]
+    fn cleared_hover_still_damages_the_previous_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                previous_hover: Some((1, 3)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(1, 3)]),
+            "clearing the hover (current None, previous Some) must still \
+             damage the rows the now-erased tint occupied"
+        );
+    }
+
+    /// Overlapping sources -- a changed row that falls inside the current
+    /// hover's span -- must merge into ONE rect, not two overlapping ones.
+    /// Same reasoning as the selection/changed-row overlap above: merging
+    /// per-source first would double-present the overlap.
+    #[test]
+    fn a_changed_row_inside_the_hover_merges_into_one_rect() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::Rows(vec![3]),
+            BoundedDamageSpans {
+                current_hover: Some((2, 4)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 4)]),
+            "row 3 sits inside the hover's [2, 4] span, so the union must \
+             merge to exactly one rect spanning [2, 4] -- two separate \
+             (and here, overlapping) rects would be a bug"
+        );
+    }
+
+    /// Overlapping sources across two *different* sources -- a hover span
+    /// that overlaps the current selection's span -- must also merge into
+    /// ONE rect. This is the case 124.14b-ii adds on top of 124.14b-i:
+    /// selection and hover are independent sources that can legitimately
+    /// highlight the same rows at once (selecting text inside the block
+    /// the pointer is hovering), and the union must not double-present
+    /// that overlap either.
+    #[test]
+    fn a_hover_span_overlapping_the_selection_merges_into_one_rect() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                current_selection: Some((2, 4)),
+                current_hover: Some((3, 6)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 6)]),
+            "the selection's [2, 4] and the hover's [3, 6] overlap on rows \
+             3-4, so the union must merge to exactly one rect spanning \
+             [2, 6] -- two separate (and here, overlapping) rects would be \
+             a bug"
         );
     }
 }

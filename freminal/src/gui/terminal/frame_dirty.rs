@@ -98,16 +98,16 @@ pub(super) struct FrameDirtyObservations {
 /// since `Rows` would otherwise lie about carrying a damage bound that no
 /// longer comes only from rows. This is produced when the content change is
 /// attributable *purely* to some combination of [`ChangedRows::Rows`] (Task
-/// 124.14a) and `selection_changed` (Task 124.14b-i) — including
-/// [`ChangedRows::None`] with `selection_changed` alone, a selection-only
-/// change with no row change at all. `ChangedRows::All`, `theme_changed`,
-/// `dims_changed`, `folds_changed`, and every other independently-global
-/// trigger (`text_blink_changed`, `search_changed`, `hover_changed`,
+/// 124.14a), `selection_changed` (Task 124.14b-i), and `hover_changed`
+/// (Task 124.14b-ii) — including [`ChangedRows::None`] with only a
+/// selection and/or hover change and no row change at all. `ChangedRows::All`,
+/// `theme_changed`, `dims_changed`, `folds_changed`, and every other
+/// independently-global trigger (`text_blink_changed`, `search_changed`,
 /// `image_frame_changed`, `image_pixels_changed`) still yield
 /// [`Self::ReevaluateFullRebuild`] (124.21's exhaustive audit, narrowed by
-/// one entry at 124.14b-i; the remaining four are 124.14b-ii/d and 124.C5's
-/// boundary and must stay unbounded until those subtasks, if ever, extend
-/// them).
+/// one entry at 124.14b-i and a second at 124.14b-ii; the remaining two are
+/// 124.14d and 124.C5's boundary and must stay unbounded until those
+/// subtasks, if ever, extend them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum VertexRebuild {
     /// Patch just the cursor quad in the existing decoration buffer
@@ -116,15 +116,16 @@ pub(super) enum VertexRebuild {
     /// Not the cursor-only fast path; content changed, but the change is
     /// provably bounded — to the window rows named by
     /// [`DirtyTrackingOutcome::changed_rows`] (Task 124.14a), to the
-    /// current/previous selection's screen-row span (Task 124.14b-i), or
-    /// both together — and no other full-repaint trigger fired. The caller
-    /// runs the exact same full rebuild as [`Self::ReevaluateFullRebuild`]
-    /// but may report a bounded [`crate::gui::renderer::PaneFrameDamage::Region`]
-    /// for it instead of `Full`. Carries no payload of its own —
-    /// deliberately, so this enum stays `Copy` — the changed-row list lives
-    /// on the outcome and the selection spans live on the render cache,
-    /// precisely so this decision and any other reader can see them without
-    /// a second copy.
+    /// current/previous selection's screen-row span (Task 124.14b-i), to
+    /// the current/previous command-block hover span (Task 124.14b-ii), or
+    /// any combination of the three — and no other full-repaint trigger
+    /// fired. The caller runs the exact same full rebuild as
+    /// [`Self::ReevaluateFullRebuild`] but may report a bounded
+    /// [`crate::gui::renderer::PaneFrameDamage::Region`] for it instead of
+    /// `Full`. Carries no payload of its own — deliberately, so this enum
+    /// stays `Copy` — the changed-row list lives on the outcome and the
+    /// selection/hover spans live on the render cache, precisely so this
+    /// decision and any other reader can see them without a second copy.
     Bounded,
     /// Not the cursor-only fast path; the full-rebuild trigger flags must
     /// still be checked by the caller.
@@ -147,12 +148,13 @@ pub(super) enum VertexRebuild {
 /// "exactly zero/all rows, coincidentally".
 ///
 /// [`Self::any`] is consumed to fold this into `content_changed`.
-/// [`Self::Rows`] (or [`Self::None`] alongside a selection change, Task
-/// 124.14b-i) is also consumed directly (Task 124.14), via
-/// [`DirtyTrackingOutcome::changed_rows`]: when the only content trigger
-/// this frame is [`Self::Rows`] and/or `selection_changed`,
-/// [`evaluate_frame_dirty_state`] selects [`VertexRebuild::Bounded`], and
-/// the caller reads `changed_rows` off the same outcome to build a bounded
+/// [`Self::Rows`] (or [`Self::None`] alongside a selection and/or hover
+/// change, Tasks 124.14b-i/124.14b-ii) is also consumed directly (Task
+/// 124.14), via [`DirtyTrackingOutcome::changed_rows`]: when the only
+/// content trigger this frame is [`Self::Rows`] and/or `selection_changed`
+/// and/or `hover_changed`, [`evaluate_frame_dirty_state`] selects
+/// [`VertexRebuild::Bounded`], and the caller reads `changed_rows` off the
+/// same outcome to build a bounded
 /// [`crate::gui::renderer::PaneFrameDamage::Region`] instead of `Full`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ChangedRows {
@@ -238,13 +240,13 @@ pub(super) struct DirtyTrackingOutcome {
     /// forcing a full-pane repaint for a bounded set of changed rows.
     ///
     /// Task 124.14: this is [`ChangedRows::Rows`] or [`ChangedRows::None`]
-    /// (the latter when a selection-only change, Task 124.14b-i, is the
-    /// sole trigger) whenever [`Self::rebuild`] is
-    /// [`VertexRebuild::Bounded`] — that variant is selected below
+    /// (the latter when a selection-only and/or hover-only change, Tasks
+    /// 124.14b-i/124.14b-ii, is the sole trigger) whenever [`Self::rebuild`]
+    /// is [`VertexRebuild::Bounded`] — that variant is selected below
     /// precisely because this field is one of those two shapes and no
     /// other full-repaint trigger fired — so the caller may read it
-    /// unconditionally in that branch, alongside the selection's screen-row
-    /// span, to build the damage union.
+    /// unconditionally in that branch, alongside the selection's and
+    /// hover's screen-row spans, to build the damage union.
     pub(super) changed_rows: ChangedRows,
     /// The normalised selection for this frame (buffer-absolute rows),
     /// after the content-change auto-clear rule has been applied.
@@ -255,7 +257,20 @@ pub(super) struct DirtyTrackingOutcome {
     /// Fingerprint of this frame's search-highlight state (cached for next
     /// frame's comparison). See `SearchState::render_epoch`.
     pub(super) search_epoch: u64,
-    /// Command-block gutter hover-tint rendered-row range this frame.
+    /// Command-block gutter hover-tint row range this frame.
+    ///
+    /// Despite the name inherited from `compute_command_block_hover_rows`'s
+    /// doc, this is already **screen**-row space, not rendered-row space:
+    /// that function's own final step calls `layout.rendered_to_screen`
+    /// before returning (124.14b-ii recon), because its result is consumed
+    /// directly as an index into the screen-indexed `rendered_shaped_lines`
+    /// array at the `widget.rs` call site — the same array `selection`'s
+    /// already-screen-space `screen_selection_rendered` indexes. So unlike
+    /// selection's `previous_selection` (buffer-absolute, needing a genuine
+    /// per-frame translation and therefore a dedicated screen-space
+    /// companion field), this value needs no further conversion to be
+    /// unioned into [`build_bounded_damage`]'s row set, and needs no second
+    /// field either.
     pub(super) command_block_hover_rows: Option<(usize, usize)>,
     /// Whether the cursor should actually be drawn this frame (DECTCEM,
     /// echo-off, active-pane, and fold-visibility all folded in).
@@ -758,23 +773,28 @@ pub(super) fn evaluate_frame_dirty_state(
     // is not a row list at all, so there is nothing to bound to) and none
     // of the other six full-repaint triggers this decision already checks
     // for `cursor_only` fired either. Those are exactly 124.21's audit
-    // boundary, narrowed by one entry at 124.14b-i: `selection_changed` is
-    // now folded INTO the bound rather than vetoing it (its screen-row
-    // extent is known at the decision point, per 124.14b-i's design, and
-    // the caller unions it with `changed_rows` rather than treating it as
-    // full-repaint-forcing); `hover_changed` is BOUNDABLE-NOW but not
-    // bounded until 124.14b-ii (it has a documented gutter-escape hazard
-    // that selection does not share); `search_changed`, `image_frame_changed`
-    // and `image_pixels_changed` are BOUNDABLE-WITH-WORK or explicitly
-    // excluded (124.C5). `text_blink_changed` has no per-row bitmap. All
-    // four stay full-repaint triggers here, deliberately.
+    // boundary, narrowed by one entry at 124.14b-i and a second at
+    // 124.14b-ii: `selection_changed` and `hover_changed` are now folded
+    // INTO the bound rather than vetoing it (each one's screen-row extent
+    // is known at the decision point -- `hover_changed`'s exactly as
+    // 124.14b-i's recon found it BOUNDABLE-NOW, and the gutter-escape
+    // hazard that recon also raised was investigated and disproved before
+    // implementation: the hover tint is baked into the background instance
+    // buffer inside `terminal_rect`, same as selection, not painted over
+    // the gutter strip -- and the caller unions both into `changed_rows`
+    // rather than treating either as full-repaint-forcing); `search_changed`,
+    // `image_frame_changed` and `image_pixels_changed` are
+    // BOUNDABLE-WITH-WORK or explicitly excluded (124.C5). `text_blink_changed`
+    // has no per-row bitmap. All three stay full-repaint triggers here,
+    // deliberately.
     //
-    // `ChangedRows::None` combined with `selection_changed` alone is a
-    // genuine, common case this bound now covers: a selection-only change
-    // (extending, shrinking, or clearing a selection with no PTY output in
-    // between) has no changed row at all, but its damage is still fully
-    // bounded to the selection's screen-row span -- see
-    // `(rows_changed.any() || selection_changed)` below.
+    // `ChangedRows::None` combined with `selection_changed` and/or
+    // `hover_changed` alone is a genuine, common case this bound now
+    // covers: a selection-only or hover-only change (extending, shrinking,
+    // or clearing a selection, or moving the hover between command blocks,
+    // with no PTY output in between) has no changed row at all, but its
+    // damage is still fully bounded to that source's screen-row span -- see
+    // `(rows_changed.any() || selection_changed || hover_changed)` below.
     //
     // `deco_verts_empty` is included for the same reason it vetoes
     // `cursor_only`: with no previously-populated decoration buffer there is
@@ -791,10 +811,9 @@ pub(super) fn evaluate_frame_dirty_state(
         && !folds_changed
         && !text_blink_changed
         && !search_changed
-        && !hover_changed
         && !image_frame_changed
         && !image_pixels_changed
-        && (rows_changed.any() || selection_changed);
+        && (rows_changed.any() || selection_changed || hover_changed);
 
     DirtyTrackingOutcome {
         rebuild: if cursor_only {
@@ -895,6 +914,10 @@ mod evaluate_frame_dirty_state_tests {
         // with that state's fingerprint.
         cache.previous_search_epoch = SearchState::default().render_epoch();
         cache.previous_command_block_hover_rows = None;
+        // Must agree with `previous_command_block_hover_rows` (Task
+        // 124.14b-ii) -- see that field's doc comment. A "settled" cache
+        // that disagreed on this pair would be describing a state `show()`
+        // itself can never produce (the two are always written together).
         cache.previous_cursor_blink_on = cursor_blink_on;
         cache.previous_cursor_pos = snap.cursor_pos;
         cache.previous_show_cursor = effective_show_cursor;
@@ -1373,6 +1396,59 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
+    /// The hover analogue of `selection_clear_alone_yields_bounded_rebuild`
+    /// (Task 124.14b-ii): a previously-recorded hover
+    /// (`cache.previous_command_block_hover_rows` is `Some`) disappears
+    /// entirely this frame, with no row change and no selection change.
+    /// `hover_changed` still fires, so this must still take
+    /// `VertexRebuild::Bounded`.
+    ///
+    /// This is the only hover-only shape `call()`'s fixed geometry
+    /// (`gutter_inset: 0.0`) can exercise at this layer: since
+    /// `compute_command_block_hover_rows` always observes `None` under that
+    /// geometry, only the clearing direction (`Some -> None`) is reachable
+    /// here -- the appearing/moving direction (`current_hover_screen_rows`
+    /// actually `Some`) is instead covered directly at the
+    /// `build_bounded_damage` level in `widget.rs`'s
+    /// `hover_only_change_damages_both_current_and_previous_rows`, which
+    /// does not need a live geometry to exercise. Together the two tests
+    /// cover both directions this subtask's mandate names.
+    #[test]
+    fn hover_clear_alone_yields_bounded_rebuild() {
+        let snap = base_snapshot();
+        let mut cache = settled_cache(&snap, true, true);
+        // Must agree with `previous_command_block_hover_rows` -- see that
+        // field's doc comment (Task 124.14b-ii).
+        cache.previous_command_block_hover_rows = Some((0, 0));
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            outcome.observations.hover_changed,
+            "precondition: Some -> None must be observed as a hover change"
+        );
+        assert!(
+            !outcome.observations.selection_changed,
+            "precondition: no selection changed -- isolates the hover-only \
+             case from 124.14b-i's selection-only case"
+        );
+        assert_eq!(
+            outcome.changed_rows,
+            ChangedRows::None,
+            "precondition: no row changed -- isolates the clearing case"
+        );
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::Bounded,
+            "124.14b-ii: a hover being cleared (Some -> None) must still \
+             take the bounded-damage path so the stale tint's rows are \
+             repainted, not silently reused unchanged"
+        );
+    }
+
     /// `ChangedRows::All` (no baseline recorded, or a length mismatch) must
     /// never select `VertexRebuild::Bounded` — `All` is not a row list at
     /// all, so there is nothing to bound the damage to, and `bounded_change`
@@ -1447,24 +1523,34 @@ mod evaluate_frame_dirty_state_tests {
         );
     }
 
-    /// 124.14b-ii's boundary (unaffected by 124.14b-i): a command-block
-    /// hover change alongside a genuine bounded row change must still veto
-    /// `VertexRebuild::Bounded`. The hover tint is baked into the
-    /// background instance VBO for rows outside `changed_rows` (the
-    /// hovered command block need not overlap the row whose epoch
-    /// bumped), so bounding to `changed_rows` would leave a stale hover
-    /// tint on screen. Hover is BOUNDABLE-NOW but not bounded until
-    /// 124.14b-ii does the work -- and per that subtask's recon, hover has
-    /// a gutter-escape hazard selection does not share, so it must NOT be
-    /// folded in alongside selection here.
+    /// 124.14b-ii inverts this boundary from its 124.14a/124.14b-i shape: a
+    /// hover change alongside a genuine bounded row change now YIELDS
+    /// `VertexRebuild::Bounded` rather than veto-ing it, because
+    /// `build_bounded_damage` (`widget.rs`) now unions the hover's
+    /// current/previous screen-row span into the damage alongside
+    /// `changed_rows`, so the tint is no longer left stale outside the
+    /// bound. This crosses the boundary 124.14b-i's own recon pinned as
+    /// "must NOT be folded in alongside selection" -- that recon's
+    /// gutter-escape hazard (a hover-bounded frame would clip away the
+    /// gutter's own repaint, per Task 124.18) was investigated further and
+    /// disproved before 124.14b-ii was implemented: the hover tint is
+    /// baked into the background instance buffer *inside* `terminal_rect`,
+    /// the same surface selection paints to, not the gutter strip itself
+    /// (see `PLAN_124_RENDER_EFFICIENCY.md`'s 124.14b recon correction).
+    /// Renamed from
+    /// `hover_change_alongside_a_row_change_still_yields_reevaluate_not_rows`
+    /// -- inverted per this subtask's mandate, not merely adjusted, because
+    /// 124.14b-ii deliberately crosses the boundary that test pinned.
     #[test]
-    fn hover_change_alongside_a_row_change_still_yields_reevaluate_not_rows() {
+    fn hover_change_alongside_a_row_change_now_yields_bounded() {
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, true);
         // `call()`'s fixed geometry (`gutter_inset: 0.0`) makes
         // `compute_command_block_hover_rows` always return `None`, so
         // recording a `Some` here as the previous frame's hover range is
-        // what makes it differ from this frame's `None`.
+        // what makes it differ from this frame's `None`. Both hover fields
+        // are set together -- see their doc comments for why they must
+        // never disagree about whether a previous hover was recorded.
         cache.previous_command_block_hover_rows = Some((0, 0));
 
         let mut changed = snap;
@@ -1485,10 +1571,11 @@ mod evaluate_frame_dirty_state_tests {
         );
         assert_eq!(
             outcome.rebuild,
-            VertexRebuild::ReevaluateFullRebuild,
-            "124.14b's boundary: hover_changed must veto \
-             VertexRebuild::Bounded even when the row change is otherwise \
-             bounded -- hover extent is not yet folded into the bound"
+            VertexRebuild::Bounded,
+            "124.14b-ii: hover_changed alongside a genuine bounded row \
+             change must now take VertexRebuild::Bounded -- \
+             build_bounded_damage unions the hover's screen-row span into \
+             the damage, so the tint is no longer left stale"
         );
     }
 
