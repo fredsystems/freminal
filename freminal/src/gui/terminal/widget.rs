@@ -1827,6 +1827,67 @@ fn row_run_damage(
     )
 }
 
+/// Build the [`crate::gui::renderer::CursorDamage`] rect for a pane's OWN
+/// full rebuild (Task 124.21 finding 2: the multi-pane fan-out).
+/// `decide_frame_damage` does `rects.clear(); break;` the moment any pane
+/// reports [`crate::gui::renderer::PaneFrameDamage::Full`], discarding rects
+/// already collected from every other pane -- so in a split, one pane
+/// needing a full rebuild was forcing a full clear + present of every
+/// provably-`Unchanged` sibling and all chrome. Reporting this pane's own
+/// bounds instead of escalating the whole frame to `Full` stops the fan-out
+/// at the source; `decide_frame_damage` itself is unchanged.
+///
+/// Returns `None` -- which the caller turns into
+/// [`crate::gui::renderer::PaneFrameDamage::Full`] -- when the pane's own
+/// bounds are degenerate: zero/negative extent, or a rect that clamps away
+/// entirely against the framebuffer. A pane whose own bounds cannot be
+/// established genuinely cannot bound its damage, and `Full` is the correct,
+/// safe fallback there.
+///
+/// `pane_rect`, not `terminal_rect`, is the pane's own bounds: a full pane
+/// rebuild also repaints the command-block gutter strip and the scrollbar,
+/// both of which live inside `pane_rect` but outside `terminal_rect`.
+///
+/// Reuses [`crate::gui::renderer::CursorDamage::from_cursor_cells`] rather
+/// than a second hand-rolled transform (124.14a's design decision). This is
+/// the first caller whose rect can extend LEFT of the viewport origin
+/// `vp_left_px`/`vp_top_px` measure from -- the cell offset below is
+/// negative whenever the gutter is enabled -- but `from_cursor_cells`
+/// already adds the offset before clamping left/top to 0, so no second
+/// Y-flip transform is needed.
+fn full_pane_rebuild_damage_rect(
+    pane_rect: egui::Rect,
+    terminal_rect: egui::Rect,
+    ppp: f32,
+    vp_left_px: f32,
+    vp_top_px: f32,
+    fb_height_px: i32,
+) -> Option<crate::gui::renderer::CursorDamage> {
+    // Checked explicitly, ahead of `from_cursor_cells`: that function pads
+    // every cell outward by 1px on every side before clamping, so a
+    // genuinely zero-width or zero-height cell would NOT naturally come out
+    // `None` there (it would come out a spurious ~2px-wide sliver instead).
+    // Only a fully out-of-framebuffer rect degenerates inside
+    // `from_cursor_cells` itself. Catching zero/negative extent here is
+    // what actually delivers "zero or negative width/height falls back to
+    // `Full`" rather than relying on padding to do it by accident.
+    if pane_rect.width() <= 0.0 || pane_rect.height() <= 0.0 {
+        return None;
+    }
+    let cell = (
+        (pane_rect.min.x - terminal_rect.min.x) * ppp,
+        (pane_rect.min.y - terminal_rect.min.y) * ppp,
+        pane_rect.width() * ppp,
+        pane_rect.height() * ppp,
+    );
+    crate::gui::renderer::CursorDamage::from_cursor_cells(
+        vp_left_px,
+        vp_top_px,
+        fb_height_px,
+        &[cell],
+    )
+}
+
 /// Whether -- and how -- a frame's full vertex rebuild can report bounded
 /// damage (Task 124.14).
 ///
@@ -2848,6 +2909,19 @@ impl FreminalTerminalWidget {
                 .approx_as_by::<i32, conv2::RoundToNearest>()
                 .unwrap_or(0);
 
+            // Task 124.21 finding 2 (the multi-pane fan-out): this pane's own
+            // rect, so a full rebuild below can report bounded damage
+            // instead of escalating the whole frame to `Full`. See
+            // `full_pane_rebuild_damage_rect`'s doc comment for why.
+            let pane_rect_damage = full_pane_rebuild_damage_rect(
+                pane_rect,
+                terminal_rect,
+                ppp,
+                vp_left_px,
+                vp_top_px,
+                fb_height_px,
+            );
+
             // Whether -- and how -- this frame's full rebuild (if any) can
             // report bounded damage, decided BEFORE the (identical either
             // way) rebuild body runs below. `VertexRebuild::Bounded` means
@@ -3269,7 +3343,17 @@ impl FreminalTerminalWidget {
                         build_image_pixel_ptrs(&snap.images, |id| view_state.selected_frame(id));
 
                     cache.last_frame_cursor_damage = match full_rebuild_damage {
-                        FullRebuildDamage::Full => crate::gui::renderer::PaneFrameDamage::Full,
+                        // Task 124.21 finding 2: report this pane's OWN rect
+                        // rather than escalating the whole frame to `Full`,
+                        // so a busy pane in a split no longer forces a full
+                        // clear + present of every sibling. `pane_rect_damage`
+                        // is `None` only when the pane's own bounds are
+                        // degenerate, in which case `Full` is the correct,
+                        // safe fallback.
+                        FullRebuildDamage::Full => pane_rect_damage
+                            .map_or(crate::gui::renderer::PaneFrameDamage::Full, |d| {
+                                crate::gui::renderer::PaneFrameDamage::Region(vec![d])
+                            }),
                         FullRebuildDamage::Bounded => build_bounded_damage(
                             &dirty.changed_rows,
                             BoundedDamageSpans {
@@ -5280,6 +5364,184 @@ mod build_bounded_damage_tests {
              3-4, so the union must merge to exactly one rect spanning \
              [2, 6] -- two separate (and here, overlapping) rects would be \
              a bug"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod full_pane_rebuild_damage_rect_tests {
+    //! Task 124.21 finding 2's fix: [`full_pane_rebuild_damage_rect`] builds
+    //! the damage rect a full pane rebuild reports instead of escalating to
+    //! `PaneFrameDamage::Full`. These tests exercise it directly at the
+    //! pure-function level rather than through the full `show()` pipeline
+    //! (which needs a GL context).
+    use super::*;
+
+    /// Physical scale factor shared by every test below.
+    const PPP: f32 = 2.0;
+    /// A framebuffer tall enough that a 50-logical-point-tall pane (100
+    /// physical pixels) plus `from_cursor_cells`' 1px outward safety pad
+    /// never clips against the bottom edge, so the tests exercising
+    /// ordinary (non-clamped) geometry see un-clamped values.
+    const TALL_FB_HEIGHT_PX: i32 = 300;
+    /// A deliberately short framebuffer, used only by the framebuffer-clamp
+    /// test below to put a pane rect entirely below the bottom edge.
+    const SHORT_FB_HEIGHT_PX: i32 = 100;
+
+    /// The pane-rect damage must be built from the WHOLE pane rect, not
+    /// `terminal_rect` -- i.e. it must extend left of the terminal area
+    /// when a gutter inset is present. This is the whole reason
+    /// `full_pane_rebuild_damage_rect` takes `pane_rect` as a distinct
+    /// parameter from `terminal_rect` rather than reusing `terminal_rect`
+    /// alone (a full pane rebuild also repaints the command-block gutter
+    /// strip and the scrollbar, both of which live inside `pane_rect` but
+    /// outside `terminal_rect`). If this regressed to using `terminal_rect`'s
+    /// bounds instead, the emitted rect's left edge would sit at the
+    /// gutter's right edge instead of the pane's own left edge, and this
+    /// assertion would fail.
+    #[test]
+    fn pane_rect_damage_extends_left_of_terminal_rect_when_a_gutter_inset_is_present() {
+        // A 20-logical-point gutter inset: `terminal_rect` starts 20 points
+        // right of `pane_rect`, matching `terminal_rect_origin`'s
+        // `pane_rect.min.x + gutter_inset` convention.
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 50.0));
+        let terminal_rect =
+            egui::Rect::from_min_max(egui::pos2(20.0, 0.0), egui::pos2(100.0, 50.0));
+        // `vp_left_px`/`vp_top_px` are `terminal_rect.min * ppp`, exactly as
+        // computed at the `show` call site.
+        let vp_left_px = terminal_rect.min.x * PPP;
+        let vp_top_px = terminal_rect.min.y * PPP;
+
+        let damage = full_pane_rebuild_damage_rect(
+            pane_rect,
+            terminal_rect,
+            PPP,
+            vp_left_px,
+            vp_top_px,
+            TALL_FB_HEIGHT_PX,
+        )
+        .expect("a well-formed pane rect must yield damage");
+
+        // The pane's left edge is at physical x=0 (pane_rect.min.x=0 * ppp),
+        // strictly left of the terminal viewport's own left edge at
+        // physical x=40 (20.0 * 2.0) -- i.e. the gutter strip's width is
+        // included.
+        assert_eq!(
+            damage.x, 0,
+            "the damage rect must start at the PANE's left edge (physical \
+             x=0), not the terminal viewport's left edge (physical x=40) -- \
+             otherwise the gutter strip would never be repainted by a full \
+             pane rebuild"
+        );
+        // Full pane width/height in physical pixels (100 * 2.0 = 200, 50 *
+        // 2.0 = 100), plus the 1px safety pad `from_cursor_cells` always
+        // applies outward on the left/top edge only (there is no separate
+        // clamp on the right/bottom edges beyond the framebuffer's own
+        // bounds, which `TALL_FB_HEIGHT_PX` is chosen not to hit here).
+        assert_eq!(damage.width, 201);
+        assert_eq!(damage.height, 101);
+    }
+
+    /// The ordinary case with no gutter (`pane_rect == terminal_rect`):
+    /// behaves exactly like damaging the terminal viewport's own full
+    /// bounds, with no leftward extension.
+    #[test]
+    fn pane_rect_damage_matches_terminal_rect_when_no_gutter_is_present() {
+        let rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 50.0));
+        let vp_left_px = rect.min.x * PPP;
+        let vp_top_px = rect.min.y * PPP;
+
+        let damage = full_pane_rebuild_damage_rect(
+            rect,
+            rect,
+            PPP,
+            vp_left_px,
+            vp_top_px,
+            TALL_FB_HEIGHT_PX,
+        )
+        .expect("a well-formed pane rect must yield damage");
+
+        assert_eq!(damage.x, 0);
+        assert_eq!(damage.width, 201);
+        assert_eq!(damage.height, 101);
+    }
+
+    /// A degenerate pane rect (zero width) falls back to `None` -- which
+    /// the `show` call site turns into `PaneFrameDamage::Full` -- rather
+    /// than emitting a zero-area `Region`. A pane whose own bounds cannot
+    /// be established genuinely cannot bound its damage.
+    #[test]
+    fn degenerate_zero_width_pane_rect_yields_none() {
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(10.0, 0.0), egui::pos2(10.0, 50.0));
+        let vp_left_px = pane_rect.min.x * PPP;
+        let vp_top_px = pane_rect.min.y * PPP;
+
+        let damage = full_pane_rebuild_damage_rect(
+            pane_rect,
+            pane_rect,
+            PPP,
+            vp_left_px,
+            vp_top_px,
+            TALL_FB_HEIGHT_PX,
+        );
+
+        assert_eq!(
+            damage, None,
+            "a zero-width pane rect must yield None (-> Full at the call \
+             site), never a zero-area Region"
+        );
+    }
+
+    /// A degenerate pane rect (negative height, e.g. an inverted rect from
+    /// an upstream bug) also falls back to `None`.
+    #[test]
+    fn degenerate_negative_extent_pane_rect_yields_none() {
+        // `max.y < min.y` makes `height()` negative.
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(0.0, 50.0), egui::pos2(100.0, 0.0));
+        let vp_left_px = pane_rect.min.x * PPP;
+        let vp_top_px = 0.0;
+
+        let damage = full_pane_rebuild_damage_rect(
+            pane_rect,
+            pane_rect,
+            PPP,
+            vp_left_px,
+            vp_top_px,
+            TALL_FB_HEIGHT_PX,
+        );
+
+        assert_eq!(
+            damage, None,
+            "a negative-extent pane rect must yield None (-> Full at the \
+             call site)"
+        );
+    }
+
+    /// A pane rect that lies entirely off the bottom of the framebuffer
+    /// clamps away to nothing and also yields `None` -- the framebuffer
+    /// clamp is the other degenerate case named in the design
+    /// (`from_cursor_cells`' own bounds check), distinct from a
+    /// zero/negative logical extent.
+    #[test]
+    fn pane_rect_clamped_entirely_off_the_framebuffer_yields_none() {
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(0.0, 200.0), egui::pos2(100.0, 250.0));
+        let vp_left_px = pane_rect.min.x * PPP;
+        let vp_top_px = pane_rect.min.y * PPP;
+
+        let damage = full_pane_rebuild_damage_rect(
+            pane_rect,
+            pane_rect,
+            PPP,
+            vp_left_px,
+            vp_top_px,
+            SHORT_FB_HEIGHT_PX,
+        );
+
+        assert_eq!(
+            damage, None,
+            "a pane rect entirely below the framebuffer must clamp away to \
+             nothing (-> Full at the call site), not emit a degenerate rect"
         );
     }
 }

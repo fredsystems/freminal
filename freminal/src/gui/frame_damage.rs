@@ -104,6 +104,14 @@ pub fn decide_frame_damage(
     let mut rects: Vec<freminal_windowing::DamageRect> = Vec::new();
     for pane in per_pane_damage {
         if pane.bell_active {
+            // Deliberately NOT bounded to the bell's own pane, unlike the
+            // `FullRebuildDamage::Full` case widget.rs now bounds (Task
+            // 124.21 finding 2). A bell also feeds
+            // `ChromeSignals::bell_active` (`app_impl.rs`), which forces the
+            // whole window `Full` through `compose_with_chrome_damage`
+            // regardless of what this function returns -- so bounding the
+            // pane half here would buy nothing and would falsely suggest
+            // bell damage is pane-bounded. Do not "fix" this.
             rects.clear();
             break;
         }
@@ -532,6 +540,84 @@ mod tests {
         ];
         let damage = decide_frame_damage(false, false, &panes);
         assert_partial(&damage, &[rect(0, 0, 80, 16), rect(100, 50, 8, 16)]);
+    }
+
+    // ── Bounding a pane's own full rebuild (Task 124.21 finding 2 fix) ──
+    //
+    // These three tests use a pane-sized rect (much larger than the
+    // cursor-sized rects used elsewhere in this file) to make clear they
+    // are pinning the scenario `widget.rs`'s `full_pane_rebuild_damage_rect`
+    // now produces for an ordinary full pane rebuild, not the generic
+    // `Region` aggregation already covered above.
+
+    /// The regression guard for the whole subtask. Before this fix, a pane
+    /// needing a full rebuild reported `PaneFrameDamage::Full`, and
+    /// `decide_frame_damage`'s `rects.clear(); break;` fan-out discarded
+    /// every rect collected from other panes -- so in a split, one busy
+    /// pane forced a full clear + present of an `Unchanged` sibling too.
+    /// Now the busy pane reports `Region` bounded to its own pane rect, so
+    /// the sibling's `Unchanged` contribution (nothing) is untouched and
+    /// the frame is `Partial` on only the busy pane's rect. If a future
+    /// change silently reintroduced `PaneFrameDamage::Full` for the common
+    /// full-rebuild case, this test would start seeing `Full` again.
+    #[test]
+    fn busy_pane_reports_only_its_own_pane_rect_not_full_alongside_unchanged_sibling() {
+        let busy_pane_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 1080,
+        };
+        let panes = [region_pane(vec![busy_pane_rect]), unchanged_pane()];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(0, 0, 960, 1080)]);
+    }
+
+    /// The escalation path must remain intact and reachable: a pane whose
+    /// own bounds could not be established (`widget.rs`'s degenerate-rect
+    /// fallback) still reports `PaneFrameDamage::Full`, and that must still
+    /// clear every rect collected from other panes and force the whole
+    /// frame `Full` -- exactly as before this subtask, for the one case
+    /// where a pane genuinely cannot bound its own damage.
+    #[test]
+    fn a_pane_that_cannot_bound_its_own_rect_still_forces_full_alongside_a_busy_sibling() {
+        let sibling_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 1080,
+        };
+        let panes = [
+            region_pane(vec![sibling_rect]),
+            PaneDamageInput {
+                bell_active: false,
+                cursor_damage: PaneFrameDamage::Full,
+            },
+        ];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// `bell_active` is deliberately NOT bounded to its own pane (see the
+    /// comment at the `bell_active` arm in `decide_frame_damage`): even
+    /// though a sibling pane now reports bounded `Region` damage instead of
+    /// escalating to `Full` for an ordinary rebuild, a bell in ANY pane must
+    /// still clear every collected rect and force the whole frame `Full`.
+    #[test]
+    fn bell_still_forces_full_even_when_a_sibling_pane_reports_bounded_region_damage() {
+        let sibling_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 1080,
+        };
+        let panes = [
+            region_pane(vec![sibling_rect]),
+            PaneDamageInput {
+                bell_active: true,
+                cursor_damage: PaneFrameDamage::Unchanged,
+            },
+        ];
+        assert_full(&decide_frame_damage(false, false, &panes));
     }
 
     #[test]
