@@ -146,7 +146,9 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Complete** — `03b8082a` |
-| 124.3 | Cell-granular pointer suppression | Ready — 124.13 confirms the case |
+| 124.3 | Cell-granular pointer suppression, and correct `?1016` delivery | In progress — expanded after mouse-report delivery recon |
+| 124.3a | Immediate-report foundation + correct `?1016` encoding | Planned — see recon below |
+| 124.3b | Cell-boundary repaint decision (post-124.3a) | Planned — gated on 124.3a's tests |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
@@ -377,17 +379,29 @@ observation, not causation:**
 These are the figures as measured; no stronger causal claim is drawn from a
 single run than what is stated above.
 
-### 124.3 — Cell-granular pointer suppression
+### 124.3 — Cell-granular pointer suppression, and correct `?1016` delivery
 
-*Migrated from 121.15 + 121.17. Gated on 124.13.*
+*Migrated from 121.15 + 121.17. Gated on 124.13. **Expanded 2026-08-25**
+after the mouse-report-delivery recon below. The original scope is kept as
+the historical premise rather than deleted, but two of its claims did not
+survive recon and are corrected in place — marked, not silently rewritten —
+so the next reader can see what changed and why.*
 
 Nearly all interactive terminal state changes at **cell** granularity — URL
-hover, gutter hover, selection extent, mouse-tracking reports — so pointer
-motion within one cell cannot change any of it. Caching the pane
-terminal-rect origin and logical cell size and suppressing any `CursorMoved`
-that does not cross a cell boundary would remove the pane-wide `has_urls`
-and `scroll_offset` vetoes, let selection drags suppress, subsume the gutter
-carve-out, and remain correct for mouse-tracking mode.
+hover, gutter hover, selection extent. **Corrected 2026-08-25:** the
+original text also listed "mouse-tracking reports" in that set, and said
+suppression would "remain correct for mouse-tracking mode." Neither survives
+recon — see the recon block below. `?1016` (`SgrPixels`) reports sub-cell
+pixel motion by design, so a mouse-tracking report is not always
+cell-granular, and today's implementation does not honor that regardless of
+what this task does. Pointer motion within one cell genuinely cannot change
+any of the cell-granular state, so caching the pane terminal-rect origin and
+logical cell size and suppressing any `CursorMoved` that does not cross a
+cell boundary would still remove the pane-wide `has_urls` and
+`scroll_offset` vetoes, let selection drags suppress, and subsume the
+gutter carve-out. **It must not, by itself, also suppress delivery of a
+mouse-tracking report** — that is a distinct problem, addressed by
+124.3a/124.3b below, not solved by cell-boundary suppression alone.
 
 **The scrollbar must stay excluded** — thumb dragging is genuinely
 pixel-granular.
@@ -410,6 +424,235 @@ The old 2026-07-29 numbers in the stub (99.16% suppression clean, 1.68% with
 one OSC 8 URL on screen) **predate the chrome cache being disabled by
 121.32** and must not be reused. 123 could not re-take them — pointer motion
 is not a renderer workload — so 124.13 does.
+
+**Corrected 2026-08-25, superseding the conclusion (not the measurement) of
+124.13's "Not a target for 124.3: `mouse_tracking_active`" note.** That
+note's measurement block is left exactly as written below — this corrects
+what follows from it, in this entry, not there. 124.13 found
+`mouse_tracking_active` a pane-wide veto that "defeats suppression... for
+the same pane-wide reason, but correctly," on the reasoning that an
+application receiving mouse reports must be sent every motion event, full
+stop. That much is true — but it is a claim about *whether* a report is
+sent, and says nothing about *what* the report contains once sent, which is
+not always cell-granular. `mouse_tracking_active` **is** a target for
+124.3: not the repaint-suppression target 124.13's percentages describe,
+but the target of the delivery-path and pixel-encoding fix in 124.3a below.
+
+#### Recon: how a mouse-tracking report actually reaches the PTY (2026-08-25, read-only)
+
+- `WindowEvent::CursorMoved` is forwarded into egui via
+  `state.egui.on_window_event(...)` (`freminal-windowing/src/event_loop.rs`,
+  the fast-path block around line 611) unconditionally; only *repaint
+  scheduling* is gated after that. `App::pointer_motion_needs_repaint`
+  (`freminal/src/gui/app_impl.rs:983`) decides that scheduling, delegating
+  to `pointer_motion_needs_repaint_decision`
+  (`freminal/src/gui/pointer_motion.rs:236`), whose pane-signal term is
+  `mouse_tracking_active || hover_region_risk` (line 246): today
+  `mouse_tracking_active` alone forces that decision to `true`. This is a
+  *scheduling* forcing term, not a delivery guarantee, and the two are
+  currently conflated only because nothing else guarantees delivery.
+- The queued `egui::Event::PointerMoved` is consumed — and the PTY report
+  actually encoded and written — only inside `write_input_to_terminal`'s
+  `Event::PointerMoved` arm (`freminal/src/gui/terminal/input.rs:2297`,
+  inside `write_input_to_terminal` at line 1590), which runs only as part
+  of a frame. If `pointer_motion_needs_repaint` returns `false` for a given
+  motion and nothing else requests a redraw, that frame does not run: the
+  event sits queued in egui-winit's input buffer until some later frame
+  runs for an unrelated reason, at which point it is delivered late. Today
+  this is masked only by `mouse_tracking_active` forcing scheduling to
+  `true` — remove that forcing term (as cell-boundary suppression in this
+  entry's original scope would, unmodified) without first giving report
+  delivery its own path, and reports would be delayed exactly as this
+  paragraph describes.
+- Coordinate conversion loses pixel information *before* encoding, not
+  inside it. `encode_egui_mouse_pos_as_usize`
+  (`freminal/src/gui/terminal/coords.rs:152`) floor-divides the raw pointer
+  position by cell size into `FreminalMousePosition`'s character
+  column/row before `freminal/src/gui/mouse.rs` ever sees a position.
+  `mouse.rs`'s `encode_x11_mouse_button` / `encode_x11_mouse_wheel`
+  (lines 293 and 341) then branch only on
+  `*encoding == MouseEncoding::X11`; every other encoding — `Sgr` (`?1006`)
+  and `SgrPixels` (`?1016`) alike — takes the same one-based
+  cell-coordinate `else` branch. `MouseEncoding::SgrPixels` exists and is
+  advertised (`freminal-common/src/buffer_states/modes/mouse.rs`, mode
+  number 1016, confirmed in `freminal-common/tests/mouse_mode_tests.rs`)
+  but nothing downstream of coordinate conversion distinguishes it from
+  `Sgr`. This is a pre-existing correctness gap, not new breakage, and it
+  falsifies the "reports are per-cell" premise this entry's original text
+  relied on.
+- Immediate delivery also needs, at the point a `CursorMoved` is observed
+  outside the frame path: the currently-held button state for `?1002`
+  (button-motion tracking) and `?1003` (any-motion tracking), current
+  modifiers, which pane the pointer resolves to (active-pane routing must
+  not change shape from today), current scrollback offset (a scrolled-back
+  pane must not emit reports for content that is not live), and the same
+  input suppressors `write_input_to_terminal` already gates on via
+  `InputSuppressors` (`modal_or_drag`, `context_menu`, `search_overlay`,
+  `command_history`, `scrollbar_drag`) — none of which have a home
+  outside a frame today.
+- `PublishedFrameState::pane_terminal_origin`
+  (`freminal/src/gui/published_frame_state.rs:264`) was built by 122.15 for
+  exactly this purpose and is already published once per frame per pane.
+  It carries origin only — logical cell size, pixels-per-point, and
+  per-pane input-suppression state have no published home yet.
+
+#### Maintainer decision (2026-08-25)
+
+Expand 124.3 and fix `?1016` now, rather than preserve the incorrect
+per-cell premise or defer the fix to a later version. The cell-boundary
+repaint suppression this entry originally scoped is still correct and
+still lands, but not until report delivery has its own path independent of
+repaint scheduling.
+
+#### Settled design
+
+1. Add generic, PTY-semantics-ignorant synchronous pointer-motion and
+   pointer-button-held-state observation hooks at the
+   `freminal-windowing::App` boundary, parallel to the existing
+   `pointer_motion_needs_repaint` / `is_chrome_interactive_at` hooks.
+   Windowing remains ignorant of mouse-tracking modes or PTY encoding. The
+   motion hook runs independently of repaint scheduling — it is not gated
+   by, and does not gate, `pointer_motion_needs_repaint`'s return value.
+   The button-held-state hook observes held state synchronously for the
+   motion hook's use; button press/release PTY emission itself stays
+   exactly where it is today, in the existing frame path.
+2. Give immediate PTY motion-report state (last-sent position, held
+   buttons relevant to `?1002`/`?1003`, etc.) a GUI-owned per-pane home. It
+   is read and written outside a frame, but `ViewState` (scroll, mouse,
+   focus) is already GUI-thread-owned per-pane state that persists outside
+   a frame, so it is not ruled out on that basis. In fact `ViewState`
+   already declares a same-named, currently-unused
+   `previous_mouse_state: Option<PreviousMouseState>` field
+   (`freminal/src/gui/view_state.rs:503`) that is a candidate ownership
+   seam — unlike the field of the same name actually in live use today,
+   `PaneRenderCache::previous_mouse_state`
+   (`freminal/src/gui/terminal/widget.rs:1327`), which is frame-scoped
+   render-cache state and must not gain out-of-frame readers. `PreviousMouseState`
+   itself (`freminal/src/gui/mouse.rs:20`) carries only a cell-granular
+   `FreminalMousePosition` and is insufficient for `SgrPixels`'s
+   pixel-granular position, so implementation must choose or define a
+   named report-state representation with the pixel precision `?1016`
+   needs — reusing `ViewState`'s ownership seam if it fits, but not
+   reusing `PreviousMouseState`'s type, and not adding report state to
+   `PaneRenderCache` merely to get out-of-frame access. Per
+   `freminal-state-representation`, this is named event/state types, never
+   a bool parameter and never a bare `true`/`false` threaded through the
+   new hooks. No new crate — this is `freminal` GUI state, same tier as
+   `ViewState` today.
+3. Publish one per-pane, last-completed-frame snapshot of exactly the
+   geometry and suppressors report delivery needs outside a frame:
+   terminal bounds/origin (already published — extend, do not duplicate,
+   `pane_terminal_origin`), logical cell size, pixels-per-point, and the
+   exact `InputSuppressors` fields (`modal_or_drag`, `context_menu`,
+   `search_overlay`, `command_history`, `scrollbar_drag`). Unknown or
+   stale/unavailable published data is conservative on both axes: no
+   immediate report is sent, and repaint scheduling is left unaffected
+   (never suppressed on the strength of missing data).
+4. Move — do not duplicate — PTY motion-report encoding and sending out of
+   `write_input_to_terminal`'s `Event::PointerMoved` arm into the new
+   synchronous hook path. Selection-extent updates, hover-state updates,
+   recording's `EventPayload::MouseMove` emission, and any other
+   terminal-owned visual-state processing that arm also performs stay
+   exactly where they are, in the queued egui `PointerMoved` path — only
+   the PTY report itself moves. A single physical motion event must
+   produce at most one PTY report; the two paths must never both fire for
+   the same motion.
+5. Implement `?1016` correctly: the same SGR framing as `?1006`
+   (`\x1b[<{cb};{x};{y}M`/`m`), but `x`/`y` are one-based *physical pixel*
+   coordinates relative to the terminal content area's top-left, not cell
+   column/row. Ordinary X11 and `?1006` SGR keep exactly their current
+   one-based cell coordinates — this is additive, not a behavior change to
+   the existing encodings. A `SgrPixels` motion report must reflect
+   within-cell pixel movement even on a frame where the cell-boundary
+   repaint decision (point 6) declines to schedule a repaint.
+6. Repaint scheduling stays a separate axis from report delivery. Remove
+   `mouse_tracking_active` as a forcing term in
+   `pointer_motion_needs_repaint_decision` **only after** 124.3a's tests
+   prove immediate report delivery works without relying on it. The
+   cell-boundary decision uses the previous and current pointer position
+   together with the published pane origin/cell size, so motion that stays
+   within one cell can suppress repaint for cell-granular terminal-owned
+   effects (hover, selection extent, URL span) while `SgrPixels` still gets
+   its pixel-granular report via the point-1 hook regardless. Scrollbar
+   dragging and any other genuinely pixel-granular/chrome/overlay condition
+   remain repaint-forcing exactly as today.
+7. Preserve current active-pane routing and the existing one-frame
+   focus-follow transition semantics unchanged (issue #495's
+   `focus_change_pending` term). Do not opportunistically change which
+   pane receives a report as a side effect of this work.
+
+#### Implementation decomposition (124.3a / 124.3b — no new roadmap task numbers)
+
+- **124.3a** — Immediate-report foundation: the synchronous motion and
+  held-button observation hooks, the per-pane GUI-owned immediate-report
+  state (point 2), the published per-pane geometry/suppressor snapshot
+  (point 3), the move of PTY motion emission out of
+  `write_input_to_terminal` (point 4), and correct `?1016` encoding
+  (point 5). Repaint scheduling is **unchanged** by this subtask —
+  `mouse_tracking_active` keeps forcing `pointer_motion_needs_repaint` to
+  `true` until 124.3b lands. Ordinary X11 and `?1006` SGR reports are
+  preserved except for earlier delivery timing (a report that was
+  previously delayed until an unrelated repaint now arrives on its own
+  motion event); `?1016` intentionally changes observable behavior, from
+  today's incorrect cell coordinates to correct pixel coordinates — that
+  is the fix, not a regression.
+- **124.3b** — Cell-boundary repaint decision (point 6): once 124.3a's
+  tests prove reports are delivered correctly without relying on the
+  forced-`true` scheduling path, remove `mouse_tracking_active` from
+  `pointer_motion_needs_repaint_decision`. The pane-wide `has_urls` veto
+  can be replaced by the cell-boundary-crossing test, subsuming the gutter
+  carve-out as originally scoped, because URL span, selection extent, and
+  gutter row are all cell-granular. The pane-wide `scroll_offset` veto is
+  a separate case: it exists because scrollbar hover/drag is genuinely
+  pixel-granular, not cell-granular, so it cannot be replaced by the same
+  cell-boundary test. The pane-wide `scroll_offset` veto can be removed
+  only once a precise, positionally-scoped scrollbar-hover/drag forcing
+  region exists to take over what it was actually protecting; until then
+  it stays.
+
+#### Tests / deliverables
+
+- Immediate report is emitted on a `CursorMoved` even when
+  `pointer_motion_needs_repaint` returns `false` for that same event —
+  proving the two axes are actually decoupled, not merely documented as
+  decoupled.
+- No duplicate report: a single physical motion produces exactly one PTY
+  write, verified against both the old frame-path site (now removed) and
+  the new hook path.
+- `?1002` held-button and `?1003` any-motion tracking behavior, active-pane
+  routing, scrollback-offset suppression, and every existing
+  `InputSuppressors` field (`modal_or_drag`, `context_menu`,
+  `search_overlay`, `command_history`, `scrollbar_drag`) all still hold
+  from the new path.
+- Exact-byte tests: ordinary SGR (`?1006`/X11) cell-coordinate output is
+  unchanged; `?1016` pixel-coordinate output is correct, including a
+  two-moves-within-one-cell case that must produce **two** distinct pixel
+  reports but (once 124.3b lands) **no second repaint**.
+- Conservative-fallback tests: no immediate report, and repaint scheduling
+  unaffected, when geometry has not yet been published or pane resolution
+  fails.
+- Regression coverage proving existing focus-follow-mouse and
+  scrollbar-drag behavior is unchanged by both subtasks.
+
+#### Documentation
+
+`freminal-escape-sequence-docs`'s mandatory dual-document update — to
+`Documents/ESCAPE_SEQUENCE_COVERAGE.md` and
+`Documents/SUPPORTED_CONTROL_CODES.md` — applies **when `?1016` behavior
+actually lands** in 124.3a's implementation pass. This entry is a
+documentation-only recon-and-design edit to the plan document; it does not
+change escape-sequence behavior, so the dual-doc update is explicitly
+deferred to that implementation pass and is not done here.
+
+#### Performance verification
+
+Use 124.13's table as the authoritative before-measurement; do not retake
+it here. 124.3a's and 124.3b's own verification must each report, per
+`PROFILING.md`: the post-change suppression rate paired with the observed
+event rate (as 124.13 established the pairing requirement), plus frame
+rate and per-frame cost. A suppression-percentage change presented without
+the paired event rate is not an acceptable performance result, and 124.13's
+own findings block is not to be edited to produce one.
 
 ### 124.4 — Named-field struct for the pointer-motion predicate
 
