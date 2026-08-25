@@ -9,7 +9,7 @@ use conv2::{ApproxFrom, ConvUtil, ValueFrom};
 use egui::{self, CentralPanel, Panel, ViewportCommand};
 use egui_glow::CallbackFn;
 use freminal_common::buffer_states::window_manipulation::Osc99ControlKind;
-use freminal_common::config::ThemeMode;
+use freminal_common::config::{CommandBlocksConfig, ThemeMode};
 use freminal_common::geometry::Rect;
 use freminal_common::pty_write::PtyWrite;
 use freminal_common::send_or_log;
@@ -26,8 +26,9 @@ use super::frame_drain::{
 use super::geometry_interop;
 use super::panes;
 use super::pointer_motion::{
-    PaneResolution, PaneSnapshotInputs, PointerMotionInputs, animation_in_flight_composed,
-    pointer_motion_needs_repaint_decision, resolve_pane_under_pointer,
+    self, PaneSnapshotInputs, PointerMotionInputs, PointerObservations,
+    animation_in_flight_composed, pointer_motion_needs_repaint_decision,
+    resolve_pane_under_pointer,
 };
 use super::renderer::{WindowPostRenderer, gl_facade::Gl};
 use super::rendering;
@@ -492,6 +493,192 @@ fn stage_chrome_signals(
     (chrome_tab_snapshot, chrome_signals)
 }
 
+/// Task 124.3b: which pane(s), if any, in `active_tab` currently have an
+/// in-progress selection drag (`ViewState::selection.is_selecting`) —
+/// extracted out of [`App::pointer_motion_needs_repaint`]'s body (Task
+/// 124.3b review) purely to keep that method under clippy's
+/// `too_many_lines` limit; it has no independent reason to be
+/// unit-testable (`Tab`/`PaneTree`/`Pane` cannot be constructed headlessly
+/// either way).
+///
+/// `PaneError::InvalidState` (empty tree) is a bug state that should never
+/// happen in normal operation -- conservative `Multiple` (forces
+/// unconditionally) on `Err`, mirroring the pre-124.3b `any_selecting`'s
+/// conservative-true-on-`Err`.
+fn classify_selecting_panes(active_tab: &Tab) -> pointer_motion::SelectingPanes {
+    active_tab
+        .pane_tree
+        .iter_panes()
+        .map_or(pointer_motion::SelectingPanes::Multiple, |panes| {
+            let mut selecting = panes
+                .iter()
+                .filter(|pane| pane.view_state.selection.is_selecting);
+            match (selecting.next(), selecting.next()) {
+                (None, _) => pointer_motion::SelectingPanes::None,
+                (Some(pane), None) => pointer_motion::SelectingPanes::One(pane.id),
+                (Some(_), Some(_)) => pointer_motion::SelectingPanes::Multiple,
+            }
+        })
+}
+
+/// Task 124.3b: resolve ONE pointer position to a
+/// [`pointer_motion::PointerObservation`] against `active_tab`'s current
+/// layout. Extracted out of [`App::pointer_motion_needs_repaint`]'s body
+/// (Task 124.3b review) so the previous and current positions are resolved
+/// by the IDENTICAL code path, called twice, rather than once per position
+/// inline; also keeps that method under clippy's `too_many_lines` limit.
+///
+/// Review fix: `central_rect`/`split_layout` are now supplied by the
+/// caller rather than recomputed here — `pointer_motion_needs_repaint`
+/// resolves the split/zoom layout exactly ONCE per `CursorMoved` call and
+/// borrows it for both the previous and current position, rather than each
+/// of the two calls to this function independently re-running
+/// `PaneTree::layout`. `central_rect` being `None` (no frame has published
+/// one yet) resolves to [`pointer_motion::PointerObservation::no_pane`]
+/// unconditionally — the top-level `pointer_pane_unresolved` term already
+/// forces conservatively for that case, so this need not distinguish it
+/// further.
+///
+/// `command_blocks` feeds [`PaneSnapshotInputs::gutter_eligible`], computed
+/// here at the pane-lookup boundary (this function has `self.config` in
+/// scope via its caller) alongside `snap.is_alternate_screen`/
+/// `snap.command_blocks` — review fix: neither this function nor
+/// [`resolve_pane_under_pointer`] takes a `bool` for this
+/// (`freminal-state-representation` forbids bool parameters outright); the
+/// caller passes the config section itself, and the eligibility bool is
+/// computed inline in the per-pane lookup closure below, then folded into
+/// the [`PaneSnapshotInputs::gutter_eligible`] field the pure resolution
+/// chain reads.
+///
+/// Mirrors `update()`'s own zoomed-vs-split layout choice exactly — see
+/// [`resolve_pane_under_pointer`]'s doc for why getting this wrong would
+/// hit-test against panes not actually rendered full-size this frame.
+fn resolve_pointer_observation_for(
+    win: &PerWindowState,
+    active_tab: &Tab,
+    command_blocks: &CommandBlocksConfig,
+    central_rect: Option<egui::Rect>,
+    split_layout: &[(panes::PaneId, Rect)],
+    pos: egui::Pos2,
+) -> pointer_motion::PointerObservation {
+    let Some(central_rect) = central_rect else {
+        return pointer_motion::PointerObservation::no_pane();
+    };
+    let point = geometry_interop::point_from_egui(pos);
+
+    resolve_pane_under_pointer(
+        point,
+        geometry_interop::rect_from_egui(central_rect),
+        active_tab.zoomed_pane,
+        split_layout,
+        |pane_id| {
+            active_tab.pane_tree.find(pane_id).map(|pane| {
+                let snap = pane.arc_swap.load();
+                let geometry = win
+                    .published
+                    .pane_pointer_report_inputs(pane_id)
+                    .map(|inputs| pointer_motion::PanePositionGeometry {
+                        terminal_rect: geometry_interop::rect_from_egui(inputs.terminal_rect),
+                        cell_width: inputs.cell_size.x,
+                        cell_height: inputs.cell_size.y,
+                        scrollbar_hit_rect: inputs
+                            .scrollbar_hit_rect
+                            .map(geometry_interop::rect_from_egui),
+                    });
+                let gutter_config_active = command_blocks.enabled
+                    && command_blocks.gutter != freminal_common::config::GutterPosition::Off;
+                PaneSnapshotInputs {
+                    has_urls: snap.has_urls,
+                    gutter_eligible: gutter_config_active
+                        && !snap.is_alternate_screen
+                        && !snap.command_blocks.is_empty(),
+                    geometry,
+                }
+            })
+        },
+    )
+}
+
+/// Task 124.3b review: resolve BOTH the previous and current pointer
+/// position against the SAME split/zoom layout, computed exactly ONCE.
+/// Extracted out of [`App::pointer_motion_needs_repaint`]'s body purely to
+/// keep that method under clippy's `too_many_lines` limit — it has no
+/// independent reason to be unit-testable (`PerWindowState`/`Tab` cannot be
+/// constructed headlessly either way; the pure resolution chain itself is
+/// [`resolve_pane_under_pointer`]).
+///
+/// # Review fix (item 4): one layout computation, not two
+///
+/// Before this extraction, `resolve_pointer_observation_for` was called
+/// twice — once per position — and each call independently ran
+/// `PaneTree::layout`. This function computes the layout ONCE and passes
+/// the same borrowed `Vec` to both resolutions.
+///
+/// # Review fix (item 2): a layout error forces, it does not silently empty
+///
+/// `PaneTree::layout` returning `Err` (an empty tree — a bug state) is NOT
+/// silently substituted with an empty layout, which would resolve every
+/// position to the legitimately-quiet `no_pane`/Outside and could
+/// therefore suppress. Instead both endpoints become
+/// [`pointer_motion::PointerObservation::unresolved`] (`Unknown`), which
+/// `unknown_geometry_force` turns into an unconditional force at the call
+/// site.
+///
+/// # Review fix: named [`PointerObservations`], not a same-typed tuple
+///
+/// Returns [`PointerObservations`] (`previous`/`current` named fields)
+/// rather than `(PointerObservation, PointerObservation)` — see that
+/// type's doc for why a bare tuple of two identically-typed values is a
+/// swap risk this composition site and its caller both eliminate by using
+/// field names instead of positional order.
+fn resolve_pointer_observations(
+    win: &PerWindowState,
+    active_tab: &Tab,
+    command_blocks: &CommandBlocksConfig,
+    positions: freminal_windowing::PointerMotionPositions,
+) -> PointerObservations {
+    let central_rect = win.published.cached_central_rect();
+    let layout_result: Result<Vec<(panes::PaneId, Rect)>, ()> = match central_rect {
+        None => Ok(Vec::new()),
+        Some(_) if active_tab.zoomed_pane.is_some() => Ok(Vec::new()),
+        Some(rect) => active_tab
+            .pane_tree
+            .layout(geometry_interop::rect_from_egui(rect))
+            .map_err(|_| ()),
+    };
+
+    match layout_result {
+        Err(()) => {
+            let unresolved = pointer_motion::PointerObservation::unresolved();
+            PointerObservations {
+                previous: unresolved,
+                current: unresolved,
+            }
+        }
+        Ok(split_layout) => {
+            let current = resolve_pointer_observation_for(
+                win,
+                active_tab,
+                command_blocks,
+                central_rect,
+                &split_layout,
+                positions.current,
+            );
+            let previous = positions.previous.map_or(current, |pos| {
+                resolve_pointer_observation_for(
+                    win,
+                    active_tab,
+                    command_blocks,
+                    central_rect,
+                    &split_layout,
+                    pos,
+                )
+            });
+            PointerObservations { previous, current }
+        }
+    }
+}
+
 impl freminal_windowing::App for FreminalGui {
     /// Called when a window is created.
     ///
@@ -932,62 +1119,43 @@ impl freminal_windowing::App for FreminalGui {
         })
     }
 
-    /// Task 121 pointer-motion repaint-gate spike: wires real per-window/
-    /// per-pane state into [`pointer_motion_needs_repaint_decision`]. See
-    /// that function's doc for the exact forcing conditions, and
-    /// `pointer_motion::pane_hover_region_risk`'s doc for the residual-risk
-    /// approximation used for URL/gutter/scrollbar hover regions.
+    /// Task 121 pointer-motion repaint-gate spike, rewritten to
+    /// cell-granular positional suppression by Task 124.3b: wires real
+    /// per-window/per-pane state into [`pointer_motion_needs_repaint_decision`].
+    /// See that function's doc for the exact forcing conditions, and
+    /// `pointer_motion`'s module doc for the pane-wide-veto-to-positional
+    /// rewrite this method's body reflects.
     ///
     /// Reuses `win.published`'s `pending_chrome_signals().any_overlay_open`/
     /// `foreground_overlay_open` — the persisted #436 §3.3 signals from the
     /// most recently rendered frame — for the "any overlay/popup/tooltip/
     /// context menu is open" bullet, rather than recomputing the
     /// `ui_overlay_open`/`foreground_overlay_open` scans (`update()`'s
-    /// `CentralPanel` closure, around `app_impl.rs` lines 1841 and
-    /// 2708-2733): this method runs OUTSIDE any frame (from `event_loop`'s
-    /// `CursorMoved` handling), where that scan's inputs (menu state,
-    /// dialog `Ui`s, etc.) are not in scope.
+    /// `CentralPanel` closure): this method runs OUTSIDE any frame (from
+    /// `event_loop`'s `CursorMoved` handling), where that scan's inputs
+    /// (menu state, dialog `Ui`s, etc.) are not in scope.
     ///
-    /// ## Gutter positional test (Task 121 fix)
+    /// `positions.previous` is resolved against the SAME frame's
+    /// layout/geometry as `positions.current` — Task 124.3b's positional
+    /// forcing terms compare the two [`pointer_motion::PointerObservation`]s
+    /// this produces, rather than looking at `positions.current` alone.
     ///
-    /// The pane-level `gutter_active` term used to be pane-wide
-    /// (`gutter_config_active && !alt_screen && !command_blocks.is_empty()`),
-    /// which measured at 100% fired on every pointer-motion check in any
-    /// session with auto-detected command blocks (Task 121 spike), making
-    /// suppression a no-op. The gutter is actually a narrow strip on the
-    /// pane's LEFT edge (`terminal/widget.rs`'s `gutter_rect`, built from
-    /// `pane_rect.min.x .. pane_rect.min.x + gutter.width_px() / ppp`), so
-    /// this method now also tests `pos.x` against that strip using the
-    /// SAME pane rect this method already resolves for pane hit-testing
-    /// (`layout`, below) — no separate rect computation.
-    ///
-    /// `pixels_per_point` (`ppp`) is not available at this call site (it is
-    /// only known once egui begins a frame; this method runs from
-    /// `event_loop`'s `CursorMoved` handling, outside any frame), and
-    /// `PerWindowState` does not cache it — adding that cache purely for
-    /// this one comparison would be new per-frame machinery for a single
-    /// read. Instead this uses `gutter.width_px()` (physical pixels)
-    /// DIRECTLY as an upper bound on the logical strip width
-    /// `width_px / ppp`: since `ppp >= 1.0` on every realistic display,
-    /// `width_px / ppp <= width_px`, so testing `pos.x < pane_rect.min.x +
-    /// width_px` only ever widens the strip relative to the real
-    /// (smaller-or-equal) one — it can cause the gutter term to fire when
-    /// the real strip would not have (false positive => an unnecessary
-    /// repaint, never a missed one), which is the safe direction for a
-    /// repaint gate.
-    ///
-    /// Subtask 122.5: the pane-resolution chain itself (layout -> hit-test
-    /// -> snapshot lookup -> signal computation) now lives in the pure,
+    /// Subtask 122.5 / 124.3b: the pane-resolution chain itself (layout ->
+    /// hit-test -> snapshot lookup -> classification) lives in the pure,
     /// headlessly-testable [`resolve_pane_under_pointer`] — see that
     /// function's doc for the zoomed-vs-split mirroring requirement this
     /// paragraph used to describe inline.
-    fn pointer_motion_needs_repaint(&self, window_id: WindowId, pos: egui::Pos2) -> bool {
+    fn pointer_motion_needs_repaint(
+        &self,
+        window_id: WindowId,
+        positions: freminal_windowing::PointerMotionPositions,
+    ) -> bool {
         let Some(win) = self.windows.get(&window_id) else {
             // Unknown window -> conservative (mirrors `is_chrome_interactive_at`).
             return true;
         };
 
-        let chrome_interactive = self.is_chrome_interactive_at(window_id, pos);
+        let chrome_interactive = self.is_chrome_interactive_at(window_id, positions.current);
         // Animation-in-flight terms. The rest of this predicate is *positional*
         // ("does the pointer's current position matter?"), which is structurally
         // blind to "something is mid-animation somewhere in this window,
@@ -1032,107 +1200,47 @@ impl freminal_windowing::App for FreminalGui {
             || animation_in_flight;
 
         let active_tab = win.tabs.active_tab();
-        // `PaneError::InvalidState` (empty tree) is a bug state that should
-        // never happen in normal operation -- conservative true on `Err`.
-        let any_selecting = active_tab.pane_tree.iter_panes().map_or(true, |panes| {
-            panes
-                .iter()
-                .any(|pane| pane.view_state.selection.is_selecting)
-        });
+        let selecting_panes = classify_selecting_panes(active_tab);
 
         let pointer_pane_unresolved = win.published.cached_central_rect().is_none();
 
-        let gutter_config_active = self.config.command_blocks.enabled
-            && self.config.command_blocks.gutter != freminal_common::config::GutterPosition::Off;
+        // Review fix (items 1, 2, 4): resolve the split/zoom layout ONCE
+        // for this `CursorMoved` call and hit-test BOTH endpoints against
+        // the SAME borrowed layout, with a `PaneTree::layout` error forcing
+        // conservatively rather than silently resolving to an empty layout
+        // — see `resolve_pointer_observations`'s doc. The command-blocks
+        // config section is passed directly (no `bool` parameter), and
+        // named fields (`observations.previous`/`observations.current`),
+        // not a same-typed tuple, eliminate the swap risk at this call
+        // site.
+        let observations =
+            resolve_pointer_observations(win, active_tab, &self.config.command_blocks, positions);
+        // First motion (no previous position at all -- see
+        // `freminal_windowing::PointerMotionPositions`'s doc) is
+        // conservative: there is nothing to compare `observations.current`
+        // against, so this forces via `PointerMotionInputs::first_motion`
+        // below regardless of what the positional terms compute for the
+        // filler `observations.previous` value.
+        let first_motion = positions.previous.is_none();
 
-        // The gutter's total inset in LOGICAL points, cached by `update()`
-        // (this method runs outside a frame and has no `ppp`). The inset is
-        // strictly wider than the painted strip, so it is a conservative
-        // bound by construction — and unlike the previous
-        // physical-pixels-as-logical approximation it does not depend on
-        // `ppp >= 1.0`, whose safety direction inverts on sub-1.0 fractional
-        // scale. See `PublishedFrameState::cached_gutter_inset_logical`.
-        let gutter_width_upper_bound_logical = win.published.cached_gutter_inset_logical();
-
-        // Subtask 122.5: the pane-resolution chain (layout -> hit-test ->
-        // snapshot lookup -> signal computation) is now the pure,
-        // headlessly-testable `resolve_pane_under_pointer`. It also
-        // computes the four diagnostic term bools unconditionally -- see
-        // `PaneResolution`'s doc for why that, rather than the previous
-        // `#[cfg(feature = "frame-profiling")]` block interleaved with the
-        // computation, is what makes the recording below structurally
-        // unable to drift from the real decision.
-        let pane_resolution = win.published.cached_central_rect().map_or_else(
-            PaneResolution::unresolved,
-            |central_rect| {
-                // Mirror `update()`'s own zoomed-vs-split layout choice
-                // exactly: when a pane is zoomed, the split layout below is
-                // never built (matching `update()`, which also skips it in
-                // that case) and `resolve_pane_under_pointer` treats the
-                // zoomed pane as filling `central_rect` instead. The actual
-                // zoomed-vs-split CHOICE lives inside that pure function;
-                // this closure only supplies the data for the non-zoomed
-                // case.
-                let split_layout: Vec<(panes::PaneId, Rect)> =
-                    if active_tab.zoomed_pane.is_none() {
-                        active_tab
-                            .pane_tree
-                            .layout(geometry_interop::rect_from_egui(central_rect))
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    };
-
-                resolve_pane_under_pointer(
-                    geometry_interop::point_from_egui(pos),
-                    geometry_interop::rect_from_egui(central_rect),
-                    active_tab.zoomed_pane,
-                    &split_layout,
-                    gutter_config_active,
-                    gutter_width_upper_bound_logical,
-                    |pane_id| {
-                        active_tab.pane_tree.find(pane_id).map(|pane| {
-                            let snap = pane.arc_swap.load();
-                            PaneSnapshotInputs {
-                                mouse_tracking_active: snap.mouse_tracking
-                                    != freminal_common::buffer_states::modes::mouse::MouseTrack::NoTracking,
-                                has_urls: snap.has_urls,
-                                scroll_offset: snap.scroll_offset,
-                                is_alternate_screen: snap.is_alternate_screen,
-                                command_blocks_non_empty: !snap.command_blocks.is_empty(),
-                            }
-                        })
-                    },
-                )
-            },
+        let url_forced =
+            pointer_motion::url_positional_force(observations.previous, observations.current);
+        let gutter_forced =
+            pointer_motion::gutter_positional_force(observations.previous, observations.current);
+        let scrollbar_boundary_forced =
+            pointer_motion::scrollbar_boundary_force(observations.previous, observations.current);
+        let selection_forced = pointer_motion::selection_positional_force(
+            observations.previous,
+            observations.current,
+            selecting_panes,
         );
-
-        // Task 121 diagnostic: count which condition(s) fired for this
-        // call, `saturating_add`'d into `win.frame_stats`'s Task 121
-        // counters (see `FrameStats::record_pointer_motion_check`'s doc for
-        // why `Cell` makes this possible through `win`'s immutable
-        // borrow). Read out, logged, and reset every `FLUSH_EVERY` drawn
-        // frames from the app-side flush further down in `update()`.
-        // Counting only -- does not read from or influence
-        // `pointer_motion_needs_repaint_decision`'s return value below.
-        // Subtask 122.5: only the RECORDING stays feature-gated -- the four
-        // terms it reads were computed unconditionally by
-        // `resolve_pane_under_pointer`, above.
-        #[cfg(feature = "frame-profiling")]
-        {
-            win.frame_stats.record_pointer_motion_check(
-                super::window::PointerMotionConditionFlags {
-                    chrome_interactive,
-                    any_pane_selecting: any_selecting,
-                    overlay_open,
-                    pointer_pane_unresolved,
-                    mouse_tracking_active: pane_resolution.mouse_tracking_active,
-                    has_urls: pane_resolution.has_urls,
-                    scroll_offset_nonzero: pane_resolution.scroll_offset_nonzero,
-                    gutter_active: pane_resolution.gutter_active,
-                },
-            );
-        }
+        let unknown_geometry =
+            pointer_motion::unknown_geometry_force(observations.previous, observations.current);
+        // Task 124.3b: an in-progress scrollbar drag forces unconditionally,
+        // regardless of where the pointer currently resolves -- see
+        // `scrollbar_boundary_force`'s doc for why this cannot be tied to
+        // the resolved pane's own flag alone.
+        let scrollbar_drag_forced = win.published.any_pane_scrollbar_dragging();
 
         // Focus-follows-mouse turns pointer motion into a state change, so
         // the gate must not suppress the frame that would apply it (#495).
@@ -1140,17 +1248,48 @@ impl freminal_windowing::App for FreminalGui {
         // the active one qualifies, so moving around inside the focused pane
         // still suppresses exactly as before.
         let focus_change_pending = self.config.tabs.focus_follows_mouse
-            && pane_resolution
-                .resolved_pane
+            && observations
+                .current
+                .pane
                 .is_some_and(|id| id != active_tab.active_pane);
 
+        // Task 121 diagnostic, rewritten by 124.3b (and its review pass): count
+        // which condition(s) actually forced a repaint for this call,
+        // `saturating_add`'d into `win.frame_stats`'s counters (see
+        // `FrameStats::record_pointer_motion_check`'s doc for why `Cell`
+        // makes this possible through `win`'s immutable borrow). Read out,
+        // logged, and reset every `FLUSH_EVERY` drawn frames from the
+        // app-side flush further down in `update()`.
+        #[cfg(feature = "frame-profiling")]
+        {
+            win.frame_stats.record_pointer_motion_check(
+                super::window::PointerMotionConditionFlags {
+                    first_motion,
+                    focus_change_pending,
+                    chrome_interactive,
+                    overlay_open,
+                    pointer_pane_unresolved,
+                    unknown_geometry,
+                    url_forced,
+                    gutter_forced,
+                    scrollbar_forced: scrollbar_boundary_forced || scrollbar_drag_forced,
+                    selection_forced,
+                },
+            );
+        }
+
         pointer_motion_needs_repaint_decision(PointerMotionInputs {
+            first_motion,
             focus_change_pending,
             chrome_interactive,
-            any_pane_selecting: any_selecting,
             overlay_open,
             pointer_pane_unresolved,
-            pane_signals: pane_resolution.signals,
+            unknown_geometry,
+            url_forced,
+            gutter_forced,
+            scrollbar_boundary_forced,
+            scrollbar_drag_forced,
+            selection_forced,
         })
     }
 
@@ -1799,12 +1938,6 @@ impl freminal_windowing::App for FreminalGui {
             } else {
                 0.0
             };
-            // Task 121 spike: publish the LOGICAL inset for
-            // `App::pointer_motion_needs_repaint`, which runs outside a frame
-            // and so has no `ppp` of its own. See the field's doc for why this
-            // beats assuming `ppp >= 1.0`.
-            win.published
-                .publish_cached_gutter_inset_logical(gutter_inset_logical);
 
             // Read live from egui rather than a per-pane cached flag: the
             // latter is only ever updated while a given pane happens to be

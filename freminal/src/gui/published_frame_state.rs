@@ -61,6 +61,16 @@ pub(super) struct PanePointerReportInputs {
     pub(super) command_history: bool,
     /// Mirrors `InputSuppressors::scrollbar_drag`.
     pub(super) scrollbar_drag: bool,
+    /// The scrollbar's exact hit rect (`terminal/widget.rs`'s
+    /// `scrollbar_hit_rect` helper), egui logical points, `Some` only when
+    /// the thumb actually rendered this frame (`ScrollbarOutcome::hit_rect`
+    /// — see that field's doc for why a not-rendered scrollbar publishes
+    /// `None` rather than a rect nothing can be hovering). Task 124.3b: the
+    /// out-of-frame pointer-motion predicate compares this exact rect
+    /// across the previous and current pointer position to decide whether
+    /// motion crossed the scrollbar's hover boundary, replacing the old
+    /// pane-wide `scroll_offset > 0` veto.
+    pub(super) scrollbar_hit_rect: Option<egui::Rect>,
 }
 
 impl PanePointerReportInputs {
@@ -90,6 +100,7 @@ impl Default for PanePointerReportInputs {
             search_overlay: false,
             command_history: false,
             scrollbar_drag: false,
+            scrollbar_hit_rect: None,
         }
     }
 }
@@ -178,11 +189,6 @@ pub(super) struct PublishedFrameState {
     /// live `available_rect` to compute it from) and by the toast-rendering
     /// block, which renders outside `central_body`.
     cached_central_rect: Option<egui::Rect>,
-    /// The command-block gutter's total inset in logical points, cached
-    /// each frame so the out-of-frame predicates can hit-test the gutter
-    /// strip without `pixels_per_point` (which is only known inside a
-    /// frame).
-    cached_gutter_inset_logical: f32,
     /// Menu-bar + tab-bar rects, captured every frame. `None` until the
     /// first frame renders — see the type doc for why this stays
     /// `Option<Vec<_>>` rather than unifying with its two siblings below.
@@ -216,9 +222,9 @@ pub(super) struct PublishedFrameState {
 
 impl PublishedFrameState {
     /// A fresh instance, matching the values a newly created window's
-    /// `PerWindowState` needs before its first frame: no cached rects, a
-    /// zero inset, no head rects yet, empty rect lists, default (all-false)
-    /// chrome signals, and no resize overlay.
+    /// `PerWindowState` needs before its first frame: no cached rects, no
+    /// head rects yet, empty rect lists, default (all-false) chrome
+    /// signals, and no resize overlay.
     pub(super) fn new() -> Self {
         Self::default()
     }
@@ -232,17 +238,6 @@ impl PublishedFrameState {
     /// Publish this frame's `CentralPanel` content rect.
     pub(super) const fn publish_cached_central_rect(&mut self, rect: egui::Rect) {
         self.cached_central_rect = Some(rect);
-    }
-
-    /// The command-block gutter's total inset in logical points, as of the
-    /// most recent frame (`0.0` before the first).
-    pub(super) const fn cached_gutter_inset_logical(&self) -> f32 {
-        self.cached_gutter_inset_logical
-    }
-
-    /// Publish this frame's gutter inset.
-    pub(super) const fn publish_cached_gutter_inset_logical(&mut self, inset: f32) {
-        self.cached_gutter_inset_logical = inset;
     }
 
     /// The menu-bar + tab-bar rects from the most recent frame, or
@@ -358,6 +353,23 @@ impl PublishedFrameState {
         self.pane_pointer_report_inputs.get(&pane_id).copied()
     }
 
+    /// Whether ANY live pane's most-recently-published `scrollbar_drag`
+    /// suppressor is active (Task 124.3b).
+    ///
+    /// The out-of-frame pointer-motion repaint predicate cannot rely on
+    /// only the currently-resolved pane's own flag: `handle_scrollbar`
+    /// keeps tracking `primary_down()` and updating the offset regardless
+    /// of which pane the pointer currently resolves to, so a drag started
+    /// in one pane can continue while the pointer strays outside that
+    /// pane's rect (or over no pane at all). Checking every published
+    /// pane's flag, rather than one resolved pane's, is what makes the
+    /// force unconditional the way an in-progress drag needs.
+    pub(super) fn any_pane_scrollbar_dragging(&self) -> bool {
+        self.pane_pointer_report_inputs
+            .values()
+            .any(|inputs| inputs.scrollbar_drag)
+    }
+
     /// Publish `pane_id`'s [`PanePointerReportInputs`] for this frame, as
     /// computed by `FreminalTerminalWidget::show` and recorded into that
     /// pane's `PaneRenderCache`.
@@ -402,7 +414,6 @@ mod tests {
     fn fresh_instance_has_documented_initial_values() {
         let state = PublishedFrameState::new();
         assert_eq!(state.cached_central_rect(), None);
-        assert!((state.cached_gutter_inset_logical() - 0.0).abs() < f32::EPSILON);
         assert_eq!(state.chrome_head_rects(), None);
         assert!(state.chrome_border_rects().is_empty());
         assert!(state.chrome_toast_rects().is_empty());
@@ -434,9 +445,6 @@ mod tests {
         let central = rect(1.0, 2.0);
         state.publish_cached_central_rect(central);
         assert_eq!(state.cached_central_rect(), Some(central));
-
-        state.publish_cached_gutter_inset_logical(12.5);
-        assert!((state.cached_gutter_inset_logical() - 12.5).abs() < f32::EPSILON);
 
         let head = vec![rect(0.0, 0.0), rect(0.0, 20.0)];
         state.publish_chrome_head_rects(head.clone());
@@ -478,7 +486,6 @@ mod tests {
         // "Frame 1" fully completes and publishes real values.
         let central = rect(5.0, 5.0);
         state.publish_cached_central_rect(central);
-        state.publish_cached_gutter_inset_logical(8.0);
         state.publish_chrome_head_rects(vec![rect(0.0, 0.0)]);
         state.publish_chrome_border_rects(vec![rect(10.0, 10.0)]);
         state.publish_chrome_toast_rects(vec![rect(20.0, 20.0)]);
@@ -514,7 +521,6 @@ mod tests {
         // one written and empty.
         assert_eq!(state.chrome_head_rects(), Some([rect(0.0, 0.0)].as_slice()));
         assert_eq!(state.chrome_toast_rects(), [rect(20.0, 20.0)].as_slice());
-        assert!((state.cached_gutter_inset_logical() - 8.0).abs() < f32::EPSILON);
         assert_eq!(state.pending_chrome_signals(), signals);
         let read_back = state
             .resize_overlay()
@@ -633,6 +639,7 @@ mod tests {
             search_overlay: false,
             command_history: false,
             scrollbar_drag: false,
+            scrollbar_hit_rect: None,
         }
     }
 
@@ -657,6 +664,34 @@ mod tests {
                 ..report_inputs_clean()
             }
             .any_suppressor()
+        );
+    }
+
+    // ── Task 124.3b: `scrollbar_hit_rect` ────────────────────────────────
+
+    #[test]
+    fn scrollbar_hit_rect_defaults_to_none() {
+        assert_eq!(PanePointerReportInputs::default().scrollbar_hit_rect, None);
+        assert_eq!(report_inputs_clean().scrollbar_hit_rect, None);
+    }
+
+    #[test]
+    fn scrollbar_hit_rect_round_trips_when_published() {
+        let hit_rect = rect(90.0, 0.0);
+        let inputs = PanePointerReportInputs {
+            scrollbar_hit_rect: Some(hit_rect),
+            ..report_inputs_clean()
+        };
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+        state.publish_pane_pointer_report_inputs(pane, inputs);
+
+        assert_eq!(
+            state
+                .pane_pointer_report_inputs(pane)
+                .and_then(|i| i.scrollbar_hit_rect),
+            Some(hit_rect)
         );
     }
 
@@ -783,5 +818,56 @@ mod tests {
             None,
             "a closed pane's stale pointer-report inputs must not survive the clear"
         );
+    }
+
+    // ── Task 124.3b: `any_pane_scrollbar_dragging` ───────────────────────
+
+    #[test]
+    fn any_pane_scrollbar_dragging_false_when_nothing_published() {
+        assert!(!PublishedFrameState::new().any_pane_scrollbar_dragging());
+    }
+
+    #[test]
+    fn any_pane_scrollbar_dragging_false_when_no_pane_is_dragging() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+        state.publish_pane_pointer_report_inputs(pane_a, report_inputs_clean());
+        assert!(!state.any_pane_scrollbar_dragging());
+    }
+
+    #[test]
+    fn any_pane_scrollbar_dragging_true_when_one_pane_is_dragging() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let pane_b = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+        state.publish_pane_pointer_report_inputs(pane_a, report_inputs_clean());
+        state.publish_pane_pointer_report_inputs(
+            pane_b,
+            PanePointerReportInputs {
+                scrollbar_drag: true,
+                ..report_inputs_clean()
+            },
+        );
+        assert!(state.any_pane_scrollbar_dragging());
+    }
+
+    #[test]
+    fn any_pane_scrollbar_dragging_forgets_a_closed_panes_drag_after_clear() {
+        let mut id_gen = PaneIdGenerator::new(0);
+        let pane_a = id_gen.next_id();
+        let mut state = PublishedFrameState::new();
+        state.publish_pane_pointer_report_inputs(
+            pane_a,
+            PanePointerReportInputs {
+                scrollbar_drag: true,
+                ..report_inputs_clean()
+            },
+        );
+        assert!(state.any_pane_scrollbar_dragging());
+
+        state.clear_pane_pointer_report_inputs();
+        assert!(!state.any_pane_scrollbar_dragging());
     }
 }

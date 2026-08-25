@@ -192,6 +192,7 @@ mod tests {
             search_overlay: false,
             command_history: false,
             scrollbar_drag: false,
+            scrollbar_hit_rect: None,
         }
     }
 

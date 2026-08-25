@@ -378,7 +378,21 @@ pub trait App {
     /// it does not affect `is_chrome_interactive_at`'s separate
     /// chrome-damage axis, and `MouseInput`/`MouseWheel`/`CursorEntered`/
     /// `CursorLeft` are deliberately NOT gated by this — only `CursorMoved`.
-    fn pointer_motion_needs_repaint(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+    ///
+    /// Task 124.3b: takes both the previous and the current pointer
+    /// position ([`PointerMotionPositions`]) rather than the current
+    /// position alone. Cell-granular suppression (URL hover, selection
+    /// extent, the command-block gutter) needs to know whether motion
+    /// crossed a cell boundary, which is meaningless without the prior
+    /// position. `previous` is `None` only for the very first `CursorMoved`
+    /// this window has observed (or the first since the pointer last left
+    /// the window) — see `event_loop.rs`'s `CursorMoved`/`CursorLeft`
+    /// handling for exactly when it resets.
+    fn pointer_motion_needs_repaint(
+        &self,
+        _window_id: WindowId,
+        _positions: PointerMotionPositions,
+    ) -> bool {
         true
     }
 
@@ -539,6 +553,33 @@ pub struct PointerMotionEvent {
     pub pos: egui::Pos2,
     /// Chorded modifier state (`EguiState::modifiers()`) as of this event.
     pub modifiers: egui::Modifiers,
+}
+
+/// The previous and current pointer position for one `CursorMoved` event,
+/// delivered to [`App::pointer_motion_needs_repaint`] (Task 124.3b).
+///
+/// `previous` is captured by `event_loop.rs`'s `WindowState::pointer_history`
+/// (a `PointerMotionHistory`) **before** it records the current event's
+/// position — so it is genuinely the position of the immediately preceding
+/// `CursorMoved` this window observed, not a recomputation of `current`. It
+/// is `None` exactly when `pointer_history` had no recorded position:
+/// before the first `CursorMoved` a window has ever received, or after a
+/// `CursorLeft` reset it (see `event_loop.rs`'s `WindowEvent::CursorLeft`
+/// arm, which calls `PointerMotionHistory::clear`) — the pointer
+/// re-entering the window starts a fresh "first motion" with no known prior
+/// position, even though the window itself is not new.
+#[derive(Debug, Clone, Copy, PartialEq)]
+// `egui::Pos2`'s `f32` fields cannot implement `Eq` — deriving it here is
+// not possible, not merely skipped.
+#[allow(clippy::derive_partial_eq_without_eq)]
+pub struct PointerMotionPositions {
+    /// The prior `CursorMoved` position, or `None` for the first motion
+    /// event since window creation or since the pointer last left the
+    /// window.
+    pub previous: Option<egui::Pos2>,
+    /// This event's position, egui logical points, window-relative,
+    /// top-left origin.
+    pub current: egui::Pos2,
 }
 
 /// A pointer-button press/release event delivered synchronously to
@@ -884,7 +925,11 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0]
         }
 
-        fn pointer_motion_needs_repaint(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
+        fn pointer_motion_needs_repaint(
+            &self,
+            _window_id: WindowId,
+            _positions: PointerMotionPositions,
+        ) -> bool {
             self.pointer_motion_needs_repaint
         }
 
@@ -944,7 +989,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(10.0, 10.0);
 
-        assert!(app.pointer_motion_needs_repaint(window_id, pos));
+        assert!(app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos
+            }
+        ));
         assert!(app.is_chrome_interactive_at(window_id, pos));
     }
 
@@ -957,7 +1008,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(10.0, 10.0);
 
-        assert!(!app.pointer_motion_needs_repaint(window_id, pos));
+        assert!(!app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos
+            }
+        ));
         // The other hook is untouched by the `..Default::default()` fill-in.
         assert!(app.is_chrome_interactive_at(window_id, pos));
     }
@@ -973,7 +1030,13 @@ mod tests {
 
         assert!(!app.is_chrome_interactive_at(window_id, pos));
         // The other hook is untouched by the `..Default::default()` fill-in.
-        assert!(app.pointer_motion_needs_repaint(window_id, pos));
+        assert!(app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos
+            }
+        ));
     }
 
     // ── Task 124.3a: `PointerButton::from_winit` ─────────────────────────
@@ -1040,7 +1103,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
 
-        assert!(!app.pointer_motion_needs_repaint(window_id, pos));
+        assert!(!app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos
+            }
+        ));
 
         let event = PointerMotionEvent {
             pos,

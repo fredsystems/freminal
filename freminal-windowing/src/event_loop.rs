@@ -21,8 +21,8 @@ use crate::error::Error;
 use crate::gl_context::GlState;
 use crate::{
     App, FrameSignals, PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent,
-    PointerPresenceLoss, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry,
-    WindowHandle, WindowId, WindowOp,
+    PointerMotionPositions, PointerPresenceLoss, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig,
+    WindowGeometry, WindowHandle, WindowId, WindowOp,
 };
 
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
@@ -312,6 +312,58 @@ const fn should_schedule_cursor_moved(
     chrome_drag_latched || previous_needed || current_needed
 }
 
+/// Owns the "what was the last observed `CursorMoved` position" invariant
+/// for one window (Task 124.3b review). Previously a bare
+/// `Option<egui::Pos2>` field (`last_cursor_pos`) mutated inline at three
+/// call sites (`CursorMoved`, `CursorLeft`, `MouseInput`'s chrome
+/// hit-test), with a free-standing `cursor_moved_positions` helper existing
+/// solely to make the two-field assignment testable — a trivial helper with
+/// no real ownership of the invariant it named
+/// (`freminal-extend-or-extract`). This type is that home: it owns the
+/// state, and its three methods are exactly the three ways callers need to
+/// use it.
+#[derive(Debug, Default)]
+struct PointerMotionHistory {
+    /// The most recently observed `CursorMoved` position, or `None` before
+    /// the first one (since window creation, or since [`Self::clear`] was
+    /// last called).
+    last: Option<egui::Pos2>,
+}
+
+impl PointerMotionHistory {
+    /// Record this frame's converted `CursorMoved` position and return the
+    /// [`PointerMotionPositions`] pair for `App::pointer_motion_needs_repaint`
+    /// — `previous` is whatever was recorded before THIS call, `current` is
+    /// `pos`. `None` in, `None` out: `pos` UNCONDITIONALLY overwrites the
+    /// recorded position (matching the pre-124.3b bare-field behavior
+    /// exactly — a conversion failure, `physical_to_logical_pos` returning
+    /// `None` for a non-finite/non-positive scale factor, discards whatever
+    /// prior position was known), and the caller's own conservative
+    /// "treated as needed" path takes over when `observe` returns `None`.
+    fn observe(&mut self, pos: Option<egui::Pos2>) -> Option<PointerMotionPositions> {
+        let previous = self.last;
+        self.last = pos;
+        pos.map(|current| PointerMotionPositions { previous, current })
+    }
+
+    /// Reset to "no known position" — called from `WindowEvent::CursorLeft`.
+    /// The pointer re-entering the window starts a fresh "first motion"
+    /// with no known prior position, even though the window itself is not
+    /// new.
+    const fn clear(&mut self) {
+        self.last = None;
+    }
+
+    /// The most recently observed position, or `None` if none has been
+    /// observed since creation or the last [`Self::clear`]. Serves the
+    /// `MouseInput` arm's chrome hit-test, which needs "where is the
+    /// pointer right now" independent of the motion-pair bookkeeping
+    /// [`Self::observe`] performs.
+    const fn current(&self) -> Option<egui::Pos2> {
+        self.last
+    }
+}
+
 /// Per-window state.
 struct WindowState {
     window: Window,
@@ -319,12 +371,13 @@ struct WindowState {
     egui: EguiState,
     /// Next scheduled repaint time (if any).
     repaint_at: Option<Instant>,
-    /// Last-known pointer position in egui logical points, updated on every
-    /// `CursorMoved` and cleared on `CursorLeft`. `None` before the first
-    /// `CursorMoved` (or after the pointer has left the window) — the region
-    /// hit-test then has no position to test and callers treat that
+    /// Pointer-motion history (Task 124.3b review): owns the last-observed
+    /// `CursorMoved` position and builds the `PointerMotionPositions` pair
+    /// `App::pointer_motion_needs_repaint` needs. `None`/cleared before the
+    /// first `CursorMoved` (or after the pointer has left the window) — the
+    /// region hit-test then has no position to test and callers treat that
     /// conservatively.
-    last_cursor_pos: Option<egui::Pos2>,
+    pointer_history: PointerMotionHistory,
     /// Chrome-border drag latch: incremented on a button press whose
     /// position is over (or unknown, conservatively) a chrome-interactive
     /// region, decremented on release. While `> 0`, pointer motion is
@@ -460,7 +513,7 @@ impl<A: App> Handler<A> {
             gl,
             egui,
             repaint_at: Some(Instant::now()),
-            last_cursor_pos: None,
+            pointer_history: PointerMotionHistory::default(),
             chrome_drag_pressed_count: 0,
             pointer_motion_needed_last: true,
             suppressed_pointer_since_last_frame: false,
@@ -652,7 +705,16 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 match event {
                     WindowEvent::CursorMoved { position, .. } => {
                         let scale = state.window.scale_factor();
-                        state.last_cursor_pos = physical_to_logical_pos(position, scale);
+                        let logical_pos = physical_to_logical_pos(position, scale);
+                        // `PointerMotionHistory::observe` unconditionally
+                        // overwrites the recorded position with
+                        // `logical_pos` (matching the pre-124.3b bare-field
+                        // behavior exactly) and returns the
+                        // `PointerMotionPositions` pair for THIS event, or
+                        // `None` only when `logical_pos` itself is `None`
+                        // (the position could not be converted — a
+                        // non-finite/non-positive scale factor).
+                        let positions = state.pointer_history.observe(logical_pos);
 
                         // Task 124.3a: the synchronous, PTY-agnostic motion
                         // hook. Deliberately unconditional and independent
@@ -663,11 +725,10 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         // the same event, so an app can deliver an
                         // immediate PTY mouse-tracking report even on a
                         // frame the repaint gate suppresses. Skipped only
-                        // when the position itself could not be converted
-                        // (non-finite/non-positive scale factor), mirroring
-                        // `app_says_needed`'s own conservative treatment of
-                        // that case just below.
-                        if let Some(pos) = state.last_cursor_pos {
+                        // when the position itself could not be converted,
+                        // mirroring `app_says_needed`'s own conservative
+                        // treatment of that case just below.
+                        if let Some(pos) = logical_pos {
                             self.app.on_pointer_moved(
                                 WindowId(winit_id),
                                 PointerMotionEvent {
@@ -677,14 +738,16 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             );
                         }
 
-                        // Task 121 spike: decide whether this pointer-motion
-                        // event needs a repaint AT ALL. `last_cursor_pos.is_none()`
-                        // (position could not be converted to logical points —
-                        // a non-finite/non-positive scale factor) is
-                        // conservative: treated as needed.
-                        let app_says_needed = state.last_cursor_pos.is_none_or(|pos| {
+                        // Task 121 spike (124.3b: now carries `previous` as
+                        // well as `current`): decide whether this
+                        // pointer-motion event needs a repaint AT ALL.
+                        // `positions.is_none()` (position could not be
+                        // converted to logical points — a non-finite/
+                        // non-positive scale factor) is conservative:
+                        // treated as needed.
+                        let app_says_needed = positions.is_none_or(|positions| {
                             self.app
-                                .pointer_motion_needs_repaint(WindowId(winit_id), pos)
+                                .pointer_motion_needs_repaint(WindowId(winit_id), positions)
                         });
                         schedule_repaint = should_schedule_cursor_moved(
                             state.chrome_drag_pressed_count > 0,
@@ -704,7 +767,7 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                     WindowEvent::CursorLeft { .. } => {
                         // The pointer is gone — a stale position must not be
                         // used to wrongly classify a later event.
-                        state.last_cursor_pos = None;
+                        state.pointer_history.clear();
                         // Task 121 spike: reset the edge-detect latch too —
                         // a stale "not needed" from before the pointer left
                         // must not suppress the first `CursorMoved` after it
@@ -725,7 +788,8 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         ..
                     } => {
                         let is_over_chrome = state
-                            .last_cursor_pos
+                            .pointer_history
+                            .current()
                             .map(|pos| self.app.is_chrome_interactive_at(WindowId(winit_id), pos));
                         state.chrome_drag_pressed_count = update_chrome_drag_latch(
                             state.chrome_drag_pressed_count,
@@ -1365,14 +1429,17 @@ pub fn run(config: WindowConfig, app: impl App + 'static) -> Result<(), Error> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{
-        App, MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
-        WindowId, clamp_repaint_delay, effective_repaint_delay, is_blocked_key,
-        logical_coord_to_i32, logical_dim_to_u32, physical_to_logical_pos,
+        App, MIN_REPAINT_INTERVAL, PointerMotionHistory, SUPPRESSED_POINTER_FALLBACK_DELAY,
+        ViewportCommandFlags, WindowId, clamp_repaint_delay, effective_repaint_delay,
+        is_blocked_key, logical_coord_to_i32, logical_dim_to_u32, physical_to_logical_pos,
         pointer_button_event_for, should_schedule_cursor_moved, update_chrome_drag_latch,
         viewport_command_flags,
     };
     use crate::tests::DummyApp;
-    use crate::{PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent};
+    use crate::{
+        PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent,
+        PointerMotionPositions,
+    };
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -1626,6 +1693,91 @@ mod tests {
         assert!(should_schedule_cursor_moved(false, false, true));
     }
 
+    // ── Task 124.3b review: `PointerMotionHistory` ────────────────────────
+
+    #[test]
+    fn pointer_motion_history_starts_with_no_position() {
+        let history = PointerMotionHistory::default();
+        assert_eq!(history.current(), None);
+    }
+
+    #[test]
+    fn pointer_motion_history_first_motion_has_no_previous() {
+        // The very first `CursorMoved` a window observes: `last` was still
+        // `None` when captured, so `previous` is `None` even though a real
+        // `current` position exists.
+        let mut history = PointerMotionHistory::default();
+        let current = egui::Pos2::new(10.0, 20.0);
+        let positions = history
+            .observe(Some(current))
+            .expect("Some(pos) in must yield Some(positions) out");
+        assert_eq!(positions.previous, None);
+        assert_eq!(positions.current, current);
+        assert_eq!(history.current(), Some(current));
+    }
+
+    #[test]
+    fn pointer_motion_history_second_motion_carries_the_prior_position() {
+        // A subsequent motion: `previous` is exactly the position recorded
+        // by the FIRST `observe` call, NOT a copy of this call's `current`.
+        let mut history = PointerMotionHistory::default();
+        let previous = egui::Pos2::new(10.0, 20.0);
+        let current = egui::Pos2::new(11.0, 20.0);
+        history.observe(Some(previous));
+        let positions = history
+            .observe(Some(current))
+            .expect("Some(pos) in must yield Some(positions) out");
+        assert_eq!(positions.previous, Some(previous));
+        assert_eq!(positions.current, current);
+        assert_ne!(
+            positions.previous,
+            Some(positions.current),
+            "previous must not silently become a copy of current"
+        );
+        assert_eq!(history.current(), Some(current));
+    }
+
+    #[test]
+    fn pointer_motion_history_clear_makes_the_next_observe_behave_like_first_motion() {
+        // `WindowEvent::CursorLeft` calls `clear()` (event_loop.rs's
+        // `CursorLeft` arm). The next `observe` after that is therefore
+        // built with `previous = None` exactly as it would be for a
+        // brand-new window, even though this window has seen motion before.
+        let mut history = PointerMotionHistory::default();
+        history.observe(Some(egui::Pos2::new(1.0, 1.0)));
+        history.clear();
+        assert_eq!(history.current(), None);
+
+        let current = egui::Pos2::new(5.0, 5.0);
+        let positions = history
+            .observe(Some(current))
+            .expect("Some(pos) in must yield Some(positions) out");
+        assert_eq!(positions.previous, None);
+        assert_eq!(positions.current, current);
+    }
+
+    #[test]
+    fn pointer_motion_history_observe_none_returns_none_and_discards_the_prior_position() {
+        // A conversion failure (`physical_to_logical_pos` returning `None`
+        // for a non-finite/non-positive scale factor) unconditionally
+        // overwrites the recorded position with `None`, matching the
+        // pre-124.3b bare-field behavior exactly -- the prior position is
+        // discarded, not preserved for a later `observe`.
+        let mut history = PointerMotionHistory::default();
+        history.observe(Some(egui::Pos2::new(1.0, 1.0)));
+
+        assert_eq!(history.observe(None), None);
+        assert_eq!(history.current(), None);
+
+        // The NEXT real observe therefore has no previous position either,
+        // exactly as if this were a brand-new window.
+        let current = egui::Pos2::new(9.0, 9.0);
+        let positions = history
+            .observe(Some(current))
+            .expect("Some(pos) in must yield Some(positions) out");
+        assert_eq!(positions.previous, None);
+    }
+
     // ── 122.6: `CursorMoved` dispatch driven by a live `App`, not
     // hand-supplied booleans (`event_loop.rs:809-845`) ────────────────────
     //
@@ -1653,7 +1805,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
 
-        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let current_needed = app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos,
+            },
+        );
         let previous_needed = true; // `WindowState::pointer_motion_needed_last`'s initial value
         assert!(should_schedule_cursor_moved(
             false, // no chrome-border drag in progress
@@ -1675,7 +1833,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
 
-        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let current_needed = app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos,
+            },
+        );
         assert!(
             !current_needed,
             "the configured app must actually answer false"
@@ -1701,7 +1865,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
 
-        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let current_needed = app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos,
+            },
+        );
         let previous_needed = true;
         assert!(should_schedule_cursor_moved(
             false,
@@ -1722,7 +1892,13 @@ mod tests {
         let window_id = WindowId(winit::window::WindowId::dummy());
         let pos = egui::Pos2::new(4.0, 4.0);
 
-        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let current_needed = app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos,
+            },
+        );
         assert!(should_schedule_cursor_moved(true, false, current_needed));
     }
 
@@ -1750,7 +1926,13 @@ mod tests {
             modifiers: egui::Modifiers::default(),
         };
         app.on_pointer_moved(window_id, event);
-        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+        let current_needed = app.pointer_motion_needs_repaint(
+            window_id,
+            PointerMotionPositions {
+                previous: None,
+                current: pos,
+            },
+        );
 
         assert!(!current_needed, "the configured app must suppress repaint");
         assert_eq!(

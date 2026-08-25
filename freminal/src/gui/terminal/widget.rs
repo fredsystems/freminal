@@ -460,6 +460,14 @@ pub(super) struct ScrollbarOutcome {
     pub(super) new_offset: Option<usize>,
     pub(super) rendered: bool,
     pub(super) hovered: bool,
+    /// The scrollbar's exact hit rect this frame ([`scrollbar_hit_rect`]),
+    /// or `None` when the thumb was not rendered at all — mirrors
+    /// `rendered`, since there is nothing to hover/drag when the scrollbar
+    /// is not shown. Task 124.3b: published verbatim into
+    /// `PanePointerReportInputs::scrollbar_hit_rect` so the out-of-frame
+    /// pointer-motion predicate can compare it across the previous and
+    /// current pointer position without recomputing scrollbar geometry.
+    pub(super) hit_rect: Option<egui::Rect>,
 }
 
 impl ScrollbarOutcome {
@@ -470,8 +478,33 @@ impl ScrollbarOutcome {
             new_offset: None,
             rendered: false,
             hovered: false,
+            hit_rect: None,
         }
     }
+}
+
+/// The scrollbar's exact clickable/hoverable hit rect for a pane, computed
+/// from the pane's viewport rect alone.
+///
+/// Task 124.3b: single source of truth for this geometry, replacing the
+/// constants (`SCROLLBAR_WIDTH`/`SCROLLBAR_MARGIN`/`HIT_TEST_PADDING`) that
+/// were previously hand-copied between `show()`'s scrollbar pre-check and
+/// [`handle_scrollbar`] itself — the two could not drift apart by
+/// construction before this extraction only because nobody had yet changed
+/// one without the other.
+pub(super) fn scrollbar_hit_rect(viewport: egui::Rect) -> egui::Rect {
+    const SCROLLBAR_WIDTH: f32 = 6.0;
+    const SCROLLBAR_MARGIN: f32 = 2.0;
+    // Wider hit-test area so the narrow pill is easy to grab.
+    const HIT_TEST_PADDING: f32 = 6.0;
+
+    let track_right = viewport.right() - SCROLLBAR_MARGIN;
+    let track_left = track_right - SCROLLBAR_WIDTH;
+
+    egui::Rect::from_min_max(
+        egui::pos2(track_left - HIT_TEST_PADDING, viewport.top()),
+        egui::pos2(track_right + HIT_TEST_PADDING, viewport.bottom()),
+    )
 }
 ///
 /// The scrollbar is shown when the user is actively scrolled back
@@ -490,8 +523,6 @@ pub(super) fn handle_scrollbar(
     const SCROLLBAR_WIDTH: f32 = 6.0;
     const SCROLLBAR_MARGIN: f32 = 2.0;
     const MIN_THUMB_HEIGHT: f32 = 12.0;
-    // Wider hit-test area so the narrow pill is easy to grab.
-    const HIT_TEST_PADDING: f32 = 6.0;
 
     // Only show when scrolled back into history — but keep rendering
     // while the user is mid-drag so the scrollbar doesn't vanish when
@@ -537,11 +568,9 @@ pub(super) fn handle_scrollbar(
     );
 
     // ── Mouse interaction ────────────────────────────────────────────────
-    // Use a wider hit-test rect so the narrow scrollbar is easy to click.
-    let hit_rect = Rect::from_min_max(
-        Pos2::new(track_left - HIT_TEST_PADDING, track_top),
-        Pos2::new(track_right + HIT_TEST_PADDING, track_bottom),
-    );
+    // Single source of truth for the hit-test rect (Task 124.3b) — see
+    // `scrollbar_hit_rect`'s doc.
+    let hit_rect = scrollbar_hit_rect(viewport);
 
     let new_offset = ui.input(|i| {
         let ptr = &i.pointer;
@@ -616,6 +645,7 @@ pub(super) fn handle_scrollbar(
         new_offset,
         rendered: true,
         hovered: effectively_hovered,
+        hit_rect: Some(hit_rect),
     }
 }
 
@@ -2257,7 +2287,7 @@ pub struct FreminalTerminalWidget {
 /// (which needs a live `Ui`, GPU-backed `RenderState`, and PTY channels —
 /// not practical to construct in a unit test). `show` and the test below
 /// are the only two callers; subtask 122.15 forbids any *third* call site
-/// re-deriving this from `cached_central_rect` + `cached_gutter_inset_logical`
+/// re-deriving this from `cached_central_rect` + a gutter inset
 /// independently — see `PublishedFrameState::pane_terminal_origin`'s doc.
 fn terminal_rect_origin(
     pane_rect: egui::Rect,
@@ -2623,17 +2653,12 @@ impl FreminalTerminalWidget {
                 if !ptr.primary_pressed() {
                     return false;
                 }
-                ptr.interact_pos().is_some_and(|pos| {
-                    let vp = ui.max_rect();
-                    let track_right = vp.right() - 2.0; // SCROLLBAR_MARGIN
-                    let track_left = track_right - 6.0; // SCROLLBAR_WIDTH
-                    let hit_left = track_left - 6.0; // HIT_TEST_PADDING
-                    let hit_right = track_right + 6.0;
-                    pos.x >= hit_left
-                        && pos.x <= hit_right
-                        && pos.y >= vp.top()
-                        && pos.y <= vp.bottom()
-                })
+                // Task 124.3b: the shared `scrollbar_hit_rect` helper is now
+                // the single source of truth for this geometry — no more
+                // hand-copied constants to keep in sync with
+                // `handle_scrollbar`.
+                ptr.interact_pos()
+                    .is_some_and(|pos| scrollbar_hit_rect(ui.max_rect()).contains(pos))
             });
             if scrollbar_hit && snap.scroll_offset > 0 {
                 cache.scrollbar_dragging = true;
@@ -2716,23 +2741,6 @@ impl FreminalTerminalWidget {
             search_overlay: view_state.search_state.is_open,
             command_history: view_state.command_history.is_open,
             scrollbar_drag: cache.scrollbar_dragging,
-        };
-
-        // Task 124.3a: publish this frame's geometry + suppressor snapshot
-        // for the out-of-frame immediate PTY mouse-report path. Computed
-        // from the SAME `terminal_rect`/`suppressors` values just above —
-        // never re-derived — so it cannot silently drift from what this
-        // frame actually drew/suppressed. `app_impl` lifts this into
-        // `PublishedFrameState` immediately after `show()` returns.
-        cache.pointer_report_inputs = PanePointerReportInputs {
-            terminal_rect,
-            cell_size: egui::vec2(logical_cell_w, logical_cell_h),
-            pixels_per_point: ppp,
-            modal_or_drag: suppressors.modal_or_drag,
-            context_menu: suppressors.context_menu,
-            search_overlay: suppressors.search_overlay,
-            command_history: suppressors.command_history,
-            scrollbar_drag: suppressors.scrollbar_drag,
         };
 
         if suppressors.any() {
@@ -3827,6 +3835,38 @@ impl FreminalTerminalWidget {
                 new_offset,
             ));
         }
+
+        // Task 124.3a/124.3b: publish this frame's geometry + suppressor
+        // snapshot for the out-of-frame immediate PTY mouse-report path AND
+        // the out-of-frame pointer-motion repaint predicate. `app_impl`
+        // lifts this into `PublishedFrameState` immediately after `show()`
+        // returns.
+        //
+        // Deliberately published HERE, after `handle_scrollbar` runs, not
+        // back where `suppressors` was built (124.3a's original site,
+        // before terminal-input processing): `cache.scrollbar_dragging` is
+        // mutated BY `handle_scrollbar` (release detection, drag-continue),
+        // so reading it before that call published a stale snapshot — a
+        // drag that ended earlier this same frame would still publish
+        // `scrollbar_drag: true`. Reading it here, after the mutation, is
+        // this frame's true value. `scrollbar_hit_rect` is `None` unless
+        // the thumb actually rendered this frame (`ScrollbarOutcome`'s own
+        // doc). Every other field (`terminal_rect`/`cell_size`/`ppp`/the
+        // four non-scrollbar suppressors) is unchanged by anything between
+        // the old and new publish sites, so moving this later changes
+        // nothing about them.
+        cache.pointer_report_inputs = PanePointerReportInputs {
+            terminal_rect,
+            cell_size: egui::vec2(logical_cell_w, logical_cell_h),
+            pixels_per_point: ppp,
+            modal_or_drag: suppressors.modal_or_drag,
+            context_menu: suppressors.context_menu,
+            search_overlay: suppressors.search_overlay,
+            command_history: suppressors.command_history,
+            scrollbar_drag: cache.scrollbar_dragging,
+            scrollbar_hit_rect: scrollbar_outcome.hit_rect,
+        };
+
         // #459 item 9 / mirrors #461 gutter: the scrollbar thumb is painted on
         // the plain egui painter (alpha varies with hover), outside per-pane VBO
         // damage. A hover-alpha change or a rendered->not-rendered vanish must

@@ -313,10 +313,15 @@ pub(super) struct PerWindowState {
     /// `App::update` and read only from `is_chrome_interactive_at` /
     /// `pointer_motion_needs_repaint`, outside any frame. See
     /// [`PublishedFrameState`] for the full publish/read discipline this
-    /// replaces (formerly seven separate fields:
-    /// `cached_central_rect`, `cached_gutter_inset_logical`,
-    /// `chrome_head_rects`, `chrome_border_rects`, `chrome_toast_rects`,
-    /// `pending_chrome_signals`, `resize_overlay`).
+    /// replaces (formerly seven separate fields: `cached_central_rect`,
+    /// `cached_gutter_inset_logical`, `chrome_head_rects`,
+    /// `chrome_border_rects`, `chrome_toast_rects`,
+    /// `pending_chrome_signals`, `resize_overlay`). `cached_gutter_inset_logical`
+    /// was itself deleted outright by Task 124.3b's review pass — gutter
+    /// hit-testing now classifies against the exact per-pane `terminal_rect`
+    /// (`PublishedFrameState::pane_pointer_report_inputs`,
+    /// `pointer_motion::classify_pointer_position`) rather than an
+    /// upper-bound inset approximation, so no replacement field exists.
     pub(super) published: PublishedFrameState,
 
     /// Last modified time of the shader file, used for hot-reload detection.
@@ -744,75 +749,88 @@ pub(super) struct FrameStats {
     /// per-condition count below as a percentage.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_repaint_check_total: std::cell::Cell<u64>,
+    /// `first_motion` fired count — the first `CursorMoved` since window
+    /// creation or since the pointer last left the window (no `previous`
+    /// position to compare against).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_first_motion: std::cell::Cell<u64>,
+    /// `focus_change_pending` fired count — focus-follows-mouse is enabled
+    /// and this motion lands on a non-active pane.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_focus_change_pending: std::cell::Cell<u64>,
     /// `chrome_interactive` fired count (see
     /// `PointerMotionConditionFlags::chrome_interactive`).
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_chrome_interactive: std::cell::Cell<u64>,
-    /// `any_pane_selecting` fired count.
-    #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_any_pane_selecting: std::cell::Cell<u64>,
     /// `overlay_open` fired count.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_overlay_open: std::cell::Cell<u64>,
     /// `pointer_pane_unresolved` fired count.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_pointer_pane_unresolved: std::cell::Cell<u64>,
-    /// `mouse_tracking_active` fired count (pane-resolved calls only).
+    /// `unknown_geometry` fired count (`pointer_motion::unknown_geometry_force`)
+    /// — either endpoint's geometry could not be classified at all.
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_mouse_tracking_active: std::cell::Cell<u64>,
-    /// `has_urls` fired count (pane-resolved calls only) — one of the three
-    /// independent sub-terms of `pane_hover_region_risk`'s disjunction,
-    /// counted separately from `scroll_offset_nonzero`/`gutter_active`
-    /// rather than as one aggregate: distinguishing which of the three is
-    /// actually responsible is the entire point of this diagnostic.
+    pub(super) pointer_cond_unknown_geometry: std::cell::Cell<u64>,
+    /// `url_forced` fired count (Task 124.3b: `pointer_motion::url_positional_force`
+    /// actually forced a repaint for this call — not merely "this pane has
+    /// URLs", which is the pre-124.3b pane-wide meaning this counter
+    /// replaces).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_has_urls: std::cell::Cell<u64>,
-    /// `scroll_offset_nonzero` fired count (pane-resolved calls only).
+    pub(super) pointer_cond_url_forced: std::cell::Cell<u64>,
+    /// `gutter_forced` fired count (`pointer_motion::gutter_positional_force`).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_scroll_offset_nonzero: std::cell::Cell<u64>,
-    /// `gutter_active` fired count (pane-resolved calls only).
+    pub(super) pointer_cond_gutter_forced: std::cell::Cell<u64>,
+    /// `scrollbar_forced` fired count — either the exact hit-rect boundary
+    /// crossed (`pointer_motion::scrollbar_boundary_force`) or a scrollbar
+    /// drag is in progress somewhere in the window
+    /// (`PublishedFrameState::any_pane_scrollbar_dragging`).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_gutter_active: std::cell::Cell<u64>,
+    pub(super) pointer_cond_scrollbar_forced: std::cell::Cell<u64>,
+    /// `selection_forced` fired count (`pointer_motion::selection_positional_force`).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_selection_forced: std::cell::Cell<u64>,
 }
 
-/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated): which of
-/// the eight conditions considered by `App::pointer_motion_needs_repaint`
-/// were true for one call.
+/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated),
+/// rewritten by Task 124.3b (and its review pass): which of the ten
+/// top-level conditions `pointer_motion_needs_repaint_decision` considers
+/// actually FORCED a repaint for one call.
 ///
-/// Distinct from `pointer_motion.rs`'s `PointerMotionPaneSignals`: that
-/// struct feeds the actual repaint DECISION for a resolved pane (two
-/// aggregated bools — `mouse_tracking_active` and a single
-/// `hover_region_risk`); this
-/// struct is diagnostic-only, exhaustive over every named condition in the
-/// predicate (including the three individual sub-terms
-/// `pane_hover_region_risk` ORs together), and never affects behavior — it
-/// is only ever consumed by `FrameStats::record_pointer_motion_check`.
-///
-/// The last four fields (`mouse_tracking_active` through `gutter_active`)
-/// are meaningful only when a pane resolved under the pointer; when no pane
-/// resolves, all four are simply left `false` (mirrors
-/// `pointer_motion_needs_repaint_decision`'s own "no pane, so no
-/// pane-specific signal applies" semantics for its `pane_signals: None`
-/// case — NOT the same as `pointer_pane_unresolved`, which covers "the pane
-/// could not be determined AT ALL").
+/// Diagnostic-only — never affects behavior — and only ever consumed by
+/// `FrameStats::record_pointer_motion_check`. Every field here means "this
+/// term forced the repaint", not "this observation happened to be true"
+/// (the pre-124.3b `has_urls` counter used to be counted whenever a pane
+/// merely CONTAINED a URL, whether or not that mattered for this motion —
+/// see `pointer_motion.rs`'s module doc for the pane-wide-veto-to-positional
+/// rewrite this counter set reflects). The review pass that added
+/// `first_motion`/`focus_change_pending`/`unknown_geometry` closed a gap
+/// where this struct claimed to cover "the conditions considered" but
+/// omitted three of `PointerMotionInputs`'s actual top-level fields —
+/// `scrollbar_boundary_forced` and `scrollbar_drag_forced` remain
+/// deliberately combined into the single `scrollbar_forced` count (both
+/// are "the scrollbar" from a diagnostic-reader's perspective), and
+/// `overlay_open` deliberately continues to include the animation-in-flight
+/// terms folded into it before this struct ever sees them.
 // struct_excessive_bools: each field is an independent yes/no observation
-// of one named condition in `pointer_motion_needs_repaint_decision`'s
-// disjunction (or one of `pane_hover_region_risk`'s three sub-terms) — not
-// a state machine. Combining them would not express any real combined
-// state and would only obscure the one-flag-per-condition mapping this
-// diagnostic exists to preserve.
+// of one named forcing condition in `pointer_motion_needs_repaint_decision`'s
+// disjunction — not a state machine. Combining them would not express any
+// real combined state and would only obscure the one-flag-per-condition
+// mapping this diagnostic exists to preserve.
 #[cfg(feature = "frame-profiling")]
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct PointerMotionConditionFlags {
+    pub(super) first_motion: bool,
+    pub(super) focus_change_pending: bool,
     pub(super) chrome_interactive: bool,
-    pub(super) any_pane_selecting: bool,
     pub(super) overlay_open: bool,
     pub(super) pointer_pane_unresolved: bool,
-    pub(super) mouse_tracking_active: bool,
-    pub(super) has_urls: bool,
-    pub(super) scroll_offset_nonzero: bool,
-    pub(super) gutter_active: bool,
+    pub(super) unknown_geometry: bool,
+    pub(super) url_forced: bool,
+    pub(super) gutter_forced: bool,
+    pub(super) scrollbar_forced: bool,
+    pub(super) selection_forced: bool,
 }
 
 impl FrameStats {
@@ -873,29 +891,25 @@ impl FrameStats {
     pub(super) fn record_pointer_motion_check(&self, flags: PointerMotionConditionFlags) {
         self.pointer_repaint_check_total
             .set(self.pointer_repaint_check_total.get().saturating_add(1));
+        Self::bump_if(&self.pointer_cond_first_motion, flags.first_motion);
+        Self::bump_if(
+            &self.pointer_cond_focus_change_pending,
+            flags.focus_change_pending,
+        );
         Self::bump_if(
             &self.pointer_cond_chrome_interactive,
             flags.chrome_interactive,
-        );
-        Self::bump_if(
-            &self.pointer_cond_any_pane_selecting,
-            flags.any_pane_selecting,
         );
         Self::bump_if(&self.pointer_cond_overlay_open, flags.overlay_open);
         Self::bump_if(
             &self.pointer_cond_pointer_pane_unresolved,
             flags.pointer_pane_unresolved,
         );
-        Self::bump_if(
-            &self.pointer_cond_mouse_tracking_active,
-            flags.mouse_tracking_active,
-        );
-        Self::bump_if(&self.pointer_cond_has_urls, flags.has_urls);
-        Self::bump_if(
-            &self.pointer_cond_scroll_offset_nonzero,
-            flags.scroll_offset_nonzero,
-        );
-        Self::bump_if(&self.pointer_cond_gutter_active, flags.gutter_active);
+        Self::bump_if(&self.pointer_cond_unknown_geometry, flags.unknown_geometry);
+        Self::bump_if(&self.pointer_cond_url_forced, flags.url_forced);
+        Self::bump_if(&self.pointer_cond_gutter_forced, flags.gutter_forced);
+        Self::bump_if(&self.pointer_cond_scrollbar_forced, flags.scrollbar_forced);
+        Self::bump_if(&self.pointer_cond_selection_forced, flags.selection_forced);
     }
 
     /// `counter.set(counter.get().saturating_add(1))` iff `condition` —
@@ -907,10 +921,10 @@ impl FrameStats {
         }
     }
 
-    /// Format eight named pointer-motion condition counts the same way
+    /// Format ten named pointer-motion condition counts the same way
     /// `format_nonzero_signal_counts` formats `chrome_signal_fired_counts`
     /// (see that method's doc for the full rationale) — `name=count`
-    /// comma-joined, non-zero entries only, `"none"` when all eight are
+    /// comma-joined, non-zero entries only, `"none"` when all ten are
     /// zero. A free-standing pure function over parallel `names`/`counts`
     /// arrays (not `&self`), so it is directly unit-testable without
     /// constructing a `Cell`-bearing `FrameStats`.
@@ -918,7 +932,7 @@ impl FrameStats {
     /// counter (see `record_pointer_motion_check`) back to zero at the end
     /// of a flush window — see `pointer_repaint_check_total`'s field doc
     /// for why these are windowed rather than cumulative-since-creation.
-    /// The eight pointer-motion condition counters paired with their names, in
+    /// The ten pointer-motion condition counters paired with their names, in
     /// declaration order.
     ///
     /// Exists so the names and the counter reads cannot drift apart: keeping
@@ -927,44 +941,42 @@ impl FrameStats {
     /// type system to catch it. Mirrors
     /// `chrome_damage::ChromeSignals::named_fields()`, which solves the same
     /// problem for the chrome signals.
-    pub(super) const fn pointer_condition_counts(&self) -> [(&'static str, u64); 8] {
+    pub(super) const fn pointer_condition_counts(&self) -> [(&'static str, u64); 10] {
         [
+            ("first_motion", self.pointer_cond_first_motion.get()),
+            (
+                "focus_change_pending",
+                self.pointer_cond_focus_change_pending.get(),
+            ),
             (
                 "chrome_interactive",
                 self.pointer_cond_chrome_interactive.get(),
-            ),
-            (
-                "any_pane_selecting",
-                self.pointer_cond_any_pane_selecting.get(),
             ),
             ("overlay_open", self.pointer_cond_overlay_open.get()),
             (
                 "pointer_pane_unresolved",
                 self.pointer_cond_pointer_pane_unresolved.get(),
             ),
-            (
-                "mouse_tracking_active",
-                self.pointer_cond_mouse_tracking_active.get(),
-            ),
-            ("has_urls", self.pointer_cond_has_urls.get()),
-            (
-                "scroll_offset_nonzero",
-                self.pointer_cond_scroll_offset_nonzero.get(),
-            ),
-            ("gutter_active", self.pointer_cond_gutter_active.get()),
+            ("unknown_geometry", self.pointer_cond_unknown_geometry.get()),
+            ("url_forced", self.pointer_cond_url_forced.get()),
+            ("gutter_forced", self.pointer_cond_gutter_forced.get()),
+            ("scrollbar_forced", self.pointer_cond_scrollbar_forced.get()),
+            ("selection_forced", self.pointer_cond_selection_forced.get()),
         ]
     }
 
     pub(super) fn reset_pointer_condition_window(&self) {
         self.pointer_repaint_check_total.set(0);
+        self.pointer_cond_first_motion.set(0);
+        self.pointer_cond_focus_change_pending.set(0);
         self.pointer_cond_chrome_interactive.set(0);
-        self.pointer_cond_any_pane_selecting.set(0);
         self.pointer_cond_overlay_open.set(0);
         self.pointer_cond_pointer_pane_unresolved.set(0);
-        self.pointer_cond_mouse_tracking_active.set(0);
-        self.pointer_cond_has_urls.set(0);
-        self.pointer_cond_scroll_offset_nonzero.set(0);
-        self.pointer_cond_gutter_active.set(0);
+        self.pointer_cond_unknown_geometry.set(0);
+        self.pointer_cond_url_forced.set(0);
+        self.pointer_cond_gutter_forced.set(0);
+        self.pointer_cond_scrollbar_forced.set(0);
+        self.pointer_cond_selection_forced.set(0);
     }
 }
 
@@ -1055,25 +1067,35 @@ mod frame_profiling_tests {
         );
     }
 
-    // ── Task 121 pointer-motion repaint-gate condition counters ──────────
+    // ── Task 121 pointer-motion repaint-gate condition counters, rewritten
+    // by Task 124.3b (and its review pass) to count FORCING conditions,
+    // exhaustively over every top-level `PointerMotionInputs` term ────────
 
-    /// The eight Task 121 pointer-motion condition names, in the same
-    /// order `record_pointer_motion_check`/the app-side flush build their
+    /// The ten pointer-motion condition names, in the same order
+    /// `record_pointer_motion_check`/the app-side flush build their
     /// parallel `counts` array.
-    const POINTER_CONDITION_NAMES: [&str; 8] = [
+    const POINTER_CONDITION_NAMES: [&str; 10] = [
+        "first_motion",
+        "focus_change_pending",
         "chrome_interactive",
-        "any_pane_selecting",
         "overlay_open",
         "pointer_pane_unresolved",
-        "mouse_tracking_active",
-        "has_urls",
-        "scroll_offset_nonzero",
-        "gutter_active",
+        "unknown_geometry",
+        "url_forced",
+        "gutter_forced",
+        "scrollbar_forced",
+        "selection_forced",
     ];
+
+    /// The all-clear `PointerMotionConditionFlags` (every field `false`),
+    /// so each test's struct literal names only the field(s) it is about.
+    fn no_conditions() -> super::PointerMotionConditionFlags {
+        super::PointerMotionConditionFlags::default()
+    }
 
     #[test]
     fn format_nonzero_pointer_condition_counts_all_zero_is_none() {
-        let counts = [0u64; 8];
+        let counts = [0u64; 10];
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
             "none"
@@ -1082,111 +1104,110 @@ mod frame_profiling_tests {
 
     #[test]
     fn format_nonzero_pointer_condition_counts_shows_only_the_nonzero_entries() {
-        let mut counts = [0u64; 8];
-        counts[4] = 12; // mouse_tracking_active
-        counts[5] = 3; // has_urls
+        let mut counts = [0u64; 10];
+        counts[6] = 12; // url_forced
+        counts[7] = 3; // gutter_forced
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
-            "mouse_tracking_active=12,has_urls=3"
+            "url_forced=12,gutter_forced=3"
         );
     }
 
     #[test]
     fn format_nonzero_pointer_condition_counts_preserves_declaration_order() {
-        let mut counts = [0u64; 8];
-        counts[7] = 1; // gutter_active
-        counts[0] = 1; // chrome_interactive
+        let mut counts = [0u64; 10];
+        counts[9] = 1; // selection_forced
+        counts[0] = 1; // first_motion
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
-            "chrome_interactive=1,gutter_active=1",
+            "first_motion=1,selection_forced=1",
             "order must follow the array's index order, not insertion order"
         );
     }
 
     #[test]
     fn record_pointer_motion_check_increments_total_and_only_true_conditions() {
-        use super::PointerMotionConditionFlags;
-
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
             chrome_interactive: true,
-            any_pane_selecting: false,
-            overlay_open: false,
-            pointer_pane_unresolved: false,
-            mouse_tracking_active: false,
-            has_urls: true,
-            scroll_offset_nonzero: false,
-            gutter_active: false,
+            url_forced: true,
+            ..no_conditions()
         });
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 0);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 0);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 0);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 0);
     }
 
     #[test]
     fn record_pointer_motion_check_counts_each_condition_independently() {
-        use super::PointerMotionConditionFlags;
-
-        // All eight conditions true at once must all be counted -- the
-        // task's explicit requirement ("several can be true at once --
-        // count each independently, do not stop at the first").
+        // All ten conditions true at once must all be counted -- several
+        // can be true simultaneously, count each independently, do not
+        // stop at the first.
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
+            first_motion: true,
+            focus_change_pending: true,
             chrome_interactive: true,
-            any_pane_selecting: true,
             overlay_open: true,
             pointer_pane_unresolved: true,
-            mouse_tracking_active: true,
-            has_urls: true,
-            scroll_offset_nonzero: true,
-            gutter_active: true,
+            unknown_geometry: true,
+            url_forced: true,
+            gutter_forced: true,
+            scrollbar_forced: true,
+            selection_forced: true,
         });
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 1);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 1);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 1);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 1);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 1);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 1);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 1);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 1);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 1);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 1);
     }
 
     #[test]
     fn reset_pointer_condition_window_clears_every_counter() {
-        use super::PointerMotionConditionFlags;
-
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
+            first_motion: true,
+            focus_change_pending: true,
             chrome_interactive: true,
-            any_pane_selecting: true,
             overlay_open: true,
             pointer_pane_unresolved: true,
-            mouse_tracking_active: true,
-            has_urls: true,
-            scroll_offset_nonzero: true,
-            gutter_active: true,
+            unknown_geometry: true,
+            url_forced: true,
+            gutter_forced: true,
+            scrollbar_forced: true,
+            selection_forced: true,
         });
 
         stats.reset_pointer_condition_window();
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 0);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 0);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 0);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 0);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 0);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 0);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 0);
     }
 }
 
