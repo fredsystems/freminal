@@ -149,6 +149,47 @@ fn patch_cursor_only_deco_verts(deco_verts: &mut Vec<f32>, cfo: usize, cursor_ve
     }
 }
 
+/// Scissor a GPU draw to the windowing-published present region, run
+/// `draw`, then restore GL scissor state to what egui expects (disabled)
+/// before returning (124.23).
+///
+/// Both of the paint callback's arms — cursor-only and full-draw — call
+/// this with the *same* `region` read, rather than each reading (or
+/// ignoring) `PresentRegion` independently. See the call sites in `show`'s
+/// paint callback for why the region scissored to is the windowing-published
+/// one, not either arm's own damage rect: on a stale back buffer the
+/// published region can be a union covering more than either arm's own
+/// declared damage, and scissoring to a narrower rect would silently skip
+/// repainting pixels the union says still need it.
+///
+/// [`freminal_windowing::PresentRegion::Full`] means the windowing layer
+/// could not prove a smaller region was safe (or the surface doesn't
+/// support partial present at all) — the whole grid must be redrawn, so
+/// `draw` runs with no scissor applied.
+fn draw_scissored_to_present_region<R>(
+    gl: &Gl<'_>,
+    region: freminal_windowing::PresentRegion,
+    draw: impl FnOnce() -> R,
+) -> R {
+    let applied_scissor = match region {
+        freminal_windowing::PresentRegion::Region(d) => {
+            unsafe {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(d.x, d.y, d.width, d.height);
+            }
+            true
+        }
+        freminal_windowing::PresentRegion::Full => false,
+    };
+    let result = draw();
+    if applied_scissor {
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+        }
+    }
+    result
+}
+
 /// Format the fold-placeholder text for a collapsed command block.
 ///
 /// See the render path (`show`) for how this is used.
@@ -3024,6 +3065,42 @@ impl FreminalTerminalWidget {
                 // of which FBO we rendered into.
                 let restore_fbo = painter.intermediate_fbo();
 
+                // Scissor the GPU redraw to what the windowing layer
+                // published as this frame's present region (124.18), NOT to
+                // this pane's own damage rect (the earlier `#435` design for
+                // the cursor-only arm). The rest of the framebuffer already
+                // holds the previous frame's contents, but on a stale
+                // (`buffer_age() > 1`) back buffer the windowing layer's
+                // region can be a union covering MORE than just this arm's
+                // own declared damage (e.g. a previous frame's cursor
+                // position this buffer never received) — scissoring to a
+                // narrower rect would silently skip repainting pixels the
+                // union says still need it. `PresentRegion::Region` is
+                // physical framebuffer pixels, bottom-left origin — the same
+                // convention as `glScissor`.
+                //
+                // Both the cursor-only and full-draw arms below read this
+                // *same* value (124.23): a full draw that scissored nothing
+                // could redraw pixels the clear deliberately skipped over,
+                // which then blend against stale (rather than cleared)
+                // content when `background_opacity < 1.0`. One region now
+                // governs the clip, the clear, and the present for either
+                // arm — see `draw_scissored_to_present_region`.
+                //
+                // egui disables `SCISSOR_TEST` after painting all
+                // primitives, and this callback is self-contained, so
+                // `draw_scissored_to_present_region` enables it before the
+                // draw and disables it again afterwards, leaving GL scissor
+                // state as egui expects.
+                //
+                // `PresentRegion::Full` means the windowing layer could not
+                // prove a smaller region was safe (or the surface doesn't
+                // support partial present at all) — the whole grid must be
+                // redrawn, so neither arm scissors in that case.
+                let region = *present_region_cb
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+
                 if is_cursor_only {
                     // Cursor-only fast path: bg/fg/image are unchanged and
                     // simply redrawn from the last full rebuild's slot.
@@ -3055,65 +3132,25 @@ impl FreminalTerminalWidget {
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
 
-                    // Scissor the GPU redraw to what the windowing layer
-                    // published as this frame's present region (124.18),
-                    // NOT to this pane's own cursor-damage rect (the earlier
-                    // `#435` design). The rest of the framebuffer already
-                    // holds the previous frame's contents, but on a stale
-                    // (`buffer_age() > 1`) back buffer the windowing layer's
-                    // region can be a union covering MORE than just this
-                    // frame's own cursor damage (e.g. a previous frame's
-                    // cursor position this buffer never received) —
-                    // scissoring to this pane's own narrower rect would
-                    // silently skip repainting pixels the union says still
-                    // need it. `PresentRegion::Region` is physical
-                    // framebuffer pixels, bottom-left origin — the same
-                    // convention as `glScissor`.
-                    //
-                    // egui disables `SCISSOR_TEST` after painting all
-                    // primitives, and this callback is self-contained, so we
-                    // enable it here and disable it again afterwards, leaving
-                    // GL scissor state as egui expects.
-                    //
-                    // `PresentRegion::Full` means the windowing layer could
-                    // not prove a smaller region was safe (or the surface
-                    // doesn't support partial present at all) — the whole
-                    // grid must be redrawn, so we must NOT scissor.
-                    let region = *present_region_cb
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let applied_scissor = match region {
-                        freminal_windowing::PresentRegion::Region(d) => {
-                            unsafe {
-                                gl.enable(glow::SCISSOR_TEST);
-                                gl.scissor(d.x, d.y, d.width, d.height);
-                            }
-                            Some(())
-                        }
-                        freminal_windowing::PresentRegion::Full => None,
-                    };
-                    renderer.draw_with_cursor_only_update(
-                        gl,
-                        atlas,
-                        deco_verts,
-                        bg_len,
-                        fg_len,
-                        img_len,
-                        draw_order,
-                        vp.width_px,
-                        vp.height_px,
-                        cw,
-                        ch,
-                        opacity,
-                        bg_image_opacity,
-                        bg_image_mode,
-                        restore_fbo,
-                    );
-                    if applied_scissor.is_some() {
-                        unsafe {
-                            gl.disable(glow::SCISSOR_TEST);
-                        }
-                    }
+                    draw_scissored_to_present_region(gl, region, || {
+                        renderer.draw_with_cursor_only_update(
+                            gl,
+                            atlas,
+                            deco_verts,
+                            bg_len,
+                            fg_len,
+                            img_len,
+                            draw_order,
+                            vp.width_px,
+                            vp.height_px,
+                            cw,
+                            ch,
+                            opacity,
+                            bg_image_opacity,
+                            bg_image_mode,
+                            restore_fbo,
+                        );
+                    });
                 } else {
                     // Full draw path: split-borrow RenderState to pass
                     // vertex slices by reference (no cloning) alongside
@@ -3126,24 +3163,26 @@ impl FreminalTerminalWidget {
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
-                    renderer.draw_with_verts(
-                        gl,
-                        atlas,
-                        &rs_ref.bg_instances,
-                        &rs_ref.deco_verts,
-                        &rs_ref.fg_instances,
-                        &rs_ref.image_verts,
-                        &rs_ref.image_draw_order,
-                        &rs_ref.snap_images,
-                        vp.width_px,
-                        vp.height_px,
-                        cw,
-                        ch,
-                        opacity,
-                        bg_image_opacity,
-                        bg_image_mode,
-                        restore_fbo,
-                    );
+                    draw_scissored_to_present_region(gl, region, || {
+                        renderer.draw_with_verts(
+                            gl,
+                            atlas,
+                            &rs_ref.bg_instances,
+                            &rs_ref.deco_verts,
+                            &rs_ref.fg_instances,
+                            &rs_ref.image_verts,
+                            &rs_ref.image_draw_order,
+                            &rs_ref.snap_images,
+                            vp.width_px,
+                            vp.height_px,
+                            cw,
+                            ch,
+                            opacity,
+                            bg_image_opacity,
+                            bg_image_mode,
+                            restore_fbo,
+                        );
+                    });
                 }
             })),
         });
