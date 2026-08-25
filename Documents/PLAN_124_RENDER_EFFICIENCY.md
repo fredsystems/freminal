@@ -146,9 +146,9 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Complete** — `03b8082a` |
-| 124.3 | Cell-granular pointer suppression, and correct `?1016` delivery | In progress — expanded after mouse-report delivery recon |
-| 124.3a | Immediate-report foundation + correct `?1016` encoding | Planned — see recon below |
-| 124.3b | Cell-boundary repaint decision (post-124.3a) | Planned — gated on 124.3a's tests |
+| 124.3 | Cell-granular pointer suppression, and correct `?1016` delivery | Measurement pending — implementation landed |
+| 124.3a | Immediate-report foundation + correct `?1016` encoding | Complete — `4644a8f9` |
+| 124.3b | Cell-boundary repaint decision (post-124.3a) | Complete — `8f518987`, `e9b33ec0`; live measurement pending |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
@@ -653,6 +653,105 @@ event rate (as 124.13 established the pairing requirement), plus frame
 rate and per-frame cost. A suppression-percentage change presented without
 the paired event rate is not an acceptable performance result, and 124.13's
 own findings block is not to be edited to produce one.
+
+#### Implementation notes (2026-08-25)
+
+**124.3 status: `Measurement pending — implementation landed`.** Both
+124.3a and 124.3b are implemented, reviewed and merged to the working
+branch; 124.3 itself is **not** marked Complete because the live-pointer
+measurement this section's own Performance Verification clause requires
+has not been captured. See the measurement blocker below.
+
+**124.3a — implementation complete, commit `4644a8f9`.**
+
+- Added synchronous PTY-agnostic pointer motion/button/presence hooks in
+  windowing; motion delivery runs independently of repaint scheduling.
+- Immediate PTY motion reports route only to the active pane, gated by the
+  terminal rect, GUI scrollback offset, the exact five input suppressors,
+  and published geometry.
+- Held-button state is window-owned; per-pane report-position history is
+  `ViewState`-owned; pointer/focus loss resets both relevant state halves.
+- Frame-time `PointerMoved` no longer sends PTY motion bytes, preventing
+  duplicates; terminal-owned selection/hover/recording processing remains
+  in the queued path.
+- `?1016` now emits one-based terminal-relative physical pixel coordinates
+  for motion/button/wheel; ordinary X11/`?1006` output is unchanged; `?1005`
+  behavior is intentionally unchanged.
+- The mandatory dual escape-sequence docs (`ESCAPE_SEQUENCE_COVERAGE.md`,
+  `SUPPORTED_CONTROL_CODES.md`) were updated for the `?1016` fix.
+
+**124.3b — implementation complete, commit `8f518987`; instrumentation
+wording fix `e9b33ec0`. Live measurement pending.**
+
+- Added previous/current pointer history at the `App` repaint-decision
+  boundary while preserving the unconditional report-hook ordering and the
+  existing scheduling edge latch.
+- Removed `mouse_tracking_active`, the pane-wide `has_urls` veto, and the
+  pane-wide `scroll_offset` veto as repaint-forcing terms.
+- Added exact per-pane classification of a pointer position: Content cell,
+  Gutter row, scrollbar pane/hit rect, Outside, Unknown. URL/selection/
+  gutter classification compares cells/rows; scrollbar classification
+  compares against the pane-aware hit boundary; a drag in progress remains
+  unconditionally repaint-forcing; unknown/layout/lookup failures force
+  conservatively rather than suppress.
+- A pointer crossing between two quiet panes — neither showing a
+  cell-granular visual effect — does not force a repaint on its own;
+  multiple simultaneously-selecting panes still force conservatively.
+- The scrollbar hit rect and the current drag state are published after
+  scrollbar processing runs; one shared helper owns the hit-rect geometry
+  so the published value and the input-handling value cannot drift apart.
+- Frame-profiling instrumentation now reports the ten actual
+  repaint-forcing conditions this design introduces, replacing stale
+  observations from before 124.3b.
+- Two motion events that both land within one cell but at different
+  `SgrPixels` sub-cell positions are pinned as two distinct PTY reports,
+  while the second of the two suppresses its repaint — the decoupling this
+  entry's design mandated.
+
+**Review corrections worth retaining because they protect correctness:**
+
+- Per-pane held-button state was rejected: a focus or tab change between
+  press and release could strand the press in a pane that never sees the
+  release.
+- A bare scrollbar-presence bool was rejected: a transition from
+  scrollbar-A to scrollbar-B is `true` to `true` under a bool but still
+  requires a repaint, so the classification must be positional, not
+  boolean.
+- Lookup or layout failure, and any case of missing published geometry,
+  resolves to `Unknown` and forces a repaint — never to a quiet `Outside`
+  classification, which would suppress silently on missing data.
+- The gutter's classification boundary is the exact half-open row range
+  production hover logic already uses, not a re-derived approximation.
+- The pane split layout is computed once per pointer event and shared by
+  both the previous-position and current-position classification, so the
+  two resolutions cannot see different geometry within the same event.
+
+**Verification independently run and green for both commits:**
+
+- `cargo fmt --all -- --check`
+- `cargo test --all`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo machete`
+- `cargo xtask check-windows`
+- pre-commit hooks passed for both implementation commits
+
+**Measurement blocker, dated 2026-08-25.** `LIBGL_ALWAYS_SOFTWARE` was
+unset; a release frame-profiling binary was built; the environment is an
+AMD GPU under Hyprland. The target window was successfully floated, moved
+and resized to 1264x681 at `(-2400,200)`, and the cursor was visibly moved
+to `(-1800,500)`. `hyprctl dispatch movecursor` (`hl.dsp.cursor.move`)
+changed the compositor's cursor position but produced zero application
+`CursorMoved` events — `pointer_repaint_checks_total` and the pointer
+scheduled/suppressed counters all stayed at zero. This reproduces the
+earlier finding that synthetic compositor-driven cursor motion cannot
+exercise this path. Therefore **no post-124.3 event rate, suppression
+percentage, or frame-rate/cost comparison is claimed here.** A physical
+pointer-device capture, paired per `PROFILING.md`, is still required before
+124.3 can be marked Complete. No visual corruption was observed during the
+output-only workload exercised in this attempt, but that is not a
+substitute for the missing pointer-path validation, and the unrelated
+output-only frame costs captured during this failed attempt are not
+recorded as a 124.3 measurement.
 
 ### 124.4 — Named-field struct for the pointer-motion predicate
 
