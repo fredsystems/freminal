@@ -157,7 +157,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Ready — and its prize is no longer zero, see 124.18** |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Ready — gate 124.C5 closed; recon done, see 124.14a recon block** |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
@@ -1246,11 +1246,20 @@ a full rebuild and `upload_verts` stays a whole-buffer write, because the
 instance buffers have no fixed per-row stride. Bounding the upload is
 Task 125 and requires a vertex format relayout. Do not start one here.
 
-That still wins, because the existing cursor-only path already proves the
-mechanism: `widget.rs:3038-3067` scissors the draw on the authoritative
-`present_is_partial` flag, and `egui_integration` restricts the EGL present.
-Extending that from one cursor rect to an arbitrary row-range rect set is the
-change.
+> **CORRECTION (124.14a recon, 2026-08-24).** This paragraph previously
+> read: *"That still wins, because the existing cursor-only path already
+> proves the mechanism: `widget.rs:3038-3067` scissors the draw on the
+> authoritative `present_is_partial` flag, and `egui_integration` restricts
+> the EGL present. Extending that from one cursor rect to an arbitrary
+> row-range rect set is the change."*
+>
+> Three things in that were wrong. `present_is_partial` no longer exists —
+> 124.18 replaced it with `freminal_windowing::PresentRegion`
+> (`freminal-windowing/src/lib.rs:99-111`). The line range is stale; the
+> scissor is now at `widget.rs:3082-3116`. And, most importantly, **the
+> mechanism is not already proven for the path a `Region` frame would
+> take** — see the recon block below. "Extending that ... is the change"
+> understates the work by the whole of the full-draw arm.
 
 The correctness argument that must be verified, not assumed: on a `Region`
 frame every pixel outside the rects must be byte-identical to the previous
@@ -1271,6 +1280,95 @@ both Task 123 harnesses; `cargo xtask check-windows` before the PR.
 Prohibitions: do NOT change `upload_verts` or the vertex emission format. Do
 NOT remove `CursorOnly` — it is a legitimate special case with a stable
 patch offset and deleting it is a separate decision.
+
+#### 124.14a activation recon (2026-08-24) — READ-ONLY, changed no code
+
+Commissioned because this entry has already been caught once citing a line
+range that was wrong when written, so its remaining citations were not
+trusted. Every claim below was re-derived from the source and then
+independently spot-checked against the file. **124.C5, the hard gate on this
+subtask, closed first** (commits `1339208c`, `74e94576`).
+
+**The blocking finding: the full-draw paint arm applies no scissor at all.**
+The paint callback splits on `is_cursor_only` (`widget.rs:3027`). The
+`CursorOnly` arm reads `PresentRegion` and scissors to it
+(`widget.rs:3082-3116`) — deliberately to the *windowing-published* region
+rather than to the pane's own cursor rect, because on a stale back buffer
+the published region is a union covering more than this frame's damage
+(comment at `widget.rs:3058-3071`). The `else` arm
+(`widget.rs:3117-3147`) calls `draw_with_verts` and **scissors nothing**.
+
+That matters because a `Region` frame takes the **full vertex rebuild**, by
+this entry's own scope boundary, and therefore lands in the unscissored arm.
+Combined with 124.20's now-scissored clear the result is a genuine
+silent-corruption hazard rather than merely wasted work: outside the region
+the clear does not run but the draw does, so semi-transparent content blends
+against whatever an unrelated earlier frame left in the back buffer
+(`a*fill + (1-a)*stale`). Those pixels are not presented this frame, but
+124.18's damage-history union means a later frame may treat that buffer as
+valid. This is the issue #432 class, and it is exactly what 124.20's
+**one-region-for-clip-clear-and-present** invariant exists to prevent.
+
+**So 124.14a's first obligation is to extend that invariant to the full-draw
+arm**, not to add enum variants. The enum work is the easy half.
+
+**What is already in place** (verified, with citations):
+
+| Fact | Where |
+| ---- | ----- |
+| `PaneFrameDamage` is `{Full, CursorOnly(Option<CursorDamage>), Unchanged}` | `renderer/mod.rs:107-116` |
+| `VertexRebuild` is `{CursorOnly, ReevaluateFullRebuild}`, one construction site | `frame_dirty.rs:87-95`, `:715-720` |
+| `ChangedRows` is `{None, Rows(Vec<usize>), All}`, already computed and tested | `frame_dirty.rs:118-133` |
+| `CursorDamage` and `DamageRect` are the same shape; conversion is a field copy | `renderer/mod.rs:129-139`, `windowing/lib.rs:73-82`, `frame_damage.rs:110-116` |
+| Both are **physical pixels, bottom-left origin** (the `glScissor` convention) | `renderer/mod.rs:118-122` |
+| `from_cursor_cells` consumes **top-left**-origin viewport-relative cells and does the Y-flip itself | `renderer/mod.rs:157-220`, flip at `:212` |
+| `decide_frame_damage` aggregates `CursorOnly(Some)` rects, and `bell` / `CursorOnly(None)` / `Full` each do `rects.clear(); break;` | `frame_damage.rs:90-130` |
+
+**Three coordinate spaces are in play and they are not the same.**
+`ChangedRows::Rows` holds **snapshot/flattened-window** row indices
+(`snapshot.rs:152-171`). `screen_selection` is also snapshot-row space
+(`frame_dirty.rs:552-585`). But `command_block_hover_rows_early` is
+**rendered-row** space, post-fold-collapse (`widget.rs:316`, `:328-337`), and
+`cache.previous_selection` is **buffer-absolute** (`widget.rs:1329`). Going
+from a snapshot row to pixels needs `row_map.snapshot_to_rendered` then
+`layout.rendered_to_screen`, which is the two-step the cursor path already
+does (`frame_dirty.rs:603-605`). **124.14b must not assume its two extents
+share a space with `changed_rows`;** that is a live bug waiting to be
+written, not a hypothetical.
+
+**`vp_left_px`, `vp_top_px` and `fb_height_px` are match-arm-local**
+(`widget.rs:2545-2553`) — computed inside the `CursorOnly` arm only, so they
+are **not** in scope in the `ReevaluateFullRebuild` arm and must be hoisted
+rather than assumed available. `cell_w_f` / `row_h_f` (`widget.rs:1928-1929`)
+and `terminal_rect` (`:2019`) are in scope for both.
+
+**The `#[expect(dead_code)]` removal is load-bearing, not cleanup.** The
+attribute (`frame_dirty.rs:211-217`) is `cfg_attr(not(test), expect(...))`.
+`expect` was chosen over `allow` precisely so that it fails the build the
+moment a real reader appears: once 124.14a adds a non-test reader,
+`dead_code` stops firing, the expectation becomes unfulfilled, and
+`unfulfilled_lint_expectations` errors under `-D warnings`. Leaving it in
+place is a build failure, not a warning.
+
+**No test asserts "a row change forces `Full`", so nothing needs inverting
+here.** Every test in both files was read.
+`a_changed_row_epoch_is_reported_as_exactly_that_row`
+(`frame_dirty.rs:999-1018`) asserts `changed_rows` but deliberately does not
+assert `outcome.rebuild`. The seven `*_beats_cursor_change` tests pin that a
+trigger *vetoes* the cursor-only fast path, which stays true. This is
+recorded because the absence is a finding: a subtask that expects to invert a
+pin and cannot find one usually has the wrong model, and here it does not.
+
+**Image damage is untouched by all of this, as 124.C5 requires.**
+`image_frame_changed` and `image_pixels_changed` remain whole-pane booleans
+with no per-row extent, gating only the full-rebuild-vs-reuse `if` at
+`widget.rs:2601-2612`. Nothing in the current code folds them into
+`changed_rows`, and 124.14a must not start.
+
+**One stale citation left uncorrected, deliberately.** 124.17's evidence
+table cites `widget.rs:3092-3100` and the retired `present_is_partial` name.
+That block is a historical findings record of what was believed at the time;
+rewriting its citations would falsify the record. Noted here instead.
 
 ### 124.15 — Measure chrome's per-frame cost
 
