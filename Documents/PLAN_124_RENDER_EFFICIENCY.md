@@ -151,7 +151,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.3b | Cell-boundary repaint decision (post-124.3a) | Complete — `8f518987`, `e9b33ec0`; live measurement complete |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
-| 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
+| 124.6 | Shaping-path levers | **Complete** — `9dbaaf47`; lever 1 only, lever 2 unsized |
 | 124.7 | GPU buffer-orphaning for small payloads | Complete |
 | 124.8 | `DESIGN_DECISIONS.md` entry for the Phase 0 / Task 121 outcome | Complete |
 | 124.9 | `sync_atlas` re-uploads glyphs a full upload already covered | Complete |
@@ -916,6 +916,105 @@ per-line content hash and reuses `Arc<ShapedLine>` on a hit
 (`shaping.rs:204-211`), but returns only `Vec<Arc<ShapedLine>>` — the
 hit/miss outcome is a fifth collapse point, discarded at the vertex-prep
 boundary. Surfacing it is most of 124.16.
+
+#### 124.6 findings (2026-08-25)
+
+**Lever 1 landed on commit `9dbaaf47`. Lever 2 was not attempted and stays
+unsized — do not read its absence as an oversight.**
+
+124.16 measured and justified exactly one thing: scrolling defeats the
+line-indexed cache because the index, not the content, is the key. That is
+the case 124.6 fixes. Full-screen TUI redraw was already at 100% line-cache
+hits before this subtask and gains nothing from it; any apparent
+improvement to that workload below is reported because it was measured, not
+because lever 1 caused it.
+
+**What landed.** A content-addressed run-level cache, keyed by exact
+`(FaceId, named ligature mode, run text)` equality — not a hash used as a
+proxy for equality, so there is no collision risk from truncating that key
+to a digest. The cache holds two generations: the current
+`shape_visible` call's miss-bearing runs, and the immediately previous
+miss-bearing call's runs. Rotation is driven by content, not frame count —
+a call that hits on every line (the identical-redraw case) does not bear a
+miss and does not rotate the generations, so the previous generation
+survives quiet frames rather than being evicted by them. There is no
+arbitrary capacity bound; the cache is bounded by the visible run content
+of at most two miss-bearing calls.
+
+Each entry stores an `Arc<[ShapedGlyph]>` canonical template shaped at
+`col_start == 0` and unit cell width. On a hit, the current call allocates
+its own output buffer, rebases the template's glyph positions to the
+run's actual `col_start`. Glyph cell and cluster widths are text-derived
+and already live in the canonical template; the metadata attached fresh on
+every hit is `ShapedRun`-level and comes from the current run, not the
+template: style, font weight, font decorations, colors, URL, blink, and
+`col_start`/position. This reuses the *shaping* result, not the
+*positioned* result — it intentionally does not implement lever 2's
+allocation reduction in `build_shaped_glyphs`; the per-run `Vec`
+allocations there are unchanged.
+
+`ShapingCache::clear()` clears both the line-index cache and both
+run-cache generations in one call, because a font rebuild can reuse a
+`FaceId` for entirely different font data and stale run-cache entries keyed
+on that `FaceId` would serve templates shaped against the old font. There
+is no separate ligature-mode cache to clear: the ligature mode is part of
+each `RunCacheKey`'s exact-equality key (`LigatureShaping`, alongside
+`face_id` and run text), not a distinct cache or a distinct invalidation
+event. Resetting `ShapingCacheStats` preserves the entries themselves — a
+stats reset is an observability action, not a cache invalidation.
+
+**Test treatment.** 124.16's `a_scroll_by_one_line_hits_nothing` asserted a
+defect deliberately and said explicitly that 124.6 must invert it, not
+delete it. It is now renamed and inverted: the same one-line scroll still
+misses all 24 line-index slots (that part of the defect is real and
+lever 1 does not touch the line cache), but now resolves to exactly 23 run
+cache hits and 1 run cache miss, matching the 23 byte-identical rows the
+scroll shifted into new slots. New differential exact-equality tests cover
+plain ASCII, a nonzero `col_start`, nonunit cell width, ligature
+substitution, wide (double-width) Unicode glyphs, and that per-run metadata
+does not leak between two calls sharing a template — each asserts the
+rebased output is bit-for-bit what a fresh shape of the same run would
+produce, not merely "close enough".
+
+**Benchmark methodology.** `cargo bench -p freminal --bench
+render_loop_bench -- shaping_crossframe --save-baseline before-124-6`
+before the change; `--baseline before-124-6` (same filter) after.
+
+| Workload | Before (midpoint) | After (midpoint) | Criterion change (midpoint, CI) |
+| -------- | ------------------ | ----------------- | -------------------------------- |
+| Persistent half-screen change | 953.56 us | 673.56 us | -29.502% (-30.362% to -28.614%) |
+| Identical full-screen redraw | 17.013 us | 15.176 us | -10.651% (-12.110% to -9.0677%) |
+| Scroll by one line | 975.74 us | 198.44 us | -79.637% (-79.938% to -79.366%) |
+
+The scroll/identical-redraw midpoint ratio — 124.16's 59x proxy for "how
+much worse is the defect than the workload that already hits" — falls from
+roughly 57.35x before this change to roughly 13.08x after. A substantial
+residual gap is expected, not a sign the fix is incomplete: lever 1 adds a
+content-addressed lookup and avoids rustybuzz shaping on run-cache hits, but
+per-line segmentation into runs, the per-hit template-rebase allocation, and
+the per-run output allocation in `build_shaped_glyphs` are all still paid on
+every call, hit or miss. That residual is lever 2's territory, and this
+subtask produced no measurement that sizes lever 2 — none should be inferred
+from it.
+
+The identical-redraw benchmark does not exercise the run cache at all (it
+was and remains 100% line-cache hits, 0 run-cache hits and 0 run-cache
+misses); its measured -10.651% is reported for completeness because it was
+captured in the same run, not attributed to lever 1 causally.
+
+**Why lever 2 is out of scope here, stated plainly.** 124.6 exists because
+124.16 measured and justified the scrolling cross-line-index miss; that is
+the evidence base this subtask acted on. 124.16 separately recorded that
+the per-run allocation reduction in `build_shaped_glyphs` "has no
+measurement here and should not be assumed to matter" — nothing in this
+subtask's work changed that. Lever 2 remains unsized and is a separate
+maintainer decision, not something to fold in silently because lever 1
+landed cleanly.
+
+**Verification.** `cargo fmt --all -- --check`, `cargo test --all`,
+`cargo clippy --all-targets --all-features -- -D warnings`,
+`cargo machete`, and `cargo xtask check-windows` all passed; pre-commit
+hooks passed on the commit above.
 
 ### 124.7 — GPU buffer-orphaning for small payloads
 
