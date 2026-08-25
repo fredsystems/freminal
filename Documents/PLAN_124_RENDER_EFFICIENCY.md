@@ -146,9 +146,9 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | ------- | ----- | ------ |
 | 124.1 | Dirty-row `Arc` churn (umbrella) | Resolved by 124.10–124.12 |
 | 124.2 | `FrameDamage::None` — a frame that changed nothing presents nothing | **Complete** — `03b8082a` |
-| 124.3 | Cell-granular pointer suppression, and correct `?1016` delivery | Measurement pending — implementation landed |
+| 124.3 | Cell-granular pointer suppression, and correct `?1016` delivery | **Complete** — `4644a8f9`, `8f518987`, `e9b33ec0`; physical capture complete |
 | 124.3a | Immediate-report foundation + correct `?1016` encoding | Complete — `4644a8f9` |
-| 124.3b | Cell-boundary repaint decision (post-124.3a) | Complete — `8f518987`, `e9b33ec0`; live measurement pending |
+| 124.3b | Cell-boundary repaint decision (post-124.3a) | Complete — `8f518987`, `e9b33ec0`; live measurement complete |
 | 124.4 | Named-field struct for the pointer-motion predicate | Complete |
 | 124.5 | Decide and execute the chrome cache's fate | Complete — deleted |
 | 124.6 | Shaping-path levers | Ready — 124.16 supports lever 1 |
@@ -656,11 +656,14 @@ own findings block is not to be edited to produce one.
 
 #### Implementation notes (2026-08-25)
 
-**124.3 status: `Measurement pending — implementation landed`.** Both
-124.3a and 124.3b are implemented, reviewed and merged to the working
-branch; 124.3 itself is **not** marked Complete because the live-pointer
-measurement this section's own Performance Verification clause requires
-has not been captured. See the measurement blocker below.
+**124.3 status: `Complete`.** Both 124.3a and 124.3b are implemented,
+reviewed and merged to the working branch; the live-pointer measurement
+this section's own Performance Verification clause requires was
+subsequently captured with a physical pointer device — see
+"Post-124.3 physical-pointer measurement (2026-08-25), AUTHORITATIVE"
+below. The synthetic-capture attempt that follows immediately is kept
+verbatim as the historical record of why a compositor-driven cursor could
+not exercise this path; it is superseded, not deleted.
 
 **124.3a — implementation complete, commit `4644a8f9`.**
 
@@ -751,7 +754,84 @@ pointer-device capture, paired per `PROFILING.md`, is still required before
 output-only workload exercised in this attempt, but that is not a
 substitute for the missing pointer-path validation, and the unrelated
 output-only frame costs captured during this failed attempt are not
-recorded as a 124.3 measurement.
+recorded as a 124.3 measurement. This blocker is retained verbatim as the
+historical record of the failed synthetic attempt; it was superseded by a
+physical pointer-device capture — see "Post-124.3 physical-pointer
+measurement (2026-08-25), AUTHORITATIVE" immediately below.
+
+#### Post-124.3 physical-pointer measurement (2026-08-25), AUTHORITATIVE
+
+Captured with a **physical** pointer device, discharging the blocker
+above. Release build with `--features frame-profiling`;
+`LIBGL_ALWAYS_SOFTWARE` unset; the live process's llvmpipe thread count
+was 0 — Hyprland/Wayland, AMD GPU, matching the environment used for the
+post-124.2 GPU measurement. The floating focused window was 1264x681 at
+`(-2400, 200)`. The PTY workload was `btop` launched directly — a
+mouse-reporting, full-screen TUI — and the maintainer moved the physical
+mouse continuously over the terminal grid for the duration of the
+capture.
+
+The steady interval is differenced from the 120-frame profiling flush at
+`23:03:56.051360Z` to the 360-frame flush at `23:04:44.982403Z` — 240
+frames over 48.931043s.
+
+| Metric | Value |
+| ---------------------------------------- | ------------------- |
+| fps | 4.90486 (240 frames / 48.931043s) |
+| real `CursorMoved` checks | 45,027 (920.213 events/s) |
+| pointer scheduled (delta) | 51 |
+| pointer suppressed (delta) | 44,976 |
+| suppression | 99.8867% |
+| total us/frame | 491.4125 |
+| run_ui us/frame | 322.5542 |
+| tessellate us/frame | 8.1167 |
+| paint us/frame | 43.2875 |
+| swap us/frame | 97.8292 |
+| app_update us/frame | 271.55 |
+| panes us/frame | 190.9583 |
+| orchestration us/frame | 11.775 |
+| final presentation: `None` (delta) | 110 |
+| final presentation: `Full` (delta) | 6 |
+| final presentation: `Partial` (delta) | 124 |
+| `Partial` taken (delta) | 124 |
+| buffer-age-blocked (delta) | 0 |
+| `buffer_age_histogram` delta `[0,1,2,3+]` | `[0,0,124,0]` |
+
+The three presentation-outcome deltas (110 + 6 + 124) sum to the full 240
+frames, as expected.
+
+Forcing-condition windows over this interval: `overlay_open` 16,
+`first_motion` 2, `chrome_interactive` 29. These sum to 47; the remaining
+four of the 51 scheduled events are consistent with the pre-existing
+previous-needed/current-needed transition latch. This is recorded as
+attribution of the already-existing scheduled events, not as a new
+forcing behavior introduced by this capture.
+
+**Interpretation, not overstated:**
+
+- This directly validates the maintainer's qualitative result: `btop` no
+  longer sustains a frame per mouse report. At roughly 920 physical
+  pointer events per second, 99.8867% are suppressed and the UI draws at
+  roughly 4.90 fps — a rate driven mostly by `btop`'s own TUI/normal
+  repaint cadence, not by every pointer event forcing a frame.
+- Compare carefully to pre-work symptoms: earlier mouse-reporting
+  captures had `mouse_tracking_active` defeat suppression entirely, with
+  mouse movement associated with roughly 60 fps.
+- Do **not** compare the 491.4125 us/frame figure here directly against
+  the post-124.2 `seq`-output measurement's 301.38 us/frame as equivalent
+  workloads — `btop` is a different, and heavier, TUI than the `seq`
+  synthetic workload, so the two totals are not a like-for-like
+  before/after pair.
+- This completes 124.3's own target as scoped above. It does **not**
+  claim parity with WezTerm. The maintainer still observes roughly 0.1%,
+  occasionally 0.2% on a slower laptop, of continued cost against this
+  workload, where WezTerm and other emulators show no comparable load.
+  That residual is recorded here as outstanding performance evidence, not
+  as an in-scope fix or a cleanup task for this subtask — any further
+  attribution of that residual must be separately scoped after Task 124
+  rather than silently expanding 124.3.
+- No visual corruption was explicitly recorded for this capture; absence
+  of a report is not itself a claim of a checked, corruption-free status.
 
 ### 124.4 — Named-field struct for the pointer-motion predicate
 
