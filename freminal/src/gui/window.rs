@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use egui;
-use freminal_windowing::{RepaintProxy, WindowId};
+use freminal_windowing::{PointerButtonAction, RepaintProxy, WindowId};
 
 use super::{
     PaneBorderDrag,
@@ -151,6 +151,90 @@ pub(super) const fn resize_is_genuine(size_changed: bool, window_resized: bool) 
     size_changed && window_resized
 }
 
+/// Convert a `freminal_windowing::PointerButton` (all five standard
+/// pointer buttons) to the `egui::PointerButton` the mouse encoders in
+/// `gui::mouse` — and [`PerWindowState::held_pointer_button`] — use.
+///
+/// Total (not `Option`-returning): every `freminal_windowing::PointerButton`
+/// variant has a mapping here, unlike the winit-to-windowing conversion
+/// (`freminal_windowing::PointerButton::from_winit`), which is the one that
+/// ignores `Other(_)`. `Back`/`Forward` map to `Extra1`/`Extra2` — this is
+/// NOT a claim that either has a native/established PTY mouse-report code;
+/// `gui::mouse`'s encoders treat any `egui::PointerButton` other than
+/// `Primary`/`Secondary`/`Middle` as an unsupported-button fallback
+/// (currently: encode as if `Primary`, with a logged error). Mapping them
+/// here — rather than dropping them at this boundary — only PRESERVES that
+/// existing fallback behavior for a physically-held Back/Forward button
+/// under `?1002`, matching what the pre-124.3a frame-time path already did
+/// with winit's `Back`/`Forward` (via egui's own identical `Extra1`/`Extra2`
+/// mapping).
+pub(super) const fn egui_button_from_windowing(
+    button: freminal_windowing::PointerButton,
+) -> egui::PointerButton {
+    match button {
+        freminal_windowing::PointerButton::Left => egui::PointerButton::Primary,
+        freminal_windowing::PointerButton::Right => egui::PointerButton::Secondary,
+        freminal_windowing::PointerButton::Middle => egui::PointerButton::Middle,
+        freminal_windowing::PointerButton::Back => egui::PointerButton::Extra1,
+        freminal_windowing::PointerButton::Forward => egui::PointerButton::Extra2,
+    }
+}
+
+/// Task 124.3a (corrected by orchestrator review): the decision behind
+/// [`PerWindowState::held_pointer_button`]'s update on every observed
+/// `App::on_pointer_button` event.
+///
+/// Two corrections over the original "just overwrite on press, clear on
+/// release" shape:
+///
+/// - **The Shift+secondary-button context-menu escape hatch is
+///   preserved.** `write_input_to_terminal`'s frame-time `shift_right_click`
+///   term already treats a Shift-held secondary-button press as "open the
+///   context menu, do not forward to the PTY" rather than an ordinary
+///   button press. A press matching that same shape must not arm the
+///   held-button state either — the frame that eventually runs and
+///   publishes `PanePointerReportInputs::context_menu = true` has not run
+///   yet at the instant this hook fires, so an unguarded arm would let a
+///   `CursorMoved` land in that gap and emit a genuine `?1002` PTY motion
+///   report for a press the user meant only to open a menu.
+/// - **A release can only clear the button it actually matches.** Because
+///   the escape hatch above declines to arm on a Shift+secondary press,
+///   `current` may legitimately be a DIFFERENT button (or `None`) when
+///   that press's matching release arrives — releasing a button that was
+///   never armed must not blank out an unrelated button that IS
+///   genuinely held (e.g. the user is chording left+shift-right).
+///
+/// Pure, so directly unit-testable without any GUI/window construction.
+/// `button` is the raw `freminal_windowing::PointerButton` from the
+/// observed event; this converts it via
+/// [`egui_button_from_windowing`] before deciding.
+pub(super) fn next_held_pointer_button(
+    current: Option<egui::PointerButton>,
+    button: freminal_windowing::PointerButton,
+    action: PointerButtonAction,
+    modifiers: egui::Modifiers,
+) -> Option<egui::PointerButton> {
+    let button = egui_button_from_windowing(button);
+    match action {
+        PointerButtonAction::Pressed => {
+            let is_shift_secondary_escape_hatch =
+                matches!(button, egui::PointerButton::Secondary) && modifiers.shift;
+            if is_shift_secondary_escape_hatch {
+                current
+            } else {
+                Some(button)
+            }
+        }
+        PointerButtonAction::Released => {
+            if matches!(current, Some(held) if held == button) {
+                None
+            } else {
+                current
+            }
+        }
+    }
+}
+
 /// Per-window state for a single OS window.
 ///
 /// Each window (whether it was the first or spawned later via `Ctrl+Shift+N`)
@@ -199,6 +283,30 @@ pub(super) struct PerWindowState {
 
     /// Active pane border drag state (mouse drag-to-resize).
     pub(super) border_drag: Option<PaneBorderDrag>,
+
+    /// The physical pointer button currently held, observed synchronously
+    /// via `App::on_pointer_button` (Task 124.3a). `None` when no button
+    /// is held. Feeds `?1002`/`?1003` mouse-tracking motion reports
+    /// (`terminal::pty_mouse_report::maybe_send_immediate_motion_report`);
+    /// button press/release PTY report emission itself stays in the
+    /// frame-time `Event::PointerButton` path, unaffected by this field.
+    ///
+    /// Window-owned, NOT pane-owned. A press and its matching release are
+    /// two physically-linked events on the SAME OS pointer device,
+    /// independent of which pane is active when either happens. The
+    /// original Task 124.3a design stored this per-pane, on
+    /// `ViewState::immediate_mouse_report` — that could leave a pane
+    /// "permanently held" whenever a press on pane A was followed by a
+    /// click, focus change, or tab switch to pane B before the matching
+    /// release arrived, because the release then updated pane B's state
+    /// instead of pane A's. Window ownership makes that sequence
+    /// impossible: there is exactly one held-button slot per window,
+    /// updated by [`next_held_pointer_button`] regardless of which pane is
+    /// active at either the press or the release. Per-pane state
+    /// (`ViewState::immediate_mouse_report`) still owns the LAST-REPORTED
+    /// POSITION, since each pane's PTY stream needs its own independent
+    /// report history — only the physical held-button identity moved here.
+    pub(super) held_pointer_button: Option<egui::PointerButton>,
 
     /// Group A (#122.4): cached rects, staged chrome signals, and the
     /// resize-overlay HUD — everything written once per completing
@@ -1403,5 +1511,233 @@ mod resize_overlay_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod held_pointer_button_tests {
+    //! Task 124.3a (orchestrator review correction #1): pure-state tests
+    //! for [`next_held_pointer_button`] and [`egui_button_from_windowing`],
+    //! proving the window-owned held-button model this module now uses.
+    //!
+    //! A live `PerWindowState` cannot be constructed headlessly (its
+    //! `WindowId` has no public constructor outside the real winit event
+    //! loop), so these tests exercise the pure decision function directly
+    //! — exactly the "structure this as pure state tests" fallback the
+    //! task calls for. The headline property under test —
+    //! "press-before-active-pane-change plus release-after-change cannot
+    //! leave either pane logically held" — is now provable STRUCTURALLY,
+    //! not just behaviorally: [`next_held_pointer_button`] takes no pane
+    //! identity at all, so there is no parameter through which a pane
+    //! switch could even influence it. The round-trip tests below confirm
+    //! the press/release bookkeeping itself is still correct now that it
+    //! has exactly one (window-scoped) home instead of N per-pane ones.
+
+    use super::{egui_button_from_windowing, next_held_pointer_button};
+    use freminal_windowing::{PointerButton, PointerButtonAction};
+
+    /// No modifiers held — the ordinary case.
+    fn plain_modifiers() -> egui::Modifiers {
+        egui::Modifiers::default()
+    }
+
+    /// Shift held, nothing else — the context-menu escape-hatch case.
+    fn shift_modifiers() -> egui::Modifiers {
+        egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::default()
+        }
+    }
+
+    // ── `egui_button_from_windowing` ─────────────────────────────────
+
+    #[test]
+    fn egui_button_from_windowing_maps_all_five_variants() {
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Left),
+            egui::PointerButton::Primary
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Right),
+            egui::PointerButton::Secondary
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Middle),
+            egui::PointerButton::Middle
+        );
+        // Review correction: Back/Forward map to Extra1/Extra2 -- preserving
+        // the existing unsupported-button fallback in `gui::mouse`'s
+        // encoders, not claiming either has a native PTY button code.
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Back),
+            egui::PointerButton::Extra1
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Forward),
+            egui::PointerButton::Extra2
+        );
+    }
+
+    // ── Plain press/release round trip (no pane concept involved at all) ─
+
+    #[test]
+    fn press_then_release_of_the_same_button_round_trips_to_none() {
+        let mut held = None;
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Primary));
+
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "a release matching the currently-held button must clear it, \
+             regardless of anything that happened to the (now-removed) \
+             per-pane routing in between -- this function has no pane \
+             parameter for such a thing to act through"
+        );
+    }
+
+    #[test]
+    fn press_of_a_different_button_overwrites_the_single_slot() {
+        // Single-button model, matching `PreviousMouseState`'s own
+        // pre-existing assumption -- not a regression introduced here.
+        let mut held = Some(egui::PointerButton::Primary);
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Secondary));
+    }
+
+    #[test]
+    fn release_of_a_button_that_is_not_currently_held_leaves_state_untouched() {
+        let held = Some(egui::PointerButton::Middle);
+        let next = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            next, held,
+            "releasing a button that was never armed as held must not \
+             clear an unrelated button's held state"
+        );
+    }
+
+    #[test]
+    fn release_with_nothing_held_stays_none() {
+        let next = next_held_pointer_button(
+            None,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(next, None);
+    }
+
+    // ── Task 124.3a (review correction #2): Shift+secondary escape hatch ─
+
+    #[test]
+    fn shift_held_secondary_press_does_not_arm() {
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "a Shift-held secondary-button press must not arm the held-button \
+             state -- it is the context-menu escape hatch, not an ordinary press"
+        );
+    }
+
+    #[test]
+    fn non_shift_secondary_press_arms_normally() {
+        // Only the SHIFTED case is special; an ordinary secondary press
+        // (e.g. right-click in a mouse-aware app with no Shift held) must
+        // still arm the held state exactly like any other button.
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Secondary));
+    }
+
+    #[test]
+    fn shift_held_secondary_release_does_not_corrupt_an_unrelated_held_button() {
+        // The chording scenario the doc names: Left is genuinely held (e.g.
+        // the user started a left-button drag), then Shift+Right is
+        // pressed (declined -- the escape hatch) and released. The
+        // Right-release must not blank out Left's still-genuine held state.
+        let held_after_left_press = next_held_pointer_button(
+            None,
+            PointerButton::Left,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held_after_left_press, Some(egui::PointerButton::Primary));
+
+        let held_after_shift_right_press = next_held_pointer_button(
+            held_after_left_press,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(
+            held_after_shift_right_press,
+            Some(egui::PointerButton::Primary),
+            "the declined Shift+secondary press must leave Left's held state untouched"
+        );
+
+        let held_after_shift_right_release = next_held_pointer_button(
+            held_after_shift_right_press,
+            PointerButton::Right,
+            PointerButtonAction::Released,
+            plain_modifiers(), // modifiers may have changed by release time
+        );
+        assert_eq!(
+            held_after_shift_right_release,
+            Some(egui::PointerButton::Primary),
+            "releasing the never-armed Right button must not clear Left's \
+             genuinely-held state"
+        );
+    }
+
+    #[test]
+    fn shift_held_secondary_press_then_matching_release_is_still_a_no_op_when_nothing_else_held() {
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(held, None);
+
+        let held = next_held_pointer_button(
+            held,
+            PointerButton::Right,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "releasing a button that the escape hatch declined to arm \
+              must leave the (already-None) state untouched"
+        );
     }
 }

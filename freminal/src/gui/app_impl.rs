@@ -691,6 +691,7 @@ impl freminal_windowing::App for FreminalGui {
                         pending_close_pane: false,
                         pending_focus_direction: None,
                         border_drag: None,
+                        held_pointer_button: None,
                         published: super::published_frame_state::PublishedFrameState::new(),
                         shader_last_mtime: None,
                         window_post,
@@ -2387,13 +2388,15 @@ impl freminal_windowing::App for FreminalGui {
             #[cfg(feature = "frame-profiling")]
             let mut phase_panes_this_frame = std::time::Duration::ZERO;
 
-            // Subtask 122.15: clear last frame's published terminal-rect
-            // origins before the per-pane loop republishes one entry per
-            // live pane below. Panes come and go (split/close), so this
-            // must happen unconditionally every frame rather than only on
-            // some branch — otherwise a closed pane's origin would linger
-            // in `win.published` forever.
-            win.published.clear_pane_terminal_origins();
+            // Task 124.3a: clear last frame's published pointer-report
+            // geometry snapshot before the per-pane loop republishes one
+            // entry per still-live pane below. Panes come and go
+            // (split/close), so this must happen unconditionally every
+            // frame rather than only on some branch — otherwise a closed
+            // pane's snapshot (and the terminal-rect origin
+            // `pane_terminal_origin` derives from it) would linger in
+            // `win.published` forever.
+            win.published.clear_pane_pointer_report_inputs();
 
             for (pane_id, pane_rect) in &pane_layout {
                 // Shrink the pane rect slightly to leave room for borders.
@@ -2663,15 +2666,20 @@ impl freminal_windowing::App for FreminalGui {
                         Some(shortest_repaint_delay.map_or(delay, |prev| prev.min(delay)));
                 }
 
-                // Subtask 122.15: lift this pane's terminal-rect origin —
-                // computed by `show()` above and recorded into
-                // `pane.render_cache.terminal_rect_origin` — into the
+                // Subtask 122.15 / Task 124.3a: lift this pane's
+                // pointer-report geometry snapshot — computed by `show()`
+                // above and recorded into
+                // `pane.render_cache.pointer_report_inputs` — into the
                 // published, out-of-frame-readable type. Read directly from
                 // the cache (not recomputed from `content_rect` +
                 // `gutter_inset_logical`) so the published value can never
-                // drift from what `show` actually drew.
-                win.published
-                    .publish_pane_terminal_origin(pane_id, pane.render_cache.terminal_rect_origin);
+                // drift from what `show` actually drew. This is also the
+                // sole source of `pane_terminal_origin`'s answer (its
+                // `terminal_rect.min`) — see that getter's doc.
+                win.published.publish_pane_pointer_report_inputs(
+                    pane_id,
+                    pane.render_cache.pointer_report_inputs,
+                );
 
                 if copied_to_clipboard {
                     self.route_freminal_toast(
@@ -3934,6 +3942,103 @@ impl freminal_windowing::App for FreminalGui {
         };
         win.pending_raw_keys.push((event, mods));
     }
+
+    /// Task 124.3a: synchronous, out-of-frame pointer-motion observation.
+    /// Resolves the active pane of the active tab (mirroring the frame-time
+    /// active-pane routing exactly — see
+    /// `terminal::pty_mouse_report::maybe_send_immediate_motion_report`'s
+    /// doc for the full gate list) and delegates the report decision/send
+    /// to that function, which has no access to `FreminalGui` itself.
+    fn on_pointer_moved(
+        &mut self,
+        window_id: WindowId,
+        event: freminal_windowing::PointerMotionEvent,
+    ) {
+        let Some(win) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        // Task 124.3a (review correction #1): the held-button identity is
+        // window-owned (`held_pointer_button`), not pane-owned — read it
+        // here, before resolving the pane, and pass it through explicitly.
+        let held_button = win.held_pointer_button;
+        let pane_id = win.tabs.active_tab().active_pane;
+        let report_inputs = win.published.pane_pointer_report_inputs(pane_id);
+        let Some(pane) = win.tabs.active_tab_mut().pane_tree.find_mut(pane_id) else {
+            return;
+        };
+        let snap = pane.arc_swap.load();
+        crate::gui::terminal::pty_mouse_report::maybe_send_immediate_motion_report(
+            &mut pane.view_state,
+            &snap,
+            &pane.input_tx,
+            report_inputs,
+            held_button,
+            event.pos,
+            event.modifiers,
+        );
+    }
+
+    /// Task 124.3a: synchronous, out-of-frame pointer-button observation.
+    /// Updates the WINDOW-owned held-button state (review correction #1 —
+    /// see `PerWindowState::held_pointer_button`'s doc for why this is not
+    /// pane-owned), used by `on_pointer_moved`'s `?1002`/`?1003`
+    /// reporting; does not itself emit any PTY report.
+    fn on_pointer_button(
+        &mut self,
+        window_id: WindowId,
+        event: freminal_windowing::PointerButtonEvent,
+    ) {
+        let Some(win) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        win.held_pointer_button = super::window::next_held_pointer_button(
+            win.held_pointer_button,
+            event.button,
+            event.action,
+            event.modifiers,
+        );
+    }
+
+    /// Task 124.3a (review correction): reset window-owned held-button
+    /// state and the active pane's immediate-report position baseline when
+    /// pointer presence over this window is lost (the pointer left the
+    /// window, or the window lost focus). Without this, re-entry or
+    /// focus-regain could preserve a phantom held button (a `?1002` drag
+    /// that visually never ended) or wrongly suppress the first `?1003`
+    /// report after return by comparing it against a stale pre-loss
+    /// position. The existing frame-time resets (`Event::PointerGone`,
+    /// `Event::WindowFocused(false)` in `write_input_to_terminal`) are
+    /// unaffected and still run — this is the out-of-frame counterpart for
+    /// the state those never touched.
+    ///
+    /// Both `PointerPresenceLoss` reasons reset identically: once the
+    /// pointer has left the window, or the window has lost focus, neither
+    /// the currently-recorded held button nor its eventual release can be
+    /// trusted to still describe a real, in-progress gesture (the matching
+    /// release might land over a different window, or not be delivered
+    /// here at all while unfocused). Matching both variants explicitly
+    /// (rather than folding them into one unconditional reset) keeps this
+    /// exhaustive: a future third reason that needs different handling
+    /// becomes a compile error here instead of a silent gap.
+    fn on_pointer_presence_lost(
+        &mut self,
+        window_id: WindowId,
+        reason: freminal_windowing::PointerPresenceLoss,
+    ) {
+        let Some(win) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        match reason {
+            freminal_windowing::PointerPresenceLoss::LeftWindow
+            | freminal_windowing::PointerPresenceLoss::FocusLost => {
+                win.held_pointer_button = None;
+            }
+        }
+        let pane_id = win.tabs.active_tab().active_pane;
+        if let Some(pane) = win.tabs.active_tab_mut().pane_tree.find_mut(pane_id) {
+            pane.view_state.immediate_mouse_report.reset();
+        }
+    }
 }
 
 impl FreminalGui {
@@ -4280,6 +4385,7 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
+            held_pointer_button: None,
             published: super::published_frame_state::PublishedFrameState::new(),
             shader_last_mtime: None,
             window_post,

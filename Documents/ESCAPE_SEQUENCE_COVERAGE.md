@@ -2,6 +2,17 @@
 
 ## Last updated
 
+Last updated: 2026-08-25 — Task 124.3a fixed `MouseEncoding::SgrPixels`
+(`?1016`): motion, button, and wheel mouse-tracking reports now use
+one-based physical pixel coordinates relative to the terminal content
+top-left, same SGR framing as `?1006`. Previously `?1016` shared the same
+non-`X11` code branch as `?1006`, so it silently reported cell coordinates
+instead of pixels — this closes that gap and adds the `?1016` row to the
+DEC Private Modes table below. `?1005` (`MouseEncoding::Utf8`) also shared
+that branch before and still does; this task leaves its pre-existing
+behavior — which this document makes no claim of correctness for —
+unchanged.
+
 Last updated: 2026-07-25 — issue #433 — OSC 9/777 per-source notification
 enable toggles now enforced. `AnsiOscType::Notify` and
 `WindowManipulation::Notification` now carry an `OscNotifySource` tag
@@ -303,6 +314,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | ?1004 | Focus Reporting                  | ✅     | Mode stored in `TerminalModes.focus_reporting`; GUI sends focus events                                                              |
 | ?1006 | SGR Mouse — Extended Coordinates | ✅     | Mode stored in `TerminalModes.mouse_tracking`                                                                                       |
 | ?1007 | AlternateScroll                  | ✅     | Mouse wheel translated to scroll keys in alternate screen                                                                           |
+| ?1016 | SGR-Pixels Mouse — Pixel Coords  | ✅     | Same SGR framing as ?1006, but one-based physical pixel coordinates; motion/button/wheel reports all fixed (Task 124.3a)            |
 | ?1047 | Alt Screen Buffer (legacy)       | ✅     | Wired to same alt-screen machinery as ?1049                                                                                         |
 | ?1048 | Save/Restore Cursor (legacy)     | ✅     | Wired to existing save/restore cursor machinery                                                                                     |
 | ?1049 | Alt Screen Buffer + Save Cursor  | ✅     | Implemented — swaps screen buffers                                                                                                  |

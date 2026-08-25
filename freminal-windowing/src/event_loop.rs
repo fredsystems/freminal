@@ -20,7 +20,8 @@ use crate::egui_integration::EguiState;
 use crate::error::Error;
 use crate::gl_context::GlState;
 use crate::{
-    App, FrameSignals, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry,
+    App, FrameSignals, PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent,
+    PointerPresenceLoss, RawKeyEvent, RawKeyMods, UserEvent, WindowConfig, WindowGeometry,
     WindowHandle, WindowId, WindowOp,
 };
 
@@ -253,6 +254,33 @@ fn update_chrome_drag_latch(
         winit::event::ElementState::Pressed => current,
         winit::event::ElementState::Released => current.saturating_sub(1),
     }
+}
+
+/// Task 124.3a: the mapping + convert-or-ignore decision the `MouseInput`
+/// arm applies to build an `App::on_pointer_button` event, extracted as a
+/// pure function (mirroring `should_schedule_cursor_moved`'s existing
+/// precedent) so the mapping is unit-testable without a live `Handler`.
+/// Returns `None` for buttons `PointerButton::from_winit` does not convert
+/// (`Other(_)`, a raw driver-specific code) — that is safely ignored, not
+/// guessed. `Left`/`Right`/`Middle`/`Back`/`Forward` all convert.
+///
+/// `modifiers` is transported into the event verbatim; this crate does not
+/// interpret it (see [`PointerButtonEvent`]'s doc).
+fn pointer_button_event_for(
+    button: winit::event::MouseButton,
+    state: winit::event::ElementState,
+    modifiers: egui::Modifiers,
+) -> Option<PointerButtonEvent> {
+    let button = PointerButton::from_winit(button)?;
+    let action = match state {
+        winit::event::ElementState::Pressed => PointerButtonAction::Pressed,
+        winit::event::ElementState::Released => PointerButtonAction::Released,
+    };
+    Some(PointerButtonEvent {
+        button,
+        action,
+        modifiers,
+    })
 }
 
 /// Task 121 spike: should THIS `CursorMoved` event actually schedule a
@@ -626,6 +654,29 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         let scale = state.window.scale_factor();
                         state.last_cursor_pos = physical_to_logical_pos(position, scale);
 
+                        // Task 124.3a: the synchronous, PTY-agnostic motion
+                        // hook. Deliberately unconditional and independent
+                        // of the repaint-scheduling decision computed below
+                        // — `App::on_pointer_moved` runs on every motion
+                        // event regardless of what
+                        // `App::pointer_motion_needs_repaint` answers for
+                        // the same event, so an app can deliver an
+                        // immediate PTY mouse-tracking report even on a
+                        // frame the repaint gate suppresses. Skipped only
+                        // when the position itself could not be converted
+                        // (non-finite/non-positive scale factor), mirroring
+                        // `app_says_needed`'s own conservative treatment of
+                        // that case just below.
+                        if let Some(pos) = state.last_cursor_pos {
+                            self.app.on_pointer_moved(
+                                WindowId(winit_id),
+                                PointerMotionEvent {
+                                    pos,
+                                    modifiers: state.egui.modifiers(),
+                                },
+                            );
+                        }
+
                         // Task 121 spike: decide whether this pointer-motion
                         // event needs a repaint AT ALL. `last_cursor_pos.is_none()`
                         // (position could not be converted to logical points —
@@ -659,9 +710,19 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                         // must not suppress the first `CursorMoved` after it
                         // re-enters (at a possibly unrelated position).
                         state.pointer_motion_needed_last = true;
+                        // Task 124.3a (review correction): tell the app so
+                        // it can reset any held-button/report-baseline
+                        // state that can no longer be trusted once the
+                        // pointer has left the window.
+                        self.app.on_pointer_presence_lost(
+                            WindowId(winit_id),
+                            PointerPresenceLoss::LeftWindow,
+                        );
                     }
                     WindowEvent::MouseInput {
-                        state: btn_state, ..
+                        state: btn_state,
+                        button,
+                        ..
                     } => {
                         let is_over_chrome = state
                             .last_cursor_pos
@@ -671,6 +732,16 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                             btn_state,
                             is_over_chrome,
                         );
+
+                        // Task 124.3a: synchronous, PTY-agnostic held-button
+                        // observation. Button press/release PTY report
+                        // emission itself stays exactly where it is today,
+                        // in the frame-time `Event::PointerButton` path.
+                        if let Some(event) =
+                            pointer_button_event_for(button, btn_state, state.egui.modifiers())
+                        {
+                            self.app.on_pointer_button(WindowId(winit_id), event);
+                        }
                     }
                     WindowEvent::CursorEntered { .. } | WindowEvent::MouseWheel { .. } => {
                         // Nothing to do beyond the `on_window_event` call
@@ -856,6 +927,14 @@ impl<A: App> ApplicationHandler<UserEvent> for Handler<A> {
                 if let Some(state) = self.windows.get_mut(&winit_id) {
                     state.chrome_drag_pressed_count = 0;
                 }
+                // Task 124.3a (review correction): same pointer-presence-loss
+                // notification as `CursorLeft` — losing focus means no
+                // further pointer/button events are guaranteed to arrive for
+                // this window until it regains focus, so any held-button
+                // state the app derived from earlier observations can no
+                // longer be trusted.
+                self.app
+                    .on_pointer_presence_lost(WindowId(winit_id), PointerPresenceLoss::FocusLost);
             }
             WindowEvent::Resized(size) => {
                 let scale = self
@@ -1289,9 +1368,11 @@ mod tests {
         App, MIN_REPAINT_INTERVAL, SUPPRESSED_POINTER_FALLBACK_DELAY, ViewportCommandFlags,
         WindowId, clamp_repaint_delay, effective_repaint_delay, is_blocked_key,
         logical_coord_to_i32, logical_dim_to_u32, physical_to_logical_pos,
-        should_schedule_cursor_moved, update_chrome_drag_latch, viewport_command_flags,
+        pointer_button_event_for, should_schedule_cursor_moved, update_chrome_drag_latch,
+        viewport_command_flags,
     };
     use crate::tests::DummyApp;
+    use crate::{PointerButton, PointerButtonAction, PointerButtonEvent, PointerMotionEvent};
     use winit::keyboard::KeyCode;
 
     #[test]
@@ -1643,6 +1724,125 @@ mod tests {
 
         let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
         assert!(should_schedule_cursor_moved(true, false, current_needed));
+    }
+
+    // ── Task 124.3a: `App::on_pointer_moved` dispatch, and
+    // `pointer_button_event_for` (the `MouseInput` arm's mapping) ────────
+
+    #[test]
+    fn cursor_moved_dispatch_calls_on_pointer_moved_even_when_repaint_is_suppressed() {
+        // Same live-`App` pattern as the 122.6 tests above, but proving the
+        // NEW hook: `App::on_pointer_moved` must fire for this event even
+        // though the same app's `pointer_motion_needs_repaint` answer for
+        // the identical position is `false` — the two axes are uncoupled
+        // (Task 124.3a), not one gating the other.
+        let mut app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        // Mirror the real arm's relative order: the motion hook runs, then
+        // the repaint-scheduling decision is computed from the same app.
+        let event = PointerMotionEvent {
+            pos,
+            modifiers: egui::Modifiers::default(),
+        };
+        app.on_pointer_moved(window_id, event);
+        let current_needed = app.pointer_motion_needs_repaint(window_id, pos);
+
+        assert!(!current_needed, "the configured app must suppress repaint");
+        assert_eq!(
+            app.pointer_moved_calls,
+            vec![event],
+            "on_pointer_moved must have fired despite the suppressing repaint answer"
+        );
+    }
+
+    #[test]
+    fn pointer_button_event_for_converts_supported_buttons_with_the_right_action() {
+        use winit::event::{ElementState, MouseButton};
+
+        let mods = egui::Modifiers::default();
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Left, ElementState::Pressed, mods),
+            Some(PointerButtonEvent {
+                button: PointerButton::Left,
+                action: PointerButtonAction::Pressed,
+                modifiers: mods,
+            })
+        );
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Right, ElementState::Released, mods),
+            Some(PointerButtonEvent {
+                button: PointerButton::Right,
+                action: PointerButtonAction::Released,
+                modifiers: mods,
+            })
+        );
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Middle, ElementState::Pressed, mods),
+            Some(PointerButtonEvent {
+                button: PointerButton::Middle,
+                action: PointerButtonAction::Pressed,
+                modifiers: mods,
+            })
+        );
+    }
+
+    #[test]
+    fn pointer_button_event_for_transports_modifiers_verbatim() {
+        use winit::event::{ElementState, MouseButton};
+
+        let mods = egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::default()
+        };
+        let event = pointer_button_event_for(MouseButton::Right, ElementState::Pressed, mods)
+            .expect("Right is a supported button");
+        assert_eq!(
+            event.modifiers, mods,
+            "modifiers must be transported verbatim -- freminal-windowing does not interpret them"
+        );
+    }
+
+    #[test]
+    fn pointer_button_event_for_ignores_only_other() {
+        use winit::event::{ElementState, MouseButton};
+
+        let mods = egui::Modifiers::default();
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Other(3), ElementState::Pressed, mods),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_button_event_for_converts_back_and_forward() {
+        // Review correction: Back/Forward must convert (not be ignored), so
+        // a physically-held Back/Forward button can still drive `?1002`
+        // motion reporting via the existing unsupported-button fallback in
+        // `freminal::gui::mouse`'s encoders, matching pre-124.3a behavior.
+        use winit::event::{ElementState, MouseButton};
+
+        let mods = egui::Modifiers::default();
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Back, ElementState::Pressed, mods),
+            Some(PointerButtonEvent {
+                button: PointerButton::Back,
+                action: PointerButtonAction::Pressed,
+                modifiers: mods,
+            })
+        );
+        assert_eq!(
+            pointer_button_event_for(MouseButton::Forward, ElementState::Released, mods),
+            Some(PointerButtonEvent {
+                button: PointerButton::Forward,
+                action: PointerButtonAction::Released,
+                modifiers: mods,
+            })
+        );
     }
 
     // ── Task 121 spike: `effective_repaint_delay` (liveness-critical) ────

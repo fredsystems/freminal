@@ -396,6 +396,170 @@ pub trait App {
     /// auto-repeat flag. `mods` is the current chorded modifier state. The
     /// default implementation does nothing.
     fn on_raw_key_event(&mut self, _window_id: WindowId, _event: RawKeyEvent, _mods: RawKeyMods) {}
+
+    /// Task 124.3a: synchronous, PTY-agnostic pointer-motion observation,
+    /// independent of repaint scheduling.
+    ///
+    /// Called from the `CursorMoved` fast path in `event_loop.rs`, on every
+    /// motion event, regardless of what [`App::pointer_motion_needs_repaint`]
+    /// answers for the same event — the two hooks are deliberately
+    /// uncoupled axes (repaint scheduling vs. this synchronous observation),
+    /// not one gating the other. This is what lets an app deliver an
+    /// immediate PTY mouse-tracking report on every motion even on a frame
+    /// the repaint gate suppresses (see `Documents/PLAN_124_RENDER_EFFICIENCY.md`
+    /// 124.3/124.3a). `freminal-windowing` itself knows nothing about mouse
+    /// reports, PTY encoding, or terminal modes — this hook's only job is
+    /// to deliver the raw pointer position and chorded modifiers to the app
+    /// synchronously; every downstream decision is the app's.
+    ///
+    /// The default implementation does nothing.
+    fn on_pointer_moved(&mut self, _window_id: WindowId, _event: PointerMotionEvent) {}
+
+    /// Task 124.3a: synchronous, PTY-agnostic pointer-button press/release
+    /// observation.
+    ///
+    /// Called from the `MouseInput` arm of the same fast path, for every
+    /// button winit reports that [`PointerButton::from_winit`] can convert
+    /// (Left/Right/Middle/Back/Forward — five standard pointer buttons).
+    /// Only `winit::event::MouseButton::Other(_)` is silently NOT delivered
+    /// here, because its mapping is genuinely unknown — the caller must not
+    /// guess one (see that method's doc). This hook exists so an app can
+    /// track held-button state for use by `?1002`/`?1003` mouse-tracking
+    /// motion reports; it does NOT itself emit any PTY report — button
+    /// press/release PTY reporting stays in the app's existing frame-time
+    /// path.
+    ///
+    /// The default implementation does nothing.
+    fn on_pointer_button(&mut self, _window_id: WindowId, _event: PointerButtonEvent) {}
+
+    /// Task 124.3a (review correction): synchronous, PTY-agnostic
+    /// notification that pointer presence over this window was lost —
+    /// either the pointer physically left the window (`CursorLeft`) or the
+    /// window lost OS focus (`Focused(false)`).
+    ///
+    /// Neither event carries further pointer/button events until the
+    /// pointer re-enters or focus returns, so any "held button" state an
+    /// app derived from earlier `on_pointer_button` observations can no
+    /// longer be trusted to describe a real, in-progress gesture — the
+    /// matching release may never be observed (e.g. it happens over a
+    /// different window, or while this window is unfocused and winit does
+    /// not deliver it here). This hook lets an app reset that state so
+    /// re-entry/focus-regain starts clean rather than preserving a phantom
+    /// held button.
+    ///
+    /// The default implementation does nothing.
+    fn on_pointer_presence_lost(&mut self, _window_id: WindowId, _reason: PointerPresenceLoss) {}
+}
+
+/// A pointer button explicitly named for delivery through the `App`
+/// boundary, converted from `winit::event::MouseButton` via
+/// [`Self::from_winit`].
+///
+/// Named domain enum (`freminal-state-representation`), not the winit type
+/// directly, so `freminal-windowing`'s `App` trait names exactly winit's
+/// five standard pointer buttons rather than exposing the winit type (whose
+/// `Other(u16)` variant carries a raw, driver-specific code) directly.
+/// `freminal-windowing` remains PTY-agnostic: this enum only names which
+/// physical button transitioned, and carries no opinion about what (if
+/// anything) a PTY mouse-report encoder does with `Back`/`Forward` — see
+/// [`Self::from_winit`]'s doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    /// The primary (usually left) mouse button.
+    Left,
+    /// The secondary (usually right) mouse button.
+    Right,
+    /// The tertiary (usually middle/scroll-wheel) mouse button.
+    Middle,
+    /// The first "extra" button on some mice (commonly a side/thumb
+    /// button, e.g. browser "Back").
+    Back,
+    /// The second "extra" button on some mice (commonly a side/thumb
+    /// button, e.g. browser "Forward").
+    Forward,
+}
+
+impl PointerButton {
+    /// Convert a `winit::event::MouseButton`, explicitly. Returns `None`
+    /// only for `Other(_)` — a raw, driver-specific button code with no
+    /// established mapping at all, so a caller must not guess one (the
+    /// "safely ignored, not guessed" requirement this method exists to
+    /// satisfy). `Left`/`Right`/`Middle`/`Back`/`Forward` — winit's entire
+    /// named set — all convert.
+    #[must_use]
+    pub const fn from_winit(button: winit::event::MouseButton) -> Option<Self> {
+        match button {
+            winit::event::MouseButton::Left => Some(Self::Left),
+            winit::event::MouseButton::Right => Some(Self::Right),
+            winit::event::MouseButton::Middle => Some(Self::Middle),
+            winit::event::MouseButton::Back => Some(Self::Back),
+            winit::event::MouseButton::Forward => Some(Self::Forward),
+            winit::event::MouseButton::Other(_) => None,
+        }
+    }
+}
+
+/// Why pointer presence over a window was lost, delivered via
+/// [`App::on_pointer_presence_lost`].
+///
+/// Named domain enum (`freminal-state-representation`), not a bare `bool`:
+/// the two reasons are genuinely distinct events at the windowing layer
+/// (`CursorLeft` vs. `Focused(false)`) even though an app may choose to
+/// react to them identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerPresenceLoss {
+    /// The pointer physically left the window (`WindowEvent::CursorLeft`).
+    LeftWindow,
+    /// The window lost OS focus (`WindowEvent::Focused(false)`).
+    FocusLost,
+}
+
+/// Whether a pointer button transitioned to pressed or released, delivered
+/// via [`App::on_pointer_button`].
+///
+/// Named domain enum, not a bare `bool` (`freminal-state-representation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButtonAction {
+    /// The button was just pressed.
+    Pressed,
+    /// The button was just released.
+    Released,
+}
+
+/// A pointer-motion event delivered synchronously to
+/// [`App::on_pointer_moved`], independent of repaint scheduling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+// `egui::Pos2`'s `f32` fields cannot implement `Eq` — deriving it here is
+// not possible, not merely skipped.
+#[allow(clippy::derive_partial_eq_without_eq)]
+pub struct PointerMotionEvent {
+    /// Pointer position, egui logical points, window-relative, top-left
+    /// origin — the same convention [`App::pointer_motion_needs_repaint`]
+    /// uses.
+    pub pos: egui::Pos2,
+    /// Chorded modifier state (`EguiState::modifiers()`) as of this event.
+    pub modifiers: egui::Modifiers,
+}
+
+/// A pointer-button press/release event delivered synchronously to
+/// [`App::on_pointer_button`].
+///
+/// `freminal-windowing` transports `modifiers` only — it does not
+/// interpret them. Any modifier-dependent behavior (e.g. a
+/// Shift-held-secondary-button escape hatch) is entirely the app's
+/// decision, kept out of this PTY-agnostic crate.
+///
+/// Unlike [`PointerMotionEvent`] (which carries `egui::Pos2` and so cannot
+/// derive `Eq`), every field here — `PointerButton`, `PointerButtonAction`,
+/// and `egui::Modifiers` — is itself `Eq`, so this type derives it too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerButtonEvent {
+    /// Which button transitioned.
+    pub button: PointerButton,
+    /// Pressed or released.
+    pub action: PointerButtonAction,
+    /// Chorded modifier state (`EguiState::modifiers()`) as of this event.
+    pub modifiers: egui::Modifiers,
 }
 
 /// Chorded modifier state accompanying a raw key event delivered via
@@ -664,6 +828,18 @@ mod tests {
         pub pointer_motion_needs_repaint: bool,
         /// Overrides `App::is_chrome_interactive_at`'s return value.
         pub chrome_interactive: bool,
+        /// Task 124.3a: every `App::on_pointer_moved` call this instance has
+        /// received, in order — lets a test prove the hook fired (and with
+        /// what event) independent of whatever `pointer_motion_needs_repaint`
+        /// answered for the same motion.
+        pub pointer_moved_calls: Vec<PointerMotionEvent>,
+        /// Task 124.3a: every `App::on_pointer_button` call this instance
+        /// has received, in order.
+        pub pointer_button_calls: Vec<PointerButtonEvent>,
+        /// Task 124.3a (review correction): every
+        /// `App::on_pointer_presence_lost` call this instance has
+        /// received, in order.
+        pub pointer_presence_loss_calls: Vec<PointerPresenceLoss>,
     }
 
     impl Default for DummyApp {
@@ -674,6 +850,9 @@ mod tests {
             Self {
                 pointer_motion_needs_repaint: true,
                 chrome_interactive: true,
+                pointer_moved_calls: Vec::new(),
+                pointer_button_calls: Vec::new(),
+                pointer_presence_loss_calls: Vec::new(),
             }
         }
     }
@@ -711,6 +890,18 @@ mod tests {
 
         fn is_chrome_interactive_at(&self, _window_id: WindowId, _pos: egui::Pos2) -> bool {
             self.chrome_interactive
+        }
+
+        fn on_pointer_moved(&mut self, _window_id: WindowId, event: PointerMotionEvent) {
+            self.pointer_moved_calls.push(event);
+        }
+
+        fn on_pointer_button(&mut self, _window_id: WindowId, event: PointerButtonEvent) {
+            self.pointer_button_calls.push(event);
+        }
+
+        fn on_pointer_presence_lost(&mut self, _window_id: WindowId, reason: PointerPresenceLoss) {
+            self.pointer_presence_loss_calls.push(reason);
         }
     }
 
@@ -783,5 +974,140 @@ mod tests {
         assert!(!app.is_chrome_interactive_at(window_id, pos));
         // The other hook is untouched by the `..Default::default()` fill-in.
         assert!(app.pointer_motion_needs_repaint(window_id, pos));
+    }
+
+    // ── Task 124.3a: `PointerButton::from_winit` ─────────────────────────
+
+    #[test]
+    fn pointer_button_from_winit_converts_all_five_named_buttons() {
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Left),
+            Some(PointerButton::Left)
+        );
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Right),
+            Some(PointerButton::Right)
+        );
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Middle),
+            Some(PointerButton::Middle)
+        );
+        // Review correction: Back/Forward must convert too, so a
+        // physically-held Back/Forward button can still arm held-button
+        // state and drive `?1002` motion reporting exactly as it did before
+        // Task 124.3a's hook existed (via the existing unsupported-button
+        // fallback in `freminal::gui::mouse`'s encoders).
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Back),
+            Some(PointerButton::Back)
+        );
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Forward),
+            Some(PointerButton::Forward)
+        );
+    }
+
+    #[test]
+    fn pointer_button_from_winit_ignores_only_other_rather_than_guessing() {
+        // `Other(_)` carries a raw, driver-specific code with no
+        // established mapping at all — it must convert to `None`, not be
+        // guessed onto one of the five named buttons.
+        assert_eq!(
+            PointerButton::from_winit(winit::event::MouseButton::Other(7)),
+            None
+        );
+    }
+
+    // ── Task 124.3a: `App::on_pointer_moved` / `App::on_pointer_button` ──
+    //
+    // `take_terminal_band_range_default_is_empty_and_reset_on_read` and its
+    // siblings above already establish that a type relying entirely on a
+    // default trait-method body compiles and behaves conservatively; these
+    // two hooks' default bodies are the same "does nothing" shape (see the
+    // trait doc), so no separate default-body test is added here — instead
+    // these tests exercise the behavior specific to Task 124.3a via
+    // `DummyApp`'s recording override.
+
+    #[test]
+    fn on_pointer_moved_is_recorded_independent_of_pointer_motion_needs_repaint() {
+        // The two hooks are deliberately uncoupled axes: a suppressing
+        // `pointer_motion_needs_repaint` answer must not prevent
+        // `on_pointer_moved` from being invoked for the same event.
+        let mut app = DummyApp {
+            pointer_motion_needs_repaint: false,
+            ..Default::default()
+        };
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let pos = egui::Pos2::new(4.0, 4.0);
+
+        assert!(!app.pointer_motion_needs_repaint(window_id, pos));
+
+        let event = PointerMotionEvent {
+            pos,
+            modifiers: egui::Modifiers::default(),
+        };
+        app.on_pointer_moved(window_id, event);
+
+        assert_eq!(app.pointer_moved_calls, vec![event]);
+    }
+
+    #[test]
+    fn on_pointer_button_records_the_event() {
+        let mut app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+        let event = PointerButtonEvent {
+            button: PointerButton::Left,
+            action: PointerButtonAction::Pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+
+        app.on_pointer_button(window_id, event);
+
+        assert_eq!(app.pointer_button_calls, vec![event]);
+    }
+
+    // ── Task 124.3a (review correction): `App::on_pointer_presence_lost` ─
+
+    #[test]
+    fn on_pointer_presence_lost_records_left_window() {
+        let mut app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        app.on_pointer_presence_lost(window_id, PointerPresenceLoss::LeftWindow);
+
+        assert_eq!(
+            app.pointer_presence_loss_calls,
+            vec![PointerPresenceLoss::LeftWindow]
+        );
+    }
+
+    #[test]
+    fn on_pointer_presence_lost_records_focus_lost() {
+        let mut app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        app.on_pointer_presence_lost(window_id, PointerPresenceLoss::FocusLost);
+
+        assert_eq!(
+            app.pointer_presence_loss_calls,
+            vec![PointerPresenceLoss::FocusLost]
+        );
+    }
+
+    #[test]
+    fn on_pointer_presence_lost_distinguishes_both_reasons_in_order() {
+        let mut app = DummyApp::default();
+        let window_id = WindowId(winit::window::WindowId::dummy());
+
+        app.on_pointer_presence_lost(window_id, PointerPresenceLoss::LeftWindow);
+        app.on_pointer_presence_lost(window_id, PointerPresenceLoss::FocusLost);
+
+        assert_eq!(
+            app.pointer_presence_loss_calls,
+            vec![
+                PointerPresenceLoss::LeftWindow,
+                PointerPresenceLoss::FocusLost
+            ]
+        );
     }
 }

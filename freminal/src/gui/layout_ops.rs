@@ -703,6 +703,7 @@ impl FreminalGui {
             pending_close_pane: false,
             pending_focus_direction: None,
             border_drag: None,
+            held_pointer_button: None,
             published: super::published_frame_state::PublishedFrameState::new(),
             shader_last_mtime: None,
             window_post,
