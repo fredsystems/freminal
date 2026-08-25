@@ -2829,6 +2829,84 @@ harness and the 1,353-test `gl-pixel` run all passed. Mutation checks proved
 the search bounded-source decision, tooltip escape fallback and popup-only
 damage aggregation are each load-bearing.
 
+#### Post-124.14 GPU re-measurement (2026-08-25), AUTHORITATIVE
+
+**On real hardware, with 124.18's history union and 124.14's bounded sources
+both landed, the partial-present path is now taken on the overwhelming
+majority of frames.** This is the direct inverse of the pre-124.18 124.17
+GPU take, which recorded `present_partial_taken == 0` across 8,160 frames
+because `buffer_age()` was 2 and the gate required exactly 1.
+
+Measured on this workstation, Hyprland/Wayland, AMD GPU (`LIBGL_ALWAYS_SOFTWARE`
+printed `<unset>`; the live process's llvmpipe thread count was 0 in every
+run), release build with `--features frame-profiling`. The floating window
+was pinned to 1264x680 at `(-2400, 200)`; the pointer was verified inside the
+window before each run. The continuous PTY workload was
+`sh -c 'while :; do seq 1 200; sleep 0.02; done'`. Steady state is the
+difference between frame 120 and frame 2520 in each run — 2,400 frames per
+run.
+
+Run 1 drove real pointer motion (144.16 events/s observed). Runs 2 and 3 are
+**output-only repeat controls**, not pointer-motion runs: compositor-driven
+synthetic cursor moves produced no application `CursorMoved` events, so no
+pointer-rate figure is reported for them rather than claiming motion that did
+not reach the app.
+
+| Metric | Run 1 | Run 2 | Run 3 |
+| ------------------------------------ | -------------- | --------------- | --------------- |
+| fps | 60.28 | 60.21 | 59.97 |
+| total us/frame | 331.55 | 329.02 | 406.57 |
+| run_ui us/frame | 123.72 | 122.87 | 153.62 |
+| tessellate us/frame | 11.84 | 12.03 | 13.92 |
+| paint us/frame | 15.94 | 16.22 | 20.36 |
+| swap us/frame | 156.10 | 154.34 | 189.44 |
+| Partial taken / requested | 2104/2400 | 2063/2400 | 2079/2400 |
+| Partial taken (%) | 87.67% | 85.96% | 86.62% |
+| Full count | 296 | 337 | 321 |
+| buffer-age-blocked count | 0 | 0 | 0 |
+| buffer_age_histogram delta `[0,1,2,3+]` | `[0,0,2104,0]` | `[0,0,2063,0]` | `[0,0,2079,0]` |
+| zero-change `Full` count | 289 | 280 | 273 |
+| other documented `Full` cause | `focus_changed` 7 | `toast_active` 57 | `toast_active` 48 |
+| pointer events/s | 144.16 | n/a (output-only control) | n/a (output-only control) |
+
+**Interpretation:**
+
+- This directly inverts pre-124.18's GPU 124.17 result on its central term:
+  `buffer_age()` remains exactly 2 in steady state in every query across all
+  three runs — the swapchain's staleness has not changed — but with the
+  124.18 damage-history union in place, every `Partial` request that reaches
+  the gate is now taken rather than blocked. `buffer-age-blocked` is 0 in
+  all three runs.
+- 124.14 moved changing-content frames from `Full` to `Partial` exactly as
+  its design intended: `Partial` is taken on 85.96%-87.67% of the 2,400
+  steady-state frames per run.
+- **Do not characterise this as "almost no `Full` frames."** Every observed
+  `Full` frame is fully and exactly accounted for: run 1 is 289 + 7 = 296,
+  run 2 is 280 + 57 = 337, run 3 is 273 + 48 = 321. The zero-change component
+  in each run is the `rects.is_empty() -> Full` fallback that 124.2 owns, not
+  a defect in 124.14. `focus_changed` and `toast_active` are documented
+  genuinely-global/chrome causes from the 124.21 audit, not unexplained
+  residue.
+- Frame rate and per-frame stage costs are reported together above rather
+  than in isolation, per the measurement discipline this task follows
+  throughout: all three runs hold ~60 fps with `run_ui`/`tessellate`/`paint`/
+  `swap` in the low hundreds of microseconds. Run 3 is the high-cost repeat
+  of the three (406.57 us/frame total against 331.55 and 329.02 for runs 1
+  and 2); the measured values are reported as-is and no causal conclusion is
+  drawn from a single repeat.
+- **No visual corruption was observed.** A live screenshot was captured and
+  inspected under the same continuous-output workload; terminal content was
+  intact.
+
+**Conclusion: 124.2 is unblocked.** `FrameDamage::None`'s `buffer_age()`
+interaction — flagged as "the correctness crux" when 124.2 was written, and
+resolved by 124.17's GPU take as "age is 2 in steady state, so a subsequent
+`Partial` frame is declined and falls back to a full clear" — now resolves
+further: with 124.18's history union, that fallback is no longer the
+common case, and 124.2's `rects.is_empty()` zero-change path is the
+best-characterised remaining `Full` source in the measurements above. 124.2
+is the next maintainer-set task.
+
 ### 124.22 — `freminal-damage-model` agent skill
 
 **Planned.** *Requested by the maintainer during 124.21.*
