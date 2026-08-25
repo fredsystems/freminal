@@ -3661,6 +3661,7 @@ mod incremental_merge_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod row_epoch_tests {
     use crate::buffer::Buffer;
+    use crate::image_store::{ImagePlacement, ImageProtocol};
     use crate::row::{LineWidth, RowJoin};
     use freminal_common::buffer_states::{fonts::FontWeight, format_tag::FormatTag, tchar::TChar};
     use std::collections::HashSet;
@@ -4093,6 +4094,177 @@ mod row_epoch_tests {
             first_set.is_disjoint(&second_set),
             "the no-cached-merge fallback must issue fresh stamps on every call, \
              never repeating a previous fallback's values: first={first:?} second={second:?}"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // 11 / 12 — Task 124.C5: an image placed over already-blank cells
+    //     under an identical tag is invisible to the epoch (paired
+    //     defect + control)
+    // ────────────────────────────────────────────────────────────────
+
+    /// Minimal `ImagePlacement` for these tests. Duplicated from
+    /// `row.rs`'s private `make_image_placement` test helper rather than
+    /// made visible across the module boundary, matching this module's
+    /// stated convention of staying self-contained.
+    fn make_test_image_placement(image_id: u64) -> ImagePlacement {
+        ImagePlacement {
+            image_id,
+            col_in_image: 0,
+            row_in_image: 0,
+            protocol: ImageProtocol::Kitty,
+            image_number: None,
+            placement_id: None,
+            z_index: 0,
+            source_crop: None,
+            placement_instance: 1,
+            subcell_offset: None,
+        }
+    }
+
+    /// Build the same 20x6 plain buffer as [`build_plain_buffer`], then
+    /// explicitly materialize columns `5..=target_col` of `target_row` as
+    /// literal, already-written space cells under the buffer's current
+    /// (default) tag.
+    ///
+    /// This gap-filling step matters: `Buffer::set_image_cell_at` pads any
+    /// column gap that does not yet exist in the row's stored `Vec<Cell>`
+    /// with `Cell::blank_with_tag(FormatTag::default())`, which would grow
+    /// the row's merged `chars` from 5 entries (just `"rowNN"`) to however
+    /// many are needed to reach `target_col` — bumping the epoch for an
+    /// unrelated, mundane reason (a length change) rather than the 124.C5
+    /// blind spot under test. Writing the spaces explicitly first, under
+    /// the same default tag `set_image_cell_at` would otherwise pad with,
+    /// means the image placement below changes only the `image` field of a
+    /// cell that already exists — the one thing 124.C5 is actually about.
+    fn buffer_with_materialized_gap(target_row: usize, target_col: usize) -> Buffer {
+        let mut buf = build_plain_buffer(20, 6);
+        buf.set_cursor_pos(Some(5), Some(target_row));
+        buf.insert_text(&text(&" ".repeat(target_col - 5 + 1)));
+        buf
+    }
+
+    /// **This test asserts a DEFECT, not a spec.** It pins plan subtask
+    /// 124.C5: `Buffer::flatten_row` reads only `cell.tchar()` and
+    /// `cell.tag()` — it never reads `cell.image_placement()`.
+    /// `Cell::image_cell` stamps the cell's *value* as `TChar::Space` under
+    /// whatever `FormatTag` is passed, so placing an inline image over
+    /// cells that already hold literal spaces under an identical tag
+    /// leaves the row's merged `chars`, `tags`, and `line_width` —
+    /// `RowRenderBasis`'s entire comparison surface — byte-identical
+    /// before and after. The row's epoch is therefore carried forward
+    /// while its rendered pixels changed: an image now covers cells the
+    /// GUI believes are unchanged and will not repaint.
+    ///
+    /// When 124.C5 is fixed, the final assertion below must be INVERTED
+    /// (the epoch must bump), not deleted — matching this repo's
+    /// established idiom for pinned, currently-shipped defects (see
+    /// 124.9's `a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload`
+    /// and 124.16's `a_scroll_by_one_line_hits_nothing`). See the paired
+    /// control `writing_text_over_those_same_cells_does_bump_the_row_epoch`
+    /// below, which proves this is an image-specific blind spot and not a
+    /// frozen stamp or a broken fixture.
+    #[test]
+    fn placing_an_image_over_identical_spaces_does_not_bump_the_row_epoch() {
+        const TARGET_ROW: usize = 2;
+        const TARGET_COL: usize = 10;
+        const WIDTH: usize = 20;
+
+        let mut buf = buffer_with_materialized_gap(TARGET_ROW, TARGET_COL);
+        let tag = buf.current_tag.clone();
+
+        let (chars_before, _tags_before, row_offsets_before, _) = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        let (r_start, r_end) = row_char_span(&row_offsets_before, chars_before.len(), TARGET_ROW);
+        let row_chars_before = chars_before[r_start..r_end].to_vec();
+        assert_eq!(
+            row_chars_before.get(TARGET_COL),
+            Some(&TChar::Space),
+            "test setup: the target cell must already be a literal space \
+             before the image is placed over it"
+        );
+
+        let placements_before = buf.visible_image_placements(0);
+        assert!(
+            placements_before[TARGET_ROW * WIDTH + TARGET_COL].is_none(),
+            "test setup: the target cell must not already carry an image"
+        );
+
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, make_test_image_placement(1), tag);
+
+        // Evidence the placement really landed: without this, the test
+        // could pass by accident if the image was silently never placed.
+        let placements_after = buf.visible_image_placements(0);
+        assert!(
+            placements_after[TARGET_ROW * WIDTH + TARGET_COL].is_some(),
+            "test setup did not actually place an image over the target cell; \
+             this test would prove nothing"
+        );
+
+        let (chars_after, _tags_after, row_offsets_after, _) = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        let (r_start_after, r_end_after) =
+            row_char_span(&row_offsets_after, chars_after.len(), TARGET_ROW);
+        let row_chars_after = chars_after[r_start_after..r_end_after].to_vec();
+
+        // Evidence the merged `chars` really are byte-identical: without
+        // this, the test could pass because something else — not the
+        // image-only blind spot — happened to leave the row unchanged.
+        assert_eq!(
+            row_chars_before, row_chars_after,
+            "test setup: row {TARGET_ROW}'s merged chars must be byte-identical \
+             before and after placing the image, isolating the image-only blind spot"
+        );
+
+        assert_eq!(
+            before_epochs, after_epochs,
+            "DEFECT (124.C5): Buffer::flatten_row never reads \
+             cell.image_placement(), so placing an image over cells that \
+             already render as identical spaces under an identical tag \
+             currently leaves every row's epoch unchanged even though the \
+             row's rendered pixels changed. When 124.C5 is fixed this \
+             assertion must be INVERTED (the epoch must bump), not deleted \
+             — see the paired control \
+             writing_text_over_those_same_cells_does_bump_the_row_epoch."
+        );
+    }
+
+    #[test]
+    fn writing_text_over_those_same_cells_does_bump_the_row_epoch() {
+        // Paired control for the defect above: identical setup, but
+        // writing ordinary (non-image) text over the same
+        // already-materialized cell does bump the row's epoch. This
+        // proves the defect test above pins an image-specific blind spot
+        // in the comparison basis, not a frozen/degenerate stamp or a
+        // broken fixture that happens to leave everything unchanged.
+        const TARGET_ROW: usize = 2;
+        const TARGET_COL: usize = 10;
+
+        let mut buf = buffer_with_materialized_gap(TARGET_ROW, TARGET_COL);
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        buf.set_cursor_pos(Some(TARGET_COL), Some(TARGET_ROW));
+        buf.insert_text(&text("Z"));
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        let mut expected = before_epochs.clone();
+        expected[TARGET_ROW] = after_epochs[TARGET_ROW];
+        assert_eq!(
+            after_epochs, expected,
+            "only row {TARGET_ROW}'s epoch may differ when only its target \
+             cell's text changes"
+        );
+        assert_ne!(
+            before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
+            "writing ordinary text over the same already-materialized cell \
+             must bump the row's epoch — proving the defect test pins an \
+             image-specific blind spot, not a frozen stamp"
         );
     }
 }
