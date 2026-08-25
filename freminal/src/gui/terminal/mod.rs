@@ -12,6 +12,7 @@
 pub(crate) mod coords;
 pub(crate) mod frame_dirty;
 pub(crate) mod input;
+pub(crate) mod search_damage;
 pub(crate) mod widget;
 
 pub use widget::FreminalTerminalWidget;

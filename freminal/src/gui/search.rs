@@ -25,7 +25,7 @@
 //! 6. The current match scroll offset is updated by `scroll_to_match()`.
 
 use crossbeam_channel::Sender;
-use egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Ui};
+use egui::{self, Align2, Area, Color32, Frame, Key, Order, Pos2, Rect, Shadow, Ui};
 use freminal_common::buffer_states::tchar::TChar;
 use freminal_terminal_emulator::{io::InputEvent, snapshot::TerminalSnapshot};
 use regex::Regex;
@@ -42,7 +42,7 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// Action produced by the search overlay on a given frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchBarAction {
     /// No action this frame.
     None,
@@ -52,6 +52,76 @@ pub enum SearchBarAction {
     Next,
     /// Navigate to the previous match.
     Prev,
+}
+
+/// Safety classification for a search bar's actual paint bounds this frame
+/// (Task 124.14d).
+///
+/// [`Self::Bounded`] means every pixel [`show_search_bar`] painted this
+/// frame stayed inside [`SearchBarFrame::paint_rect`] -- the caller may
+/// treat the previous and current frame's rect as the search overlay's
+/// complete damage, and does not need to force the whole window `Full`
+/// while search is open. [`Self::TooltipMayEscape`] means a tooltip-bearing
+/// control (Prev, Next, Close, or the match-case checkbox) is hovered this
+/// frame, so egui's hover-delay tooltip may paint outside `paint_rect` once
+/// it appears.
+///
+/// This may over-report during the tooltip delay (safe: a needless repaint
+/// of a small region for a few frames); assuming a tooltip bound that does
+/// not actually exist would under-report (a stale tooltip fragment left on
+/// screen with no later event to correct it) -- the same asymmetry
+/// `frame_dirty::ChangedRows` documents for row-level damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchOverlaySafety {
+    /// The bar's chrome painted only inside `paint_rect` this frame.
+    Bounded,
+    /// A tooltip-bearing control is hovered; chrome may escape `paint_rect`.
+    TooltipMayEscape,
+}
+
+impl SearchOverlaySafety {
+    /// Conservatively combine independent search-overlay paint sources.
+    /// Any source whose tooltip may escape makes the whole overlay
+    /// unbounded for this frame.
+    #[must_use]
+    const fn combine(self, other: Self) -> Self {
+        if matches!(self, Self::TooltipMayEscape) || matches!(other, Self::TooltipMayEscape) {
+            Self::TooltipMayEscape
+        } else {
+            Self::Bounded
+        }
+    }
+}
+
+/// What [`show_search_bar`] actually drew this frame (Task 124.14d).
+///
+/// Replaces the bare [`SearchBarAction`] the function used to return, so the
+/// caller can build the search overlay's exact old/new damage instead of
+/// treating every open-search frame as globally damaging.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchBarFrame {
+    /// The action the user triggered this frame, if any.
+    pub action: SearchBarAction,
+    /// The bar's actual paint bounds this frame, in the same logical-point
+    /// coordinate space as the `terminal_rect` passed in -- the
+    /// `egui::Area`'s own response rect, expanded by the popup frame's
+    /// drop-shadow margin ([`Shadow::margin`]), not a guessed constant. See
+    /// [`expand_by_shadow_margin`].
+    pub paint_rect: Rect,
+    /// Whether this frame's chrome is safely bounded to `paint_rect`.
+    pub safety: SearchOverlaySafety,
+}
+
+/// Expand `area_rect` by a popup frame's drop-shadow margin (Task 124.14d).
+///
+/// Pure and free of any `Ui`/`Context`, so the shadow-margin arithmetic is
+/// unit-testable directly against an asymmetric [`Shadow`] -- proving all
+/// four margins independently -- rather than only reachable through a live
+/// `show_search_bar` call, where a symmetric default shadow would not
+/// distinguish this from a hand-rolled constant.
+#[must_use]
+fn expand_by_shadow_margin(area_rect: Rect, shadow: Shadow) -> Rect {
+    area_rect + shadow.margin()
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +453,133 @@ pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
 //  Overlay UI
 // ---------------------------------------------------------------------------
 
-/// Show the search overlay bar and return the action the user triggered.
+/// Row 1 of the search bar: the text-input field, match counter, and the
+/// Prev/Next/Close buttons. Extracted from [`show_search_bar`] to keep that
+/// function under clippy's `too_many_lines` threshold; not meaningfully
+/// reusable or testable on its own (it needs a live `Ui`), so this is a
+/// pure decomposition, not a new concept.
+///
+/// Returns the action triggered this frame (if any) and the paint-safety
+/// classification of the tooltip-bearing controls (Prev, Next, or Close;
+/// Task 124.14d).
+fn show_search_bar_row_1(
+    ui: &mut Ui,
+    view_state: &mut ViewState,
+    match_count: usize,
+    current: usize,
+) -> (SearchBarAction, SearchOverlaySafety) {
+    let mut action = SearchBarAction::None;
+    let mut safety = SearchOverlaySafety::Bounded;
+
+    ui.horizontal(|ui| {
+        // When the user has typed a query but no matches were found,
+        // tint the text-edit background red so the empty-result state
+        // is visible even without reading the match-count label.
+        let no_matches = !view_state.search_state.query.is_empty() && match_count == 0;
+        // Tint from the palette error color so the no-match
+        // state follows the theme (no hard-coded red).
+        let error_color = ui.visuals().error_fg_color;
+        let no_match_bg =
+            Color32::from_rgba_unmultiplied(error_color.r(), error_color.g(), error_color.b(), 48);
+        let mut text_edit = egui::TextEdit::singleline(&mut view_state.search_state.query)
+            .hint_text("Search…")
+            .desired_width(180.0)
+            .lock_focus(true);
+        if no_matches {
+            text_edit = text_edit.background_color(no_match_bg);
+        }
+
+        // Text input.
+        let response = ui.add(text_edit);
+
+        // Handle Enter / Shift+Enter inside the text field.
+        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            if ui.input(|i| i.modifiers.shift) {
+                action = SearchBarAction::Prev;
+            } else {
+                action = SearchBarAction::Next;
+            }
+        }
+
+        // Handle Escape inside the text field.
+        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+            action = SearchBarAction::Close;
+        }
+
+        // Always request focus when the search bar is open so the
+        // user can start typing immediately.
+        if !response.has_focus() {
+            response.request_focus();
+        }
+
+        // Match counter.
+        ui.label(if match_count == 0 {
+            if view_state.search_state.query.is_empty() {
+                String::new()
+            } else {
+                "No matches".to_string()
+            }
+        } else {
+            format!("{current}/{match_count}")
+        });
+
+        // ← Prev button.
+        let prev_response = ui.button("<").on_hover_text("Previous match");
+        if prev_response.clicked() {
+            action = SearchBarAction::Prev;
+        }
+        // → Next button.
+        let next_response = ui.button(">").on_hover_text("Next match");
+        if next_response.clicked() {
+            action = SearchBarAction::Next;
+        }
+        // Close button.
+        let close_response = ui.button("X").on_hover_text("Close");
+        if close_response.clicked() {
+            action = SearchBarAction::Close;
+        }
+        if prev_response.hovered() || next_response.hovered() || close_response.hovered() {
+            safety = SearchOverlaySafety::TooltipMayEscape;
+        }
+    });
+
+    (action, safety)
+}
+
+/// Row 2 of the search bar: the Regex/match-case toggles and the error
+/// label. Extracted from [`show_search_bar`] for the same reason as
+/// [`show_search_bar_row_1`].
+///
+/// Returns the paint-safety classification of the match-case checkbox (the
+/// only tooltip-bearing control in this row; Task 124.14d). `Regex` has no
+/// tooltip and deliberately does not contribute.
+fn show_search_bar_row_2(
+    ui: &mut Ui,
+    view_state: &mut ViewState,
+    error_msg: Option<&str>,
+) -> SearchOverlaySafety {
+    let mut safety = SearchOverlaySafety::Bounded;
+
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut view_state.search_state.regex_mode, "Regex")
+            .clickable();
+        let case_response = ui
+            .checkbox(&mut view_state.search_state.case_sensitive, "Aa")
+            .clickable()
+            .on_hover_text("Match case");
+        if case_response.hovered() {
+            safety = SearchOverlaySafety::TooltipMayEscape;
+        }
+        if let Some(err) = error_msg {
+            let error_color = ui.visuals().error_fg_color;
+            ui.colored_label(error_color, err);
+        }
+    });
+
+    safety
+}
+
+/// Show the search overlay bar and return what it drew this frame.
 ///
 /// The overlay is rendered as a floating `egui::Area` at the top-right
 /// corner of `terminal_rect`.  It handles its own keyboard input (Enter,
@@ -393,13 +589,18 @@ pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
 /// The function also updates `view_state.search_state.query` in response to
 /// text-field input, but does NOT run the actual search — that is handled by
 /// the caller so it can be deferred or run on a changed-query signal.
+///
+/// Returns a [`SearchBarFrame`] (Task 124.14d) carrying the triggered
+/// [`SearchBarAction`], the bar's actual paint bounds, and whether those
+/// bounds are safe to treat as complete this frame -- see
+/// [`SearchOverlaySafety`].
 pub fn show_search_bar(
     ui: &mut Ui,
     view_state: &mut ViewState,
     terminal_rect: Rect,
     error_msg: Option<&str>,
     pane_id: PaneId,
-) -> SearchBarAction {
+) -> SearchBarFrame {
     let match_count = view_state.search_state.matches.len();
     let current = if match_count > 0 {
         view_state.search_state.current_match + 1
@@ -414,103 +615,32 @@ pub fn show_search_bar(
     let anchor_pos = Pos2::new(terminal_rect.right() - 4.0, terminal_rect.top() + 4.0);
 
     let mut action = SearchBarAction::None;
+    // OR-accumulated across every tooltip-bearing control (Task 124.14d):
+    // Prev, Next, Close, and the "Aa" match-case checkbox. `Regex` has no
+    // tooltip and deliberately does not contribute.
+    let mut safety = SearchOverlaySafety::Bounded;
 
-    Area::new(egui::Id::new("search_overlay").with(pane_id))
+    // Constructed once so the shadow margin used below to compute
+    // `paint_rect` is the exact same `Shadow` value the frame paints with,
+    // not a second, possibly-drifted copy (`Frame` is `Copy`, so capturing
+    // it here and reusing it inside the closure costs nothing).
+    let popup_frame = Frame::popup(ui.style());
+
+    let area_response = Area::new(egui::Id::new("search_overlay").with(pane_id))
         .order(Order::Foreground)
         .pivot(Align2::RIGHT_TOP)
         .fixed_pos(anchor_pos)
         .interactable(true)
         .show(ui.ctx(), |ui| {
-            Frame::popup(ui.style())
+            popup_frame
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_min_width(260.0);
-
-                    // ── Row 1: text input + control buttons ──────────────
-                    ui.horizontal(|ui| {
-                        // When the user has typed a query but no matches were found,
-                        // tint the text-edit background red so the empty-result state
-                        // is visible even without reading the match-count label.
-                        let no_matches =
-                            !view_state.search_state.query.is_empty() && match_count == 0;
-                        // Tint from the palette error color so the no-match
-                        // state follows the theme (no hard-coded red).
-                        let error_color = ui.visuals().error_fg_color;
-                        let no_match_bg = Color32::from_rgba_unmultiplied(
-                            error_color.r(),
-                            error_color.g(),
-                            error_color.b(),
-                            48,
-                        );
-                        let mut text_edit =
-                            egui::TextEdit::singleline(&mut view_state.search_state.query)
-                                .hint_text("Search…")
-                                .desired_width(180.0)
-                                .lock_focus(true);
-                        if no_matches {
-                            text_edit = text_edit.background_color(no_match_bg);
-                        }
-
-                        // Text input.
-                        let response = ui.add(text_edit);
-
-                        // Handle Enter / Shift+Enter inside the text field.
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            if ui.input(|i| i.modifiers.shift) {
-                                action = SearchBarAction::Prev;
-                            } else {
-                                action = SearchBarAction::Next;
-                            }
-                        }
-
-                        // Handle Escape inside the text field.
-                        if response.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-                            action = SearchBarAction::Close;
-                        }
-
-                        // Always request focus when the search bar is open so the
-                        // user can start typing immediately.
-                        if !response.has_focus() {
-                            response.request_focus();
-                        }
-
-                        // Match counter.
-                        ui.label(if match_count == 0 {
-                            if view_state.search_state.query.is_empty() {
-                                String::new()
-                            } else {
-                                "No matches".to_string()
-                            }
-                        } else {
-                            format!("{current}/{match_count}")
-                        });
-
-                        // ← Prev button.
-                        if ui.button("<").on_hover_text("Previous match").clicked() {
-                            action = SearchBarAction::Prev;
-                        }
-                        // → Next button.
-                        if ui.button(">").on_hover_text("Next match").clicked() {
-                            action = SearchBarAction::Next;
-                        }
-                        // Close button.
-                        if ui.button("X").on_hover_text("Close").clicked() {
-                            action = SearchBarAction::Close;
-                        }
-                    });
-
-                    // ── Row 2: toggles + error ────────────────────────────
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut view_state.search_state.regex_mode, "Regex")
-                            .clickable();
-                        ui.checkbox(&mut view_state.search_state.case_sensitive, "Aa")
-                            .clickable()
-                            .on_hover_text("Match case");
-                        if let Some(err) = error_msg {
-                            let error_color = ui.visuals().error_fg_color;
-                            ui.colored_label(error_color, err);
-                        }
-                    });
+                    let (row_1_action, row_1_safety) =
+                        show_search_bar_row_1(ui, view_state, match_count, current);
+                    action = row_1_action;
+                    safety = safety.combine(row_1_safety);
+                    safety = safety.combine(show_search_bar_row_2(ui, view_state, error_msg));
                 });
         });
 
@@ -519,7 +649,12 @@ pub fn show_search_bar(
         action = SearchBarAction::Close;
     }
 
-    action
+    let paint_rect = expand_by_shadow_margin(area_response.response.rect, popup_frame.shadow);
+    SearchBarFrame {
+        action,
+        paint_rect,
+        safety,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -901,5 +1036,54 @@ mod tests {
         assert_eq!(highlights[0].row, 10); // 100 - 90 = screen row 10
         assert_eq!(highlights[0].col_start, 3);
         assert_eq!(highlights[0].col_end, 7);
+    }
+
+    // ── expand_by_shadow_margin (Task 124.14d) ──────────────────────────────
+
+    /// An asymmetric shadow -- distinct `offset` on each axis, non-zero
+    /// `blur` and `spread` -- so all four margins (`left`, `right`, `top`,
+    /// `bottom`) are proven independently against `epaint::Shadow::margin`'s
+    /// own formula, rather than only a symmetric default that a guessed
+    /// constant could accidentally match.
+    #[test]
+    fn expand_by_shadow_margin_uses_all_four_asymmetric_margins() {
+        let shadow = Shadow {
+            offset: [3, -2],
+            blur: 4,
+            spread: 1,
+            color: Color32::BLACK,
+        };
+        // left = spread + 0.5*blur - offset_x = 1 + 2 - 3 = 0
+        // right = spread + 0.5*blur + offset_x = 1 + 2 + 3 = 6
+        // top = spread + 0.5*blur - offset_y = 1 + 2 - (-2) = 5
+        // bottom = spread + 0.5*blur + offset_y = 1 + 2 + (-2) = 1
+        let area_rect = Rect::from_min_max(Pos2::new(100.0, 100.0), Pos2::new(200.0, 150.0));
+
+        let expanded = expand_by_shadow_margin(area_rect, shadow);
+
+        assert_eq!(expanded.min.x.to_bits(), 100.0_f32.to_bits(), "left margin");
+        assert_eq!(
+            expanded.max.x.to_bits(),
+            206.0_f32.to_bits(),
+            "right margin"
+        );
+        assert_eq!(expanded.min.y.to_bits(), 95.0_f32.to_bits(), "top margin");
+        assert_eq!(
+            expanded.max.y.to_bits(),
+            151.0_f32.to_bits(),
+            "bottom margin"
+        );
+    }
+
+    /// A zero shadow (no offset, no blur, no spread) must expand by
+    /// nothing on every side -- the degenerate case that would hide a sign
+    /// error if it were the only case tested.
+    #[test]
+    fn expand_by_shadow_margin_zero_shadow_is_a_no_op() {
+        let area_rect = Rect::from_min_max(Pos2::new(10.0, 20.0), Pos2::new(30.0, 40.0));
+
+        let expanded = expand_by_shadow_margin(area_rect, Shadow::NONE);
+
+        assert_eq!(expanded, area_rect);
     }
 }

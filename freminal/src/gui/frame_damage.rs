@@ -16,7 +16,7 @@
 //! handful of booleans and per-pane facts the original block actually read
 //! — so it is directly unit-testable.
 
-use crate::gui::renderer::PaneFrameDamage;
+use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
 
 /// What one rendered pane contributed to this frame's damage decision.
 ///
@@ -38,6 +38,15 @@ pub struct PaneDamageInput {
     pub(crate) bell_active: bool,
     /// `pane.render_cache.last_frame_cursor_damage` for this pane.
     pub(crate) cursor_damage: PaneFrameDamage,
+    /// This pane's search-overlay popup damage rects this frame (Task
+    /// 124.14d), from `pane.render_cache.search_overlay_damage_rects()` --
+    /// the deduplicated union of the search bar's previous and current
+    /// paint bounds. Unioned into this frame's damage independently of
+    /// `cursor_damage`: a query with no visible matches still moves the
+    /// floating popup, and a bounded/`Unchanged` pane can still have moved
+    /// it. Never populated except by the caller; `Vec::new()` when search
+    /// is closed or was already settled closed last frame.
+    pub(crate) search_overlay_rects: Vec<CursorDamage>,
 }
 
 /// Decide this frame's [`freminal_windowing::FrameDamage`] — the #435
@@ -76,7 +85,12 @@ pub struct PaneDamageInput {
 ///      `rects` (never empty by construction).
 ///    - `cursor_damage == CursorOnly(None)` or `Full` -> clear any
 ///      collected rects and stop -> `Full`.
-///    - `cursor_damage == Unchanged` -> contributes nothing, continue.
+///    - `cursor_damage == Unchanged` -> contributes nothing on its own.
+///    - Then (Task 124.14d), unless this pane already cleared-and-stopped
+///      above: push every rect in `search_overlay_rects`. This is
+///      independent of `cursor_damage`'s own class -- the search overlay's
+///      popup can move on a frame the terminal band itself reports
+///      `Unchanged`.
 /// 4. If no rects were collected (either the loop never pushed one, or it
 ///    was cleared by a later pane), the result is `Full`; otherwise it is
 ///    `Partial(rects)`.
@@ -138,6 +152,21 @@ pub fn decide_frame_damage(
                 break;
             }
         }
+        rects.extend(
+            pane.search_overlay_rects
+                .iter()
+                .map(|d| freminal_windowing::DamageRect {
+                    x: d.x,
+                    y: d.y,
+                    width: d.width,
+                    height: d.height,
+                }),
+        );
+        // Task 124.14d: the search overlay's popup damage is independent
+        // of this pane's own terminal-content damage class -- a bounded or
+        // `Unchanged` pane can still have moved its floating search bar.
+        // Only reached when the match above did not already
+        // clear-and-break this frame to `Full`.
     }
 
     if rects.is_empty() {
@@ -213,6 +242,7 @@ mod tests {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::Unchanged,
+            search_overlay_rects: Vec::new(),
         }
     }
 
@@ -220,6 +250,7 @@ mod tests {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::CursorOnly(Some(d)),
+            search_overlay_rects: Vec::new(),
         }
     }
 
@@ -229,6 +260,38 @@ mod tests {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::Region(rects),
+            search_overlay_rects: Vec::new(),
+        }
+    }
+
+    /// A pane reporting [`PaneFrameDamage::Full`], with no search overlay
+    /// damage (Task 124.14d test helper).
+    fn full_pane() -> PaneDamageInput {
+        PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::Full,
+            search_overlay_rects: Vec::new(),
+        }
+    }
+
+    /// A pane with `bell_active: true` and otherwise-`Unchanged` cursor
+    /// damage and no search overlay damage (Task 124.14d test helper).
+    fn bell_pane() -> PaneDamageInput {
+        PaneDamageInput {
+            bell_active: true,
+            cursor_damage: PaneFrameDamage::Unchanged,
+            search_overlay_rects: Vec::new(),
+        }
+    }
+
+    /// A pane whose ONLY contribution is search-overlay popup damage
+    /// (Task 124.14d): `Unchanged` terminal-content damage, with the given
+    /// popup rects.
+    fn search_overlay_pane(rects: Vec<CursorDamage>) -> PaneDamageInput {
+        PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::Unchanged,
+            search_overlay_rects: rects,
         }
     }
 
@@ -508,13 +571,7 @@ mod tests {
             width: 3,
             height: 4,
         };
-        let panes = [
-            region_pane(vec![d]),
-            PaneDamageInput {
-                bell_active: false,
-                cursor_damage: PaneFrameDamage::Full,
-            },
-        ];
+        let panes = [region_pane(vec![d]), full_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -540,6 +597,141 @@ mod tests {
         ];
         let damage = decide_frame_damage(false, false, &panes);
         assert_partial(&damage, &[rect(0, 0, 80, 16), rect(100, 50, 8, 16)]);
+    }
+
+    // ── Search-overlay popup damage (Task 124.14d) ──────────────────────
+
+    /// The base case named in the subtask spec: an `Unchanged` terminal
+    /// pane with search-overlay popup damage must still present `Partial`
+    /// on the popup rect -- the popup's own damage does not depend on the
+    /// terminal band having changed at all.
+    #[test]
+    fn unchanged_pane_with_search_overlay_rect_is_partial() {
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [search_overlay_pane(vec![popup])];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(500, 10, 60, 24)]);
+    }
+
+    /// A pane reporting real cursor/row damage (`CursorOnly` or `Region`)
+    /// AND search-overlay popup damage must present both, in order (the
+    /// pane's own damage first, then the popup's).
+    #[test]
+    fn cursor_only_rect_plus_search_overlay_rect_is_partial_with_both_in_order() {
+        let cursor_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 16,
+        };
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::CursorOnly(Some(cursor_rect)),
+            search_overlay_rects: vec![popup],
+        }];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(0, 0, 8, 16), rect(500, 10, 60, 24)]);
+    }
+
+    /// A `Region` pane's own rects and its search-overlay popup rects must
+    /// both survive aggregation, in order.
+    #[test]
+    fn region_rect_plus_search_overlay_rect_is_partial_with_both_in_order() {
+        let region_rect = CursorDamage {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 16,
+        };
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::Region(vec![region_rect]),
+            search_overlay_rects: vec![popup],
+        }];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(0, 0, 80, 16), rect(500, 10, 60, 24)]);
+    }
+
+    /// `Full` still clears a pane's own search-overlay popup rects -- a
+    /// pane that needs a full rebuild has already made the popup's own
+    /// bound moot.
+    #[test]
+    fn full_pane_clears_its_own_search_overlay_rects() {
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [PaneDamageInput {
+            bell_active: false,
+            cursor_damage: PaneFrameDamage::Full,
+            search_overlay_rects: vec![popup],
+        }];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// A bell in one pane still clears a DIFFERENT pane's search-overlay
+    /// popup rects, same as it clears any other pane's rects.
+    #[test]
+    fn bell_clears_a_sibling_panes_search_overlay_rects() {
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [search_overlay_pane(vec![popup]), bell_pane()];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// Opening the search overlay (previous popup `None`, current
+    /// `Some`) contributes damage on its own, with no terminal-content
+    /// damage required.
+    #[test]
+    fn opening_search_overlay_rect_requires_no_terminal_damage() {
+        let popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [search_overlay_pane(vec![popup])];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(500, 10, 60, 24)]);
+    }
+
+    /// Closing the search overlay (only the previous popup rect
+    /// remains, erasing it) likewise contributes damage on its own, with
+    /// no terminal-content damage required.
+    #[test]
+    fn closing_search_overlay_rect_requires_no_terminal_damage() {
+        let previous_popup = CursorDamage {
+            x: 500,
+            y: 10,
+            width: 60,
+            height: 24,
+        };
+        let panes = [search_overlay_pane(vec![previous_popup])];
+        let damage = decide_frame_damage(false, false, &panes);
+        assert_partial(&damage, &[rect(500, 10, 60, 24)]);
     }
 
     // ── Bounding a pane's own full rebuild (Task 124.21 finding 2 fix) ──
@@ -587,13 +779,7 @@ mod tests {
             width: 960,
             height: 1080,
         };
-        let panes = [
-            region_pane(vec![sibling_rect]),
-            PaneDamageInput {
-                bell_active: false,
-                cursor_damage: PaneFrameDamage::Full,
-            },
-        ];
+        let panes = [region_pane(vec![sibling_rect]), full_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -610,13 +796,7 @@ mod tests {
             width: 960,
             height: 1080,
         };
-        let panes = [
-            region_pane(vec![sibling_rect]),
-            PaneDamageInput {
-                bell_active: true,
-                cursor_damage: PaneFrameDamage::Unchanged,
-            },
-        ];
+        let panes = [region_pane(vec![sibling_rect]), bell_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -628,13 +808,7 @@ mod tests {
             width: 8,
             height: 16,
         };
-        let panes = [
-            cursor_only_pane(d),
-            PaneDamageInput {
-                bell_active: true,
-                cursor_damage: PaneFrameDamage::Unchanged,
-            },
-        ];
+        let panes = [cursor_only_pane(d), bell_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -643,16 +817,14 @@ mod tests {
         let panes = [PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::CursorOnly(None),
+            search_overlay_rects: Vec::new(),
         }];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
     #[test]
     fn pane_full_forces_full() {
-        let panes = [PaneDamageInput {
-            bell_active: false,
-            cursor_damage: PaneFrameDamage::Full,
-        }];
+        let panes = [full_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -673,13 +845,7 @@ mod tests {
             width: 8,
             height: 16,
         };
-        let panes = [
-            cursor_only_pane(d),
-            PaneDamageInput {
-                bell_active: false,
-                cursor_damage: PaneFrameDamage::Full,
-            },
-        ];
+        let panes = [cursor_only_pane(d), full_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 

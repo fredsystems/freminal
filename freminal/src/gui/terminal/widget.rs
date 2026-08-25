@@ -1575,6 +1575,12 @@ pub struct PaneRenderCache {
     /// published type's own per-frame rebuild discipline rather than this
     /// field directly.
     pub(crate) terminal_rect_origin: freminal_common::geometry::Point,
+    /// Cross-frame search-overlay damage state (Task 124.14d): the
+    /// highlight rows and popup paint bounds the search overlay actually
+    /// drew, so a bounded rebuild can union the old/new extents into its
+    /// damage instead of forcing `Full` while search is open. See
+    /// [`super::search_damage::SearchDamageState`] for the full invariant.
+    pub(super) search_damage: super::search_damage::SearchDamageState,
 }
 
 impl PaneRenderCache {
@@ -1618,6 +1624,7 @@ impl PaneRenderCache {
             last_frame_cursor_damage: crate::gui::renderer::PaneFrameDamage::Unchanged,
             pending_repaint_delay: None,
             terminal_rect_origin: freminal_common::geometry::point(0.0, 0.0),
+            search_damage: super::search_damage::SearchDamageState::new(),
         }
     }
 
@@ -1646,6 +1653,24 @@ impl PaneRenderCache {
     #[must_use]
     pub(crate) const fn hover_tooltip_active(&self) -> bool {
         self.cached_hovered_url.is_some()
+    }
+
+    /// This pane's search-overlay safety classification this frame (Task
+    /// 124.14d) -- see [`crate::gui::search::SearchOverlaySafety`]. Mirrors
+    /// [`Self::hover_tooltip_active`]'s narrow-accessor pattern:
+    /// `search_damage` stays `pub(super)` (render-pipeline internal), and
+    /// `app_impl.rs`'s chrome-damage aggregation reads only this
+    /// classification, not the state.
+    #[must_use]
+    pub(crate) const fn search_overlay_safety(&self) -> crate::gui::search::SearchOverlaySafety {
+        self.search_damage.safety()
+    }
+
+    /// This pane's search-overlay popup damage rects this frame (Task
+    /// 124.14d), for `frame_damage::PaneDamageInput::search_overlay_rects`.
+    #[must_use]
+    pub(crate) fn search_overlay_damage_rects(&self) -> &[crate::gui::renderer::CursorDamage] {
+        self.search_damage.overlay_damage_rects()
     }
 
     /// Record that this pane observed `row_epochs` this frame and report
@@ -1863,22 +1888,54 @@ fn full_pane_rebuild_damage_rect(
     vp_top_px: f32,
     fb_height_px: i32,
 ) -> Option<crate::gui::renderer::CursorDamage> {
-    // Checked explicitly, ahead of `from_cursor_cells`: that function pads
-    // every cell outward by 1px on every side before clamping, so a
-    // genuinely zero-width or zero-height cell would NOT naturally come out
-    // `None` there (it would come out a spurious ~2px-wide sliver instead).
-    // Only a fully out-of-framebuffer rect degenerates inside
-    // `from_cursor_cells` itself. Catching zero/negative extent here is
-    // what actually delivers "zero or negative width/height falls back to
-    // `Full`" rather than relying on padding to do it by accident.
-    if pane_rect.width() <= 0.0 || pane_rect.height() <= 0.0 {
+    rect_damage_relative_to_terminal(
+        pane_rect,
+        terminal_rect,
+        ppp,
+        vp_left_px,
+        vp_top_px,
+        fb_height_px,
+    )
+}
+
+/// Shared coordinate transform behind [`full_pane_rebuild_damage_rect`] and
+/// the search-overlay popup-rect conversion (Task 124.14d, see `show`'s
+/// search-overlay block): convert a rect in the same logical-point space as
+/// `terminal_rect` -- which may extend outside it, as both a pane's own
+/// gutter-inclusive bounds and a floating popup anchored elsewhere in the
+/// pane do -- into a [`crate::gui::renderer::CursorDamage`] rect, relative
+/// to the viewport origin `vp_left_px`/`vp_top_px` already measure from.
+/// Reusing one function for both callers is what stops them silently
+/// drifting apart on the exact conversion (124.14a's design decision, the
+/// same reasoning behind hoisting `vp_left_px`/`vp_top_px`/`fb_height_px`
+/// themselves into [`viewport_framebuffer_geometry`]).
+///
+/// Returns `None` for a degenerate (zero/negative extent) or unconvertible
+/// (fully clamped away) rect -- checked explicitly ahead of
+/// `CursorDamage::from_cursor_cells`, which pads every cell outward by 1px
+/// on every side before clamping, so a genuinely zero-width or zero-height
+/// cell would NOT naturally come out `None` there (it would come out a
+/// spurious ~2px-wide sliver instead). Only a fully out-of-framebuffer rect
+/// degenerates inside `from_cursor_cells` itself. Catching zero/negative
+/// extent here is what actually delivers "zero or negative width/height
+/// falls back to the caller's unbounded case" rather than relying on
+/// padding to do it by accident.
+fn rect_damage_relative_to_terminal(
+    rect: egui::Rect,
+    terminal_rect: egui::Rect,
+    ppp: f32,
+    vp_left_px: f32,
+    vp_top_px: f32,
+    fb_height_px: i32,
+) -> Option<crate::gui::renderer::CursorDamage> {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
     let cell = (
-        (pane_rect.min.x - terminal_rect.min.x) * ppp,
-        (pane_rect.min.y - terminal_rect.min.y) * ppp,
-        pane_rect.width() * ppp,
-        pane_rect.height() * ppp,
+        (rect.min.x - terminal_rect.min.x) * ppp,
+        (rect.min.y - terminal_rect.min.y) * ppp,
+        rect.width() * ppp,
+        rect.height() * ppp,
     );
     crate::gui::renderer::CursorDamage::from_cursor_cells(
         vp_left_px,
@@ -1886,6 +1943,26 @@ fn full_pane_rebuild_damage_rect(
         fb_height_px,
         &[cell],
     )
+}
+
+/// Compute the terminal viewport's top-left corner in physical framebuffer
+/// pixels, plus the framebuffer height, from egui's own screen rect and
+/// `ppp`. Shared by the cursor-only/bounded-damage full-rebuild arms
+/// (hoisted at Task 124.14a) and the search-overlay popup-rect conversion
+/// (Task 124.14d, computed again here because that block runs outside the
+/// `!snap.skip_draw` guard the first computation lives inside) so a second
+/// hand-rolled version cannot drift from the first.
+fn viewport_framebuffer_geometry(ui: &Ui, terminal_rect: egui::Rect, ppp: f32) -> (f32, f32, i32) {
+    let vp_left_px = terminal_rect.min.x * ppp;
+    let vp_top_px = terminal_rect.min.y * ppp;
+    let screen_h_logical = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.max.y));
+    let fb_height_px: i32 = (screen_h_logical * ppp)
+        .ceil()
+        .approx_as_by::<i32, conv2::RoundToNearest>()
+        .unwrap_or(0);
+    (vp_left_px, vp_top_px, fb_height_px)
 }
 
 /// Whether -- and how -- a frame's full vertex rebuild can report bounded
@@ -1916,11 +1993,21 @@ enum FullRebuildDamage {
 /// space -- see the two Task 124.14b-ii fields' doc comments for why no
 /// further conversion happens inside [`build_bounded_damage`] itself.
 ///
+/// The search fields (Task 124.14d) differ in shape from selection/hover:
+/// search matches are not necessarily contiguous, so they are borrowed
+/// slices of individual rows rather than a single `(start, end)` span. They
+/// are still already screen-row space, sorted, and deduplicated --
+/// `PaneRenderCache::search_damage` derives them from `search_highlights`
+/// at the `show` call site (already snapshot -> rendered -> screen
+/// translated) rather than re-translating `MatchSpan`s a second time.
+///
 /// Grouped into one `Copy` struct (mirroring `RowDamageGeometry`'s
-/// precedent) so adding the hover pair at Task 124.14b-ii did not push
-/// [`build_bounded_damage`] over clippy's `too_many_arguments` threshold.
+/// precedent) so adding the hover pair at Task 124.14b-ii, and the search
+/// pair at Task 124.14d, did not push [`build_bounded_damage`] over
+/// clippy's `too_many_arguments` threshold. Slice references are `Copy`, so
+/// this stays `Copy` despite the added lifetime.
 #[derive(Clone, Copy)]
-struct BoundedDamageSpans {
+struct BoundedDamageSpans<'a> {
     /// This frame's selection highlight (derived from
     /// `screen_selection_rendered` at the call site, Task 124.14b-i).
     current_selection: Option<(usize, usize)>,
@@ -1937,13 +2024,49 @@ struct BoundedDamageSpans {
     /// ([`PaneRenderCache::previous_command_block_hover_rows`], already
     /// screen-space -- Task 124.14b-ii).
     previous_hover: Option<(usize, usize)>,
+    /// This frame's search-highlight screen rows (Task 124.14d), sorted and
+    /// deduplicated.
+    current_search_rows: &'a [usize],
+    /// The search-highlight screen rows from the last full rebuild
+    /// ([`super::search_damage::SearchDamageState::replace_highlight_rows`]'s
+    /// return value, Task 124.14d), sorted and deduplicated.
+    previous_search_rows: &'a [usize],
+}
+
+/// Whether an empty bounded-damage row union (Task 124.14d) should fall
+/// back to [`crate::gui::renderer::PaneFrameDamage::Full`] or
+/// [`crate::gui::renderer::PaneFrameDamage::Unchanged`].
+///
+/// [`Self::Unchanged`] is correct only when search is the *sole* bounded
+/// source this frame -- `selection_changed` and `hover_changed` are false
+/// and `changed_rows` is [`super::frame_dirty::ChangedRows::None`] -- and
+/// its own old/current highlight-row union came out empty too: a query
+/// with no visible matches before or after still changes the floating
+/// search-bar popup, which the caller unions in separately (via
+/// `frame_damage::PaneDamageInput::search_overlay_rects`), so the terminal
+/// band genuinely contributed nothing this frame and `Unchanged` is the
+/// accurate answer, not a fallback.
+///
+/// Selection, hover, and row sources keep the existing [`Self::Full`]
+/// fallback: an empty union there means their own extent collapsed
+/// entirely behind a fold (see [`build_bounded_damage`]'s doc), which is a
+/// genuine "cannot bound this" case, not "nothing changed" -- reporting
+/// `Unchanged` there would be silent visual corruption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyBoundedDamage {
+    /// Fall back to `PaneFrameDamage::Full`.
+    Full,
+    /// Fall back to `PaneFrameDamage::Unchanged` -- correct only when
+    /// search is the sole bounded source and its own row union is empty.
+    Unchanged,
 }
 
 /// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from every
 /// bounded damage source a [`VertexRebuild::Bounded`] outcome may carry,
-/// falling back to `Full` when no bound can be established (Task 124.14).
+/// falling back to `empty_fallback` when no bound can be established (Task
+/// 124.14, extended by 124.14d).
 ///
-/// Five sources are unioned into one row set before any rect is built:
+/// Seven sources are unioned into one row set before any rect is built:
 ///
 /// - `changed_rows` (Task 124.14a) -- the window rows named by
 ///   [`super::frame_dirty::ChangedRows::Rows`], translated snapshot ->
@@ -1961,25 +2084,32 @@ struct BoundedDamageSpans {
 ///   between two blocks (or off a block entirely) must repaint the
 ///   previously-tinted rows or the stale tint lingers with no later event
 ///   to correct it.
+/// - `spans.current_search_rows` / `spans.previous_search_rows` (Task
+///   124.14d) -- the search-match tint's current and previous frame rows,
+///   for the same erase-the-old/draw-the-new reason as selection and
+///   hover.
 ///
 /// `evaluate_frame_dirty_state` selects [`VertexRebuild::Bounded`] only when
 /// `changed_rows` is [`super::frame_dirty::ChangedRows::Rows`] or
 /// [`super::frame_dirty::ChangedRows::None`] — never
 /// [`super::frame_dirty::ChangedRows::All`] — but the `All` arm below falls
-/// back to `Full` rather than panicking on that unreachable-in-practice
-/// shape, per the panic-free-production rule and consistent with the "an
-/// empty rect set reports `Full`" decision below: an input this function
-/// cannot bound is just another way of having nothing to bound.
+/// back to `Full` (unconditionally, not `empty_fallback` -- an unbounded
+/// input is not the same shape as an empty one) rather than panicking on
+/// that unreachable-in-practice shape, per the panic-free-production rule.
 ///
 /// Snapshot rows that map to nothing (collapsed inside a fold) contribute no
 /// rect via `row_map.snapshot_to_rendered` / `layout.rendered_to_screen`
 /// returning `None`. If every source's row does — the whole change is
-/// hidden behind folds — the result is `Full`, not an empty `Region`: an
-/// empty region would be a third way of spelling "nothing changed", and
-/// `decide_frame_damage` already carries one dead `RequestedWithNoRects`
-/// variant from the last time that shape existed (124.21 finding 4).
+/// hidden behind folds — the result is `empty_fallback`, not an empty
+/// `Region`: an empty region would be a third way of spelling "nothing
+/// changed", and `decide_frame_damage` already carries one dead
+/// `RequestedWithNoRects` variant from the last time that shape existed
+/// (124.21 finding 4). This is the ONLY place `empty_fallback` is read —
+/// once `screen_rows` (below) is non-empty, every subsequent fallback (rows
+/// that survived the union but produced no convertible rect) stays `Full`
+/// unconditionally, per that field's own doc comment.
 ///
-/// All five sources are merged into one sorted, deduplicated row set
+/// All seven sources are merged into one sorted, deduplicated row set
 /// **before** run-merging runs, so overlapping sources (e.g. a changed row
 /// that sits inside the selection, or a hover span that overlaps either)
 /// collapse into one rect rather than several overlapping ones. Contiguous
@@ -1993,10 +2123,11 @@ struct BoundedDamageSpans {
 /// too).
 fn build_bounded_damage(
     changed_rows: &super::frame_dirty::ChangedRows,
-    spans: BoundedDamageSpans,
+    spans: BoundedDamageSpans<'_>,
     row_map: &RowMap,
     layout: &FoldLayout,
     geometry: RowDamageGeometry,
+    empty_fallback: EmptyBoundedDamage,
 ) -> crate::gui::renderer::PaneFrameDamage {
     let mut screen_rows: Vec<usize> = match changed_rows {
         super::frame_dirty::ChangedRows::Rows(rows) => rows
@@ -2024,8 +2155,10 @@ fn build_bounded_damage(
     if let Some((start, end)) = spans.previous_hover {
         screen_rows.extend(start..=end);
     }
+    screen_rows.extend_from_slice(spans.current_search_rows);
+    screen_rows.extend_from_slice(spans.previous_search_rows);
 
-    // Merge all five sources into one sorted, deduplicated set BEFORE
+    // Merge all seven sources into one sorted, deduplicated set BEFORE
     // run-merging, so a row contributed by more than one source (e.g. a
     // changed row inside the selection, or a hover span overlapping either)
     // collapses to a single entry rather than emitting overlapping rects
@@ -2034,7 +2167,10 @@ fn build_bounded_damage(
     screen_rows.dedup();
 
     let Some(&first) = screen_rows.first() else {
-        return crate::gui::renderer::PaneFrameDamage::Full;
+        return match empty_fallback {
+            EmptyBoundedDamage::Full => crate::gui::renderer::PaneFrameDamage::Full,
+            EmptyBoundedDamage::Unchanged => crate::gui::renderer::PaneFrameDamage::Unchanged,
+        };
     };
 
     let mut rects = Vec::new();
@@ -2053,6 +2189,13 @@ fn build_bounded_damage(
     rects.extend(row_run_damage(run_start, run_end, geometry));
 
     if rects.is_empty() {
+        // Deliberately unconditional `Full`, not `empty_fallback`: reaching
+        // here means `screen_rows` named real rows (the check above already
+        // returned for the truly-empty case) that then ALL collapsed inside
+        // a fold. That is "cannot bound this", the same shape `empty_fallback
+        // == Full` documents for selection/hover/row sources, not "search
+        // changed nothing" -- so it must not be read as `Unchanged` even
+        // when `empty_fallback` is `Unchanged`.
         crate::gui::renderer::PaneFrameDamage::Full
     } else {
         crate::gui::renderer::PaneFrameDamage::Region(rects)
@@ -2895,19 +3038,12 @@ impl FreminalTerminalWidget {
             // viewport-to-framebuffer-pixel conversion to build its
             // `PaneFrameDamage::Region` rects, and computing it twice risked
             // the two arms silently drifting apart on the exact conversion.
-            //
-            // Convert the terminal viewport's logical top-left to physical
-            // pixels, and derive the framebuffer height from egui's screen
-            // rect (logical) scaled by `ppp`.
-            let vp_left_px = terminal_rect.min.x * ppp;
-            let vp_top_px = terminal_rect.min.y * ppp;
-            let screen_h_logical = ui
-                .ctx()
-                .input(|i| i.raw.screen_rect.map_or(0.0, |r| r.max.y));
-            let fb_height_px: i32 = (screen_h_logical * ppp)
-                .ceil()
-                .approx_as_by::<i32, conv2::RoundToNearest>()
-                .unwrap_or(0);
+            // `viewport_framebuffer_geometry` is also reused, recomputed,
+            // by the search-overlay popup-rect conversion further below
+            // (Task 124.14d), which runs outside this `!snap.skip_draw`
+            // block and so cannot see this local binding.
+            let (vp_left_px, vp_top_px, fb_height_px) =
+                viewport_framebuffer_geometry(ui, terminal_rect, ppp);
 
             // Task 124.21 finding 2 (the multi-pane fan-out): this pane's own
             // rect, so a full rebuild below can report bounded damage
@@ -3143,6 +3279,19 @@ impl FreminalTerminalWidget {
                                 .collect()
                         };
 
+                    // This frame's search-highlight screen rows (Task
+                    // 124.14d), for `build_bounded_damage`'s union with
+                    // `changed_rows`/selection/hover. Derived from
+                    // `search_highlights` above -- already snapshot ->
+                    // rendered -> screen translated -- rather than
+                    // re-translating `MatchSpan`s a second time. Sorted and
+                    // deduplicated so a broad search costs at most one entry
+                    // per visible row, regardless of full-buffer match count.
+                    let mut current_search_screen_rows: Vec<usize> =
+                        search_highlights.iter().map(|h| h.row).collect();
+                    current_search_screen_rows.sort_unstable();
+                    current_search_screen_rows.dedup();
+
                     // Translate the selection's row indices from snapshot to
                     // bottom-anchored screen space.  If either endpoint sits inside
                     // a folded range or is scrolled off the top, drop the selection
@@ -3331,6 +3480,17 @@ impl FreminalTerminalWidget {
                     // could drift apart.
                     let previous_hover_screen_rows = cache.previous_command_block_hover_rows;
                     cache.previous_command_block_hover_rows = command_block_hover_rows_early;
+                    // Same capture-before-overwrite shape as selection/hover
+                    // above (Task 124.14d): only advances the search-overlay
+                    // highlight-row baseline on a frame that actually ran
+                    // this rebuild body, so a skipped frame cannot advance
+                    // it. `replace_highlight_rows` sorts/dedups internally,
+                    // so `previous_search_screen_rows` is guaranteed sorted
+                    // and deduplicated even though `current_search_screen_rows`
+                    // (above) already was.
+                    let previous_search_screen_rows = cache
+                        .search_damage
+                        .replace_highlight_rows(current_search_screen_rows.clone());
                     cache.previous_term_width = snap.term_width;
                     cache.previous_term_height = snap.term_height;
                     cache.previous_fold_epoch = fold_epoch;
@@ -3354,24 +3514,49 @@ impl FreminalTerminalWidget {
                             .map_or(crate::gui::renderer::PaneFrameDamage::Full, |d| {
                                 crate::gui::renderer::PaneFrameDamage::Region(vec![d])
                             }),
-                        FullRebuildDamage::Bounded => build_bounded_damage(
-                            &dirty.changed_rows,
-                            BoundedDamageSpans {
-                                current_selection: current_selection_screen_rows,
-                                previous_selection: previous_selection_screen_rows,
-                                current_hover: command_block_hover_rows_early,
-                                previous_hover: previous_hover_screen_rows,
-                            },
-                            row_map,
-                            &layout,
-                            RowDamageGeometry {
-                                row_h_f,
-                                viewport_width_px: terminal_rect.width() * ppp,
-                                vp_left_px,
-                                vp_top_px,
-                                fb_height_px,
-                            },
-                        ),
+                        FullRebuildDamage::Bounded => {
+                            // Task 124.14d: `Unchanged` is the accurate
+                            // terminal-band contribution -- not a fallback --
+                            // only when search is the SOLE bounded source
+                            // this frame and its own highlight-row union
+                            // comes out empty too (no visible matches before
+                            // or after). The floating popup's own damage is
+                            // unioned in separately, at the per-pane-frame
+                            // level (see the search-overlay block below).
+                            // Selection/hover/row sources keep the existing
+                            // `Full` fallback -- see `EmptyBoundedDamage`'s
+                            // doc comment.
+                            let empty_fallback = if search_changed
+                                && !selection_changed
+                                && !hover_changed
+                                && !dirty.changed_rows.any()
+                            {
+                                EmptyBoundedDamage::Unchanged
+                            } else {
+                                EmptyBoundedDamage::Full
+                            };
+                            build_bounded_damage(
+                                &dirty.changed_rows,
+                                BoundedDamageSpans {
+                                    current_selection: current_selection_screen_rows,
+                                    previous_selection: previous_selection_screen_rows,
+                                    current_hover: command_block_hover_rows_early,
+                                    previous_hover: previous_hover_screen_rows,
+                                    current_search_rows: &current_search_screen_rows,
+                                    previous_search_rows: &previous_search_screen_rows,
+                                },
+                                row_map,
+                                &layout,
+                                RowDamageGeometry {
+                                    row_h_f,
+                                    viewport_width_px: terminal_rect.width() * ppp,
+                                    vp_left_px,
+                                    vp_top_px,
+                                    fb_height_px,
+                                },
+                                empty_fallback,
+                            )
+                        }
                     };
                 }
             }
@@ -3837,16 +4022,23 @@ impl FreminalTerminalWidget {
 
         // ── Search overlay ───────────────────────────────────────────
         // Run search refresh when query changed (outside the !snap.skip_draw block
-        // to ensure it fires even on identical content frames).
+        // to ensure it fires even on identical content frames). Also update
+        // the cross-frame search-overlay damage state (Task 124.14d)
+        // unconditionally, every frame the widget runs -- not gated on
+        // whether a full rebuild happened -- because the bar's own
+        // caret/hover/text content can change independently of any
+        // terminal-content rebuild.
+        let mut search_popup_rect: Option<crate::gui::renderer::CursorDamage> = None;
+        let mut search_popup_safety = crate::gui::search::SearchOverlaySafety::Bounded;
         if view_state.search_state.is_open {
-            let bar_action = show_search_bar(
+            let bar_frame = show_search_bar(
                 ui,
                 view_state,
                 terminal_rect,
                 search_error.as_deref(),
                 pane_id,
             );
-            match bar_action {
+            match bar_frame.action {
                 SearchBarAction::Next => {
                     view_state.search_state.next_match();
                     scroll_to_match_and_send(view_state, snap, input_tx);
@@ -3860,7 +4052,39 @@ impl FreminalTerminalWidget {
                 }
                 SearchBarAction::None => {}
             }
+
+            // Convert the bar's shadow-expanded logical paint rect into a
+            // `CursorDamage`, relative to `terminal_rect` -- the search
+            // block runs outside the `!snap.skip_draw` guard that
+            // `vp_left_px`/`vp_top_px`/`fb_height_px` were originally
+            // computed inside, so they are recomputed here via the shared
+            // `viewport_framebuffer_geometry` helper rather than a second
+            // hand-rolled version.
+            let (search_vp_left_px, search_vp_top_px, search_fb_height_px) =
+                viewport_framebuffer_geometry(ui, terminal_rect, ppp);
+            match rect_damage_relative_to_terminal(
+                bar_frame.paint_rect,
+                terminal_rect,
+                ppp,
+                search_vp_left_px,
+                search_vp_top_px,
+                search_fb_height_px,
+            ) {
+                Some(rect) => {
+                    search_popup_rect = Some(rect);
+                    search_popup_safety = bar_frame.safety;
+                }
+                None => {
+                    // A degenerate/unconvertible current popup rect is an
+                    // unbounded safety case for this frame (Task 124.14d),
+                    // not a silently-dropped one.
+                    search_popup_safety = crate::gui::search::SearchOverlaySafety::TooltipMayEscape;
+                }
+            }
         }
+        cache
+            .search_damage
+            .finish_overlay_frame(search_popup_rect, search_popup_safety);
 
         // ── URL hover detection ───────────────────────────────────────
         //
@@ -5105,15 +5329,18 @@ mod build_bounded_damage_tests {
         }
     }
 
-    /// [`BoundedDamageSpans`] with every source `None`, so each test below
-    /// only needs to name the one or two sources it actually exercises
-    /// rather than repeating all four `None`s at every call site.
-    const fn no_spans() -> BoundedDamageSpans {
+    /// [`BoundedDamageSpans`] with every source empty/`None`, so each test
+    /// below only needs to name the one or two sources it actually
+    /// exercises rather than repeating every empty source at every call
+    /// site.
+    const fn no_spans() -> BoundedDamageSpans<'static> {
         BoundedDamageSpans {
             current_selection: None,
             previous_selection: None,
             current_hover: None,
             previous_hover: None,
+            current_search_rows: &[],
+            previous_search_rows: &[],
         }
     }
 
@@ -5171,6 +5398,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5200,6 +5428,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5231,6 +5460,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5267,6 +5497,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5296,6 +5527,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5323,6 +5555,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5355,6 +5588,7 @@ mod build_bounded_damage_tests {
             &layout.row_map,
             &layout,
             geometry(),
+            EmptyBoundedDamage::Full,
         );
 
         assert_eq!(
@@ -5365,6 +5599,116 @@ mod build_bounded_damage_tests {
              [2, 6] -- two separate (and here, overlapping) rects would be \
              a bug"
         );
+    }
+
+    // ── Task 124.14d: search-highlight rows ─────────────────────────────
+
+    /// A search-only change (no row change, no selection, no hover) must
+    /// still produce bounded damage, covering BOTH the current highlight
+    /// rows (drawing the new tint) and the previous ones (erasing the old
+    /// one) -- mirrors `selection_only_change_damages_both_current_and_previous_rows`
+    /// and `hover_only_change_damages_both_current_and_previous_rows`.
+    #[test]
+    fn search_only_change_damages_both_current_and_previous_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                current_search_rows: &[2],
+                previous_search_rows: &[5],
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 2), expected_run(5, 5)]),
+            "damage must name both the new search highlight's row (2) and \
+             the old highlight's row (5) as two separate, non-contiguous \
+             rects"
+        );
+    }
+
+    /// Overlapping sources -- a search row that falls inside a changed
+    /// row's run -- must merge into ONE rect, same reasoning as the
+    /// selection/hover overlap tests above.
+    #[test]
+    fn a_search_row_inside_a_changed_run_merges_into_one_rect() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::Rows(vec![2, 3, 4]),
+            BoundedDamageSpans {
+                current_search_rows: &[3],
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 4)]),
+            "search row 3 sits inside the changed run [2, 4], so the union \
+             must merge to exactly one rect"
+        );
+    }
+
+    /// The load-bearing case for Task 124.14d's `EmptyBoundedDamage`
+    /// parameter: search is the sole bounded source, and its own
+    /// current/previous highlight-row union is empty (no visible matches
+    /// before or after -- e.g. a query edit that still matches nothing).
+    /// The terminal-band contribution must be `Unchanged`, not `Full`: the
+    /// popup's own damage is unioned in separately at the per-pane-frame
+    /// level, so escalating the terminal band to `Full` here would be
+    /// pure waste, not correctness.
+    #[test]
+    fn search_only_change_with_no_visible_matches_reports_unchanged() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            no_spans(),
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Unchanged,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Unchanged,
+            "a search-only frame with no visible matches before or after \
+             must report Unchanged, not Full"
+        );
+    }
+
+    /// The control for the test above: with nothing at all bound (the
+    /// shape selection/hover/row sources hit when their own extent
+    /// collapses behind a fold), `EmptyBoundedDamage::Full` must still
+    /// yield `Full` -- proving the enum threads through correctly in both
+    /// directions, not just the new one.
+    #[test]
+    fn nothing_bound_with_full_empty_fallback_reports_full() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            no_spans(),
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(damage, PaneFrameDamage::Full);
     }
 }
 

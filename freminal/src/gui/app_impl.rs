@@ -304,18 +304,25 @@ fn stage_frame_damage(
     let active_tab = win.tabs.active_tab();
     let mut unresolved_pane = false;
     // OR-accumulated across every rendered pane: does ANY of them have an
-    // open overlay that paints ABOVE the terminal band — the
-    // `Order::Foreground` context menu, in-terminal search bar, or
-    // command-history palette, OR the `Order::Tooltip` URL-hover tooltip?
-    // All of these paint as TAIL chrome outside the captured terminal-band
-    // range, so a REPLAY frame (which reuses the stale cached tail) must
-    // not be permitted while one is open, or it would vanish/ghost
-    // (#436.4b fix — see `ChromeSignals::foreground_overlay_open`). The URL
-    // tooltip is driven by `render_cache.cached_hovered_url`, which is
-    // recomputed even under a STATIONARY mouse when PTY output scrolls new
-    // content under the cursor — i.e. it can change on a frame with no
-    // window input event, exactly the frame a REPLAY would otherwise be
-    // chosen.
+    // open overlay whose chrome this frame is NOT provably bounded — the
+    // `Order::Foreground` context menu or command-history palette, the
+    // `Order::Tooltip` URL-hover tooltip, or a search overlay whose safety
+    // classification is `TooltipMayEscape`? This is the *unbounded*
+    // foreground-overlay set, with bounded search as the named exception
+    // (Task 124.14d): a normal (bounded) search frame no longer sets this
+    // signal, because its highlight-row and popup-rect geometry already
+    // joined `FrameDamage` directly (see `PaneDamageInput::search_overlay_rects`
+    // and `build_bounded_damage`'s `EmptyBoundedDamage` handling in
+    // `widget.rs`) rather than needing the coarse "paint everything" escape
+    // hatch this signal represents. Every OTHER foreground overlay paints
+    // as TAIL chrome outside the captured terminal-band range, so a REPLAY
+    // frame (which reuses the stale cached tail) must not be permitted
+    // while one is open, or it would vanish/ghost (#436.4b fix — see
+    // `ChromeSignals::foreground_overlay_open`). The URL tooltip is driven
+    // by `render_cache.cached_hovered_url`, which is recomputed even under
+    // a STATIONARY mouse when PTY output scrolls new content under the
+    // cursor — i.e. it can change on a frame with no window input event,
+    // exactly the frame a REPLAY would otherwise be chosen.
     let mut foreground_overlay_open = false;
     // Diagnostic: capture the active pane's per-frame damage class (reused
     // from the #435 signal) for the frame-attribution stats flushed by the
@@ -335,16 +342,29 @@ fn stage_frame_damage(
             foreground_overlay_open = true;
             break;
         };
-        foreground_overlay_open |= pane.view_state.context_menu_pos.is_some()
-            || pane.view_state.search_state.is_open
-            || pane.view_state.command_history.is_open
-            || pane.render_cache.hover_tooltip_active();
+        // Task 124.14d: normal (bounded) search no longer sets this signal
+        // -- its geometry already joined `FrameDamage` via
+        // `PaneDamageInput::search_overlay_rects` below. Only a
+        // tooltip-escaping search frame counts, alongside the other
+        // genuinely-unbounded per-pane overlays. Extracted to
+        // `chrome_damage::pane_forces_foreground_overlay_open` (a pure,
+        // named-input decision) so this OR-scan is unit-testable without a
+        // full pane tree.
+        foreground_overlay_open |= chrome_damage::pane_forces_foreground_overlay_open(
+            chrome_damage::PaneForegroundOverlayInputs {
+                context_menu_open: pane.view_state.context_menu_pos.is_some(),
+                command_history_open: pane.view_state.command_history.is_open,
+                hover_tooltip_active: pane.render_cache.hover_tooltip_active(),
+                search_overlay_safety: pane.render_cache.search_overlay_safety(),
+            },
+        );
         if *pane_id == active_pane_id {
             active_pane_damage = Some(pane.render_cache.last_frame_cursor_damage.clone());
         }
         per_pane_damage.push(frame_damage::PaneDamageInput {
             bell_active: pane.view_state.bell_since.is_some(),
             cursor_damage: pane.render_cache.last_frame_cursor_damage.clone(),
+            search_overlay_rects: pane.render_cache.search_overlay_damage_rects().to_vec(),
         });
     }
     let decided = frame_damage::decide_frame_damage(
@@ -2964,8 +2984,10 @@ impl freminal_windowing::App for FreminalGui {
             // zero-pixel-change-but-presented counter.
             //
             // `zero_change_presented` counts frames where every pane in
-            // `per_pane_damage` reported `Unchanged` (no bell) and neither
-            // `force_full`/`unresolved_pane` nor `toast_active` applied --
+            // `per_pane_damage` reported `Unchanged`, no pane contributed
+            // search-overlay popup rects (Task 124.14d), no bell fired, and
+            // neither `force_full`/`unresolved_pane` nor `toast_active`
+            // applied --
             // exactly the case `decide_frame_damage` has no representation
             // for "nothing changed" distinct from "something needs a full
             // rebuild": both fall through to `FrameDamage::Full` once the
@@ -2985,6 +3007,7 @@ impl freminal_windowing::App for FreminalGui {
                     && !toast_active
                     && per_pane_damage.iter().all(|p| {
                         !p.bell_active
+                            && p.search_overlay_rects.is_empty()
                             && matches!(
                                 &p.cursor_damage,
                                 crate::gui::renderer::PaneFrameDamage::Unchanged
@@ -4628,6 +4651,7 @@ mod tests {
                 width: 8,
                 height: 16,
             })),
+            search_overlay_rects: Vec::new(),
         }];
         let pre_composition = frame_damage::decide_frame_damage(false, false, &per_pane_damage);
         assert!(
