@@ -79,25 +79,35 @@ pub struct PaneDamageInput {
 /// 3. Otherwise, `per_pane_damage` is walked in order (this must be the
 ///    same order as `pane_layout`, i.e. only the panes actually rendered
 ///    this frame):
-///    - `bell_active` -> clear any collected rects and stop -> `Full`.
+///    - `bell_active` -> return `Full` immediately, discarding any rects
+///      collected from earlier panes.
 ///    - `cursor_damage == CursorOnly(Some(rect))` -> push `rect`.
 ///    - `cursor_damage == Region(rects)` (Task 124.14) -> push every rect in
 ///      `rects` (never empty by construction).
-///    - `cursor_damage == CursorOnly(None)` or `Full` -> clear any
-///      collected rects and stop -> `Full`.
+///    - `cursor_damage == CursorOnly(None)` or `Full` -> return `Full`
+///      immediately, discarding any rects collected from earlier panes.
 ///    - `cursor_damage == Unchanged` -> contributes nothing on its own.
-///    - Then (Task 124.14d), unless this pane already cleared-and-stopped
+///    - Then (Task 124.14d), unless this pane already returned `Full`
 ///      above: push every rect in `search_overlay_rects`. This is
 ///      independent of `cursor_damage`'s own class -- the search overlay's
 ///      popup can move on a frame the terminal band itself reports
 ///      `Unchanged`.
-/// 4. If no rects were collected (either the loop never pushed one, or it
-///    was cleared by a later pane), the result is `Full`; otherwise it is
+/// 4. If every pane in the loop above finished without returning `Full`
+///    (Task 124.2 makes this structural -- `bell_active`, `CursorOnly(None)`,
+///    and `Full` each `return freminal_windowing::FrameDamage::Full`
+///    directly, rather than setting a flag the loop checks afterward), the
+///    result depends on what was collected: if no rects were collected at
+///    all -- every rendered pane's own damage was `Unchanged` and no pane
+///    contributed search-overlay rects either -- the result is
+///    [`freminal_windowing::FrameDamage::None`] (Task 124.2): nothing
+///    whatsoever changed this frame, so the windowing layer may skip the
+///    clear and every GL primitive paint entirely rather than presenting a
+///    frame that changed zero pixels. Otherwise the result is
 ///    `Partial(rects)`.
 ///
 /// An unresolvable pane in the original block behaved identically to a
-/// `bell_active` pane: clear rects and stop -> `Full`. Since this function
-/// has no pane tree to resolve against, that case is represented by the
+/// `bell_active` pane: return `Full` immediately. Since this function has
+/// no pane tree to resolve against, that case is represented by the
 /// **caller** omitting to build a full `per_pane_damage` list and instead
 /// calling this function with `force_full = true` for that frame (there is
 /// no scenario in the real caller where an unresolved pane should do
@@ -126,8 +136,13 @@ pub fn decide_frame_damage(
             // regardless of what this function returns -- so bounding the
             // pane half here would buy nothing and would falsely suggest
             // bell damage is pane-bounded. Do not "fix" this.
-            rects.clear();
-            break;
+            //
+            // Task 124.2: returns `Full` immediately (rather than setting a
+            // flag and breaking out of the loop to check it afterward), so
+            // the precedence of `Full` over the newly possible `None` is
+            // structural -- there is no later branch that could see this
+            // pane's contribution and mistake it for "nothing changed".
+            return freminal_windowing::FrameDamage::Full;
         }
         match &pane.cursor_damage {
             PaneFrameDamage::Unchanged => {}
@@ -148,8 +163,9 @@ pub fn decide_frame_damage(
                 }));
             }
             PaneFrameDamage::CursorOnly(None) | PaneFrameDamage::Full => {
-                rects.clear();
-                break;
+                // Task 124.2: same reasoning as the `bell_active` arm above
+                // -- return `Full` immediately rather than flagging it.
+                return freminal_windowing::FrameDamage::Full;
             }
         }
         rects.extend(
@@ -165,12 +181,20 @@ pub fn decide_frame_damage(
         // Task 124.14d: the search overlay's popup damage is independent
         // of this pane's own terminal-content damage class -- a bounded or
         // `Unchanged` pane can still have moved its floating search bar.
-        // Only reached when the match above did not already
-        // clear-and-break this frame to `Full`.
+        // Only reached when the match above did not already return `Full`.
     }
 
     if rects.is_empty() {
-        freminal_windowing::FrameDamage::Full
+        // Task 124.2: no short-circuit fired (no `force_full`, no
+        // `toast_active`, no bell/degenerate-cursor/pane-`Full` in the
+        // loop above -- any of those returned `Full` immediately) AND no
+        // pane or search overlay pushed a single rect -- every rendered
+        // pane genuinely changed nothing this frame. This is the exact
+        // case the doc comment above (step 4) and
+        // `PLAN_124_RENDER_EFFICIENCY.md`'s 124.2 describe: present
+        // nothing rather than a full clear + present of pixel-identical
+        // content.
+        freminal_windowing::FrameDamage::None
     } else {
         freminal_windowing::FrameDamage::Partial(rects)
     }
@@ -218,6 +242,16 @@ mod tests {
         );
     }
 
+    /// Task 124.2: assert `damage` is [`FrameDamage::None`] -- nothing
+    /// whatsoever changed this frame, so the caller may skip presenting
+    /// entirely.
+    fn assert_none(damage: &FrameDamage) {
+        assert!(
+            matches!(damage, FrameDamage::None),
+            "expected FrameDamage::None, got {damage:?}"
+        );
+    }
+
     fn assert_partial(damage: &FrameDamage, expected_rects: &[DamageRect]) {
         match damage {
             FrameDamage::Partial(rects) => {
@@ -225,6 +259,9 @@ mod tests {
             }
             FrameDamage::Full => {
                 panic!("expected FrameDamage::Partial({expected_rects:?}), got Full")
+            }
+            FrameDamage::None => {
+                panic!("expected FrameDamage::Partial({expected_rects:?}), got None")
             }
         }
     }
@@ -387,7 +424,8 @@ mod tests {
     }
 
     /// OBLIGATION 2, the part the first two tests assumed away — and the
-    /// one that actually explains a full present during pointer motion.
+    /// one that actually explains a full present during pointer motion
+    /// (before Task 124.2 fixed it).
     ///
     /// The tests above hold the *pane* damage fixed at
     /// `CursorOnly(Some(rect))` and vary only `force_full` / `toast_active`.
@@ -398,37 +436,38 @@ mod tests {
     /// `widget.rs` leaves `last_frame_cursor_damage` at
     /// [`PaneFrameDamage::Unchanged`], and no rect is ever pushed.
     ///
-    /// `decide_frame_damage` then falls through to `rects.is_empty()` and
-    /// returns [`FrameDamage::Full`]. So a frame in which **nothing
-    /// whatsoever changed** is presented as a full clear plus a full
-    /// present.
+    /// **Inverted by Task 124.2, per the plan's explicit mandate ("must be
+    /// revisited, not deleted").** Before this fix, `decide_frame_damage`
+    /// fell through to `rects.is_empty()` and returned
+    /// [`FrameDamage::Full`] — a frame in which nothing whatsoever changed
+    /// was presented as a full clear plus a full present. Now it returns
+    /// [`FrameDamage::None`]: the windowing layer skips the clear and every
+    /// GL primitive paint entirely rather than presenting pixel-identical
+    /// content.
     ///
-    /// This is the real mechanism behind the 121.31 observation, and it is
-    /// not the pointer predicate. It is structural: `FrameDamage` has only
-    /// `Full` and `Partial` variants, with `Full` as `#[default]`. There is
-    /// no way to say "nothing changed, present nothing", so any frame that
-    /// gets drawn at all while idle costs a full present.
+    /// This is the real mechanism behind the 121.31 observation, and it was
+    /// never the pointer predicate — it was structural: `FrameDamage` had
+    /// only `Full` and `Partial` variants, with no way to say "nothing
+    /// changed, present nothing", so any frame drawn at all while idle cost
+    /// a full present.
     ///
     /// Cost, from Task 123's harness: a full present is a full clear plus
-    /// ~52 GL calls and ~200 KB of uploads, paid for a frame that is
-    /// pixel-identical to its predecessor.
-    ///
-    /// This test asserts the **current** behaviour so the defect stays
-    /// pinned. It must be revisited, not deleted, by Task 124.2.
+    /// ~52 GL calls and ~200 KB of uploads — now avoided entirely for a
+    /// frame that is pixel-identical to its predecessor.
     #[test]
-    fn pointer_motion_over_inert_content_is_full_via_the_unchanged_fallback() {
+    fn pointer_motion_over_inert_content_is_none_now_that_124_2_fixed_the_unchanged_fallback() {
         // Pointer moving over terminal content: `pointer_forces_full_present`
         // is false, so `force_full` is false. No toast. And the pane reports
         // `Unchanged`, because motion over inert content changes nothing the
         // dirty tracker observes.
         let panes = [unchanged_pane()];
 
-        assert_full(&decide_frame_damage(false, false, &panes));
+        assert_none(&decide_frame_damage(false, false, &panes));
 
         // The same holds for several settled panes -- it is not an artefact
         // of the single-pane case.
         let many = [unchanged_pane(), unchanged_pane(), unchanged_pane()];
-        assert_full(&decide_frame_damage(false, false, &many));
+        assert_none(&decide_frame_damage(false, false, &many));
     }
 
     /// The other half of Obligation 2: pointer motion *over chrome* really
@@ -454,14 +493,83 @@ mod tests {
         assert_full(&decide_frame_damage(true, false, &panes));
     }
 
+    /// Task 124.2: an empty pane list collects no rects and triggers no
+    /// short-circuit, so per the function's own contract this is `None`,
+    /// not `Full` -- an empty `pane_layout` is indistinguishable from "every
+    /// pane was `Unchanged`" as far as this function can tell. The ONLY
+    /// route to `Full` for a genuinely unresolvable/empty case is the
+    /// caller passing `force_full = true` (see
+    /// `unresolvable_pane_is_represented_by_caller_forcing_full` below).
     #[test]
-    fn empty_pane_list_is_full() {
-        assert_full(&decide_frame_damage(false, false, &[]));
+    fn empty_pane_list_is_none_absent_a_caller_force_full() {
+        assert_none(&decide_frame_damage(false, false, &[]));
     }
 
+    /// Task 124.2: every rendered pane reporting `Unchanged` (no bell, no
+    /// search-overlay rects) collects no rects and triggers no
+    /// short-circuit, so the result is `None`, not `Full`.
     #[test]
-    fn all_panes_unchanged_is_full() {
+    fn all_panes_unchanged_is_none() {
         let panes = [unchanged_pane(), unchanged_pane()];
+        assert_none(&decide_frame_damage(false, false, &panes));
+    }
+
+    // ── Task 124.2: short-circuit precedence over `None` ─────────────────
+    //
+    // Every one of `decide_frame_damage`'s existing short-circuits must
+    // still win over the newly possible `None` outcome -- an all-`Unchanged`
+    // pane set is exactly the input that would otherwise produce `None`, so
+    // each test below holds that input fixed and adds exactly one
+    // short-circuit to prove it still overrides.
+
+    /// `force_full` wins over `None` -- without this, a caller-forced
+    /// full-window redraw (an open overlay, an active-pane change, chrome
+    /// motion) could be silently discarded whenever every pane happened to
+    /// be `Unchanged`.
+    #[test]
+    fn force_full_wins_over_all_panes_unchanged() {
+        let panes = [unchanged_pane(), unchanged_pane()];
+        assert_full(&decide_frame_damage(true, false, &panes));
+    }
+
+    /// `toast_active` wins over `None` for the same reason.
+    #[test]
+    fn toast_active_wins_over_all_panes_unchanged() {
+        let panes = [unchanged_pane(), unchanged_pane()];
+        assert_full(&decide_frame_damage(false, true, &panes));
+    }
+
+    /// A bell in one pane wins over `None`, even when every pane's own
+    /// `cursor_damage` is `Unchanged` -- the bell-active flag is checked
+    /// before the `Unchanged` arm contributes (or fails to contribute)
+    /// anything.
+    #[test]
+    fn bell_active_wins_over_all_panes_unchanged() {
+        let panes = [unchanged_pane(), bell_pane()];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// A degenerate `CursorOnly(None)` pane (the pane could not bound its
+    /// own cursor rect) wins over `None`, even alongside otherwise-
+    /// `Unchanged` siblings.
+    #[test]
+    fn cursor_only_none_wins_over_all_panes_unchanged() {
+        let panes = [
+            unchanged_pane(),
+            PaneDamageInput {
+                bell_active: false,
+                cursor_damage: PaneFrameDamage::CursorOnly(None),
+                search_overlay_rects: Vec::new(),
+            },
+        ];
+        assert_full(&decide_frame_damage(false, false, &panes));
+    }
+
+    /// A `PaneFrameDamage::Full` pane wins over `None`, even alongside
+    /// otherwise-`Unchanged` siblings.
+    #[test]
+    fn pane_full_wins_over_all_panes_unchanged() {
+        let panes = [unchanged_pane(), full_pane()];
         assert_full(&decide_frame_damage(false, false, &panes));
     }
 
@@ -559,9 +667,9 @@ mod tests {
         assert_partial(&damage, &[rect(1, 2, 3, 4)]);
     }
 
-    /// A `Region` pane followed by a `Full` pane: the `rects.clear();
-    /// break;` fan-out discards the region's rects entirely and the whole
-    /// frame is `Full`, exactly as it already does for `CursorOnly(Some)`
+    /// A `Region` pane followed by a `Full` pane: the `Full` pane's arm
+    /// returns `Full` immediately, discarding the region's already-collected
+    /// rects entirely, exactly as it already does for `CursorOnly(Some)`
     /// followed by `Full` (see `rects_cleared_when_a_later_pane_is_full`).
     #[test]
     fn region_plus_full_pane_discards_region_rects_and_is_full() {
@@ -744,7 +852,7 @@ mod tests {
 
     /// The regression guard for the whole subtask. Before this fix, a pane
     /// needing a full rebuild reported `PaneFrameDamage::Full`, and
-    /// `decide_frame_damage`'s `rects.clear(); break;` fan-out discarded
+    /// `decide_frame_damage`'s `Full` arm returned immediately, discarding
     /// every rect collected from other panes -- so in a split, one busy
     /// pane forced a full clear + present of an `Unchanged` sibling too.
     /// Now the busy pane reports `Region` bounded to its own pane rect, so
@@ -881,5 +989,26 @@ mod tests {
     fn chrome_unchanged_preserves_full() {
         let composed = compose_with_chrome_damage(FrameDamage::Full, ChromeDamage::Unchanged);
         assert_full(&composed);
+    }
+
+    /// Task 124.2: a chrome-`Changed` frame must upgrade `None` to `Full` --
+    /// the same reasoning as the `Partial` -> `Full` upgrade above, since a
+    /// chrome rebuild may have changed pixels this frame's #435 decision
+    /// knows nothing about, and `None` promises even MORE strongly than
+    /// `Partial` that nothing needs redrawing.
+    #[test]
+    fn chrome_changed_upgrades_none_to_full() {
+        let composed = compose_with_chrome_damage(FrameDamage::None, ChromeDamage::Changed);
+        assert_full(&composed);
+    }
+
+    /// Task 124.2: a chrome-`Unchanged` frame preserves `None` untouched --
+    /// the headline case this subtask exists for: an idle frame where
+    /// nothing changed anywhere must still resolve to `None` after
+    /// composition, not be silently upgraded.
+    #[test]
+    fn chrome_unchanged_preserves_none() {
+        let composed = compose_with_chrome_damage(FrameDamage::None, ChromeDamage::Unchanged);
+        assert_none(&composed);
     }
 }

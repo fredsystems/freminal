@@ -162,17 +162,6 @@ struct FrameDamageObservations {
     /// Whether a window-post shader is recompositing the whole window this
     /// frame. Reused as `ChromeSignals::shader_active`.
     shader_recomposites: bool,
-    /// The `force_full` term as decided here (`ui_overlay_open ||
-    /// shader_recomposites || active_pane_changed ||
-    /// pointer_forces_full_present(..)`), read only by the caller's
-    /// `#[cfg(feature = "frame-profiling")]` duty-cycle counters.
-    #[cfg(feature = "frame-profiling")]
-    force_full: bool,
-    /// Whether a pane in `pane_layout` could not be resolved in the pane
-    /// tree this frame (forces `Full`), read only by the caller's
-    /// `#[cfg(feature = "frame-profiling")]` duty-cycle counters.
-    #[cfg(feature = "frame-profiling")]
-    unresolved_pane: bool,
     /// Whether a toast or the resize overlay is animating this frame.
     /// Reused as `ChromeSignals::toast_active` and by the caller's
     /// feature-gated duty-cycle counters.
@@ -230,11 +219,13 @@ struct FrameDamageObservations {
 ///
 /// ## Feature-gated duty-cycle counter — NOT computed here
 ///
-/// The Task 121 `zero_change_presented` counter reads this function's
-/// outputs but is recorded by the caller under its own
-/// `#[cfg(feature = "frame-profiling")]` block, not inside this function
-/// (Subtask 122.5's contract: return what the counter needs and gate only
-/// the recording).
+/// The Task 124.2 `frame_damage_none_precomposition` counter reads this
+/// function's returned `FrameDamage` directly (it no longer needs to
+/// recompute "were all panes unchanged" by hand -- `decide_frame_damage`
+/// itself now says so via [`freminal_windowing::FrameDamage::None`]) but is
+/// recorded by the caller under its own `#[cfg(feature = "frame-profiling")]`
+/// block, not inside this function (Subtask 122.5's contract: return what
+/// the counter needs and gate only the recording).
 fn stage_frame_damage(
     win: &PerWindowState,
     ctx: &egui::Context,
@@ -377,10 +368,6 @@ fn stage_frame_damage(
         decided,
         FrameDamageObservations {
             shader_recomposites,
-            #[cfg(feature = "frame-profiling")]
-            force_full,
-            #[cfg(feature = "frame-profiling")]
-            unresolved_pane,
             toast_active,
             foreground_overlay_open,
             per_pane_damage,
@@ -2980,51 +2967,39 @@ impl freminal_windowing::App for FreminalGui {
             let per_pane_damage = damage_obs.per_pane_damage;
             let active_pane_damage = damage_obs.active_pane_damage;
 
-            // Task 121 frame-profiling harness (feature-gated):
-            // zero-pixel-change-but-presented counter.
+            // Task 121 frame-profiling harness (feature-gated), repointed by
+            // Task 124.2.
             //
-            // `zero_change_presented` counts frames where every pane in
-            // `per_pane_damage` reported `Unchanged`, no pane contributed
-            // search-overlay popup rects (Task 124.14d), no bell fired, and
-            // neither `force_full`/`unresolved_pane` nor `toast_active`
-            // applied --
-            // exactly the case `decide_frame_damage` has no representation
-            // for "nothing changed" distinct from "something needs a full
-            // rebuild": both fall through to `FrameDamage::Full` once the
-            // collected damage-rect list is empty (see that function's
-            // step 4). This is measurement only -- the fallback-to-Full
-            // behavior is NOT changed here.
+            // `frame_damage_none_precomposition` counts frames where the
+            // #435-only decision (before `compose_with_chrome_damage` can
+            // upgrade it) came out to
+            // [`freminal_windowing::FrameDamage::None`] -- Task 124.2 gave
+            // `decide_frame_damage` a representation for "nothing changed"
+            // distinct from "something needs a full rebuild", so this is a
+            // direct read of `win.pending_frame_damage` (the value just
+            // assigned above) rather than a hand-rolled recomputation of
+            // the same per-pane facts `decide_frame_damage` already
+            // consumed.
             //
-            // Subtask 122.9: only the RECORDING stays feature-gated here --
-            // `force_full`/`unresolved_pane`/`toast_active`/`per_pane_damage`
-            // were computed unconditionally by `stage_frame_damage`, above,
-            // per the Subtask 122.5 contract (see that function's doc).
+            // Renamed from the pre-124.2 `zero_change_presented`: a frame
+            // counted here is now typically NOT presented at all (the
+            // windowing layer skips the clear, every GL primitive paint,
+            // and the swap) -- the opposite of what that name claimed. The
+            // FINAL (post-composition) classification is counted
+            // separately, in `frame_damage_none` near
+            // `compose_with_chrome_damage`, since composition can still
+            // upgrade this frame to `Full` if the chrome changed.
             #[cfg(feature = "frame-profiling")]
             {
-                let stats = &mut win.frame_stats;
-                let all_panes_unchanged = !damage_obs.force_full
-                    && !damage_obs.unresolved_pane
-                    && !toast_active
-                    && per_pane_damage.iter().all(|p| {
-                        !p.bell_active
-                            && p.search_overlay_rects.is_empty()
-                            && matches!(
-                                &p.cursor_damage,
-                                crate::gui::renderer::PaneFrameDamage::Unchanged
-                            )
-                    });
-                if all_panes_unchanged {
-                    stats.zero_change_presented = stats.zero_change_presented.saturating_add(1);
+                if matches!(
+                    win.pending_frame_damage,
+                    freminal_windowing::FrameDamage::None
+                ) {
+                    win.frame_stats.frame_damage_none_precomposition = win
+                        .frame_stats
+                        .frame_damage_none_precomposition
+                        .saturating_add(1);
                 }
-                // `frame_damage_full`/`frame_damage_partial` are NOT counted
-                // here (Task 121 defect-2 fix): `win.pending_frame_damage` at
-                // this point is still the PRE-composition value --
-                // `compose_with_chrome_damage` (near the end of `update()`,
-                // after this closure returns) can upgrade a `Partial` here to
-                // `Full`, which would otherwise undercount `Full` and
-                // overcount `Partial`. Counted instead from the final,
-                // post-composition value at the recording point after that
-                // composition -- see the block near `compose_with_chrome_damage`.
             }
 
             // Diagnostic frame-attribution stats (reuses the #435 damage
@@ -3764,7 +3739,16 @@ impl freminal_windowing::App for FreminalGui {
         #[cfg(feature = "frame-profiling")]
         {
             // Defect 2: count the FINAL, post-composition frame damage kind.
+            // Task 124.2 added the `None` arm: a frame reaching it is
+            // genuinely NOT presented (no clear, no primitive paint, no
+            // swap) -- distinct from `frame_damage_none_precomposition`
+            // above, which is sampled BEFORE `compose_with_chrome_damage`
+            // could still upgrade it to `Full`.
             match &win.pending_frame_damage {
+                freminal_windowing::FrameDamage::None => {
+                    win.frame_stats.frame_damage_none =
+                        win.frame_stats.frame_damage_none.saturating_add(1);
+                }
                 freminal_windowing::FrameDamage::Full => {
                     win.frame_stats.frame_damage_full =
                         win.frame_stats.frame_damage_full.saturating_add(1);
@@ -3803,7 +3787,8 @@ impl freminal_windowing::App for FreminalGui {
                     target: "freminal::frame_profiling",
                     window_id = ?window_id,
                     frames_drawn = stats.frames_drawn,
-                    zero_change_presented = stats.zero_change_presented,
+                    frame_damage_none_precomposition = stats.frame_damage_none_precomposition,
+                    frame_damage_none = stats.frame_damage_none,
                     frame_damage_full = stats.frame_damage_full,
                     frame_damage_partial = stats.frame_damage_partial,
                     phase_app_update_total_us = stats.phase_app_update_total.as_micros(),
@@ -3859,7 +3844,12 @@ impl freminal_windowing::App for FreminalGui {
                             &stats.pointer_condition_counts()
                         ),
                     "app-side frame-profiling stats (task 121 harness): \
-                     zero-pixel-change-but-presented frames, the \
+                     frame_damage_none_precomposition (Task 124.2: the \
+                     #435-only decision, before compose_with_chrome_damage, \
+                     resolved to FrameDamage::None -- nothing changed) vs. \
+                     frame_damage_none/frame_damage_full/frame_damage_partial \
+                     (the FINAL, post-composition classification -- a \
+                     None frame is genuinely NOT presented at all), the \
                      freminal-owned phase_app_update/phase_orchestration/phase_panes \
                      wall-clock split (phase_app_update = the whole productive body of \
                      update(); phase_orchestration = central_body total minus the \

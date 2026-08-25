@@ -1192,4 +1192,198 @@ mod tests {
              damage region"
         );
     }
+
+    // ── Task 124.2: `FrameDamage::None` -- skip clear AND paint entirely ─
+    //
+    // Distinct from the 124.18/124.20 suites above: those prove a `Taken`
+    // frame clips/clears correctly. This proves the newly possible
+    // `FrameDamage::None` case skips the clear, every GL primitive paint,
+    // AND the swap-adjacent steps `paint_frame` owns -- even though the
+    // app's `ui_fn` still runs and still emits paint shapes (mirroring a
+    // real app that computed its damage as `None` but still built its
+    // normal egui UI this frame).
+
+    /// A brand-new, highly visible shape painted ONLY by the `None`-damage
+    /// frame below, at a location `baseline_frame` never touches. If
+    /// `paint_frame` ever painted a `None` frame instead of skipping it,
+    /// this shape would show up in the readback and the byte-identical
+    /// assertion below would fail.
+    fn none_frame_phantom_rect() -> Rect {
+        Rect::from_min_size(pos2(4.0, 4.0), vec2(16.0, 16.0))
+    }
+    fn none_frame_phantom_color() -> Color32 {
+        Color32::from_rgb(0, 0, 255)
+    }
+    /// Sample point well inside `none_frame_phantom_rect`'s interior.
+    const NONE_PHANTOM_SAMPLE: (u32, u32) = (12, 12);
+
+    /// The frame under test: repaints the background fill and the marker
+    /// (egui is immediate-mode, so a real app re-emits its whole current
+    /// visual state every pass regardless of declared damage) and ALSO
+    /// paints `none_frame_phantom_rect` -- but declares
+    /// [`FrameDamage::None`]. A correct `paint_frame` must never let any of
+    /// these three shapes reach the framebuffer.
+    fn none_frame_with_phantom_paint() -> FrameFn<'static> {
+        Box::new(|ctx: &egui::Context, _gl: &glow::Context| {
+            let painter = ctx.layer_painter(LayerId::background());
+            painter.rect_filled(background_fill_rect(), 0.0, background_color());
+            painter.rect_filled(marker_rect(), 0.0, marker_color());
+            painter.rect_filled(none_frame_phantom_rect(), 0.0, none_frame_phantom_color());
+            FrameSignals {
+                frame_damage: FrameDamage::None,
+                band_range: 1..1,
+                terminal_requested_delay: None,
+            }
+        })
+    }
+
+    /// **Pins the fix (124.2).** A [`FrameDamage::None`] frame must leave
+    /// the ENTIRE framebuffer byte-identical to the previous frame, even
+    /// though its UI closure emitted paint shapes (including a brand-new
+    /// one, `none_frame_phantom_rect`, `baseline_frame` never paints) --
+    /// proving the clear and every GL primitive paint were genuinely
+    /// skipped, not merely that nothing happened to change on screen.
+    #[test]
+    fn a_none_frame_paints_nothing_leaving_the_framebuffer_byte_identical() {
+        let Some(mut driver) =
+            new_driver_or_skip(PartialPresentSupport::Supported, 1, "none-frame-skip")
+        else {
+            return;
+        };
+
+        let results = driver.run_frames(vec![baseline_frame(), none_frame_with_phantom_paint()]);
+        assert_eq!(results.len(), 2, "sanity: both frames painted");
+        let baseline = &results[0];
+        let none_result = &results[1];
+
+        // 1. The decision correctly reflects `FrameDamage::None` --
+        // distinct from every other decision, since NO presentation
+        // happens at all.
+        assert_eq!(
+            none_result.decision,
+            PartialPresentDecision::NoPresentation,
+            "a FrameDamage::None frame must resolve to \
+             PartialPresentDecision::NoPresentation; got {:?}",
+            none_result.decision
+        );
+
+        // 2. Neither the full clear nor a scissored clear ran.
+        assert!(
+            !none_result.cleared,
+            "a None frame must not clear the framebuffer at all"
+        );
+        assert_eq!(
+            none_result.scissor_cleared, None,
+            "a None frame must not scissor-clear either"
+        );
+
+        // 3. THE FIX: byte-identical over the WHOLE canvas, not just a
+        // sample point -- even though the UI closure emitted a brand-new,
+        // highly visible shape this frame. If `paint_frame` painted this
+        // frame instead of skipping it, at minimum the phantom rect (which
+        // `baseline_frame` never painted) would show up as a difference.
+        assert_eq!(
+            baseline.readback.differing_pixels(&none_result.readback),
+            0,
+            "a FrameDamage::None frame must leave the entire framebuffer \
+             byte-identical to the previous frame, even though its UI \
+             closure emitted paint shapes -- if this fails, paint_frame is \
+             painting a None frame instead of skipping the clear and \
+             primitive paint entirely"
+        );
+
+        // 4. Sanity check on assertion 3's own premise: the phantom rect
+        // really would have been visible had it painted -- without this, a
+        // harness bug that silently dropped ALL shapes (not just this
+        // frame's) could make assertion 3 pass for the wrong reason.
+        let (px, py) = NONE_PHANTOM_SAMPLE;
+        let phantom_expected = none_frame_phantom_color().to_srgba_unmultiplied();
+        let actual_at_phantom = none_result
+            .readback
+            .pixel(px, py)
+            .expect("phantom-sample pixel present in the None frame's readback");
+        assert_ne!(
+            actual_at_phantom, phantom_expected,
+            "the phantom rect must NOT have been painted onto the \
+             framebuffer by the None frame"
+        );
+    }
+
+    /// **The other half of 124.2's contract.** A skipped `None` frame must
+    /// not corrupt anything the NEXT frame's ordinary skip-clear +
+    /// partial-present gate depends on -- the following `Partial` frame
+    /// must still take the exact same age-1 fast path, clip correctly, and
+    /// preserve/paint the exact same pixels it would have if the `None`
+    /// frame had never been painted at all.
+    #[test]
+    fn a_taken_partial_present_still_works_correctly_after_a_preceding_none_frame() {
+        let Some(mut driver) =
+            new_driver_or_skip(PartialPresentSupport::Supported, 1, "none-then-partial")
+        else {
+            return;
+        };
+
+        let baseline = driver.run_frames(vec![baseline_frame()])[0].clone();
+        let none_result = driver.run_frames(vec![none_frame_with_phantom_paint()])[0].clone();
+        assert_eq!(
+            none_result.decision,
+            PartialPresentDecision::NoPresentation,
+            "sanity: the middle frame must actually be skipped for this \
+             test to mean anything"
+        );
+
+        let taken = driver.run_frames(vec![partial_frame_without_marker()])[0].clone();
+
+        // 1. The gate behaves exactly as it would with no preceding None
+        // frame: `Taken` at `age == 1`, reconstructed from this frame's own
+        // rect alone.
+        assert_eq!(
+            taken.decision,
+            PartialPresentDecision::Taken {
+                age: 1,
+                region: declared_damage_rect(),
+            },
+            "a Partial frame following a skipped None frame must still \
+             take the ordinary age-1 fast path; got {:?}",
+            taken.decision
+        );
+        assert!(
+            !taken.cleared,
+            "a Taken frame must not have done a full clear"
+        );
+
+        // 2. The marker -- painted only on the baseline, never repainted by
+        // either the None frame or this Partial frame -- is still intact.
+        // If the skipped frame had left painter/GL state disturbed, this is
+        // exactly the kind of stale/corrupted pixel that would surface.
+        let (mx, my) = MARKER_SAMPLE;
+        let baseline_pixel = baseline
+            .readback
+            .pixel(mx, my)
+            .expect("marker pixel present in baseline readback");
+        let after_pixel = taken
+            .readback
+            .pixel(mx, my)
+            .expect("marker pixel present in the post-None Partial readback");
+        assert_eq!(
+            baseline_pixel, after_pixel,
+            "the marker must survive a None frame followed by a Taken \
+             Partial frame exactly as it would with no None frame in \
+             between"
+        );
+
+        // 3. This frame's own new content still lands correctly in the
+        // declared damage region.
+        let (dx, dy) = DAMAGE_SAMPLE;
+        let pixel = taken
+            .readback
+            .pixel(dx, dy)
+            .expect("damage-region pixel present in the post-None Partial readback");
+        assert_eq!(
+            pixel,
+            damage_paint_color().to_srgba_unmultiplied(),
+            "the Partial frame's own declared damage region must still be \
+             repainted correctly after a preceding None frame"
+        );
+    }
 }

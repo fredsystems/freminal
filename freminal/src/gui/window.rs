@@ -355,15 +355,25 @@ pub(super) struct PerWindowState {
     /// Frame-damage report for the most recent `update()` of this window
     /// (#435), drained by `App::take_frame_damage`.
     ///
-    /// Set at the end of each `update()`: [`FrameDamage::Partial`] with the
-    /// cursor damage rect(s) when the frame was a pure cursor-only update
-    /// (every rendered pane took the cursor-only fast path and nothing else in
-    /// the window changed), otherwise [`FrameDamage::Full`]. Defaults to
-    /// `Full` so a window that has not yet rendered, or any frame the
-    /// aggregation does not positively prove cursor-only, presents fully.
+    /// Set at the end of each `update()` to one of three variants (see
+    /// [`FrameDamage`]'s own doc for the full contract):
+    /// [`FrameDamage::Full`] -- the conservative default, and what every
+    /// window starts at before its first render -- clears, redraws, and
+    /// presents the whole surface; [`FrameDamage::Partial`] with one or
+    /// more bounded damage rects (cursor-only fast-path frames, and Task
+    /// 124.14's bounded pane rebuilds) when every rendered pane's damage
+    /// is positively proven to fit inside those rects and nothing else in
+    /// the window changed; and [`FrameDamage::None`] (Task 124.2) when
+    /// every rendered pane proved it changed NOTHING at all -- not even a
+    /// bounded rect -- so the windowing layer skips the clear, every GL
+    /// primitive paint, `pre_present_notify`, and the buffer swap
+    /// entirely. Any doubt at all falls back to `Full`, which is always
+    /// correct.
     ///
+    /// [`FrameDamage`]: freminal_windowing::FrameDamage
     /// [`FrameDamage::Partial`]: freminal_windowing::FrameDamage::Partial
     /// [`FrameDamage::Full`]: freminal_windowing::FrameDamage::Full
+    /// [`FrameDamage::None`]: freminal_windowing::FrameDamage::None
     pub(super) pending_frame_damage: freminal_windowing::FrameDamage,
 
     /// Shape-index range for the "terminal band" (the pre-clear FBO
@@ -513,14 +523,29 @@ pub(super) struct FrameStats {
     // build must not carry so much as an extra counter increment in the
     // frame path, since timing calls there would perturb the very thing
     // being measured. See `agents.md` / the `freminal-bench-table` skill.
-    /// Frames where every rendered pane reported `PaneFrameDamage::Unchanged`
-    /// (and no bell/toast/force-full override applied) yet the frame was
-    /// still presented. `decide_frame_damage` has no representation for "no
-    /// pane changed anything" distinct from "some pane needs a full
-    /// rebuild" -- both fall through to `FrameDamage::Full` when the damage
-    /// rect list ends up empty -- so this counts how often that happens.
+    /// The #435-only `FrameDamage` decision (before
+    /// `compose_with_chrome_damage` can still upgrade it) was
+    /// `FrameDamage::None` (Task 124.2): every rendered pane reported
+    /// `PaneFrameDamage::Unchanged`, no pane contributed search-overlay
+    /// popup rects, and no bell/toast/force-full override applied.
+    ///
+    /// Renamed from the pre-124.2 `zero_change_presented`, which claimed a
+    /// frame counted here was still presented -- true before Task 124.2
+    /// (there was no way to say "nothing changed, present nothing", so
+    /// `decide_frame_damage` fell through to `FrameDamage::Full`), false
+    /// now: such a frame typically resolves to `FrameDamage::None` and is
+    /// NOT presented at all (no clear, no primitive paint, no swap). See
+    /// [`Self::frame_damage_none`] for the FINAL, post-composition count --
+    /// composition can still upgrade this to `Full` if the chrome changed,
+    /// so the two are not guaranteed equal.
     #[cfg(feature = "frame-profiling")]
-    pub(super) zero_change_presented: u64,
+    pub(super) frame_damage_none_precomposition: u64,
+    /// Frames whose FINAL, post-composition `win.pending_frame_damage` was
+    /// `FrameDamage::None` (Task 124.2) -- these are NOT presented at all:
+    /// no clear, no GL primitive paint, no `pre_present_notify`, no buffer
+    /// swap.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) frame_damage_none: u64,
     /// Frames whose final `win.pending_frame_damage` was `FrameDamage::Full`.
     #[cfg(feature = "frame-profiling")]
     pub(super) frame_damage_full: u64,

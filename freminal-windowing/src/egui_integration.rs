@@ -15,7 +15,7 @@ use winit::window::Window;
 use crate::error::Error;
 #[cfg(feature = "frame-profiling")]
 use crate::frame_paint::PartialPresentDecision;
-use crate::frame_paint::{DamageHistory, PaintFrameRequest, paint_frame};
+use crate::frame_paint::{DamageHistory, FramePresentation, PaintFrameRequest, paint_frame};
 use crate::gl_context::GlState;
 use crate::modifier_tracker::ModifierTracker;
 
@@ -191,12 +191,18 @@ struct FrameProfile {
     /// not need to, per the app's own state.
     pointer_frames_suppressed: u64,
 
-    // ── 124.17: skip-clear + partial-present path attribution ───────────
+    // ── 124.17/124.2: skip-clear + partial-present path attribution ─────
     //
     // `decide_partial_present` (pure, unit-tested) attributes every frame to
-    // exactly one `PartialPresentDecision`, so these five counters are
+    // exactly one `PartialPresentDecision`, so these six counters are
     // mutually exclusive and sum to `frame_counter`. Cumulative since window
     // creation, like every other plain counter on this struct.
+    /// Frames where the app reported [`crate::FrameDamage::None`] (Task
+    /// 124.2): nothing changed at all, so nothing was presented -- no
+    /// clear, no GL primitive paint, no `pre_present_notify`, no buffer
+    /// swap. Deliberately distinct from [`Self::present_partial_not_requested`]
+    /// (which DOES present, just fully).
+    present_frame_damage_none: u64,
     /// Frames where the app reported [`crate::FrameDamage::Full`].
     present_partial_not_requested: u64,
     /// Frames where the app reported `Partial` with an empty rect list.
@@ -500,18 +506,31 @@ impl EguiState {
         self.winit_state
             .handle_platform_output(window, paint_output.platform_output);
 
-        // Pre-present notify for Wayland frame pacing
-        window.pre_present_notify();
-
         #[cfg(feature = "frame-profiling")]
         let swap_start = std::time::Instant::now();
-        let swap_result = paint_output.partial.as_ref().map_or_else(
-            || gl_state.swap_buffers(),
-            |region| gl_state.swap_buffers_with_damage(std::slice::from_ref(region)),
-        );
+        // Task 124.2: `FramePresentation::None` means nothing changed this
+        // frame -- `paint_frame` already skipped the clear and every GL
+        // primitive paint, and per the plan this window-bound shell must
+        // likewise skip `pre_present_notify` (no point notifying the
+        // compositor about a frame with no new content) and the buffer
+        // swap entirely, rather than swapping a framebuffer that was never
+        // touched.
+        let swap_result = match paint_output.presentation {
+            FramePresentation::None => None,
+            FramePresentation::Full => {
+                // Pre-present notify for Wayland frame pacing
+                window.pre_present_notify();
+                Some(gl_state.swap_buffers())
+            }
+            FramePresentation::Partial(region) => {
+                // Pre-present notify for Wayland frame pacing
+                window.pre_present_notify();
+                Some(gl_state.swap_buffers_with_damage(std::slice::from_ref(&region)))
+            }
+        };
         #[cfg(feature = "frame-profiling")]
         let swap_elapsed = swap_start.elapsed();
-        if let Err(e) = swap_result {
+        if let Some(Err(e)) = swap_result {
             tracing::error!("swap_buffers failed: {e}");
         }
 
@@ -529,14 +548,20 @@ impl EguiState {
         // causes an unbounded render loop on platforms where `swap_buffers`
         // returns immediately (macOS with vsync disabled).
 
-        // 124.17: fold the skip-clear + partial-present decision `paint_frame`
-        // computed into the five mutually-exclusive counters -- moved here
-        // (rather than immediately after `paint_frame` returns) so it sits
-        // next to the rest of the frame-profiling fold/flush below; nothing
-        // reads `self.frame_profile` in between, so the accumulated values
-        // are identical to updating them immediately.
+        // 124.17/124.2: fold the skip-clear + partial-present decision
+        // `paint_frame` computed into the six mutually-exclusive counters --
+        // moved here (rather than immediately after `paint_frame` returns)
+        // so it sits next to the rest of the frame-profiling fold/flush
+        // below; nothing reads `self.frame_profile` in between, so the
+        // accumulated values are identical to updating them immediately.
         #[cfg(feature = "frame-profiling")]
         match paint_output.decision {
+            PartialPresentDecision::NoPresentation => {
+                self.frame_profile.present_frame_damage_none = self
+                    .frame_profile
+                    .present_frame_damage_none
+                    .saturating_add(1);
+            }
             PartialPresentDecision::NotRequested => {
                 self.frame_profile.present_partial_not_requested = self
                     .frame_profile
@@ -681,12 +706,14 @@ impl EguiState {
                         p.pointer_frames_scheduled,
                         p.pointer_frames_suppressed
                     ),
-                    // 124.17: skip-clear + partial-present path attribution,
-                    // cumulative since window creation. Mutually exclusive
-                    // and sum to `frame_counter`. `buffer_age_histogram`'s
-                    // total is `present_partial_blocked_buffer_age +
+                    // 124.17/124.2: skip-clear + partial-present path
+                    // attribution, cumulative since window creation.
+                    // Mutually exclusive and sum to `frame_counter`.
+                    // `buffer_age_histogram`'s total is
+                    // `present_partial_blocked_buffer_age +
                     // present_partial_taken`, NOT `frame_counter` — see that
                     // field's doc.
+                    present_frame_damage_none = p.present_frame_damage_none,
                     present_partial_not_requested = p.present_partial_not_requested,
                     present_partial_no_rects = p.present_partial_no_rects,
                     present_partial_blocked_surface = p.present_partial_blocked_surface,
@@ -704,8 +731,9 @@ impl EguiState {
                      the Task 121 pointer-motion-suppression-spike counters \
                      (pointer_frames_scheduled/pointer_frames_suppressed/\
                      pointer_suppressed_duty_cycle_pct, cumulative since window \
-                     creation), and the 124.17 skip-clear + partial-present path \
-                     attribution (present_partial_*, cumulative, mutually exclusive, \
+                     creation), and the 124.17/124.2 skip-clear + \
+                     partial-present path attribution (present_frame_damage_none \
+                     plus present_partial_*, cumulative, mutually exclusive, \
                      summing to frame_counter; buffer_age_histogram bucketed by \
                      min(age, 3), summing to present_partial_blocked_buffer_age + \
                      present_partial_taken instead)"

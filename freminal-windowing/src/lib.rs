@@ -128,8 +128,25 @@ pub enum PresentRegion {
 /// unavailable (non-EGL backends, a buffer stale beyond the retained
 /// history, an unqueryable age, a resize) the windowing layer falls back to
 /// a full frame regardless.
+///
+/// [`FrameDamage::None`] (Task 124.2) is the third, stricter case: the app
+/// proved that *nothing at all* changed this frame — not even a bounded
+/// rect. The windowing layer still runs the egui UI pass (so scheduling,
+/// platform output, and the app's own damage computation stay correct) but
+/// skips the framebuffer clear, every GL primitive paint, the
+/// `pre_present_notify` call, and the buffer swap entirely. A `None` frame
+/// is therefore NOT a presented frame: `frame_paint::DamageHistory`, which
+/// exists to reconstruct what a *swapped* back buffer is missing, must
+/// never record one — see that type's doc.
 #[derive(Debug, Clone, Default)]
 pub enum FrameDamage {
+    /// Nothing changed this frame: no clear, no primitive paint, no
+    /// `pre_present_notify`, no buffer swap. The caller guarantees every
+    /// pixel is identical to the previous frame's AND that no bounded
+    /// region needs redrawing either — stricter than an empty
+    /// [`FrameDamage::Partial`] only in that the windowing layer skips
+    /// presenting entirely rather than falling back to a full present.
+    None,
     /// The entire surface changed. Clear + full redraw + full present.
     #[default]
     Full,

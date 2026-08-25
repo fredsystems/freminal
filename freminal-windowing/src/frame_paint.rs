@@ -4,7 +4,11 @@
 // https://opensource.org/licenses/MIT.
 
 //! Painting one egui frame into a surface, including the decision to skip
-//! the clear (124.17's skip-clear + partial-present gate).
+//! the clear (124.17's skip-clear + partial-present gate) and, when
+//! [`crate::FrameDamage::None`] proves nothing changed at all, the decision
+//! to skip shape partitioning, tessellation, the clear, AND every GL
+//! primitive paint (Task 124.2). Texture-delta bookkeeping (egui 0.36's
+//! drop-bomb contract) still runs unconditionally either way.
 //!
 //! This is a separate module from `egui_integration` on purpose: that
 //! module owns per-window state (`egui_winit::State`, the winit `Window`,
@@ -66,6 +70,14 @@ impl From<bool> for PartialPresentSupport {
 /// `frame-profiling` counters sum to the frame count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialPresentDecision {
+    /// The app reported [`crate::FrameDamage::None`] (Task 124.2): nothing
+    /// changed at all, so nothing is presented this frame — no clear, no
+    /// GL primitive paint, no `pre_present_notify`, no buffer swap.
+    /// Deliberately distinct from [`Self::NotRequested`] (which DOES
+    /// present, just fully): a frame reaching this variant never queries
+    /// buffer age and is never recorded into [`DamageHistory`], since no
+    /// swap happens for it to describe.
+    NoPresentation,
     /// The app reported [`crate::FrameDamage::Full`].
     NotRequested,
     /// The app reported `Partial` with an empty rect list.
@@ -143,10 +155,17 @@ impl DamageHistory {
 
     /// Record `damage` as the most recently presented frame's own declared
     /// damage, evicting the oldest entry once more than [`Self::MAX_DEPTH`]
-    /// are held. Call exactly once per frame, regardless of what
-    /// [`PartialPresentDecision`] that frame reached — every frame's own
-    /// damage is needed to reconstruct a LATER frame's union, even one that
-    /// itself fell back to a full present.
+    /// are held. Call once per frame that actually presents — regardless of
+    /// which [`PartialPresentDecision`] a presenting frame reached, even one
+    /// that fell back to a full present, since every presented frame's own
+    /// damage is needed to reconstruct a LATER frame's union.
+    ///
+    /// Task 124.2: do NOT call this for a frame whose decision was
+    /// [`PartialPresentDecision::NoPresentation`] — that frame never swaps,
+    /// so it is not a "recently presented frame" this history describes at
+    /// all, and recording it would let a later frame's buffer-age
+    /// reconstruction assume a swap that never happened. See
+    /// `ResolvedPartialPresent::resolve`'s call site.
     pub fn push(&mut self, damage: FrameDamage) {
         self.entries.push_back(damage);
         while self.entries.len() > Self::MAX_DEPTH {
@@ -213,9 +232,19 @@ impl DamageHistory {
 /// surface for [`FrameDamage::Full`], the bounding box of the rects for
 /// [`FrameDamage::Partial`] (`None` for an empty rect list — an
 /// empty-`Partial` frame changed nothing, so it must not force a wider
-/// union than its neighbours warrant).
+/// union than its neighbours warrant), and `None` for [`FrameDamage::None`]
+/// for the same reason — a frame that changed nothing contributes nothing
+/// to the union.
+///
+/// [`FrameDamage::None`] is never actually recorded into [`DamageHistory`]
+/// (see [`DamageHistory::push`]'s doc), and [`decide_partial_present`]
+/// short-circuits before ever reaching a call into
+/// [`DamageHistory::redraw_region`] with it as `current` either — so this
+/// arm exists only for exhaustiveness, not because a real `None` value is
+/// expected to reach it.
 fn damage_bbox(damage: &FrameDamage, size_px: [u32; 2]) -> Option<DamageRect> {
     match damage {
+        FrameDamage::None => None,
         FrameDamage::Full => whole_surface_rect(size_px),
         FrameDamage::Partial(rects) => bbox_of_rects(rects),
     }
@@ -304,15 +333,18 @@ fn damage_rect_to_egui_rect(
 ///
 /// `buffer_age` is taken **lazily** (`impl FnOnce() -> u32`, not `u32`):
 /// the gate short-circuits, so the EGL buffer-age query is never issued on
-/// a `Full` frame, an empty-rect `Partial` frame, or a `Partial` frame the
-/// surface cannot present a sub-region for. Taking it eagerly would add a
-/// per-frame driver round trip to every frame in the program — a behaviour
-/// change inside the very path this function only measures.
+/// a `None` frame (Task 124.2), a `Full` frame, an empty-rect `Partial`
+/// frame, or a `Partial` frame the surface cannot present a sub-region for.
+/// Taking it eagerly would add a per-frame driver round trip to every frame
+/// in the program — a behaviour change inside the very path this function
+/// only measures.
 ///
 /// Does NOT record `frame_damage` into `history` — the caller does that
 /// (see [`DamageHistory::push`]'s doc for why: this frame's own damage must
 /// still be visible to a LATER frame's reconstruction even when this
-/// frame's own decision fell back to a full present).
+/// frame's own decision fell back to a full present, and why a
+/// [`PartialPresentDecision::NoPresentation`] frame must NOT be recorded at
+/// all).
 pub fn decide_partial_present(
     frame_damage: &FrameDamage,
     support: PartialPresentSupport,
@@ -321,6 +353,7 @@ pub fn decide_partial_present(
     buffer_age: impl FnOnce() -> u32,
 ) -> PartialPresentDecision {
     match frame_damage {
+        FrameDamage::None => PartialPresentDecision::NoPresentation,
         FrameDamage::Full => PartialPresentDecision::NotRequested,
         FrameDamage::Partial(rects) => {
             if rects.is_empty() {
@@ -469,10 +502,16 @@ pub struct PaintFrameProfiling {
     pub run_ui: std::time::Duration,
     /// Wall-clock time across the band tessellation plus the head/tail
     /// chrome tessellation, summed as ONE span rather than split
-    /// band-vs-head/tail — see the call site comment for why.
+    /// band-vs-head/tail — see the call site comment for why. Exactly
+    /// [`Duration::ZERO`](std::time::Duration::ZERO) when this frame's
+    /// presentation was [`crate::FrameDamage::None`] (Task 124.2): no
+    /// tessellation phase ran to measure.
     pub tessellate: std::time::Duration,
     /// Wall-clock time across the three `paint_primitives` calls (head,
-    /// band, tail), summed.
+    /// band, tail), summed. Exactly
+    /// [`Duration::ZERO`](std::time::Duration::ZERO) when this frame's
+    /// presentation was [`crate::FrameDamage::None`] (Task 124.2): no
+    /// `paint_primitives` call ran to measure.
     pub paint: std::time::Duration,
     /// `ctx.repaint_causes()` entries collected immediately after `run_ui`
     /// returns, in iteration order — see the call site comment for why
@@ -493,12 +532,15 @@ pub struct PaintFrameOutput {
     /// `.get(&egui::ViewportId::ROOT)` out of this exactly as it read it out
     /// of `full_output.viewport_output` before this extraction.
     pub viewport_output: egui::OrderedViewportIdMap<egui::ViewportOutput>,
-    /// The region to present, if the skip-clear + partial-present path was
-    /// taken this frame. A single bounding box (see
-    /// [`DamageHistory::redraw_region`]'s doc for why one rect is
-    /// sufficient for v1) — the same region every unclipped primitive was
-    /// clipped to before painting.
-    pub partial: Option<DamageRect>,
+    /// What this frame decided to actually do to the framebuffer and swap
+    /// chain (Task 124.2). Replaces the earlier `partial: Option<DamageRect>`
+    /// — a bare `None` there meant "the full clear+paint+swap path was
+    /// taken", which became ambiguous with the newly possible "nothing was
+    /// presented at all" case once [`crate::FrameDamage::None`] exists.
+    /// [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame)
+    /// matches this to decide whether to skip `pre_present_notify` and the
+    /// swap entirely, swap the whole surface, or swap only a damaged region.
+    pub presentation: FramePresentation,
     /// Why this frame did or did not take the skip-clear + partial-present
     /// path.
     ///
@@ -511,9 +553,10 @@ pub struct PaintFrameOutput {
     /// second consumer, which is why this `cfg` is
     /// `any(feature = "frame-profiling", feature = "gl-offscreen")` rather
     /// than `frame-profiling` alone. Assert on this rather than on
-    /// `partial.is_some()` -- the two are equivalent as predicates, but a
-    /// failure reporting `BlockedByBufferAge { age: 0 }` names the cause,
-    /// where `None` only says "not taken".
+    /// `presentation` directly -- a failure reporting
+    /// `BlockedByBufferAge { age: 0 }` names the cause, where
+    /// `FramePresentation::Full` only says "the full path was taken", not
+    /// why.
     #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
     pub decision: PartialPresentDecision,
     /// The delay the app itself requested via `ctx.request_repaint_after`
@@ -524,11 +567,42 @@ pub struct PaintFrameOutput {
     pub profiling: PaintFrameProfiling,
 }
 
-/// Everything [`paint_frame`] needs from the 124.17/124.18 skip-clear +
-/// partial-present gate for one frame: the decision itself, the single
-/// redraw-region bounding box to present (`None` if the full path was
-/// taken), and that region already converted to an egui clip rect
-/// (`None` alongside `partial: None`, or if the conversion failed).
+/// What [`paint_frame`] decided to actually do with the framebuffer and
+/// swap chain this frame (Task 124.2) — the resolution of
+/// [`PartialPresentDecision`] into the three concrete actions
+/// [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame)
+/// can take.
+///
+/// Replaces the pre-124.2 `Option<DamageRect>` (`None` meant "clear the
+/// whole surface, paint everything unclipped, swap fully" — the ordinary
+/// `Full` case). That encoding stopped being sound once a frame could
+/// legitimately do NOTHING: a bare `None` could no longer say whether the
+/// caller should still clear+paint+swap fully, or skip all three. Per
+/// `freminal-state-representation`, the fix is a named domain enum, not a
+/// second bool bolted onto the existing `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FramePresentation {
+    /// Nothing changed this frame ([`crate::FrameDamage::None`]): no clear,
+    /// no GL primitive paint, no `pre_present_notify`, no buffer swap. Not
+    /// a presented frame — must not be recorded into [`DamageHistory`] (see
+    /// that type's doc).
+    None,
+    /// The whole surface was cleared and must be redrawn and presented via
+    /// a full `swap_buffers`.
+    Full,
+    /// Only this region was cleared/redrawn; present via
+    /// `swap_buffers_with_damage` restricted to it. The same region every
+    /// unclipped primitive was clipped to before painting (see
+    /// [`DamageHistory::redraw_region`]'s doc for why a single bounding box
+    /// is sufficient for v1).
+    Partial(DamageRect),
+}
+
+/// Everything [`paint_frame`] needs from the 124.17/124.18/124.2
+/// skip-clear-plus-partial-present gate for one frame: the decision itself,
+/// the [`FramePresentation`] it resolves to, and the redraw region already
+/// converted to an egui clip rect (`None` unless `presentation` is
+/// [`FramePresentation::Partial`]).
 ///
 /// Extracted out of [`paint_frame`] purely to keep that function under
 /// clippy's `too_many_lines` threshold, per `freminal-extend-or-extract` —
@@ -539,15 +613,16 @@ struct ResolvedPartialPresent {
     /// (and warning as dead code) in a default build.
     #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
     decision: PartialPresentDecision,
-    partial: Option<DamageRect>,
+    presentation: FramePresentation,
     redraw_clip: Option<egui::Rect>,
 }
 
 impl ResolvedPartialPresent {
     /// Resolve the gate for one frame, recording `frame_damage` into
-    /// `history` as a side effect (see [`DamageHistory::push`]'s doc for
-    /// why that happens regardless of what this frame's own decision came
-    /// out to).
+    /// `history` as a side effect for every decision EXCEPT
+    /// [`PartialPresentDecision::NoPresentation`] (Task 124.2) — see
+    /// [`DamageHistory::push`]'s doc for why a frame that never presents
+    /// must not be recorded as if it had.
     fn resolve<S: FrameSurface>(
         surface: &S,
         frame_damage: FrameDamage,
@@ -562,13 +637,15 @@ impl ResolvedPartialPresent {
             size_px,
             || surface.back_buffer_age(),
         );
-        history.push(frame_damage);
+        if !matches!(decision, PartialPresentDecision::NoPresentation) {
+            history.push(frame_damage);
+        }
 
         // `partial` and `redraw_clip` are downgraded to `None` together if
         // the region can't be converted to an egui clip rect: painting
         // unclipped chrome while having already decided to skip the clear
-        // is exactly the defect this subtask fixes, so there is no safe
-        // way to have one without the other.
+        // is exactly the defect 124.18 fixed, so there is no safe way to
+        // have one without the other.
         let region_from_decision = match decision {
             PartialPresentDecision::Taken { region, .. } => Some(region),
             _ => None,
@@ -577,23 +654,31 @@ impl ResolvedPartialPresent {
             .and_then(|region| damage_rect_to_egui_rect(region, pixels_per_point, size_px[1]));
         let partial = redraw_clip.and(region_from_decision);
 
+        let presentation = if matches!(decision, PartialPresentDecision::NoPresentation) {
+            FramePresentation::None
+        } else {
+            partial.map_or(FramePresentation::Full, FramePresentation::Partial)
+        };
+
         Self {
             #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
             decision,
-            partial,
+            presentation,
             redraw_clip,
         }
     }
 
     /// The decision to actually report to callers (frame-profiling
     /// counters, the offscreen harness): stays truthful about what
-    /// happened even when [`Self::resolve`] downgraded `partial` back to
-    /// `None` after a clip-conversion failure -- a `Taken` decision would
-    /// be a lie in that case, since this frame took the full-clear path
-    /// exactly as if `redraw_region` itself had returned `None`.
+    /// happened even when [`Self::resolve`] downgraded `presentation` back
+    /// to [`FramePresentation::Full`] after a clip-conversion failure -- a
+    /// `Taken` decision would be a lie in that case, since this frame took
+    /// the full-clear path exactly as if `redraw_region` itself had
+    /// returned `None`. [`FramePresentation::None`] is never downgraded --
+    /// [`PartialPresentDecision::NoPresentation`] is always accurate.
     #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
     const fn reported_decision(&self) -> PartialPresentDecision {
-        if self.partial.is_some() {
+        if matches!(self.presentation, FramePresentation::Partial(_)) {
             self.decision
         } else if let PartialPresentDecision::Taken { age, .. } = self.decision {
             PartialPresentDecision::BlockedByBufferAge { age }
@@ -603,11 +688,163 @@ impl ResolvedPartialPresent {
     }
 }
 
+/// Clear the framebuffer for a presenting (`Full`/`Partial`) frame, clip
+/// every primitive to the redraw region (a no-op on `Full`, since
+/// `redraw_clip` is `None` then), and publish the authoritative
+/// [`crate::PresentRegion`] before the paint callbacks run.
+///
+/// Only ever called when `presentation` is NOT [`FramePresentation::None`]
+/// -- [`paint_frame`] gates the call on `should_paint`. Extracted purely to
+/// keep that function under clippy's `too_many_lines` threshold, per
+/// `freminal-extend-or-extract`; the three primitive lists are bundled into
+/// one `[&mut Vec<_>; 3]` array parameter (rather than three positional
+/// parameters) to stay under `too_many_arguments` as well.
+fn clear_clip_and_publish<S: FrameSurface>(
+    surface: &S,
+    clear_color: [f32; 4],
+    presentation: FramePresentation,
+    redraw_clip: Option<egui::Rect>,
+    present_flag: Option<&std::sync::Arc<std::sync::Mutex<crate::PresentRegion>>>,
+    primitives: [&mut Vec<egui::ClippedPrimitive>; 3],
+) {
+    // 124.20: a `Partial` frame's redraw region must be cleared, not
+    // skipped -- skipping it entirely left a `DefaultBackground` terminal
+    // cell or a `background_opacity < 1.0` chrome fill (both of which
+    // deliberately paint no opaque quad) blending against whatever a
+    // stale, unrelated previous frame left in the framebuffer instead of
+    // against `clear_color`. Clearing the WHOLE surface on a `Partial`
+    // frame would be just as wrong the other way -- it would erase content
+    // outside `region` that this frame never repaints -- so the clear is
+    // confined to exactly the region already computed for clipping below.
+    // `FramePresentation::None` never reaches this function (the caller's
+    // `should_paint` gate), so the fallback-to-`clear_to` half of this
+    // match is reached only by `Full`.
+    match presentation {
+        FramePresentation::Partial(region) => surface.clear_region_to(clear_color, region),
+        FramePresentation::Full | FramePresentation::None => {
+            surface.clear_to(clear_color);
+        }
+    }
+
+    // 124.18: a partial present means only `redraw_clip`'s pixels may
+    // change, so every unclipped primitive -- head, band, and tail alike --
+    // must be clipped to it, or the always-opaque `CentralPanel` fill
+    // (painted in "head" every frame regardless of declared damage) erases
+    // everything outside it. Intersecting each primitive's own `clip_rect`
+    // is sufficient: a `Primitive::Callback`'s `clip_rect` becomes the GL
+    // scissor `egui_glow::Painter::paint_primitives` sets before invoking
+    // the callback, and `set_clip_rect` clamps `max` to `>= min` (verified
+    // against egui_glow 0.36.1), so a primitive fully outside the region
+    // scissors to zero area and draws nothing -- no separate zero-size
+    // check needed here. `redraw_clip` is `None` whenever `presentation`
+    // is `Full`, so this is a no-op on a full frame.
+    if let Some(clip) = redraw_clip {
+        for primitives in primitives {
+            for clipped in primitives.iter_mut() {
+                clipped.clip_rect = clipped.clip_rect.intersect(clip);
+            }
+        }
+    }
+
+    // Publish the authoritative region BEFORE the paint callbacks run (they
+    // execute inside the `paint_primitives` calls the caller makes right
+    // after this returns), so any callback that scissors to the damage
+    // region reads the same value that decided whether the clear was
+    // skipped and whether the egui primitives were clipped. Same-thread
+    // lock immediately before the reads -> an uncontended `Mutex` is
+    // sufficient, no atomics needed. Not published at all on a `None`
+    // frame (this function is never called for one): no paint callback
+    // runs to read it that frame, and a stale published value from the
+    // last real frame is exactly what a callback that never runs should
+    // keep seeing.
+    if let Some(flag) = present_flag {
+        let region = match presentation {
+            FramePresentation::Partial(region) => crate::PresentRegion::Region(region),
+            FramePresentation::Full | FramePresentation::None => crate::PresentRegion::Full,
+        };
+        let mut guard = flag
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = region;
+    }
+}
+
+/// The three tessellated primitive lists for one frame's head/band/tail
+/// paint-order split (see [`tessellate_head_band_tail`]'s doc), plus the
+/// wall-clock time spent tessellating all three (feature-gated).
+struct TessellatedFrame {
+    head: Vec<egui::ClippedPrimitive>,
+    band: Vec<egui::ClippedPrimitive>,
+    tail: Vec<egui::ClippedPrimitive>,
+    /// Only ever read by [`paint_frame`]'s `tessellate_elapsed`, which is
+    /// itself `cfg`-gated identically -- so this field is too, rather than
+    /// existing unread (and warning as dead code) in a default build.
+    #[cfg(feature = "frame-profiling")]
+    elapsed: std::time::Duration,
+}
+
+/// Slice `shapes` into head (chrome painted before the terminal band —
+/// e.g. the `CentralPanel` background fill, menu bar, tab bar), band
+/// (terminal content, rebuilt every frame), and tail (chrome painted after
+/// the band — overlays, borders, modals) by `band_range`, then tessellate
+/// each slice separately. `LayerId::background()`'s `PaintList` drains
+/// first into `full_output.shapes`, and the band occupies a contiguous
+/// range within it (see `App::take_terminal_band_range`), so `band_range`
+/// is valid as an index range into `shapes` directly.
+///
+/// Clamp defensively: an app that reports a range referring to a shape
+/// count larger than what actually drained (e.g. stale state) must never
+/// panic on the slice below. `start` is clamped to the shape count; `end`
+/// is then clamped to `[start, shape count]`, so `start <= end <=
+/// shapes.len()` always holds.
+///
+/// Only ever called when [`paint_frame`]'s `should_paint` is `true` (Task
+/// 124.2) -- extracted purely to keep that function under clippy's
+/// `too_many_lines` threshold, per `freminal-extend-or-extract`, not
+/// because this logic is reusable elsewhere.
+fn tessellate_head_band_tail(
+    ctx: &egui::Context,
+    shapes: &[egui::epaint::ClippedShape],
+    band_range: std::ops::Range<usize>,
+    pixels_per_point: f32,
+) -> TessellatedFrame {
+    let start = band_range.start.min(shapes.len());
+    let end = band_range.end.clamp(start, shapes.len());
+    let band_shapes: Vec<egui::epaint::ClippedShape> = shapes[start..end].to_vec();
+
+    // Task 121 frame-profiling harness: time the ENTIRE tessellation phase
+    // as one span (band tessellation plus head/tail tessellation) rather
+    // than splitting them into separate counters -- one total, sampled
+    // per-frame, is the more meaningful number to threshold/alert on.
+    #[cfg(feature = "frame-profiling")]
+    let tessellate_start = std::time::Instant::now();
+
+    // The band is tessellated from this frame's own shapes -- the
+    // terminal band is rebuilt every frame.
+    let band = ctx.tessellate(band_shapes, pixels_per_point);
+
+    // Head/tail: re-tessellated from this frame's own shapes every frame.
+    let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
+    let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
+    let head = ctx.tessellate(head_shapes, pixels_per_point);
+    let tail = ctx.tessellate(tail_shapes, pixels_per_point);
+
+    TessellatedFrame {
+        head,
+        band,
+        tail,
+        #[cfg(feature = "frame-profiling")]
+        elapsed: tessellate_start.elapsed(),
+    }
+}
+
 /// Paint one egui frame into `surface`.
 ///
 /// Runs the app's `ui_fn`, decides whether this frame may skip the clear
-/// (124.17), tessellates and paints the head/band/tail split, and manages
-/// egui's texture deltas. Deliberately does not touch anything window-bound
+/// (124.17) or skip tessellation, clearing, and painting entirely (124.2),
+/// then -- unless skipped -- tessellates and paints the head/band/tail
+/// split. Always manages egui's texture deltas, whether or not this frame
+/// painted anything. Deliberately does not touch anything window-bound
 /// (`window.inner_size()`, `handle_platform_output`, `pre_present_notify`,
 /// the buffer swap, `window.id()`) — those stay in
 /// [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame),
@@ -695,52 +932,17 @@ where
     // change delivered this frame. Used for all tessellation below.
     let pixels_per_point = ctx.pixels_per_point();
 
-    // ── 3-way paint-order split ──────────────────────────
-    //
-    // Slice `full_output.shapes` into head (chrome painted before the
-    // terminal band — e.g. the `CentralPanel` background fill, menu
-    // bar, tab bar), band (terminal content, rebuilt every frame), and
-    // tail (chrome painted after the band — overlays, borders, modals)
-    // by `band_range`, then tessellate and paint each slice separately,
-    // in that order. `LayerId::background()`'s `PaintList` drains
-    // first into `full_output.shapes`, and the band occupies a
-    // contiguous range within it (see `App::take_terminal_band_range`),
-    // so `band_range` is valid as an index range into `full_output.shapes`
-    // directly.
-    //
-    // Clamp defensively: an app that reports a range referring to a
-    // shape count larger than what actually drained (e.g. stale state)
-    // must never panic on the slice below. `start` is clamped to the
-    // shape count; `end` is then clamped to `[start, shape count]`, so
-    // `start <= end <= shapes.len()` always holds.
-    let shapes = full_output.shapes;
-    let start = band_range.start.min(shapes.len());
-    let end = band_range.end.clamp(start, shapes.len());
-    let band_shapes: Vec<egui::epaint::ClippedShape> = shapes[start..end].to_vec();
-
-    // Task 121 frame-profiling harness: time the ENTIRE tessellation
-    // phase as one span (band tessellation plus head/tail tessellation)
-    // rather than splitting them into separate counters -- one total,
-    // sampled per-frame, is the more meaningful number to
-    // threshold/alert on.
-    #[cfg(feature = "frame-profiling")]
-    let tessellate_start = std::time::Instant::now();
-
-    // The band is tessellated from this frame's own shapes -- the
-    // terminal band is rebuilt every frame.
-    let mut band_primitives = ctx.tessellate(band_shapes, pixels_per_point);
-
-    // Head/tail: re-tessellated from this frame's own shapes every
-    // frame.
-    let head_shapes: Vec<egui::epaint::ClippedShape> = shapes[..start].to_vec();
-    let tail_shapes: Vec<egui::epaint::ClippedShape> = shapes[end..].to_vec();
-    let mut head_primitives = ctx.tessellate(head_shapes, pixels_per_point);
-    let mut tail_primitives = ctx.tessellate(tail_shapes, pixels_per_point);
-    #[cfg(feature = "frame-profiling")]
-    let tessellate_elapsed = tessellate_start.elapsed();
-
     // Decide whether this frame may skip the full clear and present only a
-    // reconstructed redraw region. This is a two-part gate:
+    // reconstructed redraw region -- or skip presenting at all (Task
+    // 124.2). Resolved HERE, immediately once `pixels_per_point` is known
+    // and BEFORE any shape partitioning or tessellation runs: a
+    // `FrameDamage::None` frame has nothing to tessellate or paint, so
+    // doing that work first and only then discovering it was unnecessary
+    // would contradict the entire point of this subtask -- proving a
+    // skipped frame costs nothing at the paint layer, not merely that its
+    // GL calls are skipped after the CPU work to feed them already ran.
+    //
+    // For a non-`None` frame this is a two-part gate:
     //   1. The app reports the frame as `Partial` (only the listed rects
     //      changed; everything else is identical to the previous frame).
     //   2. `DamageHistory` can reconstruct a safe redraw region for the
@@ -749,12 +951,12 @@ where
     // If either fails we fall back to the always-correct full path:
     // clear + full paint + full swap.
     //
-    // 124.17/124.18: the gate itself lives in `decide_partial_present`
-    // (pure, unit-tested), and its resolution into a redraw
-    // region/clip-rect pair lives in `ResolvedPartialPresent::resolve`
-    // (extracted solely to keep this function under clippy's
-    // `too_many_lines` threshold) -- see that function's doc for why
-    // `buffer_age` stays a lazy closure here rather than a plain `u32`.
+    // 124.17/124.18/124.2: the gate itself lives in `decide_partial_present`
+    // (pure, unit-tested), and its resolution into a `FramePresentation` /
+    // clip-rect pair lives in `ResolvedPartialPresent::resolve` (extracted
+    // solely to keep this function under clippy's `too_many_lines`
+    // threshold) -- see that function's doc for why `buffer_age` stays a
+    // lazy closure here rather than a plain `u32`.
     let resolved = ResolvedPartialPresent::resolve(
         surface,
         frame_damage,
@@ -762,72 +964,88 @@ where
         size_px,
         pixels_per_point,
     );
-    let partial = resolved.partial;
+    let presentation = resolved.presentation;
     let redraw_clip = resolved.redraw_clip;
 
-    // 124.20: a `Taken` frame's redraw region must be cleared, not skipped
-    // -- skipping it entirely left a `DefaultBackground` terminal cell or a
-    // `background_opacity < 1.0` chrome fill (both of which deliberately
-    // paint no opaque quad) blending against whatever a stale, unrelated
-    // previous frame left in the framebuffer instead of against
-    // `clear_color`. Clearing the WHOLE surface on a `Taken` frame would be
-    // just as wrong the other way -- it would erase content outside
-    // `region` that this frame never repaints -- so the clear is confined
-    // to exactly the region already computed for clipping above.
-    match partial {
-        Some(region) => surface.clear_region_to(clear_color, region),
-        None => surface.clear_to(clear_color),
-    }
+    // Task 124.2: `FramePresentation::None` means nothing changed this
+    // frame at all -- skip shape partitioning, tessellation, the clear,
+    // and every GL primitive paint entirely. The egui UI pass above still
+    // ran (so scheduling, platform output, and the app's own damage
+    // computation stay correct), and the texture-delta drains below still
+    // run unconditionally (painter bookkeeping and egui 0.36's drop-bomb
+    // contract, not framebuffer paint -- see the comment at those
+    // drains), but no CPU work that exists only to feed a GL paint call
+    // may run either.
+    let should_paint = !matches!(presentation, FramePresentation::None);
 
-    // 124.18: a partial present means only `redraw_clip`'s pixels may
-    // change, so every unclipped primitive -- head, band, and tail alike --
-    // must be clipped to it, or the always-opaque `CentralPanel` fill
-    // (painted in "head" every frame regardless of declared damage) erases
-    // everything outside it. Intersecting each primitive's own `clip_rect`
-    // is sufficient: a `Primitive::Callback`'s `clip_rect` becomes the GL
-    // scissor `egui_glow::Painter::paint_primitives` sets before invoking
-    // the callback, and `set_clip_rect` clamps `max` to `>= min` (verified
-    // against egui_glow 0.36.1), so a primitive fully outside the region
-    // scissors to zero area and draws nothing -- no separate zero-size
-    // check needed here.
-    if let Some(clip) = redraw_clip {
-        for primitives in [
-            &mut head_primitives,
-            &mut band_primitives,
-            &mut tail_primitives,
-        ] {
-            for clipped in primitives.iter_mut() {
-                clipped.clip_rect = clipped.clip_rect.intersect(clip);
-            }
+    // Task 121 frame-profiling harness: time the ENTIRE tessellation
+    // phase as one span (band tessellation plus head/tail tessellation)
+    // rather than splitting them into separate counters -- one total,
+    // sampled per-frame, is the more meaningful number to
+    // threshold/alert on. Initialized to exactly `Duration::ZERO` and left
+    // untouched when `should_paint` is `false` (Task 124.2) -- there is no
+    // tessellation phase to measure on a skipped frame, so this is never
+    // an `Instant::elapsed()` taken around empty work.
+    #[cfg(feature = "frame-profiling")]
+    let mut tessellate_elapsed = std::time::Duration::ZERO;
+
+    // ── 3-way paint-order split ──────────────────────────
+    //
+    // Only runs when `should_paint` (Task 124.2): a `None` frame has
+    // nothing to slice or tessellate. See [`tessellate_head_band_tail`]'s
+    // doc for the slicing/clamping contract. `full_output.shapes` is taken
+    // via `std::mem::take` rather than moved out of the field directly, so
+    // `full_output`'s other fields (`platform_output`, `viewport_output`,
+    // `textures_delta`) stay fully usable below regardless of which branch
+    // ran, and a `None` frame's shapes are simply left in place (and
+    // dropped, unread, with `full_output` at the end of this function).
+    let (mut head_primitives, mut band_primitives, mut tail_primitives) = if should_paint {
+        let shapes = std::mem::take(&mut full_output.shapes);
+        let tessellated = tessellate_head_band_tail(ctx, &shapes, band_range, pixels_per_point);
+        #[cfg(feature = "frame-profiling")]
+        {
+            tessellate_elapsed = tessellated.elapsed;
         }
+        (tessellated.head, tessellated.band, tessellated.tail)
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
+    if should_paint {
+        clear_clip_and_publish(
+            surface,
+            clear_color,
+            presentation,
+            redraw_clip,
+            present_flag,
+            [
+                &mut head_primitives,
+                &mut band_primitives,
+                &mut tail_primitives,
+            ],
+        );
     }
 
-    // Publish the authoritative region BEFORE the paint callbacks run
-    // (they execute inside the `paint_primitives` calls below), so any
-    // callback that scissors to the damage region reads the same value
-    // that decided whether the clear was skipped and whether the egui
-    // primitives were clipped. Same-thread lock immediately before the
-    // reads -> an uncontended `Mutex` is sufficient, no atomics needed.
-    if let Some(flag) = present_flag {
-        let region = partial.map_or(crate::PresentRegion::Full, crate::PresentRegion::Region);
-        let mut guard = flag
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = region;
-    }
-
-    // Paint: set all textures, then three `paint_primitives` calls in
-    // head -> band -> tail order, then free all textures. This is
-    // exactly what `paint_and_update_textures` does internally (set
-    // all -> paint -> free all), just split across three paint calls so
-    // the band can be painted independently of chrome. Order matters:
-    // `paint_primitives` re-establishes GL state (scissor/blend, unbound
-    // VBO/EBO/texture/program) independently on every call, so three
-    // sequential calls over a partition of the same shape list paint
-    // identically to one call over the concatenation — head paints
-    // first (e.g. the `CentralPanel` background fill, which must be
-    // UNDER the band), then band, then tail (overlays/borders, which
-    // must be OVER the band).
+    // Texture bookkeeping -- runs UNCONDITIONALLY, regardless of
+    // `should_paint`. This is painter-state management (which textures the
+    // `egui_glow::Painter` atlas knows about) and egui 0.36's
+    // `TexturesDelta` drop-bomb contract, not framebuffer paint: it must
+    // stay correct even on a `None` frame that skips shape partitioning,
+    // tessellation, and every GL primitive paint, per Task 124.2's mandate
+    // not to mislabel this bookkeeping as the work that IS skipped.
+    //
+    // Paint order when `should_paint`: set all textures, then three
+    // `paint_primitives` calls in head -> band -> tail order, then free all
+    // textures. This is exactly what `paint_and_update_textures` does
+    // internally (set all -> paint -> free all), just split across three
+    // paint calls so the band can be painted independently of chrome.
+    // Order matters: `paint_primitives` re-establishes GL state
+    // (scissor/blend, unbound VBO/EBO/texture/program) independently on
+    // every call, so three sequential calls over a partition of the same
+    // shape list paint identically to one call over the concatenation —
+    // head paints first (e.g. the `CentralPanel` background fill, which
+    // must be UNDER the band), then band, then tail (overlays/borders,
+    // which must be OVER the band).
     //
     // egui 0.36 (upstream #8356) made `TexturesDelta` a drop-bomb: it
     // `debug_assert!`s that it is empty when dropped, and upstream's
@@ -851,13 +1069,23 @@ where
     // Task 121 frame-profiling harness: time the three `paint_primitives`
     // calls, summed (a contiguous span across all three, since nothing
     // else runs between them, is equal to summing each individually).
+    // Initialized to exactly `Duration::ZERO` and left untouched when
+    // `should_paint` is `false` (Task 124.2) -- there is no paint phase to
+    // measure on a skipped frame, so this is never an `Instant::elapsed()`
+    // taken around empty work.
     #[cfg(feature = "frame-profiling")]
-    let paint_start = std::time::Instant::now();
-    painter.paint_primitives(size_px, pixels_per_point, &head_primitives);
-    painter.paint_primitives(size_px, pixels_per_point, &band_primitives);
-    painter.paint_primitives(size_px, pixels_per_point, &tail_primitives);
-    #[cfg(feature = "frame-profiling")]
-    let paint_elapsed = paint_start.elapsed();
+    let mut paint_elapsed = std::time::Duration::ZERO;
+    if should_paint {
+        #[cfg(feature = "frame-profiling")]
+        let paint_start = std::time::Instant::now();
+        painter.paint_primitives(size_px, pixels_per_point, &head_primitives);
+        painter.paint_primitives(size_px, pixels_per_point, &band_primitives);
+        painter.paint_primitives(size_px, pixels_per_point, &tail_primitives);
+        #[cfg(feature = "frame-profiling")]
+        {
+            paint_elapsed = paint_start.elapsed();
+        }
+    }
     for id in full_output.textures_delta.free.drain() {
         painter.free_texture(id);
     }
@@ -865,7 +1093,7 @@ where
     PaintFrameOutput {
         platform_output: full_output.platform_output,
         viewport_output: full_output.viewport_output,
-        partial,
+        presentation,
         #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
         decision: resolved.reported_decision(),
         terminal_requested_delay,
@@ -882,7 +1110,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        DamageHistory, PartialPresentDecision, PartialPresentSupport, decide_partial_present,
+        DamageHistory, FramePresentation, FrameSurface, PartialPresentDecision,
+        PartialPresentSupport, ResolvedPartialPresent, decide_partial_present,
     };
     use crate::{DamageRect, FrameDamage};
 
@@ -911,6 +1140,39 @@ mod tests {
         }
     }
 
+    /// A [`FrameSurface`] that reports fixed [`PartialPresentSupport`]/age
+    /// and panics if anything ever calls into GL through it -- sufficient
+    /// for exercising [`ResolvedPartialPresent::resolve`] directly (Task
+    /// 124.2's history-bookkeeping tests below), since that function never
+    /// touches `glow()`/`clear_to()`/`clear_region_to()` itself (only
+    /// `paint_frame` does, and only when `should_paint` is true).
+    struct FakeSurface {
+        support: PartialPresentSupport,
+        age: u32,
+    }
+
+    impl FrameSurface for FakeSurface {
+        fn glow(&self) -> &glow::Context {
+            unreachable!("FakeSurface: resolve() must never touch GL")
+        }
+
+        fn partial_present_support(&self) -> PartialPresentSupport {
+            self.support
+        }
+
+        fn back_buffer_age(&self) -> u32 {
+            self.age
+        }
+
+        fn clear_to(&self, _color: [f32; 4]) {
+            unreachable!("FakeSurface: resolve() must never paint")
+        }
+
+        fn clear_region_to(&self, _color: [f32; 4], _region: DamageRect) {
+            unreachable!("FakeSurface: resolve() must never paint")
+        }
+    }
+
     #[test]
     fn not_requested_on_full_damage_and_never_queries_buffer_age() {
         let history = DamageHistory::new();
@@ -922,6 +1184,148 @@ mod tests {
             || panic!("buffer_age() must not be queried on a Full frame"),
         );
         assert_eq!(decision, PartialPresentDecision::NotRequested);
+    }
+
+    // ── Task 124.2: `FrameDamage::None` ──────────────────────────────────
+
+    #[test]
+    fn no_presentation_on_none_damage_and_never_queries_buffer_age() {
+        let history = DamageHistory::new();
+        let decision = decide_partial_present(
+            &FrameDamage::None,
+            PartialPresentSupport::Supported,
+            &history,
+            SIZE_PX,
+            || panic!("buffer_age() must not be queried on a None frame"),
+        );
+        assert_eq!(decision, PartialPresentDecision::NoPresentation);
+    }
+
+    /// Even an unsupported surface or an unqueryable history must not
+    /// change a `None` frame's decision -- `FrameDamage::None` short-circuits
+    /// before any of the `Partial`-only gate logic runs.
+    #[test]
+    fn no_presentation_on_none_damage_regardless_of_surface_support() {
+        let history = DamageHistory::new();
+        let decision = decide_partial_present(
+            &FrameDamage::None,
+            PartialPresentSupport::Unsupported,
+            &history,
+            SIZE_PX,
+            || panic!("buffer_age() must not be queried on a None frame"),
+        );
+        assert_eq!(decision, PartialPresentDecision::NoPresentation);
+    }
+
+    /// [`ResolvedPartialPresent::resolve`] must resolve a `None` decision to
+    /// [`FramePresentation::None`] and must NOT record it into
+    /// [`DamageHistory`] -- a `None` frame never swaps, so it is not a
+    /// "recently presented frame" the history describes (see
+    /// `DamageHistory::push`'s doc).
+    #[test]
+    fn resolve_on_none_damage_yields_framepresentation_none_and_does_not_advance_history() {
+        let mut history = DamageHistory::new();
+        let surface = FakeSurface {
+            support: PartialPresentSupport::Supported,
+            age: 1,
+        };
+        let resolved = ResolvedPartialPresent::resolve(
+            &surface,
+            FrameDamage::None,
+            &mut history,
+            SIZE_PX,
+            1.0,
+        );
+        assert_eq!(resolved.presentation, FramePresentation::None);
+        assert_eq!(resolved.redraw_clip, None);
+        assert_eq!(
+            history.len(),
+            0,
+            "a None-decision frame must not be pushed into DamageHistory"
+        );
+    }
+
+    /// A `Full` or `Partial` decision, by contrast, DOES advance
+    /// [`DamageHistory`] -- the contrast case that proves the test above
+    /// is pinning `None`'s special-casing specifically, not history's
+    /// `push` being broken in general.
+    #[test]
+    fn resolve_on_full_damage_advances_history() {
+        let mut history = DamageHistory::new();
+        let surface = FakeSurface {
+            support: PartialPresentSupport::Supported,
+            age: 1,
+        };
+        let resolved = ResolvedPartialPresent::resolve(
+            &surface,
+            FrameDamage::Full,
+            &mut history,
+            SIZE_PX,
+            1.0,
+        );
+        assert_eq!(resolved.presentation, FramePresentation::Full);
+        assert_eq!(
+            history.len(),
+            1,
+            "a Full-decision frame DOES present and must be recorded"
+        );
+    }
+
+    /// A `None` frame interleaved between two presenting frames must be
+    /// invisible to a LATER frame's buffer-age reconstruction -- if a
+    /// `None` frame were mistakenly pushed, it would occupy a slot in
+    /// `DamageHistory`'s bounded lookback and silently displace a real
+    /// presented frame's damage from the window a later `age` query needs.
+    #[test]
+    fn a_none_frame_interleaved_between_presenting_frames_does_not_shift_the_history_window() {
+        let mut history = DamageHistory::new();
+        let surface = FakeSurface {
+            support: PartialPresentSupport::Supported,
+            age: 1,
+        };
+
+        // Frame 1: Full baseline -- always presents, always recorded.
+        ResolvedPartialPresent::resolve(&surface, FrameDamage::Full, &mut history, SIZE_PX, 1.0);
+        // Frame 2: Partial, presents (age == 1 needs no history), recorded
+        // with its own rect at x == 20.
+        ResolvedPartialPresent::resolve(
+            &surface,
+            FrameDamage::Partial(vec![rect_at(20)]),
+            &mut history,
+            SIZE_PX,
+            1.0,
+        );
+        // Frame 3: None -- must NOT be recorded.
+        ResolvedPartialPresent::resolve(&surface, FrameDamage::None, &mut history, SIZE_PX, 1.0);
+
+        assert_eq!(
+            history.len(),
+            2,
+            "the None frame must not have added a third entry"
+        );
+
+        // Frame 4: Partial at age == 2 -- needs exactly the immediately
+        // previous PRESENTED frame's damage (frame 2's `rect_at(20)`), not
+        // the interleaved None frame's (nonexistent) contribution. Had the
+        // None frame been incorrectly pushed, `entries` would hold three
+        // entries with the (bogus) None one newest, so an age-2 query's
+        // "one previous frame" would consume THAT entry instead --
+        // `damage_bbox(&FrameDamage::None, ..)` contributes nothing (see
+        // that function's doc), so the union would silently OMIT frame 2's
+        // real rect entirely, never even reaching back far enough to touch
+        // frame 1's whole-surface `Full` contribution.
+        let current = FrameDamage::Partial(vec![rect_at(0)]);
+        assert_eq!(
+            history.redraw_region(&current, 2, SIZE_PX),
+            Some(DamageRect {
+                x: 0,
+                y: 0,
+                width: 30,
+                height: 10,
+            }),
+            "age == 2 after a None frame must union with frame 2's own rect, \
+             exactly as if the None frame had never been painted at all"
+        );
     }
 
     #[test]
