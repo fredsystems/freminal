@@ -173,6 +173,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
 | 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | Planned — mechanical rename; never fold into 124.14a |
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
+| 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | Split during recon — b-ii needs the gutter strip, see below |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2595,6 +2596,65 @@ Held back deliberately rather than folded into 124.14a: a rename inflates a
 behaviour diff and the review risk in 124.14a is concentrated in the
 coordinate transform and the damage aggregation, which a rename would bury.
 Take it as its own commit, before or after 124.14a, never inside it.
+
+#### 124.14b recon (2026-08-24) — the subtask splits in two
+
+**Selection and hover are not the same shape of problem, and pairing them
+in one subtask hides a real hazard in the smaller half.** Split into
+**124.14b-i (selection)** and **124.14b-ii (hover)**.
+
+**The hazard, found by reading: hover damage escapes `terminal_rect`.**
+`terminal_rect` deliberately starts at `pane_rect.min.x + gutter_inset`
+(`widget.rs:1933`) — the command-block gutter strip is **outside** it, and
+is painted separately by egui, not by the GL callback. `row_run_damage`
+builds rects from the viewport origin rightward, so a hover-bounded rect
+covers the terminal rows and **not** the gutter.
+
+`hover_changed` is `command_block_hover_rows_early !=
+cache.previous_command_block_hover_rows` (`frame_dirty.rs:567`) — it fires
+when the hovered *block* changes, which moves the gutter's tinted segment.
+The gutter's own signal, `gutter_hover_repaint_decision`
+(`widget.rs:643-650`), is a pure boolean over "is the pointer in the gutter
+at all", so moving between two blocks does **not** flip it. Nothing else
+would mark the gutter damaged.
+
+Since 124.18 clips every egui primitive to the redraw region, a
+hover-bounded frame would clip the gutter repaint away and leave a **stale
+tint on the previously-hovered block**. That is an under-report — silent
+visual corruption, the issue #432 class — not a missed optimisation.
+
+**Consequence for 124.14b-ii:** a hover rect must be widened leftward over
+the gutter strip (`gutter_inset * ppp`), so clip, clear and present still
+agree on one region per 124.20's invariant. Recorded rather than
+implemented, because it deserves its own commit and its own pixel evidence.
+
+**124.14b-i (selection) has no equivalent escape.** The selection highlight
+is drawn as decoration/background vertices inside `terminal_rect` only.
+
+#### 124.14b-i design decisions (2026-08-24)
+
+**Cache the previous frame's selection in *screen*-row space, not
+buffer-absolute.** `cache.previous_selection` is buffer-absolute
+(`frame_dirty.rs:534`) and `screen_selection` is snapshot-row space
+(`:569`), so a naive union would compare two different spaces — the trap
+recorded in 124.14a's recon. Translating the old selection with *this*
+frame's `win_start` is also wrong whenever the window moved between frames
+(a scroll, or new output pushing rows into scrollback while `scroll_offset`
+stays 0, which does not set `scroll_changed`).
+
+The question being answered is **"where on screen was the old highlight
+painted"**, which is inherently a screen-space question, so the answer is
+stored in screen space and needs no translation and no window-movement
+guard. Added as a `PaneRenderCache` field updated in lockstep with
+`previous_selection` (`widget.rs:3106`), inside the rebuild body, so it only
+advances on a frame that actually drew.
+
+**`VertexRebuild::Rows` is renamed `VertexRebuild::Bounded`.** Once
+selection contributes, "Rows" names one of several sources. The variant is
+one commit old, so the rename costs nothing and prevents a name that lies.
+
+**The damage extent is the union of every bounded source, merged into runs
+once**, rather than each source emitting its own overlapping rects.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
