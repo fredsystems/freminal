@@ -3972,8 +3972,8 @@ impl freminal_windowing::App for FreminalGui {
                     ),
                     // Task 121 pointer-motion repaint-gate spike follow-up:
                     // of the `pointer_motion_needs_repaint` calls this flush
-                    // window, how many total, and which of the eight named
-                    // conditions fired on how many of them (non-exclusive --
+                    // window, how many total, and which of the ten named
+                    // forcing conditions fired on how many of them (non-exclusive --
                     // several can fire on the same call; each counted
                     // independently, see `record_pointer_motion_check`).
                     // WINDOWED (reset below), unlike `chrome_signals_fired`
@@ -3999,8 +3999,8 @@ impl freminal_windowing::App for FreminalGui {
                      non-zero entries only) over frames_drawn drawn frames for this \
                      window_id, and -- the pointer-motion repaint-gate spike \
                      follow-up -- how many of the last pointer_repaint_checks_total \
-                     `pointer_motion_needs_repaint` calls each of the eight named \
-                     gate conditions fired on this flush window \
+                     `pointer_motion_needs_repaint` calls each of the ten named \
+                     forcing conditions fired on this flush window \
                      (pointer_repaint_conditions_fired, non-zero entries only, \
                      reset every flush window)"
                 );
