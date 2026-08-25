@@ -170,6 +170,8 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
+| 124.C5 | Inline image placement is invisible to the row epoch | Planned — **constrains 124.14a** |
+| 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
 
@@ -2217,14 +2219,14 @@ full-surface cost.
 
 | Trigger | Why no bounded region suffices |
 | ------- | ------------------------------ |
-| `theme_changed` | fg/bg colours are baked per-vertex at build time; every drawn cell is stale |
-| `dims_changed` | a width change reflows and re-shapes every row, not merely repositions |
-| `ChangedRows::All` | no epoch baseline exists to diff against (first rebuild / `invalidate_content`) |
+| `theme_changed` | colours are baked per-vertex; every drawn cell is stale |
+| `dims_changed` | a width change reflows and re-shapes every row |
+| `ChangedRows::All` | no epoch baseline exists to diff against |
 | `deco_verts.is_empty()` | no previous rebuild ever populated the buffer |
-| `CursorDamage` `None` | cursor rect degenerated after clamping; deliberately conservative |
-| `shader_recomposites` | a post-process shader reads/writes the whole framebuffer by construction |
-| `style_changed`, `size_changed`, `ppp_changed`, `warming_up` | chrome-layer equivalents of the above |
-| `buffer_age() == 0`, `PartialPresentSupport::Unsupported` | buffer contents unknown / platform lacks the capability |
+| `CursorDamage` `None` | cursor rect degenerated after clamping |
+| `shader_recomposites` | a post-process shader rewrites the whole framebuffer |
+| `style_changed`, `size_changed`, `ppp_changed` | chrome-layer equivalents |
+| `buffer_age() == 0`, `Unsupported` | contents unknown / no capability |
 
 #### The rest, by how much work bounding them needs
 
@@ -2304,3 +2306,80 @@ default *only* when the extent genuinely cannot be established.
 
 Should be written after 124.14 lands, so it codifies the shipped model
 rather than the intended one.
+
+### 124.C5 — Inline image placement is invisible to the row epoch
+
+*Surfaced 2026-08-24 by the read-only verification of 124.10-124.12's
+no-under-report guarantee, commissioned before 124.14a was decomposed.
+Cleanup entry. **Pre-existing and already shipped** — 124.14 does not
+introduce it, but must not build on top of it.*
+
+**The guarantee holds for text.** Row epochs do not under-report changes to
+`chars`, `tags` (after URL refinement) or `line_width`. That was re-derived
+by reading, and is backed by an always-on `debug_assertions` oracle
+(`debug_verify_epochs`) plus a `proptest` fuzzer, both of which run in every
+`cargo test`.
+
+**It does not cover inline image placement.** `flatten_row` never reads
+`cell.image_placement()` — only `cell.tchar()` and `cell.tag()`. `Cell::image_cell`
+stamps the cell's value as `TChar::Space` under whatever `FormatTag` was
+active. So placing an image over cells that already held plain spaces under
+an identical tag leaves `chars`, `tags` and `line_width` byte-identical, the
+epoch is carried forward, and the row is reported unchanged **while its
+rendered pixels have changed.**
+
+Reproduced empirically against `freminal-buffer`, not merely reasoned about:
+
+```text
+row_epochs(before) = [1, 2, 3, 4, 5]
+place_image(new id) over row 0's three literal-space cells, same default tag
+row_epochs(after)  = [1, 2, 3, 4, 5]      <- row 0 did NOT bump
+cell(0,0) now shows image id 1
+```
+
+**Why it was previously harmless, and why that matters.** `place_image` sets
+`row.dirty = true`, which forced a rebuilt `RowCacheEntry` and therefore a
+**fresh `Arc`** regardless of byte content — and `Arc::ptr_eq` treats any new
+allocation as changed. That accidental safety net is exactly what
+124.10-124.12 deliberately removed, since a byte-identical re-flatten must
+not look changed. Image placement fell into the blind spot that created.
+
+`image_pixels_changed` catches some sub-cases coincidentally (a brand-new
+image id changes the pixel-map's key set), but **not** an already-known image
+moved onto content-identical cells. `snap.visible_image_placements` has no
+independent diff anywhere in the GUI.
+
+**Binding constraint on 124.14a:** `changed_rows` is a sound, tested,
+non-under-reporting signal for text/tag/line-width content — proceed on that
+basis. It is **not** sound for image damage. Image vertex rebuilding must
+stay on its existing coarser whole-pane trigger set
+(`image_frame_changed || image_pixels_changed || ...`) and must **not** be
+folded into the per-row `changed_rows` decision until this entry is closed.
+Doing so would take a currently-quiet bug and make it load-bearing for a
+correctness property 124.14a is supposed to provide.
+
+### 124.C6 — `search_corpus` over an open fold desyncs `merge_cache` permanently
+
+*Surfaced by the same verification. Cleanup entry. Performance, not
+correctness — the direction is over-reporting, which is safe.*
+
+`interface.rs` records that a `search_corpus` call "costs one spurious full
+repaint". **That characterisation is empirically wrong.** When Ctrl-F runs
+while a fold has extended the window (`extra_rows > 0`), `search_corpus`
+overwrites `merge_cache` with a different-sized window, and every subsequent
+**idle** `build_snapshot` then takes `visible_row_epochs`' no-matching-cache
+fallback and re-stamps every row — indefinitely, with zero PTY activity,
+until some row is genuinely dirtied and resyncs the cache:
+
+```text
+idle snap 0 epochs = [12, 13, 14, 15, 16, 17]
+idle snap 1 epochs = [18, 19, 20, 21, 22, 23]
+idle snap 2 epochs = [24, 25, 26, 27, 28, 29]
+```
+
+Control: with matching windows the sequence stays `[1,2,3,4,5]` forever.
+
+This is the sticky-full-rebuild-every-frame class that 124.10-124.12 exists
+to eliminate, reintroduced by one specific interaction. Related to 124.C3
+(both are `merge_cache` eviction), but distinct: C3 is alt-screen round
+trips costing one rebuild each; this recurs every frame until broken.
