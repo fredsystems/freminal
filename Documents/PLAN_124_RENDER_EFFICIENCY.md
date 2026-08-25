@@ -157,7 +157,8 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.11 | `row_epochs` on `TerminalSnapshot`; delete `content_changed` | Complete — field landed here, deletion landed in 124.12b |
 | 124.12 | GUI consumes epochs; delete the `Arc::ptr_eq` content test | Complete |
 | 124.13 | Re-measure pointer-motion suppression rates | Complete |
-| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Rows` | **Ready — gate 124.C5 closed; recon done, see 124.14a recon block** |
+| 124.14 | `PaneFrameDamage::Region` and `VertexRebuild::Bounded` | In progress — a/b/c complete; d blocked by chrome forcing `Full` |
+| 124.14a | Bound row-only damage | **Complete** — `eae76d1b` |
 | 124.15 | Measure chrome's per-frame cost | Complete |
 | 124.16 | Shaping cache instrumentation and a TUI-redraw benchmark | Complete |
 | 124.C1 | `decide_frame_damage`'s doc comment describes a removed term | Complete |
@@ -173,7 +174,9 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
 | 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | Planned — mechanical rename; never fold into 124.14a |
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
-| 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | Split during recon — b-ii needs the gutter strip, see below |
+| 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | **Complete** — `edf9e017`, `284ce253`; gutter hazard disproved |
+| 124.14c | Stop a busy pane forcing full damage on unchanged siblings | **Complete** — `058c2627` |
+| 124.14d | Bound `search_changed` | **Blocked** — open search independently forces chrome `Full` |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2680,6 +2683,38 @@ one commit old, so the rename costs nothing and prevents a name that lies.
 
 **The damage extent is the union of every bounded source, merged into runs
 once**, rather than each source emitting its own overlapping rects.
+
+#### 124.14d recon (2026-08-24) — BLOCKED, terminal damage is erased by chrome
+
+**Do not implement 124.14d from the original entry. Its premise does not
+match the current frame path.** The requested search extent is buildable —
+`SearchState::matches` carries real `MatchSpan` row locations — but consuming
+it in `VertexRebuild::Bounded` would have zero present effect while search is
+open:
+
+1. `stage_frame_damage` sets `foreground_overlay_open` when any pane has
+   `pane.view_state.search_state.is_open` (`app_impl.rs:338-341`).
+2. `foreground_overlay_open` is independently sufficient for
+   `ChromeDamage::Changed` (`chrome_damage.rs:136-156`), pinned by
+   `foreground_overlay_open_alone_forces_changed` (`:440-448`).
+3. `compose_with_chrome_damage` upgrades any terminal `FrameDamage` to
+   `FrameDamage::Full` whenever chrome reports `Changed`
+   (`frame_damage.rs:167-174`).
+
+So a bounded search-highlight region would be computed, transported and then
+discarded on every open-search frame. That is the same inert-optimisation
+shape 124.5 found in the chrome cache and 124.17 found in partial present;
+landing it anyway would improve an intermediate enum while changing no clear,
+draw or present.
+
+The original 124.14 entry did not account for this independent chrome path.
+Its statement that search merely needs "a real extent built" is therefore
+insufficient: 124.14d also needs a design for bounding the search overlay's
+chrome damage, or an explicit decision that the overlay remains globally
+damaging and search highlights stay unbounded with it. That is a maintainer
+decision because it changes 124.14d's scope from terminal damage into the
+chrome damage model. Per the task's stop rule, no workaround or inert partial
+implementation was started.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
