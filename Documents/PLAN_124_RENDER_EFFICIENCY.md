@@ -2603,6 +2603,31 @@ Take it as its own commit, before or after 124.14a, never inside it.
 in one subtask hides a real hazard in the smaller half.** Split into
 **124.14b-i (selection)** and **124.14b-ii (hover)**.
 
+> **CORRECTED 2026-08-24, before implementation. The hazard below is
+> WRONG.** The gutter strip's fill is `snap.theme.gutter_color_for(status)`
+> — the block's *status* colour, plus a desaturate flag for fold
+> placeholders — and its paint block (`widget.rs:3535-3608`) contains **no
+> hover term at all**. The hover tint is baked into the background instance
+> buffer *inside* `terminal_rect` (`widget.rs:2303`: "the hover tint is
+> baked into the background instance buffer"), so hover damage does **not**
+> escape the terminal rect and **no gutter widening is needed**.
+>
+> The error was misreading `compute_command_block_hover_rows`' doc
+> (`widget.rs:360`): *"the gutter strip is the sole hover **trigger**"*
+> describes which surface the pointer must be over to trigger a hover, not
+> which surface gets painted. Trigger surface was read as paint surface.
+>
+> The split into b-i and b-ii is **kept anyway** — two smaller commits with
+> independent evidence is still better than one — but b-ii is the same
+> shape as b-i, not a harder problem. The URL-hover tooltip is a separate
+> signal (`hover_tooltip_active()` = `cached_hovered_url.is_some()`) which
+> already forces `Full` via `foreground_overlay_open`, and the command-block
+> duration label is not hover-dependent. Both checked.
+>
+> Retained rather than deleted because a wrong hazard that was investigated
+> and disproved is worth more to the next reader than silence: it records
+> that the question was asked and answers it.
+
 **The hazard, found by reading: hover damage escapes `terminal_rect`.**
 `terminal_rect` deliberately starts at `pane_rect.min.x + gutter_inset`
 (`widget.rs:1933`) — the command-block gutter strip is **outside** it, and
