@@ -38,6 +38,7 @@ use freminal_common::buffer_states::{
     buffer_type::BufferType, format_tag::FormatTag, tchar::TChar, url::Url,
 };
 
+use crate::image_store::ImagePlacement;
 use crate::row::{LineWidth, Row, RowJoin};
 use crate::url_detect;
 
@@ -65,6 +66,26 @@ pub struct AutoUrlRange {
     /// group of rows needs the group-level URL redetection in
     /// [`Buffer::refresh_row_cache_and_refine_wrapped_urls`].
     pub touches_row_end: bool,
+}
+
+/// One image-placement annotation captured at flatten time for a single
+/// cell within a row's flat character stream.
+///
+/// `char_index` is a post-continuation-skip index — aligned with the
+/// enclosing [`RowCacheEntry::chars`], not the row's raw column index — so
+/// it can be compared directly against another flatten's `RowImageCell`s
+/// without re-deriving the alignment. `placement` is the cell's full
+/// [`ImagePlacement`], compared field-for-field rather than reduced to
+/// `image_id`, so a change to any field (including `z_index`, which does
+/// not affect which pixels are sourced but does affect layering) is
+/// visible to the epoch comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowImageCell {
+    /// Character index into the row's `chars` (post-continuation-skip)
+    /// that this image placement occupies.
+    pub char_index: usize,
+    /// The full image placement stamped on that cell.
+    pub placement: ImagePlacement,
 }
 
 /// Per-row flatten cache entry.
@@ -116,6 +137,29 @@ pub struct RowCacheEntry {
     /// `set_cursor_line_width` marks the row dirty, so this is always
     /// refreshed in the same pass that rebuilds the rest of the entry.
     pub line_width: LineWidth,
+    /// The row's image placements, one entry per cell that carries
+    /// [`crate::cell::Cell::image_placement`], as of the flatten that built
+    /// this entry.
+    ///
+    /// Task 124.C5. Like `line_width` above, this contributes *nothing* to
+    /// the merged `chars`/`tags` output — [`Cell::image_cell`] stamps a
+    /// cell's *value* as `TChar::Space` under whatever tag is passed, so an
+    /// image placed over cells that already hold literal spaces under an
+    /// identical tag leaves `chars`/`tags` byte-identical. It is captured
+    /// purely so the per-row content epoch comparison at the merge output
+    /// can see an image-placement change, which alters what the row renders
+    /// as without altering a single character or tag. Without it the epoch
+    /// would under-report an image placed over (or cleared from)
+    /// already-blank cells — exactly the defect pinned by 124.C5's original
+    /// test.
+    ///
+    /// Every `set_image_cell_at` / `place_image` / `place_image_at` /
+    /// `clear_image_placements_*` site in `images.rs` sets `row.dirty` and
+    /// clears `row_cache[i]`, so this is always refreshed in the same pass
+    /// that rebuilds the rest of the entry.
+    ///
+    /// [`Cell::image_cell`]: crate::cell::Cell::image_cell
+    pub images: Vec<RowImageCell>,
 }
 
 impl RowCacheEntry {
@@ -130,6 +174,7 @@ impl RowCacheEntry {
             auto_urls: Vec::new(),
             tail_could_be_wrapped_scheme: false,
             line_width: LineWidth::Normal,
+            images: Vec::new(),
         }
     }
 }
@@ -255,6 +300,17 @@ pub(in crate::buffer) struct MergeCache {
     /// to compare the new one against. Never handed out, so unlike the four
     /// result vectors it needs no `Arc`.
     row_line_widths: Vec<LineWidth>,
+    /// The image placements each row in this merge was rendered with, one
+    /// entry per entry in `row_offsets`.
+    ///
+    /// Task 124.C5's counterpart to `row_line_widths` above: retained
+    /// solely as the previous-frame half of the epoch comparison. An image
+    /// placement changes what a row renders as without appearing in
+    /// `chars`/`tags` at all (`Cell::image_cell` stamps the cell's value as
+    /// plain `TChar::Space`), so without keeping the old value there is
+    /// nothing to compare the new one against. Plain `Vec`, not `Arc` —
+    /// like `row_line_widths` it is never handed out.
+    row_images: Vec<Vec<RowImageCell>>,
 }
 
 /// One merge output's per-row rendered content, as the epoch comparison sees
@@ -334,14 +390,18 @@ impl<'a> MergedWindow<'a> {
 }
 
 /// The full comparison basis for one window row: its rendered characters,
-/// its rendered tags, and its [`LineWidth`].
+/// its rendered tags, its [`LineWidth`], and its image placements.
 ///
-/// `line_width` is carried separately because it is the one part of "what
-/// this row renders as" that never appears in `chars`/`tags`.
+/// `line_width` and `images` are carried separately because they are the
+/// parts of "what this row renders as" that never appear in `chars`/`tags`
+/// — `Cell::image_cell` stamps an image cell's *value* as plain
+/// `TChar::Space`, so an image placement change is invisible to `chars`
+/// and `tags` alike.
 #[derive(Clone, Copy)]
 struct RowRenderBasis<'a> {
     window: MergedWindow<'a>,
     line_widths: &'a [LineWidth],
+    images: &'a [Vec<RowImageCell>],
 }
 
 impl RowRenderBasis<'_> {
@@ -359,6 +419,10 @@ impl RowRenderBasis<'_> {
         };
 
         if self.line_widths.get(row) != other.line_widths.get(row) {
+            return false;
+        }
+
+        if self.images.get(row) != other.images.get(row) {
             return false;
         }
 
@@ -559,9 +623,12 @@ impl Buffer {
     /// position `r` changed since the previous flatten of the same window —
     /// where "rendered content" means the merged characters, the merged
     /// format tags (compared row-relative, so a length change earlier in the
-    /// window does not alias) and the row's [`LineWidth`]. A row that was
-    /// *written to* with identical bytes does **not** change its epoch; that
-    /// distinction is the entire point, because full-screen TUIs rewrite
+    /// window does not alias), the row's [`LineWidth`], and the row's image
+    /// placements (Task 124.C5 — an image placement can change what a row
+    /// renders as without appearing in the merged characters or tags at
+    /// all). A row that was *written to* with identical bytes does **not**
+    /// change its epoch; that distinction is the entire point, because
+    /// full-screen TUIs rewrite
     /// unchanged bytes by idiom.
     ///
     /// # Why this is `&mut self`
@@ -621,6 +688,21 @@ impl Buffer {
             .iter()
             .flatten()
             .map(|entry| entry.line_width)
+            .collect()
+    }
+
+    /// The image placements of each populated row cache entry, in window
+    /// order.
+    ///
+    /// Aligned with `row_offsets`: [`Self::merge_rows_range`] pushes a
+    /// `row_offsets` entry only for `Some` cache entries, and this skips
+    /// `None` entries for the same reason, so index `r` refers to the same
+    /// row in both.
+    fn collect_row_images(cache: &[Option<RowCacheEntry>]) -> Vec<Vec<RowImageCell>> {
+        cache
+            .iter()
+            .flatten()
+            .map(|entry| entry.images.clone())
             .collect()
     }
 
@@ -940,6 +1022,7 @@ impl Buffer {
         let (chars, tags, row_offsets, url_tag_indices) = merged;
 
         let row_line_widths = Self::collect_row_line_widths(cache);
+        let row_images = Self::collect_row_images(cache);
         let next_basis = RowRenderBasis {
             window: MergedWindow {
                 chars: &chars,
@@ -947,12 +1030,14 @@ impl Buffer {
                 row_offsets: &row_offsets,
             },
             line_widths: &row_line_widths,
+            images: &row_images,
         };
         let previous_basis = merge_cache.as_ref().map(|cached| {
             (
                 RowRenderBasis {
                     window: MergedWindow::from_cache(cached),
                     line_widths: &cached.row_line_widths,
+                    images: &cached.row_images,
                 },
                 cached.row_epochs.as_slice(),
             )
@@ -974,6 +1059,7 @@ impl Buffer {
             url_tag_indices: Arc::clone(&url_tag_indices),
             row_epochs: Arc::new(row_epochs),
             row_line_widths,
+            row_images,
         });
         (chars, tags, row_offsets, url_tag_indices)
     }
@@ -1589,6 +1675,7 @@ impl Buffer {
         let mut tags: Vec<FormatTag> = Vec::new();
         let mut bytes: Vec<u8> = Vec::new();
         let mut byte_to_char: Vec<u32> = Vec::new();
+        let mut images: Vec<RowImageCell> = Vec::new();
 
         for cell in row.characters() {
             // Skip wide-glyph continuation cells.
@@ -1599,6 +1686,17 @@ impl Buffer {
             let char_idx = chars.len();
             let tc = *cell.tchar();
             chars.push(tc);
+
+            // Task 124.C5: `Cell::image_cell` always constructs with
+            // `is_wide_continuation: false`, so an image cell is never
+            // skipped by the `continue` above — `char_idx` here is exactly
+            // the index this placement occupies in `chars`.
+            if let Some(placement) = cell.image_placement() {
+                images.push(RowImageCell {
+                    char_index: char_idx,
+                    placement: placement.clone(),
+                });
+            }
 
             // Build the byte mirror in the same pass when auto-detect is on.
             if auto_detect {
@@ -1672,6 +1770,7 @@ impl Buffer {
             auto_urls,
             tail_could_be_wrapped_scheme,
             line_width: row.line_width,
+            images,
         }
     }
 
@@ -4098,9 +4197,13 @@ mod row_epoch_tests {
     }
 
     // ────────────────────────────────────────────────────────────────
-    // 11 / 12 — Task 124.C5: an image placed over already-blank cells
-    //     under an identical tag is invisible to the epoch (paired
-    //     defect + control)
+    // 11 – 16 — Task 124.C5: image placements are part of a row's render
+    //     basis. `Cell::image_cell` stamps a cell's *value* as plain
+    //     `TChar::Space`, so an image placement change is invisible to
+    //     `chars`/`tags` and must be covered by a dedicated comparison
+    //     term. Every "does bump" case below is paired with a "does not
+    //     bump" degenerate-guard control, matching this module's stated
+    //     convention.
     // ────────────────────────────────────────────────────────────────
 
     /// Minimal `ImagePlacement` for these tests. Duplicated from
@@ -4144,28 +4247,42 @@ mod row_epoch_tests {
         buf
     }
 
-    /// **This test asserts a DEFECT, not a spec.** It pins plan subtask
-    /// 124.C5: `Buffer::flatten_row` reads only `cell.tchar()` and
-    /// `cell.tag()` — it never reads `cell.image_placement()`.
-    /// `Cell::image_cell` stamps the cell's *value* as `TChar::Space` under
-    /// whatever `FormatTag` is passed, so placing an inline image over
-    /// cells that already hold literal spaces under an identical tag
-    /// leaves the row's merged `chars`, `tags`, and `line_width` —
-    /// `RowRenderBasis`'s entire comparison surface — byte-identical
-    /// before and after. The row's epoch is therefore carried forward
-    /// while its rendered pixels changed: an image now covers cells the
-    /// GUI believes are unchanged and will not repaint.
+    /// [`buffer_with_materialized_gap`], but materializes the same gap on
+    /// every row in `target_rows` within one buffer — needed by tests that
+    /// compare an image placement's effect across two distinct rows whose
+    /// target cell must independently be a literal, already-written space
+    /// under the buffer's default tag before the test's own mutation.
+    fn buffer_with_materialized_gaps(target_rows: &[usize], target_col: usize) -> Buffer {
+        let mut buf = build_plain_buffer(20, 6);
+        for &row in target_rows {
+            buf.set_cursor_pos(Some(5), Some(row));
+            buf.insert_text(&text(&" ".repeat(target_col - 5 + 1)));
+        }
+        buf
+    }
+
+    /// Spec: placing an inline image over cells that already render as
+    /// identical spaces under an identical tag must still bump the
+    /// affected row's content epoch.
     ///
-    /// When 124.C5 is fixed, the final assertion below must be INVERTED
-    /// (the epoch must bump), not deleted — matching this repo's
-    /// established idiom for pinned, currently-shipped defects (see
-    /// 124.9's `a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload`
-    /// and 124.16's `a_scroll_by_one_line_hits_nothing`). See the paired
+    /// `Cell::image_cell` stamps the cell's *value* as `TChar::Space` under
+    /// whatever `FormatTag` is passed, so the row's merged `chars` and
+    /// `tags` are byte-identical before and after the placement — an image
+    /// placement changes what a row renders as without appearing in either
+    /// of those two vectors at all. `RowCacheEntry::images` /
+    /// `RowRenderBasis::images` (Task 124.C5) exist precisely to give the
+    /// epoch comparison a way to see this.
+    ///
+    /// This was 124.C5's pinned defect: until the `images` comparison term
+    /// was added, this row's epoch was carried forward while its rendered
+    /// pixels changed — an image would silently cover cells the GUI
+    /// believed were unchanged and would not repaint. See the paired
     /// control `writing_text_over_those_same_cells_does_bump_the_row_epoch`
-    /// below, which proves this is an image-specific blind spot and not a
-    /// frozen stamp or a broken fixture.
+    /// below, which proves ordinary text over the same cells was never
+    /// affected — this is (was) an image-specific blind spot, not a frozen
+    /// stamp or a broken fixture.
     #[test]
-    fn placing_an_image_over_identical_spaces_does_not_bump_the_row_epoch() {
+    fn placing_an_image_over_identical_spaces_bumps_the_row_epoch() {
         const TARGET_ROW: usize = 2;
         const TARGET_COL: usize = 10;
         const WIDTH: usize = 20;
@@ -4210,24 +4327,27 @@ mod row_epoch_tests {
         let row_chars_after = chars_after[r_start_after..r_end_after].to_vec();
 
         // Evidence the merged `chars` really are byte-identical: without
-        // this, the test could pass because something else — not the
-        // image-only blind spot — happened to leave the row unchanged.
+        // this, the test could pass for the wrong reason — an unrelated
+        // change (e.g. a length shift) bumping the epoch instead of the
+        // image placement itself.
         assert_eq!(
             row_chars_before, row_chars_after,
             "test setup: row {TARGET_ROW}'s merged chars must be byte-identical \
-             before and after placing the image, isolating the image-only blind spot"
+             before and after placing the image, isolating the image-only signal"
         );
 
+        let mut expected = before_epochs.clone();
+        expected[TARGET_ROW] = after_epochs[TARGET_ROW];
         assert_eq!(
-            before_epochs, after_epochs,
-            "DEFECT (124.C5): Buffer::flatten_row never reads \
-             cell.image_placement(), so placing an image over cells that \
-             already render as identical spaces under an identical tag \
-             currently leaves every row's epoch unchanged even though the \
-             row's rendered pixels changed. When 124.C5 is fixed this \
-             assertion must be INVERTED (the epoch must bump), not deleted \
-             — see the paired control \
-             writing_text_over_those_same_cells_does_bump_the_row_epoch."
+            after_epochs, expected,
+            "only row {TARGET_ROW}'s epoch may differ when only its target \
+             cell's image placement changes"
+        );
+        assert_ne!(
+            before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
+            "placing an image over cells that already render as identical \
+             spaces under an identical tag must bump the row's epoch \
+             (Task 124.C5)"
         );
     }
 
@@ -4265,6 +4385,186 @@ mod row_epoch_tests {
             "writing ordinary text over the same already-materialized cell \
              must bump the row's epoch — proving the defect test pins an \
              image-specific blind spot, not a frozen stamp"
+        );
+    }
+
+    /// Degenerate-guard control for the placement test above: a row
+    /// holding an image placement, rebuilt with nothing actually changed,
+    /// must NOT bump its epoch. Without this, a comparison that always
+    /// reports "different" (e.g. one that mishandles `Vec::new()` vs. an
+    /// absent entry) would pass every other test in this section.
+    #[test]
+    fn a_row_holding_an_unchanged_image_keeps_its_epoch() {
+        const TARGET_ROW: usize = 2;
+        const TARGET_COL: usize = 10;
+
+        let mut buf = buffer_with_materialized_gap(TARGET_ROW, TARGET_COL);
+        let tag = buf.current_tag.clone();
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, make_test_image_placement(1), tag);
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        // Force a rebuild of the row with nothing actually changed — the
+        // idiom full-screen TUIs use every frame, matching
+        // `a_row_rewritten_with_identical_bytes_does_not_bump_its_epoch`.
+        buf.rows[TARGET_ROW].mark_dirty();
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        assert_eq!(
+            before_epochs, after_epochs,
+            "rebuilding a row holding an unchanged image placement must \
+             not bump any row's epoch"
+        );
+    }
+
+    /// Mirror of the placement case: clearing an image from an
+    /// otherwise-identical cell is a genuinely distinct code path
+    /// (`Cell::clear_image` vs. `Cell::image_cell`) and must independently
+    /// bump the row's epoch.
+    #[test]
+    fn clearing_an_image_from_otherwise_identical_cells_bumps_the_row_epoch() {
+        const TARGET_ROW: usize = 2;
+        const TARGET_COL: usize = 10;
+        const WIDTH: usize = 20;
+
+        let mut buf = buffer_with_materialized_gap(TARGET_ROW, TARGET_COL);
+        let tag = buf.current_tag.clone();
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, make_test_image_placement(1), tag);
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        buf.clear_image_placements_by_id(1);
+
+        // Evidence the clear really landed: without this, the test could
+        // pass by accident if the image was silently never cleared.
+        let placements_after = buf.visible_image_placements(0);
+        assert!(
+            placements_after[TARGET_ROW * WIDTH + TARGET_COL].is_none(),
+            "test setup did not actually clear the image; this test would \
+             prove nothing"
+        );
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        let mut expected = before_epochs.clone();
+        expected[TARGET_ROW] = after_epochs[TARGET_ROW];
+        assert_eq!(
+            after_epochs, expected,
+            "only row {TARGET_ROW}'s epoch may differ when only its image \
+             placement is cleared"
+        );
+        assert_ne!(
+            before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
+            "clearing an image placement from an otherwise-identical cell \
+             must bump the row's epoch"
+        );
+    }
+
+    /// The sub-case the plan explicitly records as not caught by any other
+    /// signal: an image whose `image_id` is already known (placed
+    /// elsewhere first, so a hypothetical comparison keyed on "did the set
+    /// of known image ids change" would see no difference) placed onto a
+    /// different, content-identical cell. The per-row content comparison
+    /// must still bump the target row's epoch because it compares each
+    /// row's own `RowImageCell`s directly, not a global id set.
+    #[test]
+    fn moving_a_known_image_onto_content_identical_cells_bumps_the_row_epoch() {
+        const SOURCE_ROW: usize = 2;
+        const TARGET_ROW: usize = 3;
+        const TARGET_COL: usize = 10;
+        const WIDTH: usize = 20;
+
+        let mut buf = buffer_with_materialized_gaps(&[SOURCE_ROW, TARGET_ROW], TARGET_COL);
+        let tag = buf.current_tag.clone();
+
+        // Place the image on the source row first, so `image_id = 1` is
+        // already "known" (present somewhere in the buffer) by the time it
+        // is placed on the target row.
+        buf.set_image_cell_at(
+            SOURCE_ROW,
+            TARGET_COL,
+            make_test_image_placement(1),
+            tag.clone(),
+        );
+
+        let (chars_before, _tags_before, row_offsets_before, _) = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        let (r_start, r_end) = row_char_span(&row_offsets_before, chars_before.len(), TARGET_ROW);
+        assert_eq!(
+            chars_before[r_start..r_end].get(TARGET_COL),
+            Some(&TChar::Space),
+            "test setup: the target row's target cell must be a literal \
+             space before the already-known image is placed onto it"
+        );
+
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, make_test_image_placement(1), tag);
+
+        // Evidence the placement really landed on the target row.
+        let placements_after = buf.visible_image_placements(0);
+        assert!(
+            placements_after[TARGET_ROW * WIDTH + TARGET_COL].is_some(),
+            "test setup did not actually place the image onto the target \
+             row's target cell; this test would prove nothing"
+        );
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        let mut expected = before_epochs.clone();
+        expected[TARGET_ROW] = after_epochs[TARGET_ROW];
+        assert_eq!(
+            after_epochs, expected,
+            "only row {TARGET_ROW}'s epoch may differ when only its \
+             target cell's image placement changes"
+        );
+        assert_ne!(
+            before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
+            "placing an already-known image id onto a different, \
+             content-identical cell must bump that row's epoch"
+        );
+    }
+
+    /// Pins that the *whole* placement is compared, not just `image_id`:
+    /// two placements identical in every field except `z_index` must
+    /// still bump the row's epoch. Over-reporting on a field that might
+    /// not affect rendering is the safe direction and is deliberate — see
+    /// `RowRenderBasis::row_renders_identically`'s doc comment.
+    #[test]
+    fn a_z_index_only_placement_change_bumps_the_row_epoch() {
+        const TARGET_ROW: usize = 2;
+        const TARGET_COL: usize = 10;
+
+        let mut buf = buffer_with_materialized_gap(TARGET_ROW, TARGET_COL);
+        let tag = buf.current_tag.clone();
+
+        let mut placement = make_test_image_placement(1);
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, placement.clone(), tag.clone());
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let before_epochs = buf.visible_row_epochs(0, 0);
+
+        placement.z_index = 5;
+        buf.set_image_cell_at(TARGET_ROW, TARGET_COL, placement, tag);
+
+        let _ = buf.visible_as_tchars_and_tags(0);
+        let after_epochs = buf.visible_row_epochs(0, 0);
+
+        let mut expected = before_epochs.clone();
+        expected[TARGET_ROW] = after_epochs[TARGET_ROW];
+        assert_eq!(
+            after_epochs, expected,
+            "only row {TARGET_ROW}'s epoch may differ when only its \
+             target cell's placement z_index changes"
+        );
+        assert_ne!(
+            before_epochs[TARGET_ROW], after_epochs[TARGET_ROW],
+            "a z_index-only placement change must bump the row's epoch — \
+             the whole placement is compared, not just image_id"
         );
     }
 }
