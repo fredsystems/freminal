@@ -171,6 +171,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
+| 124.23 | The full-draw paint arm ignores the published present region | Ready — **blocks all of 124.14**; reachable today at `bg_opacity < 1.0` |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2382,6 +2383,120 @@ completion, not re-derived. **If that guarantee is unsound, every
 boundability rests on those structures not being reachable from
 `evaluate_frame_dirty_state`'s current inputs, not on an exhaustive search of
 the emulator crate. No experiment was run — the audit was read-only.
+
+### 124.23 — The full-draw paint arm ignores the published present region
+
+**Blocks 124.14a, b, c and d — all four spend this path.** *Added
+2026-08-24 by 124.14a's activation recon. Maintainer chose design (a),
+scissor the draw, on 2026-08-24.*
+
+#### What is wrong
+
+124.20 established the invariant that **one region governs the clip, the
+clear and the present**. That invariant is enforced in the windowing layer
+and in the app's *cursor-only* paint arm. It is not enforced in the app's
+**full-draw** arm, which scissors nothing (`widget.rs:3117-3147`).
+
+Today the cursor-only arm reads `PresentRegion` and scissors to it
+(`widget.rs:3082-3116`) — deliberately to the windowing-published region
+rather than the pane's own cursor rect, because on a stale back buffer the
+published region is a union covering more than this frame's damage.
+
+#### This is reachable today, not merely a hazard 124.14 would create
+
+Established by reading, and stated as the reason this entry is a **fix**
+rather than preparation:
+
+- The paint-callback registration sits **outside** the
+  `if !snap.skip_draw` block (`widget.rs:2465` opens it; registration is at
+  `:2960`), so every pane registers a callback every frame regardless of
+  whether it changed.
+- `is_cursor_only` is a per-widget local initialised `false`
+  (`widget.rs:2410`) and set `true` only inside the cursor-only rebuild arm
+  (`:2532`). A pane reporting `Unchanged` therefore takes the **full-draw**
+  arm.
+- `decide_frame_damage` does **not** clear rects for an `Unchanged` pane —
+  only `Full`, `CursorOnly(None)` and `bell_active` do
+  (`frame_damage.rs:104-121`).
+
+Compose those: in a split where pane A has a blinking cursor and pane B is
+genuinely idle, the frame is `Partial` on A's cursor rect, the clear is
+scissored to that rect, and **pane B redraws its whole viewport with no
+scissor over pixels the clear deliberately skipped.**
+
+#### The bound, stated so it is not overstated
+
+At the default `background_opacity == 1.0` pane B's own quads are opaque and
+fully overwrite the stale pixels, so nothing is visible — the same bound
+124.20 recorded for its own defect, and the reason this has never been seen.
+It bites `background_opacity < 1.0` (Task 34 transparency), where the idle
+pane's quads blend against already-composited pixels from an older frame
+(`a*fill + (1-a)*stale`) instead of against the clear colour, compounding
+across frames.
+
+Note it is **not** a defect that pane B's *untouched* pixels are stale. That
+is what partial present is for, and 124.18's damage-history union covers a
+pane that changed within the staleness window. The defect is specifically
+the unscissored **draw** over an unscissored-away **clear**.
+
+#### The fix — design (a), chosen by the maintainer
+
+Both arms read the same `PresentRegion` and both scissor to it. Design (b) —
+leave the draw unbounded and widen the published region to cover every pane
+doing a full draw — was considered and declined: it cannot corrupt and is
+less code, but it forfeits the fill saving and makes damage pane-granular,
+and having two paint arms disagree about whether the region binds them is
+the shape of bug this task keeps finding.
+
+Scope: `freminal/src/gui/terminal/widget.rs` only. Lift the `PresentRegion`
+read out of the `is_cursor_only` branch so both arms share one read, and
+apply the same enable/scissor/disable discipline around `draw_with_verts`
+that the cursor arm already applies around `draw_with_cursor_only_update`.
+Leave GL scissor state as egui expects on both paths.
+
+#### Why this can land ahead of 124.14a, and must
+
+**It is behaviour-neutral for every frame that exists today** in the
+single-pane case, because a pane that produces a `Region` takes the cursor
+arm, so the full-draw arm only ever sees `PresentRegion::Full`, on which the
+scissor is a no-op. That is what makes it independently verifiable: a `Full`
+frame must be byte-identical before and after. The multi-pane case above is
+the one behaviour change, and it is the bug fix.
+
+Landing it inside 124.14a instead would put a correctness fix for a shipped
+defect inside a subtask whose verification is aimed at a new enum, and would
+leave no frame at which the no-op property could be demonstrated.
+
+#### Verification for 124.23
+
+The windowing-level harness in `frame_paint.rs` is the **wrong instrument**
+and must not be used for this: it drives synthetic egui `FrameFn` closures,
+and a GL `Primitive::Callback` is precisely the thing that bypasses egui's
+scissor, so that harness structurally cannot reproduce the defect. The right
+instrument is `freminal`'s own pixel harness
+(`cargo test -p freminal --features gl-pixel`), which drives the renderer
+directly.
+
+Pin, fix, then invert, per the idiom used by 124.9, 124.16 and 124.C5:
+
+1. a pixel test reproducing the blend-against-stale case at
+   `background_opacity < 1.0` through the full-draw path, asserting the
+   defective pixel values;
+2. the fix;
+3. the inversion, plus a test proving a `PresentRegion::Full` frame is
+   byte-identical before and after (the no-op property).
+
+Then `cargo test --all`;
+`cargo clippy --all-targets --all-features -- -D warnings`;
+`cargo clippy --workspace --all-targets`; `cargo machete`; both Task 123
+harnesses; `cargo xtask check-windows` before the PR.
+
+#### Prohibitions for 124.23
+
+Do NOT add `PaneFrameDamage::Region` or touch `VertexRebuild` — that is
+124.14a and this entry exists so it can be built safely. Do NOT change
+`decide_frame_damage`. Do NOT touch the vertex layout or `upload_verts`. Do
+NOT widen the published region (that is design (b), declined).
 
 ### 124.22 — `freminal-damage-model` agent skill
 
