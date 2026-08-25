@@ -170,7 +170,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
-| 124.C5 | Inline image placement is invisible to the row epoch | Planned — **constrains 124.14a** |
+| 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2309,6 +2309,9 @@ rather than the intended one.
 
 ### 124.C5 — Inline image placement is invisible to the row epoch
 
+**Complete (2026-08-24). Two commits: the pin `1339208c`, the fix
+`74e94576`.**
+
 *Surfaced 2026-08-24 by the read-only verification of 124.10-124.12's
 no-under-report guarantee, commissioned before 124.14a was decomposed.
 Cleanup entry. **Pre-existing and already shipped** — 124.14 does not
@@ -2349,14 +2352,75 @@ image id changes the pixel-map's key set), but **not** an already-known image
 moved onto content-identical cells. `snap.visible_image_placements` has no
 independent diff anywhere in the GUI.
 
-**Binding constraint on 124.14a:** `changed_rows` is a sound, tested,
-non-under-reporting signal for text/tag/line-width content — proceed on that
-basis. It is **not** sound for image damage. Image vertex rebuilding must
-stay on its existing coarser whole-pane trigger set
-(`image_frame_changed || image_pixels_changed || ...`) and must **not** be
-folded into the per-row `changed_rows` decision until this entry is closed.
-Doing so would take a currently-quiet bug and make it load-bearing for a
-correctness property 124.14a is supposed to provide.
+**Binding constraint on 124.14a — now partially lifted, and the remaining
+half is the part that matters.** `changed_rows` is a sound, tested,
+non-under-reporting signal for text, tag, line-width **and image-placement**
+content, and 124.14a may proceed on that basis for the **present region**.
+It is still **not** a complete signal for image *pixel* damage: an animation
+frame advancing, or an image's transmitted bytes being replaced, changes no
+placement and so bumps no epoch. Image vertex rebuilding must therefore stay
+on its existing coarser whole-pane trigger set (`image_frame_changed ||
+image_pixels_changed || ...`) and must **not** be folded into the per-row
+`changed_rows` decision. What C5 bought is that a row whose image *placement*
+changed can no longer be excluded from a bounded present region — which was
+the gate — not that `changed_rows` has become a complete image damage signal.
+
+#### 124.C5 implementation notes (2026-08-24)
+
+**Fixed in 124.10's `line_width` idiom, deliberately, because it is the same
+shape of problem**: something a row renders as that never appears in
+`chars`/`tags`. `RowCacheEntry` gains `images: Vec<RowImageCell>` captured in
+`flatten_row`, `MergeCache` gains `row_images` as the previous-frame half,
+and `RowRenderBasis::row_renders_identically` compares them alongside
+everything else. That predicate is the single choke point —
+`row_epochs_for_merge`, the incremental path's reused-prefix carry and the
+`debug_verify_epochs` oracle all route through it — so all three gained image
+coverage without being touched. Two `RowRenderBasis` construction sites and
+one `MergeCache` construction site exist; all were audited, not assumed.
+
+**The whole `ImagePlacement` is compared, not just `image_id`.** A field that
+turns out not to affect rendering costs a spurious repaint; a field omitted
+from the comparison is silent visual corruption. Only the first is
+recoverable. For the same reason the placements are compared literally rather
+than hashed — 124.10 rejected content hashing on the record because a
+collision is an under-report.
+
+**Keying on the post-continuation-skip `char_idx` is exact, not lossy.**
+`Cell::image_cell` sets `is_wide_continuation: false`, and `Cell::from_parts`
+— the only other constructor that can set that flag — sets `image: None`. So
+no cell can be simultaneously a wide continuation and hold a placement, and
+`flatten_row`'s `continue` can never skip an image cell. Verified in
+`cell.rs` rather than inferred from the happy path.
+
+**Cost:** rows with no images produce a `Vec::new()`, which does not
+allocate, so the common case is one `Option::is_some` check per cell. Only
+re-merged rows clone.
+
+**Tests: the pin was inverted, not deleted**, keeping both of its evidence
+assertions (that the placement really landed, and that the merged `chars`
+really are byte-identical) — without those the inverted assertion could pass
+for the wrong reason. Four more were added: image *removal* (a distinct code
+path, `clear_image` rather than `image_cell`); an already-known `image_id`
+moved onto a different content-identical cell, which is the sub-case this
+entry records as caught by no other signal; a `z_index`-only change, pinning
+that the whole placement is compared; and a degenerate guard proving an
+unchanged image still does **not** bump. That last one is load-bearing: a
+comparison that always reported "different" would satisfy every other test
+here.
+
+**Verified by mutation rather than by assertion count.** With the four-line
+`images` comparison removed from `row_renders_identically`, all four "does
+bump" tests fail and the degenerate guard still passes. The tests are
+therefore pinned to the production change and not to the fixture.
+
+**Not covered, stated rather than glossed:** the `proptest` fuzzer in this
+file (`incremental_merge_matches_full_merge`) lives in
+`incremental_merge_tests`, generates only `set_cursor_pos` + `insert_text`
+with ASCII and tag changes, and asserts merged-output equality against an
+oracle. It does not touch `visible_row_epochs` at all, so it gives the epoch
+mechanism **zero** coverage — image-related or otherwise. The
+`debug_assertions` oracle `debug_verify_epochs` is the epoch's coverage, and
+that one *did* gain the image term automatically.
 
 ### 124.C6 — `search_corpus` over an open fold desyncs `merge_cache` permanently
 
