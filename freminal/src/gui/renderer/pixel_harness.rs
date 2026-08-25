@@ -884,9 +884,9 @@ mod present_region_scissor_tests {
 /// never-cleared framebuffer restricted to a scissor rect (the `Region`
 /// frame's bounded present)". A `Region` frame's whole safety argument is
 /// that its content is byte-identical to what a `Full` rebuild of the same
-/// state would produce -- `VertexRebuild::Rows` runs the exact same
+/// state would produce -- `VertexRebuild::Bounded` runs the exact same
 /// full-rebuild code as `VertexRebuild::ReevaluateFullRebuild`
-/// (`frame_dirty.rs`'s doc on `VertexRebuild::Rows`), so the vertices fed
+/// (`frame_dirty.rs`'s doc on `VertexRebuild::Bounded`), so the vertices fed
 /// to the second draw are identical to the first's. Passing the *same*
 /// [`SyntheticFrame`] as both `first` and `second` reproduces exactly that:
 /// "this frame's rebuild, presented in full" versus "this frame's
@@ -922,7 +922,7 @@ mod region_present_matches_full_present_tests {
     /// full viewport, which `a_full_viewport_scissor_box_clips_nothing`
     /// already covers, and not edge-aligned, so an off-by-one in either
     /// bound would still land inside the checked area) -- a stand-in for
-    /// one of `build_row_range_damage`'s row-range rects.
+    /// one of `build_bounded_damage`'s row-range rects.
     #[test]
     fn a_region_present_of_unchanged_state_matches_a_full_present_everywhere() {
         let frame = SyntheticFrame::new(40, 10);

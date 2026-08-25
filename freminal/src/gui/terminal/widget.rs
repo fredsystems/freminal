@@ -1368,6 +1368,32 @@ pub struct PaneRenderCache {
     /// The normalised selection from the last full vertex rebuild, used to
     /// detect selection changes that require a full rebuild.
     pub(super) previous_selection: Option<(CellCoord, CellCoord)>,
+    /// The screen-row span (inclusive, `(min, max)`) the selection occupied
+    /// at the last full vertex rebuild, in **screen**-row space, not
+    /// buffer-absolute (Task 124.14b-i).
+    ///
+    /// [`Self::previous_selection`] is buffer-absolute and
+    /// `DirtyTrackingOutcome::screen_selection` is snapshot-row space, so a
+    /// bounded-damage union built by naively comparing the two would be
+    /// comparing coordinates from two different spaces. Translating the old
+    /// selection with *this* frame's `win_start` is also wrong whenever the
+    /// window moved between frames — new output pushing rows into
+    /// scrollback moves the window without setting `scroll_changed`, so
+    /// there is no reliable signal that the translation would even need
+    /// correcting.  The question a bounded-damage rebuild must answer is
+    /// "where on screen was the old highlight painted", which is inherently
+    /// a screen-space question — so the answer is stored in screen space
+    /// once, here, and needs no translation and no window-movement guard
+    /// when read back.
+    ///
+    /// Updated in lockstep with [`Self::previous_selection`] — see that
+    /// field's call site in `show()` — so it only advances on a frame that
+    /// actually ran the full rebuild body; a frame that reused the previous
+    /// frame's vertices unchanged leaves both fields alone. Reset to `None`
+    /// everywhere [`Self::previous_selection`] is reset to `None`, so the
+    /// two fields can never disagree about whether a previous selection was
+    /// recorded at all.
+    pub(super) previous_selection_screen_rows: Option<(usize, usize)>,
     /// Text blink slow-visibility from the most recently rendered frame.
     pub(super) previous_text_blink_slow_visible: bool,
     /// Text blink fast-visibility from the most recently rendered frame.
@@ -1551,6 +1577,7 @@ impl PaneRenderCache {
             last_rendered_row_epochs: None,
             previous_theme: None,
             previous_selection: None,
+            previous_selection_screen_rows: None,
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
             overlay_was_open_last_frame: false,
@@ -1725,7 +1752,7 @@ pub(super) fn image_pixels_changed(
     build_image_pixel_ptrs(images, selected) != *prev
 }
 
-/// Pixel geometry shared by every row-range rect a [`build_row_range_damage`]
+/// Pixel geometry shared by every row-range rect a [`build_bounded_damage`]
 /// call may emit. Grouped into one `Copy` struct so that function (and its
 /// per-run helper) stay under clippy's `too_many_arguments` threshold —
 /// mirrors `frame_dirty::FrameDirtyGeometry`'s precedent for the same reason.
@@ -1787,65 +1814,106 @@ fn row_run_damage(
 /// damage (Task 124.14).
 ///
 /// Decided before the rebuild body runs, because the body is byte-for-byte
-/// the same either way: [`VertexRebuild::Rows`] means "full rebuild, bounded
-/// *damage*", never a bounded rebuild. Bounding the vertex upload itself is
-/// Task 125, gated on a fixed-stride relayout that does not exist yet.
+/// the same either way: [`VertexRebuild::Bounded`] means "full rebuild,
+/// bounded *damage*", never a bounded rebuild. Bounding the vertex upload
+/// itself is Task 125, gated on a fixed-stride relayout that does not exist
+/// yet.
 enum FullRebuildDamage {
-    /// Content changed only within the frame's `changed_rows` row list and
-    /// no other full-repaint trigger fired -- build
+    /// Content changed only within known bounds -- the frame's
+    /// `changed_rows` row list (Task 124.14a), the current/previous
+    /// selection's screen-row span (Task 124.14b-i), or both together -- and
+    /// no other full-repaint trigger fired. Build
     /// [`crate::gui::renderer::PaneFrameDamage::Region`] from it once the
-    /// rebuild completes (or fall back to `Full` if the rows all map to
-    /// nothing, e.g. collapsed inside a fold).
+    /// rebuild completes (or fall back to `Full` if every contributing row
+    /// maps to nothing, e.g. collapsed inside a fold).
     Bounded,
     /// No bound is available; report
     /// [`crate::gui::renderer::PaneFrameDamage::Full`].
     Full,
 }
 
-/// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from the window
-/// rows named by a [`VertexRebuild::Rows`] outcome, falling back to `Full`
-/// when no bound can be established (Task 124.14).
+/// Build a [`crate::gui::renderer::PaneFrameDamage::Region`] from every
+/// bounded damage source a [`VertexRebuild::Bounded`] outcome may carry,
+/// falling back to `Full` when no bound can be established (Task 124.14).
 ///
-/// `changed_rows` must be [`super::frame_dirty::ChangedRows::Rows`] whenever
-/// this is called — `evaluate_frame_dirty_state` selects
-/// [`VertexRebuild::Rows`] only when it is — but this falls back to `Full`
-/// rather than panicking on any other shape, per the panic-free-production
-/// rule and consistent with the "an empty rect set reports `Full`" design
-/// decision below: an unreachable-in-practice input is just another way of
-/// having nothing to bound.
+/// Three sources are unioned into one row set before any rect is built:
+///
+/// - `changed_rows` (Task 124.14a) -- the window rows named by
+///   [`super::frame_dirty::ChangedRows::Rows`], translated snapshot ->
+///   rendered -> screen.
+/// - `current_selection_screen_rows` (Task 124.14b-i) -- this frame's
+///   selection highlight, already in screen-row space (derived from
+///   `screen_selection_rendered` at the call site, which performed the same
+///   two-step translation).
+/// - `previous_selection_screen_rows` (Task 124.14b-i) -- last frame's
+///   selection highlight, also already in screen-row space
+///   ([`PaneRenderCache::previous_selection_screen_rows`] — see that
+///   field's doc for why it is cached in screen space rather than
+///   translated on demand). Erasing the *old* highlight matters as much as
+///   drawing the *new* one: a selection that shrank or was cleared still
+///   left pixels on screen that only these rows will repaint.
+///
+/// `evaluate_frame_dirty_state` selects [`VertexRebuild::Bounded`] only when
+/// `changed_rows` is [`super::frame_dirty::ChangedRows::Rows`] or
+/// [`super::frame_dirty::ChangedRows::None`] — never
+/// [`super::frame_dirty::ChangedRows::All`] — but the `All` arm below falls
+/// back to `Full` rather than panicking on that unreachable-in-practice
+/// shape, per the panic-free-production rule and consistent with the "an
+/// empty rect set reports `Full`" decision below: an input this function
+/// cannot bound is just another way of having nothing to bound.
 ///
 /// Snapshot rows that map to nothing (collapsed inside a fold) contribute no
 /// rect via `row_map.snapshot_to_rendered` / `layout.rendered_to_screen`
-/// returning `None`. If every row does — the whole change is hidden behind
-/// folds — the result is `Full`, not an empty `Region`: an empty region
-/// would be a third way of spelling "nothing changed", and
+/// returning `None`. If every source's row does — the whole change is
+/// hidden behind folds — the result is `Full`, not an empty `Region`: an
+/// empty region would be a third way of spelling "nothing changed", and
 /// `decide_frame_damage` already carries one dead `RequestedWithNoRects`
 /// variant from the last time that shape existed (124.21 finding 4).
 ///
-/// Contiguous on-screen rows are merged into a single rect (a run) rather
-/// than emitted one rect per row, so a block of adjacent changed rows costs
-/// one [`crate::gui::renderer::CursorDamage`] rather than many — but
-/// non-contiguous rows (e.g. rows 3 and 40) stay separate rects rather than
-/// collapsing to their bounding box, which is the entire reason
-/// `PaneFrameDamage::Region` carries a `Vec` instead of one rect (124.14a's
-/// design decision: a single bbox would present the rows between them too).
-fn build_row_range_damage(
+/// The three sources are merged into one sorted, deduplicated row set
+/// **before** run-merging runs, so overlapping sources (e.g. a changed row
+/// that sits inside the selection) collapse into one rect rather than two
+/// overlapping ones. Contiguous on-screen rows are merged into a single
+/// rect (a run) rather than emitted one rect per row, so a block of
+/// adjacent rows costs one [`crate::gui::renderer::CursorDamage`] rather
+/// than many — but non-contiguous rows (e.g. rows 3 and 40) stay separate
+/// rects rather than collapsing to their bounding box, which is the entire
+/// reason `PaneFrameDamage::Region` carries a `Vec` instead of one rect
+/// (124.14a's design decision: a single bbox would present the rows between
+/// them too).
+fn build_bounded_damage(
     changed_rows: &super::frame_dirty::ChangedRows,
+    current_selection_screen_rows: Option<(usize, usize)>,
+    previous_selection_screen_rows: Option<(usize, usize)>,
     row_map: &RowMap,
     layout: &FoldLayout,
     geometry: RowDamageGeometry,
 ) -> crate::gui::renderer::PaneFrameDamage {
-    let super::frame_dirty::ChangedRows::Rows(rows) = changed_rows else {
-        return crate::gui::renderer::PaneFrameDamage::Full;
+    let mut screen_rows: Vec<usize> = match changed_rows {
+        super::frame_dirty::ChangedRows::Rows(rows) => rows
+            .iter()
+            .filter_map(|&snap_row| {
+                let rendered = row_map.snapshot_to_rendered(snap_row)?;
+                layout.rendered_to_screen(rendered)
+            })
+            .collect(),
+        super::frame_dirty::ChangedRows::None => Vec::new(),
+        super::frame_dirty::ChangedRows::All => {
+            return crate::gui::renderer::PaneFrameDamage::Full;
+        }
     };
 
-    let mut screen_rows: Vec<usize> = rows
-        .iter()
-        .filter_map(|&snap_row| {
-            let rendered = row_map.snapshot_to_rendered(snap_row)?;
-            layout.rendered_to_screen(rendered)
-        })
-        .collect();
+    if let Some((start, end)) = current_selection_screen_rows {
+        screen_rows.extend(start..=end);
+    }
+    if let Some((start, end)) = previous_selection_screen_rows {
+        screen_rows.extend(start..=end);
+    }
+
+    // Merge all three sources into one sorted, deduplicated set BEFORE
+    // run-merging, so a row contributed by more than one source (e.g. a
+    // changed row inside the selection) collapses to a single entry rather
+    // than emitting overlapping rects for it.
     screen_rows.sort_unstable();
     screen_rows.dedup();
 
@@ -2727,14 +2795,14 @@ impl FreminalTerminalWidget {
 
             // Whether -- and how -- this frame's full rebuild (if any) can
             // report bounded damage, decided BEFORE the (identical either
-            // way) rebuild body runs below. `VertexRebuild::Rows` means
+            // way) rebuild body runs below. `VertexRebuild::Bounded` means
             // "full rebuild, bounded *damage*" (Task 124.14): the rebuild
             // itself never changes shape or becomes partial -- bounding the
             // vertex upload itself is Task 125, gated on a fixed-stride
             // relayout that does not exist yet.
             let full_rebuild = match dirty.rebuild {
                 VertexRebuild::CursorOnly => None,
-                VertexRebuild::Rows => Some(FullRebuildDamage::Bounded),
+                VertexRebuild::Bounded => Some(FullRebuildDamage::Bounded),
                 VertexRebuild::ReevaluateFullRebuild => {
                     if content_changed
                         || selection_changed
@@ -2964,6 +3032,17 @@ impl FreminalTerminalWidget {
                             })
                         };
 
+                    // This frame's selection screen-row span (inclusive),
+                    // for the union-with-selection extension of
+                    // `build_bounded_damage` (Task 124.14b-i). Derived from
+                    // `screen_selection_rendered` above rather than
+                    // re-translating `screen_selection` a second time --
+                    // that value already performed the identical snapshot
+                    // -> rendered -> screen translation, and a second
+                    // hand-rolled translation is how these go wrong.
+                    let current_selection_screen_rows = screen_selection_rendered
+                        .map(|(_, sr_s, _, er_s)| (sr_s.min(er_s), sr_s.max(er_s)));
+
                     // ── Command-block hover-row range (current frame) ──
                     //
                     // Determine which OSC 133 block (if any) the mouse is
@@ -3103,7 +3182,16 @@ impl FreminalTerminalWidget {
                     cache.last_rendered_visible = Some(Arc::clone(&snap.visible_chars));
                     cache.last_rendered_row_epochs = Some(Arc::clone(&snap.row_epochs));
                     cache.previous_theme = Some(snap.theme);
+                    // Captured BEFORE the overwrite below so the damage
+                    // build a few lines down can still see where THIS
+                    // frame's selection was painted last time (Task
+                    // 124.14b-i) -- `previous_selection` and
+                    // `previous_selection_screen_rows` are updated in
+                    // lockstep here, inside the rebuild body, so both only
+                    // advance on a frame that actually drew.
+                    let previous_selection_screen_rows = cache.previous_selection_screen_rows;
                     cache.previous_selection = current_selection;
+                    cache.previous_selection_screen_rows = current_selection_screen_rows;
                     cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                     cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
                     cache.previous_search_epoch = search_epoch;
@@ -3121,8 +3209,10 @@ impl FreminalTerminalWidget {
 
                     cache.last_frame_cursor_damage = match full_rebuild_damage {
                         FullRebuildDamage::Full => crate::gui::renderer::PaneFrameDamage::Full,
-                        FullRebuildDamage::Bounded => build_row_range_damage(
+                        FullRebuildDamage::Bounded => build_bounded_damage(
                             &dirty.changed_rows,
+                            current_selection_screen_rows,
+                            previous_selection_screen_rows,
                             row_map,
                             &layout,
                             RowDamageGeometry {
@@ -4834,6 +4924,152 @@ mod image_pixels_changed_tests {
         assert!(
             image_pixels_changed(&images, |_| 1, &prev),
             "a removed image id must trigger a rebuild"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod build_bounded_damage_tests {
+    //! Task 124.14b-i: [`build_bounded_damage`] unions three damage
+    //! sources -- the changed-row list (124.14a), the current selection's
+    //! screen-row span, and the previous selection's screen-row span --
+    //! into one merged rect set. These tests exercise that union directly,
+    //! at the pure-function level, rather than through the full `show()`
+    //! pipeline (which needs a GL context). A no-fold, no-scroll-skip
+    //! `FoldLayout`/`RowMap` pair is used throughout so snapshot row ==
+    //! rendered row == screen row, isolating the union/merge logic from
+    //! the row-translation logic 124.14a's own tests already cover.
+    use super::*;
+    use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
+    use crate::gui::terminal::frame_dirty::ChangedRows;
+
+    /// A `RowMap`/`FoldLayout` pair with no folds and no scroll-skip, so
+    /// `row_map.snapshot_to_rendered` and `layout.rendered_to_screen`
+    /// together act as the identity function over `[0, row_count)`.
+    fn identity_layout(row_count: usize) -> FoldLayout {
+        FoldLayout {
+            flat_window_start: 0,
+            row_map: RowMap::new(row_count, &[]),
+            render_skip: 0,
+        }
+    }
+
+    /// Fixed geometry shared by every test: 10px-tall rows, a 100px-wide
+    /// viewport, and a 200px-tall framebuffer (20 rows) with the viewport
+    /// pinned to the framebuffer's top-left origin. Rows used by the tests
+    /// below are chosen away from row 0 and the last row so the 1px safety
+    /// pad in `CursorDamage::from_cursor_cells` never gets clamped away --
+    /// that clamping is `CursorDamage`'s own concern (covered by its own
+    /// tests / the pixel harness), not this union logic's.
+    fn geometry() -> RowDamageGeometry {
+        RowDamageGeometry {
+            row_h_f: 10.0,
+            viewport_width_px: 100.0,
+            vp_left_px: 0.0,
+            vp_top_px: 0.0,
+            fb_height_px: 200,
+        }
+    }
+
+    /// The exact `CursorDamage` `row_run_damage` produces for on-screen rows
+    /// `[start, end]` inclusive under [`geometry`] -- worked out once here
+    /// and reused by every assertion below, rather than re-deriving the
+    /// same arithmetic at each call site.
+    fn expected_run(start: usize, end: usize) -> CursorDamage {
+        let top: i32 = (start * 10).approx_as().unwrap_or(0);
+        let bottom: i32 = ((end + 1) * 10).approx_as().unwrap_or(0);
+        CursorDamage {
+            x: 0,
+            y: 200 - (bottom + 1),
+            width: 101,
+            height: (bottom + 1) - (top - 1),
+        }
+    }
+
+    /// A selection-only change (no row change) must still produce bounded
+    /// damage, and that damage must cover BOTH the current selection's rows
+    /// (the new highlight) and the previous selection's rows (erasing the
+    /// old one) -- the old-rows half is what a shrinking or moving
+    /// selection needs to avoid leaving a stale highlight on screen. Uses
+    /// two non-adjacent single-row spans so the result is provably two
+    /// separate rects, not a bounding box spanning the rows between them
+    /// (124.14a's design decision, still load-bearing here).
+    #[test]
+    fn selection_only_change_damages_both_current_and_previous_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            Some((2, 2)),
+            Some((5, 5)),
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 2), expected_run(5, 5)]),
+            "damage must name both the new selection's row (2) and the old \
+             selection's row (5) as two separate, non-contiguous rects"
+        );
+    }
+
+    /// The clearing case: the current selection is `None` (nothing to
+    /// draw this frame) but a previous selection was recorded. The union
+    /// must still damage the previous selection's rows -- if it did not,
+    /// the just-cleared highlight's pixels would never be repainted and
+    /// would linger on screen forever (nothing else would ever touch
+    /// those rows again).
+    #[test]
+    fn cleared_selection_still_damages_the_previous_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            None,
+            Some((1, 3)),
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(1, 3)]),
+            "clearing the selection (current None, previous Some) must \
+             still damage the rows the now-erased highlight occupied"
+        );
+    }
+
+    /// Overlapping sources -- a changed row that falls inside the current
+    /// selection's span -- must merge into ONE rect, not two overlapping
+    /// ones. This is the reason the three sources are combined into a
+    /// single sorted, deduplicated row set before any run-merging runs:
+    /// merging per-source first (row list -> one set of rects, selection ->
+    /// another) would double-present the overlap, which is wasted work at
+    /// best and, if a future change made a rect's bounds sensitive to which
+    /// source produced it, a duplicate-rect correctness hazard at worst.
+    #[test]
+    fn a_changed_row_inside_the_selection_merges_into_one_rect() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::Rows(vec![3]),
+            Some((2, 4)),
+            None,
+            &layout.row_map,
+            &layout,
+            geometry(),
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 4)]),
+            "row 3 sits inside the selection's [2, 4] span, so the union \
+             must merge to exactly one rect spanning [2, 4] -- two \
+             separate (and here, overlapping) rects would be a bug"
         );
     }
 }

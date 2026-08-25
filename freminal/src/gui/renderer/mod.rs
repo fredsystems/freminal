@@ -102,7 +102,7 @@ use conv2::{ConvUtil, RoundToNearest};
 ///   pane's cursor region did not resolve to a valid rect (degenerate size);
 ///   the aggregator treats that as a full frame out of caution.
 /// - [`PaneFrameDamage::Region`] — the pane took a full rebuild (Task
-///   124.14: `VertexRebuild::Rows`), but the content change is provably
+///   124.14: `VertexRebuild::Bounded`), but the content change is provably
 ///   bounded to these rects. Never empty (an empty rect set is reported as
 ///   [`Self::Full`] instead — see [`CursorDamage::from_cursor_cells`]'s
 ///   caller in `widget.rs`).
