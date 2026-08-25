@@ -176,7 +176,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
 | 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | **Complete** — `edf9e017`, `284ce253`; gutter hazard disproved |
 | 124.14c | Stop a busy pane forcing full damage on unchanged siblings | **Complete** — `058c2627` |
-| 124.14d | Bound `search_changed` | **Blocked** — open search independently forces chrome `Full` |
+| 124.14d | Bound search highlights and the search overlay | In progress — expanded into chrome damage by maintainer decision |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
 
 ### Execution model
@@ -2715,6 +2715,67 @@ damaging and search highlights stay unbounded with it. That is a maintainer
 decision because it changes 124.14d's scope from terminal damage into the
 chrome damage model. Per the task's stop rule, no workaround or inert partial
 implementation was started.
+
+> **UNBLOCKED 2026-08-24 by maintainer decision: expand 124.14d into the
+> chrome damage model.** The final framebuffer is one surface; the split
+> between terminal damage and chrome damage is an implementation boundary,
+> not a reason to discard known geometry. Search changes two independently
+> knowable regions and both join the final `FrameDamage::Partial`:
+>
+> 1. old/new search-highlight rows in the terminal band;
+> 2. old/new floating search-bar paint bounds, including the popup shadow.
+>
+> Search is then removed from the binary `foreground_overlay_open` chrome
+> escalation. Context menus, command history, URL tooltips and every other
+> foreground overlay remain globally damaging.
+
+#### 124.14d expanded design (2026-08-24)
+
+**The search bar reports its actual paint bounds.** `show_search_bar` returns
+a named output containing its `SearchBarAction`, the `egui::Area` response
+rect, and whether a tooltip-bearing control is hovered. The paint rect is the
+area rect expanded by `Frame::popup(ui.style()).shadow.margin()` — egui's own
+shadow-bound calculation (`epaint::Shadow::margin`), not a guessed constant.
+The old and new popup rects are both damaged so opening, resizing and closing
+erase the previous pixels correctly.
+
+**Button tooltips retain the safe `Full` fallback.** Prev, next, close and
+the match-case control use `on_hover_text`; their tooltip can paint outside
+the popup rect. While any such response is hovered, search remains an
+unbounded foreground overlay for that frame. This may over-report during the
+tooltip delay, which is safe; assuming a tooltip bound we do not have would
+under-report. Normal typing, navigation, caret blinking and highlight changes
+stay bounded.
+
+**Search highlights use old/new visible screen-row sets.** `MatchSpan` rows
+are buffer-absolute; the existing `matches_to_highlights` plus fold/layout
+translation already produces the exact current screen rows drawn by the
+renderer. Cache the previous drawn screen-row set and union it with the
+current one. A broad search costs at most one entry per visible row, not one
+per full-buffer match. Old rows erase highlights that disappeared; new rows
+draw highlights that appeared or changed.
+
+**Search-only changes with no visible highlight rows are valid bounded
+frames.** The popup still supplies damage, so the terminal-band contribution
+may be `PaneFrameDamage::Unchanged`; it must not fall back to `Full` merely
+because no match is visible. Selection/hover/row sources keep their existing
+`Full` fallback when no bound can be established.
+
+**Damage ownership gets a named home.** Add
+`terminal/search_damage.rs::SearchDamageState`, owned by `PaneRenderCache`,
+instead of adding three unrelated fields to `widget.rs`. Its invariant:
+previous highlight rows and previous popup bounds describe what was actually
+drawn on the last relevant frame; per-frame popup damage is the deduplicated
+union of old/current bounds; and the tooltip safety state is reset and
+recomputed every frame. `PaneRenderCache` exposes only the current frame's
+popup damage and safety classification to `stage_frame_damage`.
+
+**The coarse chrome signal remains binary for everything else.** Do not add
+a `Region` variant to `ChromeDamage`: search geometry is composed into
+`FrameDamage` before the existing binary chrome composition. Rename/comment
+the local signal as the *unbounded* foreground-overlay set so excluding
+search is explicit rather than silently changing what "any foreground
+overlay" means.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
