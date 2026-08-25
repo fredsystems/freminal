@@ -168,6 +168,8 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.20 | Scissor the clear to the redraw region, don't skip it | **Complete** |
 | 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned — maintainer has not decided whether to execute |
 | 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
+| 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
+| 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
 
 ### Execution model
 
@@ -1215,9 +1217,24 @@ change are all forced to `Full` because the type cannot express "these
 cells".
 
 Add `PaneFrameDamage::Region(Vec<DamageRect>)` and a `VertexRebuild` variant
-carrying 124.12's changed-row set. Compute the damage rects from the changed
-rows plus the existing selection, hover and search extents, which are already
-known at `widget.rs:2585-2596` as the booleans that currently force `Full`.
+carrying 124.12's changed-row set.
+
+> **CORRECTION (124.21, 2026-08-24).** This entry previously said the
+> selection, hover and search extents "are already known at
+> `widget.rs:2585-2596` as the booleans that currently force `Full`". That
+> citation is **wrong and was already wrong when written**. That line range
+> is the *cursor-only* damage assignment (`CursorDamage::from_cursor_cells`
+> -> `PaneFrameDamage::CursorOnly`) and contains **zero** references to
+> selection, hover or search. Those flags live in `frame_dirty.rs`, which
+> Task 122's cleanup entry 122.C3 split out on 2026-08-03 — three weeks
+> before this task was activated.
+>
+> The claim was also **overstated**. Of the three, only selection and hover
+> have a real extent at the decision point (`screen_selection`,
+> `command_block_hover_rows_early`). `search_changed` is a **hash**
+> (`search_epoch`), not a location — bounding it needs new work, not
+> plumbing. See 124.21's census.
+
 `decide_frame_damage` aggregates `Region` rects exactly as it already
 aggregates `CursorOnly(Some(rect))`.
 
@@ -2181,3 +2198,109 @@ anything running in the other pane, partial present never fires at all.
 So 124.18 + 124.20 delivered the **mechanism**, not yet the **benefit**. Its
 only consumer today is a blinking cursor in an otherwise idle single pane.
 124.14 is what makes it pay.
+
+### 124.21 — Exhaustive audit of every full-repaint-forcing trigger
+
+**Complete (2026-08-24). READ-ONLY audit; changed no code.**
+
+*Commissioned because a four-item summary of the full-forcing surface was
+offered and was badly incomplete. The maintainer's requirement is 100%
+coverage: a missed path that 124.14 bounds anyway is silent visual
+corruption, and a path left unbounded is exactly the wasted work this task
+exists to eliminate.*
+
+**The surface is 52 distinct triggers, not four.** Only **eight** are
+genuinely global. Everything else is bounded work currently being done at
+full-surface cost.
+
+#### Genuinely GLOBAL — these must always force a full repaint
+
+| Trigger | Why no bounded region suffices |
+| ------- | ------------------------------ |
+| `theme_changed` | fg/bg colours are baked per-vertex at build time; every drawn cell is stale |
+| `dims_changed` | a width change reflows and re-shapes every row, not merely repositions |
+| `ChangedRows::All` | no epoch baseline exists to diff against (first rebuild / `invalidate_content`) |
+| `deco_verts.is_empty()` | no previous rebuild ever populated the buffer |
+| `CursorDamage` `None` | cursor rect degenerated after clamping; deliberately conservative |
+| `shader_recomposites` | a post-process shader reads/writes the whole framebuffer by construction |
+| `style_changed`, `size_changed`, `ppp_changed`, `warming_up` | chrome-layer equivalents of the above |
+| `buffer_age() == 0`, `PartialPresentSupport::Unsupported` | buffer contents unknown / platform lacks the capability |
+
+#### The rest, by how much work bounding them needs
+
+- **BOUNDABLE-NOW** (extent already computed at the decision point, just
+  discarded): `rows_changed` (`changed_rows`), `selection_changed`
+  (`screen_selection` + `cache.previous_selection`), `hover_changed`
+  (`command_block_hover_rows_early` + its cached previous).
+- **BOUNDABLE-WITH-WORK** (region knowable, not currently computed or not
+  reachable from the decision point): `folds_changed`, `search_changed`
+  (only a hash today), `image_frame_changed`, `image_pixels_changed`,
+  `text_blink_changed` (`has_blinking_text` is one whole-snapshot bool with
+  no per-row bitmap), scrollbar visibility and hover-alpha, bell flash,
+  `active_pane_changed`, all eight `ui_overlay_open` sub-conditions, both
+  `pointer_forces_full_present` disjuncts, both `toast_active`
+  sub-conditions, `tab_set_changed`, `tab_title_changed`,
+  `pane_layout_changed`, `broadcast_state_changed`, `focus_changed`,
+  `foreground_overlay_open`, `dismissible_presence_transitioned`,
+  `DamageHistory::MAX_DEPTH` overflow.
+
+#### Findings that are not merely classification
+
+1. **`changed_rows` is already computed, tested, and deliberately unread.**
+   `frame_dirty.rs` carries
+   `#[expect(dead_code, reason = "computed and tested by 124.12; the first
+   production reader arrives in 124.14")]`. 124.14 must remove that
+   `expect`.
+2. **The multi-pane fan-out is confirmed.** In `decide_frame_damage`'s loop,
+   one pane reporting `Full` — or a bell in *any* pane — does
+   `rects.clear(); break;`, discarding rects already collected from every
+   other pane. **In a split, one busy pane forces a full clear + present of
+   every provably-`Unchanged` sibling and all chrome.** This is arguably a
+   larger prize than the per-pane bounding itself.
+3. **Precedence is monotonic toward `Full` and finalised outside
+   `central_body`.** `compose_with_chrome_damage` runs *after*
+   `stage_frame_damage` and can upgrade a `Partial` to `Full`, never the
+   reverse. So the true frame damage is not knowable from
+   `stage_frame_damage`'s return value alone.
+4. **`PartialPresentDecision::RequestedWithNoRects` is dead.**
+   `decide_frame_damage` can never return an empty `Partial` (it collapses
+   to `Full` first), and `event_loop.rs` is the only production constructor
+   of `FrameSignals`. Same shape as the chrome cache's inertness — flagged
+   deliberately.
+5. **`unresolved_pane` reachability is UNKNOWN.** Not proven dead; the audit
+   named the experiment (a counter plus a stress session with concurrent
+   tab-close/split) rather than guessing.
+6. **Chrome has 15 independently-sufficient signals**, each pinned by
+   `chrome_damage.rs::each_signal_field_alone_forces_changed`. Any one alone
+   forces the whole window `Full`.
+
+#### What the audit did NOT verify, stated rather than glossed
+
+`freminal-buffer`'s epoch machinery was taken on trust from 124.10-124.12's
+completion, not re-derived. **If that guarantee is unsound, every
+`BOUNDABLE-NOW` classification needs re-examination.** Image and text-blink
+boundability rests on those structures not being reachable from
+`evaluate_frame_dirty_state`'s current inputs, not on an exhaustive search of
+the emulator crate. No experiment was run — the audit was read-only.
+
+### 124.22 — `freminal-damage-model` agent skill
+
+**Planned.** *Requested by the maintainer during 124.21.*
+
+Codify the rule that a full-surface repaint is a last resort, so future work
+does not silently re-add unbounded damage. The skill fires when adding or
+changing anything that writes `PaneFrameDamage`, `FrameDamage`,
+`ChromeDamage`, or any `*_changed` flag feeding them.
+
+It must carry: the eight genuinely-global triggers and why each is global;
+the requirement that any new trigger states its classification
+(GLOBAL / BOUNDABLE-NOW / BOUNDABLE-WITH-WORK) and justifies GLOBAL rather
+than defaulting to it; the monotonic-toward-`Full` precedence rule and that
+damage is only final after `compose_with_chrome_damage`; the multi-pane
+`rects.clear(); break;` fan-out; the one-region-for-clip-clear-and-present
+invariant from 124.20; and the rule that bounding a trigger whose extent is
+not provably complete is silent visual corruption, so `GLOBAL` is the safe
+default *only* when the extent genuinely cannot be established.
+
+Should be written after 124.14 lands, so it codifies the shipped model
+rather than the intended one.
