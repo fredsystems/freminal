@@ -240,6 +240,42 @@ fn a_toast_more_than_doubles_frame_cost() {
     );
 }
 
+/// Subtask 124.C2: the toast atlas must not replay its rasterisations
+/// either.
+///
+/// The single-frame assertion above could not see this defect and did not
+/// change when it was fixed. `sync_atlas_to_texture` takes the full-upload
+/// branch on the frame that first rasterises the toast's glyphs, so the
+/// stale-dirty-rect cost lands entirely on **frame 2** — which a one-frame
+/// workload never reaches. That is exactly how the duplicated copy in
+/// `toast_text_pass` survived 124.9.
+///
+/// Measured across the fix: frame 2's uploads went from 14 to 8 against a
+/// steady-state 7, and the three-frame total from 370 calls to 358.
+///
+/// The residual one upload above steady state is the decoration buffer's
+/// second double-buffer slot being sized for the first time, which is
+/// subtask 124.7's expected and permanent warm-up cost, not a replay.
+#[test]
+fn a_toast_does_not_replay_its_glyph_uploads_on_the_second_frame() {
+    let toast = standard().with_toast(ToastPresence::Present);
+    let one = Metrics::of(&record_steady_state(&toast, 1).expect("toast frame 1"));
+    let two = Metrics::of(&record_steady_state(&toast, 2).expect("toast frames 1-2"));
+    let three = Metrics::of(&record_steady_state(&toast, 3).expect("toast frames 1-3"));
+
+    let frame_two_uploads = two.uploads - one.uploads;
+    let frame_three_uploads = three.uploads - two.uploads;
+
+    assert_eq!(
+        frame_two_uploads,
+        frame_three_uploads + 1,
+        "frame 2 must cost steady state plus only the decoration buffer's \
+         one-off sizing orphan ({frame_two_uploads} versus \
+         {frame_three_uploads}); anything more is the toast atlas replaying \
+         glyphs its full upload already covered"
+    );
+}
+
 #[test]
 fn cursor_only_saves_bandwidth_not_call_count() {
     // Stands in for: the `is_cursor_only` fast path in the terminal
@@ -275,23 +311,60 @@ fn cursor_only_saves_bandwidth_not_call_count() {
     );
 }
 
+/// Subtask 124.7: the decoration buffer stops orphaning once its slot is
+/// already big enough for a small payload.
+///
+/// Stands in for: the idle cursor-blink frame, which re-uploads only
+/// `deco_verts` and whose floor is the cursor quad alone
+/// (`CURSOR_QUAD_FLOATS` = 36 floats = 144 bytes).
+///
+/// The honest size of this win is asserted here rather than described:
+/// **one zero-byte GL call per gated upload, and no bytes at all.** Per
+/// 123.14's correction the cost model is bandwidth, not call count, so this
+/// is deliberately not presented as a bandwidth improvement. The first
+/// upload into each of the two double-buffer slots still orphans, because
+/// it is what sizes the storage; only the reuses are gated.
 #[test]
-fn a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload() {
-    // CHARACTERISES DEFECT 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
-    // This test asserts the buggy behaviour deliberately, so the defect is
-    // pinned and measurable; it must be INVERTED, not deleted, when 124.9
-    // lands.
+fn a_small_decoration_payload_reuses_its_allocation_instead_of_orphaning() {
+    let cursor = record_cursor_only(&standard(), 3).expect("cursor-only frames");
+
+    let orphans = cursor
+        .iter()
+        .filter(|c| c.method == "buffer_data_size")
+        .count();
+    let writes = cursor
+        .iter()
+        .filter(|c| c.method == "buffer_sub_data_u8_slice")
+        .count();
+
+    assert_eq!(
+        writes, 3,
+        "each of the three cursor-only frames still writes its decoration \
+         payload; the gate removes the orphan, never the write"
+    );
+    assert!(
+        orphans < writes,
+        "at least one cursor-only frame must reuse its slot's existing \
+         allocation, got {orphans} orphans for {writes} writes"
+    );
+}
+
+#[test]
+fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
+    // REGRESSION GUARD FOR 124.9 — see `PLAN_124_RENDER_EFFICIENCY.md`.
+    // This test was written by Task 123 to pin the *defect*, and inverted
+    // (not deleted) by 124.9, which is the only guard this behaviour has.
     //
     // Stands in for: the first two frames after a GL context is created,
     // and after any later event that sets the atlas's `full_reupload` flag
     // (atlas growth, a font change, `RenderState::clear_atlas`).
     //
     // `TerminalRenderer::sync_atlas` takes the full-reupload branch on the
-    // first frame and uploads the whole atlas with one `tex_image_2d` — but
-    // it never clears `GlyphAtlas::dirty_rects`. Every glyph rasterised
-    // before that upload therefore stays queued, and the *second* frame
-    // re-uploads each one individually with `tex_sub_image_2d`, even though
-    // the full upload already contained all of them.
+    // first frame and uploads the whole atlas with one `tex_image_2d`. That
+    // upload covers every pixel, so the rects queued before it are redundant
+    // by construction and are now dropped there. The *second* frame must
+    // therefore look like steady state, not like a per-glyph replay of the
+    // first frame's rasterisations.
     let one = Metrics::of(&record_steady_state(&standard(), 1).expect("frame 1"));
     let two = Metrics::of(&record_steady_state(&standard(), 2).expect("frames 1-2"));
     let three = Metrics::of(&record_steady_state(&standard(), 3).expect("frames 1-3"));
@@ -299,19 +372,36 @@ fn a_full_atlas_upload_leaves_stale_dirty_rects_to_re_upload() {
     let frame_two_uploads = two.uploads - one.uploads;
     let frame_three_uploads = three.uploads - two.uploads;
 
-    // The exact rect count depends on how many distinct glyphs the bundled
-    // font rasterises for the synthetic grid, so this asserts the shape of
-    // the defect rather than that incidental number — a deliberate,
-    // up-front choice, not a tolerance loosened after a flake.
+    // Exactly one more than steady state, and the one is nameable: subtask
+    // 124.7 gates the decoration buffer's orphan on the slot already being
+    // large enough, and `deco_vbo` is double-buffered, so frames 1 and 2
+    // each pay a one-off sizing orphan for their own slot and frame 3 is the
+    // first to reuse one. That is a known interaction with a known cause,
+    // not a tolerance widened to make a red test green -- before 124.9 this
+    // difference was 30 versus 4.
+    assert_eq!(
+        frame_two_uploads,
+        frame_three_uploads + 1,
+        "frame 2 must cost steady state plus only the second decoration \
+         slot's one-off sizing orphan; the frame-1 full atlas upload already \
+         covered every queued glyph ({frame_two_uploads} versus \
+         {frame_three_uploads})"
+    );
+
+    // The paired control: frame 1 genuinely does more work than frame 2, so
+    // the assertion above is not the degenerate "every frame is identical".
+    // Compared like-for-like against `frame_two_uploads` (an upload-only
+    // delta) rather than `one.total` (which also counts draws and state
+    // changes) -- the two are not the same unit.
     assert!(
-        frame_two_uploads > frame_three_uploads * 4,
-        "frame 2 redundantly re-uploads glyphs the frame-1 full upload \
-         already covered: {frame_two_uploads} uploads versus \
-         {frame_three_uploads} in steady state"
+        one.uploads > frame_two_uploads,
+        "frame 1 should still carry the one-off full-upload cost \
+         ({} upload calls) that later frames do not",
+        one.uploads
     );
     assert!(
-        two.total > one.total * 2,
-        "the redundant re-upload roughly doubles frame 2's GL call count \
+        two.total < one.total * 2,
+        "frame 2 must no longer roughly double the running GL call count \
          ({} for frames 1-2 versus {} for frame 1 alone)",
         two.total,
         one.total

@@ -9,22 +9,29 @@
 //! `build_snapshot`:
 //!
 //! 1. **First-ever snapshot** — nothing dirty yet, no cache → flatten once,
-//!    `content_changed = true`.
+//!    every visible row stamped with a fresh, distinct content epoch.
 //! 2. **Clean path / cache hit** — no rows dirty after a snapshot with no new
-//!    data → return Arc clones, `content_changed = false`, zero allocation.
+//!    data → return Arc clones and element-for-element identical
+//!    `row_epochs`, zero allocation.
 //! 3. **Dirty path** — rows dirtied by `handle_incoming_data` → re-flatten,
-//!    compare to previous, set `content_changed` correctly.
+//!    bump only the affected row(s)' epoch.
 //!
 //! Additional invariants covered:
-//! - Alt-screen enter/leave invalidates the snapshot cache.
+//! - Alt-screen enter/leave invalidates the snapshot cache and re-stamps
+//!   every visible row's epoch.
 //! - Alt-screen always reports `scroll_offset = 0` and `max_scroll_offset = 0`.
 //! - `show_cursor = false` when `scroll_offset > 0`.
 //! - `scroll_changed` is `true` only on the first snapshot after the offset
 //!   changed, then `false` on the subsequent one.
 //! - New data while scrolled back auto-resets `scroll_offset` to 0.
 //! - Arc pointer identity on the clean path (no extra allocation).
-//! - Cursor-only move does not set `content_changed = true`.
+//! - Cursor-only move does not bump any row's content epoch.
+//! - A content change survives snapshots the GUI never renders (`row_epochs`
+//!   is level-triggered against the consumer's own baseline, unlike the
+//!   sticky `content_changed` bool it replaced — see Task 124.12 and
+//!   `Documents/PLAN_124_RENDER_EFFICIENCY.md` "The defect, stated once").
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use freminal_terminal_emulator::interface::TerminalEmulator;
@@ -58,16 +65,6 @@ fn fill_scrollback(emu: &mut TerminalEmulator, n: u32) {
 // ─── 1. First-ever snapshot ──────────────────────────────────────────────────
 
 #[test]
-fn first_snapshot_reports_content_changed_true() {
-    let (mut emu, _rx) = make_emulator();
-    let snap = emu.build_snapshot();
-    assert!(
-        snap.content_changed,
-        "first snapshot must report content_changed = true (no prior cache)"
-    );
-}
-
-#[test]
 fn first_snapshot_has_correct_dimensions() {
     let (mut emu, _rx) = make_emulator();
     let snap = emu.build_snapshot();
@@ -92,17 +89,6 @@ fn first_snapshot_is_not_alternate_screen() {
 // ─── 2. Clean path / cache hit ───────────────────────────────────────────────
 
 #[test]
-fn second_snapshot_with_no_new_data_reports_content_changed_false() {
-    let (mut emu, _rx) = make_emulator();
-    let _first = emu.build_snapshot();
-    let second = emu.build_snapshot();
-    assert!(
-        !second.content_changed,
-        "second snapshot with no new data must report content_changed = false"
-    );
-}
-
-#[test]
 fn clean_path_reuses_same_arc_allocation() {
     let (mut emu, _rx) = make_emulator();
     // Seed real content so the Arc is non-trivially populated.
@@ -123,18 +109,6 @@ fn clean_path_reuses_same_arc_allocation() {
 // ─── 3. Dirty path ───────────────────────────────────────────────────────────
 
 #[test]
-fn new_data_after_snapshot_causes_content_changed_true() {
-    let (mut emu, _rx) = make_emulator();
-    let _first = emu.build_snapshot(); // populate cache
-    emu.handle_incoming_data(b"new output");
-    let second = emu.build_snapshot();
-    assert!(
-        second.content_changed,
-        "snapshot after new PTY data must report content_changed = true"
-    );
-}
-
-#[test]
 fn dirty_path_produces_new_arc_allocation() {
     let (mut emu, _rx) = make_emulator();
     emu.handle_incoming_data(b"first");
@@ -150,40 +124,27 @@ fn dirty_path_produces_new_arc_allocation() {
 #[test]
 fn multiple_snapshots_after_successive_writes() {
     let (mut emu, _rx) = make_emulator();
+    let mut previous_epochs: Option<Arc<[u64]>> = None;
     for i in 0..5u8 {
         let line = format!("line {i}\r\n");
         emu.handle_incoming_data(line.as_bytes());
         let snap = emu.build_snapshot();
-        assert!(
-            snap.content_changed,
-            "snapshot immediately after write #{i} must report content_changed = true"
-        );
-        // A second snapshot without new data must be clean.
+        if let Some(previous) = &previous_epochs {
+            assert_ne!(
+                *previous, snap.row_epochs,
+                "row_epochs immediately after write #{i} must differ from the \
+                 previous snapshot's"
+            );
+        }
+        // A second snapshot without new data must carry identical row_epochs.
         let clean = emu.build_snapshot();
-        assert!(
-            !clean.content_changed,
-            "snapshot with no new data after write #{i} must report content_changed = false"
+        assert_eq!(
+            snap.row_epochs, clean.row_epochs,
+            "row_epochs for a snapshot with no new data after write #{i} must be \
+             identical to the previous one"
         );
+        previous_epochs = Some(clean.row_epochs);
     }
-}
-
-// ─── 4. Cursor movement only ─────────────────────────────────────────────────
-
-#[test]
-fn cursor_only_move_does_not_set_content_changed() {
-    let (mut emu, _rx) = make_emulator();
-    // Write some initial text so the visible window is non-empty.
-    emu.handle_incoming_data(b"hello");
-    let _first = emu.build_snapshot(); // cache the content
-
-    // Move cursor via CUP without writing any text cells.
-    // ESC [ 1 ; 1 H  → CUP row=1, col=1
-    emu.handle_incoming_data(b"\x1b[1;1H");
-    let after_move = emu.build_snapshot();
-    assert!(
-        !after_move.content_changed,
-        "cursor-only CUP must not set content_changed (no cells mutated)"
-    );
 }
 
 // ─── 5. Alternate screen ─────────────────────────────────────────────────────
@@ -233,35 +194,21 @@ fn alternate_screen_always_has_zero_scroll_offsets() {
 }
 
 #[test]
-fn alt_screen_enter_invalidates_cache() {
-    let (mut emu, _rx) = make_emulator();
-    emu.handle_incoming_data(b"primary text");
-    let _primary = emu.build_snapshot(); // populate cache with primary content
-
-    // Switch to alternate screen — cache must be invalidated.
-    emu.handle_incoming_data(b"\x1b[?1049h");
-    let alt = emu.build_snapshot();
-    // content_changed must be true on the first snapshot in the new buffer
-    // (cache was invalidated, so we always report changed).
-    assert!(
-        alt.content_changed,
-        "first snapshot after entering alternate screen must report content_changed = true"
-    );
-}
-
-#[test]
 fn alt_screen_leave_invalidates_cache() {
     let (mut emu, _rx) = make_emulator();
     emu.handle_incoming_data(b"\x1b[?1049h"); // enter alt
     emu.handle_incoming_data(b"alt content");
-    let _alt = emu.build_snapshot(); // populate cache with alt content
+    let alt = emu.build_snapshot(); // populate cache with alt content
 
-    // Leave alternate screen — cache must be invalidated.
+    // Leave alternate screen — cache must be invalidated and every visible
+    // row re-stamped, exactly as it is on entry (see
+    // `entering_the_alternate_screen_changes_row_epochs`).
     emu.handle_incoming_data(b"\x1b[?1049l");
     let primary = emu.build_snapshot();
-    assert!(
-        primary.content_changed,
-        "first snapshot after leaving alternate screen must report content_changed = true"
+    assert_ne!(
+        alt.row_epochs, primary.row_epochs,
+        "first snapshot after leaving alternate screen must re-stamp every \
+         visible row's epoch"
     );
 }
 
@@ -503,17 +450,17 @@ fn visible_chars_contains_written_text() {
 // ─── 14. Round-trip: clear screen does not persist stale content ─────────────
 
 #[test]
-fn erase_display_sets_content_changed_true() {
+fn erase_display_bumps_row_epochs() {
     let (mut emu, _rx) = make_emulator();
     emu.handle_incoming_data(b"some content");
-    let _first = emu.build_snapshot();
+    let first = emu.build_snapshot();
 
     // ESC [ 2 J → erase entire display
     emu.handle_incoming_data(b"\x1b[2J");
     let after_erase = emu.build_snapshot();
-    assert!(
-        after_erase.content_changed,
-        "erase-display must mark visible rows dirty → content_changed = true"
+    assert_ne!(
+        first.row_epochs, after_erase.row_epochs,
+        "erase-display must mark visible rows dirty → row_epochs must differ"
     );
 }
 
@@ -745,5 +692,178 @@ fn task_113_new_data_resets_extra_rows() {
         after.window_extra_rows, 0,
         "handle_incoming_data must clear extra_flatten_rows on new output \
          (call reset_scroll_offset, not just zero the offset)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK 124.11 — `row_epochs` on `TerminalSnapshot`.
+//
+// `row_epochs[r]` is the per-row content epoch, parallel to `row_offsets[r]`.
+// It changes exactly when the rendered content at window row `r` changed
+// since the previous flatten of the window, and — unlike `content_changed` —
+// it is level-triggered rather than edge-triggered: it survives the many
+// snapshots the GUI never renders. See `Documents/PLAN_124_RENDER_EFFICIENCY.md`
+// "The defect, stated once" / "The fix, stated once".
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Resize `emu` to a small, exact-row-count terminal so tests can target one
+/// row without guessing at the default 100×100 window.
+fn resize_small(emu: &mut TerminalEmulator, width: usize, height: usize) {
+    emu.set_win_size(width, height, 0, 0)
+        .expect("resizing a headless emulator must not fail");
+}
+
+/// Write `rows.len()` distinct lines into `emu` without a trailing `\r\n`
+/// after the last one, so the cursor lands on the last written row instead
+/// of scrolling the buffer by one extra line.
+fn write_distinct_rows(emu: &mut TerminalEmulator, rows: &[&str]) {
+    for (i, row) in rows.iter().enumerate() {
+        emu.handle_incoming_data(row.as_bytes());
+        if i + 1 < rows.len() {
+            emu.handle_incoming_data(b"\r\n");
+        }
+    }
+}
+
+#[test]
+fn row_epochs_has_one_entry_per_visible_row() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"hello world\r\nsecond line\r\n");
+    let snap = emu.build_snapshot();
+    assert_eq!(
+        snap.row_epochs.len(),
+        snap.row_offsets.len(),
+        "row_epochs must have exactly one entry per visible row, parallel to row_offsets, \
+         so the GUI can index both with the same row number"
+    );
+}
+
+#[test]
+fn the_first_snapshot_stamps_every_row_distinctly() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"hello");
+    let snap = emu.build_snapshot();
+    let unique: HashSet<u64> = snap.row_epochs.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        snap.row_epochs.len(),
+        "every row epoch on the first-ever snapshot must be distinct — a stamp is never reused"
+    );
+}
+
+#[test]
+fn a_snapshot_with_no_new_data_carries_identical_row_epochs() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"hello world");
+    let first = emu.build_snapshot();
+    let second = emu.build_snapshot();
+    assert_eq!(
+        first.row_epochs, second.row_epochs,
+        "a snapshot built with no new PTY data must carry element-for-element \
+         identical row epochs to the previous one"
+    );
+}
+
+#[test]
+fn new_pty_data_bumps_only_the_affected_rows_epoch() {
+    let (mut emu, _rx) = make_emulator();
+    resize_small(&mut emu, 20, 5);
+    write_distinct_rows(&mut emu, &["row0", "row1", "row2", "row3", "row4"]);
+    let first = emu.build_snapshot();
+    assert_eq!(first.row_epochs.len(), 5);
+
+    // Overwrite window row index 2 (1-indexed CUP row 3) with new content;
+    // no other row is touched.
+    emu.handle_incoming_data(b"\x1b[3;1Hchanged");
+    let second = emu.build_snapshot();
+
+    assert_ne!(
+        first.row_epochs[2], second.row_epochs[2],
+        "the overwritten row's epoch must differ from the previous snapshot"
+    );
+
+    // Patch the expected row into a copy of `first` and require the rest to
+    // be byte-identical — a spurious bump anywhere else must fail this.
+    let mut expected: Vec<u64> = first.row_epochs.to_vec();
+    expected[2] = second.row_epochs[2];
+    assert_eq!(
+        expected,
+        second.row_epochs.to_vec(),
+        "only the changed row's epoch may differ; every other row's epoch \
+         must be byte-identical to the previous snapshot"
+    );
+}
+
+#[test]
+fn a_cursor_only_move_bumps_no_row_epoch() {
+    let (mut emu, _rx) = make_emulator();
+    resize_small(&mut emu, 20, 5);
+    write_distinct_rows(&mut emu, &["row0", "row1", "row2", "row3", "row4"]);
+    let first = emu.build_snapshot();
+
+    // Move the cursor via CUP without writing any text cells.
+    emu.handle_incoming_data(b"\x1b[1;1H");
+    let after_move = emu.build_snapshot();
+
+    assert_eq!(
+        first.row_epochs, after_move.row_epochs,
+        "a cursor-only CUP must not bump any row's epoch (no cells mutated)"
+    );
+}
+
+#[test]
+fn a_change_survives_the_snapshots_the_gui_never_renders() {
+    // This test originally asserted BOTH halves of a contrast: that the
+    // now-deleted `content_changed` bool reported the change on the very
+    // next snapshot (B) but had gone stale three unrendered snapshots later
+    // (E) — the sticky-bool defect described in the plan's "The defect,
+    // stated once" table and the reason `row_epochs` exists at all. That
+    // half was verified empirically when this test was first written (Task
+    // 124.11) and is preserved in git history and
+    // `Documents/PLAN_124_RENDER_EFFICIENCY.md`; it is no longer restatable
+    // here because Task 124.12 deleted the field it exercised. What remains
+    // is the surviving half: `row_epochs` must NOT go stale under the exact
+    // same conditions that made the bool go stale.
+    let (mut emu, _rx) = make_emulator();
+    resize_small(&mut emu, 20, 5);
+    write_distinct_rows(&mut emu, &["row0", "row1", "row2", "row3", "row4"]);
+    let a = emu.build_snapshot();
+
+    // Change window row index 2 (1-indexed CUP row 3).
+    emu.handle_incoming_data(b"\x1b[3;1Hchanged");
+
+    let _b = emu.build_snapshot();
+    let _c = emu.build_snapshot();
+    let _d = emu.build_snapshot();
+    let e = emu.build_snapshot();
+
+    // The epoch is level-triggered against whatever baseline the consumer
+    // last rendered (here, snapshot A), so it cannot go stale across
+    // snapshots the GUI never rendered, unlike the bool it replaced.
+    assert_ne!(
+        a.row_epochs, e.row_epochs,
+        "row_epochs must still differ from the pre-change baseline, no matter \
+         how many unrendered snapshots were built in between"
+    );
+    assert_ne!(
+        a.row_epochs[2], e.row_epochs[2],
+        "the specific changed row's epoch must still differ from its baseline value"
+    );
+}
+
+#[test]
+fn entering_the_alternate_screen_changes_row_epochs() {
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"primary text");
+    let primary = emu.build_snapshot();
+
+    // ESC [ ? 1049 h → enter alternate screen
+    emu.handle_incoming_data(b"\x1b[?1049h");
+    let alt = emu.build_snapshot();
+
+    assert_ne!(
+        primary.row_epochs, alt.row_epochs,
+        "entering the alternate screen must invalidate the merge cache and \
+         re-stamp every visible row's epoch"
     );
 }

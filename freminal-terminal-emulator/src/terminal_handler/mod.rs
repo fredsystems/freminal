@@ -947,9 +947,30 @@ impl TerminalHandler {
     /// separator after it.
     ///
     /// Pass `scroll_offset = 0` when calling from the PTY thread.
+    ///
+    /// ## Task 124.C6: does not touch the visible-window merge cache
+    ///
+    /// The visible half is flattened via
+    /// [`Buffer::visible_as_tchars_and_tags_full_merge`], not
+    /// [`Buffer::visible_as_tchars_and_tags`]. This always requests the
+    /// plain `extra_rows == 0` window, which can differ from whatever
+    /// (possibly fold-extended) window the GUI's snapshot path last cached.
+    /// Using the cached/incremental method here would miss that cache's
+    /// fingerprint, take the full-merge fallback, and replace the cache with
+    /// this window. The GUI's chars/tags path tolerates that (it skips the
+    /// incremental merge entirely when no
+    /// visible row is dirty), but its per-row content-epoch computation does
+    /// not: it checks the cache's fingerprint on every snapshot regardless of
+    /// dirtiness, and mints a fresh, unstable epoch for every row whenever it
+    /// misses — without ever writing a repaired fingerprint back. A single
+    /// search would therefore leave every following idle snapshot minting a
+    /// new, unstable set of epochs, indefinitely, with no second search
+    /// required. See that method's doc comment for the full explanation.
     #[must_use]
     pub fn search_corpus(&mut self, scroll_offset: usize) -> Vec<TChar> {
-        let (visible_chars, _, _, _) = self.buffer.visible_as_tchars_and_tags(scroll_offset);
+        let (visible_chars, _, _, _) = self
+            .buffer
+            .visible_as_tchars_and_tags_full_merge(scroll_offset);
         let (scrollback_chars, _, scrollback_row_offsets, _) =
             self.buffer.scrollback_as_tchars_and_tags(scroll_offset);
 

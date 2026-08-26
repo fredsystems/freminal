@@ -328,80 +328,50 @@ hide the gutter-hover / interaction widgets.
   regression tests pin the current behaviour. If they fail on a bump, the
   band-layer strategy needs re-evaluation.
 
-### A12 — egui-winit flags a repaint for scale-factor (and similar) events
+### A12 — RETIRED (Task 124.5): the FULL/REPLAY chrome-input gate no longer exists
 
-The FULL/REPLAY input gate forces FULL on chrome-affecting input. It relies in
-part on `egui-winit` returning `EventResponse { repaint: true }` for events like
-`ScaleFactorChanged`, so a DPI change forces FULL via the `response.repaint`
-branch even though `is_unconditional_chrome_input` does not enumerate every such
-event.
+**This assumption is retired. Do not re-verify it on an egui bump; there is
+nothing left for it to constrain.**
 
-**Carve-out (found post-#436, fixed after #436 landed): `RedrawRequested` must
-be excluded from the `response.repaint` half of this gate.** `egui-winit`
-returns `EventResponse { repaint: true, .. }` for
-`WindowEvent::RedrawRequested` _unconditionally_, via a grouped match arm
-commented "Things that may require repaint:" that also covers
-`CursorEntered`/`Destroyed`/`Occluded`/`Resized`/`Moved`/`TouchpadPressure`/
-`CloseRequested` (`egui-winit-0.36.1/src/lib.rs:512-522`). Note this is a
-_different_ arm from `ScaleFactorChanged`'s, which is its own separate arm
-(`~324-338`) that happens to return `repaint: true` too — the two are not
-grouped together, they merely share the outcome this gate relies on. But `RedrawRequested` is also the
-event that drives every single frame, and `window_event`'s `RedrawRequested`
-arm reads this gate back (via `std::mem::take(&mut
-state.chrome_input_pending)`) in the same call that just set it. Before the
-fix this made `chrome_input_pending` `true` on every frame with no exception,
-which made `ChromeMode::Replay` permanently unreachable (measured: 0/360
-Replay frames at idle) — the entire chrome-cache subsystem was inert since
-issue #436 landed. The gate condition is therefore not simply
-`is_unconditional_chrome_input(event) || response.repaint`; it is
-`should_set_chrome_input_pending(event, response.repaint)`, which forces
-`false` for `RedrawRequested` regardless of `repaint`.
+It documented the FULL/REPLAY input gate — specifically that `egui-winit`
+returns `EventResponse { repaint: true }` for `ScaleFactorChanged`, and the
+`RedrawRequested` carve-out that stopped the gate disqualifying
+`ChromeMode::Replay` on every frame (121.8's finding that the whole
+chrome-cache subsystem had been inert since #436 landed).
 
-**What a future egui bump must re-verify is the _behaviour_, not the source
-layout:** does `on_window_event` still report `repaint: true` for
-`RedrawRequested` (so the carve-out is still needed), and does any _other_
-event that fires unconditionally every frame now report it too (so it would
-need the same carve-out)? How upstream happens to group its match arms is an
-implementation detail that can change freely without affecting this invariant
-— don't check the grouping, check the returned `repaint` value. If egui-winit
-ever stops reporting `repaint: true` for `RedrawRequested`, the carve-out
-becomes a harmless no-op rather than wrong.
+**Task 124 subtask 124.5 deleted the chrome cache**, on the maintainer's
+decision: `ChromeMode::Replay` skipped _constructing_ chrome widgets while
+egui resolves hit-testing against the previous frame's widget set, so unbuilt
+widgets were uninteractable — that shipped as a tab-click and pane-border-drag
+regression in 0.12.0-beta.7, and the subsystem had been disabled by default
+since 121.32. With it went `ChromeMode`, `is_unconditional_chrome_input`,
+`should_set_chrome_input_pending`, `chrome_input_pending` and the two unit
+tests this entry named as its detection mechanism.
 
-- **Our code:** `freminal-windowing/src/event_loop.rs` —
-  `is_unconditional_chrome_input`, `should_set_chrome_input_pending` (the
-  `RedrawRequested` carve-out), and the general event arm's call to it in
-  place of the old inline `|| response.repaint` OR.
-- **Upstream (0.36.1):** `egui-winit/src/lib.rs` —
-  `WindowEvent::ScaleFactorChanged { .. }` (`~324-338`) and
-  `WindowEvent::RedrawRequested` (`~512-522`, in the grouped "Things that may
-  require repaint:" arm) each return `EventResponse { repaint: true, .. }`
-  unconditionally, from **separate** match arms. On a bump, re-verify both
-  that `ScaleFactorChanged` still flags a repaint (the gate's completeness
-  depends on it) and that `RedrawRequested` still does (the carve-out exists
-  because it does, and would become unnecessary — though harmless — if it
-  ever stopped).
-- **Symptom if broken:**
-  - If the `ScaleFactorChanged` half regresses: a DPI / scale-factor change is
-    not forced FULL — the chrome renders at the wrong scale on a REPLAY frame
-    until an unrelated FULL frame fixes it.
-  - If the `RedrawRequested` carve-out is removed or "simplified away": no
-    visible pixel symptom, and `ChromeMode::Replay` silently stops firing at
-    idle — the chrome-cache subsystem goes inert again, as it was for the whole
-    life of #436 before this was found. **This is caught by a unit test, not
-    only by observation:**
-    `should_set_chrome_input_pending_excludes_redraw_requested_regardless_of_repaint`
-    in `event_loop.rs`'s test module fails immediately if the carve-out is
-    dropped, and
-    `should_set_chrome_input_pending_still_honors_repaint_for_non_enumerated_events`
-    fails if it is over-broadened. The frame-profiling Replay/Full duty-cycle
-    counters are supplementary confirmation in a live session, not the primary
-    detection mechanism.
+Retained as a retired entry rather than deleted, because 124.15 recorded that
+the _sound_ version of this optimisation — cache the tessellated output while
+still constructing the widgets — remains available to anyone who wants the
+measured ~8% back. **If that is ever built, this assumption comes back**, and
+the `RedrawRequested` carve-out is the specific trap it must not re-fall into:
+the event that drives every frame set the flag that disqualified every frame,
+and it went unnoticed for the entire life of #436.
+
+Note that **A13 was not retired with it.** A13 constrains the physical→logical
+pointer hit-test, which survives 124.5 with live callers and is still
+load-bearing — see A13.
 
 ### A13 — egui `pixels_per_point` equals winit `scale_factor` (zoom is off)
 
-The #436.8 region-aware pointer gate hit-tests the physical cursor position
-against chrome rects captured in egui **logical points**. It converts physical
-to logical by dividing by `window.scale_factor()`. This is only correct while
+**Still live after 124.5.** The chrome _cache_ is gone, but the region-aware
+pointer hit-test it was introduced alongside (#436.8) is not: it also feeds
+`pointer_motion_needs_repaint`'s `chrome_interactive` term (Task 121's
+pointer-motion repaint suppression) and `stage_frame_damage`'s
+`pointer_over_chrome`, so `is_chrome_interactive_at` and
+`point_in_chrome_rects` both survive with real callers.
+
+The hit-test compares the physical cursor position against chrome rects
+captured in egui **logical points**. It converts physical to logical by
+dividing by `window.scale_factor()`. This is only correct while
 egui's own `pixels_per_point()` equals `window.scale_factor()` — i.e. while
 egui's zoom factor is exactly `1.0` (egui-winit computes
 `pixels_per_point = scale_factor * ctx.zoom_factor()`). Freminal guarantees
@@ -451,7 +421,7 @@ copies in `~/.cargo/registry/src/*/`.
 | `egui_glow/src/painter.rs` | `paint_and_update_textures` only | A1 holds, **A2 changed** |
 | `egui/src/context.rs` | `run_logic`, `sync_window_theme`, hit-test filter | A5, A7, A8, A10 |
 | `epaint/src/textures.rs` | `TexturesDelta` reshaped | **A2 changed** |
-| `egui-winit/src/lib.rs` | modifiers, dropped files, IME purpose | A12, A13 |
+| `egui-winit/src/lib.rs` | modifiers, dropped files, IME purpose | A12 (now retired, see its entry), A13 |
 
 Outcome: **A2 changed** (see its entry — the `TexturesDelta` reshape and drop
 bomb, upstream #8356); **A6 held upstream but its consumer needed rewriting**

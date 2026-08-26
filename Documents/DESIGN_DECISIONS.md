@@ -1018,3 +1018,89 @@ them. This was rejected because:
 
 The cost is microseconds-per-prompt of dropped marker traffic, which is
 not measurable in practice.
+
+---
+
+## Render Performance: the Phase 0 / Task 121 outcome (Task 124.8)
+
+### Why this entry exists at all
+
+`Documents/DECOUPLING_FRAMEWORK.md` §2A is the source of truth for the
+Phase 0 measurements, and `PLAN_121_PERF_REMEDIATION.md` is the closed
+record of the work. This entry exists because both are documents a future
+reader has to know to go looking for, and because the durable lesson is not
+in either one's conclusions — it is in **how often the conclusions were
+wrong**.
+
+### The direction, stated plainly
+
+**Phase 0 weakened rather than strengthened the case for replacing egui in
+the main window.** It was undertaken partly expecting to justify a rewrite.
+It did the opposite.
+
+The strongest maintenance argument on the table had been "we carry 13
+undocumented assumptions about egui internals for an optimisation that never
+fires". Finding 1 established that the optimisation never firing was a
+**one-line bug** — `WindowEvent::RedrawRequested` drove every frame, egui-winit
+reported it as input, and the chrome-input gate consumed that as evidence of
+input, so the event that drove the frame disqualified that same frame. Fixed,
+`ChromeMode::Replay` went from 0% to 100% duty cycle at idle, chrome
+construction 69 us -> 10 us, total frame 434 us -> 376 us.
+
+The performance case is spent. Idle was already 0.073% of a core; pointer
+motion went from about 2% to about 0.08%. **Nothing measured justifies a
+multi-version rewrite on CPU grounds.** The maintainer position at the end of
+Phase 0 was _leaning against the rewrite, explicitly undecided_, and it rests
+now on maintainability and undocumented-internals reliance, not speed.
+
+### The inconvenient numbers, recorded deliberately
+
+An entry that listed only the wins would misrepresent the method, so:
+
+- **Task 121 closed with four of six issue #459 candidate items refuted by
+  their own verification step.** The refutations were the deliverable, not a
+  failure of it. A profiling task whose candidate list survives contact
+  intact has probably not been checking.
+- **Task 121 itself was closed as an umbrella**, not completed. It reached
+  36 subtasks across seven groups, executed out of order, with much of
+  Groups F and G predicated on a chrome cache that had since been disabled
+  by default. It stopped working as a tracker and was retired to a
+  historical record.
+- **The chrome cache was re-disabled after being fixed.** Finding 1 made it
+  engage and deliver; 121.32 then turned it off by default anyway, because
+  `ChromeMode::Replay` skips _constructing_ chrome widgets and egui resolves
+  hit-testing against the previous pass's widget set — so unbuilt widgets are
+  uninteractable. That shipped as a tab-click and pane-border-drag regression
+  in 0.12.0-beta.7. A measured, real speed-up was reverted for correctness,
+  and that is the right trade every time.
+- **Task 123's Obligation 2 verdict was itself wrong, and was corrected on
+  2026-08-21** after the maintainer noticed that its two tests had assumed
+  away the very mechanism they were meant to test. The corrected verdict was
+  _partially refuted_: the symptom was real, but the accused predicate
+  (`pointer_forces_full_present`) was innocent; the actual cause was the
+  `Unchanged -> Full` fallback in `decide_frame_damage`.
+
+That last item is the reason this entry is worded the way it is. **The
+verification step caught a wrong diagnosis; then a human caught a wrong
+verification.** Both layers were necessary, and a record that shows only the
+successful refutations would teach the wrong lesson about how much to trust
+a test that agrees with you.
+
+### Durable principles
+
+1. **Measure before optimising, and treat refutation as success.** Four of
+   six candidates were wrong. The cost of checking was far below the cost of
+   having "fixed" them.
+2. **A test that confirms your hypothesis deserves more scrutiny than one
+   that refutes it.** Obligation 2's first pass produced a comfortable
+   confirmation by assuming away the mechanism.
+3. **Correctness outranks a measured speed-up.** The chrome cache was faster
+   and was still disabled.
+4. **Justify render work on the right unit.** Task 123 found the waste is
+   overwhelmingly **bandwidth** — roughly 350x the bytes for roughly 1.08x
+   the calls. Call counts are the intuitive metric and were the wrong one.
+5. **Docs describing a removed mechanism are worse than no docs.**
+   `decide_frame_damage`'s comment still named a `pointer_moving` term that
+   issue #459 had deleted, and it stated precisely the hypothesis under
+   investigation — a reader checking the docs would have taken a false
+   confirmation of a refuted diagnosis (fixed as 124.C1).

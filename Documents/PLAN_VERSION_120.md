@@ -32,20 +32,31 @@ hot, so it ships together):
   and G predicated on a chrome cache now disabled by default, and had stopped working as a
   tracker. `PLAN_121_PERF_REMEDIATION.md` is now a historical record carrying the migration
   map. Summarised below.
-- **Task 123 — GL Pipeline Measurement Harness** (planned): the instrument Task 121 never
-  had. Phase 1 is a 47-method facade over `&glow::Context` with a recording backend —
-  deterministic, no GPU, no display server, runs in the existing CI matrix on all four
-  platforms. Phase 2 is the pixel/readback harness issue #440 has wanted since #436, which is
-  Linux-only and needs Mesa/llvmpipe/Xvfb added to `flake.nix` plus a new Nix CI job. It
-  changes no rendering behaviour. Broken down in
+- **Task 123 — GL Pipeline Measurement Harness** (complete, merged 2026-08-23 via PR #497):
+  the instrument Task 121 never had. Phase 1 is a 47-method facade over `&glow::Context` with
+  a recording backend — deterministic, no GPU, no display server, runs in the existing CI
+  matrix on all four platforms. Phase 2 is the pixel/readback harness issue #440 has wanted
+  since #436, Linux-only, needing Mesa/llvmpipe/Xvfb in `flake.nix` plus a new Nix CI job. It
+  changed no rendering behaviour. Its Findings section (123.14) discharged both diagnostic
+  obligations and is the input to Task 124. Broken down in
   `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md`.
-- **Task 124 — Render Efficiency Remediation** (stub, gated on 123): the fixes. Carries the
-  surviving work from Task 121 — cell-granular pointer suppression, the full-present-on-motion
-  anomaly, the chrome-cache keep/delete decision, the shaping levers, GPU buffer orphaning —
-  plus its own leading hypothesis, that dirty-row `Arc` churn forces a full rebuild on
-  byte-identical content. **No subtask is implemented before 123 quantifies it**, except
-  124.4 (bool-to-struct), which has no expected performance effect. Broken down in
+- **Task 124 — Damage Model Remediation** (activated 2026-08-23, was "Render Efficiency
+  Remediation"): the fixes. Activation recon found that three of its nine stub entries —
+  124.1, 124.2 and 124.3 — are not three problems but three symptoms of **one missing type**:
+  freminal cannot say "these specific rows changed", and cannot say "nothing changed". The
+  task was renamed and re-scoped accordingly. Its spine is a per-row content epoch propagated
+  from `freminal-buffer` to the GUI (124.10–124.12), consumed by two new damage states,
+  `PaneFrameDamage::Region` (124.14) and `FrameDamage::None` (124.2). The remaining entries —
+  pointer suppression, the chrome-cache decision, the shaping levers, GPU orphaning, the
+  bool-to-struct fix and the `sync_atlas` defect — are independent leaves. Broken down in
   `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+- **Task 125 — Fixed-Stride Vertex Relayout** (enriched stub, unassigned version, gated on
+  124's measurements): the bandwidth half. Task 124 stops doing work that produces no pixels;
+  Task 125 makes the work that does produce pixels cheaper, by making row N's instance range a
+  pure function of `row_idx` so that a per-row dirty set becomes a per-row `glBufferSubData`.
+  It is **not** carried by v0.12.0 — its roadmap position is an open maintainer decision, and
+  closing it unexecuted is a legitimate outcome if 124's residual does not justify a vertex
+  format change. Recorded in `Documents/PLAN_125_VERTEX_RELAYOUT.md`.
 
 **Theme 3 — structural cleanup:**
 
@@ -80,8 +91,8 @@ before executing.
 | 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
 | 121 | Performance Remediation           | Large     | Complete    | None           |
 | 122 | Orchestration Extraction          | Large     | Complete    | None           |
-| 123 | GL Pipeline Measurement Harness   | Large     | Planned     | Task 122       |
-| 124 | Render Efficiency Remediation     | Large     | Stub        | Task 123       |
+| 123 | GL Pipeline Measurement Harness   | Large     | Complete    | Task 122       |
+| 124 | Damage Model Remediation          | Large     | In progress | Task 123       |
 
 ---
 

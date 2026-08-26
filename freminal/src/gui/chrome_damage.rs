@@ -46,8 +46,8 @@ use crate::gui::tabs::TabId;
 /// Number of frames after window creation during which chrome is always
 /// forced `Changed` (#436 §7 warm-up). The font atlas, layout, and
 /// `PanelState` id-maps settle over the first 1-2 frames; giving a small
-/// margin (3) is cheap insurance against a REPLAY being permitted before
-/// steady state.
+/// margin (3) is cheap insurance against a `Partial` present being taken
+/// (see `compose_with_chrome_damage`) before steady state.
 pub const WARMUP_FRAMES: u32 = 3;
 
 /// Whether a window is still in its startup warm-up window (#436 §7): the
@@ -120,16 +120,28 @@ pub struct ChromeSignals {
     /// creation (#436 §7) — force `Changed` unconditionally until steady
     /// state.
     pub warming_up: bool,
-    /// Any rendered pane has an open overlay that paints ABOVE the terminal
-    /// band: the `Order::Foreground` right-click context menu, in-terminal
-    /// search bar, or command-history palette, OR the `Order::Tooltip`
-    /// URL-hover tooltip. These all paint outside the captured terminal-band
-    /// range (TAIL chrome), so a REPLAY frame would otherwise discard their
-    /// freshly-built shapes and repaint the stale cached tail from before the
-    /// overlay opened — making the open overlay vanish or ghost. Issue #436 §1
-    /// names context-menu/command-history and the URL tooltip as chrome that
-    /// must be covered. (The name predates the tooltip addition; it covers all
-    /// above-band per-pane terminal overlays, not only `Order::Foreground`.)
+    /// Any rendered pane has an open overlay whose chrome this frame is
+    /// **not provably bounded**: the `Order::Foreground` right-click
+    /// context menu or command-history palette, the `Order::Tooltip`
+    /// URL-hover tooltip, OR a search overlay whose safety classification
+    /// is `TooltipMayEscape`. These all paint outside the captured
+    /// terminal-band range (TAIL chrome) with no known extent, so a REPLAY
+    /// frame would otherwise discard their freshly-built shapes and
+    /// repaint the stale cached tail from before the overlay opened —
+    /// making the open overlay vanish or ghost. Issue #436 §1 names
+    /// context-menu/command-history and the URL tooltip as chrome that
+    /// must be covered. (The name predates the tooltip addition; it covers
+    /// all above-band per-pane terminal overlays with unknown extent, not
+    /// only `Order::Foreground`.)
+    ///
+    /// **Bounded search is the named exception (Task 124.14d).** A normal
+    /// search frame — no tooltip-bearing control hovered — no longer sets
+    /// this signal: its highlight-row and popup-rect geometry already
+    /// joins `FrameDamage` directly (`PaneDamageInput::search_overlay_rects`,
+    /// consumed by `decide_frame_damage`), so escalating the whole window
+    /// `Changed` for it would erase that bounded damage's benefit for no
+    /// reason. See `chrome_damage::pane_forces_foreground_overlay_open`
+    /// for the per-pane decision that computes this field's contribution.
     pub foreground_overlay_open: bool,
 }
 
@@ -362,14 +374,51 @@ pub fn point_in_chrome_rects(
         || toast_rects.iter().any(|r| r.contains(pos))
 }
 
+/// Per-pane inputs to the OR-accumulated `foreground_overlay_open` scan in
+/// `app_impl.rs::stage_frame_damage` (Task 124.14d). Extracted as a pure,
+/// named-input decision -- rather than re-implementing `stage_frame_damage`'s
+/// boolean logic inline in a test -- because that scan needs a full
+/// `PerWindowState`/pane-tree to exercise directly.
+///
+/// `search_overlay_safety` is a named enum, not a bool, per
+/// `freminal-state-representation`: a *bounded* search overlay is the named
+/// exception that no longer forces this signal -- its geometry already
+/// joins `FrameDamage` directly (`PaneDamageInput::search_overlay_rects`,
+/// `build_bounded_damage`'s `EmptyBoundedDamage` handling in `widget.rs`) --
+/// while a `TooltipMayEscape` frame still does, alongside every other
+/// per-pane overlay here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneForegroundOverlayInputs {
+    /// `pane.view_state.context_menu_pos.is_some()`.
+    pub context_menu_open: bool,
+    /// `pane.view_state.command_history.is_open`.
+    pub command_history_open: bool,
+    /// `pane.render_cache.hover_tooltip_active()` -- the `Order::Tooltip`
+    /// URL-hover tooltip.
+    pub hover_tooltip_active: bool,
+    /// `pane.render_cache.search_overlay_safety()` (Task 124.14d).
+    pub search_overlay_safety: crate::gui::search::SearchOverlaySafety,
+}
+
+/// Whether one pane's per-frame state alone must set
+/// `foreground_overlay_open` this frame (Task 124.14d).
+#[must_use]
+pub fn pane_forces_foreground_overlay_open(inputs: PaneForegroundOverlayInputs) -> bool {
+    inputs.context_menu_open
+        || inputs.command_history_open
+        || inputs.hover_tooltip_active
+        || inputs.search_overlay_safety == crate::gui::search::SearchOverlaySafety::TooltipMayEscape
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ChromeSignals, ChromeTabSnapshot, DismissiblePresence, WARMUP_FRAMES, decide_chrome_damage,
-        diff_tab_snapshots, dismissible_presence_transitioned, is_chrome_warming_up,
-        point_in_chrome_rects,
+        ChromeSignals, ChromeTabSnapshot, DismissiblePresence, PaneForegroundOverlayInputs,
+        WARMUP_FRAMES, decide_chrome_damage, diff_tab_snapshots, dismissible_presence_transitioned,
+        is_chrome_warming_up, pane_forces_foreground_overlay_open, point_in_chrome_rects,
     };
     use crate::gui::panes::{PaneId, PaneIdGenerator};
+    use crate::gui::search::SearchOverlaySafety;
     use crate::gui::tabs::TabId;
     use freminal_windowing::ChromeDamage;
 
@@ -445,7 +494,100 @@ mod tests {
         assert_eq!(
             decide_chrome_damage(&signals, false, false),
             ChromeDamage::Changed,
-            "an open context-menu/search-bar/command-history overlay must force Changed"
+            "an open context-menu/tooltip-escaping-search/command-history overlay must force Changed"
+        );
+    }
+
+    // ── pane_forces_foreground_overlay_open (Task 124.14d) ──────────────
+
+    /// The default input (nothing open, bounded search) must NOT force the
+    /// signal -- the base case every other test below deviates from by
+    /// exactly one field.
+    fn no_overlay_inputs() -> PaneForegroundOverlayInputs {
+        PaneForegroundOverlayInputs {
+            context_menu_open: false,
+            command_history_open: false,
+            hover_tooltip_active: false,
+            search_overlay_safety: SearchOverlaySafety::Bounded,
+        }
+    }
+
+    #[test]
+    fn nothing_open_and_bounded_search_does_not_force_open() {
+        assert!(!pane_forces_foreground_overlay_open(no_overlay_inputs()));
+    }
+
+    /// The headline property this subtask exists for: a *bounded* search
+    /// overlay, alone, must NOT force `foreground_overlay_open` -- its
+    /// geometry already joined `FrameDamage` directly, so escalating the
+    /// whole window `Changed` for it would erase that bounded damage's
+    /// benefit for no reason.
+    #[test]
+    fn bounded_search_alone_does_not_force_open() {
+        let inputs = PaneForegroundOverlayInputs {
+            search_overlay_safety: SearchOverlaySafety::Bounded,
+            ..no_overlay_inputs()
+        };
+        assert!(!pane_forces_foreground_overlay_open(inputs));
+    }
+
+    /// The other half of the same property: a search frame where a
+    /// tooltip-bearing control (Prev/Next/Close/case-sensitivity) is
+    /// hovered DOES force the signal, because its chrome may paint outside
+    /// the bounded popup rect.
+    #[test]
+    fn tooltip_escaping_search_alone_forces_open() {
+        let inputs = PaneForegroundOverlayInputs {
+            search_overlay_safety: SearchOverlaySafety::TooltipMayEscape,
+            ..no_overlay_inputs()
+        };
+        assert!(pane_forces_foreground_overlay_open(inputs));
+    }
+
+    #[test]
+    fn context_menu_alone_forces_open() {
+        let inputs = PaneForegroundOverlayInputs {
+            context_menu_open: true,
+            ..no_overlay_inputs()
+        };
+        assert!(pane_forces_foreground_overlay_open(inputs));
+    }
+
+    #[test]
+    fn command_history_alone_forces_open() {
+        let inputs = PaneForegroundOverlayInputs {
+            command_history_open: true,
+            ..no_overlay_inputs()
+        };
+        assert!(pane_forces_foreground_overlay_open(inputs));
+    }
+
+    #[test]
+    fn hover_tooltip_alone_forces_open() {
+        let inputs = PaneForegroundOverlayInputs {
+            hover_tooltip_active: true,
+            ..no_overlay_inputs()
+        };
+        assert!(pane_forces_foreground_overlay_open(inputs));
+    }
+
+    /// Ties `pane_forces_foreground_overlay_open` back to the full chain a
+    /// bounded-search frame actually goes through: with the pane input
+    /// false, `ChromeSignals::foreground_overlay_open` is false, so
+    /// `decide_chrome_damage` reports `Unchanged`, and
+    /// `compose_with_chrome_damage` (`frame_damage.rs`) therefore leaves a
+    /// `Partial` present untouched -- a bounded search popup/highlight no
+    /// longer gets erased by chrome composition.
+    #[test]
+    fn bounded_search_leaves_chrome_unchanged() {
+        let signals = ChromeSignals {
+            foreground_overlay_open: pane_forces_foreground_overlay_open(no_overlay_inputs()),
+            ..ChromeSignals::default()
+        };
+        assert_eq!(
+            decide_chrome_damage(&signals, false, false),
+            ChromeDamage::Unchanged,
+            "a bounded search frame with nothing else open must leave chrome Unchanged"
         );
     }
 

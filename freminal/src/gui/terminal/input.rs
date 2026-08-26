@@ -7,8 +7,8 @@
 
 use crate::gui::{
     mouse::{
-        FreminalMousePosition, PreviousMouseState, handle_pointer_button, handle_pointer_moved,
-        handle_pointer_scroll,
+        PointerButtonHold, PreviousMouseState, handle_pointer_button, handle_pointer_scroll,
+        motion_position_changed, motion_track_wants_report,
     },
     view_state::{CellCoord, PendingPaste, ViewState},
 };
@@ -42,9 +42,7 @@ use freminal_terminal_emulator::{
 };
 use std::borrow::Cow;
 
-use super::coords::{
-    encode_egui_mouse_pos_as_usize, visible_window_start, visible_window_start_for,
-};
+use super::coords::{encode_egui_mouse_pos, visible_window_start, visible_window_start_for};
 use super::widget::hit_test_placeholder;
 use crate::gui::folding::{compute_extra_rows, compute_fold_ranges};
 
@@ -1433,6 +1431,13 @@ pub(super) struct WriteInputParams<'a, 'rec> {
     pub(super) view_state: &'a mut ViewState,
     pub(super) character_size_x: f32,
     pub(super) character_size_y: f32,
+    /// `ctx.pixels_per_point()` for this frame. Task 124.3a: needed to
+    /// convert a logical-point pointer offset into the physical-pixel
+    /// coordinates `MouseEncoding::SgrPixels` (`?1016`) reports; the
+    /// button/wheel arms below still encode reports directly (motion
+    /// reports moved to the out-of-frame immediate-report hook), so they
+    /// still need this to build a pixel-precise `FreminalMousePosition`.
+    pub(super) pixels_per_point: f32,
     pub(super) terminal_rect: Rect,
     pub(super) repeat_characters: Decarm,
     pub(super) binding_map: &'a BindingMap,
@@ -1595,6 +1600,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
         view_state,
         character_size_x,
         character_size_y,
+        pixels_per_point,
         terminal_rect,
         repeat_characters,
         binding_map,
@@ -2304,20 +2310,17 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     continue;
                 }
 
-                let (x, y) = encode_egui_mouse_pos_as_usize(
+                let position = encode_egui_mouse_pos(
                     *pos,
                     (character_size_x, character_size_y),
                     terminal_origin,
+                    pixels_per_point,
                 );
+                let x = position.x_as_character_column;
+                let y = position.y_as_character_row;
 
-                let position = FreminalMousePosition::new(x, y);
-                let (previous, current) =
-                    if let Some(last_mouse_position) = &mut last_reported_mouse_pos {
-                        (
-                            last_mouse_position.clone(),
-                            last_mouse_position.new_from_previous_mouse_state(position),
-                        )
-                    } else {
+                let (previous, current) = last_reported_mouse_pos.as_mut().map_or_else(
+                    || {
                         (
                             PreviousMouseState::default(),
                             PreviousMouseState::new(
@@ -2327,13 +2330,49 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                                 Modifiers::default(),
                             ),
                         )
-                    };
+                    },
+                    |last_mouse_position| {
+                        (
+                            last_mouse_position.clone(),
+                            last_mouse_position.new_from_previous_mouse_state(position),
+                        )
+                    },
+                );
 
-                let res = handle_pointer_moved(
-                    &current,
-                    &previous,
+                // Task 124.3a: PTY motion-report encoding and sending moved
+                // out of this arm into the out-of-frame immediate-report
+                // hook (`terminal::pty_mouse_report::on_pointer_moved`).
+                // This arm keeps only the terminal-owned bookkeeping that
+                // hook does not do: the `last_reported_mouse_pos` carry
+                // (also read by the wheel arm below when it falls back to
+                // the last-known position), recording, and — when this
+                // motion does not qualify for a report — selection-drag
+                // extension. `motion_position_changed` +
+                // `motion_track_wants_report` are the SAME predicate
+                // `handle_pointer_moved` uses, reused (not duplicated) here
+                // purely to decide whether a report WOULD have been sent,
+                // without asking it to encode bytes nobody sends from this
+                // arm. A single physical motion event must still produce
+                // at most one PTY report; this arm now never produces one.
+                //
+                // Review correction #5: this must compare at the SAME
+                // granularity `handle_pointer_moved` would use for the
+                // active encoding (pixel for `SgrPixels`, cell otherwise)
+                // — always comparing cell coordinates here, regardless of
+                // `mouse_encoding`, would silently diverge from the hook's
+                // own decision for the one encoding this task exists to
+                // fix.
+                let position_change =
+                    motion_position_changed(Some(&previous), &current, mouse_encoding);
+                let button_hold = if current.button_pressed {
+                    PointerButtonHold::Held
+                } else {
+                    PointerButtonHold::NotHeld
+                };
+                let report_wanted = motion_track_wants_report(
                     effective_mouse_tracking,
-                    mouse_encoding,
+                    button_hold,
+                    position_change,
                 );
 
                 last_reported_mouse_pos = Some(current);
@@ -2351,58 +2390,57 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     });
                 }
 
-                if let Some(res) = res {
-                    res
-                } else {
-                    // Mouse tracking is off — update text selection if a drag
-                    // is in progress.
-                    if view_state.selection.is_selecting {
-                        let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
-                        let end_col = if view_state.click_count >= 3 {
-                            // Triple-click drag — snap end to line boundaries.
-                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
-                            let snap_y = abs_row.saturating_sub(
-                                visible_window_start(snap).saturating_sub(snap.window_extra_rows),
-                            );
-                            let (line_start, line_end) = crate::gui::view_state::line_boundaries(
-                                &snap.visible_chars,
-                                snap_y,
-                            );
-                            if abs_row >= anchor_row {
-                                line_end
-                            } else {
-                                line_start
-                            }
-                        } else if view_state.click_count == 2 {
-                            // Double-click drag — snap end to word boundaries.
-                            let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
-                            let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
-                            let (word_start, word_end) =
-                                crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
-                            if abs_row > anchor_row
-                                || (abs_row == anchor_row && word_end >= anchor_col)
-                            {
-                                word_end
-                            } else {
-                                word_start
-                            }
-                        } else {
-                            // Single-click drag — track exact cell.
-                            x
-                        };
-                        view_state.selection.end = Some(CellCoord {
-                            col: end_col,
-                            row: abs_row,
-                        });
-                        // Keep block mode in sync with the current Alt state so
-                        // releasing or pressing Alt mid-drag switches mode live.
-                        if view_state.click_count <= 1 {
-                            view_state.selection.is_block = input.modifiers.alt;
-                        }
-                        state_changed = true;
-                    }
+                if report_wanted {
+                    // The immediate-report hook handles delivery; nothing
+                    // more for this arm to do.
                     continue;
                 }
+
+                // Mouse tracking is off (or this motion did not qualify for
+                // a report) — update text selection if a drag is in progress.
+                if view_state.selection.is_selecting {
+                    let abs_row = screen_row_to_buffer_row(snap, &view_state.folded_blocks, y);
+                    let end_col = if view_state.click_count >= 3 {
+                        // Triple-click drag — snap end to line boundaries.
+                        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                        let snap_y = abs_row.saturating_sub(
+                            visible_window_start(snap).saturating_sub(snap.window_extra_rows),
+                        );
+                        let (line_start, line_end) =
+                            crate::gui::view_state::line_boundaries(&snap.visible_chars, snap_y);
+                        if abs_row >= anchor_row {
+                            line_end
+                        } else {
+                            line_start
+                        }
+                    } else if view_state.click_count == 2 {
+                        // Double-click drag — snap end to word boundaries.
+                        let anchor_row = view_state.selection.anchor.map_or(abs_row, |a| a.row);
+                        let anchor_col = view_state.selection.anchor.map_or(x, |a| a.col);
+                        let (word_start, word_end) =
+                            crate::gui::view_state::word_boundaries(&snap.visible_chars, y, x);
+                        if abs_row > anchor_row || (abs_row == anchor_row && word_end >= anchor_col)
+                        {
+                            word_end
+                        } else {
+                            word_start
+                        }
+                    } else {
+                        // Single-click drag — track exact cell.
+                        x
+                    };
+                    view_state.selection.end = Some(CellCoord {
+                        col: end_col,
+                        row: abs_row,
+                    });
+                    // Keep block mode in sync with the current Alt state so
+                    // releasing or pressing Alt mid-drag switches mode live.
+                    if view_state.click_count <= 1 {
+                        view_state.selection.is_block = input.modifiers.alt;
+                    }
+                    state_changed = true;
+                }
+                continue;
             }
             Event::PointerButton {
                 button,
@@ -2447,14 +2485,16 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
 
                 state_changed = true;
 
-                let (x, y) = encode_egui_mouse_pos_as_usize(
+                let mouse_pos = encode_egui_mouse_pos(
                     *pos,
                     (character_size_x, character_size_y),
                     terminal_origin,
+                    pixels_per_point,
                 );
-                let mouse_pos = FreminalMousePosition::new(x, y);
+                let x = mouse_pos.x_as_character_column;
+                let y = mouse_pos.y_as_character_row;
                 let new_mouse_position =
-                    PreviousMouseState::new(*button, *pressed, mouse_pos.clone(), *modifiers);
+                    PreviousMouseState::new(*button, *pressed, mouse_pos, *modifiers);
 
                 // Shift+right-click escape hatch: when mouse tracking is
                 // active, holding Shift overrides PTY forwarding so the user
@@ -2677,12 +2717,12 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
                     && let Some(hover) = input.pointer.latest_pos()
                     && terminal_rect.contains(hover)
                 {
-                    let (x, y) = encode_egui_mouse_pos_as_usize(
+                    let position = encode_egui_mouse_pos(
                         hover,
                         (character_size_x, character_size_y),
                         terminal_origin,
+                        pixels_per_point,
                     );
-                    let position = FreminalMousePosition::new(x, y);
                     last_reported_mouse_pos = Some(PreviousMouseState::new(
                         PointerButton::Primary,
                         false,
@@ -3724,6 +3764,217 @@ mod finalize_selection_drag_tests {
             vs.selection.end,
             Some(CellCoord { col: 9, row: 0 }),
             "end must be preserved verbatim regardless of any snapshot state"
+        );
+    }
+}
+
+/// Task 124.3a: proves `write_input_to_terminal`'s `Event::PointerMoved`
+/// arm never sends a PTY motion report anymore — that responsibility moved
+/// entirely to the out-of-frame immediate-report hook
+/// (`terminal::pty_mouse_report`, see its own tests for the delivery side).
+/// This is the "no duplicate frame-time report" half of Task 124.3a's
+/// requirement: the OLD frame-path site is proven to send nothing, so it
+/// can never fire alongside the hook for the same motion.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod pointer_moved_frame_path_tests {
+    use super::*;
+    use freminal_common::buffer_states::modes::mouse::{MouseEncoding, MouseTrack};
+
+    fn snapshot_with_tracking(track: MouseTrack, encoding: MouseEncoding) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.mouse_tracking = track;
+        snap.mouse_encoding = encoding;
+        snap.term_width = 80;
+        snap.term_height = 24;
+        snap.total_rows = 24;
+        snap
+    }
+
+    /// Drive `write_input_to_terminal` with a single `Event::PointerMoved`
+    /// and return whatever bytes (if any) it sent to the PTY.
+    fn run_pointer_moved(snap: &TerminalSnapshot, pos: egui::Pos2) -> Vec<InputEvent> {
+        let (input_tx, input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let mut input_state = InputState::default();
+        input_state.raw.events.push(Event::PointerMoved(pos));
+        let binding_map = BindingMap::default();
+
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+            },
+        });
+
+        input_rx.try_iter().collect()
+    }
+
+    #[test]
+    fn xtmseany_motion_sends_no_pty_bytes_from_the_frame_path() {
+        // Under mouse tracking that WOULD have reported this motion
+        // pre-124.3a, the frame path must now send nothing at all — the
+        // immediate-report hook is the sole sender.
+        let snap = snapshot_with_tracking(MouseTrack::XtMseAny, MouseEncoding::Sgr);
+        let sent = run_pointer_moved(&snap, egui::pos2(16.0, 16.0));
+        assert!(
+            sent.is_empty(),
+            "the frame-path PointerMoved arm must never send a PTY motion report, got: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn xtmsebtn_motion_sends_no_pty_bytes_from_the_frame_path() {
+        let snap = snapshot_with_tracking(MouseTrack::XtMseBtn, MouseEncoding::Sgr);
+        let sent = run_pointer_moved(&snap, egui::pos2(16.0, 16.0));
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn no_tracking_motion_still_updates_selection_when_dragging() {
+        // Regression: with mouse tracking off, the frame path must still
+        // do its terminal-owned bookkeeping (selection-drag extension) —
+        // Task 124.3a only removed the PTY report, nothing else.
+        let snap = snapshot_with_tracking(MouseTrack::NoTracking, MouseEncoding::Sgr);
+        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        view_state.selection.is_selecting = true;
+        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        view_state.click_count = 1;
+        let mut input_state = InputState::default();
+        input_state
+            .raw
+            .events
+            .push(Event::PointerMoved(egui::pos2(32.0, 8.0)));
+        let binding_map = BindingMap::default();
+
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0)),
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+            },
+        });
+
+        assert_eq!(
+            view_state.selection.end,
+            Some(CellCoord { col: 4, row: 0 }),
+            "selection-drag extension must still run when mouse tracking is off"
+        );
+    }
+
+    /// Review correction #5: `report_wanted`'s position-change comparison
+    /// must be encoding-aware, matching `handle_pointer_moved`'s own
+    /// granularity choice, not always cell-based. Under
+    /// `MouseEncoding::SgrPixels`, two positions within the SAME cell but
+    /// at different pixel offsets must still be treated as "changed" —
+    /// which, under `XtMseAny` tracking, means `report_wanted` is `true`
+    /// and this arm must NOT fall through to extend the selection (that
+    /// only happens when a motion does not qualify for a report). A
+    /// cell-only comparison would wrongly say "unchanged" here and let
+    /// selection extend instead.
+    #[test]
+    fn sgr_pixels_sub_cell_move_is_treated_as_changed_and_does_not_extend_selection() {
+        let snap = snapshot_with_tracking(MouseTrack::XtMseAny, MouseEncoding::SgrPixels);
+        let (input_tx, _input_rx) = crossbeam_channel::unbounded();
+        let mut view_state = ViewState::new();
+        let binding_map = BindingMap::default();
+        let terminal_rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 400.0));
+
+        // First motion: establishes `last_reported_mouse_pos` at cell (1, 0),
+        // pixel (10, 10).
+        let mut input_state = InputState::default();
+        input_state
+            .raw
+            .events
+            .push(Event::PointerMoved(egui::pos2(10.0, 10.0)));
+        let result = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect,
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: InputCarryState {
+                last_reported_mouse_pos: None,
+                previous_key: None,
+                scroll_amount: 0.0,
+                super_state: SuperKeyState::default(),
+            },
+        });
+
+        // Now stage a selection drag and move within the SAME cell but a
+        // different pixel offset.
+        view_state.selection.is_selecting = true;
+        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
+        view_state.click_count = 1;
+        let mut input_state = InputState::default();
+        input_state
+            .raw
+            .events
+            .push(Event::PointerMoved(egui::pos2(11.0, 10.0)));
+
+        let _ = write_input_to_terminal(WriteInputParams {
+            input: &input_state,
+            snap: &snap,
+            input_tx: &input_tx,
+            view_state: &mut view_state,
+            character_size_x: 8.0,
+            character_size_y: 16.0,
+            pixels_per_point: 1.0,
+            terminal_rect,
+            repeat_characters: Decarm::default(),
+            binding_map: &binding_map,
+            pane_focus: PaneFocus::Active,
+            recording_ctx: None,
+            placeholder_rects: &[],
+            key_broadcast_targets: &[],
+            carry: result.carry,
+        });
+
+        assert_eq!(
+            view_state.selection.end, None,
+            "a pixel-granular position change under SgrPixels must be treated as \
+             \"reportable\", so this arm must not fall through to extend the selection"
         );
     }
 }

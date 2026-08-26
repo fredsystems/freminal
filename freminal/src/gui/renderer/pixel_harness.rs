@@ -123,7 +123,17 @@ impl PixelFrame {
     }
 }
 
-/// Render `frame` into a fresh offscreen context and capture the result.
+/// Shared setup for every pixel-capture entry point below: size the
+/// viewport from `frame`, create a fresh offscreen GL context, wrap it in
+/// a [`Gl`] just long enough to run `driver.init`, and hand back the
+/// initialized driver alongside the still-live offscreen context.
+///
+/// This returns `(HeadlessRenderer, OffscreenGl, u32, u32)` rather than an
+/// already-wrapped [`Gl`], because `Gl::real` borrows the [`OffscreenGl`]
+/// it wraps (`Gl::real(off.gl())`) — a `Gl` tied to a local `off` cannot
+/// outlive this function's return. Callers construct their own
+/// `Gl::real(off.gl())` immediately after calling this, once `off` lives in
+/// their own stack frame.
 ///
 /// A new context per call is deliberate: it makes each capture independent,
 /// so a test cannot be polluted by GL state a previous one left behind, and
@@ -135,7 +145,9 @@ impl PixelFrame {
 /// [`PixelHarnessError::NoContext`] when no GL context is available (skip,
 /// do not fail); [`PixelHarnessError::Driver`] for font or GL-init
 /// failures; [`PixelHarnessError::InvalidSize`] for a degenerate frame.
-pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> {
+fn setup_capture(
+    frame: &SyntheticFrame,
+) -> Result<(HeadlessRenderer, OffscreenGl, u32, u32), PixelHarnessError> {
     // The driver touches no GL in `new`, so it can be asked for the
     // viewport size before a context exists to size the pbuffer to match.
     let mut driver = HeadlessRenderer::new()?;
@@ -146,10 +158,135 @@ pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> 
     };
 
     let off = OffscreenGl::new(width, height)?;
+    {
+        let gl = Gl::real(off.gl());
+        driver.init(&gl)?;
+    }
+
+    Ok((driver, off, width, height))
+}
+
+/// Render `frame` into a fresh offscreen context and capture the result.
+///
+/// # Errors
+///
+/// [`PixelHarnessError::NoContext`] when no GL context is available (skip,
+/// do not fail); [`PixelHarnessError::Driver`] for font or GL-init
+/// failures; [`PixelHarnessError::InvalidSize`] for a degenerate frame.
+pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(frame)?;
     let gl = Gl::real(off.gl());
 
-    driver.init(&gl)?;
     driver.draw_frame(&gl, frame);
+
+    Ok(read_back(off.gl(), width, height))
+}
+
+/// Render `frame` once, then `cursor_only_frames` further **cursor-only**
+/// frames on the same renderer, and capture the last one.
+///
+/// Added by subtask 124.7. [`capture`] draws exactly one frame into a fresh
+/// renderer, which cannot see any defect that only appears once a GPU buffer
+/// is *reused* across frames — and buffer reuse is precisely what 124.7
+/// introduced by letting a small decoration payload skip the orphan when the
+/// slot's existing allocation is already large enough. The first upload into
+/// each `deco_vbo` slot still orphans (it has to, to size the storage), so a
+/// single-frame capture takes only the unchanged path.
+///
+/// Three cursor-only frames is the smallest count that exercises the gate on
+/// both double-buffer slots and then again on the first, which is where a
+/// stale-allocation bug would show.
+///
+/// # Errors
+///
+/// As [`capture`].
+pub fn capture_after_cursor_only_frames(
+    frame: &SyntheticFrame,
+    cursor_only_frames: usize,
+) -> Result<PixelFrame, PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(frame)?;
+    let gl = Gl::real(off.gl());
+
+    driver.draw_frame(&gl, frame);
+    for _ in 0..cursor_only_frames {
+        driver.draw_cursor_only(&gl, frame);
+    }
+
+    Ok(read_back(off.gl(), width, height))
+}
+
+/// Draw `first` into a fresh offscreen context (unscissored), capture it,
+/// then draw `second` on top with `SCISSOR_TEST` restricted to `scissor`.
+///
+/// The second draw lands on the SAME framebuffer -- no clear in between,
+/// matching the production paint callback, where the clear is the
+/// windowing layer's job and never this renderer's.
+///
+/// `scissor` is `(x, y, width, height)` in physical framebuffer pixels,
+/// bottom-left origin, the same convention as `glScissor` and
+/// [`freminal_windowing::DamageRect`].
+///
+/// Added for 124.23: proving the fix is exactly comparing the returned
+/// `(before, after)` outside `scissor` -- any pixel that differs there is a
+/// pixel the scissored second draw was not supposed to be able to touch.
+///
+/// # Errors
+///
+/// As [`capture`].
+pub fn capture_scissored_overdraw(
+    first: &SyntheticFrame,
+    second: &SyntheticFrame,
+    scissor: (i32, i32, i32, i32),
+) -> Result<(PixelFrame, PixelFrame), PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(first)?;
+    let gl = Gl::real(off.gl());
+
+    driver.draw_frame(&gl, first);
+    let before = read_back(off.gl(), width, height);
+
+    let (x, y, w, h) = scissor;
+    unsafe {
+        off.gl().enable(glow::SCISSOR_TEST);
+        off.gl().scissor(x, y, w, h);
+    }
+    driver.draw_frame(&gl, second);
+    unsafe {
+        off.gl().disable(glow::SCISSOR_TEST);
+    }
+
+    let after = read_back(off.gl(), width, height);
+    Ok((before, after))
+}
+
+/// Draw `frame` once with `SCISSOR_TEST` enabled and set to exactly the
+/// full viewport, then capture the result.
+///
+/// Used only to prove the [`freminal_windowing::PresentRegion::Full`]
+/// no-op property (124.23): a scissor box covering the entire viewport
+/// clips nothing, so this must be pixel-identical to [`capture`], which
+/// never touches `SCISSOR_TEST` at all -- the exact case the full-draw
+/// paint arm takes today, before and after the 124.23 fix, in the
+/// single-pane case.
+///
+/// # Errors
+///
+/// As [`capture`].
+pub fn capture_with_full_viewport_scissor(
+    frame: &SyntheticFrame,
+) -> Result<PixelFrame, PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(frame)?;
+    let gl = Gl::real(off.gl());
+    let vp_w = width.value_as::<i32>().unwrap_or(0);
+    let vp_h = height.value_as::<i32>().unwrap_or(0);
+
+    unsafe {
+        off.gl().enable(glow::SCISSOR_TEST);
+        off.gl().scissor(0, 0, vp_w, vp_h);
+    }
+    driver.draw_frame(&gl, frame);
+    unsafe {
+        off.gl().disable(glow::SCISSOR_TEST);
+    }
 
     Ok(read_back(off.gl(), width, height))
 }
@@ -396,6 +533,51 @@ mod tests {
             return;
         }
 
+        // A pixel golden is only meaningful relative to the rasteriser that
+        // produced it -- this module's own header says so. Before 123.C2 the
+        // `default` dev shell exported `LIBGL_ALWAYS_SOFTWARE=1`, so every
+        // local run was llvmpipe and matched the recorded golden by
+        // accident. 123.C2 correctly confined that to the `gl-pixel` shell,
+        // which left this test comparing an llvmpipe golden against whatever
+        // GPU the developer has -- 9648/80000 pixels differ on a Radeon
+        // 7900 XTX. Since the pre-commit hook runs `cargo test
+        // --all-features`, that failure blocked EVERY commit on any machine
+        // with a real GPU.
+        //
+        // So: decline to compare two images that were never comparable.
+        // This is NOT a widened tolerance -- the comparison below is still
+        // exact, at zero differing pixels. It is a guard on whether the
+        // comparison means anything at all.
+        //
+        // The `gl_context_required()` split is load-bearing in the same way
+        // it is in `capture_or_skip`. In the dedicated `gl-pixel` CI job
+        // that variable is set and the renderer is pinned to llvmpipe by
+        // `glPixelEnv`, so a mismatch THERE cannot be a developer's GPU --
+        // it means the golden was regenerated under the wrong rasteriser,
+        // which would otherwise silently skip this test in CI forever.
+        // That must fail loudly, not skip.
+        if let Some(recorded) = recorded_renderer(name)
+            && recorded != renderer
+        {
+            assert!(
+                !gl_context_required(),
+                "golden {name} was captured under `{recorded}` but this \
+                 environment renders with `{renderer}`, despite \
+                 FREMINAL_REQUIRE_GL being set -- that variable means this \
+                 is the pinned-llvmpipe gl-pixel job, so the golden was \
+                 regenerated under the wrong rasteriser. Regenerate it \
+                 under `.#gl-pixel`, not from the `default` shell."
+            );
+            eprintln!(
+                "SKIP golden {name}: captured under `{recorded}`, this run \
+                 renders with `{renderer}`.\n  A pixel golden is only \
+                 meaningful against its own rasteriser. Compare it with:\n    \
+                 nix develop .#gl-pixel --command xvfb-run -a cargo test -p \
+                 freminal --features gl-pixel {name}"
+            );
+            return;
+        }
+
         match compare(name, &captured).expect("comparison ran") {
             GoldenComparison::Match => {}
             GoldenComparison::Missing { path } => {
@@ -440,7 +622,7 @@ mod wasted_work_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::super::headless::SyntheticFrame;
-    use super::capture;
+    use super::{capture, capture_after_cursor_only_frames};
     // Reuse the tests module's variant-aware guard rather than duplicating
     // it: an "any error is a skip" guard is exactly the bug this file was
     // reviewed for.
@@ -509,6 +691,280 @@ mod wasted_work_tests {
             transparent * 2 > total,
             "most of a text frame should be untouched default background, \
              got {transparent} transparent of {total}"
+        );
+    }
+
+    /// Subtask 124.7's correctness guard: reusing a decoration-buffer
+    /// allocation instead of orphaning it must not change a single pixel.
+    ///
+    /// 124.7 lets `upload_deco_verts` skip the orphan when the payload is
+    /// small and the slot is already big enough. The failure mode of getting
+    /// that wrong is **silent visual corruption** — the issue #432 class —
+    /// and no call-count test can see it, which is exactly why this subtask
+    /// waited for Phase 2.
+    ///
+    /// The comparison is a cursor-only frame reached by reuse against the
+    /// same state reached without it. `capture` draws one frame into a fresh
+    /// renderer, so every upload in it orphans; `capture_after_cursor_only_frames`
+    /// drives further cursor-only frames, and from the second onward the
+    /// decoration upload takes the gated no-orphan path. Identical pixels at
+    /// a channel bound of zero is the only acceptable result.
+    #[test]
+    fn reusing_a_decoration_allocation_changes_no_pixels() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Some(orphaned) = super::tests::capture_or_skip(&frame, "deco-orphan-baseline") else {
+            return;
+        };
+        let reused =
+            capture_after_cursor_only_frames(&frame, 3).expect("reused-allocation capture");
+
+        assert_eq!(
+            orphaned.differing_pixels(&reused, 0),
+            Some(0),
+            "skipping the decoration buffer's orphan must be invisible; any \
+             difference here is the silent-corruption class 124.7 was \
+             deliberately held back for a pixel harness to rule out"
+        );
+    }
+}
+
+/// Subtask 124.23's own tests: the full-draw paint arm now scissors to the
+/// windowing-published `PresentRegion`, exactly as the cursor-only arm
+/// already did. See `widget.rs`'s `draw_scissored_to_present_region` for
+/// the production change.
+///
+/// Note on what this module deliberately does NOT attempt: the plan's
+/// third, best-effort test -- reproducing a pane's semi-transparent quads
+/// blending against stale (rather than cleared) pixels at
+/// `background_opacity < 1.0` -- is not expressible here. This renderer
+/// (`gpu.rs`'s `draw_with_verts` / `draw_with_cursor_only_update`) issues
+/// no `glClear` call at all, in this file or in `headless.rs`; the clear
+/// that the defect skips happens in the windowing layer, entirely outside
+/// what `HeadlessRenderer` drives. There is consequently no "clear
+/// happened" vs "clear was skipped" distinction this harness can even
+/// pose, let alone assert on. Confirming that would require instrumenting
+/// `freminal-windowing`, which is outside this subtask's scope. Separately,
+/// `HeadlessRenderer::draw_frame` (`headless.rs`) hardcodes `bg_opacity` to
+/// `1.0` and exposes no way to vary it from `SyntheticFrame` -- the knob
+/// the reproduction needs also lives in a file outside this subtask's
+/// scope (`freminal/src/gui/terminal/widget.rs` and this file only).
+#[cfg(test)]
+mod present_region_scissor_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::super::headless::{CursorPresence, SyntheticFrame};
+    use super::{capture, capture_scissored_overdraw, capture_with_full_viewport_scissor};
+
+    /// The core property 124.23 delivers: a scissored draw writes no
+    /// pixels outside the scissor rect, even when the geometry it is asked
+    /// to draw would otherwise have changed pixels there.
+    ///
+    /// The synthetic cursor is always drawn at cell (0, 0) (`headless.rs`'s
+    /// `cursor_pixel_pos: (0.0, 0.0)`), so hiding it changes pixels only
+    /// within that top-left cell's column -- `first`'s cursor-shown draw
+    /// and `second`'s cursor-hidden draw are pixel-identical everywhere
+    /// else. That is confirmed here directly (the "control" check) rather
+    /// than assumed, so a stale assumption about cursor placement fails
+    /// loudly instead of silently making the main assertion vacuous.
+    ///
+    /// The scissored second draw is then restricted to every column
+    /// *except* the leftmost one -- deliberately excluding the one region
+    /// that would otherwise change. If the scissor mechanism confines the
+    /// draw as it must, the leftmost column is left exactly as the first
+    /// (cursor-shown) draw left it, even though the second draw's own data
+    /// says the cursor should be gone there.
+    #[test]
+    fn scissored_full_draw_writes_no_pixels_outside_the_scissor_rect() {
+        let cols = 20;
+        let rows = 6;
+        let shown = SyntheticFrame::new(cols, rows);
+        let hidden = shown.with_cursor(CursorPresence::Hidden);
+
+        let Some(shown_alone) = super::tests::capture_or_skip(&shown, "scissor-mechanism-control")
+        else {
+            return;
+        };
+        let hidden_alone = capture(&hidden).expect("unscissored control capture");
+
+        let cols_u32 = u32::try_from(cols).expect("cols fits u32");
+        let cell_w = shown_alone.width / cols_u32;
+        assert!(cell_w > 0, "cell width must be positive, got {cell_w}");
+
+        // Control: the cursor-visibility difference must be real, and must
+        // land within the leftmost `cell_w` columns. Without this, the
+        // "outside the scissor" region below could trivially match
+        // regardless of whether the scissor mechanism works at all.
+        let mut control_differs = false;
+        'control: for y in 0..shown_alone.height {
+            for x in 0..cell_w {
+                if shown_alone.pixel(x, y) != hidden_alone.pixel(x, y) {
+                    control_differs = true;
+                    break 'control;
+                }
+            }
+        }
+        assert!(
+            control_differs,
+            "expected the cursor-visibility difference to land in the \
+             leftmost column (cell (0, 0)); either the driver changed or \
+             this test's assumption about cursor placement is stale"
+        );
+
+        let vp_w = i32::try_from(shown_alone.width).expect("width fits i32");
+        let vp_h = i32::try_from(shown_alone.height).expect("height fits i32");
+        let cell_w_i = i32::try_from(cell_w).expect("cell_w fits i32");
+
+        // Allowed (scissored) region: every column except the leftmost.
+        let (before, after) =
+            capture_scissored_overdraw(&shown, &hidden, (cell_w_i, 0, vp_w - cell_w_i, vp_h))
+                .expect("scissored overdraw capture");
+
+        for y in 0..before.height {
+            for x in 0..cell_w {
+                assert_eq!(
+                    before.pixel(x, y),
+                    after.pixel(x, y),
+                    "pixel ({x}, {y}) is outside the scissor rect and must \
+                     be left untouched by the second (scissored) draw, but \
+                     it changed -- the scissor failed to confine the write"
+                );
+            }
+        }
+    }
+
+    /// Pins the scissor **convention** the 124.23 helper relies on: a box
+    /// covering the entire viewport, expressed in physical framebuffer
+    /// pixels with a bottom-left origin, must clip nothing.
+    ///
+    /// Read what this does and does not establish, because the distinction
+    /// matters. `PresentRegion::Full` makes
+    /// `draw_scissored_to_present_region` touch no GL state at all — it does
+    /// **not** set a full-viewport scissor — so that arm's no-op property is
+    /// structural and has nothing observable for a pixel test to compare.
+    /// This test is therefore *not* a direct test of that arm.
+    ///
+    /// What it does catch is a wrong convention in the other arm. If the
+    /// helper's rect were interpreted in logical points, or with a top-left
+    /// origin, or off by the viewport offset, then a box nominally covering
+    /// the whole viewport would clip part of it and this would fail. That is
+    /// the assumption `PresentRegion::Region` silently depends on, and it is
+    /// otherwise only exercised by geometry that happens to look plausible.
+    #[test]
+    fn a_full_viewport_scissor_box_clips_nothing() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Some(baseline) =
+            super::tests::capture_or_skip(&frame, "full-viewport-scissor-convention")
+        else {
+            return;
+        };
+        let scissored =
+            capture_with_full_viewport_scissor(&frame).expect("full-viewport-scissor capture");
+
+        assert_eq!(
+            baseline.differing_pixels(&scissored, 0),
+            Some(0),
+            "a scissor box covering the entire viewport must be \
+             pixel-identical to no scissor at all -- if this fails, the \
+             rect convention the PresentRegion scissor uses (physical \
+             pixels, bottom-left origin) is wrong"
+        );
+    }
+}
+
+/// Subtask 124.14's own pixel test: the plan's mandated deliverable that a
+/// `Region` frame and a `Full` frame of the same state produce identical
+/// pixels ("124.14"'s "correctness argument that must be verified, not
+/// assumed" in `PLAN_124_RENDER_EFFICIENCY.md`).
+///
+/// Read the module doc above `present_region_scissor_tests` before reading
+/// this: this harness drives [`HeadlessRenderer`] directly and issues no
+/// `glClear` anywhere, and `bg_opacity` is hardcoded to `1.0`. That is why
+/// the test below is built the way it is, rather than actually invoking
+/// two different `PaneFrameDamage` variants (there is nothing in this
+/// renderer that reads that type at all -- it lives in `widget.rs` and
+/// `frame_damage.rs`, entirely above this harness).
+///
+/// What IS expressible, and what the property in the plan actually reduces
+/// to at this layer: [`capture_scissored_overdraw`] already models
+/// "render once (the `Full` frame), then render again on the SAME,
+/// never-cleared framebuffer restricted to a scissor rect (the `Region`
+/// frame's bounded present)". A `Region` frame's whole safety argument is
+/// that its content is byte-identical to what a `Full` rebuild of the same
+/// state would produce -- `VertexRebuild::Bounded` runs the exact same
+/// full-rebuild code as `VertexRebuild::ReevaluateFullRebuild`
+/// (`frame_dirty.rs`'s doc on `VertexRebuild::Bounded`), so the vertices fed
+/// to the second draw are identical to the first's. Passing the *same*
+/// [`SyntheticFrame`] as both `first` and `second` reproduces exactly that:
+/// "this frame's rebuild, presented in full" versus "this frame's
+/// identical rebuild, presented through a bounded scissor" -- of the same
+/// state, per the deliverable's own wording.
+#[cfg(test)]
+mod region_present_matches_full_present_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::super::headless::SyntheticFrame;
+    use super::capture_scissored_overdraw;
+
+    /// A `Region` present of unchanged state must be pixel-identical,
+    /// everywhere in the framebuffer (not merely inside the scissor rect),
+    /// to a `Full` present of that same state.
+    ///
+    /// Outside the scissor rect this is nearly definitional -- the second
+    /// draw cannot touch those pixels at all, so they are left exactly as
+    /// the first (`Full`) draw already rendered them, which is what
+    /// `scissored_full_draw_writes_no_pixels_outside_the_scissor_rect`
+    /// (`present_region_scissor_tests`) already pins for a *differing*
+    /// second frame. The property this test adds is the part that is NOT
+    /// definitional: *inside* the scissor rect, redrawing the identical
+    /// content a second time (no clear in between, and this renderer
+    /// enables no `GL_BLEND` anywhere -- verified by grep, not assumed)
+    /// must not perturb a single channel. If it did -- e.g. some
+    /// undiscovered blending or dithering path -- a `Region` frame would
+    /// be observably different from a `Full` one even though nothing in
+    /// the underlying state changed, which is exactly the silent
+    /// corruption class 124.14's correctness argument exists to rule out.
+    ///
+    /// The rect is deliberately a genuine interior sub-region (not the
+    /// full viewport, which `a_full_viewport_scissor_box_clips_nothing`
+    /// already covers, and not edge-aligned, so an off-by-one in either
+    /// bound would still land inside the checked area) -- a stand-in for
+    /// one of `build_bounded_damage`'s row-range rects.
+    #[test]
+    fn a_region_present_of_unchanged_state_matches_a_full_present_everywhere() {
+        let frame = SyntheticFrame::new(40, 10);
+        let Some(baseline) =
+            super::tests::capture_or_skip(&frame, "region-present-matches-full-present")
+        else {
+            return;
+        };
+
+        let vp_w = i32::try_from(baseline.width).expect("viewport width fits i32");
+        let vp_h = i32::try_from(baseline.height).expect("viewport height fits i32");
+        assert!(
+            vp_w >= 4 && vp_h >= 4,
+            "viewport too small ({vp_w}x{vp_h}) to carve a non-trivial \
+             interior scissor rect out of it"
+        );
+        // An interior quarter of the viewport, offset from every edge.
+        let region = (vp_w / 4, vp_h / 4, vp_w / 2, vp_h / 2);
+
+        // `first` and `second` are the SAME frame: this stands in for "the
+        // state did not change between the Full rebuild and the Region
+        // rebuild", which is precisely the precondition that makes a
+        // Region frame safe to bound in production (124.14a's correctness
+        // argument: outside the rects, the previous frame's pixels remain
+        // valid because nothing there changed).
+        let (full, region_present) = capture_scissored_overdraw(&frame, &frame, region)
+            .expect("scissored overdraw capture of identical state");
+
+        assert_eq!(
+            full.differing_pixels(&region_present, 0),
+            Some(0),
+            "a Region frame (bounded redraw of unchanged state) must be \
+             pixel-identical to a Full frame of the same state, at every \
+             pixel -- any difference here means bounding the presented \
+             damage silently changed what got drawn, which is the exact \
+             hazard 124.14's correctness argument exists to rule out"
         );
     }
 }

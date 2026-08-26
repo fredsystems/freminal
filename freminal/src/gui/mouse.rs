@@ -63,10 +63,153 @@ impl PreviousMouseState {
         }
     }
 
-    /// Returns `true` if the mouse position has changed relative to `new`.
+    /// Returns `true` if the CELL-granular mouse position has changed
+    /// relative to `new`. Used by cell-based mouse encodings (X11, SGR,
+    /// UTF-8), via [`motion_position_changed`], which picks this or
+    /// [`Self::pixel_position_changed`] based on the active encoding —
+    /// deliberately compares only the cell fields, not the whole
+    /// [`FreminalMousePosition`], so gaining pixel fields (Task 124.3a)
+    /// cannot change this method's answer for callers that never populate
+    /// them.
     #[must_use]
-    pub fn should_report(&self, new: &Self) -> bool {
-        self.mouse_position != new.mouse_position
+    pub const fn should_report(&self, new: &Self) -> bool {
+        self.mouse_position.x_as_character_column != new.mouse_position.x_as_character_column
+            || self.mouse_position.y_as_character_row != new.mouse_position.y_as_character_row
+    }
+
+    /// Returns `true` if the PIXEL-granular mouse position has changed
+    /// relative to `new` — the precision [`MouseEncoding::SgrPixels`]
+    /// (`?1016`) needs. Distinct from [`Self::should_report`] so two
+    /// pointer moves that stay within one cell still compare unequal here
+    /// (Task 124.3a).
+    #[must_use]
+    pub const fn pixel_position_changed(&self, new: &Self) -> bool {
+        self.mouse_position.x_as_physical_pixel != new.mouse_position.x_as_physical_pixel
+            || self.mouse_position.y_as_physical_pixel != new.mouse_position.y_as_physical_pixel
+    }
+}
+
+/// Whether a pointer button is currently held, for
+/// [`motion_track_wants_report`]'s `?1002` gate.
+///
+/// Named domain enum (`freminal-state-representation`), not a bare `bool`:
+/// `motion_track_wants_report` takes this instead of `button_pressed: bool`
+/// so a call site cannot pass an unnamed `true`/`false`. Each of the two
+/// call sites (`handle_pointer_moved` here, and the frame-time
+/// selection-drag gate in `write_input_to_terminal`) classifies its own
+/// pre-existing `PreviousMouseState::button_pressed: bool` field into this
+/// enum inline with an explicit `if`, rather than through a shared
+/// `bool`-taking conversion function — a `From<bool>`/`from_button_pressed`
+/// helper would itself be exactly the kind of unnamed-bool entry point this
+/// enum exists to close off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButtonHold {
+    /// A pointer button is currently held down.
+    Held,
+    /// No pointer button is currently held.
+    NotHeld,
+}
+
+/// Whether the mouse position changed, for [`motion_track_wants_report`]'s
+/// gate — the named-enum return type of [`motion_position_changed`].
+///
+/// Named domain enum (`freminal-state-representation`), not a bare `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionPositionChange {
+    /// The position changed (at whatever granularity was compared).
+    Changed,
+    /// The position did not change.
+    Unchanged,
+}
+
+/// Whether `mouse_track`'s motion-reporting rule considers this motion
+/// event reportable.
+///
+/// Given whether the tracked position actually changed (at whatever
+/// granularity the caller compared — cell for ordinary tracking, pixel for
+/// [`MouseEncoding::SgrPixels`], see [`handle_pointer_moved`]) and whether a
+/// button is currently held.
+///
+/// Pure decision, shared by [`handle_pointer_moved`] (which additionally
+/// encodes the escape sequence) and the frame-time selection-drag gate in
+/// `write_input_to_terminal`, which needs the SAME reportable-or-not
+/// decision `handle_pointer_moved` used to return, without asking it to
+/// encode bytes nobody will send — Task 124.3a moved PTY motion-report
+/// sending to the out-of-frame immediate-report hook path
+/// (`terminal::pty_mouse_report`), so the frame-time arm must decide
+/// whether a report *would* have been sent without producing one.
+#[must_use]
+pub const fn motion_track_wants_report(
+    mouse_track: &MouseTrack,
+    button_hold: PointerButtonHold,
+    position_change: MotionPositionChange,
+) -> bool {
+    match mouse_track {
+        MouseTrack::XtMseBtn => {
+            matches!(button_hold, PointerButtonHold::Held)
+                && matches!(position_change, MotionPositionChange::Changed)
+        }
+        MouseTrack::XtMseAny => matches!(position_change, MotionPositionChange::Changed),
+        MouseTrack::NoTracking
+        | MouseTrack::XtMsex10
+        | MouseTrack::XtMseX11
+        | MouseTrack::XtMseHilite
+        | MouseTrack::Query(_) => false,
+    }
+}
+
+/// GUI-owned, per-pane state for the immediate (out-of-frame) PTY
+/// motion-report path (Task 124.3a).
+///
+/// Lives on `ViewState` (see that field's doc) — read and written by
+/// `FreminalGui::on_pointer_moved` (`terminal::pty_mouse_report`), which
+/// runs outside any frame — rather than on `PaneRenderCache`, which is
+/// frame-scoped render-cache state and must not gain out-of-frame
+/// readers/writers.
+///
+/// Carries ONLY the last-reported position, per pane: each pane's PTY
+/// stream needs its own independent report history, since two panes'
+/// terminal content are entirely unrelated. The held pointer BUTTON is
+/// deliberately NOT here — see
+/// [`PerWindowState::held_pointer_button`](super::window::PerWindowState::held_pointer_button)'s
+/// doc for why that is window-owned instead: a physical button press and
+/// its matching release are events on the SAME OS pointer device,
+/// independent of which pane happens to be active at either moment, and
+/// storing that identity per-pane (this type's original Task 124.3a shape)
+/// could leave a pane's button "permanently held" across a focus change
+/// between press and release.
+///
+/// Deliberately NOT [`PreviousMouseState`]: that type is the frame-local
+/// carry `write_input_to_terminal` threads through `InputCarryState` on
+/// every call. The underlying concept — "what got last reported, for
+/// change-detection" — is related, which is why this type's `position`
+/// field has the same shape as `PreviousMouseState::mouse_position`, but
+/// the OWNER and LIFETIME differ, and conflating the two would blur which
+/// state belongs to which control path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImmediateMouseReportState {
+    /// The position (cell + physical-pixel) the last immediate report was
+    /// computed from. `None` before the first observed motion in this
+    /// pane — deliberately not a synthetic `(0, 0)` default; see
+    /// [`motion_position_changed`]'s doc for why that distinction matters.
+    pub position: Option<FreminalMousePosition>,
+}
+
+impl ImmediateMouseReportState {
+    /// Reset this pane's report baseline (Task 124.3a, review correction —
+    /// pointer-presence-loss reset).
+    ///
+    /// Called when the app observes `App::on_pointer_presence_lost` (the
+    /// pointer left the window, or the window lost focus): once no further
+    /// pointer events are guaranteed to arrive, `position` can no longer be
+    /// trusted as a real "last reported position" baseline for THIS pane —
+    /// re-entry or focus-regain must be treated as a fresh start. Setting
+    /// `position` back to `None`, rather than leaving it at its last real
+    /// value, makes the next observed motion unambiguously "changed" per
+    /// [`motion_position_changed`]'s `None`-previous semantics, even if it
+    /// lands at the exact same position the pane last reported.
+    pub const fn reset(&mut self) {
+        self.position = None;
     }
 }
 
@@ -78,25 +221,54 @@ pub enum MouseEvent {
     Scroll(Vec2),
 }
 
-/// Terminal mouse position in character-cell coordinates.
+/// Terminal mouse position, carrying both cell and pixel coordinates.
 ///
-/// Mouse tracking encodings (X11, SGR) report button and motion events in cell
-/// coordinates, not pixels, so only the column/row pair is retained. If a future
-/// feature needs pixel-precise reporting, re-derive it at the call site from the
-/// `egui::Pos2` that was originally passed to this type's constructor.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Character-cell coordinates are used by every cell-granular mouse
+/// encoding (X11, SGR, UTF-8); physical-pixel coordinates are used only by
+/// `MouseEncoding::SgrPixels` (`?1016` — Task 124.3a).
+///
+/// Both coordinate pairs are relative to the terminal content area's
+/// top-left, zero-based. The pixel fields default to `0` via
+/// [`Self::new`] for callers that only need cell precision; use
+/// [`Self::new_with_pixels`] when pixel precision is also needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FreminalMousePosition {
     pub(crate) x_as_character_column: usize,
     pub(crate) y_as_character_row: usize,
+    pub(crate) x_as_physical_pixel: usize,
+    pub(crate) y_as_physical_pixel: usize,
 }
 
 impl FreminalMousePosition {
-    /// Create a new `FreminalMousePosition` from cell coordinates.
+    /// Create a new `FreminalMousePosition` from cell coordinates alone.
+    /// The physical-pixel fields are `0` — only use this constructor where
+    /// the caller is certain `MouseEncoding::SgrPixels` cannot be in play,
+    /// or where pixel precision has no effect (e.g. purely cell-based
+    /// comparisons via [`PreviousMouseState::should_report`]).
     #[must_use]
     pub const fn new(x_as_character_column: usize, y_as_character_row: usize) -> Self {
         Self {
             x_as_character_column,
             y_as_character_row,
+            x_as_physical_pixel: 0,
+            y_as_physical_pixel: 0,
+        }
+    }
+
+    /// Create a new `FreminalMousePosition` with both cell and
+    /// physical-pixel coordinates specified explicitly.
+    #[must_use]
+    pub const fn new_with_pixels(
+        x_as_character_column: usize,
+        y_as_character_row: usize,
+        x_as_physical_pixel: usize,
+        y_as_physical_pixel: usize,
+    ) -> Self {
+        Self {
+            x_as_character_column,
+            y_as_character_row,
+            x_as_physical_pixel,
+            y_as_physical_pixel,
         }
     }
 }
@@ -144,52 +316,87 @@ pub fn handle_pointer_button(
     }
 }
 
+/// Whether the mouse position has changed between `previous` and `current`.
+///
+/// Compares at the granularity `encoding` needs (pixel for
+/// [`MouseEncoding::SgrPixels`], cell otherwise) — see
+/// [`PreviousMouseState::should_report`] and
+/// [`PreviousMouseState::pixel_position_changed`] for what each
+/// granularity compares.
+///
+/// `previous == None` (no prior observed position at all — the very
+/// first motion event on this report stream, or the report baseline was
+/// just reset via [`ImmediateMouseReportState::reset`] after a
+/// pointer-presence loss) is unambiguously [`MotionPositionChange::Changed`],
+/// regardless of where `current` lands. Task 124.3a's original
+/// implementation substituted a synthetic cell/pixel `(0, 0)` baseline
+/// for "no previous position", which conflated "never observed a
+/// position" with "previously observed at the origin": a genuine first
+/// motion that itself lands at cell/pixel `(0, 0)` would then compare
+/// equal to that synthetic baseline and be wrongly treated as
+/// unchanged — silently dropping the first `?1003` report of a session
+/// that happens to start at the terminal's top-left corner. Threading
+/// `Option` through explicitly, rather than a sentinel value, makes that
+/// case structurally unrepresentable.
+#[must_use]
+pub fn motion_position_changed(
+    previous: Option<&PreviousMouseState>,
+    current: &PreviousMouseState,
+    encoding: &MouseEncoding,
+) -> MotionPositionChange {
+    let Some(previous) = previous else {
+        return MotionPositionChange::Changed;
+    };
+    let changed = if *encoding == MouseEncoding::SgrPixels {
+        previous.pixel_position_changed(current)
+    } else {
+        previous.should_report(current)
+    };
+    if changed {
+        MotionPositionChange::Changed
+    } else {
+        MotionPositionChange::Unchanged
+    }
+}
+
 /// Encode a mouse motion event for the PTY.
 ///
-/// `mouse_track` determines whether this tracking level reports motion events.
-/// `encoding` determines the wire format (X11 binary vs SGR text).
+/// `mouse_track` determines whether this tracking level reports motion
+/// events. `encoding` determines the wire format (X11 binary vs SGR text).
+/// `previous_state` is `None` when there is no prior observed position at
+/// all (the first motion event on this report stream) — see
+/// [`motion_position_changed`]'s doc for why that must NOT be modeled as
+/// a synthetic `(0, 0)` `PreviousMouseState`.
 #[must_use]
 pub fn handle_pointer_moved(
     current_state: &PreviousMouseState,
-    previous_state: &PreviousMouseState,
+    previous_state: Option<&PreviousMouseState>,
     mouse_track: &MouseTrack,
     encoding: &MouseEncoding,
 ) -> Option<Cow<'static, [TerminalInput]>> {
-    match mouse_track {
-        MouseTrack::XtMseBtn => {
-            if current_state.button_pressed && previous_state.should_report(current_state) {
-                return Some(encode_x11_mouse_button(
-                    current_state.button,
-                    true,
-                    current_state.modifiers,
-                    &current_state.mouse_position,
-                    true,
-                    encoding,
-                ));
-            }
+    // Task 124.3a: `?1016` (SgrPixels) motion must be distinguishable at
+    // pixel granularity — two moves that stay within one cell must still
+    // compare unequal — so the position-changed check is granularity-aware
+    // rather than always comparing cell coordinates.
+    let position_change = motion_position_changed(previous_state, current_state, encoding);
+    let button_hold = if current_state.button_pressed {
+        PointerButtonHold::Held
+    } else {
+        PointerButtonHold::NotHeld
+    };
 
-            None
-        }
-        MouseTrack::XtMseAny => {
-            if previous_state.should_report(current_state) {
-                return Some(encode_x11_mouse_button(
-                    current_state.button,
-                    current_state.button_pressed,
-                    current_state.modifiers,
-                    &current_state.mouse_position,
-                    true,
-                    encoding,
-                ));
-            }
-
-            None
-        }
-        MouseTrack::NoTracking
-        | MouseTrack::XtMsex10
-        | MouseTrack::XtMseX11
-        | MouseTrack::XtMseHilite
-        | MouseTrack::Query(_) => None,
+    if !motion_track_wants_report(mouse_track, button_hold, position_change) {
+        return None;
     }
+
+    Some(encode_x11_mouse_button(
+        current_state.button,
+        current_state.button_pressed,
+        current_state.modifiers,
+        &current_state.mouse_position,
+        true,
+        encoding,
+    ))
 }
 
 /// Encode a mouse scroll event for the PTY.
@@ -318,23 +525,35 @@ fn encode_x11_mouse_wheel(
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    if *encoding == MouseEncoding::X11 {
-        let padding: usize = 32;
-        let cb = padding + button_code + modifiers_code;
-        let x = pos.x_as_character_column + 1 + padding;
-        let y = pos.y_as_character_row + 1 + padding;
-        let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
-        Some(raw_ascii_bytes_to_terminal_input(&[
-            b'\x1b', b'[', b'M', cb, x, y,
-        ]))
-    } else {
-        // SGR encoding: coordinates are decimal text — do NOT truncate to u8.
-        // Terminals wider or taller than 255 columns/rows would produce wrong
-        // output if we truncated before formatting.
-        let cb = button_code + modifiers_code;
-        let x = pos.x_as_character_column + 1;
-        let y = pos.y_as_character_row + 1;
-        Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
+    match encoding {
+        MouseEncoding::X11 => {
+            let padding: usize = 32;
+            let cb = padding + button_code + modifiers_code;
+            let x = pos.x_as_character_column + 1 + padding;
+            let y = pos.y_as_character_row + 1 + padding;
+            let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
+            Some(raw_ascii_bytes_to_terminal_input(&[
+                b'\x1b', b'[', b'M', cb, x, y,
+            ]))
+        }
+        MouseEncoding::SgrPixels => {
+            // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
+            // one-based PHYSICAL PIXEL coordinates relative to the
+            // terminal content area's top-left, not cell column/row.
+            let cb = button_code + modifiers_code;
+            let x = pos.x_as_physical_pixel + 1;
+            let y = pos.y_as_physical_pixel + 1;
+            Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
+        }
+        MouseEncoding::Sgr | MouseEncoding::Utf8 => {
+            // SGR encoding: coordinates are decimal text — do NOT truncate to
+            // u8. Terminals wider or taller than 255 columns/rows would
+            // produce wrong output if we truncated before formatting.
+            let cb = button_code + modifiers_code;
+            let x = pos.x_as_character_column + 1;
+            let y = pos.y_as_character_row + 1;
+            Some(collect_text(&format!("\x1b[<{cb};{x};{y}M")))
+        }
     }
 }
 
@@ -367,22 +586,36 @@ fn encode_x11_mouse_button(
 
     // Both X11 and SGR protocols use 1-based coordinates.
     // X11 additionally adds 32 as a "padding" offset to make the byte printable.
-    if *encoding == MouseEncoding::X11 {
-        // X11 binary encoding: add the printability padding (32) and encode as bytes.
-        let x = pos.x_as_character_column + 1 + padding;
-        let y = pos.y_as_character_row + 1 + padding;
-        let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
-        raw_ascii_bytes_to_terminal_input(&[b'\x1b', b'[', b'M', cb, x, y])
-    } else {
-        // SGR text encoding: coordinates are decimal — do NOT truncate to u8.
-        // Terminals wider or taller than 255 columns/rows would produce wrong
-        // output if we truncated before formatting.
-        let x = pos.x_as_character_column + 1;
-        let y = pos.y_as_character_row + 1;
-        collect_text(&format!(
-            "\x1b[<{cb};{x};{y}{}",
-            if pressed { "M" } else { "m" }
-        ))
+    match encoding {
+        MouseEncoding::X11 => {
+            // X11 binary encoding: add the printability padding (32) and encode as bytes.
+            let x = pos.x_as_character_column + 1 + padding;
+            let y = pos.y_as_character_row + 1 + padding;
+            let (cb, x, y) = encode_cb_and_x_and_y_as_u8_from_usize(cb, x, y);
+            raw_ascii_bytes_to_terminal_input(&[b'\x1b', b'[', b'M', cb, x, y])
+        }
+        MouseEncoding::SgrPixels => {
+            // Task 124.3a: same SGR framing as `?1006`, but `x`/`y` are
+            // one-based PHYSICAL PIXEL coordinates relative to the
+            // terminal content area's top-left, not cell column/row.
+            let x = pos.x_as_physical_pixel + 1;
+            let y = pos.y_as_physical_pixel + 1;
+            collect_text(&format!(
+                "\x1b[<{cb};{x};{y}{}",
+                if pressed { "M" } else { "m" }
+            ))
+        }
+        MouseEncoding::Sgr | MouseEncoding::Utf8 => {
+            // SGR text encoding: coordinates are decimal — do NOT truncate to u8.
+            // Terminals wider or taller than 255 columns/rows would produce wrong
+            // output if we truncated before formatting.
+            let x = pos.x_as_character_column + 1;
+            let y = pos.y_as_character_row + 1;
+            collect_text(&format!(
+                "\x1b[<{cb};{x};{y}{}",
+                if pressed { "M" } else { "m" }
+            ))
+        }
     }
 }
 
@@ -706,7 +939,7 @@ mod tests {
         );
         let result = handle_pointer_moved(
             &current,
-            &previous,
+            Some(&previous),
             &MouseTrack::XtMseAny,
             &MouseEncoding::Sgr,
         )
@@ -769,5 +1002,365 @@ mod tests {
         );
         // cb = 32 + 0 (left press) = 32, x = 5+1+32 = 38, y = 3+1+32 = 36
         assert_eq!(bytes, b"\x1b[M &$", "X11 button press wrong: {bytes:?}");
+    }
+
+    // ── Task 124.3a: `motion_track_wants_report` ─────────────────────────
+
+    #[test]
+    fn motion_track_wants_report_xtmsebtn_needs_both_button_and_position_change() {
+        assert!(motion_track_wants_report(
+            &MouseTrack::XtMseBtn,
+            PointerButtonHold::Held,
+            MotionPositionChange::Changed
+        ));
+        assert!(!motion_track_wants_report(
+            &MouseTrack::XtMseBtn,
+            PointerButtonHold::NotHeld,
+            MotionPositionChange::Changed
+        ));
+        assert!(!motion_track_wants_report(
+            &MouseTrack::XtMseBtn,
+            PointerButtonHold::Held,
+            MotionPositionChange::Unchanged
+        ));
+    }
+
+    #[test]
+    fn motion_track_wants_report_xtmseany_needs_only_position_change() {
+        assert!(motion_track_wants_report(
+            &MouseTrack::XtMseAny,
+            PointerButtonHold::NotHeld,
+            MotionPositionChange::Changed
+        ));
+        assert!(!motion_track_wants_report(
+            &MouseTrack::XtMseAny,
+            PointerButtonHold::NotHeld,
+            MotionPositionChange::Unchanged
+        ));
+    }
+
+    #[test]
+    fn motion_track_wants_report_other_tracks_never_report_motion() {
+        for track in [
+            MouseTrack::NoTracking,
+            MouseTrack::XtMsex10,
+            MouseTrack::XtMseX11,
+            MouseTrack::XtMseHilite,
+            MouseTrack::Query(1000),
+        ] {
+            assert!(!motion_track_wants_report(
+                &track,
+                PointerButtonHold::Held,
+                MotionPositionChange::Changed
+            ));
+        }
+    }
+
+    // ── Task 124.3a (review correction #2): `ImmediateMouseReportState::reset` ─
+
+    #[test]
+    fn immediate_mouse_report_state_reset_clears_a_real_position() {
+        let mut report = ImmediateMouseReportState {
+            position: Some(FreminalMousePosition::new(5, 3)),
+        };
+        report.reset();
+        assert_eq!(report.position, None);
+    }
+
+    #[test]
+    fn immediate_mouse_report_state_reset_is_a_no_op_when_already_none() {
+        let mut report = ImmediateMouseReportState::default();
+        assert_eq!(report.position, None);
+        report.reset();
+        assert_eq!(report.position, None);
+    }
+
+    // ── Task 124.3a: `PreviousMouseState::pixel_position_changed` ────────
+
+    #[test]
+    fn pixel_position_changed_true_when_pixels_differ_within_the_same_cell() {
+        // Same cell (2, 3), different sub-cell pixel offset — must still
+        // report a change at pixel granularity.
+        let a = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new_with_pixels(2, 3, 20, 30),
+            Modifiers::default(),
+        );
+        let b = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new_with_pixels(2, 3, 21, 30),
+            Modifiers::default(),
+        );
+        assert!(a.pixel_position_changed(&b));
+        // `should_report` (cell-granular) must NOT see a change here.
+        assert!(!a.should_report(&b));
+    }
+
+    #[test]
+    fn pixel_position_changed_false_when_pixels_are_identical() {
+        let a = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new_with_pixels(2, 3, 20, 30),
+            Modifiers::default(),
+        );
+        let b = a.clone();
+        assert!(!a.pixel_position_changed(&b));
+    }
+
+    // ── Task 124.3a: `?1016` (SgrPixels) exact-byte encoding ─────────────
+
+    #[test]
+    fn sgr_pixels_button_press_uses_physical_pixel_coordinates() {
+        // Cell (4, 2) but pixel (37, 19) — the encoded bytes must reflect
+        // the PIXEL position, not the cell position.
+        let pos = FreminalMousePosition::new_with_pixels(4, 2, 37, 19);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("SgrPixels button press should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        // 1-based pixel coords: 37+1=38, 19+1=20. Cell coords (5, 3) must
+        // NOT appear.
+        assert_eq!(bytes, b"\x1b[<0;38;20M");
+    }
+
+    #[test]
+    fn sgr_pixels_wheel_uses_physical_pixel_coordinates() {
+        let pos = FreminalMousePosition::new_with_pixels(10, 10, 123, 45);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, false, pos, Modifiers::default());
+        let result = handle_pointer_scroll(
+            Vec2::new(0.0, 1.0),
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("SgrPixels scroll should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // Button 64 = scroll up, 1-based pixel coords 124, 46.
+        assert_eq!(s, "\x1b[<64;124;46M");
+    }
+
+    #[test]
+    fn sgr_pixels_motion_uses_physical_pixel_coordinates_and_lowercase_m_when_not_pressed() {
+        let current_pos = FreminalMousePosition::new_with_pixels(12, 7, 200, 100);
+        let current = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            current_pos,
+            Modifiers::default(),
+        );
+        let previous_pos = FreminalMousePosition::new_with_pixels(11, 7, 190, 100);
+        let previous = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            previous_pos,
+            Modifiers::default(),
+        );
+        let result = handle_pointer_moved(
+            &current,
+            Some(&previous),
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("SgrPixels motion should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // motion bit = 32, button 0 -> cb = 32; pixel coords 201, 101.
+        assert_eq!(s, "\x1b[<32;201;101m");
+    }
+
+    #[test]
+    fn sgr_pixels_two_moves_within_one_cell_produce_two_distinct_reports() {
+        // Both positions floor to the same cell (5, 5), but the pixel
+        // offset differs — under SgrPixels this must still be treated as
+        // motion (Task 124.3a's headline distinctness requirement).
+        let start_pos = FreminalMousePosition::new_with_pixels(5, 5, 50, 50);
+        let start = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            start_pos,
+            Modifiers::default(),
+        );
+        let mid_pos = FreminalMousePosition::new_with_pixels(5, 5, 52, 50);
+        let mid =
+            PreviousMouseState::new(PointerButton::Primary, false, mid_pos, Modifiers::default());
+        let end_pos = FreminalMousePosition::new_with_pixels(5, 5, 55, 50);
+        let end =
+            PreviousMouseState::new(PointerButton::Primary, false, end_pos, Modifiers::default());
+
+        let first = handle_pointer_moved(
+            &mid,
+            Some(&start),
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("first sub-cell move should report");
+        let second = handle_pointer_moved(
+            &end,
+            Some(&mid),
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("second sub-cell move should report");
+
+        let first_bytes = inputs_to_bytes(first.as_ref());
+        let second_bytes = inputs_to_bytes(second.as_ref());
+        assert_ne!(
+            first_bytes, second_bytes,
+            "two distinct sub-cell pixel positions must produce two distinct reports"
+        );
+    }
+
+    #[test]
+    fn sgr_cell_encoding_unaffected_by_pixel_fields() {
+        // Regression guard: ordinary `?1006` SGR output must be byte-for-
+        // byte unchanged now that `FreminalMousePosition` also carries
+        // pixel fields — this pins that `Sgr`/`X11` never read them.
+        let pos = FreminalMousePosition::new_with_pixels(4, 2, 999, 999);
+        let state =
+            PreviousMouseState::new(PointerButton::Primary, true, pos, Modifiers::default());
+        let result = handle_pointer_button(
+            PointerButton::Primary,
+            &state,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::Sgr,
+        )
+        .expect("SGR button press should produce output");
+
+        let bytes = inputs_to_bytes(result.as_ref());
+        let expected = b"\x1b[<0;5;3M";
+        assert_eq!(
+            bytes, expected,
+            "SGR cell-based encoding must ignore populated pixel fields"
+        );
+    }
+
+    // ── Task 124.3a (review correction #3): first motion at the origin ──
+
+    #[test]
+    fn motion_position_changed_is_true_with_no_previous_position_even_at_the_origin() {
+        // The headline regression: a genuine first motion landing at cell
+        // (0, 0) must NOT compare equal to a "no previous position" state.
+        let current = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(0, 0),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            motion_position_changed(None, &current, &MouseEncoding::Sgr),
+            MotionPositionChange::Changed
+        );
+        assert_eq!(
+            motion_position_changed(None, &current, &MouseEncoding::SgrPixels),
+            MotionPositionChange::Changed
+        );
+    }
+
+    #[test]
+    fn motion_position_changed_with_a_real_previous_position_still_compares_normally() {
+        let previous = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(0, 0),
+            Modifiers::default(),
+        );
+        let same = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(0, 0),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            motion_position_changed(Some(&previous), &same, &MouseEncoding::Sgr),
+            MotionPositionChange::Unchanged,
+            "identical real positions must still compare unchanged"
+        );
+
+        let moved = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(1, 0),
+            Modifiers::default(),
+        );
+        assert_eq!(
+            motion_position_changed(Some(&previous), &moved, &MouseEncoding::Sgr),
+            MotionPositionChange::Changed
+        );
+    }
+
+    #[test]
+    fn xtmseany_first_motion_at_cell_origin_reports_exact_bytes() {
+        // Exact-byte regression: the very first `?1003` motion, landing at
+        // cell (0, 0), must produce a real SGR report -- not be silently
+        // dropped by a synthetic-zero-baseline comparison.
+        let current = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(0, 0),
+            Modifiers::default(),
+        );
+        let result =
+            handle_pointer_moved(&current, None, &MouseTrack::XtMseAny, &MouseEncoding::Sgr)
+                .expect("first motion at the cell origin must report under XtMseAny");
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        // motion bit 32, button 0 (Primary, not held) -> cb=32; 1-based
+        // coords (0+1, 0+1) = (1, 1). Lowercase 'm' since button not held.
+        assert_eq!(s, "\x1b[<32;1;1m");
+    }
+
+    #[test]
+    fn xtmseany_first_motion_at_pixel_origin_reports_exact_bytes() {
+        // Same regression, at pixel granularity under SgrPixels.
+        let current = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new_with_pixels(0, 0, 0, 0),
+            Modifiers::default(),
+        );
+        let result = handle_pointer_moved(
+            &current,
+            None,
+            &MouseTrack::XtMseAny,
+            &MouseEncoding::SgrPixels,
+        )
+        .expect("first motion at the pixel origin must report under XtMseAny/SgrPixels");
+        let bytes = inputs_to_bytes(result.as_ref());
+        let s = std::str::from_utf8(&bytes).expect("SGR sequence must be valid UTF-8");
+        assert_eq!(s, "\x1b[<32;1;1m");
+    }
+
+    #[test]
+    fn xtmsebtn_first_motion_still_requires_a_held_button_even_at_the_origin() {
+        // `motion_position_changed` being unconditionally `true` on the
+        // first motion must not bypass the SEPARATE button-held gate for
+        // `?1002` -- a first motion with no button held must still not
+        // report.
+        let current = PreviousMouseState::new(
+            PointerButton::Primary,
+            false,
+            FreminalMousePosition::new(0, 0),
+            Modifiers::default(),
+        );
+        let result =
+            handle_pointer_moved(&current, None, &MouseTrack::XtMseBtn, &MouseEncoding::Sgr);
+        assert!(
+            result.is_none(),
+            "?1002 must not report a first motion with no button held, got: {result:?}"
+        );
     }
 }

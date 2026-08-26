@@ -9,6 +9,7 @@
 //! and font-face boundaries, then shapes each run to produce glyph IDs and advances.
 //! Results are cached per-line for incremental updates.
 
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -122,9 +123,210 @@ pub struct ShapedLine {
 /// Stores `(content_hash, Arc<ShapedLine>)` per row index.  On each snapshot,
 /// only re-shape rows whose content hash changed.  Cache hits return an `Arc`
 /// clone (refcount bump) instead of a deep clone.
+///
+/// Subtask 124.6 (lever 1) adds a second, content-addressed cache
+/// ([`RunCache`]) alongside the line cache. The line cache is keyed by line
+/// index, so a one-line scroll invalidates every line even though most of
+/// their runs are byte-identical to runs shaped a moment ago at a different
+/// index (see the 124.16 findings block in
+/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`). The run cache is keyed by
+/// `(face_id, ligatures, run text)` instead, so it can still hit across that
+/// shift.
 pub struct ShapingCache {
     /// Per-line cache: `(hash, shaped_line)`.
     entries: Vec<Option<(u64, Arc<ShapedLine>)>>,
+    /// Subtask 124.16: cumulative hit/miss tally across every
+    /// [`Self::shape_visible`] call since the last [`Self::reset_stats`].
+    stats: ShapingCacheStats,
+    /// Subtask 124.6: content-addressed run-level glyph-template cache.
+    run_cache: RunCache,
+}
+
+/// Named ligature-shaping mode, used only as the `ligatures` component of
+/// [`RunCacheKey`].
+///
+/// The `ligatures: bool` flag threaded through every shaping function
+/// (`shape_visible`, `shape_runs`, `shape_single_run`, ...) predates subtask
+/// 124.6 and is grandfathered as-is at every existing call site. This type
+/// exists so that the run-cache *key* — new in 124.6 — never carries a bare
+/// `bool`: the pre-existing flag is classified into a named domain value
+/// inline at the one point it crosses into the new cache key, rather than
+/// threading another bool parameter through new code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LigatureShaping {
+    /// `calt`/`liga` were enabled for this run.
+    Enabled,
+    /// `calt`/`liga` were disabled for this run.
+    Disabled,
+}
+
+/// Content-addressed key for [`RunCache`].
+///
+/// Equality is structural over all four fields — deliberately not a
+/// hash-only lookup, so a hash collision can never be mistaken for a real
+/// match. `text` is owned because a `TextRun`'s text does not outlive the
+/// `shape_visible` call that built it, while cache entries must survive
+/// across calls.
+///
+/// `char_widths` is part of the key, not just `text`: [`TextRun::text`] is
+/// built from `tchar_to_char`, which takes only the *first* Unicode scalar
+/// of a `TChar::Utf8` grapheme cluster (see that function's doc). Two
+/// distinct grapheme clusters that happen to share a first scalar — e.g. a
+/// base character combined with different combining marks, or a base
+/// character alone versus the same base character plus a variation
+/// selector — can therefore produce byte-identical `text` while
+/// `TChar::display_width()` reports different total widths for the two
+/// clusters. Without `char_widths` in the key, the second run's cache
+/// lookup would hit the first run's entry and reuse its `cell_width`s,
+/// corrupting the second run's cell-grid layout (glyphs would occupy the
+/// wrong number of columns) even though nothing about the actual shaping
+/// call was wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunCacheKey {
+    /// The font face the run resolved to.
+    face_id: FaceId,
+    /// Whether ligature features were enabled for this run. Part of the key
+    /// because the same text shapes to different glyphs with `calt`/`liga`
+    /// on versus off.
+    ligatures: LigatureShaping,
+    /// The run's UTF-8 text content.
+    text: String,
+    /// Per-character column widths, cloned from [`TextRun::char_widths`].
+    /// See this struct's doc comment for why `text` alone is not a
+    /// sufficient key.
+    char_widths: Vec<usize>,
+}
+
+/// Position-independent shaped-glyph template for one run, cached at the
+/// canonical position `col_start = 0` and canonical pixel cell width `1.0`.
+///
+/// At those canonical values `build_shaped_glyphs`/`build_tofu_glyphs`
+/// compute `x_px` as exactly the glyph's column offset *within the run*
+/// (`0.0`, `1.0`, `2.0`, ...), independent of where the run actually sits on
+/// the line or how wide a cell is in pixels. Rebasing to a concrete
+/// `col_start`/`cell_width` is then just
+/// `(template_x_px + col_start) * cell_width` — see
+/// [`build_shaped_run_from_template`].
+///
+/// `Arc<[ShapedGlyph]>`, not `Vec<ShapedGlyph>`: a cache hit (current or
+/// promoted-from-previous) then costs one refcount bump, never a deep clone
+/// of the glyph vector. Only a genuine miss builds the `Vec` (once, in
+/// [`shape_run_canonical`]) and converts it into the `Arc` that gets stored.
+type GlyphTemplate = Arc<[ShapedGlyph]>;
+
+/// Two-generation, content-addressed cache of [`GlyphTemplate`]s, owned by
+/// [`ShapingCache`] (subtask 124.6, lever 1).
+///
+/// Bounded without an arbitrary capacity: only the current and immediately
+/// previous **miss-bearing** `shape_visible` call's generation are kept. A
+/// call in which every line hits the line-level cache does not rotate, so a
+/// generation survives across any number of quiet calls — letting a later
+/// scroll still reuse runs shaped several quiet frames earlier. A call is
+/// rotated at most once, on its first line miss; every later miss within
+/// the same call shares that call's `current` generation.
+#[derive(Debug, Default)]
+struct RunCache {
+    /// Templates cached during the in-progress (or most recent) miss-bearing
+    /// call.
+    current: HashMap<RunCacheKey, GlyphTemplate>,
+    /// Templates cached during the miss-bearing call before that. Evicted
+    /// wholesale the next time [`Self::rotate`] runs.
+    previous: HashMap<RunCacheKey, GlyphTemplate>,
+}
+
+impl RunCache {
+    /// Age `current` into `previous`, discarding whatever was in `previous`
+    /// before. Called at most once per miss-bearing `shape_visible` call.
+    fn rotate(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
+
+    /// Drop every cached template in both generations.
+    ///
+    /// Needed alongside [`ShapingCache::clear`]: font rebuilds can reuse
+    /// `FaceId` values for entirely different font data, and `FaceId` is
+    /// part of [`RunCacheKey`] but says nothing about *which* font backs it.
+    fn clear(&mut self) {
+        self.current.clear();
+        self.previous.clear();
+    }
+}
+
+/// Subtask 124.16: per-line shaping cache hit/miss tally.
+///
+/// [`ShapingCache::shape_visible`] already decides, per line, whether to
+/// reuse an `Arc<ShapedLine>` or re-shape from scratch, but it returned only
+/// `Vec<Arc<ShapedLine>>` — the outcome was computed and thrown away. That
+/// made it the fifth and last collapse point in the chain Task 124's
+/// defect table lists, and the reason 124.6's two levers could not be
+/// justified or sized. This surfaces it.
+///
+/// Counting only. Nothing here influences which branch is taken, and the
+/// counters are always compiled (not feature-gated) so a measurement can
+/// never diverge from the code path it claims to describe — the same
+/// rationale subtask 122.5 recorded for `PaneResolution`'s diagnostic terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShapingCacheStats {
+    /// Lines served by an `Arc` refcount bump.
+    pub hits: u64,
+    /// Lines re-segmented and re-shaped through rustybuzz.
+    pub misses: u64,
+    /// Subtask 124.6: runs served from [`RunCache`] (current or previous
+    /// generation) as a template clone, without a `rustybuzz` shape call.
+    /// Only counted for runs belonging to a line that missed the line-level
+    /// cache — a line hit never touches the run cache at all.
+    pub run_hits: u64,
+    /// Subtask 124.6: runs that missed [`RunCache`] entirely and were shaped
+    /// fresh through `rustybuzz`.
+    pub run_misses: u64,
+}
+
+impl ShapingCacheStats {
+    /// Lines considered — `hits + misses`.
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.hits.saturating_add(self.misses)
+    }
+
+    /// Fraction of considered lines served from cache, or `None` when no
+    /// line has been considered yet.
+    ///
+    /// `None` rather than `0.0` deliberately: "no data" and "nothing hit"
+    /// are different findings, and a measurement that silently reports the
+    /// second when it means the first is worse than one that reports
+    /// nothing.
+    #[must_use]
+    pub fn hit_rate(self) -> Option<f64> {
+        let total = self.total();
+        if total == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Some(self.hits as f64 / total as f64)
+    }
+
+    /// Runs considered by [`RunCache`] — `run_hits + run_misses`.
+    ///
+    /// Always `<=` the number of runs segmented from missed lines: a run
+    /// belonging to a line-level cache hit is never counted here at all.
+    #[must_use]
+    pub const fn run_total(self) -> u64 {
+        self.run_hits.saturating_add(self.run_misses)
+    }
+
+    /// Fraction of considered runs served from [`RunCache`], or `None` when
+    /// no run has been considered yet. See [`Self::hit_rate`] for why `None`
+    /// is distinct from `0.0`.
+    #[must_use]
+    pub fn run_hit_rate(self) -> Option<f64> {
+        let total = self.run_total();
+        if total == 0 {
+            return None;
+        }
+        let hits: f64 = self.run_hits.approx_as::<f64>().unwrap_or(0.0);
+        let total_f: f64 = total.approx_as::<f64>().unwrap_or(0.0);
+        Some(hits / total_f)
+    }
 }
 
 impl Default for ShapingCache {
@@ -135,16 +337,51 @@ impl Default for ShapingCache {
 
 impl ShapingCache {
     /// Create a new empty shaping cache.
+    ///
+    /// Not `const` (unlike before subtask 124.6): [`RunCache`]'s `HashMap`
+    /// fields have no `const` constructor.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            stats: ShapingCacheStats::default(),
+            run_cache: RunCache::default(),
         }
     }
 
     /// Invalidate the entire cache (e.g. on font change).
+    ///
+    /// Deliberately does **not** reset [`Self::stats`]: a font change is one
+    /// of the events a hit-rate measurement most wants to see the cost of,
+    /// and zeroing the tally here would hide it. Use [`Self::reset_stats`].
+    ///
+    /// Also clears [`Self::run_cache`] (subtask 124.6): a font rebuild can
+    /// reuse the same `FaceId` values for entirely different font data, so
+    /// leaving stale run-cache entries keyed on those `FaceId`s behind would
+    /// serve glyph templates shaped against the old font.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.run_cache.clear();
+    }
+
+    /// Subtask 124.16: the cumulative hit/miss tally.
+    #[must_use]
+    pub const fn stats(&self) -> ShapingCacheStats {
+        self.stats
+    }
+
+    /// Subtask 124.16: zero the hit/miss tally, leaving cached lines (and,
+    /// per subtask 124.6, cached runs) intact.
+    ///
+    /// Separate from [`Self::clear`] so a measurement can prime the cache and
+    /// then count only the frames it cares about.
+    pub const fn reset_stats(&mut self) {
+        self.stats = ShapingCacheStats {
+            hits: 0,
+            misses: 0,
+            run_hits: 0,
+            run_misses: 0,
+        };
     }
 
     /// Shape all visible lines, using cached results where possible.
@@ -186,6 +423,13 @@ impl ShapingCache {
         // Track the character offset into the global flat array for tag lookup.
         let mut global_offset: usize = 0;
 
+        // Subtask 124.6: whether `self.run_cache` has already rotated for
+        // THIS call. A call rotates at most once, on its first line miss —
+        // a call where every line hits (e.g. an identical full-screen
+        // redraw) never touches this and never rotates, so a generation
+        // survives across any number of quiet calls.
+        let mut run_cache_rotated = false;
+
         for (line_idx, line_chars) in lines.iter().enumerate() {
             let lw = visible_line_widths
                 .get(line_idx)
@@ -208,9 +452,15 @@ impl ShapingCache {
                 .filter(|(h, _)| *h == line_hash)
             {
                 // Cache hit — reuse via Arc refcount bump.
+                self.stats.hits = self.stats.hits.saturating_add(1);
                 Arc::clone(shaped_line)
             } else {
                 // Cache miss — segment and shape.
+                self.stats.misses = self.stats.misses.saturating_add(1);
+                if !run_cache_rotated {
+                    self.run_cache.rotate();
+                    run_cache_rotated = true;
+                }
                 let runs = segment_line(
                     line_chars,
                     visible_tags,
@@ -218,7 +468,13 @@ impl ShapingCache {
                     term_width,
                     font_manager,
                 );
-                let shaped_runs = shape_runs(&runs, font_manager, cell_width, ligatures, &features);
+                let shaped_runs = self.shape_runs_via_run_cache(
+                    &runs,
+                    font_manager,
+                    cell_width,
+                    ligatures,
+                    &features,
+                );
                 let shaped_line = Arc::new(ShapedLine {
                     runs: shaped_runs,
                     line_width: lw,
@@ -234,6 +490,89 @@ impl ShapingCache {
         }
 
         result
+    }
+
+    /// Shape `runs` (all belonging to one line-cache-missed line), consulting
+    /// [`Self::run_cache`] per run instead of shaping every one from scratch.
+    ///
+    /// Subtask 124.6, lever 1. Only ever called from the line-cache-miss
+    /// branch of [`Self::shape_visible`] — a run belonging to a line that hit
+    /// the line-level cache never reaches here, since the whole
+    /// `Arc<ShapedLine>` (all its runs included) is reused by refcount bump.
+    fn shape_runs_via_run_cache(
+        &mut self,
+        runs: &[TextRun],
+        font_manager: &FontManager,
+        cell_width: f32,
+        ligatures: bool,
+        features: &[rustybuzz::Feature],
+    ) -> Vec<ShapedRun> {
+        runs.iter()
+            .map(|run| {
+                self.shape_run_via_run_cache(run, font_manager, cell_width, ligatures, features)
+            })
+            .collect()
+    }
+
+    /// Shape a single run via [`Self::run_cache`], falling back to a fresh
+    /// `rustybuzz` shape on a genuine miss.
+    fn shape_run_via_run_cache(
+        &mut self,
+        run: &TextRun,
+        font_manager: &FontManager,
+        cell_width: f32,
+        ligatures: bool,
+        features: &[rustybuzz::Feature],
+    ) -> ShapedRun {
+        let key = RunCacheKey {
+            face_id: run.face_id,
+            ligatures: if ligatures {
+                LigatureShaping::Enabled
+            } else {
+                LigatureShaping::Disabled
+            },
+            text: run.text.clone(),
+            char_widths: run.char_widths.clone(),
+        };
+
+        let template = if let Some(template) = self.run_cache_lookup(&key) {
+            template
+        } else {
+            self.stats.run_misses = self.stats.run_misses.saturating_add(1);
+            let glyphs = shape_run_canonical(run, font_manager, ligatures, features);
+            let template: GlyphTemplate = Arc::from(glyphs);
+            self.run_cache.current.insert(key, Arc::clone(&template));
+            template
+        };
+
+        build_shaped_run_from_template(run, &template, cell_width)
+    }
+
+    /// Look up `key` in [`Self::run_cache`]: current generation first (so
+    /// duplicate runs within the same call — e.g. two identical rows in one
+    /// frame — hit each other), then the previous generation. A previous-
+    /// generation hit is promoted into the current generation (an `Arc`
+    /// clone, not a deep copy) so it survives the *next* rotation too, per
+    /// [`RunCache`]'s two-generation bound.
+    ///
+    /// Returns `None` on a genuine miss in both generations; the caller is
+    /// responsible for shaping and inserting in that case (kept out of this
+    /// method so it doesn't need `font_manager`/`features` just to record a
+    /// hit).
+    fn run_cache_lookup(&mut self, key: &RunCacheKey) -> Option<GlyphTemplate> {
+        if let Some(template) = self.run_cache.current.get(key) {
+            self.stats.run_hits = self.stats.run_hits.saturating_add(1);
+            return Some(Arc::clone(template));
+        }
+        if let Some(template) = self.run_cache.previous.get(key) {
+            self.stats.run_hits = self.stats.run_hits.saturating_add(1);
+            let template = Arc::clone(template);
+            self.run_cache
+                .current
+                .insert(key.clone(), Arc::clone(&template));
+            return Some(template);
+        }
+        None
     }
 }
 
@@ -638,6 +977,16 @@ pub fn shape_placeholder_line(
 }
 
 /// Shape a single `TextRun` via `rustybuzz`.
+///
+/// Composed from [`shape_run_canonical`] (the actual `rustybuzz` call, at
+/// the canonical `col_start = 0` / pixel `cell_width = 1.0` position) and
+/// [`build_shaped_run_from_template`] (rebasing to `run`'s real position and
+/// attaching its metadata). This is the same composition
+/// [`ShapingCache::shape_run_via_run_cache`] uses on a run-cache miss, so the
+/// two paths cannot silently diverge — this one just never consults or
+/// populates the cache, since callers of this function (placeholder-line
+/// shaping, tests) have no `ShapingCache` to share it through (subtask
+/// 124.6's point 5: no global/static cache state).
 fn shape_single_run(
     run: &TextRun,
     font_manager: &FontManager,
@@ -645,6 +994,32 @@ fn shape_single_run(
     ligatures: bool,
     features: &[rustybuzz::Feature],
 ) -> ShapedRun {
+    let template = shape_run_canonical(run, font_manager, ligatures, features);
+    build_shaped_run_from_template(run, &template, cell_width)
+}
+
+/// Shape `run` via `rustybuzz` at the canonical position `col_start = 0` and
+/// canonical pixel cell width `1.0`, producing glyph identity data whose
+/// `x_px` is exactly the glyph's column offset *within the run*, independent
+/// of where the run actually sits or how wide a cell is in pixels.
+///
+/// Returns a plain `Vec`, not a [`GlyphTemplate`]: this is the one-time build
+/// on a run-cache miss (or the whole computation on the uncached path), and
+/// the caller decides whether/how to wrap it in the `Arc` a [`GlyphTemplate`]
+/// requires. Converting here unconditionally would force an `Arc` allocation
+/// even on [`shape_single_run`]'s uncached path, which never touches the
+/// cache at all.
+///
+/// This is the shaping half used by both the uncached path
+/// ([`shape_single_run`]) and the run-cache-miss path
+/// ([`ShapingCache::shape_run_via_run_cache`]) — see
+/// [`build_shaped_run_from_template`] for the rebasing half.
+fn shape_run_canonical(
+    run: &TextRun,
+    font_manager: &FontManager,
+    ligatures: bool,
+    features: &[rustybuzz::Feature],
+) -> Vec<ShapedGlyph> {
     let is_emoji_face = run.face_id == FaceId::Emoji;
 
     // Build the input buffer and guess its segment properties (script,
@@ -657,28 +1032,54 @@ fn shape_single_run(
     buffer.guess_segment_properties();
 
     // Try to shape via the cached Face + ShapePlan (Task #430).
-    let glyphs = font_manager
+    font_manager
         .shape_cached(run.face_id, ligatures, features, buffer)
         .map_or_else(
             || {
                 // No face available — produce tofu (glyph_id=0) per character.
-                build_tofu_glyphs(&run.char_widths, run.col_start, run.face_id, cell_width)
+                build_tofu_glyphs(&run.char_widths, 0, run.face_id, 1.0)
             },
             |output| {
                 let infos = output.glyph_infos();
 
-                // Map shaped glyphs back to cell-grid positions.
+                // Map shaped glyphs back to canonical column offsets.
                 build_shaped_glyphs(
                     infos,
                     &run.text,
                     &run.char_widths,
-                    run.col_start,
+                    0,
                     run.face_id,
                     is_emoji_face,
-                    cell_width,
+                    1.0,
                 )
             },
-        );
+        )
+}
+
+/// Rebase a canonical [`GlyphTemplate`] (`col_start = 0`, pixel
+/// `cell_width = 1.0`) onto `run`'s real column position and pixel cell
+/// width, and attach `run`'s current metadata (style, colors, URL, blink,
+/// `col_start`).
+///
+/// The metadata always comes from `run` — the caller — never from whatever
+/// run originally produced the template. That is what makes a run-cache hit
+/// safe: `RunCacheKey` covers only `(face_id, ligatures, text, char_widths)`,
+/// so a hit can legitimately reuse glyph *shapes* from a differently-styled
+/// or differently-positioned prior run, but must never leak that prior run's
+/// style/color/URL/blink/position.
+fn build_shaped_run_from_template(
+    run: &TextRun,
+    template: &[ShapedGlyph],
+    cell_width: f32,
+) -> ShapedRun {
+    let col_start_f: f32 = run.col_start.approx_as::<f32>().unwrap_or(0.0);
+    let glyphs = template
+        .iter()
+        .map(|g| ShapedGlyph {
+            x_px: (g.x_px + col_start_f) * cell_width,
+            ..g.clone()
+        })
+        .collect();
 
     ShapedRun {
         glyphs,
@@ -893,6 +1294,25 @@ mod tests {
         }
     }
 
+    /// Helper: build a minimal `TextRun` with default metadata, for the
+    /// run-cache unit tests (subtask 124.6). Each character is 1 cell wide.
+    fn make_run(text: &str, col_start: usize, face_id: FaceId) -> TextRun {
+        let width = text.chars().count();
+        TextRun {
+            col_start,
+            col_count: width,
+            face_id,
+            style: GlyphStyle::from_format(&FontWeight::Normal, FontDecorationFlags::empty()),
+            font_weight: FontWeight::Normal,
+            font_decorations: FontDecorationFlags::empty(),
+            colors: freminal_common::buffer_states::cursor::StateColors::default(),
+            url: None,
+            text: text.to_string(),
+            char_widths: vec![1; width],
+            blink: BlinkState::None,
+        }
+    }
+
     // -- Line splitting --
 
     #[test]
@@ -1088,6 +1508,498 @@ mod tests {
         assert_eq!(r2.len(), 1);
         assert_eq!(r2[0].runs.len(), 1);
         assert_eq!(r2[0].runs[0].glyphs.len(), 1);
+    }
+
+    // -- Run cache (subtask 124.6, lever 1) --
+    //
+    // These drive `ShapingCache::shape_run_via_run_cache` directly (rather
+    // than through `shape_visible`) to pin the run cache's key semantics and
+    // generation lifecycle precisely, independent of line-level segmentation.
+    // The end-to-end integration — that `shape_visible` rotates a generation
+    // only on a genuine line miss — is covered separately by
+    // `shaping_cache_hit_rate::a_scroll_by_one_line_reuses_unchanged_runs`.
+
+    #[test]
+    fn run_cache_hits_on_identical_key() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run = make_run("hello", 0, FaceId::PrimaryRegular);
+
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+        assert_eq!(cache.stats().run_hits, 0);
+
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_hits, 1,
+            "identical (face_id, ligatures, text) key must hit"
+        );
+        assert_eq!(stats.run_misses, 1);
+    }
+
+    #[test]
+    fn run_cache_misses_when_face_id_differs() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
+        let run_b = make_run("hello", 0, FaceId::PrimaryBold);
+
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_misses, 2,
+            "a different face_id must not hit the other face's entry"
+        );
+        assert_eq!(stats.run_hits, 0);
+    }
+
+    #[test]
+    fn run_cache_misses_when_ligatures_differs() {
+        let fm = test_font_manager();
+        let features_off = shaping_features(false);
+        let features_on = shaping_features(true);
+        let mut cache = ShapingCache::new();
+
+        let run = make_run("->", 0, FaceId::PrimaryRegular);
+
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features_off);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, true, &features_on);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_misses, 2,
+            "the ligatures flag must be part of the run-cache key"
+        );
+        assert_eq!(stats.run_hits, 0);
+    }
+
+    #[test]
+    fn run_cache_misses_when_text_differs() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        let run_a = make_run("hello", 0, FaceId::PrimaryRegular);
+        let run_b = make_run("world", 0, FaceId::PrimaryRegular);
+
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+
+        let stats = cache.stats();
+        assert_eq!(stats.run_misses, 2, "different run text must not hit");
+        assert_eq!(stats.run_hits, 0);
+    }
+
+    /// Regression for a real reachable case, not just a synthetic fixture:
+    /// [`TextRun::text`] is built by `tchar_to_char`, which keeps only the
+    /// FIRST Unicode scalar of a `TChar::Utf8` grapheme cluster (see that
+    /// function's doc). Two different grapheme clusters that happen to
+    /// share a first scalar therefore produce byte-identical `text` while
+    /// `TChar::display_width()` reports different total widths for the two
+    /// clusters — e.g. a base character alone versus the same base
+    /// character combined with a wide combining mark. `run_a`/`run_b` below
+    /// stand in for exactly that: identical `(face_id, ligatures, text)` but
+    /// genuinely different `char_widths`, built directly (via `TextRun`
+    /// struct-update over [`make_run`], the same pattern
+    /// `run_cache_hit_never_leaks_prior_metadata` below uses) rather than
+    /// through `segment_line`, so this test pins the run-cache key contract
+    /// independent of grapheme segmentation. Before `char_widths` joined
+    /// `RunCacheKey`, `run_b` would incorrectly hit `run_a`'s cached
+    /// template and inherit its `cell_width`, corrupting `run_b`'s
+    /// cell-grid layout.
+    #[test]
+    fn run_cache_misses_when_char_widths_differ_for_identical_text() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        let run_a = make_run("e", 0, FaceId::PrimaryRegular);
+        assert_eq!(run_a.char_widths, vec![1]);
+        let run_b = TextRun {
+            char_widths: vec![2],
+            col_count: 2,
+            ..make_run("e", 0, FaceId::PrimaryRegular)
+        };
+
+        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+
+        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_misses, 2,
+            "same (face_id, ligatures, text) but different char_widths \
+             must not hit the run cache"
+        );
+        assert_eq!(stats.run_hits, 0);
+
+        assert_eq!(shaped_a.glyphs.len(), 1);
+        assert_eq!(shaped_b.glyphs.len(), 1);
+        assert_eq!(
+            shaped_a.glyphs[0].cell_width, 1,
+            "run_a's own glyph must keep its own width"
+        );
+        assert_eq!(
+            shaped_b.glyphs[0].cell_width, 2,
+            "run_b's own glyph must keep its own width (2), not leak \
+             run_a's cached width (1)"
+        );
+    }
+
+    #[test]
+    fn run_cache_hit_never_leaks_prior_metadata() {
+        use freminal_common::buffer_states::fonts::FontDecorations;
+
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let cell_w = 10.0;
+
+        let run_a = make_run("hi", 0, FaceId::PrimaryRegular);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, cell_w, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+
+        // Same (face_id, ligatures, text) as `run_a`, but every field NOT
+        // covered by `RunCacheKey` differs: style, font_weight, colors,
+        // decorations, URL, blink, and col_start.
+        let mut decorations = FontDecorationFlags::empty();
+        decorations.insert(FontDecorations::Underline);
+        let style_b = GlyphStyle::from_format(&FontWeight::Bold, decorations);
+        let run_b = TextRun {
+            col_start: 7,
+            style: style_b,
+            font_weight: FontWeight::Bold,
+            colors: freminal_common::buffer_states::cursor::StateColors {
+                color: freminal_common::colors::TerminalColor::Blue,
+                ..Default::default()
+            },
+            font_decorations: decorations,
+            url: Some(Arc::new(freminal_common::buffer_states::url::Url {
+                id: None,
+                url: "https://example.invalid".to_string(),
+            })),
+            blink: BlinkState::Slow,
+            ..make_run("hi", 7, FaceId::PrimaryRegular)
+        };
+
+        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, cell_w, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_hits, 1,
+            "same (face_id, ligatures, text) must hit the run cache"
+        );
+        assert_eq!(
+            stats.run_misses, 1,
+            "a run-cache hit must not call rustybuzz again"
+        );
+
+        // The hit must carry run_b's OWN metadata, never run_a's.
+        assert_eq!(shaped_b.style, style_b);
+        assert_eq!(shaped_b.font_weight, FontWeight::Bold);
+        assert_eq!(
+            shaped_b.colors.color,
+            freminal_common::colors::TerminalColor::Blue
+        );
+        assert_eq!(shaped_b.font_decorations, decorations);
+        assert_eq!(shaped_b.blink, BlinkState::Slow);
+        assert_eq!(
+            shaped_b.url.as_ref().map(|u| u.url.as_str()),
+            Some("https://example.invalid")
+        );
+        assert_eq!(shaped_b.col_start, 7);
+
+        // And the glyph position must be rebased to run_b's col_start (7),
+        // never reused verbatim from run_a's col_start (0). Exact equality
+        // is correct (not a tolerance): this is the identical
+        // `(template_x_px + col_start) * cell_width` arithmetic performed
+        // in `build_shaped_run_from_template`.
+        let expected_x = 7.0 * cell_w;
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(
+                shaped_b.glyphs[0].x_px, expected_x,
+                "glyph position must rebase to the new col_start"
+            );
+        }
+    }
+
+    // -- Differential regression: cached-hit output vs. uncached
+    // `shape_single_run` output, field-by-field (subtask 124.6 review fix) --
+    //
+    // These compare two independently-computed PRODUCTION outputs rather
+    // than reimplementing any shaping math: `expected` always comes from
+    // `shape_single_run` (the uncached path, never touches `RunCache`), and
+    // `actual` always comes from a genuine run-cache HIT that rebases a
+    // template originally built for a DIFFERENT run (different col_start
+    // and, where noted, a different pixel `cell_width`). Exact equality
+    // (`==`, not a tolerance) is correct here because both paths perform the
+    // identical `(template_x_px + col_start) * cell_width` arithmetic in
+    // `build_shaped_run_from_template` — any mismatch is a real defect.
+
+    /// Assert two `ShapedGlyph`s are identical in every field.
+    fn assert_glyph_fields_eq(actual: &ShapedGlyph, expected: &ShapedGlyph, ctx: &str) {
+        assert_eq!(actual.glyph_id, expected.glyph_id, "{ctx}: glyph_id");
+        assert_eq!(actual.x_px, expected.x_px, "{ctx}: x_px");
+        assert_eq!(actual.y_offset, expected.y_offset, "{ctx}: y_offset");
+        assert_eq!(actual.face_id, expected.face_id, "{ctx}: face_id");
+        assert_eq!(actual.is_color, expected.is_color, "{ctx}: is_color");
+        assert_eq!(actual.cell_width, expected.cell_width, "{ctx}: cell_width");
+        assert_eq!(
+            actual.source_char, expected.source_char,
+            "{ctx}: source_char"
+        );
+    }
+
+    /// Assert two `ShapedRun`s (produced via different code paths) are
+    /// identical: every metadata field, and every glyph in order.
+    fn assert_shaped_runs_eq(actual: &ShapedRun, expected: &ShapedRun, ctx: &str) {
+        assert_eq!(actual.col_start, expected.col_start, "{ctx}: col_start");
+        assert_eq!(actual.style, expected.style, "{ctx}: style");
+        assert_eq!(
+            actual.font_weight, expected.font_weight,
+            "{ctx}: font_weight"
+        );
+        assert_eq!(
+            actual.font_decorations, expected.font_decorations,
+            "{ctx}: font_decorations"
+        );
+        assert_eq!(actual.colors, expected.colors, "{ctx}: colors");
+        assert_eq!(actual.url, expected.url, "{ctx}: url");
+        assert_eq!(actual.blink, expected.blink, "{ctx}: blink");
+        assert_eq!(
+            actual.glyphs.len(),
+            expected.glyphs.len(),
+            "{ctx}: glyph count"
+        );
+        for (i, (a, e)) in actual.glyphs.iter().zip(expected.glyphs.iter()).enumerate() {
+            assert_glyph_fields_eq(a, e, &format!("{ctx}: glyph {i}"));
+        }
+    }
+
+    #[test]
+    fn run_cache_hit_matches_uncached_shape_for_ascii_at_nonzero_position() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        // Populate the cache from a run at one position and pixel cell width...
+        let run_a = make_run("hello world", 2, FaceId::PrimaryRegular);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 8.0, false, &features);
+
+        // ...then hit it from a DIFFERENT run (same face/ligatures/text) at a
+        // different col_start and a different (non-1.0) pixel cell_width.
+        let run_b = make_run("hello world", 17, FaceId::PrimaryRegular);
+        let cell_w_b = 13.5;
+        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        assert_eq!(
+            cache.stats().run_hits,
+            1,
+            "run_b must hit run_a's cached template"
+        );
+
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        assert_shaped_runs_eq(&actual, &expected, "ascii nonzero col_start/cell_width");
+    }
+
+    #[test]
+    fn run_cache_hit_matches_uncached_shape_for_ligature_text() {
+        let fm = test_font_manager();
+        let features = shaping_features(true);
+        let mut cache = ShapingCache::new();
+
+        let run_a = make_run("->", 0, FaceId::PrimaryRegular);
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, true, &features);
+
+        let run_b = make_run("->", 4, FaceId::PrimaryRegular);
+        let cell_w_b = 12.0;
+        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, true, &features);
+        assert_eq!(
+            cache.stats().run_hits,
+            1,
+            "run_b must hit run_a's cached ligature template"
+        );
+
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, true, &features);
+        assert_shaped_runs_eq(&actual, &expected, "ligature text with ligatures enabled");
+    }
+
+    #[test]
+    fn run_cache_hit_matches_uncached_shape_for_wide_unicode_text() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        // U+4E2D (中): a single wide CJK character, display_width = 2. The
+        // shared `make_run` helper assumes 1-wide chars, so build these
+        // directly with the correct `char_widths`/`col_count`.
+        let run_a = TextRun {
+            char_widths: vec![2],
+            col_count: 2,
+            ..make_run("中", 3, FaceId::PrimaryRegular)
+        };
+        let _ = cache.shape_run_via_run_cache(&run_a, &fm, 9.0, false, &features);
+
+        let run_b = TextRun {
+            char_widths: vec![2],
+            col_count: 2,
+            ..make_run("中", 11, FaceId::PrimaryRegular)
+        };
+        let cell_w_b = 14.25;
+        let actual = cache.shape_run_via_run_cache(&run_b, &fm, cell_w_b, false, &features);
+        assert_eq!(
+            cache.stats().run_hits,
+            1,
+            "run_b must hit run_a's cached wide-glyph template"
+        );
+
+        let expected = shape_single_run(&run_b, &fm, cell_w_b, false, &features);
+        assert_shaped_runs_eq(&actual, &expected, "wide unicode cluster/cell widths");
+
+        // Sanity: this genuinely exercises the wide-glyph path (not a
+        // silent fallback to width 1).
+        assert_eq!(expected.glyphs.len(), 1);
+        assert_eq!(
+            expected.glyphs[0].cell_width, 2,
+            "wide char must occupy 2 cells"
+        );
+    }
+
+    #[test]
+    fn run_cache_quiet_lookups_do_not_evict_prior_generation() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run = make_run("alpha", 0, FaceId::PrimaryRegular);
+
+        // "Call 1": miss-bearing — rotates once, then shapes `run` into the
+        // new current generation.
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+
+        // "Call 2": quiet. A quiet `shape_visible` call never touches
+        // `run_cache` at all (every line hits the line-level cache), so it
+        // is modeled here by doing nothing — no `rotate()`, no lookup.
+
+        // "Call 3": miss-bearing again. Because call 2 never rotated, `run`'s
+        // template must still be reachable: it becomes `previous` when call
+        // 3 rotates `current` (still holding it from call 1).
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_hits, 1,
+            "a generation must survive an intervening quiet call"
+        );
+        assert_eq!(stats.run_misses, 1);
+    }
+
+    #[test]
+    fn run_cache_third_miss_bearing_generation_evicts_the_first() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run = make_run("alpha", 0, FaceId::PrimaryRegular);
+        let other = make_run("beta", 0, FaceId::PrimaryRegular);
+
+        // Generation 1: shape `run`.
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+
+        // Generation 2: shape something else. `run` is not looked up here,
+        // so it survives only as the (now) `previous` generation.
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&other, &fm, 10.0, false, &features);
+
+        // Generation 3: rotates again. Generation 1 (which held `run`) is now
+        // neither `current` nor `previous` — bounded to two generations, it
+        // must be gone.
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_misses, 3,
+            "generation 1's entry for `run` must be evicted by generation 3's rotation"
+        );
+        assert_eq!(stats.run_hits, 0);
+    }
+
+    #[test]
+    fn run_cache_duplicate_runs_in_the_same_call_hit_the_current_generation() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run_row1 = make_run("same text", 0, FaceId::PrimaryRegular);
+        let run_row2 = make_run("same text", 0, FaceId::PrimaryRegular);
+
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run_row1, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run_row2, &fm, 10.0, false, &features);
+
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_hits, 1,
+            "the second identical row must hit the first row's entry, \
+             freshly inserted into the SAME call's current generation"
+        );
+        assert_eq!(stats.run_misses, 1);
+    }
+
+    #[test]
+    fn clear_invalidates_run_cache() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run = make_run("hello", 0, FaceId::PrimaryRegular);
+
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_hits, 1);
+
+        cache.clear();
+
+        // Subtask 124.6: `clear()` must drop both run-cache generations, not
+        // just the line cache — a font rebuild can reuse a `FaceId` for
+        // entirely different font data.
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        assert_eq!(
+            cache.stats().run_misses,
+            2,
+            "clear() must invalidate cached run templates"
+        );
+    }
+
+    #[test]
+    fn reset_stats_preserves_run_cache_entries() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+        let run = make_run("hello", 0, FaceId::PrimaryRegular);
+
+        cache.run_cache.rotate();
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+
+        cache.reset_stats();
+        assert_eq!(cache.stats(), ShapingCacheStats::default());
+
+        // The cached template must still be there — reset_stats zeroes only
+        // the tally, per its own contract (mirroring the line cache).
+        let _ = cache.shape_run_via_run_cache(&run, &fm, 10.0, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_hits, 1,
+            "reset_stats must not clear cached run templates"
+        );
+        assert_eq!(stats.run_misses, 0);
     }
 
     // -- Ligature-breaking conditions (Task 5.6) --
@@ -1579,5 +2491,222 @@ mod tests {
             "emoji: shape_with_plan output must match the old rustybuzz::shape() \
              output exactly"
         );
+    }
+}
+
+/// Subtask 124.16: the shaping cache's hit rate on the four workloads that
+/// decide 124.6.
+///
+/// These are a **measurement**, kept as tests so the numbers cannot rot
+/// silently the way the 2026-07-29 pointer-motion table did. Each asserts
+/// the structural finding rather than a timing, so they are deterministic
+/// and platform-independent.
+///
+/// The headline results are recorded in 124.16's findings block in
+/// `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
+#[cfg(test)]
+mod shaping_cache_hit_rate {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{FormatTag, ShapingCache, ShapingCacheStats};
+    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_common::config::Config;
+
+    use crate::gui::font_manager::FontManager;
+
+    /// A `width` x `height` grid of newline-separated ASCII, generated from
+    /// cell coordinates so every row is distinct and the content is
+    /// reproducible (the same property `SyntheticFrame` relies on in the
+    /// Task 123 harness — no randomness, so a hit count is exact).
+    /// No trailing newline: `split_into_lines` would read one as a final
+    /// empty line, giving `height + 1` lines and quietly shifting every hit
+    /// count in this module by one.
+    fn grid_chars(width: usize, height: usize) -> Vec<TChar> {
+        let mut out = Vec::with_capacity((width + 1) * height);
+        for row in 0..height {
+            if row > 0 {
+                out.push(TChar::NewLine);
+            }
+            for col in 0..width {
+                let b = b'a' + u8::try_from((row * 7 + col * 3) % 26).unwrap_or(0);
+                out.push(TChar::Ascii(b));
+            }
+        }
+        out
+    }
+
+    /// Drive one frame through a cache and return that frame's tally alone.
+    fn frame(
+        cache: &mut ShapingCache,
+        fm: &mut FontManager,
+        chars: &[TChar],
+        width: usize,
+    ) -> ShapingCacheStats {
+        let tags = vec![FormatTag {
+            start: 0,
+            end: chars.len(),
+            ..FormatTag::default()
+        }];
+        cache.reset_stats();
+        #[allow(clippy::cast_precision_loss)]
+        let cell_w = fm.cell_width() as f32;
+        let _ = cache.shape_visible(chars, &tags, width, fm, cell_w, false, &[]);
+        cache.stats()
+    }
+
+    fn fixture() -> (FontManager, ShapingCache) {
+        (
+            FontManager::new(&Config::default(), 1.0).unwrap(),
+            ShapingCache::new(),
+        )
+    }
+
+    /// A full-screen redraw of **identical** content costs nothing.
+    ///
+    /// This is the workload the whole of Task 124 exists for: a TUI that
+    /// rewrites unchanged bytes every tick. The shaping stage already
+    /// handles it correctly, which is a genuine finding — it means shaping
+    /// is *not* where that workload's cost lives.
+    #[test]
+    fn identical_full_screen_redraw_is_a_total_hit() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 24);
+
+        let cold = frame(&mut cache, &mut fm, &chars, 80);
+        assert_eq!(cold.hits, 0, "the first frame cannot hit");
+        assert_eq!(cold.misses, 24);
+
+        let warm = frame(&mut cache, &mut fm, &chars, 80);
+        assert_eq!(warm.misses, 0, "an identical redraw must re-shape nothing");
+        assert_eq!(warm.hit_rate(), Some(1.0));
+
+        // Subtask 124.6: a 100%-line-hit call never touches the run cache at
+        // all (a line hit reuses the whole `Arc<ShapedLine>`, runs included).
+        // This is the fact that keeps 124.6 from being justified on this
+        // workload — the run cache has nothing to contribute here because
+        // the line cache already handles it perfectly.
+        assert_eq!(warm.run_hits, 0);
+        assert_eq!(warm.run_misses, 0);
+        assert_eq!(warm.run_hit_rate(), None);
+    }
+
+    /// A single-character edit re-shapes exactly one row.
+    ///
+    /// Note what this does *not* say. The row is the granule: one changed
+    /// character re-shapes every run on its line, which is 124.6's second
+    /// lever. But it does not spill into neighbouring rows.
+    #[test]
+    fn a_single_character_edit_reshapes_exactly_one_row() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 24);
+        let _ = frame(&mut cache, &mut fm, &chars, 80);
+
+        let mut edited = chars.clone();
+        let target = edited
+            .iter()
+            .position(|c| matches!(c, TChar::Ascii(_)))
+            .expect("an ascii cell");
+        edited[target] = TChar::Ascii(b'#');
+
+        let after = frame(&mut cache, &mut fm, &edited, 80);
+        assert_eq!(after.misses, 1, "exactly the edited row re-shapes");
+        assert_eq!(after.hits, 23);
+    }
+
+    /// **A scroll by one line still misses the LINE cache completely, but
+    /// subtask 124.6's run cache now reuses all 23 unchanged rows.**
+    ///
+    /// This is the inverted form of the original
+    /// `a_scroll_by_one_line_hits_nothing`, which pinned the pre-124.6
+    /// defect as a regression guard (per the idiom Task 123 used for 124.9
+    /// and 124.1). `ShapingCache`'s LINE cache is still keyed by line index —
+    /// unchanged by this subtask — so scrolling by one row still shifts
+    /// every line's content into a different slot and every line still
+    /// misses at that layer (asserted below, exactly as before). But this
+    /// grid fixture's uniform single-tag format puts every row in exactly
+    /// one run, so at the RUN layer the 23 rows that are byte-identical to a
+    /// row shaped a moment ago (just at a different line index and thus a
+    /// different `RunCacheKey`-irrelevant position) now hit the
+    /// content-addressed run cache instead of paying a fresh `rustybuzz`
+    /// call. Only the one genuinely new bottom row misses.
+    #[test]
+    fn a_scroll_by_one_line_reuses_unchanged_runs() {
+        let (mut fm, mut cache) = fixture();
+        let chars = grid_chars(80, 25);
+
+        // Frame 1: rows 0..24 of the content.
+        let top = grid_chars_window(&chars, 0, 24);
+        let _ = frame(&mut cache, &mut fm, &top, 80);
+
+        // Frame 2: rows 1..25 — a one-line scroll. 23 of these 24 lines were
+        // shaped a moment ago, at a different index.
+        let scrolled = grid_chars_window(&chars, 1, 24);
+        let after = frame(&mut cache, &mut fm, &scrolled, 80);
+
+        assert_eq!(
+            after.hits, 0,
+            "the LINE cache is still keyed by index, so it still misses every line"
+        );
+        assert_eq!(after.misses, 24);
+        assert_eq!(after.hit_rate(), Some(0.0));
+
+        assert_eq!(
+            after.run_hits, 23,
+            "the RUN cache is content-addressed, so the 23 rows byte-identical \
+             to a row shaped a moment ago (at a different line index) must hit"
+        );
+        assert_eq!(
+            after.run_misses, 1,
+            "only the genuinely new bottom row should miss the run cache"
+        );
+        assert_eq!(after.run_hit_rate(), Some(23.0 / 24.0));
+    }
+
+    /// Steady typing: one row changes per frame, the rest hit.
+    #[test]
+    fn steady_typing_hits_every_row_but_the_one_being_typed_on() {
+        let (mut fm, mut cache) = fixture();
+        let mut chars = grid_chars(80, 24);
+        let _ = frame(&mut cache, &mut fm, &chars, 80);
+
+        // Type five characters into the last row, one per frame.
+        let last_row_start = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, TChar::NewLine))
+            .map(|(i, _)| i)
+            .nth(22)
+            .expect("row boundary")
+            + 1;
+
+        let mut totals = ShapingCacheStats::default();
+        for k in 0..5 {
+            chars[last_row_start + k] = TChar::Ascii(b'z');
+            let s = frame(&mut cache, &mut fm, &chars, 80);
+            totals.hits += s.hits;
+            totals.misses += s.misses;
+        }
+
+        assert_eq!(totals.misses, 5, "one row re-shapes per keystroke");
+        assert_eq!(totals.hits, 5 * 23);
+    }
+
+    /// Take `count` lines starting at line `from` out of a newline-separated
+    /// char grid, as its own newline-separated grid.
+    fn grid_chars_window(chars: &[TChar], from: usize, count: usize) -> Vec<TChar> {
+        let mut out = Vec::new();
+        for (i, line) in chars
+            .split(|c| matches!(c, TChar::NewLine))
+            .skip(from)
+            .take(count)
+            .enumerate()
+        {
+            // No trailing newline, for the same reason `grid_chars` omits it.
+            if i > 0 {
+                out.push(TChar::NewLine);
+            }
+            out.extend_from_slice(line);
+        }
+        out
     }
 }

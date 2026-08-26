@@ -786,10 +786,22 @@ further Phase 2 work.
    `${pkgs.mesa}/share/glvnd/egl_vendor.d/50_mesa.json`) were verified to
    exist in the `mesa` derivation before being written.
 
-`glPixelEnv` is merged into the **`default`** shell only, never `ci` —
-forcing software GL in the CI shell would silently slow every unrelated
-check. 123.13's job must therefore use the `default` shell (or a dedicated
-one), not `ci`.
+`glPixelEnv` is merged into the **`gl-pixel`** shell only, never `ci` and
+never `default`.
+
+**This was originally applied to `default`, and that was a defect —
+corrected 2026-08-23 (123.C2).** Forcing software GL in the CI shell would
+silently slow every unrelated check, which 123.10 did anticipate; what it did
+not anticipate is that the same variables are inherited by every process
+launched from an *interactive* shell, including a developer's own
+`freminal`. From `2d917ffc` until the fix, anyone using `nix develop` or
+direnv on this repo ran the terminal on the CPU rasteriser. Measured on one
+binary with only `LIBGL_ALWAYS_SOFTWARE` changed: **idle 0.10% -> 11.3% of a
+core**, with mouse-motion cost going from unmeasurable to plainly visible.
+See 123.C2 for the full account.
+
+123.13's job therefore uses `gl-pixel`, and `default` is **not** an
+acceptable substitute for it.
 
 Verified without building: `nix eval .#devShells.x86_64-linux.default.drvPath`
 succeeds, and `nixfmt` / `statix check` / `deadnix --fail` are all clean.
@@ -1324,6 +1336,10 @@ guess.
   describes a `force_full` term (`pointer_moving`) removed by #459 item 9.
   It states precisely the hypothesis Obligation 2 was testing, so a reader
   checking the docs would get a false confirmation.
+- **Cleanup 123.C2 (added 2026-08-23, already fixed).** 123.10 put
+  `glPixelEnv` in the `default` dev shell, so every interactively-run
+  freminal inherited `LIBGL_ALWAYS_SOFTWARE=1` and rendered on llvmpipe —
+  roughly 100x idle CPU. Found by maintainer bisect, not by any test.
 
 ### What this means for Task 124
 
@@ -1340,6 +1356,9 @@ guess.
 - **124.4** — unchanged; confirmed to have no expected performance effect.
 - **124.9** — new, measured, one-line fix, not gated on further work.
 - **123.C1** — new, documentation only.
+- **123.C2** — new, `flake.nix`; found and fixed 2026-08-23. Invalidates any
+  CPU measurement taken inside `nix develop` before that date, **including
+  124.17's**, which must be re-taken on the GPU.
 - **Open question for the maintainer** — whether to extend the `Gl` facade
   across the `freminal-windowing` boundary so the two per-full-frame
   `clear`/`clear_color` calls are recorded too. Not a Task 124 subtask
@@ -1480,6 +1499,73 @@ real behaviour.
 Not fixed in Task 123 because Task 123 changes no behaviour and touches no
 file it is not measuring; this is a one-line docs correction better carried
 with Task 124's `frame_damage.rs` work (124.2/124.4 both touch this area).
+
+### 123.C2 — `glPixelEnv` in the `default` shell forced every interactive freminal onto llvmpipe
+
+Surfaced 2026-08-23 by a maintainer bisect, during Task 124's investigation
+of a reported idle/mouse CPU regression. **Fixed in the same session** —
+recorded here because the failure mode is instructive and the fix must not
+be reverted.
+
+123.10 (`2d917ffc`) added `glPixelEnv` to the **`default`** dev shell:
+
+```nix
+LIBGL_ALWAYS_SOFTWARE = "1";
+LIBGL_DRIVERS_PATH = "${pkgs.mesa}/lib/dri";
+__EGL_VENDOR_LIBRARY_FILENAMES = ".../50_mesa.json";
+```
+
+Its commit message reasons explicitly about not leaking these into the `ci`
+shell. The same argument applies to interactive use of `default` and was
+missed: **these variables are inherited by every process launched from the
+shell**, so from that commit onward, anyone running `freminal` from
+`nix develop` or direnv rendered on Mesa's llvmpipe CPU rasteriser rather
+than the GPU.
+
+Measured on a single unchanged release binary, toggling only
+`LIBGL_ALWAYS_SOFTWARE`, static content, geometry and pointer path held
+fixed:
+
+| Environment | Idle (% of one core) | Pointer-motion CPU (s) |
+| ----------- | -------------------- | ---------------------- |
+| GPU (unset) | 0.10, 0.10 | 0.000, 0.000 |
+| `LIBGL_ALWAYS_SOFTWARE=1` | 11.30, 12.10 | 0.570, 0.840 |
+
+Roughly **100x idle CPU**, with 32 `llvmpipe-*` threads accounting for
+essentially all of it. The maintainer's report — idle 0.0% -> 0.4%, mouse
+motion 0.1% -> 2%+ — is the same effect at their window size.
+
+**Why it was expensive to find, recorded as the lesson.** The binary was
+innocent, so bisecting *product* commits could not converge; and any
+endpoint-vs-endpoint comparison run inside the dev shell compares two builds
+that are *both* on llvmpipe, where the ~12% floor swamps the signal under
+test. An investigating agent independently hit the same trap and burned a
+session's measurements on it before noticing the variable. **Any CPU
+measurement of freminal taken inside `nix develop` is invalid unless
+`LIBGL_ALWAYS_SOFTWARE` is unset.**
+
+Fix (2026-08-23): `glPixelEnv` moved to the `gl-pixel` shell **only**.
+`default` keeps `glPixelTools` (Mesa/Xvfb binaries on PATH, which are inert
+on their own) but sets none of the three variables; `ci` remains untouched.
+Verified via `nix derivation show` on all three shells:
+
+| Shell | `LIBGL_ALWAYS_SOFTWARE` |
+| ----- | ----------------------- |
+| `default` | unset |
+| `ci` | unset |
+| `gl-pixel` | `1` |
+
+`.github/workflows/gl-pixel.yml` already targeted `.#gl-pixel` and needed no
+functional change; a comment in it claiming `.#default` "would work too" was
+corrected, since that is now false and would reintroduce the bug.
+
+**Consequence for Task 124, and it is not bookkeeping.** 124.17's findings
+were taken from an interactive session that, if it ran inside `default`
+after `2d917ffc`, measured **llvmpipe's** EGL rather than the GPU's — and
+124.17's central results are `supports_partial_present()` and
+`buffer_age()`, exactly the properties that plausibly differ between a
+software surface and a real one. 124.14 and 124.2 are blocked on that
+measurement. It must be re-taken on the GPU before either unblocks.
 
 ---
 

@@ -23,7 +23,7 @@ use egui;
 use freminal_common::buffer_states::{command_block::CommandBlockId, tchar::TChar};
 use freminal_terminal_emulator::{AnimationRunMode, InlineImage};
 
-use super::mouse::PreviousMouseState;
+use super::mouse::ImmediateMouseReportState;
 
 /// Default gap between animation frames, in milliseconds, used when a
 /// frame's declared gap is `0` ("use the protocol default"). Matches
@@ -338,7 +338,7 @@ impl SearchState {
     ///
     /// Deliberately does **not** hash the `matches` themselves: matches are a
     /// pure function of (query, flags, corpus), corpus changes are already
-    /// covered by the snapshot's `content_changed`, and a broad search can
+    /// covered by the snapshot's `row_epochs`, and a broad search can
     /// produce tens of thousands of spans that would then be re-hashed on
     /// every single frame.
     #[must_use]
@@ -497,10 +497,27 @@ pub struct ViewState {
     /// frames so sub-line scroll events are not lost.
     pub previous_scroll_amount: f32,
 
-    /// The mouse button / position / modifier state from the previous frame,
-    /// used to detect button-state transitions and avoid sending redundant
-    /// mouse reports to the PTY.
-    pub previous_mouse_state: Option<PreviousMouseState>,
+    /// GUI-owned, per-pane state for the out-of-frame immediate PTY
+    /// motion-report path (Task 124.3a). Read and written by
+    /// `FreminalGui::on_pointer_moved` (`terminal::pty_mouse_report`),
+    /// which runs outside any frame. Carries only the last-reported
+    /// POSITION — the held pointer BUTTON is window-owned instead
+    /// (`PerWindowState::held_pointer_button`, orchestrator review
+    /// correction #1), since a button press and its matching release are
+    /// events on the same OS pointer device independent of which pane is
+    /// active at either moment; see that field's doc for the bug this
+    /// avoids.
+    ///
+    /// Replaces this field's former `Option<PreviousMouseState>` shape
+    /// (unused before Task 124.3a): `PreviousMouseState`'s
+    /// `FreminalMousePosition` alone is the frame-local carry
+    /// `write_input_to_terminal` threads through `InputCarryState`, a
+    /// distinct control path from this out-of-frame one — see
+    /// [`ImmediateMouseReportState`]'s own doc for why it is a separate
+    /// type rather than a reuse. Distinct from
+    /// `PaneRenderCache::previous_mouse_state`, which is frame-scoped
+    /// render-cache state and must not gain out-of-frame readers.
+    pub immediate_mouse_report: ImmediateMouseReportState,
 
     /// Current text selection state (anchor, end, `is_selecting`).
     ///
@@ -704,7 +721,7 @@ impl Default for ViewState {
             last_sent_size: (0, 0),
             previous_key: None,
             previous_scroll_amount: 0.0,
-            previous_mouse_state: None,
+            immediate_mouse_report: ImmediateMouseReportState::default(),
             selection: SelectionState::default(),
             pending_paste: None,
             folded_blocks: HashSet::new(),

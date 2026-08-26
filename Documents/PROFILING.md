@@ -99,7 +99,7 @@ The phase nesting is `run_frame` wraps `run_ui` wraps `App::update` wraps
 | `frame_damage_full` / `frame_damage_partial` | final, post-composition damage |
 | `zero_change_presented` | frames presented with no pixel change |
 | `chrome_signals_fired` | which chrome-damage signals fired |
-| `pointer_repaint_conditions_fired` | **which suppression veto fired** — `mouse_tracking_active`, `has_urls`, `scroll_offset_nonzero`, `gutter_active`, etc. |
+| `pointer_repaint_conditions_fired` | **which condition FORCED a repaint** (Task 124.3b, ten counters: `first_motion`, `focus_change_pending`, `chrome_interactive`, `overlay_open`, `pointer_pane_unresolved`, `unknown_geometry`, `url_forced`, `gutter_forced`, `scrollbar_forced`, `selection_forced` — each counted only when it actually forced, not merely when the underlying observation was true) |
 
 That last row is usually the one you want when asking "why isn't pointer
 suppression engaging?"
@@ -208,6 +208,52 @@ There is no `cargo xtask` profiling subcommand.
 
 ## Reporting discipline
 
+**Check the rasteriser before you record a single number.** The `gl-pixel`
+dev shell deliberately sets `LIBGL_ALWAYS_SOFTWARE=1` (plus
+`LIBGL_DRIVERS_PATH` and `__EGL_VENDOR_LIBRARY_FILENAMES`) so the Phase 2
+pixel harness runs deterministically on Mesa's llvmpipe. Those variables are
+inherited by **every process launched from that shell**, freminal included,
+and they move idle CPU by roughly **100x** — measured at 0.10% of a core on
+the GPU against 11.3% on llvmpipe, same binary, same content. A run on
+llvmpipe is not a slower version of the real thing; it is a different
+program's cost profile, dominated by 32 `llvmpipe-*` rasteriser threads that
+have nothing to do with the code under test.
+
+Before measuring:
+
+```bash
+echo "${LIBGL_ALWAYS_SOFTWARE:-<unset>}"   # must print <unset>
+```
+
+If it prints `1`, you are in `gl-pixel` (or a stale shell predating the
+123.C2 fix). Re-enter `nix develop` / `direnv reload`, or launch with
+`env -u LIBGL_ALWAYS_SOFTWARE`.
+
+That environment-variable check is only a quick guard, not confirmation --
+it says what freminal *asked for*, not what it *got*. The actual
+confirmation is the startup log line every `freminal` process emits once
+its GL context is current (`freminal-windowing`'s `GlState::new`):
+
+```text
+Active OpenGL renderer: <string>
+```
+
+Inspect that exact line (`RUST_LOG` at `info` or above reaches it, and it
+also lands in the rolling log file described under Tier 1 above). Reject
+the run as software-rendered if `<string>` contains `llvmpipe`, `softpipe`,
+or `swrast` -- Mesa's three CPU rasterisers -- and re-check the environment
+above. Do not infer the rasteriser from `/proc` thread names; the log line
+is the authoritative source and needs no additional tooling beyond what is
+already in the dev shells.
+
+This is not a hypothetical footgun. It shipped in the `default` shell from
+`2d917ffc` until 2026-08-23, was reported as a product CPU regression, and
+cost a full bisect plus a session of invalidated agent measurements before
+anyone looked at the environment. Worse, it is invisible to A/B comparison:
+both endpoints are equally affected, so the ~12% floor simply swamps
+whatever is under test. See 123.C2 in
+`PLAN_123_GL_MEASUREMENT_HARNESS.md`.
+
 **Always report frame rate and per-frame cost as a pair, never a single CPU
 number.** Total CPU is the product of the two, so a single figure cannot
 distinguish "we draw fewer frames" from "each frame is cheaper" — and work on
@@ -244,10 +290,20 @@ not re-derive those numbers and do not restate them more strongly than §2A does
   (new fast path versus the existing path, asserted equal) over appearance
   checks wherever that is possible.
 - **Typing.** Still unmeasured (subtask 121.25).
-- **Sustained-motion cost under btop.** The veto mechanism is confirmed
-  (`mouse_tracking_active` fired on 216 of 217 checks) but that capture averaged
-  ~8 pointer events/s, so it is not a sustained-motion measurement.
+- **Sustained-motion cost under btop.** A pre-124.3b capture found the
+  then-current pane-wide `mouse_tracking_active` veto firing on 216 of 217
+  checks, but that capture averaged ~8 pointer events/s, so it was not a
+  sustained-motion measurement even before the term it named was removed.
+  `mouse_tracking_active` is no longer a repaint-forcing term at all (Task
+  124.3b: PTY mouse-tracking report delivery is independent of repaint
+  scheduling, see 124.3a) — a fresh capture citing it would be measuring
+  something that no longer exists.
 
-The vetoed pointer-motion path — `has_urls`, `scroll_offset > 0`,
-`mouse_tracking_active`, the gutter strip — **is** now measured; see subtask 121.17
-in `PLAN_121_PERF_REMEDIATION.md` for the numbers and the method.
+The pre-124.3b pane-wide pointer-motion vetoes (`has_urls`, a nonzero
+scroll offset, `mouse_tracking_active`, the gutter strip) were measured in
+subtask 121.17/124.13 (`PLAN_121_PERF_REMEDIATION.md` and
+`PLAN_124_RENDER_EFFICIENCY.md`). Task 124.3b replaced the `has_urls` and
+scroll-offset vetoes with the cell-granular positional terms named in the
+table row above; a fresh capture pairing `pointer_repaint_conditions_fired`
+with the observed event rate is the correct way to characterize the
+post-124.3b suppression rate, not a reuse of the pre-124.3b numbers.

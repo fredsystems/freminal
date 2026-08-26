@@ -61,8 +61,10 @@ See `PLAN_VERSION_100.md`.
 support and no new user-facing features: the scrollback-memory effort (Tasks 118–120), the CPU
 performance remediation umbrella (Task 121, now closed), the orchestration extraction
 (Task 122), which is a no-behaviour-change refactor rather than a fix or an optimisation, and
-its two successors — the GL measurement harness (Task 123) and render efficiency remediation
-(Task 124). Tasks 102 (Kitty File Transfer) and 103 (Multiple Cursors) were planned for
+its two successors — the GL measurement harness (Task 123) and damage model remediation
+(Task 124). **Task 125 (Fixed-Stride Vertex Relayout) is deliberately not in this version**:
+it is gated on Task 124's measurements and its roadmap position is an open maintainer
+decision. Tasks 102 (Kitty File Transfer) and 103 (Multiple Cursors) were planned for
 v0.12.0 and **moved to v0.13.0** when it was redefined; their plan content moved unchanged.
 See `PLAN_VERSION_120.md`.
 
@@ -210,8 +212,9 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 120 | Compression-Aware Windowed Reflow         | `PLAN_VERSION_120.md` (Task 120)              | Stub      | Tasks 118, 119         |
 | 121 | Performance Remediation                   | `PLAN_121_PERF_REMEDIATION.md` (Task 121)     | Complete  | None                   |
 | 122 | Orchestration Extraction                  | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete  | None                   |
-| 123 | GL Pipeline Measurement Harness           | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Pending merge | Task 122           |
-| 124 | Render Efficiency Remediation             | `PLAN_124_RENDER_EFFICIENCY.md`               | Stub      | Task 123               |
+| 123 | GL Pipeline Measurement Harness           | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete  | Task 122               |
+| 124 | Damage Model Remediation                  | `PLAN_124_RENDER_EFFICIENCY.md`               | In progress | Task 123             |
+| 125 | Fixed-Stride Vertex Relayout              | `PLAN_125_VERTEX_RELAYOUT.md`                 | Stub      | Task 124               |
 
 ---
 
@@ -541,17 +544,43 @@ that fabricates GL handles. It needs no GPU, no display server and no `flake.nix
 runs in the existing `cargo test` matrix on all four CI platforms. (Wrapping `glow::HasContext`
 directly is impossible: the trait is sealed. The facade exists because of that, not in spite of
 it.) Phase 2 is the pixel/readback harness that issue #440 and 121.28 have wanted since #436 —
-Linux-only, requiring `pkgs.mesa`, `mesa.llvmpipeHook` and `pkgs.xorg.xvfb` in `flake.nix` plus
+Linux-only, requiring `pkgs.mesa`, `pkgs.xvfb` and an explicit llvmpipe env in `flake.nix` plus
 a new Nix-based CI job, because the existing test matrix runs on `dtolnay/rust-toolchain` and
-inherits nothing from the flake. **Task 124 does the fixing**, and no subtask in it may be
-implemented before 123 has quantified what it claims to fix — the direct lesson of Task 121's
-Group D, where four of six candidate items were refuted by measurement. The one exception is
-124.4 (replacing six positional bools in the pointer-motion predicate with a named-field
-struct), which is a `state-representation` fix with no expected performance effect. 124's
-leading hypothesis is 124.1: dirty-row `Arc` churn makes `frame_dirty.rs`'s `Arc::ptr_eq` test
-report `content_changed` on byte-identical content, forcing a full rebuild and full present on
-every tick of any workload that touches rows — which is workload-correlated, **not**
-alt-screen-specific, a distinction recon established on 2026-08-20.
+inherits nothing from the flake. That env lives in the dedicated `gl-pixel` dev shell **only** —
+it was briefly in `default`, where it forced every interactively-run freminal onto the CPU
+rasteriser at ~100x idle CPU (see 123.C2). **Task 124 does the fixing.** 123 merged on 2026-08-23 and
+its Findings section (123.14) discharged both diagnostic obligations: 124.1's premise was
+**CONFIRMED** (a byte-identical re-flatten in a fresh `Arc` does force a full rebuild), and
+124.2's was **PARTIALLY REFUTED** — its symptom is real but `pointer_forces_full_present` is
+innocent; the cause is the `Unchanged` -> `Full` fallback in `decide_frame_damage`. 123 also
+corrected the cost model: the waste is overwhelmingly **bandwidth**, roughly 350x the bytes
+for roughly 1.08x the calls, so 124 must be justified and measured on bytes.
+
+**Task 124 was activated on 2026-08-23 and re-scoped in the process**, from "Render
+Efficiency Remediation" (nine loosely-related fixes) to **"Damage Model Remediation"**.
+Activation recon found that 124.1, 124.2 and 124.3 are three symptoms of one missing type:
+freminal cannot express "these specific rows changed" or "nothing changed". The dirty signal
+is collapsed to a bool four separate times between `freminal-buffer` and the GPU, and the
+emulator's own accurate byte-level diff is discarded by the GUI in favour of a coarser
+`Arc::ptr_eq` because a sticky bool cannot survive the many-snapshots-per-frame publish
+relationship. 124's spine is therefore a **per-row content epoch** (124.10–124.12) — bumped
+when a row's rendered content actually changes, not merely when it is written to — consumed
+by two new damage states, `PaneFrameDamage::Region` (124.14) and `FrameDamage::None` (124.2).
+The maintainer's governing instruction at activation: do the structural fix, not a band-aid
+that improves the number while leaving the shape wrong.
+
+**Task 125 (unassigned version, gated on Task 124):** the bandwidth half. Task 124 stops
+doing work that produces no pixels; Task 125 makes the work that does produce pixels cheaper.
+Per-row dirty information cannot become a per-row GPU upload today because none of the three
+instance buffers has a fixed stride per row — `bg_instances` skips `DefaultBackground` cells,
+`fg_instances` varies with ligatures and blink, and `deco_verts` interleaves per-row
+decorations with multi-row spans — so one changed row is an insert-and-shift, not an
+overwrite. Fixing that needs a fixed-stride vertex relayout, which is a genuine format change
+and is deliberately **not** in v0.12.0. Its hard constraint is that `DefaultBackground` means
+"leave these pixels untouched" (Task 34), so padded slots must emit no fragments; a
+call-count test cannot catch a violation, only the Phase 2 pixel harness can. **Closing
+Task 125 unexecuted is a legitimate outcome** if Task 124's residual does not justify the
+risk.
 
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
 blocks, fractional scaling, custom width algorithm). It shares no seams with Tasks 102 and
@@ -766,7 +795,8 @@ Update this section as tasks complete:
 | 121  | 2026-07-27 | 2026-08-20 | Closed as umbrella; survivors migrated to Tasks 123/124. See its migration map   |
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged       |
-| 124  |            |            | Stub. Gated on 123's findings; 124.4 (bool-to-struct) is not gated               |
+| 124  | 2026-08-23 |            | Activated and re-scoped as a damage-model task; renamed. Spine is 124.10-124.12 |
+| 125  |            |            | Enriched stub, version unassigned. Gated on Task 124's measurements             |
 
 ---
 
@@ -782,11 +812,12 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122 complete, 123 planned, 124 a gated stub)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122 complete, 123 complete, 124 in progress)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
-- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Render Efficiency Remediation" (124.1–124.8; specified but gated on Task 123)
+- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
+- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Fixed-Stride Vertex Relayout" (enriched stub; version unassigned, gated on Task 124)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)

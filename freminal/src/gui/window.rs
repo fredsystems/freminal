@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use egui;
-use freminal_windowing::{RepaintProxy, WindowId};
+use freminal_windowing::{PointerButtonAction, RepaintProxy, WindowId};
 
 use super::{
     PaneBorderDrag,
@@ -151,6 +151,90 @@ pub(super) const fn resize_is_genuine(size_changed: bool, window_resized: bool) 
     size_changed && window_resized
 }
 
+/// Convert a `freminal_windowing::PointerButton` (all five standard
+/// pointer buttons) to the `egui::PointerButton` the mouse encoders in
+/// `gui::mouse` — and [`PerWindowState::held_pointer_button`] — use.
+///
+/// Total (not `Option`-returning): every `freminal_windowing::PointerButton`
+/// variant has a mapping here, unlike the winit-to-windowing conversion
+/// (`freminal_windowing::PointerButton::from_winit`), which is the one that
+/// ignores `Other(_)`. `Back`/`Forward` map to `Extra1`/`Extra2` — this is
+/// NOT a claim that either has a native/established PTY mouse-report code;
+/// `gui::mouse`'s encoders treat any `egui::PointerButton` other than
+/// `Primary`/`Secondary`/`Middle` as an unsupported-button fallback
+/// (currently: encode as if `Primary`, with a logged error). Mapping them
+/// here — rather than dropping them at this boundary — only PRESERVES that
+/// existing fallback behavior for a physically-held Back/Forward button
+/// under `?1002`, matching what the pre-124.3a frame-time path already did
+/// with winit's `Back`/`Forward` (via egui's own identical `Extra1`/`Extra2`
+/// mapping).
+pub(super) const fn egui_button_from_windowing(
+    button: freminal_windowing::PointerButton,
+) -> egui::PointerButton {
+    match button {
+        freminal_windowing::PointerButton::Left => egui::PointerButton::Primary,
+        freminal_windowing::PointerButton::Right => egui::PointerButton::Secondary,
+        freminal_windowing::PointerButton::Middle => egui::PointerButton::Middle,
+        freminal_windowing::PointerButton::Back => egui::PointerButton::Extra1,
+        freminal_windowing::PointerButton::Forward => egui::PointerButton::Extra2,
+    }
+}
+
+/// Task 124.3a (corrected by orchestrator review): the decision behind
+/// [`PerWindowState::held_pointer_button`]'s update on every observed
+/// `App::on_pointer_button` event.
+///
+/// Two corrections over the original "just overwrite on press, clear on
+/// release" shape:
+///
+/// - **The Shift+secondary-button context-menu escape hatch is
+///   preserved.** `write_input_to_terminal`'s frame-time `shift_right_click`
+///   term already treats a Shift-held secondary-button press as "open the
+///   context menu, do not forward to the PTY" rather than an ordinary
+///   button press. A press matching that same shape must not arm the
+///   held-button state either — the frame that eventually runs and
+///   publishes `PanePointerReportInputs::context_menu = true` has not run
+///   yet at the instant this hook fires, so an unguarded arm would let a
+///   `CursorMoved` land in that gap and emit a genuine `?1002` PTY motion
+///   report for a press the user meant only to open a menu.
+/// - **A release can only clear the button it actually matches.** Because
+///   the escape hatch above declines to arm on a Shift+secondary press,
+///   `current` may legitimately be a DIFFERENT button (or `None`) when
+///   that press's matching release arrives — releasing a button that was
+///   never armed must not blank out an unrelated button that IS
+///   genuinely held (e.g. the user is chording left+shift-right).
+///
+/// Pure, so directly unit-testable without any GUI/window construction.
+/// `button` is the raw `freminal_windowing::PointerButton` from the
+/// observed event; this converts it via
+/// [`egui_button_from_windowing`] before deciding.
+pub(super) fn next_held_pointer_button(
+    current: Option<egui::PointerButton>,
+    button: freminal_windowing::PointerButton,
+    action: PointerButtonAction,
+    modifiers: egui::Modifiers,
+) -> Option<egui::PointerButton> {
+    let button = egui_button_from_windowing(button);
+    match action {
+        PointerButtonAction::Pressed => {
+            let is_shift_secondary_escape_hatch =
+                matches!(button, egui::PointerButton::Secondary) && modifiers.shift;
+            if is_shift_secondary_escape_hatch {
+                current
+            } else {
+                Some(button)
+            }
+        }
+        PointerButtonAction::Released => {
+            if matches!(current, Some(held) if held == button) {
+                None
+            } else {
+                current
+            }
+        }
+    }
+}
+
 /// Per-window state for a single OS window.
 ///
 /// Each window (whether it was the first or spawned later via `Ctrl+Shift+N`)
@@ -200,15 +284,44 @@ pub(super) struct PerWindowState {
     /// Active pane border drag state (mouse drag-to-resize).
     pub(super) border_drag: Option<PaneBorderDrag>,
 
+    /// The physical pointer button currently held, observed synchronously
+    /// via `App::on_pointer_button` (Task 124.3a). `None` when no button
+    /// is held. Feeds `?1002`/`?1003` mouse-tracking motion reports
+    /// (`terminal::pty_mouse_report::maybe_send_immediate_motion_report`);
+    /// button press/release PTY report emission itself stays in the
+    /// frame-time `Event::PointerButton` path, unaffected by this field.
+    ///
+    /// Window-owned, NOT pane-owned. A press and its matching release are
+    /// two physically-linked events on the SAME OS pointer device,
+    /// independent of which pane is active when either happens. The
+    /// original Task 124.3a design stored this per-pane, on
+    /// `ViewState::immediate_mouse_report` — that could leave a pane
+    /// "permanently held" whenever a press on pane A was followed by a
+    /// click, focus change, or tab switch to pane B before the matching
+    /// release arrived, because the release then updated pane B's state
+    /// instead of pane A's. Window ownership makes that sequence
+    /// impossible: there is exactly one held-button slot per window,
+    /// updated by [`next_held_pointer_button`] regardless of which pane is
+    /// active at either the press or the release. Per-pane state
+    /// (`ViewState::immediate_mouse_report`) still owns the LAST-REPORTED
+    /// POSITION, since each pane's PTY stream needs its own independent
+    /// report history — only the physical held-button identity moved here.
+    pub(super) held_pointer_button: Option<egui::PointerButton>,
+
     /// Group A (#122.4): cached rects, staged chrome signals, and the
     /// resize-overlay HUD — everything written once per completing
     /// `App::update` and read only from `is_chrome_interactive_at` /
     /// `pointer_motion_needs_repaint`, outside any frame. See
     /// [`PublishedFrameState`] for the full publish/read discipline this
-    /// replaces (formerly seven separate fields:
-    /// `cached_central_rect`, `cached_gutter_inset_logical`,
-    /// `chrome_head_rects`, `chrome_border_rects`, `chrome_toast_rects`,
-    /// `pending_chrome_signals`, `resize_overlay`).
+    /// replaces (formerly seven separate fields: `cached_central_rect`,
+    /// `cached_gutter_inset_logical`, `chrome_head_rects`,
+    /// `chrome_border_rects`, `chrome_toast_rects`,
+    /// `pending_chrome_signals`, `resize_overlay`). `cached_gutter_inset_logical`
+    /// was itself deleted outright by Task 124.3b's review pass — gutter
+    /// hit-testing now classifies against the exact per-pane `terminal_rect`
+    /// (`PublishedFrameState::pane_pointer_report_inputs`,
+    /// `pointer_motion::classify_pointer_position`) rather than an
+    /// upper-bound inset approximation, so no replacement field exists.
     pub(super) published: PublishedFrameState,
 
     /// Last modified time of the shader file, used for hot-reload detection.
@@ -355,15 +468,25 @@ pub(super) struct PerWindowState {
     /// Frame-damage report for the most recent `update()` of this window
     /// (#435), drained by `App::take_frame_damage`.
     ///
-    /// Set at the end of each `update()`: [`FrameDamage::Partial`] with the
-    /// cursor damage rect(s) when the frame was a pure cursor-only update
-    /// (every rendered pane took the cursor-only fast path and nothing else in
-    /// the window changed), otherwise [`FrameDamage::Full`]. Defaults to
-    /// `Full` so a window that has not yet rendered, or any frame the
-    /// aggregation does not positively prove cursor-only, presents fully.
+    /// Set at the end of each `update()` to one of three variants (see
+    /// [`FrameDamage`]'s own doc for the full contract):
+    /// [`FrameDamage::Full`] -- the conservative default, and what every
+    /// window starts at before its first render -- clears, redraws, and
+    /// presents the whole surface; [`FrameDamage::Partial`] with one or
+    /// more bounded damage rects (cursor-only fast-path frames, and Task
+    /// 124.14's bounded pane rebuilds) when every rendered pane's damage
+    /// is positively proven to fit inside those rects and nothing else in
+    /// the window changed; and [`FrameDamage::None`] (Task 124.2) when
+    /// every rendered pane proved it changed NOTHING at all -- not even a
+    /// bounded rect -- so the windowing layer skips the clear, every GL
+    /// primitive paint, `pre_present_notify`, and the buffer swap
+    /// entirely. Any doubt at all falls back to `Full`, which is always
+    /// correct.
     ///
+    /// [`FrameDamage`]: freminal_windowing::FrameDamage
     /// [`FrameDamage::Partial`]: freminal_windowing::FrameDamage::Partial
     /// [`FrameDamage::Full`]: freminal_windowing::FrameDamage::Full
+    /// [`FrameDamage::None`]: freminal_windowing::FrameDamage::None
     pub(super) pending_frame_damage: freminal_windowing::FrameDamage,
 
     /// Shape-index range for the "terminal band" (the pre-clear FBO
@@ -396,17 +519,23 @@ pub(super) struct PerWindowState {
     /// global blink cycle's current half. `None` before the first frame.
     pub(super) previous_active_pane_key: Option<(TabId, crate::gui::panes::PaneId)>,
 
-    /// Authoritative partial-present flag for this window (#435).
+    /// Authoritative published present region for this window (124.18,
+    /// formerly named `present_is_partial` and typed as an `AtomicBool`).
     ///
-    /// The windowing layer stores into this each frame — `true` when it
-    /// skipped the full clear and is presenting only the damage region,
-    /// `false` for a normal full clear + present — **before** the pane paint
-    /// callbacks run. The callbacks read it (a clone is captured into each)
-    /// to gate their scissor optimization, so a pane only scissors its redraw
-    /// when the clear was actually skipped. Shared via `Arc` because the pane
-    /// `PaintCallback` closures require `'static` captures; only ever touched
-    /// on the GUI thread, so `Relaxed` ordering suffices.
-    pub(super) present_is_partial: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The windowing layer stores into this each frame, **before** the pane
+    /// paint callbacks run: [`freminal_windowing::PresentRegion::Region`]
+    /// when it skipped the full clear and is presenting only that region,
+    /// or [`freminal_windowing::PresentRegion::Full`] for a normal full
+    /// clear and present. The callbacks read it (a clone is captured into
+    /// each) and scissor to exactly what it says, rather than to a
+    /// narrower rect they compute themselves, so a pane's redraw can never
+    /// disagree with what the windowing layer actually redrew (see
+    /// [`freminal_windowing::PresentRegion`]'s doc for why a bare bool plus
+    /// the app's own rect was unsound). Shared via `Arc<Mutex<_>>` because
+    /// the pane `PaintCallback` closures require `Send + Sync + 'static`
+    /// captures; only ever touched on the GUI thread, so an uncontended
+    /// lock suffices.
+    pub(super) present_region: std::sync::Arc<std::sync::Mutex<freminal_windowing::PresentRegion>>,
 
     /// Chrome-damage decision for the most recent `update()` of this window
     /// (#436.3), drained by `App::take_chrome_damage`.
@@ -462,15 +591,17 @@ pub(super) struct PerWindowState {
     pub(super) chrome_frames_rendered: u32,
 
     /// The delay `update()` itself requested via `ctx.request_repaint_after`
-    /// on the most recent frame (#436.4b §3.1 amendment), drained by
+    /// on the most recent frame, drained by
     /// `App::take_terminal_requested_delay`.
     ///
     /// Set at the end of each `update()` from `shortest_repaint_delay` (the
     /// shortest interval any rendered pane needed — cursor blink, content
-    /// update, or shader animation). Compared against egui's own requested
-    /// repaint delay by `egui_integration::chrome_repaint_settled` to decide
-    /// whether a REPLAY is permitted: a REPLAY requires that nothing OTHER
-    /// than this frame's own request also wants a wake. Defaults to `None`.
+    /// update, or shader animation). Consumed by
+    /// `event_loop::effective_repaint_delay`'s suppressed-pointer-motion
+    /// substitution (Task 121): when the only thing that happened since the
+    /// previous frame was pointer motion the app classified as needing no
+    /// frame, this value stands in for egui's own (zero) requested delay so
+    /// the window does not busy-loop. Defaults to `None`.
     pub(super) pending_terminal_requested_delay: Option<std::time::Duration>,
 
     /// Per-frame render attribution counters (diagnostic), flushed to a
@@ -505,22 +636,29 @@ pub(super) struct FrameStats {
     // build must not carry so much as an extra counter increment in the
     // frame path, since timing calls there would perturb the very thing
     // being measured. See `agents.md` / the `freminal-bench-table` skill.
-    /// Frames where `App::update` received `ChromeMode::Full`.
+    /// The #435-only `FrameDamage` decision (before
+    /// `compose_with_chrome_damage` can still upgrade it) was
+    /// `FrameDamage::None` (Task 124.2): every rendered pane reported
+    /// `PaneFrameDamage::Unchanged`, no pane contributed search-overlay
+    /// popup rects, and no bell/toast/force-full override applied.
+    ///
+    /// Renamed from the pre-124.2 `zero_change_presented`, which claimed a
+    /// frame counted here was still presented -- true before Task 124.2
+    /// (there was no way to say "nothing changed, present nothing", so
+    /// `decide_frame_damage` fell through to `FrameDamage::Full`), false
+    /// now: such a frame typically resolves to `FrameDamage::None` and is
+    /// NOT presented at all (no clear, no primitive paint, no swap). See
+    /// [`Self::frame_damage_none`] for the FINAL, post-composition count --
+    /// composition can still upgrade this to `Full` if the chrome changed,
+    /// so the two are not guaranteed equal.
     #[cfg(feature = "frame-profiling")]
-    pub(super) chrome_mode_full: u64,
-    /// Frames where `App::update` received `ChromeMode::Replay`. Answers
-    /// "does Replay ever actually engage in a live session, and at what
-    /// duty cycle" — no counter for this existed anywhere before Task 121.
+    pub(super) frame_damage_none_precomposition: u64,
+    /// Frames whose FINAL, post-composition `win.pending_frame_damage` was
+    /// `FrameDamage::None` (Task 124.2) -- these are NOT presented at all:
+    /// no clear, no GL primitive paint, no `pre_present_notify`, no buffer
+    /// swap.
     #[cfg(feature = "frame-profiling")]
-    pub(super) chrome_mode_replay: u64,
-    /// Frames where every rendered pane reported `PaneFrameDamage::Unchanged`
-    /// (and no bell/toast/force-full override applied) yet the frame was
-    /// still presented. `decide_frame_damage` has no representation for "no
-    /// pane changed anything" distinct from "some pane needs a full
-    /// rebuild" -- both fall through to `FrameDamage::Full` when the damage
-    /// rect list ends up empty -- so this counts how often that happens.
-    #[cfg(feature = "frame-profiling")]
-    pub(super) zero_change_presented: u64,
+    pub(super) frame_damage_none: u64,
     /// Frames whose final `win.pending_frame_damage` was `FrameDamage::Full`.
     #[cfg(feature = "frame-profiling")]
     pub(super) frame_damage_full: u64,
@@ -611,75 +749,88 @@ pub(super) struct FrameStats {
     /// per-condition count below as a percentage.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_repaint_check_total: std::cell::Cell<u64>,
+    /// `first_motion` fired count — the first `CursorMoved` since window
+    /// creation or since the pointer last left the window (no `previous`
+    /// position to compare against).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_first_motion: std::cell::Cell<u64>,
+    /// `focus_change_pending` fired count — focus-follows-mouse is enabled
+    /// and this motion lands on a non-active pane.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_focus_change_pending: std::cell::Cell<u64>,
     /// `chrome_interactive` fired count (see
     /// `PointerMotionConditionFlags::chrome_interactive`).
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_chrome_interactive: std::cell::Cell<u64>,
-    /// `any_pane_selecting` fired count.
-    #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_any_pane_selecting: std::cell::Cell<u64>,
     /// `overlay_open` fired count.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_overlay_open: std::cell::Cell<u64>,
     /// `pointer_pane_unresolved` fired count.
     #[cfg(feature = "frame-profiling")]
     pub(super) pointer_cond_pointer_pane_unresolved: std::cell::Cell<u64>,
-    /// `mouse_tracking_active` fired count (pane-resolved calls only).
+    /// `unknown_geometry` fired count (`pointer_motion::unknown_geometry_force`)
+    /// — either endpoint's geometry could not be classified at all.
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_mouse_tracking_active: std::cell::Cell<u64>,
-    /// `has_urls` fired count (pane-resolved calls only) — one of the three
-    /// independent sub-terms of `pane_hover_region_risk`'s disjunction,
-    /// counted separately from `scroll_offset_nonzero`/`gutter_active`
-    /// rather than as one aggregate: distinguishing which of the three is
-    /// actually responsible is the entire point of this diagnostic.
+    pub(super) pointer_cond_unknown_geometry: std::cell::Cell<u64>,
+    /// `url_forced` fired count (Task 124.3b: `pointer_motion::url_positional_force`
+    /// actually forced a repaint for this call — not merely "this pane has
+    /// URLs", which is the pre-124.3b pane-wide meaning this counter
+    /// replaces).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_has_urls: std::cell::Cell<u64>,
-    /// `scroll_offset_nonzero` fired count (pane-resolved calls only).
+    pub(super) pointer_cond_url_forced: std::cell::Cell<u64>,
+    /// `gutter_forced` fired count (`pointer_motion::gutter_positional_force`).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_scroll_offset_nonzero: std::cell::Cell<u64>,
-    /// `gutter_active` fired count (pane-resolved calls only).
+    pub(super) pointer_cond_gutter_forced: std::cell::Cell<u64>,
+    /// `scrollbar_forced` fired count — either the exact hit-rect boundary
+    /// crossed (`pointer_motion::scrollbar_boundary_force`) or a scrollbar
+    /// drag is in progress somewhere in the window
+    /// (`PublishedFrameState::any_pane_scrollbar_dragging`).
     #[cfg(feature = "frame-profiling")]
-    pub(super) pointer_cond_gutter_active: std::cell::Cell<u64>,
+    pub(super) pointer_cond_scrollbar_forced: std::cell::Cell<u64>,
+    /// `selection_forced` fired count (`pointer_motion::selection_positional_force`).
+    #[cfg(feature = "frame-profiling")]
+    pub(super) pointer_cond_selection_forced: std::cell::Cell<u64>,
 }
 
-/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated): which of
-/// the eight conditions considered by `App::pointer_motion_needs_repaint`
-/// were true for one call.
+/// Task 121 pointer-motion repaint-gate diagnostic (feature-gated),
+/// rewritten by Task 124.3b (and its review pass): which of the ten
+/// top-level conditions `pointer_motion_needs_repaint_decision` considers
+/// actually FORCED a repaint for one call.
 ///
-/// Distinct from `pointer_motion.rs`'s `PointerMotionPaneSignals`: that
-/// struct feeds the actual repaint DECISION for a resolved pane (two
-/// aggregated bools — `mouse_tracking_active` and a single
-/// `hover_region_risk`); this
-/// struct is diagnostic-only, exhaustive over every named condition in the
-/// predicate (including the three individual sub-terms
-/// `pane_hover_region_risk` ORs together), and never affects behavior — it
-/// is only ever consumed by `FrameStats::record_pointer_motion_check`.
-///
-/// The last four fields (`mouse_tracking_active` through `gutter_active`)
-/// are meaningful only when a pane resolved under the pointer; when no pane
-/// resolves, all four are simply left `false` (mirrors
-/// `pointer_motion_needs_repaint_decision`'s own "no pane, so no
-/// pane-specific signal applies" semantics for its `pane_signals: None`
-/// case — NOT the same as `pointer_pane_unresolved`, which covers "the pane
-/// could not be determined AT ALL").
+/// Diagnostic-only — never affects behavior — and only ever consumed by
+/// `FrameStats::record_pointer_motion_check`. Every field here means "this
+/// term forced the repaint", not "this observation happened to be true"
+/// (the pre-124.3b `has_urls` counter used to be counted whenever a pane
+/// merely CONTAINED a URL, whether or not that mattered for this motion —
+/// see `pointer_motion.rs`'s module doc for the pane-wide-veto-to-positional
+/// rewrite this counter set reflects). The review pass that added
+/// `first_motion`/`focus_change_pending`/`unknown_geometry` closed a gap
+/// where this struct claimed to cover "the conditions considered" but
+/// omitted three of `PointerMotionInputs`'s actual top-level fields —
+/// `scrollbar_boundary_forced` and `scrollbar_drag_forced` remain
+/// deliberately combined into the single `scrollbar_forced` count (both
+/// are "the scrollbar" from a diagnostic-reader's perspective), and
+/// `overlay_open` deliberately continues to include the animation-in-flight
+/// terms folded into it before this struct ever sees them.
 // struct_excessive_bools: each field is an independent yes/no observation
-// of one named condition in `pointer_motion_needs_repaint_decision`'s
-// disjunction (or one of `pane_hover_region_risk`'s three sub-terms) — not
-// a state machine. Combining them would not express any real combined
-// state and would only obscure the one-flag-per-condition mapping this
-// diagnostic exists to preserve.
+// of one named forcing condition in `pointer_motion_needs_repaint_decision`'s
+// disjunction — not a state machine. Combining them would not express any
+// real combined state and would only obscure the one-flag-per-condition
+// mapping this diagnostic exists to preserve.
 #[cfg(feature = "frame-profiling")]
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct PointerMotionConditionFlags {
+    pub(super) first_motion: bool,
+    pub(super) focus_change_pending: bool,
     pub(super) chrome_interactive: bool,
-    pub(super) any_pane_selecting: bool,
     pub(super) overlay_open: bool,
     pub(super) pointer_pane_unresolved: bool,
-    pub(super) mouse_tracking_active: bool,
-    pub(super) has_urls: bool,
-    pub(super) scroll_offset_nonzero: bool,
-    pub(super) gutter_active: bool,
+    pub(super) unknown_geometry: bool,
+    pub(super) url_forced: bool,
+    pub(super) gutter_forced: bool,
+    pub(super) scrollbar_forced: bool,
+    pub(super) selection_forced: bool,
 }
 
 impl FrameStats {
@@ -689,28 +840,6 @@ impl FrameStats {
 
 #[cfg(feature = "frame-profiling")]
 impl FrameStats {
-    /// Percentage of `(chrome_mode_full + chrome_mode_replay)` frames that
-    /// were `Replay`. Pure so it's unit-testable without constructing a
-    /// window or an egui frame. `0.0` when no frames have been counted yet
-    /// (rather than dividing by zero).
-    ///
-    /// Deliberately duplicated in `freminal_windowing::egui_integration::FrameProfile`
-    /// rather than shared (reviewed and accepted) -- keep the two in sync by
-    /// eye if either changes.
-    pub(super) fn chrome_replay_duty_cycle_pct(full: u64, replay: u64) -> f64 {
-        let total = full.saturating_add(replay);
-        if total == 0 {
-            return 0.0;
-        }
-        // `u64 -> f64` is lossy for very large counts (beyond 2^53), but a
-        // live session's frame counters never approach that range; `approx_as`
-        // is the established lossy-conversion idiom in this codebase (see
-        // e.g. `egui_integration.rs`'s `scale_factor().approx_as::<f32>()`).
-        let replay_f: f64 = conv2::ConvUtil::approx_as(replay).unwrap_or(0.0);
-        let total_f: f64 = conv2::ConvUtil::approx_as(total).unwrap_or(1.0);
-        (replay_f / total_f) * 100.0
-    }
-
     /// Mean of a cumulative `Duration` sum over `count` samples, as a
     /// `Duration`. Returns `Duration::ZERO` for `count == 0` rather than
     /// dividing by zero. Pure so it's unit-testable in isolation.
@@ -762,29 +891,25 @@ impl FrameStats {
     pub(super) fn record_pointer_motion_check(&self, flags: PointerMotionConditionFlags) {
         self.pointer_repaint_check_total
             .set(self.pointer_repaint_check_total.get().saturating_add(1));
+        Self::bump_if(&self.pointer_cond_first_motion, flags.first_motion);
+        Self::bump_if(
+            &self.pointer_cond_focus_change_pending,
+            flags.focus_change_pending,
+        );
         Self::bump_if(
             &self.pointer_cond_chrome_interactive,
             flags.chrome_interactive,
-        );
-        Self::bump_if(
-            &self.pointer_cond_any_pane_selecting,
-            flags.any_pane_selecting,
         );
         Self::bump_if(&self.pointer_cond_overlay_open, flags.overlay_open);
         Self::bump_if(
             &self.pointer_cond_pointer_pane_unresolved,
             flags.pointer_pane_unresolved,
         );
-        Self::bump_if(
-            &self.pointer_cond_mouse_tracking_active,
-            flags.mouse_tracking_active,
-        );
-        Self::bump_if(&self.pointer_cond_has_urls, flags.has_urls);
-        Self::bump_if(
-            &self.pointer_cond_scroll_offset_nonzero,
-            flags.scroll_offset_nonzero,
-        );
-        Self::bump_if(&self.pointer_cond_gutter_active, flags.gutter_active);
+        Self::bump_if(&self.pointer_cond_unknown_geometry, flags.unknown_geometry);
+        Self::bump_if(&self.pointer_cond_url_forced, flags.url_forced);
+        Self::bump_if(&self.pointer_cond_gutter_forced, flags.gutter_forced);
+        Self::bump_if(&self.pointer_cond_scrollbar_forced, flags.scrollbar_forced);
+        Self::bump_if(&self.pointer_cond_selection_forced, flags.selection_forced);
     }
 
     /// `counter.set(counter.get().saturating_add(1))` iff `condition` —
@@ -796,18 +921,7 @@ impl FrameStats {
         }
     }
 
-    /// Format eight named pointer-motion condition counts the same way
-    /// `format_nonzero_signal_counts` formats `chrome_signal_fired_counts`
-    /// (see that method's doc for the full rationale) — `name=count`
-    /// comma-joined, non-zero entries only, `"none"` when all eight are
-    /// zero. A free-standing pure function over parallel `names`/`counts`
-    /// arrays (not `&self`), so it is directly unit-testable without
-    /// constructing a `Cell`-bearing `FrameStats`.
-    /// Reset the pointer-motion condition counters and the total call
-    /// counter (see `record_pointer_motion_check`) back to zero at the end
-    /// of a flush window — see `pointer_repaint_check_total`'s field doc
-    /// for why these are windowed rather than cumulative-since-creation.
-    /// The eight pointer-motion condition counters paired with their names, in
+    /// The ten pointer-motion condition counters paired with their names, in
     /// declaration order.
     ///
     /// Exists so the names and the counter reads cannot drift apart: keeping
@@ -816,44 +930,46 @@ impl FrameStats {
     /// type system to catch it. Mirrors
     /// `chrome_damage::ChromeSignals::named_fields()`, which solves the same
     /// problem for the chrome signals.
-    pub(super) const fn pointer_condition_counts(&self) -> [(&'static str, u64); 8] {
+    pub(super) const fn pointer_condition_counts(&self) -> [(&'static str, u64); 10] {
         [
+            ("first_motion", self.pointer_cond_first_motion.get()),
+            (
+                "focus_change_pending",
+                self.pointer_cond_focus_change_pending.get(),
+            ),
             (
                 "chrome_interactive",
                 self.pointer_cond_chrome_interactive.get(),
-            ),
-            (
-                "any_pane_selecting",
-                self.pointer_cond_any_pane_selecting.get(),
             ),
             ("overlay_open", self.pointer_cond_overlay_open.get()),
             (
                 "pointer_pane_unresolved",
                 self.pointer_cond_pointer_pane_unresolved.get(),
             ),
-            (
-                "mouse_tracking_active",
-                self.pointer_cond_mouse_tracking_active.get(),
-            ),
-            ("has_urls", self.pointer_cond_has_urls.get()),
-            (
-                "scroll_offset_nonzero",
-                self.pointer_cond_scroll_offset_nonzero.get(),
-            ),
-            ("gutter_active", self.pointer_cond_gutter_active.get()),
+            ("unknown_geometry", self.pointer_cond_unknown_geometry.get()),
+            ("url_forced", self.pointer_cond_url_forced.get()),
+            ("gutter_forced", self.pointer_cond_gutter_forced.get()),
+            ("scrollbar_forced", self.pointer_cond_scrollbar_forced.get()),
+            ("selection_forced", self.pointer_cond_selection_forced.get()),
         ]
     }
 
+    /// Reset the pointer-motion condition counters and the total call
+    /// counter (see `record_pointer_motion_check`) back to zero at the end
+    /// of a flush window — see `pointer_repaint_check_total`'s field doc
+    /// for why these are windowed rather than cumulative-since-creation.
     pub(super) fn reset_pointer_condition_window(&self) {
         self.pointer_repaint_check_total.set(0);
+        self.pointer_cond_first_motion.set(0);
+        self.pointer_cond_focus_change_pending.set(0);
         self.pointer_cond_chrome_interactive.set(0);
-        self.pointer_cond_any_pane_selecting.set(0);
         self.pointer_cond_overlay_open.set(0);
         self.pointer_cond_pointer_pane_unresolved.set(0);
-        self.pointer_cond_mouse_tracking_active.set(0);
-        self.pointer_cond_has_urls.set(0);
-        self.pointer_cond_scroll_offset_nonzero.set(0);
-        self.pointer_cond_gutter_active.set(0);
+        self.pointer_cond_unknown_geometry.set(0);
+        self.pointer_cond_url_forced.set(0);
+        self.pointer_cond_gutter_forced.set(0);
+        self.pointer_cond_scrollbar_forced.set(0);
+        self.pointer_cond_selection_forced.set(0);
     }
 }
 
@@ -868,28 +984,6 @@ mod frame_profiling_tests {
     /// `pointer_condition_counts`) precisely so no parallel arrays exist there.
     fn pairs<'a, const N: usize>(names: &[&'a str; N], counts: &[u64; N]) -> [(&'a str, u64); N] {
         std::array::from_fn(|i| (names[i], counts[i]))
-    }
-
-    #[test]
-    fn duty_cycle_is_zero_with_no_frames() {
-        assert!((FrameStats::chrome_replay_duty_cycle_pct(0, 0) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn duty_cycle_is_zero_when_replay_never_engages() {
-        assert!((FrameStats::chrome_replay_duty_cycle_pct(120, 0) - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn duty_cycle_is_100_when_always_replay() {
-        let pct = FrameStats::chrome_replay_duty_cycle_pct(0, 120);
-        assert!((pct - 100.0).abs() < 0.001, "pct was {pct}");
-    }
-
-    #[test]
-    fn duty_cycle_is_75_for_1_full_3_replay() {
-        let pct = FrameStats::chrome_replay_duty_cycle_pct(30, 90);
-        assert!((pct - 75.0).abs() < 0.001, "pct was {pct}");
     }
 
     #[test]
@@ -966,25 +1060,35 @@ mod frame_profiling_tests {
         );
     }
 
-    // ── Task 121 pointer-motion repaint-gate condition counters ──────────
+    // ── Task 121 pointer-motion repaint-gate condition counters, rewritten
+    // by Task 124.3b (and its review pass) to count FORCING conditions,
+    // exhaustively over every top-level `PointerMotionInputs` term ────────
 
-    /// The eight Task 121 pointer-motion condition names, in the same
-    /// order `record_pointer_motion_check`/the app-side flush build their
+    /// The ten pointer-motion condition names, in the same order
+    /// `record_pointer_motion_check`/the app-side flush build their
     /// parallel `counts` array.
-    const POINTER_CONDITION_NAMES: [&str; 8] = [
+    const POINTER_CONDITION_NAMES: [&str; 10] = [
+        "first_motion",
+        "focus_change_pending",
         "chrome_interactive",
-        "any_pane_selecting",
         "overlay_open",
         "pointer_pane_unresolved",
-        "mouse_tracking_active",
-        "has_urls",
-        "scroll_offset_nonzero",
-        "gutter_active",
+        "unknown_geometry",
+        "url_forced",
+        "gutter_forced",
+        "scrollbar_forced",
+        "selection_forced",
     ];
+
+    /// The all-clear `PointerMotionConditionFlags` (every field `false`),
+    /// so each test's struct literal names only the field(s) it is about.
+    fn no_conditions() -> super::PointerMotionConditionFlags {
+        super::PointerMotionConditionFlags::default()
+    }
 
     #[test]
     fn format_nonzero_pointer_condition_counts_all_zero_is_none() {
-        let counts = [0u64; 8];
+        let counts = [0u64; 10];
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
             "none"
@@ -993,111 +1097,110 @@ mod frame_profiling_tests {
 
     #[test]
     fn format_nonzero_pointer_condition_counts_shows_only_the_nonzero_entries() {
-        let mut counts = [0u64; 8];
-        counts[4] = 12; // mouse_tracking_active
-        counts[5] = 3; // has_urls
+        let mut counts = [0u64; 10];
+        counts[6] = 12; // url_forced
+        counts[7] = 3; // gutter_forced
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
-            "mouse_tracking_active=12,has_urls=3"
+            "url_forced=12,gutter_forced=3"
         );
     }
 
     #[test]
     fn format_nonzero_pointer_condition_counts_preserves_declaration_order() {
-        let mut counts = [0u64; 8];
-        counts[7] = 1; // gutter_active
-        counts[0] = 1; // chrome_interactive
+        let mut counts = [0u64; 10];
+        counts[9] = 1; // selection_forced
+        counts[0] = 1; // first_motion
         assert_eq!(
             FrameStats::format_nonzero_counts(&pairs(&POINTER_CONDITION_NAMES, &counts)),
-            "chrome_interactive=1,gutter_active=1",
+            "first_motion=1,selection_forced=1",
             "order must follow the array's index order, not insertion order"
         );
     }
 
     #[test]
     fn record_pointer_motion_check_increments_total_and_only_true_conditions() {
-        use super::PointerMotionConditionFlags;
-
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
             chrome_interactive: true,
-            any_pane_selecting: false,
-            overlay_open: false,
-            pointer_pane_unresolved: false,
-            mouse_tracking_active: false,
-            has_urls: true,
-            scroll_offset_nonzero: false,
-            gutter_active: false,
+            url_forced: true,
+            ..no_conditions()
         });
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 0);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 0);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 0);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 0);
     }
 
     #[test]
     fn record_pointer_motion_check_counts_each_condition_independently() {
-        use super::PointerMotionConditionFlags;
-
-        // All eight conditions true at once must all be counted -- the
-        // task's explicit requirement ("several can be true at once --
-        // count each independently, do not stop at the first").
+        // All ten conditions true at once must all be counted -- several
+        // can be true simultaneously, count each independently, do not
+        // stop at the first.
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
+            first_motion: true,
+            focus_change_pending: true,
             chrome_interactive: true,
-            any_pane_selecting: true,
             overlay_open: true,
             pointer_pane_unresolved: true,
-            mouse_tracking_active: true,
-            has_urls: true,
-            scroll_offset_nonzero: true,
-            gutter_active: true,
+            unknown_geometry: true,
+            url_forced: true,
+            gutter_forced: true,
+            scrollbar_forced: true,
+            selection_forced: true,
         });
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 1);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 1);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 1);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 1);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 1);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 1);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 1);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 1);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 1);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 1);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 1);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 1);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 1);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 1);
     }
 
     #[test]
     fn reset_pointer_condition_window_clears_every_counter() {
-        use super::PointerMotionConditionFlags;
-
         let stats = FrameStats::default();
-        stats.record_pointer_motion_check(PointerMotionConditionFlags {
+        stats.record_pointer_motion_check(super::PointerMotionConditionFlags {
+            first_motion: true,
+            focus_change_pending: true,
             chrome_interactive: true,
-            any_pane_selecting: true,
             overlay_open: true,
             pointer_pane_unresolved: true,
-            mouse_tracking_active: true,
-            has_urls: true,
-            scroll_offset_nonzero: true,
-            gutter_active: true,
+            unknown_geometry: true,
+            url_forced: true,
+            gutter_forced: true,
+            scrollbar_forced: true,
+            selection_forced: true,
         });
 
         stats.reset_pointer_condition_window();
 
         assert_eq!(stats.pointer_repaint_check_total.get(), 0);
+        assert_eq!(stats.pointer_cond_first_motion.get(), 0);
+        assert_eq!(stats.pointer_cond_focus_change_pending.get(), 0);
         assert_eq!(stats.pointer_cond_chrome_interactive.get(), 0);
-        assert_eq!(stats.pointer_cond_any_pane_selecting.get(), 0);
         assert_eq!(stats.pointer_cond_overlay_open.get(), 0);
         assert_eq!(stats.pointer_cond_pointer_pane_unresolved.get(), 0);
-        assert_eq!(stats.pointer_cond_mouse_tracking_active.get(), 0);
-        assert_eq!(stats.pointer_cond_has_urls.get(), 0);
-        assert_eq!(stats.pointer_cond_scroll_offset_nonzero.get(), 0);
-        assert_eq!(stats.pointer_cond_gutter_active.get(), 0);
+        assert_eq!(stats.pointer_cond_unknown_geometry.get(), 0);
+        assert_eq!(stats.pointer_cond_url_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_gutter_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_scrollbar_forced.get(), 0);
+        assert_eq!(stats.pointer_cond_selection_forced.get(), 0);
     }
 }
 
@@ -1422,5 +1525,233 @@ mod resize_overlay_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod held_pointer_button_tests {
+    //! Task 124.3a (orchestrator review correction #1): pure-state tests
+    //! for [`next_held_pointer_button`] and [`egui_button_from_windowing`],
+    //! proving the window-owned held-button model this module now uses.
+    //!
+    //! A live `PerWindowState` cannot be constructed headlessly (its
+    //! `WindowId` has no public constructor outside the real winit event
+    //! loop), so these tests exercise the pure decision function directly
+    //! — exactly the "structure this as pure state tests" fallback the
+    //! task calls for. The headline property under test —
+    //! "press-before-active-pane-change plus release-after-change cannot
+    //! leave either pane logically held" — is now provable STRUCTURALLY,
+    //! not just behaviorally: [`next_held_pointer_button`] takes no pane
+    //! identity at all, so there is no parameter through which a pane
+    //! switch could even influence it. The round-trip tests below confirm
+    //! the press/release bookkeeping itself is still correct now that it
+    //! has exactly one (window-scoped) home instead of N per-pane ones.
+
+    use super::{egui_button_from_windowing, next_held_pointer_button};
+    use freminal_windowing::{PointerButton, PointerButtonAction};
+
+    /// No modifiers held — the ordinary case.
+    fn plain_modifiers() -> egui::Modifiers {
+        egui::Modifiers::default()
+    }
+
+    /// Shift held, nothing else — the context-menu escape-hatch case.
+    fn shift_modifiers() -> egui::Modifiers {
+        egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::default()
+        }
+    }
+
+    // ── `egui_button_from_windowing` ─────────────────────────────────
+
+    #[test]
+    fn egui_button_from_windowing_maps_all_five_variants() {
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Left),
+            egui::PointerButton::Primary
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Right),
+            egui::PointerButton::Secondary
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Middle),
+            egui::PointerButton::Middle
+        );
+        // Review correction: Back/Forward map to Extra1/Extra2 -- preserving
+        // the existing unsupported-button fallback in `gui::mouse`'s
+        // encoders, not claiming either has a native PTY button code.
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Back),
+            egui::PointerButton::Extra1
+        );
+        assert_eq!(
+            egui_button_from_windowing(PointerButton::Forward),
+            egui::PointerButton::Extra2
+        );
+    }
+
+    // ── Plain press/release round trip (no pane concept involved at all) ─
+
+    #[test]
+    fn press_then_release_of_the_same_button_round_trips_to_none() {
+        let mut held = None;
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Primary));
+
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "a release matching the currently-held button must clear it, \
+             regardless of anything that happened to the (now-removed) \
+             per-pane routing in between -- this function has no pane \
+             parameter for such a thing to act through"
+        );
+    }
+
+    #[test]
+    fn press_of_a_different_button_overwrites_the_single_slot() {
+        // Single-button model, matching `PreviousMouseState`'s own
+        // pre-existing assumption -- not a regression introduced here.
+        let mut held = Some(egui::PointerButton::Primary);
+        held = next_held_pointer_button(
+            held,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Secondary));
+    }
+
+    #[test]
+    fn release_of_a_button_that_is_not_currently_held_leaves_state_untouched() {
+        let held = Some(egui::PointerButton::Middle);
+        let next = next_held_pointer_button(
+            held,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            next, held,
+            "releasing a button that was never armed as held must not \
+             clear an unrelated button's held state"
+        );
+    }
+
+    #[test]
+    fn release_with_nothing_held_stays_none() {
+        let next = next_held_pointer_button(
+            None,
+            PointerButton::Left,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(next, None);
+    }
+
+    // ── Task 124.3a (review correction #2): Shift+secondary escape hatch ─
+
+    #[test]
+    fn shift_held_secondary_press_does_not_arm() {
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "a Shift-held secondary-button press must not arm the held-button \
+             state -- it is the context-menu escape hatch, not an ordinary press"
+        );
+    }
+
+    #[test]
+    fn non_shift_secondary_press_arms_normally() {
+        // Only the SHIFTED case is special; an ordinary secondary press
+        // (e.g. right-click in a mouse-aware app with no Shift held) must
+        // still arm the held state exactly like any other button.
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held, Some(egui::PointerButton::Secondary));
+    }
+
+    #[test]
+    fn shift_held_secondary_release_does_not_corrupt_an_unrelated_held_button() {
+        // The chording scenario the doc names: Left is genuinely held (e.g.
+        // the user started a left-button drag), then Shift+Right is
+        // pressed (declined -- the escape hatch) and released. The
+        // Right-release must not blank out Left's still-genuine held state.
+        let held_after_left_press = next_held_pointer_button(
+            None,
+            PointerButton::Left,
+            PointerButtonAction::Pressed,
+            plain_modifiers(),
+        );
+        assert_eq!(held_after_left_press, Some(egui::PointerButton::Primary));
+
+        let held_after_shift_right_press = next_held_pointer_button(
+            held_after_left_press,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(
+            held_after_shift_right_press,
+            Some(egui::PointerButton::Primary),
+            "the declined Shift+secondary press must leave Left's held state untouched"
+        );
+
+        let held_after_shift_right_release = next_held_pointer_button(
+            held_after_shift_right_press,
+            PointerButton::Right,
+            PointerButtonAction::Released,
+            plain_modifiers(), // modifiers may have changed by release time
+        );
+        assert_eq!(
+            held_after_shift_right_release,
+            Some(egui::PointerButton::Primary),
+            "releasing the never-armed Right button must not clear Left's \
+             genuinely-held state"
+        );
+    }
+
+    #[test]
+    fn shift_held_secondary_press_then_matching_release_is_still_a_no_op_when_nothing_else_held() {
+        let held = next_held_pointer_button(
+            None,
+            PointerButton::Right,
+            PointerButtonAction::Pressed,
+            shift_modifiers(),
+        );
+        assert_eq!(held, None);
+
+        let held = next_held_pointer_button(
+            held,
+            PointerButton::Right,
+            PointerButtonAction::Released,
+            plain_modifiers(),
+        );
+        assert_eq!(
+            held, None,
+            "releasing a button that the escape hatch declined to arm \
+              must leave the (already-None) state untouched"
+        );
     }
 }

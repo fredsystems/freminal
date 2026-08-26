@@ -101,33 +101,56 @@ use conv2::{ConvUtil, RoundToNearest};
 ///   path; the rect (if any) is the changed cursor region. `None` means the
 ///   pane's cursor region did not resolve to a valid rect (degenerate size);
 ///   the aggregator treats that as a full frame out of caution.
+/// - [`PaneFrameDamage::Region`] — the pane took a full rebuild (Task
+///   124.14: `VertexRebuild::Bounded`), but the content change is provably
+///   bounded to these rects. Never empty (an empty rect set is reported as
+///   [`Self::Full`] instead — see [`PaneDamageRect::from_cursor_cells`]'s
+///   caller in `widget.rs`).
 /// - [`PaneFrameDamage::Unchanged`] — the pane re-drew its existing vertices
 ///   with no change at all (the common inactive-pane case); it contributes no
 ///   damage and does **not** force a full frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// This type deliberately is **not** [`Copy`] (Task 124.14a design
+/// decision): a single bounding box per pane would keep it `Copy` and is
+/// equivalent *today* (`windowing::DamageHistory::redraw_region` bboxes
+/// anyway), but it is lossy exactly in the case this variant exists for —
+/// two changed rows far apart would present every row between them. Callers
+/// that previously relied on an implicit copy now clone explicitly (a
+/// handful of `.clone()` calls, once per pane per frame).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PaneFrameDamage {
     /// The pane rebuilt its full content this frame.
     Full,
     /// The pane took the cursor-only fast path; carries the changed region.
-    CursorOnly(Option<CursorDamage>),
+    CursorOnly(Option<PaneDamageRect>),
+    /// The pane took a full rebuild whose damage is provably bounded to
+    /// these rects (Task 124.14). Never empty.
+    Region(Vec<PaneDamageRect>),
     /// The pane rendered no change (reused existing vertices).
     #[default]
     Unchanged,
 }
 
-/// The changed screen region of a cursor-only frame (#435).
+/// A changed screen region within a pane's framebuffer (#435).
 ///
 /// Coordinates are **physical framebuffer pixels with a bottom-left origin**
 /// (the OpenGL / EGL convention shared by `glScissor` and
 /// `eglSwapBuffersWithDamage`).
 ///
-/// A cursor blink or a cursor move changes at most two cells (the old cursor
-/// cell, now revealing its glyph, and the new cursor cell). This rect is the
-/// tight bounding box of those cells; presenting only it — and skipping the
-/// full-framebuffer clear — is what turns a blink from a full-scene redraw
-/// into a one-region update.
+/// This is the general-purpose damage rectangle used by every
+/// [`PaneFrameDamage`] variant that carries a bounded region —
+/// [`PaneFrameDamage::CursorOnly`] and [`PaneFrameDamage::Region`] alike —
+/// as well as by overlay damage (e.g. the search popup, see
+/// `search_damage.rs`). The cursor-only case is the original and still most
+/// common user: a cursor blink or a cursor move changes at most two cells
+/// (the old cursor cell, now revealing its glyph, and the new cursor cell),
+/// and the rect is the tight bounding box of those cells; presenting only
+/// it — and skipping the full-framebuffer clear — is what turns a blink
+/// from a full-scene redraw into a one-region update. The same rect shape
+/// serves `Region` frames (Task 124.14), where it bounds a provably-changed
+/// area of a full rebuild instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CursorDamage {
+pub struct PaneDamageRect {
     /// X of the lower-left corner, physical pixels.
     pub x: i32,
     /// Y of the lower-left corner, physical pixels (bottom-left origin).
@@ -138,7 +161,7 @@ pub struct CursorDamage {
     pub height: i32,
 }
 
-impl CursorDamage {
+impl PaneDamageRect {
     /// Build the damage bounding box for a cursor-only frame.
     ///
     /// Inputs are all in the terminal's own coordinate space:
@@ -223,7 +246,7 @@ impl CursorDamage {
 #[cfg(test)]
 mod cursor_damage_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::CursorDamage;
+    use super::PaneDamageRect;
 
     // All expectations below include the 1px safety pad applied outward on
     // every side before clamping (see `from_cursor_cells`).
@@ -232,7 +255,7 @@ mod cursor_damage_tests {
     fn single_cell_blink_flips_y_to_bottom_left_origin() {
         // Framebuffer 800x600. Terminal viewport at top-left (0,0). A cell of
         // 10x20 px at column 0, row 0 (top-left corner of the viewport).
-        let d = CursorDamage::from_cursor_cells(0.0, 0.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
+        let d = PaneDamageRect::from_cursor_cells(0.0, 0.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
             .expect("one cell yields damage");
         // x: [-1,11] clamped-left to [0,11] -> x=0, width=11.
         assert_eq!(d.x, 0);
@@ -245,7 +268,7 @@ mod cursor_damage_tests {
     #[test]
     fn viewport_offset_is_added() {
         // Viewport starts 100px right, 50px down (e.g. a gutter + menu bar).
-        let d = CursorDamage::from_cursor_cells(100.0, 50.0, 600, &[(30.0, 40.0, 10.0, 20.0)])
+        let d = PaneDamageRect::from_cursor_cells(100.0, 50.0, 600, &[(30.0, 40.0, 10.0, 20.0)])
             .expect("damage");
         // Cell top-left in fb coords: x=130, top=90, bottom=110; +/-1 pad.
         assert_eq!(d.x, 129);
@@ -258,7 +281,7 @@ mod cursor_damage_tests {
     #[test]
     fn cursor_move_unions_old_and_new_cells() {
         // Old cell at col 0, new cell at col 5 (both row 0), 10x20 cells.
-        let d = CursorDamage::from_cursor_cells(
+        let d = PaneDamageRect::from_cursor_cells(
             0.0,
             0.0,
             600,
@@ -275,7 +298,7 @@ mod cursor_damage_tests {
     #[test]
     fn subpixel_edges_round_outward() {
         // A cell at a fractional origin must not clip its edge pixels.
-        let d = CursorDamage::from_cursor_cells(0.0, 0.0, 600, &[(0.5, 0.5, 10.0, 20.0)])
+        let d = PaneDamageRect::from_cursor_cells(0.0, 0.0, 600, &[(0.5, 0.5, 10.0, 20.0)])
             .expect("damage");
         // left floor 0 -1 = -1 -> clamp 0; right ceil 11 +1 = 12 -> width 12.
         assert_eq!(d.x, 0);
@@ -287,14 +310,14 @@ mod cursor_damage_tests {
 
     #[test]
     fn empty_cells_yield_no_damage() {
-        assert_eq!(CursorDamage::from_cursor_cells(0.0, 0.0, 600, &[]), None);
+        assert_eq!(PaneDamageRect::from_cursor_cells(0.0, 0.0, 600, &[]), None);
     }
 
     #[test]
     fn cell_clamped_to_framebuffer_bounds() {
         // A cell partly below the framebuffer bottom must clamp, not emit a
         // negative-origin or oversized rect.
-        let d = CursorDamage::from_cursor_cells(0.0, 590.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
+        let d = PaneDamageRect::from_cursor_cells(0.0, 590.0, 600, &[(0.0, 0.0, 10.0, 20.0)])
             .expect("damage");
         // top 590 - 1 = 589; bottom 610 + 1 = 611 clamped to 600 -> height 11;
         // y = 600 - 600 = 0.

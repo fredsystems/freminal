@@ -285,6 +285,17 @@ impl GlState {
             glow::Context::from_loader_function_cstr(|name| gl_display.get_proc_address(name))
         });
 
+        // Log the actual active OpenGL renderer at startup. This is the
+        // authoritative way to confirm whether a session is hardware- or
+        // software-accelerated -- see `PROFILING.md`'s reporting-discipline
+        // section, which reads this exact line rather than inferring the
+        // rasteriser from `/proc` thread names.
+        // SAFETY: `glow_context` was just created above and `context` was
+        // made current on `surface` immediately before it, so a GL context
+        // is current on this thread for this `get_parameter_string` call.
+        let renderer_string = unsafe { glow_context.get_parameter_string(glow::RENDERER) };
+        tracing::info!("Active OpenGL renderer: {renderer_string}");
+
         // Probe optional EGL partial-present support. Absent on GLX / WGL and
         // on EGL displays that do not advertise the damage extension; in all
         // those cases we fall back to a full `swap_buffers`. On Apple
@@ -300,8 +311,9 @@ impl GlState {
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         if egl_damage.is_some() {
             tracing::info!(
-                "Present path: damage-aware (EGL swap-with-damage) — cursor-only \
-                 frames will skip the full clear and present only the changed region"
+                "Present path: damage-aware (EGL swap-with-damage available) — the \
+                 skip-clear + partial-present fast path is available for cursor-only \
+                 frames (see 124.17 for whether it is actually taken)"
             );
         } else {
             tracing::info!(
@@ -356,13 +368,60 @@ impl GlState {
         }
     }
 
+    /// Clear only `region` of the framebuffer to `color`, leaving every
+    /// pixel outside it untouched (124.20).
+    ///
+    /// `region` is in physical framebuffer pixels with a bottom-left
+    /// origin -- the same convention [`DamageRect`] documents and
+    /// `glScissor` uses directly, so no coordinate flip is needed.
+    ///
+    /// Restores the FULL scissor state (both the enable flag and the box)
+    /// exactly as found, not just the enable flag. `egui_glow::Painter`
+    /// does re-establish scissor state before every primitive it paints,
+    /// but this method must not rely on that -- it runs before any
+    /// primitive paints this frame, and this crate's own contract for a
+    /// GL-touching helper (see [`Self::clear`]'s callers) is to leave GL
+    /// state as it found it.
+    pub(crate) fn clear_scissored(&self, color: [f32; 4], region: DamageRect) {
+        unsafe {
+            let was_enabled = self.glow_context.is_enabled(glow::SCISSOR_TEST);
+            let mut prev_box = [0_i32; 4];
+            self.glow_context
+                .get_parameter_i32_slice(glow::SCISSOR_BOX, &mut prev_box);
+
+            self.glow_context.enable(glow::SCISSOR_TEST);
+            self.glow_context
+                .scissor(region.x, region.y, region.width, region.height);
+            self.glow_context
+                .clear_color(color[0], color[1], color[2], color[3]);
+            self.glow_context.clear(glow::COLOR_BUFFER_BIT);
+
+            self.glow_context
+                .scissor(prev_box[0], prev_box[1], prev_box[2], prev_box[3]);
+            if was_enabled {
+                self.glow_context.enable(glow::SCISSOR_TEST);
+            } else {
+                self.glow_context.disable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+
     /// Age of the current back buffer.
     ///
     /// Returns `1` when the back buffer still holds the **previous** frame's
-    /// contents (so a skip-clear + partial redraw is safe), and `0` when the
-    /// buffer is new or its age is unknown (so the whole buffer must be
-    /// redrawn). Values `> 1` mean the buffer holds an older frame and is
-    /// likewise unsafe to treat as "last frame".
+    /// contents (so a skip-clear + partial redraw of just this frame's own
+    /// damage is safe), and `0` when the buffer is new or its age is unknown
+    /// (so the whole buffer must be redrawn — this case is never safe to
+    /// repair). Values `> 1` mean the buffer holds an *older* frame, which is
+    /// **not** the same as unsafe: it is *repairable* by unioning this
+    /// frame's own declared damage with the previous `age - 1` frames'
+    /// (see `frame_paint::DamageHistory`, 124.18). A conventionally
+    /// double-buffered surface reports `2` in steady state — measured on
+    /// real hardware across ~250 queries in 21 flush windows, never `1`,
+    /// never `3` or higher — so treating `> 1` as unconditionally unsafe (an
+    /// earlier revision of this doc did) means partial present never fires
+    /// on any shipped build; only `0` is the unconditional "must redraw
+    /// everything" case.
     ///
     /// On non-EGL backends and platforms without `EGL_EXT_buffer_age` this
     /// returns `0`, which correctly forces the full-frame path.

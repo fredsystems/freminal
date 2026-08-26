@@ -125,13 +125,6 @@ pub struct TerminalSnapshot {
     /// used by `SelectionState`.
     pub total_rows: usize,
 
-    /// Set to `true` when the visible content changed since the previous
-    /// snapshot.
-    ///
-    /// The GUI uses this flag to reset `ViewState::scroll_offset` to 0 when
-    /// the user is scrolled back and new output arrives.
-    pub content_changed: bool,
-
     /// `true` when at least one visible format tag has a non-`None` blink state.
     ///
     /// The GUI uses this to drive the blink timer — when no visible text is
@@ -155,6 +148,27 @@ pub struct TerminalSnapshot {
     ///
     /// Wrapped in `Arc` so the clean-path snapshot reuse is a refcount bump.
     pub row_offsets: Arc<Vec<usize>>,
+
+    /// Per-row content epoch for the visible window, parallel to `row_offsets`.
+    ///
+    /// One entry per visible window row, top to bottom — `row_epochs[r]`
+    /// addresses the same row as `row_offsets[r]`. The value changes exactly
+    /// when that row's rendered content changed since the previous flatten of
+    /// the window (merged characters, merged format tags, and the row's
+    /// [`freminal_buffer::row::LineWidth`]); a row merely *written to* with
+    /// identical bytes does not bump. Stamps are globally monotonic and never
+    /// reused, so the consumer detects change by comparing each entry against
+    /// the epoch it last rendered for that row, not by comparing against a
+    /// fixed baseline.
+    ///
+    /// Unlike a `bool` edge, a monotonic stamp is level-triggered rather than
+    /// edge-triggered, so it survives the many snapshots the GUI never
+    /// renders: a change made between two rendered frames still shows up as a
+    /// differing epoch on the next one the GUI actually consumes, instead of
+    /// being silently lost. This replaced a sticky `content_changed: bool`
+    /// field (deleted by Task 124.12) that went stale across exactly those
+    /// unrendered snapshots.
+    pub row_epochs: Arc<[u64]>,
 
     /// Indices into `visible_tags` of tags that carry a URL (`url.is_some()`).
     ///
@@ -371,10 +385,10 @@ impl TerminalSnapshot {
             term_width: 0,
             term_height: 0,
             total_rows: 0,
-            content_changed: false,
             has_blinking_text: false,
             has_urls: false,
             row_offsets: Arc::new(Vec::new()),
+            row_epochs: Arc::from([]),
             url_tag_indices: Arc::new(Vec::new()),
             scroll_changed: false,
             bracketed_paste: RlBracket::default(),

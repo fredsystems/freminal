@@ -204,6 +204,16 @@ pub struct TerminalRenderer {
     /// instead of patching live bytes into a buffer a pending draw from the
     /// previous frame may still be reading (issue #432).
     deco_vbo_index: usize,
+    /// Subtask 124.7: bytes currently allocated in each `deco_vbo` slot by
+    /// the last orphaning upload, so a same-or-smaller small payload can
+    /// skip the orphan. See [`Self::upload_deco_verts`] for why only the
+    /// decoration buffer is gated, and
+    /// [`SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES`] for the threshold's meaning.
+    ///
+    /// Reset to zero wherever `deco_vbo` is (re)created or deleted — a stale
+    /// capacity against a fresh buffer would skip an orphan the new,
+    /// zero-sized storage genuinely needs.
+    deco_vbo_allocated_bytes: [usize; 2],
 }
 
 impl Default for TerminalRenderer {
@@ -260,6 +270,7 @@ impl TerminalRenderer {
             img_u_image: None,
             vbo_index: 0,
             deco_vbo_index: 0,
+            deco_vbo_allocated_bytes: [0, 0],
         }
     }
 
@@ -373,6 +384,9 @@ impl TerminalRenderer {
         self.deco_program = Some(program);
         self.deco_vao = Some(vao);
         self.deco_vbo = [Some(vbo0), Some(vbo1)];
+        // Fresh, zero-sized storage: the next upload into either slot must
+        // orphan to size it, whatever the payload (subtask 124.7).
+        self.deco_vbo_allocated_bytes = [0, 0];
 
         Ok(())
     }
@@ -732,72 +746,56 @@ impl TerminalRenderer {
         self.deco_vbo_index = 1 - self.deco_vbo_index;
     }
 
-    /// Synchronise the atlas CPU data to the GPU texture.
+    /// Synchronise the atlas CPU data to this renderer's GPU texture.
+    ///
+    /// A thin wrapper supplying `atlas_texture`; all the logic lives in
+    /// [`sync_atlas_to_texture`], which the toast text pass shares.
     fn sync_atlas(&self, gl: &Gl<'_>, atlas: &mut GlyphAtlas) {
         let Some(tex) = self.atlas_texture else {
             return;
         };
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        }
-
-        let size = gl_i32_u32(atlas.size());
-
-        if atlas.needs_full_reupload() {
-            // Full upload — create or replace the entire texture.
-            unsafe {
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA.cast_signed(),
-                    size,
-                    size,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(atlas.pixels())),
-                );
-            }
-        } else {
-            // Delta upload — only upload modified regions.
-            for rect in atlas.take_dirty_rects() {
-                let rx = gl_i32_u32(rect.x);
-                let ry = gl_i32_u32(rect.y);
-                let rw = gl_i32_u32(rect.width);
-                let rh = gl_i32_u32(rect.height);
-
-                // Build the sub-image pixel slice for this rect.
-                let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
-
-                unsafe {
-                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-                    gl.tex_sub_image_2d(
-                        glow::TEXTURE_2D,
-                        0,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                        glow::RGBA,
-                        glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&sub_pixels)),
-                    );
-                }
-            }
-        }
-
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, None);
-        }
+        sync_atlas_to_texture(gl, tex, atlas);
     }
 
-    /// Upload decoration vertex data via orphan-then-write.
-    fn upload_deco_verts(&self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
+    /// Upload decoration vertex data, orphaning only when the payload is not
+    /// small enough to reuse the slot's existing allocation (subtask 124.7).
+    ///
+    /// The decoration buffer is the only one gated, and that is deliberate.
+    /// It is the one buffer re-uploaded on **every** cursor-only frame, and
+    /// its idle floor is the cursor quad alone — `CURSOR_QUAD_FLOATS` = 36
+    /// floats = 144 bytes. `bg_inst_vbo`/`fg_vbo`/`img_vbo` are not
+    /// re-uploaded at all on such a frame, and when they are uploaded the
+    /// payload is bulk (measured at 99,840 bytes for an 80x24 grid), far
+    /// above any threshold worth gating.
+    ///
+    /// **Skipping the orphan cannot corrupt.** `glBufferSubData` is
+    /// synchronous with respect to prior GL commands, so the worst case is a
+    /// pipeline stall, not a stale or torn read — and the stall is already
+    /// mitigated by `deco_vbo`'s independent double-buffer index, which
+    /// means the slot being written was last drawn from two frames ago.
+    /// Issue #432's corruption was **CPU-side offset bookkeeping**
+    /// (commit `c76ae8d1`: the cursor tail-quad offset was computed from
+    /// `show_cursor` alone while the quad was only appended when the blink
+    /// phase also said visible); the orphan arrived in that commit as
+    /// explicitly secondary hardening, not as the fix.
+    ///
+    /// A payload *smaller* than the existing allocation leaves stale bytes
+    /// in the tail. Nothing reads them: `draw_decorations` is passed
+    /// `deco_verts.len()` and derives its vertex count from it, so the draw
+    /// never reaches past the bytes just written.
+    fn upload_deco_verts(&mut self, gl: &Gl<'_>, verts: &[f32], buf_idx: usize) {
         let Some(vbo) = self.deco_vbo[buf_idx] else {
             return;
         };
-        upload_verts(gl, vbo, verts);
+        let bytes = std::mem::size_of_val(verts);
+        if bytes <= SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES
+            && bytes <= self.deco_vbo_allocated_bytes[buf_idx]
+        {
+            upload_verts_into_existing_allocation(gl, vbo, verts);
+        } else {
+            upload_verts(gl, vbo, verts);
+            self.deco_vbo_allocated_bytes[buf_idx] = bytes;
+        }
     }
 
     /// Upload instanced background instance data via orphan-then-write.
@@ -1403,6 +1401,7 @@ impl TerminalRenderer {
                     gl.delete_buffer(b);
                 }
             }
+            self.deco_vbo_allocated_bytes = [0, 0];
             // Foreground resources.
             if let Some(p) = self.fg_program.take() {
                 gl.delete_program(p);
@@ -1646,6 +1645,103 @@ unsafe fn compile_shader(
 //  GPU upload helpers
 // ---------------------------------------------------------------------------
 
+/// Synchronise `atlas`'s CPU-side pixel data to `texture` on the GPU.
+///
+/// The single implementation shared by every glyph atlas: the terminal
+/// renderer's via [`TerminalRenderer::sync_atlas`], and the toast text
+/// pass's, which owns a separate texture and atlas entirely.
+///
+/// Subtask 124.C2 collapsed those into this one function. There used to be a
+/// hand-maintained copy in `toast_text_pass`, whose own doc comment
+/// explained that it was "reproduced here (rather than reused) because that
+/// method is private to `TerminalRenderer` and bound to its own
+/// `atlas_texture` field". Parameterising on the texture removes that reason
+/// — and the copy had already drifted: 124.9 fixed the stale-dirty-rect
+/// defect in one copy and not the other. Fixing that bug twice would have
+/// left in place the thing that caused it.
+///
+/// Two upload modes:
+///
+/// - **Full** (`needs_full_reupload`), one `tex_image_2d` over the whole
+///   atlas. Because that covers every pixel, any rects queued beforehand are
+///   redundant by construction and are dropped here — omitting that was the
+///   124.9 defect, which made the *next* frame re-upload each of those
+///   glyphs individually.
+/// - **Delta**, one `tex_sub_image_2d` per queued dirty rect.
+pub(super) fn sync_atlas_to_texture(gl: &Gl<'_>, texture: glow::Texture, atlas: &mut GlyphAtlas) {
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    }
+
+    let size = gl_i32_u32(atlas.size());
+
+    if atlas.needs_full_reupload() {
+        unsafe {
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA.cast_signed(),
+                size,
+                size,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(atlas.pixels())),
+            );
+        }
+
+        // Redundant by construction: see this function's doc comment (124.9).
+        drop(atlas.take_dirty_rects());
+    } else {
+        for rect in atlas.take_dirty_rects() {
+            let rx = gl_i32_u32(rect.x);
+            let ry = gl_i32_u32(rect.y);
+            let rw = gl_i32_u32(rect.width);
+            let rh = gl_i32_u32(rect.height);
+
+            let sub_pixels = extract_atlas_rect(atlas.pixels(), atlas.size(), &rect);
+
+            unsafe {
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    rx,
+                    ry,
+                    rw,
+                    rh,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&sub_pixels)),
+                );
+            }
+        }
+    }
+
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, None);
+    }
+}
+
+/// Subtask 124.7: the payload size at or below which
+/// [`TerminalRenderer::upload_deco_verts`] reuses the slot's existing
+/// allocation instead of orphaning it.
+///
+/// An orphan exists to avoid a sync stall on a buffer the GPU may still be
+/// reading, at the price of making the driver retire the old store and
+/// allocate a new one. At the decoration buffer's idle floor — the 144-byte
+/// cursor quad — that trade is the wrong way round, and the double-buffer
+/// index has already removed the stall it was insuring against.
+///
+/// 4 KiB is chosen as a bound comfortably above the decoration buffer's
+/// realistic idle and light-decoration sizes while remaining far below the
+/// bulk uploads (measured at 99,840 bytes for an 80x24 grid) where orphaning
+/// is unambiguously right. It is **not** a measured optimum: see this
+/// subtask's findings block in `PLAN_124_RENDER_EFFICIENCY.md`, which
+/// records that the prize is one zero-byte GL call per gated upload plus an
+/// unmeasured amount of driver allocator churn.
+pub(super) const SMALL_UPLOAD_ORPHAN_THRESHOLD_BYTES: usize = 4096;
+
 /// Upload a `&[f32]` to a VBO using the orphan-then-write pattern.
 ///
 /// `pub(super)` so sibling passes under `renderer/` (e.g. [`super::toast_pass`])
@@ -1655,10 +1751,7 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
         return;
     }
 
-    // SAFETY: we reinterpret `&[f32]` as `&[u8]` for the GL call.
-    let bytes = unsafe {
-        std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), std::mem::size_of_val(verts))
-    };
+    let bytes = verts_as_bytes(verts);
 
     unsafe {
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
@@ -1667,6 +1760,35 @@ pub(super) fn upload_verts(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
         gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
     }
+}
+
+/// Subtask 124.7: write `verts` into a VBO **without** orphaning it first.
+///
+/// The caller is responsible for knowing that the buffer's existing
+/// allocation is at least `size_of_val(verts)` bytes; writing past it is a
+/// GL error. Today the only caller is
+/// [`TerminalRenderer::upload_deco_verts`], whose doc comment carries the
+/// full safety argument for why dropping the orphan is sound here.
+fn upload_verts_into_existing_allocation(gl: &Gl<'_>, vbo: glow::Buffer, verts: &[f32]) {
+    if verts.is_empty() {
+        return;
+    }
+
+    let bytes = verts_as_bytes(verts);
+
+    unsafe {
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+    }
+}
+
+/// Reinterpret a `&[f32]` vertex slice as the `&[u8]` the GL calls take.
+const fn verts_as_bytes(verts: &[f32]) -> &[u8] {
+    // SAFETY: `f32` has no padding and no invalid bit patterns, so any
+    // `&[f32]` is a valid `&[u8]` of `size_of_val` bytes over the same
+    // lifetime. The returned slice borrows `verts`, so it cannot outlive it.
+    unsafe { std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), std::mem::size_of_val(verts)) }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,9 @@
 # Supported Control Codes
 
+Last updated: 2026-08-25 — Task 124.3a added the `?1016` (SGR-Pixels
+Mouse) row and fixed its encoding to report one-based physical pixel
+coordinates instead of cell coordinates.
+
 Last updated: 2026-03-31 — Updated post-Task 20 completion (DEC Private Mode Coverage)
 
 ## Key
@@ -155,6 +159,7 @@ Last updated: 2026-03-31 — Updated post-Task 20 completion (DEC Private Mode C
 | ?1004 | Focus Reporting                  | ✅          | `TerminalModes.focus_reporting`; GUI sends `InputEvent::FocusChange`                 |
 | ?1006 | SGR Mouse — Extended Coordinates | ✅          | `TerminalModes.mouse_tracking`                                                       |
 | ?1007 | Alternate Scroll Mode            | ✅          | Scroll → arrow keys on alt screen when set (Task 20.4)                               |
+| ?1016 | SGR-Pixels Mouse — Pixel Coords  | ✅          | `TerminalModes.mouse_encoding`; one-based physical pixel coords (Task 124.3a)        |
 | ?1045 | XTREVWRAP2 — Extended Rev-Wrap   | ✅          | Extends ?45 reverse-wrap into scrollback region (Task 20.9)                          |
 | ?1046 | AllowAltScreen                   | ✅          | Gates ?47/?1047/?1049 alternate screen switching (Task 20.6)                         |
 | ?1047 | Alt Screen Buffer (legacy)       | ✅          | Wired to same alt-screen machinery as ?1049                                          |

@@ -11,7 +11,7 @@
     # cargo-bundle is only used inside the dev shell to produce the Linux
     # deb/appimage artifacts locally.  nixpkgs is pinned at 0.9.0, which predates
     # SVG-icon and `appimage` support; we build from upstream master so the dev
-    # shell matches the 0.12.0-beta.8+ the release CI installs via `cargo install`.
+    # shell matches the 0.12.0-beta.9+ the release CI installs via `cargo install`.
     # `nix flake update cargo-bundle-src` picks up new upstream commits.
     cargo-bundle-src = {
       url = "github:burtonageo/cargo-bundle";
@@ -107,7 +107,7 @@
             };
           };
 
-          version = "0.12.0-beta.8";
+          version = "0.12.0-beta.9";
 
           # The build sandbox strips `.git`, so the crate's build.rs `git
           # describe` can only ever yield "unknown".  Feed it a real value via
@@ -177,9 +177,9 @@
                     <key>CFBundleIdentifier</key>
                     <string>io.github.fredclausen.freminal</string>
                     <key>CFBundleVersion</key>
-                    <string>0.12.0-beta.8</string>
+                    <string>0.12.0-beta.9</string>
                     <key>CFBundleShortVersionString</key>
-                    <string>0.12.0-beta.8</string>
+                    <string>0.12.0-beta.9</string>
                     <key>CFBundleExecutable</key>
                     <string>freminal</string>
                     <key>CFBundleIconFile</key>
@@ -342,7 +342,7 @@
 
               # cargo-bundle built from upstream master (see the cargo-bundle-src
               # input).  nixpkgs ships 0.9.0, which cannot bundle SVG icons or
-              # produce appimages; this matches the 0.12.0-beta.8+ the release CI uses.
+              # produce appimages; this matches the 0.12.0-beta.9+ the release CI uses.
               # Mirrors the nixpkgs recipe (squashfsTools wrap for appimage).
               cargoBundleLatest = pkgs.rustPlatform.buildRustPackage {
                 pname = "cargo-bundle";
@@ -493,10 +493,22 @@
               };
 
               # Task 123 Phase 2: point libglvnd at Mesa's software rasteriser
-              # so an offscreen GL context can be created with no GPU. Set only
-              # in the `default` shell on Linux, alongside `windowsCheckEnv` —
-              # the `ci` shell must not get these, since forcing software GL
-              # there would silently slow every other check.
+              # so an offscreen GL context can be created with no GPU.
+              #
+              # Set ONLY in the `gl-pixel` shell. It must not go into `default`
+              # or `ci`, because these variables are inherited by every process
+              # launched from the shell — including an interactively-run
+              # `freminal` — and force it to rasterise on CPU instead of the
+              # GPU.
+              #
+              # That is not hypothetical. 123.10 originally applied this to the
+              # `default` shell, and the result was a ~100x idle-CPU regression
+              # for anyone developing in `nix develop`/direnv: 0.0% -> ~0.4% of
+              # a core at idle and a clearly visible cost on mouse movement,
+              # measured here as 0.10% -> 11.3% idle on the same binary with
+              # only this variable changed. It cost a full bisect to find,
+              # because the binary was innocent and every endpoint compared was
+              # equally affected. Do not re-add it to an interactive shell.
               #
               # These are set explicitly rather than by adding
               # `pkgs.mesa.llvmpipeHook` to the package list, which is what
@@ -505,9 +517,8 @@
               # without building it, and a setup hook that silently overrides
               # an explicitly-set variable is exactly the kind of
               # action-at-a-distance this file otherwise avoids. The explicit
-              # form also matches `windowsCheckEnv`'s existing idiom directly
-              # above, and both paths below were verified to exist in the
-              # `mesa` derivation.
+              # form also matches `windowsCheckEnv`'s idiom above, and both
+              # paths below were verified to exist in the `mesa` derivation.
               #
               # LIBGL_ALWAYS_SOFTWARE  — never pick a hardware driver.
               # LIBGL_DRIVERS_PATH     — where llvmpipe's DRI module lives.
@@ -548,7 +559,12 @@
               # Full interactive shell: lint/test tooling plus the dev-only
               # extras (cargo-bundle, profilers, vttest, ...) and the Windows
               # cross-check env.
-              default = mkFreminalShell (devOnlyTools ++ glPixelTools) (windowsCheckEnv // glPixelEnv);
+              #
+              # Carries `glPixelTools` (Mesa, Xvfb) so the pixel harness's
+              # binaries are on PATH, but deliberately NOT `glPixelEnv` — see
+              # that binding for why forcing software GL in an interactive
+              # shell is a footgun. Run the pixel harness in `.#gl-pixel`.
+              default = mkFreminalShell (devOnlyTools ++ glPixelTools) windowsCheckEnv;
 
               # Lean shell for CI lint/test gates.  Omits devOnlyTools so CI
               # never builds cargo-bundle from source, and gets no Windows
@@ -560,10 +576,11 @@
               # none of `devOnlyTools`. CI must not build cargo-bundle from
               # source just to read back some pixels.
               #
-              # Deliberately separate from `ci` rather than folded into it:
-              # `glPixelEnv` forces software GL, and leaking that into the
-              # ordinary lint/test gate would silently slow every unrelated
-              # check.
+              # This is the ONLY shell carrying `glPixelEnv`. It is separate
+              # from both `ci` and `default` for the same reason: those
+              # variables force software GL on every process launched from the
+              # shell, which would silently slow every unrelated check in `ci`
+              # and cripple an interactively-run `freminal` from `default`.
               gl-pixel = mkFreminalShell glPixelTools glPixelEnv;
             };
         }) systems

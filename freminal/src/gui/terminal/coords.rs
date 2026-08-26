@@ -185,6 +185,69 @@ pub(super) fn encode_egui_mouse_pos_as_usize(
     (x, y)
 }
 
+/// Convert an egui pointer position to zero-based, floored PHYSICAL PIXEL
+/// coordinates relative to the terminal content area's top-left `origin`.
+///
+/// Task 124.3a: `MouseEncoding::SgrPixels` (`?1016`) reports sub-cell pixel
+/// motion, which `encode_egui_mouse_pos_as_usize`'s cell-floor-division
+/// discards before `mouse.rs` ever sees a position. `pixels_per_point`
+/// converts the logical-point offset used everywhere else in this module
+/// into physical pixels; the clamp/fallback discipline mirrors
+/// `encode_egui_mouse_pos_as_usize` exactly. The `255` fallback is a
+/// defensive sentinel for a practically-unreachable non-finite position
+/// (NaN/infinite `pos` or `pixels_per_point`), not a real coordinate
+/// limit — physical pixel offsets for any realistic window size convert
+/// to `usize` without needing it.
+pub(super) fn encode_egui_mouse_pos_as_pixels(
+    pos: Pos2,
+    origin: Pos2,
+    pixels_per_point: f32,
+) -> (usize, usize) {
+    let rel_x = (pos.x - origin.x).max(0.0);
+    let rel_y = (pos.y - origin.y).max(0.0);
+
+    let px = (rel_x * pixels_per_point).floor();
+    let py = (rel_y * pixels_per_point).floor();
+
+    let x = px.approx_as::<usize>().unwrap_or_else(|_| {
+        if px > 0.0 {
+            debug!("Mouse pixel x ({px}) out of range, clamping to 255");
+            255
+        } else {
+            debug!("Mouse pixel x ({px}) out of range, clamping to 0");
+            0
+        }
+    });
+    let y = py.approx_as::<usize>().unwrap_or_else(|_| {
+        if py > 0.0 {
+            debug!("Mouse pixel y ({py}) out of range, clamping to 255");
+            255
+        } else {
+            debug!("Mouse pixel y ({py}) out of range, clamping to 0");
+            0
+        }
+    });
+
+    (x, y)
+}
+
+/// Convert an egui pointer position to a full
+/// [`FreminalMousePosition`](crate::gui::mouse::FreminalMousePosition) —
+/// both character-cell coordinates and physical-pixel coordinates,
+/// relative to the terminal content area's top-left `origin` (Task
+/// 124.3a). Combines [`encode_egui_mouse_pos_as_usize`] and
+/// [`encode_egui_mouse_pos_as_pixels`] rather than duplicating either.
+pub(super) fn encode_egui_mouse_pos(
+    pos: Pos2,
+    character_size: (f32, f32),
+    origin: Pos2,
+    pixels_per_point: f32,
+) -> crate::gui::mouse::FreminalMousePosition {
+    let (col, row) = encode_egui_mouse_pos_as_usize(pos, character_size, origin);
+    let (px, py) = encode_egui_mouse_pos_as_pixels(pos, origin, pixels_per_point);
+    crate::gui::mouse::FreminalMousePosition::new_with_pixels(col, row, px, py)
+}
+
 #[cfg(test)]
 mod visible_window_start_tests {
     use super::*;
@@ -574,5 +637,64 @@ mod url_at_cell_tests {
         );
         // Col 3 is the underscore between URLs — plain tag.
         assert_eq!(url_at_cell(0, 3, &chars, &tags, window_start, &[]), None);
+    }
+}
+
+#[cfg(test)]
+mod encode_egui_mouse_pos_tests {
+    //! Task 124.3a: `encode_egui_mouse_pos_as_pixels` / `encode_egui_mouse_pos`.
+
+    use super::*;
+
+    #[test]
+    fn pixels_are_floored_and_relative_to_origin() {
+        let origin = Pos2::new(10.0, 20.0);
+        let pos = Pos2::new(15.5, 23.9);
+        // rel = (5.5, 3.9); at ppp=2.0 -> (11.0, 7.8) -> floored (11, 7).
+        assert_eq!(encode_egui_mouse_pos_as_pixels(pos, origin, 2.0), (11, 7));
+    }
+
+    #[test]
+    fn pixels_at_unity_scale_equal_the_logical_offset_floored() {
+        let origin = Pos2::new(0.0, 0.0);
+        let pos = Pos2::new(42.9, 7.1);
+        assert_eq!(encode_egui_mouse_pos_as_pixels(pos, origin, 1.0), (42, 7));
+    }
+
+    #[test]
+    fn pixels_clamp_to_zero_left_or_above_origin() {
+        let origin = Pos2::new(50.0, 50.0);
+        let pos = Pos2::new(10.0, 10.0);
+        assert_eq!(encode_egui_mouse_pos_as_pixels(pos, origin, 1.0), (0, 0));
+    }
+
+    #[test]
+    fn two_positions_within_one_cell_produce_distinct_pixels() {
+        // Cell size 10x10 logical points, ppp=1.0 -- both positions floor
+        // to the same cell but must remain pixel-distinguishable.
+        let origin = Pos2::new(0.0, 0.0);
+        let a = Pos2::new(21.0, 21.0);
+        let b = Pos2::new(22.0, 21.0);
+        assert_eq!(
+            encode_egui_mouse_pos_as_usize(a, (10.0, 10.0), origin),
+            encode_egui_mouse_pos_as_usize(b, (10.0, 10.0), origin),
+            "both positions must floor to the same cell"
+        );
+        assert_ne!(
+            encode_egui_mouse_pos_as_pixels(a, origin, 1.0),
+            encode_egui_mouse_pos_as_pixels(b, origin, 1.0),
+            "pixel coordinates must still distinguish them"
+        );
+    }
+
+    #[test]
+    fn encode_egui_mouse_pos_combines_cell_and_pixel_coordinates() {
+        let origin = Pos2::new(0.0, 0.0);
+        let pos = Pos2::new(25.0, 15.0);
+        let position = encode_egui_mouse_pos(pos, (10.0, 10.0), origin, 2.0);
+        assert_eq!(position.x_as_character_column, 2);
+        assert_eq!(position.y_as_character_row, 1);
+        assert_eq!(position.x_as_physical_pixel, 50);
+        assert_eq!(position.y_as_physical_pixel, 30);
     }
 }
