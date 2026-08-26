@@ -1,9 +1,10 @@
 # PLAN_124_RENDER_EFFICIENCY.md — Task 124 "Damage Model Remediation"
 
-> **STATUS: ACTIVATED 2026-08-23.** Task 123 merged (PR #497), its Findings
-> section discharged both diagnostic obligations, and the activation recon
-> below re-scoped this task from a list of point fixes into a single
-> architectural change plus a set of independent leaves.
+> **STATUS: COMPLETE.** Activated 2026-08-23, completed 2026-08-26, and merged
+> to `main` via PR #503 (`5ec7e42d`). Task 123's Findings discharged both
+> diagnostic obligations, and the activation recon below re-scoped this task
+> from a list of point fixes into a single architectural change plus a set of
+> independent leaves.
 
 Task 124 is carried by v0.12.0. See `Documents/PLAN_VERSION_120.md` for the
 version summary and `Documents/MASTER_PLAN.md` for roadmap position.

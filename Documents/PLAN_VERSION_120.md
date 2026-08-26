@@ -33,15 +33,16 @@ hot, so it ships together):
   tracker. `PLAN_121_PERF_REMEDIATION.md` is now a historical record carrying the migration
   map. Summarised below.
 - **Task 123 — GL Pipeline Measurement Harness** (complete, merged 2026-08-23 via PR #497):
-  the instrument Task 121 never had. Phase 1 is a 47-method facade over `&glow::Context` with
+  the instrument Task 121 never had. Phase 1 is a 49-method facade over `&glow::Context` with
   a recording backend — deterministic, no GPU, no display server, runs in the existing CI
   matrix on all four platforms. Phase 2 is the pixel/readback harness issue #440 has wanted
   since #436, Linux-only, needing Mesa/llvmpipe/Xvfb in `flake.nix` plus a new Nix CI job. It
   changed no rendering behaviour. Its Findings section (123.14) discharged both diagnostic
   obligations and is the input to Task 124. Broken down in
   `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md`.
-- **Task 124 — Damage Model Remediation** (activated 2026-08-23, was "Render Efficiency
-  Remediation"): the fixes. Activation recon found that three of its nine stub entries —
+- **Task 124 — Damage Model Remediation** (complete, merged 2026-08-26 via PR #503; activated
+  2026-08-23 as "Render Efficiency Remediation"): the fixes. Activation recon found that three
+  of its nine stub entries —
   124.1, 124.2 and 124.3 — are not three problems but three symptoms of **one missing type**:
   freminal cannot say "these specific rows changed", and cannot say "nothing changed". The
   task was renamed and re-scoped accordingly. Its spine is a per-row content epoch propagated
@@ -50,13 +51,15 @@ hot, so it ships together):
   pointer suppression, the chrome-cache decision, the shaping levers, GPU orphaning, the
   bool-to-struct fix and the `sync_atlas` defect — are independent leaves. Broken down in
   `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
-- **Task 125 — Fixed-Stride Vertex Relayout** (enriched stub, unassigned version, gated on
-  124's measurements): the bandwidth half. Task 124 stops doing work that produces no pixels;
-  Task 125 makes the work that does produce pixels cheaper, by making row N's instance range a
-  pure function of `row_idx` so that a per-row dirty set becomes a per-row `glBufferSubData`.
-  It is **not** carried by v0.12.0 — its roadmap position is an open maintainer decision, and
-  closing it unexecuted is a legitimate outcome if 124's residual does not justify a vertex
-  format change. Recorded in `Documents/PLAN_125_VERTEX_RELAYOUT.md`.
+- **Task 125 — Performance Parity and Residual Remediation** (broadened enriched stub,
+  unassigned version): explain and close Freminal's remaining CPU/GPU gap against matched
+  WezTerm and Ghostty workloads. The former fixed-stride relayout is one conditional branch,
+  not the governing goal: it cannot improve idle, and Task 124 did not capture the live
+  changed-row, upload-byte, or GPU-time evidence needed to justify it for active workloads.
+  Activation therefore starts with parity measurement and attribution, then decomposes only
+  the remediation branches the findings support. It is **not** carried by v0.12.0; its roadmap
+  position remains an open maintainer decision. Recorded in
+  `Documents/PLAN_125_VERTEX_RELAYOUT.md`.
 
 **Theme 3 — structural cleanup:**
 
@@ -84,15 +87,15 @@ before executing.
 
 ## Task Summary
 
-| #   | Feature                           | Scope     | Status      | Depends On     |
-| --- | --------------------------------- | --------- | ----------- | -------------- |
-| 118 | Compact Cell Representation       | Medium    | Complete    | None           |
-| 119 | Scrollback Compression (LZ4)      | Large     | Complete    | Task 118       |
-| 120 | Compression-Aware Windowed Reflow | Large     | Stub        | Tasks 118, 119 |
-| 121 | Performance Remediation           | Large     | Complete    | None           |
-| 122 | Orchestration Extraction          | Large     | Complete    | None           |
-| 123 | GL Pipeline Measurement Harness   | Large     | Complete    | Task 122       |
-| 124 | Damage Model Remediation          | Large     | In progress | Task 123       |
+| #   | Feature                           | Scope  | Status   | Depends On     |
+| --- | --------------------------------- | ------ | -------- | -------------- |
+| 118 | Compact Cell Representation       | Medium | Complete | None           |
+| 119 | Scrollback Compression (LZ4)      | Large  | Complete | Task 118       |
+| 120 | Compression-Aware Windowed Reflow | Large  | Stub     | Tasks 118, 119 |
+| 121 | Performance Remediation           | Large  | Complete | None           |
+| 122 | Orchestration Extraction          | Large  | Complete | None           |
+| 123 | GL Pipeline Measurement Harness   | Large  | Complete | Task 122       |
+| 124 | Damage Model Remediation          | Large  | Complete | Task 123       |
 
 ---
 
@@ -176,7 +179,7 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   (`rows[0 .. rows.len()-height]`) are candidates for the compact form. The boundary is
   crossed when a row scrolls out of the visible window.
 - **The `row_cache` duplicate is part of the prize.** `Buffer.row_cache:
-  Vec<Option<RowCacheEntry>>` (`buffer/mod.rs:84`) holds a *second*, fully-flattened copy of
+Vec<Option<RowCacheEntry>>` (`buffer/mod.rs:84`) holds a _second_, fully-flattened copy of
   every row (`chars`, `tags`, `bytes`, `byte_to_char`, `auto_urls`). For scrollback rows this
   is pure duplication of data that is rarely read. Evicting / not-populating the cache entry
   for compacted scrollback rows is a first-class part of this task's memory win, separate
@@ -230,8 +233,8 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   synchronously inside `enforce_scrollback_limit` (reached from `insert_text`/`handle_lf`/resize).
   Benchmarking showed this put `CompactRow::from_row` cost directly on hot paths: the worst case
   was `softwrap_heavy` (+45% → +23% after the O(n²) reflow-offset fix), where reflowing one
-  5000-char line to width 10 creates ~420 scrollback rows that were all compacted *inside the
-  timed resize*. Resize is a hot loop and always will be; a giant line can hit the buffer and
+  5000-char line to width 10 creates ~420 scrollback rows that were all compacted _inside the
+  timed resize_. Resize is a hot loop and always will be; a giant line can hit the buffer and
   immediately scroll into history. The durable principle: **having the most recent snapshot
   available to the user, at the expense of slightly delaying the memory saving, is more valuable
   than getting the memory win immediately.** Therefore compaction is moved entirely off the hot
@@ -251,10 +254,10 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   - Entry point: a new `pub` `Buffer::compact_idle_scrollback(budget) -> usize` (rows compacted),
     passed through `TerminalHandler`/`TerminalEmulator`, callable from the PTY loop via
     `emulator.internal.handler.buffer_mut()`.
-  This makes the memory win **eventually-consistent** rather than immediate, which is the correct
-  tradeoff for a memory optimisation: the user never pays compaction latency during typing,
-  scrolling, or resizing; they get the full snapshot immediately and the memory is reclaimed a
-  few hundred ms later once the terminal goes quiet.
+    This makes the memory win **eventually-consistent** rather than immediate, which is the correct
+    tradeoff for a memory optimisation: the user never pays compaction latency during typing,
+    scrolling, or resizing; they get the full snapshot immediately and the memory is reclaimed a
+    few hundred ms later once the terminal goes quiet.
 - **`row_cache` decompaction seam is via `Row`'s accessors, memoized (118.3).** The 3
   borrow-returning accessors (`cells()`, `characters()`, `cells_mut()`) are the seam: a
   `Compact` `Row` materialises back to `Live` on first cell access and stays `Live` for the
@@ -280,7 +283,7 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   OLDEST scrollback rows at the top of the buffer — the wrong rows: it over-invalidated cold
   scrollback (wasting cache rebuilds, and needlessly touching compact rows) while leaving the
   genuinely-newly-visible rows stale. Fixed to invalidate the new bottom-anchored visible window
-  (`rows.len()-new_height..rows.len()`).   Regression test added
+  (`rows.len()-new_height..rows.len()`). Regression test added
   (`height_grow_invalidates_new_visible_window_not_top_scrollback`) asserting the new visible
   window is invalidated and top-of-scrollback cache entries are retained. Impact was benign
   (over-invalidation, not corruption), consistent with the original assessment.
@@ -307,7 +310,7 @@ per-cell and (b) drops the always-null image slot from the common-case storage r
   e.g. `row.rs:570`).
 - **`Buffer.rows: Vec<Row>`** — `buffer/mod.rs:78`; scrollback = indices
   `0..rows.len()-height`, visible = last `height`. **`Buffer.row_cache:
-  Vec<Option<RowCacheEntry>>`** — `buffer/mod.rs:84`, index-parallel to `rows`.
+Vec<Option<RowCacheEntry>>`** — `buffer/mod.rs:84`, index-parallel to `rows`.
 - **`FormatTag`** — `freminal-common/src/buffer_states/format_tag.rs:22`; 40 bytes; the only
   heap field is `url: Option<Arc<Url>>` (cloning bumps a refcount, never deep-copies).
   `is_visually_default()` (`format_tag.rs:60`) is the cheap default check.
@@ -421,11 +424,12 @@ the buffer benches (`freminal-buffer/benches/buffer_row_bench.rs`,
 What: capture before/after memory + throughput per `performance-benchmarks` +
 `freminal-bench-table` for `bench_scrollback_flatten`, `bench_scrollback_render`,
 `bench_build_snapshot_with_scrollback`, `buffer_resize`, and `softwrap_heavy`. Confirm no
->15% regression on the read/flatten hot paths (some slowdown on the cold decompact-on-read
-path is acceptable and expected; the visible-region path must not regress). Using the
-measured post-compaction per-line cost, raise `ScrollbackConfig`'s default `limit` to a value
-that is net-lower-or-equal memory versus today's 4000-line default (proposed target decided
-here with data, not guessed), and update `config_example.toml` and the field doc/comment.
+
+> 15% regression on the read/flatten hot paths (some slowdown on the cold decompact-on-read
+> path is acceptable and expected; the visible-region path must not regress). Using the
+> measured post-compaction per-line cost, raise `ScrollbackConfig`'s default `limit` to a value
+> that is net-lower-or-equal memory versus today's 4000-line default (proposed target decided
+> here with data, not guessed), and update `config_example.toml` and the field doc/comment.
 
 Deliverable: benchmark record (before/after) + the new default + config doc update.
 
@@ -537,14 +541,14 @@ fast.
 
 ### 119 What Task 118 already provides (reuse, do not rebuild)
 
-Task 118 shipped the infrastructure that made compression the *smaller* half of the effort:
+Task 118 shipped the infrastructure that made compression the _smaller_ half of the effort:
 
 - **The flat, pointer-free compact form** (`CompactRow`, `freminal-buffer/src/compact_row.rs`)
   is the only thing safe to byte-compress — raw `Cell` holds `Arc`/`Box` pointers. LZ4
   operates on the serialized compact bytes, never on `Cell` directly.
 - **The idle-driven background driver** (`freminal/src/gui/pty.rs` `select!` idle-tick arm:
   `crossbeam_channel::after(...)`, budgeted work, re-arm-while-work-remains, `never()` disarm
-  when caught up) is exactly the mechanism idle *compression* needs. Compression is another
+  when caught up) is exactly the mechanism idle _compression_ needs. Compression is another
   kind of budgeted work the same tick drives — **do not add a second timer/thread.**
 - **The decompact-on-read seam** via `Row`'s memoized accessors (`cells()`/`characters()`/
   `cells_mut()`) is architecturally the same seam decompress-on-scroll needs; extend it, don't
@@ -606,9 +610,9 @@ churn are (addressed by the block + LRU + scratch-buffer decisions above).
   serialization for LZ4 input; confirm whether the in-memory `CompactRow` is already
   contiguous-serializable or needs an explicit encode step.
 - **Row storage enum** — `freminal-buffer/src/row.rs` (Task 118 Design B: `Row` holds
-  `{ Live(Vec<Cell>), Compact(CompactRow) }`). A third state — a *reference into a compressed
-  block* — is the shape to weigh in 119.1 (a `Row` whose storage is `Compressed(block_id,
-  offset)` decompressed on access), vs. a separate block store indexed alongside `Buffer.rows`.
+  `{ Live(Vec<Cell>), Compact(CompactRow) }`). A third state — a _reference into a compressed
+  block_ — is the shape to weigh in 119.1 (a `Row` whose storage is `Compressed(block_id,
+offset)` decompressed on access), vs. a separate block store indexed alongside `Buffer.rows`.
 - **Idle driver** — `freminal/src/gui/pty.rs` idle-tick arm + `Buffer::compact_idle_scrollback`
   passthrough (`TerminalHandler`/`TerminalEmulator`). Compression reuses this entry point
   pattern (`compress_idle_scrollback` alongside/after compaction).
@@ -793,8 +797,8 @@ This task **absorbs two previously-separate pieces** that turned out to be one c
 1. The former **118.10** lazy/windowed-reflow stub.
 2. The **reflow half of the original Task 119** (band-decompression on resize).
 
-They are unified because *the band you decompress is the band you reflow, and the async tail
-that finishes decompression is the async tail that finishes reflow.* Building them separately
+They are unified because _the band you decompress is the band you reflow, and the async tail
+that finishes decompression is the async tail that finishes reflow._ Building them separately
 would construct the lazy-reflow band machinery twice.
 
 ### 120 Design principle (durable)
@@ -811,14 +815,14 @@ On a width resize:
    scrolls up** into not-yet-reflowed history. Recompaction and recompression of reflowed rows
    then follow the normal deferred path.
 
-Reflow cost becomes proportional to what is *visible*, not to total scrollback depth.
+Reflow cost becomes proportional to what is _visible_, not to total scrollback depth.
 
 ### 120 Why this is a stub, not decomposed now
 
 Lazy, compression-aware reflow is substantially larger and subtler than the 118/119 memory
 work. It touches logical-line reconstruction, cursor remapping, band-decompression, and — the
 hard part — the **`command_blocks` / `prompt_rows` absolute-index remapping** (Task 113 "Bug
-R") across a buffer that is only *partially* reflowed to the current width **and** partially
+R") across a buffer that is only _partially_ reflowed to the current width **and** partially
 compressed. The buffer must track which scrollback regions are reflowed-to-current-width vs
 stale, handle a scroll into a stale and/or compressed region (reflow-and-decompress-on-read),
 and keep the absolute-index remaps correct while regions carry mixed widths and mixed
@@ -867,26 +871,26 @@ redraw — to the level set by wezterm and ghostty on the same hardware.
 
 ### 121 Subtask summary
 
-| Group                                 | Subtasks              | Status      | Covers                                                                                           |
-| ------------------------------------- | --------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
-| A — Completed work                    | 121.1–121.11          | Complete    | PRs #458, #460, #461, #464, #465                                                                 |
-| B — Bugs found and fixed              | 121.12–121.14         | Complete    | blink-off fallback; animation signal. NB 121.13 was reverted 2026-08-02 — see 121.32             |
-| B — Bug blocked behind Task 122       | 121.15                | Unblocked   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17                                    |
-| B — Withdrawn                         | 121.16                | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy                                      |
-| C — Unifying improvement              | 121.17                | Not started | cell-granular pointer suppression; Task 122 seam landed, chrome-cache numbers stale (re-measure) |
-| D — Reconned, premise does not hold   | 121.18, 121.19, 121.21, 121.22 | Closed | items 3, 4, 6, 7 — all four closed as not actionable as framed                          |
-| D — Reconned, needs maintainer gate   | 121.20                | Blocked     | item 5 — premise confirmed; needs 121.28 or an agreed manual-QA gate                             |
-| D — Measured and refuted              | 121.24                | Complete    | per-`CursorMoved` allocations are ~1.4% of the residual; no fix warranted                        |
-| D — Profiling methodology             | 121.23                | Complete    | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file                         |
-| E — Measurement debt                  | 121.27–121.28         | Not started | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                                            |
-| E — Measurement debt (partly done)    | 121.25                | In progress | clean Finding 3 re-run done; typing and btop outstanding                                         |
-| E — Blink-off comparison              | 121.26                | Complete    | blink-off ≈ blink-on ≈ 0.0–0.1% at idle; resolution-limited                                      |
-| F — Surfaced by the Group B work      | 121.29–121.31         | Not started | `repaint_causes()`; chrome not built on `Replay`; full present on motion                         |
-| G — beta.7 interaction regression     | 121.32                | Complete    | chrome cache disabled by default; tab-click / border-drag regression fixed                       |
-| G — Surfaced by 121.32                | 121.33                | Not started | `Full`/`Replay` `Ui` id divergence churns pane-border drag state                                 |
-| G — Chrome-cache decision gate        | 121.34                | Not started | measure always-`Full` cost; decides keep/delete/confine (121.32)                                 |
-| G — Chrome-cache waste while disabled | 121.35                | Deferred    | stop populating cache while disabled; Task 122 takes priority                                    |
-| G — Confine Replay to non-chrome      | 121.36                | Conditional | confine `Replay` to pointer-not-over-chrome frames; conditional on 121.34, blocked on 121.33     |
+| Group                                 | Subtasks                       | Status      | Covers                                                                                           |
+| ------------------------------------- | ------------------------------ | ----------- | ------------------------------------------------------------------------------------------------ |
+| A — Completed work                    | 121.1–121.11                   | Complete    | PRs #458, #460, #461, #464, #465                                                                 |
+| B — Bugs found and fixed              | 121.12–121.14                  | Complete    | blink-off fallback; animation signal. NB 121.13 was reverted 2026-08-02 — see 121.32             |
+| B — Bug blocked behind Task 122       | 121.15                         | Unblocked   | pane-wide `has_urls` / `scroll_offset` vetoes; left to 121.17                                    |
+| B — Withdrawn                         | 121.16                         | Withdrawn   | config kill switch — rejected; revert-and-fix is the remedy                                      |
+| C — Unifying improvement              | 121.17                         | Not started | cell-granular pointer suppression; Task 122 seam landed, chrome-cache numbers stale (re-measure) |
+| D — Reconned, premise does not hold   | 121.18, 121.19, 121.21, 121.22 | Closed      | items 3, 4, 6, 7 — all four closed as not actionable as framed                                   |
+| D — Reconned, needs maintainer gate   | 121.20                         | Blocked     | item 5 — premise confirmed; needs 121.28 or an agreed manual-QA gate                             |
+| D — Measured and refuted              | 121.24                         | Complete    | per-`CursorMoved` allocations are ~1.4% of the residual; no fix warranted                        |
+| D — Profiling methodology             | 121.23                         | Complete    | `Documents/PROFILING.md`; fixed a `Cargo.toml` ref to a nonexistent file                         |
+| E — Measurement debt                  | 121.27–121.28                  | Not started | `DESIGN_DECISIONS.md` entry, issue #440 pixel harness                                            |
+| E — Measurement debt (partly done)    | 121.25                         | In progress | clean Finding 3 re-run done; typing and btop outstanding                                         |
+| E — Blink-off comparison              | 121.26                         | Complete    | blink-off ≈ blink-on ≈ 0.0–0.1% at idle; resolution-limited                                      |
+| F — Surfaced by the Group B work      | 121.29–121.31                  | Not started | `repaint_causes()`; chrome not built on `Replay`; full present on motion                         |
+| G — beta.7 interaction regression     | 121.32                         | Complete    | chrome cache disabled by default; tab-click / border-drag regression fixed                       |
+| G — Surfaced by 121.32                | 121.33                         | Not started | `Full`/`Replay` `Ui` id divergence churns pane-border drag state                                 |
+| G — Chrome-cache decision gate        | 121.34                         | Not started | measure always-`Full` cost; decides keep/delete/confine (121.32)                                 |
+| G — Chrome-cache waste while disabled | 121.35                         | Deferred    | stop populating cache while disabled; Task 122 takes priority                                    |
+| G — Confine Replay to non-chrome      | 121.36                         | Conditional | confine `Replay` to pointer-not-over-chrome frames; conditional on 121.34, blocked on 121.33     |
 
 ### 121 Headline result
 
@@ -1006,7 +1010,7 @@ Three findings changed the shape, and are recorded in full in the plan document:
 
 ## Task 123 — GL Pipeline Measurement Harness
 
-> **STATUS: PLANNED.** Summary only. The full per-subtask breakdown (123.1–123.14) lives in
+> **STATUS: COMPLETE.** Summary only. The full per-subtask breakdown (123.1–123.14) lives in
 > `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — edit that document, not this section,
 > when subtask status changes.
 
@@ -1050,9 +1054,9 @@ confound).
 
 ---
 
-## Task 124 — Render Efficiency Remediation
+## Task 124 — Damage Model Remediation
 
-> **STATUS: STUB, gated on Task 123.** Summary only. The full breakdown (124.1–124.8) lives
+> **STATUS: COMPLETE.** Merged to `main` on 2026-08-26 via PR #503. The full breakdown lives
 > in `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
 
 ### 124 Summary
@@ -1075,5 +1079,5 @@ dirty, even when the merged bytes are byte-identical, so `frame_dirty.rs`'s `Arc
 test reports `content_changed` and forces a full vertex rebuild and a full present. Any
 workload that touches rows every tick pays that, whether or not a pixel changed. Recon on
 2026-08-20 established this is **workload-correlated, not alt-screen-specific** — every
-branch on `is_alternate_screen` in the render path *suppresses* work, and a primary-screen
+branch on `is_alternate_screen` in the render path _suppresses_ work, and a primary-screen
 `watch` would behave identically.

@@ -1,37 +1,79 @@
-# PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Fixed-Stride Vertex Relayout"
+# PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: ENRICHED STUB — deliberately not decomposed.** Every durable
-> design decision made at Task 124's activation (2026-08-23) is recorded
-> below. Subtask decomposition happens in a dedicated session when this task
-> is activated, against the code as it then exists, per `plan-decomposition`'s
+> **STATUS: ENRICHED STUB — broadened after activation recon, deliberately
+> not decomposed.** The 2026-08-26 recon established that fixed-stride vertex
+> relayout cannot affect the observed idle CPU floor and that Task 124 did not
+> collect the live changed-row, upload-byte, or GPU-time measurements needed
+> to justify it for active workloads. Task 125 therefore starts with a
+> measurement phase. Remediation subtasks are decomposed only after those
+> measurements identify the remaining cost, per `plan-decomposition`'s
 > just-in-time rule.
 >
-> **Version: unassigned.** This task is gated on Task 124's measurements and
-> its roadmap position is a maintainer decision that has not been taken. It
-> is deliberately **not** placed in v0.12.0, which is already carrying
-> Tasks 118–124.
+> **Version: unassigned.** Task 124 is complete and merged. Task 125 is
+> deliberately **not** placed in v0.12.0. Its roadmap position remains a
+> maintainer decision, informed by the measurement phase rather than assumed
+> from the former relayout proposal.
 
 ---
 
 ## Goal
 
-Make a per-row dirty set translate into a per-row GPU upload.
+Under controlled equivalent workloads, bring Freminal's CPU and GPU cost into
+parity with WezTerm and Ghostty closely enough that no persistent overhead
+remains unexplained.
 
-Task 124 gives freminal the ability to say "these rows changed". This task
-gives it the ability to *act* on that at the vertex layer, by making row N's
-instance range a pure function of `row_idx` so that `glBufferSubData` at a
-non-zero offset becomes possible.
+The target is product-level resource use, not a particular implementation.
+Fixed-stride per-row GPU upload remains a candidate for sparse active
+workloads, but it is neither the task's governing goal nor a foregone
+conclusion. CPU scheduling, egui/chrome construction, vertex construction,
+driver uploads, GPU execution, presentation, and compositor interaction are
+all in scope when measurement attributes meaningful residual cost to them.
+
+Difficulty or a small expected return is not grounds for omitting a candidate.
+Every credible remediation is recorded with honest benefit, complexity,
+correctness risk, and portability cost. The final decision may still be to
+accept a measured residual, but only after it is explained.
+
+## Activation decision from 2026-08-26 recon
+
+**Do not activate the old fixed-stride implementation plan as written.** Its
+gate was not discharged:
+
+- Task 124's authoritative sustained-output capture recorded 2,104 `Partial`,
+  281 `None`, and 15 `Full` outcomes across 2,400 frames at 60.24 fps, but did
+  not distinguish `VertexRebuild::Bounded` from other partial sources, record
+  changed-row counts, or record live upload bytes.
+- Task 123 measures deterministic GL calls and synthetic upload volume. It
+  does not measure actual GPU execution time, driver stalls, GPU utilisation,
+  power, or compositor cost.
+- A cursor-only blink frame already avoids background and foreground uploads;
+  Task 125's former relayout cannot improve true idle. A steady-cursor idle
+  terminal draws no frame at all.
+- Every redraw still runs egui's UI pass. Historical genuine-idle profiling
+  measured 434 us/frame at 1.95 fps: 96 us in Freminal, 89 us in egui, 226 us
+  in present, and 23 us unmeasured. This is the leading idle-parity surface,
+  not vertex bandwidth.
+- The existing foreground one-row benchmark creates a fresh glyph atlas per
+  timed iteration. The 2026-08-26 recon measured 906.29 us for all 50 rows
+  against 751.24 us for one row at 200 columns, showing that atlas setup and
+  rasterisation dominate the result. It does not isolate incremental vertex
+  construction. The background counterpart measured 133.97 ns for all rows
+  against 14.41 ns for one row, but its corpus does not establish the
+  fixed-stride padding cost.
+
+The first activated work is therefore measurement infrastructure and a
+controlled parity capture. Remediation is selected afterward.
 
 ---
 
-## Relationship to Task 124
+## Relationship to Tasks 123 and 124
 
-The division, set at 124's activation and not open for reinterpretation:
+The original division remains useful but is no longer the complete task:
 
 - **Task 124 stops doing work that produces no pixels.** It is the
   frame-count and present win.
-- **Task 125 makes the work that does produce pixels cheaper.** It is the
-  bandwidth win.
+- **Task 125 explains and remediates what remains.** Per-row upload is one
+  possible bandwidth win; idle and chrome costs live elsewhere.
 
 Task 123 measured the size of each. A needless full rebuild is roughly
 **350x the bytes for roughly 1.08x the calls** — so 124's prize is counted in
@@ -39,14 +81,18 @@ frames avoided and 125's is counted in bytes not moved. Roughly 200 KB per
 full-rebuild frame against under a kilobyte for a cursor-only frame
 (`PLAN_123_GL_MEASUREMENT_HARNESS.md`, "Per-workload GL cost, 80x24").
 
-### The gate
+### The old relayout gate
 
-**This task is not activated until Task 124 has landed and measured the
-residual.** 124.12 and 124.14 both carry mandatory before/after captures.
-If, after 124, the remaining per-frame upload volume on realistic workloads
-is small — because most frames are now `None` or `Region` and never rebuild
-at all — then a vertex format relayout is not worth its risk and this task
-should be closed rather than executed.
+Task 124 has landed, but it did not measure the live residual in the units the
+relayout decision needs. A `Region` frame bounds clear, draw, and present; it
+still performs a full vertex rebuild and whole-buffer upload. The missing
+gate is the distribution of `VertexRebuild` outcomes, changed-row counts, and
+bytes uploaded per real frame.
+
+If realistic sparse-update workloads rarely reach `Bounded`, or usually
+change nearly every visible row, the fixed-stride branch closes unexecuted.
+That result does not close Task 125: measurements may instead select an idle,
+chrome, scheduling, CPU-build, driver, or presentation remediation.
 
 That gate is not ceremonial. It is the direct lesson of Task 121, which
 closed with four of six candidate items refuted by their own verification
@@ -56,9 +102,9 @@ cause.
 
 ---
 
-## The problem, as established by recon (2026-08-23)
+## Fixed-stride candidate, as established by recon (2026-08-23)
 
-`upload_verts` (`freminal/src/gui/renderer/gpu.rs:1653-1670`) orphans the
+`upload_verts` (`freminal/src/gui/renderer/gpu.rs:1749-1763`) orphans the
 whole buffer and rewrites it from offset zero on every upload:
 
 ```rust
@@ -74,16 +120,16 @@ slice. No non-zero offset exists anywhere in the codebase.
 It has to work this way today, because **none of the three instance buffers
 has a fixed stride per row**:
 
-| Buffer | Emission rule | Why the count varies |
-| ------ | ------------- | -------------------- |
-| `bg_instances` | one 6-float instance per **non-default-background** cell (`vertex.rs:390-431`) | `DefaultBackground` cells are skipped entirely (`vertex.rs:406-415`); count depends on content |
-| `fg_instances` | one 13-float instance per **glyph** (`vertex.rs:722-784`) | ligature clusters, wide characters, and blink-hidden runs contributing zero |
-| `deco_verts` | per-row underline and strikethrough quads, **interleaved** with non-row-scoped artifacts | search highlights, command-block hover tint, selection spans, and the cursor quad always appended last |
+| Buffer         | Emission rule                                                                            | Why the count varies                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `bg_instances` | one 6-float instance per **non-default-background** cell (`vertex.rs:361-431`)           | `DefaultBackground` cells are skipped entirely (`vertex.rs:405-415`); count depends on content         |
+| `fg_instances` | one 13-float instance per **glyph** (`vertex.rs:722-784`)                                | ligature clusters, wide characters, and blink-hidden runs contributing zero                            |
+| `deco_verts`   | per-row underline and strikethrough quads, **interleaved** with non-row-scoped artifacts | search highlights, command-block hover tint, selection spans, and the cursor quad always appended last |
 
 So row N's byte range differs in **length** between frames. A one-row change
 is an insert-and-delete-and-shift for every row after it, not an overwrite in
 place. `deco_verts` is worse than variable-length: a single row is not even
-guaranteed to be *contiguous*, since a row can receive an underline quad in
+guaranteed to be _contiguous_, since a row can receive an underline quad in
 the first pass and then be touched again by a selection quad appended much
 later in the buffer.
 
@@ -94,9 +140,11 @@ analogue for the instance buffers.
 
 ---
 
-## Durable design decisions
+## Conditional fixed-stride design decisions
 
-These were settled at Task 124's activation and should not be re-derived.
+These apply only if the measurement phase selects fixed-stride relayout. They
+were settled at Task 124's activation and should not be re-derived without new
+evidence.
 
 ### 1. The mechanism is a fixed-stride relayout, not an offset table
 
@@ -117,7 +165,7 @@ expensive correctness obligation.
 
 Activation must nonetheless re-examine this against the code as it then
 stands, and must quantify the padding's cost: fixed stride means uploading
-slots for cells that emit nothing, so the byte volume of a *full* rebuild
+slots for cells that emit nothing, so the byte volume of a _full_ rebuild
 goes **up**. The design only pays if partial uploads are common enough to
 cover that. Measure both.
 
@@ -140,14 +188,14 @@ window transparency, and **no call-count test will catch it**. Use the pixel
 harness.
 
 Recorded because it was raised at 124's activation and is a natural idea:
-painting every cell the clear colour *including its alpha* does not work as
+painting every cell the clear colour _including its alpha_ does not work as
 a substitute for the clear either. With blending enabled an alpha-zero quad
 writes nothing and therefore does not erase stale pixels; disabling blending
 to force a replace breaks the image and shader compositing layers.
 
 ### 3. The clear stays
 
-`GlState::clear` (`freminal-windowing/src/gl_context.rs:350-357`) is two
+`GlState::clear` (`freminal-windowing/src/gl_context.rs:363-369`) is two
 zero-byte calls on a GPU fast-clear path, already skipped on partial frames
 behind a genuine `EGL_EXT_buffer_age` query
 (`egui_integration.rs:1195-1208`), with a real `eglSwapBuffersWithDamageKHR`
@@ -180,9 +228,18 @@ do not redo it.
 
 ## Open questions for activation
 
-- Does 124's residual justify this at all? See "The gate" above. Closing this
-  task is a legitimate outcome and should be reported as a result, not a
-  failure.
+- What exact Freminal configuration and competitor versions produce the
+  reported 0.1% versus 0.0% observation? Cursor blink, dimensions, font,
+  opacity, shell, tabs, panes, and workload must match.
+- Is the residual CPU work, GPU work, driver blocking, compositor/present
+  cost, or wake frequency? Existing wall-clock phase timers cannot answer all
+  five.
+- How often does each `VertexRebuild` outcome occur in real workloads, and
+  what is the changed-row-count distribution within `Bounded` frames?
+- What are live per-buffer upload bytes per frame, rather than synthetic
+  workload totals?
+- Does the fixed-stride candidate's active-workload benefit justify it? Closing
+  that branch is a legitimate result, not a failure.
 - What is the padding's measured cost on a full rebuild, and at what ratio of
   partial-to-full frames does the relayout break even?
 - Is `fg_instances` relayoutable in practice, given that glyph count per cell
@@ -197,6 +254,108 @@ do not redo it.
   regression against a property that is now pinned by
   `call_count_is_independent_of_grid_size`.
 - Which version carries this task.
+
+## Measurement-first activation scope
+
+The activation session decomposes these in order. Remediation subtasks are not
+invented until the findings gate closes.
+
+### 1. Controlled parity protocol
+
+Define reproducible Freminal, WezTerm, and Ghostty runs with matched window
+dimensions, font, shell, cursor mode, opacity, tab/pane topology, and workload.
+Record exact binary versions and renderer strings. Capture both blinking and
+steady cursor cases rather than comparing unlike defaults.
+
+The workload matrix must include:
+
+- true idle with a visible blinking cursor;
+- true idle with a steady cursor;
+- scripted typing and a single-row update;
+- a hidden-cursor TUI such as `btop`;
+- scrollback scrolling;
+- continuous PTY output;
+- pointer motion over inert terminal content; and
+- multiple tabs and panes with representative chrome.
+
+Use an external process-level instrument such as `perf stat` for comparable
+task-clock, user/system time, cycles, instructions, context switches, and
+wakeups. `btop` remains a product-level smoke indicator, not the attribution
+instrument. Always report frame rate and per-frame cost together.
+
+### 2. Live rebuild and upload attribution
+
+Extend the feature-gated profiling path to report:
+
+- `VertexRebuild::{CursorOnly, Bounded, ReevaluateFullRebuild}` counts;
+- the count of frames that reuse all prior vertex buffers;
+- a changed-row-count histogram for `Bounded` frames;
+- bytes uploaded per frame and per background, foreground, decoration,
+  image, and atlas buffer; and
+- frame outcome alongside upload volume, so `None`, cursor-only, sparse
+  bounded, dense bounded, and full work cannot be conflated.
+
+Default builds must retain zero instrumentation overhead. The counters observe
+already-computed values and do not alter damage or rendering decisions.
+
+### 3. CPU benchmark repair
+
+Replace the current foreground all-rows-versus-one-row comparison with a
+steady-state measurement whose glyph atlas is already populated, and measure
+atlas rasterisation separately. Add background corpora that quantify sparse,
+dense, and default-background-heavy emission so fixed-stride padding cost is
+visible. Preserve the existing benchmark IDs where their meaning remains
+accurate; use new IDs where it does not.
+
+### 4. Asynchronous GPU timing
+
+Add real-hardware GPU timing that separates, at minimum, buffer upload,
+terminal draw, chrome draw, and total GPU execution. OpenGL timer-query results
+must be polled on later frames; reading a query in the frame that issued it
+would introduce the stall being measured. Unsupported contexts report the
+capability as unavailable rather than changing behavior or carrying a second
+renderer path.
+
+The Task 123 recording harness continues to own deterministic call and byte
+accounting. The pixel harness continues to own output correctness. Neither is
+a substitute for real-GPU timing.
+
+### 5. Findings and remediation gate
+
+Record the parity matrix and attribute each material gap. For every candidate,
+report expected benefit, measured ceiling, implementation complexity,
+correctness risk, portability limits, and verification method. Then choose and
+decompose only the supported remediation branches.
+
+Candidates explicitly on the table include:
+
+- bypassing most of the egui/chrome frame path for cursor-only redraws;
+- caching retained chrome output while preserving current-frame hit testing;
+- decoupling cursor blink rendering from full UI reconstruction;
+- fixed-stride per-row uploads;
+- CPU-side incremental row vertex construction;
+- mapped or persistent GPU buffers with capability-based fallbacks;
+- further scheduling and unnecessary-wakeup elimination; and
+- presentation/compositor changes where the platform APIs expose a real lever.
+
+Changing the default cursor from blinking to steady may alter the headline
+idle number, but it is a product-default decision, not a performance
+remediation, and may not be used to conceal blinking-cursor cost.
+
+## Decision gates
+
+- **Idle/chrome branch:** proceed only if matched blinking-cursor captures
+  attribute a material competitor gap to Freminal's UI pass or presentation
+  path.
+- **Fixed-stride branch:** proceed only if live sparse `Bounded` frames are
+  common enough that saved CPU work and upload bytes exceed the measured
+  padding cost on dense/full rebuilds.
+- **Persistent-buffer branch:** proceed only if GPU timing attributes material
+  cost to upload/driver synchronization and a safe capability fallback is
+  available on supported platforms.
+- **Accept residual:** allowed only when the gap is measured, explained, and
+  either shared by peers under matched conditions or smaller than every safe
+  remediation's demonstrated cost/risk.
 
 ---
 
@@ -218,14 +377,18 @@ Additionally mandatory for this task specifically:
 - A before/after capture per `performance-benchmarks` and
   `freminal-bench-table`, reported in **bytes** as well as calls, per Task
   123's correction to the cost model.
+- Matched external process-level captures for Freminal, WezTerm, and Ghostty
+  on the target laptop for every remediation claiming parity benefit.
+- Real-GPU timing on supported hardware for changes justified by GPU or driver
+  cost. llvmpipe remains a correctness harness and must not be reported as
+  hardware performance evidence.
 
 ---
 
 ## References
 
-- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — the damage-model task that
-  produces the per-row dirty signal this task consumes, and the gate this
-  task waits behind.
+- `Documents/PLAN_124_RENDER_EFFICIENCY.md` — the completed damage-model task
+  that produces the per-row dirty signal this task can consume.
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — the measurement harnesses
   and the per-workload cost table quoted throughout.
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — closed; the source of the
