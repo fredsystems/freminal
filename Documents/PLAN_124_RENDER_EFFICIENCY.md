@@ -174,12 +174,12 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | **Complete** — `3de34651` |
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
-| 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | Planned — mechanical rename; never fold into 124.14a |
+| 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | **Complete** — renamed to `PaneDamageRect`, `7e63bb8c` |
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
 | 124.14b | Bound `selection_changed` (b-i) and `hover_changed` (b-ii) | **Complete** — `edf9e017`, `284ce253`; gutter hazard disproved |
 | 124.14c | Stop a busy pane forcing full damage on unchanged siblings | **Complete** — `058c2627` |
 | 124.14d | Bound search highlights and the search overlay | **Complete** — `ab275052` |
-| 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | Planned |
+| 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | **Complete** — isolated search flatten, `c77047bd` |
 
 ### Execution model
 
@@ -3194,15 +3194,21 @@ transform is how these go wrong.
 
 *Deferred from 124.14a's design, 2026-08-24. Cleanup entry.*
 
-`PaneFrameDamage::Region` reuses `CursorDamage` (`renderer/mod.rs:129-139`)
-as its rect type, so the name now describes one of its two users. A rename
-to a neutral name is purely mechanical across `renderer/mod.rs`,
-`frame_damage.rs` and `widget.rs`.
+**Complete (2026-08-25), commit `7e63bb8c`.** `CursorDamage` is now
+`PaneDamageRect` across the renderer, frame aggregation, widget, search-overlay
+damage state, tests, and the damage-model skill. The existing
+`from_cursor_cells` coordinate transform and all rectangle semantics are
+unchanged; this was an isolated nominal refactor.
 
-Held back deliberately rather than folded into 124.14a: a rename inflates a
-behaviour diff and the review risk in 124.14a is concentrated in the
-coordinate transform and the damage aggregation, which a rename would bury.
-Take it as its own commit, before or after 124.14a, never inside it.
+Before this cleanup, `PaneFrameDamage::Region` reused `CursorDamage` as its
+rect type, so the name described only one of its users. The current call-site
+inventory also includes search-overlay damage and app-level tests added after
+this entry was written; all were renamed mechanically in the same commit.
+
+It was held back deliberately rather than folded into 124.14a: a rename
+inflates a behaviour diff and the review risk in 124.14a is concentrated in
+the coordinate transform and the damage aggregation, which a rename would
+bury. It therefore landed as its own commit after 124.14a.
 
 #### 124.14b recon (2026-08-24) — the subtask splits in two
 
@@ -3602,10 +3608,10 @@ pre-commit hook suite; the skill's frontmatter `name` field matches its
 containing folder name (`freminal-damage-model`), satisfying the shared
 skill-authoring convention.
 
-**124.C3, 124.C6, and 124.C7 remain maintainer-approval-gated and were not
-touched by this entry.** Task 124's overall completion still awaits the
-maintainer's disposition of those three cleanup entries; this entry closes
-124.22 only.
+**At 124.22's completion, 124.C3, 124.C6, and 124.C7 remained
+maintainer-approval-gated and were not touched by that entry.** The maintainer
+subsequently closed C3 unexecuted and approved C6 and C7; both implementations
+are now complete.
 
 ### 124.C5 — Inline image placement is invisible to the row epoch
 
@@ -3747,3 +3753,18 @@ This is the sticky-full-rebuild-every-frame class that 124.10-124.12 exists
 to eliminate, reintroduced by one specific interaction. Related to 124.C3
 (both are `merge_cache` eviction), but distinct: C3 is alt-screen round
 trips costing one rebuild each; this recurs every frame until broken.
+
+#### 124.C6 implementation notes (2026-08-25)
+
+**Complete, commit `c77047bd`.** Search now flattens the normal visible window
+through `Buffer::visible_as_tchars_and_tags_full_merge`, which reuses the
+existing per-row caches but neither reads nor replaces the snapshot path's
+`merge_cache` and does not mint row epochs. No additional persistent cache or
+state was added.
+
+The regression test establishes a fold-extended snapshot window, requests a
+search corpus, and proves repeated idle snapshots retain identical row epochs.
+It then edits one visible row without changing the window and proves exactly
+that row's epoch changes. A buffer-level test independently proves the search
+flatten leaves the extended-window merge cache allocation and fingerprint
+untouched while producing the same visible content as the ordinary flatten.
