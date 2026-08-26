@@ -438,8 +438,10 @@
                 pkgs.cargo-msrv
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                pkgs.amdgpu_top
                 pkgs.perf
                 pkgs.fish
+                pkgs.wtype
                 # Windows cross-check toolchain (see `windowsCheck`). Linux-only,
                 # `default`-shell-only — the `ci` shell never gets these.
                 windowsCheck.toolchain
