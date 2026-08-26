@@ -227,12 +227,24 @@ echo "${LIBGL_ALWAYS_SOFTWARE:-<unset>}"   # must print <unset>
 
 If it prints `1`, you are in `gl-pixel` (or a stale shell predating the
 123.C2 fix). Re-enter `nix develop` / `direnv reload`, or launch with
-`env -u LIBGL_ALWAYS_SOFTWARE`. A quick confirmation that a live process is
-on the GPU:
+`env -u LIBGL_ALWAYS_SOFTWARE`.
 
-```bash
-ls /proc/<pid>/task/*/comm | xargs cat | grep -c llvmpipe   # must be 0
+That environment-variable check is only a quick guard, not confirmation --
+it says what freminal *asked for*, not what it *got*. The actual
+confirmation is the startup log line every `freminal` process emits once
+its GL context is current (`freminal-windowing`'s `GlState::new`):
+
+```text
+Active OpenGL renderer: <string>
 ```
+
+Inspect that exact line (`RUST_LOG` at `info` or above reaches it, and it
+also lands in the rolling log file described under Tier 1 above). Reject
+the run as software-rendered if `<string>` contains `llvmpipe`, `softpipe`,
+or `swrast` -- Mesa's three CPU rasterisers -- and re-check the environment
+above. Do not infer the rasteriser from `/proc` thread names; the log line
+is the authoritative source and needs no additional tooling beyond what is
+already in the dev shells.
 
 This is not a hypothetical footgun. It shipped in the `default` shell from
 `2d917ffc` until 2026-08-23, was reported as a product CPU regression, and

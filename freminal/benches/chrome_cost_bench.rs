@@ -59,7 +59,7 @@ fn run_chrome_frame(
         ..Default::default()
     };
 
-    let full = ctx.run_ui(raw_input, |root_ui| {
+    let mut full = ctx.run_ui(raw_input, |root_ui| {
         egui::Panel::top("menu_bar").show(root_ui, |ui| {
             ui.horizontal(|ui| {
                 for name in ["File", "Edit", "View", "Terminal", "Help"] {
@@ -87,6 +87,11 @@ fn run_chrome_frame(
         });
     });
 
+    // No painter here, so the egui 0.36 `TexturesDelta` drop-bomb (#8356)
+    // must be defused explicitly -- see A2 in EGUI_UPGRADE_ASSUMPTIONS.md,
+    // and `render_loop_bench.rs`'s `bench_chrome_frame_record` for the same
+    // convention.
+    full.textures_delta.clear();
     full.shapes
 }
 

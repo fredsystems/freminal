@@ -390,11 +390,14 @@ fn a_full_atlas_upload_consumes_the_dirty_rects_it_already_covered() {
 
     // The paired control: frame 1 genuinely does more work than frame 2, so
     // the assertion above is not the degenerate "every frame is identical".
+    // Compared like-for-like against `frame_two_uploads` (an upload-only
+    // delta) rather than `one.total` (which also counts draws and state
+    // changes) -- the two are not the same unit.
     assert!(
-        one.total > frame_two_uploads,
-        "frame 1 should still carry the one-off full-upload and setup cost \
-         ({} total calls) that later frames do not",
-        one.total
+        one.uploads > frame_two_uploads,
+        "frame 1 should still carry the one-off full-upload cost \
+         ({} upload calls) that later frames do not",
+        one.uploads
     );
     assert!(
         two.total < one.total * 2,

@@ -123,7 +123,17 @@ impl PixelFrame {
     }
 }
 
-/// Render `frame` into a fresh offscreen context and capture the result.
+/// Shared setup for every pixel-capture entry point below: size the
+/// viewport from `frame`, create a fresh offscreen GL context, wrap it in
+/// a [`Gl`] just long enough to run `driver.init`, and hand back the
+/// initialized driver alongside the still-live offscreen context.
+///
+/// This returns `(HeadlessRenderer, OffscreenGl, u32, u32)` rather than an
+/// already-wrapped [`Gl`], because `Gl::real` borrows the [`OffscreenGl`]
+/// it wraps (`Gl::real(off.gl())`) — a `Gl` tied to a local `off` cannot
+/// outlive this function's return. Callers construct their own
+/// `Gl::real(off.gl())` immediately after calling this, once `off` lives in
+/// their own stack frame.
 ///
 /// A new context per call is deliberate: it makes each capture independent,
 /// so a test cannot be polluted by GL state a previous one left behind, and
@@ -135,7 +145,9 @@ impl PixelFrame {
 /// [`PixelHarnessError::NoContext`] when no GL context is available (skip,
 /// do not fail); [`PixelHarnessError::Driver`] for font or GL-init
 /// failures; [`PixelHarnessError::InvalidSize`] for a degenerate frame.
-pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> {
+fn setup_capture(
+    frame: &SyntheticFrame,
+) -> Result<(HeadlessRenderer, OffscreenGl, u32, u32), PixelHarnessError> {
     // The driver touches no GL in `new`, so it can be asked for the
     // viewport size before a context exists to size the pbuffer to match.
     let mut driver = HeadlessRenderer::new()?;
@@ -146,9 +158,25 @@ pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> 
     };
 
     let off = OffscreenGl::new(width, height)?;
+    {
+        let gl = Gl::real(off.gl());
+        driver.init(&gl)?;
+    }
+
+    Ok((driver, off, width, height))
+}
+
+/// Render `frame` into a fresh offscreen context and capture the result.
+///
+/// # Errors
+///
+/// [`PixelHarnessError::NoContext`] when no GL context is available (skip,
+/// do not fail); [`PixelHarnessError::Driver`] for font or GL-init
+/// failures; [`PixelHarnessError::InvalidSize`] for a degenerate frame.
+pub fn capture(frame: &SyntheticFrame) -> Result<PixelFrame, PixelHarnessError> {
+    let (mut driver, off, width, height) = setup_capture(frame)?;
     let gl = Gl::real(off.gl());
 
-    driver.init(&gl)?;
     driver.draw_frame(&gl, frame);
 
     Ok(read_back(off.gl(), width, height))
@@ -176,17 +204,9 @@ pub fn capture_after_cursor_only_frames(
     frame: &SyntheticFrame,
     cursor_only_frames: usize,
 ) -> Result<PixelFrame, PixelHarnessError> {
-    let mut driver = HeadlessRenderer::new()?;
-    let (vp_w, vp_h) = driver.viewport_px(frame);
-    let (width, height) = match (u32::try_from(vp_w), u32::try_from(vp_h)) {
-        (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-        _ => return Err(PixelHarnessError::InvalidSize(vp_w, vp_h)),
-    };
-
-    let off = OffscreenGl::new(width, height)?;
+    let (mut driver, off, width, height) = setup_capture(frame)?;
     let gl = Gl::real(off.gl());
 
-    driver.init(&gl)?;
     driver.draw_frame(&gl, frame);
     for _ in 0..cursor_only_frames {
         driver.draw_cursor_only(&gl, frame);
@@ -218,17 +238,9 @@ pub fn capture_scissored_overdraw(
     second: &SyntheticFrame,
     scissor: (i32, i32, i32, i32),
 ) -> Result<(PixelFrame, PixelFrame), PixelHarnessError> {
-    let mut driver = HeadlessRenderer::new()?;
-    let (vp_w, vp_h) = driver.viewport_px(first);
-    let (width, height) = match (u32::try_from(vp_w), u32::try_from(vp_h)) {
-        (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-        _ => return Err(PixelHarnessError::InvalidSize(vp_w, vp_h)),
-    };
-
-    let off = OffscreenGl::new(width, height)?;
+    let (mut driver, off, width, height) = setup_capture(first)?;
     let gl = Gl::real(off.gl());
 
-    driver.init(&gl)?;
     driver.draw_frame(&gl, first);
     let before = read_back(off.gl(), width, height);
 
@@ -262,17 +274,11 @@ pub fn capture_scissored_overdraw(
 pub fn capture_with_full_viewport_scissor(
     frame: &SyntheticFrame,
 ) -> Result<PixelFrame, PixelHarnessError> {
-    let mut driver = HeadlessRenderer::new()?;
-    let (vp_w, vp_h) = driver.viewport_px(frame);
-    let (width, height) = match (u32::try_from(vp_w), u32::try_from(vp_h)) {
-        (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
-        _ => return Err(PixelHarnessError::InvalidSize(vp_w, vp_h)),
-    };
-
-    let off = OffscreenGl::new(width, height)?;
+    let (mut driver, off, width, height) = setup_capture(frame)?;
     let gl = Gl::real(off.gl());
+    let vp_w = width.value_as::<i32>().unwrap_or(0);
+    let vp_h = height.value_as::<i32>().unwrap_or(0);
 
-    driver.init(&gl)?;
     unsafe {
         off.gl().enable(glow::SCISSOR_TEST);
         off.gl().scissor(0, 0, vp_w, vp_h);

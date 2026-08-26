@@ -285,6 +285,17 @@ impl GlState {
             glow::Context::from_loader_function_cstr(|name| gl_display.get_proc_address(name))
         });
 
+        // Log the actual active OpenGL renderer at startup. This is the
+        // authoritative way to confirm whether a session is hardware- or
+        // software-accelerated -- see `PROFILING.md`'s reporting-discipline
+        // section, which reads this exact line rather than inferring the
+        // rasteriser from `/proc` thread names.
+        // SAFETY: `glow_context` was just created above and `context` was
+        // made current on `surface` immediately before it, so a GL context
+        // is current on this thread for this `get_parameter_string` call.
+        let renderer_string = unsafe { glow_context.get_parameter_string(glow::RENDERER) };
+        tracing::info!("Active OpenGL renderer: {renderer_string}");
+
         // Probe optional EGL partial-present support. Absent on GLX / WGL and
         // on EGL displays that do not advertise the damage extension; in all
         // those cases we fall back to a full `swap_buffers`. On Apple
