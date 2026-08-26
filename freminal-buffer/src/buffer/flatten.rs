@@ -616,6 +616,75 @@ impl Buffer {
         )
     }
 
+    /// Task 124.C6: flatten the **normal** visible window (`extra_rows ==
+    /// 0`, i.e. exactly the bounds [`Self::visible_window_bounds`] returns
+    /// for `extra_rows = 0`) using the same full per-row-cache merge
+    /// machinery as
+    /// [`Self::rows_as_tchars_and_tags_cached`], but WITHOUT reading or
+    /// replacing [`Buffer::merge_cache`] and WITHOUT minting any
+    /// [`Buffer::row_epoch_counter`] stamps. That no-merge-cache,
+    /// no-epoch contract is the entire reason this method exists, so it is
+    /// load-bearing — do not "optimize" this into a call to
+    /// [`Self::visible_as_tchars_and_tags_extended`] or
+    /// [`Self::visible_row_epochs`].
+    ///
+    /// ## Why a caller would want this instead of the cached path
+    ///
+    /// [`Self::visible_as_tchars_and_tags_extended`] (via
+    /// [`Self::visible_as_tchars_and_tags_extended_arc`]) is the hot
+    /// per-frame snapshot path, and it is keyed on a [`MergeWindowFp`] that
+    /// includes `extra_rows`: the GUI's `build_snapshot` calls it with a
+    /// non-zero `extra_rows` whenever a command-block fold is open, to pull
+    /// extra real rows above the normal window. Every call to that method
+    /// stores its result into `merge_cache` unconditionally — fast path,
+    /// slow path, or no-op path alike. A second, differently-windowed
+    /// caller of it — such as a search corpus builder that always wants the
+    /// plain `extra_rows == 0` window regardless of the GUI's current fold
+    /// state — therefore misses the cached fingerprint, takes the fallback,
+    /// and replaces `merge_cache` with its own window.
+    ///
+    /// The GUI's per-frame chars/tags path (`interface.rs`'s
+    /// `flatten_visible`) tolerates this: it only re-invokes the incremental
+    /// merge when a visible row is actually dirty, and otherwise reuses its
+    /// own separate snapshot-level cache without ever consulting
+    /// `merge_cache`. [`Self::visible_row_epochs`], however, reads
+    /// `merge_cache`'s fingerprint on *every* call regardless of dirtiness,
+    /// and its fallback for a mismatch is to mint an entirely fresh,
+    /// never-repeated epoch stamp for every row in the window — without
+    /// writing anything back into `merge_cache`. So a single off-window call
+    /// is enough to leave `merge_cache` pointing at the wrong fingerprint
+    /// indefinitely: every subsequent idle snapshot's `visible_row_epochs`
+    /// call keeps missing that same fingerprint and keeps minting a brand
+    /// new set of throwaway epochs, with nothing repairing `merge_cache`
+    /// until a genuinely dirty row drives a fresh
+    /// `visible_as_tchars_and_tags_extended_arc` call for the correct
+    /// window. No second off-window call is required to keep this going.
+    /// This method sidesteps the whole failure mode by never touching
+    /// `merge_cache` (or the epoch counter) at all.
+    ///
+    /// Any future caller that needs the plain visible window's content
+    /// without being the snapshot path's own incremental-merge consumer
+    /// should use this method rather than
+    /// [`Self::visible_as_tchars_and_tags_extended`], for the same reason.
+    #[must_use]
+    pub fn visible_as_tchars_and_tags_full_merge(
+        &mut self,
+        scroll_offset: usize,
+    ) -> (Vec<TChar>, Vec<FormatTag>, Vec<usize>, Vec<usize>) {
+        let (visible_start, visible_end) = self.visible_window_bounds(scroll_offset, 0);
+        // Task 119: mirrors the decompress-before-read step in
+        // `visible_as_tchars_and_tags_extended_arc` — a nonzero
+        // `scroll_offset` can pull compressed scrollback rows into this
+        // window.
+        self.ensure_decompressed(visible_start..visible_end);
+        let auto_detect = self.auto_detect_urls;
+        Self::rows_as_tchars_and_tags_cached(
+            &mut self.rows[visible_start..visible_end],
+            &mut self.row_cache[visible_start..visible_end],
+            auto_detect,
+        )
+    }
+
     /// Task 124.10: the per-row content epoch for each row in the visible
     /// window, one entry per row, top-to-bottom.
     ///
@@ -2194,6 +2263,7 @@ fn splice_auto_urls(tags: &[FormatTag], ranges: &[AutoUrlRange]) -> Vec<FormatTa
 mod extended_window_tests {
     use crate::buffer::Buffer;
     use freminal_common::buffer_states::tchar::TChar;
+    use std::sync::Arc;
 
     fn t(s: &str) -> Vec<TChar> {
         s.chars().map(TChar::from).collect()
@@ -2282,6 +2352,78 @@ mod extended_window_tests {
         assert!(
             !buf.any_visible_dirty_extended(0, 2),
             "freshly flattened extended window must be clean"
+        );
+    }
+
+    /// Task 124.C6: [`Buffer::visible_as_tchars_and_tags_full_merge`] must
+    /// (a) produce exactly the same content as the ordinary visible flatten,
+    /// and (b) leave a previously-populated **extended-window** `merge_cache`
+    /// completely untouched — same fingerprint, same underlying `Arc`
+    /// allocations, not merely equal content.
+    ///
+    /// The buffer used here has an "open fold"-equivalent `merge_cache`:
+    /// populated with `extra_rows == 2`, i.e. a different window than the
+    /// plain `extra_rows == 0` window `visible_as_tchars_and_tags_full_merge`
+    /// always requests. Before the fix, any method that flattened the plain
+    /// window through the incremental/cached path would overwrite this
+    /// cache with a mismatched fingerprint; this test proves the new method
+    /// does not.
+    #[test]
+    fn full_merge_matches_ordinary_flatten_and_leaves_merge_cache_untouched() {
+        let mut buf = buffer_with_scrollback();
+
+        // Warm merge_cache with an EXTENDED window (extra_rows = 2) — this
+        // stands in for a GUI-side open command-block fold.
+        let _ = buf.visible_as_tchars_and_tags_extended(0, 2);
+        let cached = buf
+            .merge_cache
+            .as_ref()
+            .expect("extended flatten must populate merge_cache");
+        let fp_before = cached.fp;
+        let chars_before = Arc::clone(&cached.chars);
+        let tags_before = Arc::clone(&cached.tags);
+        let row_offsets_before = Arc::clone(&cached.row_offsets);
+        let url_tag_indices_before = Arc::clone(&cached.url_tag_indices);
+
+        // The new method requests the plain (extra_rows == 0) window —
+        // deliberately a different window than the cache above holds.
+        let full_merge_result = buf.visible_as_tchars_and_tags_full_merge(0);
+
+        // merge_cache must be byte-for-byte, allocation-for-allocation the
+        // exact same object as before this call: not read, not replaced.
+        let cached_after = buf
+            .merge_cache
+            .as_ref()
+            .expect("visible_as_tchars_and_tags_full_merge must not clear merge_cache");
+        assert_eq!(
+            fp_before, cached_after.fp,
+            "visible_as_tchars_and_tags_full_merge must not change merge_cache's fingerprint"
+        );
+        assert!(
+            Arc::ptr_eq(&chars_before, &cached_after.chars),
+            "merge_cache.chars must be the same allocation — full_merge must not replace it"
+        );
+        assert!(
+            Arc::ptr_eq(&tags_before, &cached_after.tags),
+            "merge_cache.tags must be the same allocation — full_merge must not replace it"
+        );
+        assert!(
+            Arc::ptr_eq(&row_offsets_before, &cached_after.row_offsets),
+            "merge_cache.row_offsets must be the same allocation — full_merge must not replace it"
+        );
+        assert!(
+            Arc::ptr_eq(&url_tag_indices_before, &cached_after.url_tag_indices),
+            "merge_cache.url_tag_indices must be the same allocation — full_merge must not replace it"
+        );
+
+        // Content must match the ordinary (extra_rows == 0) flatten exactly.
+        // This call is made AFTER the stability assertions above since it
+        // legitimately overwrites merge_cache with the extra_rows == 0
+        // fingerprint.
+        let ordinary_result = buf.visible_as_tchars_and_tags(0);
+        assert_eq!(
+            full_merge_result, ordinary_result,
+            "visible_as_tchars_and_tags_full_merge must match the ordinary visible flatten"
         );
     }
 }

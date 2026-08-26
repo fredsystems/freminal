@@ -882,12 +882,33 @@ impl TerminalEmulator {
         // `merge_cache` without dirtying a row.
         //
         // The non-obvious way to break this: `merge_cache` holds one window,
-        // so any *other* caller of `Buffer::visible_as_tchars_and_tags*` on
-        // this buffer overwrites it. Today the only one is
-        // `TerminalHandler::search_corpus` (Ctrl-F), which is occasional and
-        // costs a single spurious full repaint. A per-frame caller using a
-        // different window would silently defeat this and every downstream
-        // damage optimisation with it.
+        // a differently-windowed call to
+        // `Buffer::visible_as_tchars_and_tags_extended*` misses that
+        // fingerprint, takes the full-merge fallback, and replaces the cache.
+        // `TerminalHandler::search_corpus` (Ctrl-F) used to be exactly such a
+        // caller (Task 124.C6): it always requested the plain `extra_rows ==
+        // 0` window regardless of this snapshot path's fold state, so a single
+        // search replaced `merge_cache` with the mismatched window.
+        // `flatten_visible` above tolerates that —
+        // it only re-invokes the incremental merge when a row is dirty, and
+        // otherwise reuses its own separate `previous_visible_snap` cache
+        // without consulting `merge_cache` at all — but `visible_row_epochs`
+        // does not: it checks `merge_cache`'s fingerprint on every call, and
+        // its mismatch fallback mints a throwaway fresh epoch stamp for
+        // every row without writing anything back. So the one mismatched
+        // write was enough to make every subsequent *idle* snapshot's
+        // `visible_row_epochs` call keep missing and keep minting a brand
+        // new, unstable set of epochs — indefinitely, with no second search
+        // required — until a genuinely dirty row drove a fresh
+        // `visible_as_tchars_and_tags_extended*` call for the correct window
+        // and repaired `merge_cache`. `search_corpus` now calls
+        // `visible_as_tchars_and_tags_full_merge`, which never reads or
+        // writes `merge_cache`, so it no longer participates in this hazard
+        // at all. The warning still stands for any *other* future caller: a
+        // per-frame (or otherwise differently-windowed) caller of the
+        // incremental `visible_as_tchars_and_tags_extended*` path would
+        // silently defeat this and every downstream damage optimisation
+        // with it.
         let row_epochs: Arc<[u64]> = Arc::from(
             self.internal
                 .handler
@@ -1305,6 +1326,125 @@ mod tests {
             snap1.row_epochs, snap2.row_epochs,
             "terminal resize should invalidate the visible snap cache and \
              re-stamp row_epochs"
+        );
+    }
+
+    #[test]
+    fn search_corpus_over_open_fold_does_not_thrash_idle_row_epochs() {
+        // Task 124.C6 regression: `search_corpus` used to flatten the visible
+        // window via the incremental/cached merge path with `extra_rows ==
+        // 0`, always. When the GUI's snapshot path had a command-block fold
+        // open (`extra_rows > 0`), that search overwrote
+        // `freminal_buffer::Buffer::merge_cache` with a mismatched
+        // fingerprint: that differently-windowed call missed the cached
+        // fingerprint, took the full-merge fallback, and replaced the cache.
+        // The GUI's own chars/tags path tolerates a
+        // stale `merge_cache` — it only re-invokes the incremental merge when
+        // a visible row is dirty, otherwise it reuses its own separate
+        // snapshot-level cache — but `visible_row_epochs` checks
+        // `merge_cache`'s fingerprint on every call regardless of dirtiness,
+        // and its mismatch fallback mints a fresh, unstable epoch stamp for
+        // every row without writing anything back. So the single mismatched
+        // write left every subsequent *idle* snapshot minting a brand new set
+        // of throwaway epochs, forever, with no second search required.
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        let _ = emu.set_win_size(10, 5, 8, 16);
+
+        // Enough scrollback that an "open fold" extra-rows request actually
+        // has real rows above the normal window to pull from.
+        for i in 0..20 {
+            emu.handle_incoming_data(format!("row{i}\r\n").as_bytes());
+        }
+
+        // Simulate an open command-block fold: request 3 extra rows above
+        // the normal visible window, then establish a baseline snapshot.
+        emu.set_requested_scroll_window(0, 3);
+        let baseline = emu.build_snapshot();
+        assert!(
+            baseline.window_extra_rows > 0,
+            "test setup must produce a nonzero effective extra-rows window \
+             (open-fold-equivalent), got {}",
+            baseline.window_extra_rows
+        );
+
+        // Run a search over the plain `extra_rows == 0` window. Before the
+        // fix this used `Buffer::visible_as_tchars_and_tags`, which reads and
+        // replaces `merge_cache`.
+        let _ = emu.internal.handler.search_corpus(0);
+
+        // Two subsequent idle snapshots — no new PTY data, no scroll/fold
+        // change in between — must retain byte-identical row_epochs. Neither
+        // call below touches `handle_incoming_data`, `set_requested_scroll_window`,
+        // or anything else that would legitimately invalidate the cache, so
+        // any change here can only be the bug's fingerprint-thrash.
+        let idle1 = emu.build_snapshot();
+        assert_eq!(
+            baseline.row_epochs, idle1.row_epochs,
+            "search_corpus must not disturb idle row_epochs (first idle \
+             snapshot after search)"
+        );
+
+        // Run a second search to prove this isn't a one-shot coincidence —
+        // the old bug reproduced on every subsequent idle snapshot, not just
+        // the first one after a search.
+        let _ = emu.internal.handler.search_corpus(0);
+        let idle2 = emu.build_snapshot();
+        assert_eq!(
+            idle1.row_epochs, idle2.row_epochs,
+            "search_corpus must not disturb idle row_epochs (second idle \
+             snapshot after a second search)"
+        );
+
+        // Control: prove epochs are not frozen outright — a genuine content
+        // change must still bump them. Mutate exactly one visible row
+        // directly through the public `Buffer` API (`set_cursor_pos` +
+        // `insert_text`) rather than `handle_incoming_data`, so the fold
+        // window (`extra_flatten_rows`) is left completely undisturbed —
+        // `handle_incoming_data` would reset it and change the flatten
+        // window's row count, which would make a row_epochs difference prove
+        // geometry changed rather than content. Screen row 0 is the top of
+        // the *plain* visible window; it lies inside the fold-extended
+        // window too (the extra fold rows sit strictly above it), so this
+        // keeps the exact same window as `idle2`.
+        {
+            let buffer = emu.internal.handler.buffer_mut();
+            buffer.set_cursor_pos(Some(0), Some(0));
+            buffer.insert_text(&[TChar::from('Z')]);
+        }
+        let mutated = emu.build_snapshot();
+
+        assert_eq!(
+            mutated.window_extra_rows, idle2.window_extra_rows,
+            "the fold window must be unchanged by this in-place content edit"
+        );
+        assert!(
+            mutated.window_extra_rows > 0,
+            "the fold window must still be open for this control to be meaningful"
+        );
+        assert_eq!(
+            mutated.row_epochs.len(),
+            idle2.row_epochs.len(),
+            "row count must be unchanged by a same-window content edit"
+        );
+
+        let differing: Vec<usize> = idle2
+            .row_epochs
+            .iter()
+            .zip(mutated.row_epochs.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            differing.len(),
+            1,
+            "editing exactly one visible row's content must bump exactly \
+             one row's epoch; differing indices: {differing:?}"
+        );
+        assert_eq!(
+            differing[0], mutated.window_extra_rows,
+            "the changed epoch must be at window position `window_extra_rows` \
+             — the top of the plain visible window, where the edit landed"
         );
     }
 
