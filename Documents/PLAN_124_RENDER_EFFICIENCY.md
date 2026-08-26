@@ -172,7 +172,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned — maintainer has not decided whether to execute |
 | 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
-| 124.22 | `freminal-damage-model` agent skill | Planned — write after 124.14 |
+| 124.22 | `freminal-damage-model` agent skill | **Complete** — `3de34651` |
 | 124.C5 | Inline image placement is invisible to the row epoch | **Complete** — gate on 124.14a lifted for placement, see below |
 | 124.C7 | `CursorDamage` is a misnomer once `Region` carries it | Planned — mechanical rename; never fold into 124.14a |
 | 124.23 | The full-draw paint arm ignores the published present region | **Complete** — 124.14 unblocked; two residual gaps recorded |
@@ -3503,7 +3503,8 @@ is the next maintainer-set task.
 
 ### 124.22 — `freminal-damage-model` agent skill
 
-**Planned.** *Requested by the maintainer during 124.21.*
+**Complete (2026-08-25). `3de34651`.** *Requested by the maintainer during
+124.21.*
 
 Codify the rule that a full-surface repaint is a last resort, so future work
 does not silently re-add unbounded damage. The skill fires when adding or
@@ -3520,8 +3521,81 @@ invariant from 124.20; and the rule that bounding a trigger whose extent is
 not provably complete is silent visual corruption, so `GLOBAL` is the safe
 default *only* when the extent genuinely cannot be established.
 
-Should be written after 124.14 lands, so it codifies the shipped model
-rather than the intended one.
+Written after 124.14 landed, so it codifies the shipped model rather than
+the intended one. `.opencode/skills/freminal-damage-model/SKILL.md` landed,
+and `agents.md`'s skill table was updated to register it.
+
+#### 124.22 implementation notes (2026-08-25)
+
+The skill's ten sections carry the durable content, not a restatement of
+124's narrative:
+
+- **Section 1, the classification rule.** Every new or changed trigger must
+  state GLOBAL / BOUNDABLE-NOW / BOUNDABLE-WITH-WORK, and a current `Full`
+  fallback is explicitly *not* proof of GLOBAL — several audited triggers
+  are `BOUNDABLE-WITH-WORK` and only unbounded because the geometry was
+  never built, so the skill forbids canonising that debt as GLOBAL.
+- **Section 2, the eight genuinely-global categories** from the 124.21
+  audit (theme change, resize, `ChangedRows::All`, empty prior
+  decoration/vertex state, degenerate cursor damage, shader recomposites,
+  chrome style/size/ppp change, and unrepresentable windowing history),
+  each with why no bounded region suffices, plus the explicit warning that
+  this is a category list, not license to leave every other `BOUNDABLE`
+  trigger unbounded forever.
+- **Section 3, the shipped flow**: `PaneFrameDamage` (per pane) ->
+  `decide_frame_damage` -> `FrameDamage` -> `compose_with_chrome_damage` ->
+  windowing's `DamageHistory`/`PresentRegion`. Carries the monotonic-toward-
+  `Full` precedence rule, that damage is not final until after chrome
+  composition, and that `FrameDamage::None` is never pushed into
+  `DamageHistory`.
+- **Section 4, multi-pane fan-out**: any pane reporting `Full`,
+  `CursorOnly(None)`, or an active bell flash discards every rect already
+  collected from sibling panes for that frame; 124.14c's fix (a boundable
+  busy pane reports its own region rather than forcing `Full`) must not be
+  regressed.
+- **Section 5, the one-region invariant** from 124.20/124.23: the exact
+  `PresentRegion` windowing publishes governs clip, clear, draw, *and*
+  present together — never derive a second, app-local scissor from a
+  frame's own declared damage, since `DamageHistory`'s buffer-age union can
+  make the published region wider than this frame's own damage.
+- **Section 6, the complete-bound rule**: bounded damage must cover the
+  union of old and new extents, not just the new one; under-reporting is
+  silent corruption while over-reporting is only wasted work, so `Full` is
+  the safe fallback when completeness can't be proven.
+- **Section 7, coordinate/representation constraints**: damage rects are
+  physical framebuffer pixels in bottom-left-origin `glScissor` convention,
+  reuse `CursorDamage::from_cursor_cells` rather than hand-rolling a second
+  transform, damage state must be a named domain enum per
+  `freminal-state-representation`, and `DefaultBackground` means "leave
+  these pixels untouched" — a constraint a call-count test cannot verify,
+  only the pixel harness can.
+- **Section 8, the Task 125 boundary**: `Region`/`Bounded` bound the
+  present (clear/draw/present), not the vertex upload — a `Bounded` frame
+  still runs a full vertex rebuild and writes the whole instance buffer,
+  and the skill forbids touching `upload_verts` or the vertex emission
+  format from a damage change.
+- **Section 9, the review checklist**, and **section 10, stop triggers**
+  (classifying GLOBAL without justification, a bound crossing the
+  terminal/chrome ownership split without prior authorization, hand-rolling
+  a coordinate transform, shipping an unproven bound, weakening a `Full`
+  fallback, touching Task 125's territory, a pixel harness that can't reach
+  the change, and terminal-semantics ambiguity per `agents.md`).
+
+**Verification performed:** the new skill file was run through
+`markdownlint-cli2` and produced zero local findings. Adding the new row
+to `agents.md`'s skill table did not introduce any new MD060
+(table-column-width) issue — the repository's markdownlint config already
+reports seven pre-existing local findings in `agents.md` unrelated to this
+change, and that count did not increase. The actual pre-commit
+`markdownlint` hook passed on the commit, as did the rest of the
+pre-commit hook suite; the skill's frontmatter `name` field matches its
+containing folder name (`freminal-damage-model`), satisfying the shared
+skill-authoring convention.
+
+**124.C3, 124.C6, and 124.C7 remain maintainer-approval-gated and were not
+touched by this entry.** Task 124's overall completion still awaits the
+maintainer's disposition of those three cleanup entries; this entry closes
+124.22 only.
 
 ### 124.C5 — Inline image placement is invisible to the row epoch
 
