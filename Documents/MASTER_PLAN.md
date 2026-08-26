@@ -812,7 +812,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122 complete, 123 planned, 124 a gated stub)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122 complete, 123 complete, 124 in progress)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)

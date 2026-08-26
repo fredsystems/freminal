@@ -2158,10 +2158,11 @@ mod tests {
         assert_eq!(latch, 0);
     }
 
-    /// A press that STARTS over terminal content still latches (the pointer
-    /// position is only conservative for the *unknown* case; a press
-    /// explicitly `Some(false)` -- over terminal content -- does NOT latch),
-    /// so subsequent releases over terminal content leave it at 0 throughout.
+    /// A press that STARTS over terminal content does NOT latch (a press
+    /// explicitly `Some(false)` -- over terminal content -- never increments
+    /// the latch; the conservative "counts as chrome" treatment applies only
+    /// to the *unknown* (`None`) case), so subsequent releases over terminal
+    /// content leave it at 0 throughout.
     #[test]
     fn drag_latch_sequence_press_on_terminal_never_latches() {
         use winit::event::ElementState::{Pressed, Released};

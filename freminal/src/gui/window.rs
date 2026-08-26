@@ -921,17 +921,6 @@ impl FrameStats {
         }
     }
 
-    /// Format ten named pointer-motion condition counts the same way
-    /// `format_nonzero_signal_counts` formats `chrome_signal_fired_counts`
-    /// (see that method's doc for the full rationale) — `name=count`
-    /// comma-joined, non-zero entries only, `"none"` when all ten are
-    /// zero. A free-standing pure function over parallel `names`/`counts`
-    /// arrays (not `&self`), so it is directly unit-testable without
-    /// constructing a `Cell`-bearing `FrameStats`.
-    /// Reset the pointer-motion condition counters and the total call
-    /// counter (see `record_pointer_motion_check`) back to zero at the end
-    /// of a flush window — see `pointer_repaint_check_total`'s field doc
-    /// for why these are windowed rather than cumulative-since-creation.
     /// The ten pointer-motion condition counters paired with their names, in
     /// declaration order.
     ///
@@ -965,6 +954,10 @@ impl FrameStats {
         ]
     }
 
+    /// Reset the pointer-motion condition counters and the total call
+    /// counter (see `record_pointer_motion_check`) back to zero at the end
+    /// of a flush window — see `pointer_repaint_check_total`'s field doc
+    /// for why these are windowed rather than cumulative-since-creation.
     pub(super) fn reset_pointer_condition_window(&self) {
         self.pointer_repaint_check_total.set(0);
         self.pointer_cond_first_motion.set(0);
