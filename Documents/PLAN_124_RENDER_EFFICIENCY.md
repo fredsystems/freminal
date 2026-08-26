@@ -180,6 +180,11 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.14c | Stop a busy pane forcing full damage on unchanged siblings | **Complete** — `058c2627` |
 | 124.14d | Bound search highlights and the search overlay | **Complete** — `ab275052` |
 | 124.C6 | `search_corpus` + open fold desyncs `merge_cache` permanently | **Complete** — isolated search flatten, `c77047bd` |
+| 124.C8 | Run-cache key omits per-character widths | **Complete** — `d94eefdc` |
+| 124.C9 | Bounded rebuild omits previous/current cursor rows | **Complete** — `d94eefdc` |
+| 124.C10 | Review hardening for measurement infrastructure | **Complete** — `a8875ab0` |
+| 124.C11 | Search-overlay safety composition is duplicated | **Complete** — `670a5288` |
+| 124.C12 | Review-flagged documentation drift | **Complete** — `046d28f1` |
 
 ### Execution model
 
@@ -3768,3 +3773,21 @@ It then edits one visible row without changing the window and proves exactly
 that row's epoch changes. A buffer-level test independently proves the search
 flatten leaves the extended-window merge cache allocation and fingerprint
 untouched while producing the same visible content as the ordinary flatten.
+
+### 124.C8-C12 — PR #503 review remediation
+
+**Complete (2026-08-26).** CodeRabbit's full review, including all four
+nitpick comments, surfaced two correctness gaps and three cleanup groups:
+
+| Entry | Finding | Resolution |
+| ----- | ------- | ---------- |
+| 124.C8 | Run-cache keys could alias equal text with different grapheme widths | `char_widths` joined the structural key; a regression test pins the miss |
+| 124.C9 | A bounded content rebuild could omit old/new cursor rows | Cursor screen rows now join damage only when cursor state changed |
+| 124.C10 | Renderer verification and measurement helpers had unsafe assumptions or duplication | Log `GL_RENDERER`, harden assertions/texture disposal, share pixel setup |
+| 124.C11 | Search safety composition had two implementations | One truth-table-tested `combine` now owns the rule |
+| 124.C12 | Skill/status/comment prose had drifted from behavior | Corrected without changing runtime behavior |
+
+The shaping benchmark's cache-hit path changed by +2.9% and the partial-dirty
+path by +7.9%, both below the 15% threshold and accepted for the correctness
+fix. Full workspace tests, strict clippy, machete, the GL pixel tests, benchmark
+compilation, and the Windows cross-check cover the combined remediation.
