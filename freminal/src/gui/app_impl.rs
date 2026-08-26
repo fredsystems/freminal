@@ -4767,7 +4767,7 @@ mod tests {
         settings_owner_close_decision,
     };
     use crate::gui::frame_damage::{self, PaneDamageInput};
-    use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
+    use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
     use freminal_common::cursor::CursorVisualStyle;
 
     #[test]
@@ -4874,7 +4874,7 @@ mod tests {
         // (write #1) resolves to `Partial`.
         let per_pane_damage = [PaneDamageInput {
             bell_active: false,
-            cursor_damage: PaneFrameDamage::CursorOnly(Some(CursorDamage {
+            cursor_damage: PaneFrameDamage::CursorOnly(Some(PaneDamageRect {
                 x: 0,
                 y: 0,
                 width: 8,

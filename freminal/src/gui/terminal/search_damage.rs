@@ -16,7 +16,7 @@
 //! `freminal-extend-or-extract`'s guidance to give cross-frame state a
 //! named home rather than adding three loose fields to `widget.rs`.
 
-use crate::gui::renderer::CursorDamage;
+use crate::gui::renderer::PaneDamageRect;
 use crate::gui::search::SearchOverlaySafety;
 
 /// What the search overlay painted last frame, and what it paints this
@@ -49,12 +49,12 @@ pub(super) struct SearchDamageState {
     /// The search-bar's paint bounds as of the most recent
     /// [`Self::finish_overlay_frame`] call. `None` once the bar has settled
     /// closed for at least one frame.
-    previous_popup_rect: Option<CursorDamage>,
+    previous_popup_rect: Option<PaneDamageRect>,
     /// This frame's popup damage: the deduplicated union of
     /// [`Self::previous_popup_rect`] (before it is overwritten) and the
     /// rect passed to the most recent [`Self::finish_overlay_frame`] call.
     /// Never carries more than two entries.
-    current_popup_rects: Vec<CursorDamage>,
+    current_popup_rects: Vec<PaneDamageRect>,
     /// The previous frame's search-overlay safety classification. Combined
     /// with the current input by [`Self::finish_overlay_frame`] so the frame
     /// that removes an escaped tooltip remains unbounded once.
@@ -98,7 +98,7 @@ impl SearchDamageState {
     /// classification.
     ///
     /// `current_popup_rect` is `Some` exactly when the bar was drawn this
-    /// frame and its paint rect converted to a valid [`CursorDamage`];
+    /// frame and its paint rect converted to a valid [`PaneDamageRect`];
     /// `None` when the bar was not drawn this frame, OR its rect
     /// degenerated during conversion -- the caller is responsible for
     /// passing [`SearchOverlaySafety::TooltipMayEscape`] in the latter
@@ -113,7 +113,7 @@ impl SearchDamageState {
     /// before settling empty on the next call.
     pub(super) fn finish_overlay_frame(
         &mut self,
-        current_popup_rect: Option<CursorDamage>,
+        current_popup_rect: Option<PaneDamageRect>,
         safety: SearchOverlaySafety,
     ) {
         self.safety = if self.previous_safety == SearchOverlaySafety::TooltipMayEscape
@@ -143,7 +143,7 @@ impl SearchDamageState {
     /// `frame_damage::PaneDamageInput::search_overlay_rects`. Search
     /// highlight rows take the separate [`Self::replace_highlight_rows`]
     /// path into `build_bounded_damage`.
-    pub(super) fn overlay_damage_rects(&self) -> &[CursorDamage] {
+    pub(super) fn overlay_damage_rects(&self) -> &[PaneDamageRect] {
         &self.current_popup_rects
     }
 
@@ -166,10 +166,10 @@ impl Default for SearchDamageState {
 mod tests {
     use super::*;
 
-    /// A distinct, easily-told-apart `CursorDamage` rect for each of the
+    /// A distinct, easily-told-apart `PaneDamageRect` rect for each of the
     /// small integer ids used below.
-    const fn rect(id: i32) -> CursorDamage {
-        CursorDamage {
+    const fn rect(id: i32) -> PaneDamageRect {
+        PaneDamageRect {
             x: id,
             y: id,
             width: 10,
@@ -246,7 +246,7 @@ mod tests {
         state.finish_overlay_frame(None, SearchOverlaySafety::Bounded);
         assert_eq!(
             state.overlay_damage_rects(),
-            &[] as &[CursorDamage],
+            &[] as &[PaneDamageRect],
             "a settled-closed frame must report no popup damage at all"
         );
     }

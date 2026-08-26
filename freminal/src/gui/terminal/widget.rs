@@ -1705,7 +1705,7 @@ impl PaneRenderCache {
     /// This pane's search-overlay popup damage rects this frame (Task
     /// 124.14d), for `frame_damage::PaneDamageInput::search_overlay_rects`.
     #[must_use]
-    pub(crate) fn search_overlay_damage_rects(&self) -> &[crate::gui::renderer::CursorDamage] {
+    pub(crate) fn search_overlay_damage_rects(&self) -> &[crate::gui::renderer::PaneDamageRect] {
         self.search_damage.overlay_damage_rects()
     }
 
@@ -1852,15 +1852,15 @@ struct RowDamageGeometry {
     vp_top_px: f32,
     /// The full framebuffer height in physical pixels, needed for the
     /// top-left-to-bottom-left origin flip (see
-    /// [`crate::gui::renderer::CursorDamage::from_cursor_cells`]).
+    /// [`crate::gui::renderer::PaneDamageRect::from_cursor_cells`]).
     fb_height_px: i32,
 }
 
-/// Build the [`crate::gui::renderer::CursorDamage`] rect for one contiguous
+/// Build the [`crate::gui::renderer::PaneDamageRect`] rect for one contiguous
 /// run of on-screen rows `[run_start, run_end]` (inclusive), or `None` if the
 /// run degenerates to nothing under `from_cursor_cells`' clamping.
 ///
-/// Reuses [`crate::gui::renderer::CursorDamage::from_cursor_cells`] for the
+/// Reuses [`crate::gui::renderer::PaneDamageRect::from_cursor_cells`] for the
 /// coordinate transform (Task 124.14a's design decision) rather than
 /// hand-rolling a second Y-flip / outward-rounding / framebuffer-clamp —
 /// that function already consumes top-left-origin, viewport-relative
@@ -1870,7 +1870,7 @@ fn row_run_damage(
     run_start: usize,
     run_end: usize,
     geometry: RowDamageGeometry,
-) -> Option<crate::gui::renderer::CursorDamage> {
+) -> Option<crate::gui::renderer::PaneDamageRect> {
     let start_f = run_start.approx_as::<f32>().unwrap_or(0.0);
     let run_len = run_end.saturating_sub(run_start).saturating_add(1);
     let len_f = run_len.approx_as::<f32>().unwrap_or(0.0);
@@ -1880,7 +1880,7 @@ fn row_run_damage(
         geometry.viewport_width_px,
         len_f * geometry.row_h_f,
     );
-    crate::gui::renderer::CursorDamage::from_cursor_cells(
+    crate::gui::renderer::PaneDamageRect::from_cursor_cells(
         geometry.vp_left_px,
         geometry.vp_top_px,
         geometry.fb_height_px,
@@ -1888,7 +1888,7 @@ fn row_run_damage(
     )
 }
 
-/// Build the [`crate::gui::renderer::CursorDamage`] rect for a pane's OWN
+/// Build the [`crate::gui::renderer::PaneDamageRect`] rect for a pane's OWN
 /// full rebuild (Task 124.21 finding 2: the multi-pane fan-out).
 /// `decide_frame_damage` does `rects.clear(); break;` the moment any pane
 /// reports [`crate::gui::renderer::PaneFrameDamage::Full`], discarding rects
@@ -1909,7 +1909,7 @@ fn row_run_damage(
 /// rebuild also repaints the command-block gutter strip and the scrollbar,
 /// both of which live inside `pane_rect` but outside `terminal_rect`.
 ///
-/// Reuses [`crate::gui::renderer::CursorDamage::from_cursor_cells`] rather
+/// Reuses [`crate::gui::renderer::PaneDamageRect::from_cursor_cells`] rather
 /// than a second hand-rolled transform (124.14a's design decision). This is
 /// the first caller whose rect can extend LEFT of the viewport origin
 /// `vp_left_px`/`vp_top_px` measure from -- the cell offset below is
@@ -1923,7 +1923,7 @@ fn full_pane_rebuild_damage_rect(
     vp_left_px: f32,
     vp_top_px: f32,
     fb_height_px: i32,
-) -> Option<crate::gui::renderer::CursorDamage> {
+) -> Option<crate::gui::renderer::PaneDamageRect> {
     rect_damage_relative_to_terminal(
         pane_rect,
         terminal_rect,
@@ -1939,7 +1939,7 @@ fn full_pane_rebuild_damage_rect(
 /// search-overlay block): convert a rect in the same logical-point space as
 /// `terminal_rect` -- which may extend outside it, as both a pane's own
 /// gutter-inclusive bounds and a floating popup anchored elsewhere in the
-/// pane do -- into a [`crate::gui::renderer::CursorDamage`] rect, relative
+/// pane do -- into a [`crate::gui::renderer::PaneDamageRect`] rect, relative
 /// to the viewport origin `vp_left_px`/`vp_top_px` already measure from.
 /// Reusing one function for both callers is what stops them silently
 /// drifting apart on the exact conversion (124.14a's design decision, the
@@ -1948,7 +1948,7 @@ fn full_pane_rebuild_damage_rect(
 ///
 /// Returns `None` for a degenerate (zero/negative extent) or unconvertible
 /// (fully clamped away) rect -- checked explicitly ahead of
-/// `CursorDamage::from_cursor_cells`, which pads every cell outward by 1px
+/// `PaneDamageRect::from_cursor_cells`, which pads every cell outward by 1px
 /// on every side before clamping, so a genuinely zero-width or zero-height
 /// cell would NOT naturally come out `None` there (it would come out a
 /// spurious ~2px-wide sliver instead). Only a fully out-of-framebuffer rect
@@ -1963,7 +1963,7 @@ fn rect_damage_relative_to_terminal(
     vp_left_px: f32,
     vp_top_px: f32,
     fb_height_px: i32,
-) -> Option<crate::gui::renderer::CursorDamage> {
+) -> Option<crate::gui::renderer::PaneDamageRect> {
     if rect.width() <= 0.0 || rect.height() <= 0.0 {
         return None;
     }
@@ -1973,7 +1973,7 @@ fn rect_damage_relative_to_terminal(
         rect.width() * ppp,
         rect.height() * ppp,
     );
-    crate::gui::renderer::CursorDamage::from_cursor_cells(
+    crate::gui::renderer::PaneDamageRect::from_cursor_cells(
         vp_left_px,
         vp_top_px,
         fb_height_px,
@@ -2151,7 +2151,7 @@ enum EmptyBoundedDamage {
 /// collapse into one rect rather than several overlapping ones. Contiguous
 /// on-screen rows are merged into a single rect (a run) rather than
 /// emitted one rect per row, so a block of adjacent rows costs one
-/// [`crate::gui::renderer::CursorDamage`] rather than many — but
+/// [`crate::gui::renderer::PaneDamageRect`] rather than many — but
 /// non-contiguous rows (e.g. rows 3 and 40) stay separate rects rather
 /// than collapsing to their bounding box, which is the entire reason
 /// `PaneFrameDamage::Region` carries a `Vec` instead of one rect (124.14a's
@@ -3134,7 +3134,7 @@ impl FreminalTerminalWidget {
                 // region is the union of the cursor's *previous* cell (whose
                 // glyph is revealed when the cursor moves or blinks off) and
                 // its *current* cell. Coordinates are physical framebuffer
-                // pixels; `CursorDamage` handles the Y-flip to GL origin.
+                // pixels; `PaneDamageRect` handles the Y-flip to GL origin.
                 let cell_w_px = cell_w_f * cursor_x_scale;
                 // Current cursor cell, relative to the viewport top-left.
                 let (cur_x, cur_y) = cursor_pixel_pos;
@@ -3163,7 +3163,7 @@ impl FreminalTerminalWidget {
                     let prev_cell_w = cell_w_f * prev_scale;
                     damage_cells.push((prev_x, prev_y, prev_cell_w, row_h_f));
                 }
-                let cursor_damage = crate::gui::renderer::CursorDamage::from_cursor_cells(
+                let cursor_damage = crate::gui::renderer::PaneDamageRect::from_cursor_cells(
                     vp_left_px,
                     vp_top_px,
                     fb_height_px,
@@ -4084,7 +4084,7 @@ impl FreminalTerminalWidget {
         // whether a full rebuild happened -- because the bar's own
         // caret/hover/text content can change independently of any
         // terminal-content rebuild.
-        let mut search_popup_rect: Option<crate::gui::renderer::CursorDamage> = None;
+        let mut search_popup_rect: Option<crate::gui::renderer::PaneDamageRect> = None;
         let mut search_popup_safety = crate::gui::search::SearchOverlaySafety::Bounded;
         if view_state.search_state.is_open {
             let bar_frame = show_search_bar(
@@ -4110,7 +4110,7 @@ impl FreminalTerminalWidget {
             }
 
             // Convert the bar's shadow-expanded logical paint rect into a
-            // `CursorDamage`, relative to `terminal_rect` -- the search
+            // `PaneDamageRect`, relative to `terminal_rect` -- the search
             // block runs outside the `!snap.skip_draw` guard that
             // `vp_left_px`/`vp_top_px`/`fb_height_px` were originally
             // computed inside, so they are recomputed here via the shared
@@ -5371,7 +5371,7 @@ mod build_bounded_damage_tests {
     //! isolating the union/merge logic from the row-translation logic
     //! 124.14a's own tests already cover.
     use super::*;
-    use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
+    use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
     use crate::gui::terminal::frame_dirty::ChangedRows;
 
     /// A `RowMap`/`FoldLayout` pair with no folds and no scroll-skip, so
@@ -5404,8 +5404,8 @@ mod build_bounded_damage_tests {
     /// viewport, and a 200px-tall framebuffer (20 rows) with the viewport
     /// pinned to the framebuffer's top-left origin. Rows used by the tests
     /// below are chosen away from row 0 and the last row so the 1px safety
-    /// pad in `CursorDamage::from_cursor_cells` never gets clamped away --
-    /// that clamping is `CursorDamage`'s own concern (covered by its own
+    /// pad in `PaneDamageRect::from_cursor_cells` never gets clamped away --
+    /// that clamping is `PaneDamageRect`'s own concern (covered by its own
     /// tests / the pixel harness), not this union logic's.
     fn geometry() -> RowDamageGeometry {
         RowDamageGeometry {
@@ -5417,14 +5417,14 @@ mod build_bounded_damage_tests {
         }
     }
 
-    /// The exact `CursorDamage` `row_run_damage` produces for on-screen rows
+    /// The exact `PaneDamageRect` `row_run_damage` produces for on-screen rows
     /// `[start, end]` inclusive under [`geometry`] -- worked out once here
     /// and reused by every assertion below, rather than re-deriving the
     /// same arithmetic at each call site.
-    fn expected_run(start: usize, end: usize) -> CursorDamage {
+    fn expected_run(start: usize, end: usize) -> PaneDamageRect {
         let top: i32 = (start * 10).approx_as().unwrap_or(0);
         let bottom: i32 = ((end + 1) * 10).approx_as().unwrap_or(0);
-        CursorDamage {
+        PaneDamageRect {
             x: 0,
             y: 200 - (bottom + 1),
             width: 101,

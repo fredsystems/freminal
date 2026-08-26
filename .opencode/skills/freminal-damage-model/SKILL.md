@@ -72,7 +72,7 @@ windowing:        DamageHistory / buffer_age()  ->  PresentRegion::{Full, Region
 ```
 
 - **Per-pane** (`freminal/src/gui/renderer/mod.rs`): `PaneFrameDamage`.
-  `Region(Vec<CursorDamage>)` is never empty by construction -- an empty
+  `Region(Vec<PaneDamageRect>)` is never empty by construction -- an empty
   rect set is reported as `Full` instead, so `Region` and "nothing
   changed" never collide.
 - **Terminal aggregation** (`freminal/src/gui/frame_damage.rs`,
@@ -155,10 +155,10 @@ always to report more, never less.
 
 ## 7. Coordinate and representation constraints
 
-- Damage rects (`DamageRect`, `CursorDamage`) are **physical framebuffer
+- Damage rects (`DamageRect`, `PaneDamageRect`) are **physical framebuffer
   pixels, bottom-left origin** -- the `glScissor` / `eglSwapBuffersWithDamage`
   convention. Reuse the sanctioned transform
-  (`CursorDamage::from_cursor_cells`, which already does the Y-flip,
+  (`PaneDamageRect::from_cursor_cells`, which already does the Y-flip,
   outward rounding, safety pad, and framebuffer clamp) rather than
   hand-rolling a second one. `renderer/mod.rs` and `frame_dirty.rs`
   document at least three *other* coordinate spaces in play
@@ -219,7 +219,7 @@ Before landing a damage-model change, confirm:
   search did in 124.14d) and the plan you are working from did not
   already authorize that.
 - You find yourself writing a second coordinate transform instead of
-  reusing `CursorDamage::from_cursor_cells`.
+  reusing `PaneDamageRect::from_cursor_cells`.
 - You cannot prove the old extent is complete, but you're tempted to ship
   the bound anyway "since it's probably fine".
 - You are about to weaken the `Full` fallback (e.g. remove a short-circuit

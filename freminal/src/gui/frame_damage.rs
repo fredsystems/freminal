@@ -16,7 +16,7 @@
 //! handful of booleans and per-pane facts the original block actually read
 //! — so it is directly unit-testable.
 
-use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
+use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
 
 /// What one rendered pane contributed to this frame's damage decision.
 ///
@@ -46,7 +46,7 @@ pub struct PaneDamageInput {
     /// floating popup, and a bounded/`Unchanged` pane can still have moved
     /// it. Never populated except by the caller; `Vec::new()` when search
     /// is closed or was already settled closed last frame.
-    pub(crate) search_overlay_rects: Vec<CursorDamage>,
+    pub(crate) search_overlay_rects: Vec<PaneDamageRect>,
 }
 
 /// Decide this frame's [`freminal_windowing::FrameDamage`] — the #435
@@ -230,7 +230,7 @@ pub fn compose_with_chrome_damage(
 #[cfg(test)]
 mod tests {
     use super::{PaneDamageInput, compose_with_chrome_damage, decide_frame_damage};
-    use crate::gui::renderer::{CursorDamage, PaneFrameDamage};
+    use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
     use freminal_windowing::{ChromeDamage, DamageRect, FrameDamage};
 
     /// `FrameDamage` does not implement `PartialEq` (see its definition),
@@ -283,7 +283,7 @@ mod tests {
         }
     }
 
-    fn cursor_only_pane(d: CursorDamage) -> PaneDamageInput {
+    fn cursor_only_pane(d: PaneDamageRect) -> PaneDamageInput {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::CursorOnly(Some(d)),
@@ -293,7 +293,7 @@ mod tests {
 
     /// A pane reporting [`PaneFrameDamage::Region`] (Task 124.14): a full
     /// vertex rebuild whose damage is provably bounded to `rects`.
-    fn region_pane(rects: Vec<CursorDamage>) -> PaneDamageInput {
+    fn region_pane(rects: Vec<PaneDamageRect>) -> PaneDamageInput {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::Region(rects),
@@ -324,7 +324,7 @@ mod tests {
     /// A pane whose ONLY contribution is search-overlay popup damage
     /// (Task 124.14d): `Unchanged` terminal-content damage, with the given
     /// popup rects.
-    fn search_overlay_pane(rects: Vec<CursorDamage>) -> PaneDamageInput {
+    fn search_overlay_pane(rects: Vec<PaneDamageRect>) -> PaneDamageInput {
         PaneDamageInput {
             bell_active: false,
             cursor_damage: PaneFrameDamage::Unchanged,
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn force_full_wins_regardless_of_other_inputs() {
-        let panes = [cursor_only_pane(CursorDamage {
+        let panes = [cursor_only_pane(PaneDamageRect {
             x: 1,
             y: 2,
             width: 3,
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn toast_active_forces_full_when_not_force_full() {
-        let panes = [cursor_only_pane(CursorDamage {
+        let panes = [cursor_only_pane(PaneDamageRect {
             x: 1,
             y: 2,
             width: 3,
@@ -396,7 +396,7 @@ mod tests {
     /// 123.C1 in `PLAN_123_GL_MEASUREMENT_HARNESS.md`.
     #[test]
     fn pointer_motion_over_content_is_partial_once_the_toast_confound_is_removed() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 10,
             y: 20,
             width: 8,
@@ -480,7 +480,7 @@ mod tests {
     /// toast.
     #[test]
     fn pointer_motion_over_chrome_forces_full_even_with_no_toast() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 10,
             y: 20,
             width: 8,
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn single_cursor_only_rect_is_partial() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 10,
             y: 20,
             width: 8,
@@ -588,13 +588,13 @@ mod tests {
 
     #[test]
     fn two_cursor_only_rects_is_partial_pane_switch_case() {
-        let d1 = CursorDamage {
+        let d1 = PaneDamageRect {
             x: 0,
             y: 0,
             width: 8,
             height: 16,
         };
-        let d2 = CursorDamage {
+        let d2 = PaneDamageRect {
             x: 100,
             y: 0,
             width: 8,
@@ -611,7 +611,7 @@ mod tests {
     /// aggregated exactly like a `CursorOnly(Some(rect))` one.
     #[test]
     fn single_region_rect_is_partial() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 4,
             y: 8,
             width: 16,
@@ -634,13 +634,13 @@ mod tests {
     /// one covering the gap) and fail.
     #[test]
     fn two_non_contiguous_region_rects_are_both_partial_in_order() {
-        let top = CursorDamage {
+        let top = PaneDamageRect {
             x: 0,
             y: 0,
             width: 80,
             height: 16,
         };
-        let bottom = CursorDamage {
+        let bottom = PaneDamageRect {
             x: 0,
             y: 640,
             width: 80,
@@ -656,7 +656,7 @@ mod tests {
     /// `Region` pane's rects.
     #[test]
     fn region_plus_unchanged_pane_is_partial_with_only_region_rects() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 1,
             y: 2,
             width: 3,
@@ -673,7 +673,7 @@ mod tests {
     /// followed by `Full` (see `rects_cleared_when_a_later_pane_is_full`).
     #[test]
     fn region_plus_full_pane_discards_region_rects_and_is_full() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 1,
             y: 2,
             width: 3,
@@ -687,13 +687,13 @@ mod tests {
     /// both contribute rects, and both survive aggregation.
     #[test]
     fn region_plus_cursor_only_rect_is_partial_with_both() {
-        let region_rect = CursorDamage {
+        let region_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 80,
             height: 16,
         };
-        let cursor_rect = CursorDamage {
+        let cursor_rect = PaneDamageRect {
             x: 100,
             y: 50,
             width: 8,
@@ -715,7 +715,7 @@ mod tests {
     /// terminal band having changed at all.
     #[test]
     fn unchanged_pane_with_search_overlay_rect_is_partial() {
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -731,13 +731,13 @@ mod tests {
     /// pane's own damage first, then the popup's).
     #[test]
     fn cursor_only_rect_plus_search_overlay_rect_is_partial_with_both_in_order() {
-        let cursor_rect = CursorDamage {
+        let cursor_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 8,
             height: 16,
         };
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -756,13 +756,13 @@ mod tests {
     /// both survive aggregation, in order.
     #[test]
     fn region_rect_plus_search_overlay_rect_is_partial_with_both_in_order() {
-        let region_rect = CursorDamage {
+        let region_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 80,
             height: 16,
         };
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -782,7 +782,7 @@ mod tests {
     /// bound moot.
     #[test]
     fn full_pane_clears_its_own_search_overlay_rects() {
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -800,7 +800,7 @@ mod tests {
     /// popup rects, same as it clears any other pane's rects.
     #[test]
     fn bell_clears_a_sibling_panes_search_overlay_rects() {
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -815,7 +815,7 @@ mod tests {
     /// damage required.
     #[test]
     fn opening_search_overlay_rect_requires_no_terminal_damage() {
-        let popup = CursorDamage {
+        let popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -831,7 +831,7 @@ mod tests {
     /// no terminal-content damage required.
     #[test]
     fn closing_search_overlay_rect_requires_no_terminal_damage() {
-        let previous_popup = CursorDamage {
+        let previous_popup = PaneDamageRect {
             x: 500,
             y: 10,
             width: 60,
@@ -862,7 +862,7 @@ mod tests {
     /// full-rebuild case, this test would start seeing `Full` again.
     #[test]
     fn busy_pane_reports_only_its_own_pane_rect_not_full_alongside_unchanged_sibling() {
-        let busy_pane_rect = CursorDamage {
+        let busy_pane_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 960,
@@ -881,7 +881,7 @@ mod tests {
     /// where a pane genuinely cannot bound its own damage.
     #[test]
     fn a_pane_that_cannot_bound_its_own_rect_still_forces_full_alongside_a_busy_sibling() {
-        let sibling_rect = CursorDamage {
+        let sibling_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 960,
@@ -898,7 +898,7 @@ mod tests {
     /// still clear every collected rect and force the whole frame `Full`.
     #[test]
     fn bell_still_forces_full_even_when_a_sibling_pane_reports_bounded_region_damage() {
-        let sibling_rect = CursorDamage {
+        let sibling_rect = PaneDamageRect {
             x: 0,
             y: 0,
             width: 960,
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn bell_active_pane_forces_full_and_clears_prior_rects() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 0,
             y: 0,
             width: 8,
@@ -947,7 +947,7 @@ mod tests {
 
     #[test]
     fn rects_cleared_when_a_later_pane_is_full() {
-        let d = CursorDamage {
+        let d = PaneDamageRect {
             x: 0,
             y: 0,
             width: 8,
