@@ -169,7 +169,7 @@ numbers with re-pointed scope; new work takes new numbers from 124.10.
 | 124.18 | Make partial present actually work (gate + clipping) | **Complete** |
 | 124.19 | Phase 3: an egui-level offscreen pixel harness | **Complete** — 124.19a extraction, 124.19b harness |
 | 124.20 | Scissor the clear to the redraw region, don't skip it | **Complete** |
-| 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Planned — maintainer has not decided whether to execute |
+| 124.C3 | `merge_cache` has no per-buffer stash, so alt-screen round trips over-report | Closed unexecuted — maintainer decision; risk exceeds one-rebuild benefit |
 | 124.C4 | A pixel golden must not be compared across rasterisers | **Complete** |
 | 124.21 | Exhaustive audit of every full-repaint-forcing trigger | **Complete** — 52 triggers, 8 genuinely global |
 | 124.22 | `freminal-damage-model` agent skill | **Complete** — `3de34651` |
@@ -2708,6 +2708,16 @@ One repaint per TUI entry and exit is close to unmeasurable, and the fix
 carries real corruption risk. Closing this entry unexecuted is a legitimate
 outcome; it is recorded so the behaviour is known rather than rediscovered as
 a bug.
+
+**Disposition (2026-08-25): closed unexecuted, maintainer decision.** The
+cost is one full rebuild per user-initiated alt-screen round trip (entering
+or leaving `vim`, `less`, a TUI) — near-unmeasurable in practice. The fix
+requires a per-buffer `merge_cache` stash, and an incorrect stash is an
+**under**-report, i.e. silent visual corruption, not merely a missed
+optimisation. The known behaviour today — re-stamping every row on a round
+trip — is safe over-reporting, the direction 124.10 established as
+tolerable. Risk exceeds benefit, so this entry is closed unexecuted.
+Reopening requires new evidence that the benefit justifies the risk.
 
 ---
 
