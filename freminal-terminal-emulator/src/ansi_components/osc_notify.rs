@@ -39,9 +39,11 @@ use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 /// Handle OSC 9 (`iTerm2` / `WezTerm` notification).
 ///
-/// The entire payload after the leading `9;` is the notification body;
-/// there is no separate title. An empty body is silently consumed (nothing
-/// useful to display).
+/// The entire payload after the leading `9;` is the notification body unless
+/// it is the conflicting `ConEmu` progress-report form `9;4;<state>[;<value>]`.
+/// Progress reports are recognized and silently consumed because Freminal
+/// does not currently expose progress state in its chrome. An empty
+/// notification body is also silently consumed (nothing useful to display).
 pub(super) fn handle_osc_notify_9(
     raw_params: &[u8],
     seq_trace: &SequenceTracer,
@@ -58,6 +60,10 @@ pub(super) fn handle_osc_notify_9(
     };
 
     let body_bytes = &raw_params[first_semi + 1..];
+    if body_bytes.starts_with(b"4;") && is_conemu_progress_report(body_bytes) {
+        return;
+    }
+
     let Some(body) = decode_utf8(body_bytes, seq_trace) else {
         return;
     };
@@ -75,6 +81,32 @@ pub(super) fn handle_osc_notify_9(
         title: None,
         body,
     }));
+}
+
+/// Identify the ConEmu/Windows Terminal progress sub-protocol without
+/// swallowing ordinary OSC 9 notification text that happens to start with
+/// `4;`.
+fn is_conemu_progress_report(payload: &[u8]) -> bool {
+    let mut fields = payload.split(|&byte| byte == b';');
+    let Some(subcommand) = fields.next() else {
+        return false;
+    };
+    let Some(state) = fields.next() else {
+        return false;
+    };
+    if subcommand != b"4" || !matches!(state, [b'0'..=b'4']) {
+        return false;
+    }
+
+    let progress = fields.next();
+    fields.next().is_none()
+        && progress.is_none_or(|value| {
+            !value.is_empty()
+                && std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .is_some_and(|value| value <= 100)
+        })
 }
 
 /// Handle OSC 777 (urxvt notification).
@@ -282,6 +314,36 @@ mod tests {
         assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "a;b;c");
+    }
+
+    #[test]
+    fn osc9_conemu_progress_reports_are_consumed() {
+        for payload in [
+            b"9;4;1;0\x1b\\".as_slice(),
+            b"9;4;1;100\x1b\\".as_slice(),
+            b"9;4;0;0\x1b\\".as_slice(),
+        ] {
+            let output = feed_osc(payload);
+            assert!(output.is_empty(), "got: {output:?}");
+        }
+    }
+
+    #[test]
+    fn osc9_invalid_progress_form_remains_notification_text() {
+        let output = feed_osc(b"9;4;build finished\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;build finished");
+    }
+
+    #[test]
+    fn osc9_progress_above_100_remains_notification_text() {
+        let output = feed_osc(b"9;4;1;101\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;101");
     }
 
     #[test]

@@ -1,6 +1,10 @@
 # Escape Sequence Gaps
 
-Last updated: 2026-07-25 — issue #433 — OSC 9/777 per-source notification
+Last updated: 2026-08-26 — issue #502 — valid ConEmu `OSC 9;4` progress
+reports are now recognized and silently consumed instead of being misrouted
+as desktop notifications. Visual per-pane progress state remains unimplemented
+and is tracked by issue #507. Protocol reference:
+<https://ghostty.org/docs/vt/osc/conemu>. Earlier: 2026-07-25 — issue #433 — OSC 9/777 per-source notification
 enable toggles now enforced (see ESCAPE_SEQUENCE_COVERAGE.md). No gap
 entries changed: the OSC 9 ConEmu progress-report gap below is unrelated
 and unaffected. Earlier: 2026-07-08 — Task 115 (v0.11.1) closed the DECSCNM
@@ -29,9 +33,10 @@ alternate buffers (`scroll_region_up_n` / `scroll_region_down_n`,
 `declrmm_enabled` and call `scroll_slice_up_columns` /
 `scroll_slice_down_columns`, mirroring IL/DL). The third gap from that pass —
 OSC 9 implementing only the iTerm2/WezTerm simple-body variant, with the
-ConEmu progress-report sub-protocol (`OSC 9;1`–`9;4`) misparsed as literal
+ConEmu progress-report sub-protocol (`OSC 9;4`) misparsed as literal
 notification text (`freminal-terminal-emulator/src/ansi_components/osc_notify.rs:45-77`)
-— remains open and is still listed below. Earlier: 2026-07-08 —
+— remained open until issue #502 corrected the dispatch. Visual progress
+support remains listed below under issue #507. Earlier: 2026-07-08 —
 Documentation drift-reconciliation pass (no code changes) added the three
 gaps above and corrected the DECDHL entry: the previous "top-half-only"
 characterization was wrong — both top and bottom halves render correctly
@@ -99,8 +104,8 @@ Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys un
 F3 → `CSI 13 ~`), and Task 114's raw-winit delivery of keypad/media/print/pause/menu keys.
 The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
 
-- **OSC gaps:** OSC 66 (recognized but no effect); OSC 9 ConEmu progress-report
-  sub-protocol (`9;1`–`9;4`, misparsed as literal notification text)
+- **OSC gaps:** OSC 66 (recognized but no effect); OSC 9;4 ConEmu per-pane
+  progress state and visual presentation (recognized and silently consumed)
 - **Keyboard gaps:** `caps_lock`/`num_lock` decoration bits + CapsLock/NumLock/ScrollLock
   transition events (reverted — not producible uniformly across platforms),
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
@@ -129,11 +134,11 @@ the prior panel-fill-only white inversion.
 
 ## OSC Gaps
 
-| Sequence                            | Importance | Type | Planned        | Notes                                                                                                                                                                                                                |
-| ----------------------------------- | ---------- | ---- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| OSC 66                              | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                                                                                                       |
-| OSC 133 UI                          | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                   |
-| OSC 9 ConEmu (`9;1`–`9;4`) progress | ⬜         | ⬜   | —              | Only the iTerm2/WezTerm simple-body variant is recognized (`handle_osc_notify_9`, `osc_notify.rs:45-77`); ConEmu-style progress-state sequences are misparsed as literal notification body text, not ignored/handled |
+| Sequence                   | Importance | Type | Planned        | Notes                                                                                                                                                                                                               |
+| -------------------------- | ---------- | ---- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OSC 66                     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                                                                                                      |
+| OSC 133 UI                 | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                  |
+| OSC 9;4 ConEmu progress UI | ⬜         | ⬜   | issue #507     | Valid reports are recognized and silently consumed (issue #502), but Freminal does not retain per-pane progress state or render it. Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
 
 ---
 
@@ -270,10 +275,10 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 
 ### Priority 2 — Polish
 
-| Item                               | Rationale                                                                                                                                                                    | Planned |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| XTGETTCAP capability expansion     | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —       |
-| OSC 9 ConEmu progress sub-protocol | Affects Windows Terminal/ConEmu-targeting scripts (e.g. progress bars); freminal shows a spurious notification instead of ignoring the sequence                              | —       |
+| Item                           | Rationale                                                                                                                                                                    | Planned    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
+| OSC 9;4 ConEmu progress UI     | Reports are safely consumed after issue #502, but Freminal does not retain or display the per-pane progress state                                                            | issue #507 |
 
 ### Priority 3 — Low priority / optional
 
