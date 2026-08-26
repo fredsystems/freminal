@@ -84,7 +84,7 @@ impl SearchOverlaySafety {
     /// Any source whose tooltip may escape makes the whole overlay
     /// unbounded for this frame.
     #[must_use]
-    const fn combine(self, other: Self) -> Self {
+    pub(super) const fn combine(self, other: Self) -> Self {
         if matches!(self, Self::TooltipMayEscape) || matches!(other, Self::TooltipMayEscape) {
             Self::TooltipMayEscape
         } else {
@@ -681,6 +681,25 @@ mod tests {
             }
         }
         chars
+    }
+
+    // ── SearchOverlaySafety::combine ─────────────────────────────────────
+
+    /// Compact truth table for `combine`'s two-source OR-toward-unbounded
+    /// rule. `Bounded`/`Bounded` and the two mixed cases are already
+    /// exercised indirectly wherever `combine` is called (`show_search_bar`,
+    /// `SearchDamageState::finish_overlay_frame`'s settling test); this pins
+    /// all four cells explicitly, including `TooltipMayEscape`/
+    /// `TooltipMayEscape`, which no caller's test sequence happens to hit
+    /// (both operands unbounded at once is otherwise untested).
+    #[test]
+    fn combine_truth_table() {
+        use SearchOverlaySafety::{Bounded, TooltipMayEscape};
+
+        assert_eq!(Bounded.combine(Bounded), Bounded);
+        assert_eq!(Bounded.combine(TooltipMayEscape), TooltipMayEscape);
+        assert_eq!(TooltipMayEscape.combine(Bounded), TooltipMayEscape);
+        assert_eq!(TooltipMayEscape.combine(TooltipMayEscape), TooltipMayEscape);
     }
 
     // ── run_search: substring ──────────────────────────────────────────────

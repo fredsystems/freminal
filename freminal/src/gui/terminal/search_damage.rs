@@ -116,13 +116,7 @@ impl SearchDamageState {
         current_popup_rect: Option<PaneDamageRect>,
         safety: SearchOverlaySafety,
     ) {
-        self.safety = if self.previous_safety == SearchOverlaySafety::TooltipMayEscape
-            || safety == SearchOverlaySafety::TooltipMayEscape
-        {
-            SearchOverlaySafety::TooltipMayEscape
-        } else {
-            SearchOverlaySafety::Bounded
-        };
+        self.safety = self.previous_safety.combine(safety);
         self.previous_safety = safety;
         self.current_popup_rects.clear();
         match (self.previous_popup_rect, current_popup_rect) {
