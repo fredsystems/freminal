@@ -23,7 +23,7 @@ and plan document maintenance rules.
 | v0.10.0 | Beautification & Fonts          | `PLAN_VERSION_100.md`                                                 | 111–112          | Complete    |
 | v0.11.0 | Kitty: Notifications & Graphics | `PLAN_VERSION_110.md`                                                 | 99–101, 114      | Complete    |
 | v0.11.1 | Correctness Fixes               | `PLAN_VERSION_111.md`                                                 | 115–117          | Complete    |
-| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–124          | In progress |
+| v0.12.0 | Scrollback Memory & Performance | `PLAN_VERSION_120.md`                                                 | 118–125          | In progress |
 | v0.13.0 | Kitty: Transfer, Cursors & Text | `PLAN_VERSION_130.md`                                                 | 102–104          | Planned     |
 | v0.14.0 | Power-User Toolkit              | `PLAN_VERSION_140.md`                                                 | 78–83, 96–97     | Stub        |
 | v0.15.0 | Remote                          | `PLAN_VERSION_150.md`                                                 | 86               | Stub        |
@@ -61,11 +61,10 @@ See `PLAN_VERSION_100.md`.
 support and no new user-facing features: the scrollback-memory effort (Tasks 118–120), the CPU
 performance remediation umbrella (Task 121, now closed), the orchestration extraction
 (Task 122), which is a no-behaviour-change refactor rather than a fix or an optimisation, and
-its two successors — the GL measurement harness (Task 123) and damage model remediation
-(Task 124, complete). **Task 125 (Performance Parity and Residual Remediation) is deliberately
-not in this version**: its measurement-first activation determines whether fixed-stride upload,
-idle/chrome work, or another measured residual deserves implementation, and its roadmap
-position remains an open maintainer decision. Tasks 102 (Kitty File Transfer) and 103
+its three successors — the GL measurement harness (Task 123), damage model remediation
+(Task 124, complete), and performance parity and residual remediation (Task 125). Task 125's
+measurement-first activation determines whether fixed-stride upload, idle/chrome work, or
+another measured residual deserves implementation. Tasks 102 (Kitty File Transfer) and 103
 (Multiple Cursors) were planned for
 v0.12.0 and **moved to v0.13.0** when it was redefined; their plan content moved unchanged.
 See `PLAN_VERSION_120.md`.
@@ -216,7 +215,7 @@ into v0.14.0–v0.16.0 and v0.20.0) and remaining Category C housekeeping (Tasks
 | 122 | Orchestration Extraction                    | `PLAN_122_ORCHESTRATION_EXTRACTION.md`        | Complete  | None                   |
 | 123 | GL Pipeline Measurement Harness             | `PLAN_123_GL_MEASUREMENT_HARNESS.md`          | Complete  | Task 122               |
 | 124 | Damage Model Remediation                    | `PLAN_124_RENDER_EFFICIENCY.md`               | Complete  | Task 123               |
-| 125 | Performance Parity and Residual Remediation | `PLAN_125_VERTEX_RELAYOUT.md`                 | Stub      | Task 124               |
+| 125 | Performance Parity and Residual Remediation | `PLAN_125_VERTEX_RELAYOUT.md`                 | Planned   | Task 124               |
 
 ---
 
@@ -571,11 +570,11 @@ by two new damage states, `PaneFrameDamage::Region` (124.14) and `FrameDamage::N
 The maintainer's governing instruction at activation: do the structural fix, not a band-aid
 that improves the number while leaving the shape wrong.
 
-**Task 125 (unassigned version, measurement-first):** close or explain Freminal's remaining
+**Task 125 (v0.12.0, measurement phase activated):** close or explain Freminal's remaining
 CPU/GPU gap against matched WezTerm and Ghostty workloads. The old fixed-stride proposal is now
 one conditional branch, not the goal: recon established that it cannot improve idle, while
 Task 124's live captures did not record changed-row distributions, live upload bytes, or actual
-GPU execution time. Activation therefore begins with matched external process measurements,
+GPU execution time. Its activated measurement phase begins with matched external process measurements,
 live rebuild/upload attribution, corrected incremental vertex benchmarks, and asynchronous
 real-GPU timing. Findings then select the remediation: idle/chrome bypass, incremental CPU or
 GPU vertex work, persistent buffers, scheduling, presentation, another measured lever, or an
@@ -797,7 +796,7 @@ Update this section as tasks complete:
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged        |
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
-| 125  |            |            | Broadened stub: parity goal; measurement-first activation; version unassigned    |
+| 125  |            |            | v0.12.0; measurement planned; remediation gated on findings                      |
 
 ---
 
@@ -813,12 +812,12 @@ Update this section as tasks complete:
 - `Documents/PLAN_VERSION_100.md` — v0.10.0 "Beautification & Fonts" (Tasks 111–112, decomposed)
 - `Documents/PLAN_VERSION_110.md` — v0.11.0 "Kitty: Notifications & Graphics" (Tasks 99–101, 114, decomposed)
 - `Documents/PLAN_VERSION_111.md` — v0.11.1 "Correctness Fixes" (Tasks 115–117, decomposed)
-- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–124; 118–119 complete, 120 a stub, 121 closed, 122–124 complete)
+- `Documents/PLAN_VERSION_120.md` — v0.12.0 "Scrollback Memory & Performance" (Tasks 118–125; 118–119 complete, 120 a stub, 121 closed, 122–124 complete, 125 planned)
 - `Documents/PLAN_122_ORCHESTRATION_EXTRACTION.md` — Task 122 "Orchestration Extraction" full breakdown (122.1–122.16, plus cleanup entries 122.C1–122.C2)
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
-- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (enriched measurement-first stub; version unassigned)
+- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0 measurement phase planned)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)
