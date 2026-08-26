@@ -100,7 +100,13 @@ fn is_conemu_progress_report(payload: &[u8]) -> bool {
 
     let progress = fields.next();
     fields.next().is_none()
-        && progress.is_none_or(|value| !value.is_empty() && value.iter().all(u8::is_ascii_digit))
+        && progress.is_none_or(|value| {
+            !value.is_empty()
+                && std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .is_some_and(|value| value <= 100)
+        })
 }
 
 /// Handle OSC 777 (urxvt notification).
@@ -312,7 +318,11 @@ mod tests {
 
     #[test]
     fn osc9_conemu_progress_reports_are_consumed() {
-        for payload in [b"9;4;1;0\x1b\\".as_slice(), b"9;4;0;0\x1b\\".as_slice()] {
+        for payload in [
+            b"9;4;1;0\x1b\\".as_slice(),
+            b"9;4;1;100\x1b\\".as_slice(),
+            b"9;4;0;0\x1b\\".as_slice(),
+        ] {
             let output = feed_osc(payload);
             assert!(output.is_empty(), "got: {output:?}");
         }
@@ -325,6 +335,15 @@ mod tests {
         assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "4;build finished");
+    }
+
+    #[test]
+    fn osc9_progress_above_100_remains_notification_text() {
+        let output = feed_osc(b"9;4;1;101\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;101");
     }
 
     #[test]
