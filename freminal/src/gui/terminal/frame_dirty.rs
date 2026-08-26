@@ -273,6 +273,14 @@ pub(super) struct DirtyTrackingOutcome {
     /// unioned into [`build_bounded_damage`]'s row set, and needs no second
     /// field either.
     pub(super) command_block_hover_rows: Option<(usize, usize)>,
+    /// This frame's cursor screen row, or `None` when the cursor is hidden.
+    /// Used with the prior rendered row to bound cursor damage during a full
+    /// rebuild without repeating the snapshot-to-screen translation.
+    pub(super) cursor_screen_row: Option<usize>,
+    /// Whether blink, position, visibility, color, or trail state changed.
+    /// The bounded-damage caller uses this same signal rather than duplicating
+    /// the cursor-change predicate.
+    pub(super) cursor_state_changed: bool,
     /// Whether the cursor should actually be drawn this frame (DECTCEM,
     /// echo-off, active-pane, and fold-visibility all folded in).
     pub(super) effective_show_cursor: bool,
@@ -846,6 +854,8 @@ pub(super) fn evaluate_frame_dirty_state(
         screen_selection,
         search_epoch,
         command_block_hover_rows: command_block_hover_rows_early,
+        cursor_screen_row: effective_show_cursor.then_some(cursor_screen_row).flatten(),
+        cursor_state_changed,
         effective_show_cursor,
         cursor_pixel_pos,
         cursor_x_scale,
@@ -1276,6 +1286,59 @@ mod evaluate_frame_dirty_state_tests {
         let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);
 
         assert_eq!(outcome.rebuild, VertexRebuild::ReevaluateFullRebuild);
+    }
+
+    /// Pins the call-site gate `widget.rs` reads off
+    /// [`DirtyTrackingOutcome::cursor_state_changed`]: a cursor move
+    /// combined with a single changed row must still select
+    /// `VertexRebuild::Bounded` (the row change bounds the rebuild on its
+    /// own) AND report `cursor_state_changed = true`, so the caller knows
+    /// to include the cursor's current/previous screen row in
+    /// `build_bounded_damage`'s union rather than passing `None` for both.
+    #[test]
+    fn cursor_state_changed_is_true_for_a_moved_cursor_alongside_a_bounded_row_change() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+
+        let mut changed = snap;
+        bump_one_row_epoch(&mut changed);
+        changed.cursor_pos = freminal_common::buffer_states::cursor::CursorPos { x: 3, y: 2 };
+
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+        let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            outcome.rebuild,
+            VertexRebuild::Bounded,
+            "a changed row plus a cursor move, with nothing else \
+             different, must still take the bounded-damage full rebuild"
+        );
+        assert!(
+            outcome.cursor_state_changed,
+            "the cursor's position differs from cache.previous_cursor_pos, \
+             so this must be true"
+        );
+    }
+
+    /// The control for the test above: nothing about the cursor (or
+    /// anything else) changed, so `cursor_state_changed` must be false --
+    /// the call-site gate must not spuriously include the cursor's row in
+    /// a bounded rebuild's damage union when the cursor itself did not
+    /// change.
+    #[test]
+    fn cursor_state_changed_is_false_when_settled() {
+        let snap = base_snapshot();
+        let cache = settled_cache(&snap, true, true);
+        let mut view_state = ViewState::new();
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(
+            !outcome.cursor_state_changed,
+            "a fully settled frame must report no cursor-state change"
+        );
     }
 
     // ── VertexRebuild::Bounded boundary (Task 124.14a) ────────────────────

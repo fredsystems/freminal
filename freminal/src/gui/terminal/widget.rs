@@ -1372,6 +1372,9 @@ pub struct PaneRenderCache {
     pub(super) previous_cursor_blink_on: bool,
     /// Cursor position from the most recently rendered frame.
     pub(super) previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos,
+    /// Cursor screen row from the most recently drawn frame. This advances
+    /// only after damage has consumed the old row and never on `skip_draw`.
+    pub(super) previous_cursor_screen_row: Option<usize>,
     /// Whether the cursor was shown in the most recently rendered frame.
     pub(super) previous_show_cursor: bool,
     /// Cursor color override from the most recently rendered frame.
@@ -1630,6 +1633,7 @@ impl PaneRenderCache {
             previous_scroll_amount: 0.0,
             previous_cursor_blink_on: true,
             previous_cursor_pos: freminal_common::buffer_states::cursor::CursorPos::default(),
+            previous_cursor_screen_row: None,
             previous_show_cursor: false,
             previous_cursor_color_override: None,
             last_rendered_visible: None,
@@ -2067,6 +2071,10 @@ struct BoundedDamageSpans<'a> {
     /// ([`super::search_damage::SearchDamageState::replace_highlight_rows`]'s
     /// return value, Task 124.14d), sorted and deduplicated.
     previous_search_rows: &'a [usize],
+    /// This frame's cursor row when cursor state changed.
+    current_cursor_row: Option<usize>,
+    /// Last drawn cursor row when cursor state changed.
+    previous_cursor_row: Option<usize>,
 }
 
 /// Whether an empty bounded-damage row union (Task 124.14d) should fall
@@ -2102,7 +2110,7 @@ enum EmptyBoundedDamage {
 /// falling back to `empty_fallback` when no bound can be established (Task
 /// 124.14, extended by 124.14d).
 ///
-/// Seven sources are unioned into one row set before any rect is built:
+/// Nine sources are unioned into one row set before any rect is built:
 ///
 /// - `changed_rows` (Task 124.14a) -- the window rows named by
 ///   [`super::frame_dirty::ChangedRows::Rows`], translated snapshot ->
@@ -2124,6 +2132,9 @@ enum EmptyBoundedDamage {
 ///   124.14d) -- the search-match tint's current and previous frame rows,
 ///   for the same erase-the-old/draw-the-new reason as selection and
 ///   hover.
+/// - `spans.current_cursor_row` / `spans.previous_cursor_row` -- the cursor's
+///   current and previous screen rows when cursor state changed. Both are
+///   needed to draw the new cursor and erase the old one.
 ///
 /// `evaluate_frame_dirty_state` selects [`VertexRebuild::Bounded`] only when
 /// `changed_rows` is [`super::frame_dirty::ChangedRows::Rows`] or
@@ -2145,7 +2156,7 @@ enum EmptyBoundedDamage {
 /// that survived the union but produced no convertible rect) stays `Full`
 /// unconditionally, per that field's own doc comment.
 ///
-/// All seven sources are merged into one sorted, deduplicated row set
+/// All nine sources are merged into one sorted, deduplicated row set
 /// **before** run-merging runs, so overlapping sources (e.g. a changed row
 /// that sits inside the selection, or a hover span that overlaps either)
 /// collapse into one rect rather than several overlapping ones. Contiguous
@@ -2193,8 +2204,14 @@ fn build_bounded_damage(
     }
     screen_rows.extend_from_slice(spans.current_search_rows);
     screen_rows.extend_from_slice(spans.previous_search_rows);
+    if let Some(row) = spans.current_cursor_row {
+        screen_rows.push(row);
+    }
+    if let Some(row) = spans.previous_cursor_row {
+        screen_rows.push(row);
+    }
 
-    // Merge all seven sources into one sorted, deduplicated set BEFORE
+    // Merge all nine sources into one sorted, deduplicated set BEFORE
     // run-merging, so a row contributed by more than one source (e.g. a
     // changed row inside the selection, or a hover span overlapping either)
     // collapses to a single entry rather than emitting overlapping rects
@@ -3046,6 +3063,7 @@ impl FreminalTerminalWidget {
             let screen_selection = dirty.screen_selection;
             let search_epoch = dirty.search_epoch;
             let command_block_hover_rows_early = dirty.command_block_hover_rows;
+            let cursor_state_changed = dirty.cursor_state_changed;
             effective_show_cursor = dirty.effective_show_cursor;
             let cursor_pixel_pos = dirty.cursor_pixel_pos;
             let cursor_x_scale = dirty.cursor_x_scale;
@@ -3568,6 +3586,15 @@ impl FreminalTerminalWidget {
                                     previous_hover: previous_hover_screen_rows,
                                     current_search_rows: &current_search_screen_rows,
                                     previous_search_rows: &previous_search_screen_rows,
+                                    // Cursor rows contribute only when cursor
+                                    // state changed; otherwise search-only
+                                    // empty damage must remain `Unchanged`.
+                                    current_cursor_row: cursor_state_changed
+                                        .then_some(dirty.cursor_screen_row)
+                                        .flatten(),
+                                    previous_cursor_row: cursor_state_changed
+                                        .then_some(cache.previous_cursor_screen_row)
+                                        .flatten(),
                                 },
                                 row_map,
                                 &layout,
@@ -3587,6 +3614,9 @@ impl FreminalTerminalWidget {
             // else: neither path applies (content unchanged, cursor
             // unchanged, selection unchanged, buffers not empty) -- simply
             // re-draw the existing VBO data, no CPU work at all.
+
+            // Advance only after damage has consumed the prior drawn row.
+            cache.previous_cursor_screen_row = dirty.cursor_screen_row;
 
             // Drive the cursor trail animation: request a repaint on the next
             // frame so the interpolation continues smoothly until it completes.
@@ -5397,6 +5427,8 @@ mod build_bounded_damage_tests {
             previous_hover: None,
             current_search_rows: &[],
             previous_search_rows: &[],
+            current_cursor_row: None,
+            previous_cursor_row: None,
         }
     }
 
@@ -5765,6 +5797,47 @@ mod build_bounded_damage_tests {
         );
 
         assert_eq!(damage, PaneFrameDamage::Full);
+    }
+
+    // ── Cursor screen-row extents ────────────────────────────────────────
+
+    /// A frame with a changed content row (8) AND a cursor that moved from
+    /// screen row 15 (last frame) to screen row 2 (this frame) must damage
+    /// all three rows -- the changed content row, the cursor's new row,
+    /// and the cursor's old row -- as three separate, non-contiguous rects,
+    /// sorted and deduplicated. Mirrors the selection/hover/search
+    /// "current and previous" pattern: erasing the OLD cursor row matters
+    /// exactly as much as damaging the NEW one, since a bounded rebuild's
+    /// presented damage must not leave stale cursor pixels behind on the
+    /// row the cursor just vacated.
+    #[test]
+    fn changed_row_and_cursor_move_damages_all_three_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::Rows(vec![8]),
+            BoundedDamageSpans {
+                current_cursor_row: Some(2),
+                previous_cursor_row: Some(15),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![
+                expected_run(2, 2),
+                expected_run(8, 8),
+                expected_run(15, 15)
+            ]),
+            "damage must name the cursor's new row (2), the changed \
+             content row (8), and the cursor's old row (15) as three \
+             separate, sorted, deduplicated rects"
+        );
     }
 }
 

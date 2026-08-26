@@ -162,11 +162,25 @@ enum LigatureShaping {
 
 /// Content-addressed key for [`RunCache`].
 ///
-/// Equality is structural over all three fields — deliberately not a
+/// Equality is structural over all four fields — deliberately not a
 /// hash-only lookup, so a hash collision can never be mistaken for a real
 /// match. `text` is owned because a `TextRun`'s text does not outlive the
 /// `shape_visible` call that built it, while cache entries must survive
 /// across calls.
+///
+/// `char_widths` is part of the key, not just `text`: [`TextRun::text`] is
+/// built from `tchar_to_char`, which takes only the *first* Unicode scalar
+/// of a `TChar::Utf8` grapheme cluster (see that function's doc). Two
+/// distinct grapheme clusters that happen to share a first scalar — e.g. a
+/// base character combined with different combining marks, or a base
+/// character alone versus the same base character plus a variation
+/// selector — can therefore produce byte-identical `text` while
+/// `TChar::display_width()` reports different total widths for the two
+/// clusters. Without `char_widths` in the key, the second run's cache
+/// lookup would hit the first run's entry and reuse its `cell_width`s,
+/// corrupting the second run's cell-grid layout (glyphs would occupy the
+/// wrong number of columns) even though nothing about the actual shaping
+/// call was wrong.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RunCacheKey {
     /// The font face the run resolved to.
@@ -177,6 +191,10 @@ struct RunCacheKey {
     ligatures: LigatureShaping,
     /// The run's UTF-8 text content.
     text: String,
+    /// Per-character column widths, cloned from [`TextRun::char_widths`].
+    /// See this struct's doc comment for why `text` alone is not a
+    /// sufficient key.
+    char_widths: Vec<usize>,
 }
 
 /// Position-independent shaped-glyph template for one run, cached at the
@@ -514,6 +532,7 @@ impl ShapingCache {
                 LigatureShaping::Disabled
             },
             text: run.text.clone(),
+            char_widths: run.char_widths.clone(),
         };
 
         let template = if let Some(template) = self.run_cache_lookup(&key) {
@@ -1044,9 +1063,9 @@ fn shape_run_canonical(
 ///
 /// The metadata always comes from `run` — the caller — never from whatever
 /// run originally produced the template. That is what makes a run-cache hit
-/// safe: `RunCacheKey` covers only `(face_id, ligatures, text)`, so a hit can
-/// legitimately reuse glyph *shapes* from a differently-styled or
-/// differently-positioned prior run, but must never leak that prior run's
+/// safe: `RunCacheKey` covers only `(face_id, ligatures, text, char_widths)`,
+/// so a hit can legitimately reuse glyph *shapes* from a differently-styled
+/// or differently-positioned prior run, but must never leak that prior run's
 /// style/color/URL/blink/position.
 fn build_shaped_run_from_template(
     run: &TextRun,
@@ -1575,6 +1594,62 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.run_misses, 2, "different run text must not hit");
         assert_eq!(stats.run_hits, 0);
+    }
+
+    /// Regression for a real reachable case, not just a synthetic fixture:
+    /// [`TextRun::text`] is built by `tchar_to_char`, which keeps only the
+    /// FIRST Unicode scalar of a `TChar::Utf8` grapheme cluster (see that
+    /// function's doc). Two different grapheme clusters that happen to
+    /// share a first scalar therefore produce byte-identical `text` while
+    /// `TChar::display_width()` reports different total widths for the two
+    /// clusters — e.g. a base character alone versus the same base
+    /// character combined with a wide combining mark. `run_a`/`run_b` below
+    /// stand in for exactly that: identical `(face_id, ligatures, text)` but
+    /// genuinely different `char_widths`, built directly (via `TextRun`
+    /// struct-update over [`make_run`], the same pattern
+    /// `run_cache_hit_never_leaks_prior_metadata` below uses) rather than
+    /// through `segment_line`, so this test pins the run-cache key contract
+    /// independent of grapheme segmentation. Before `char_widths` joined
+    /// `RunCacheKey`, `run_b` would incorrectly hit `run_a`'s cached
+    /// template and inherit its `cell_width`, corrupting `run_b`'s
+    /// cell-grid layout.
+    #[test]
+    fn run_cache_misses_when_char_widths_differ_for_identical_text() {
+        let fm = test_font_manager();
+        let features = shaping_features(false);
+        let mut cache = ShapingCache::new();
+
+        let run_a = make_run("e", 0, FaceId::PrimaryRegular);
+        assert_eq!(run_a.char_widths, vec![1]);
+        let run_b = TextRun {
+            char_widths: vec![2],
+            col_count: 2,
+            ..make_run("e", 0, FaceId::PrimaryRegular)
+        };
+
+        let shaped_a = cache.shape_run_via_run_cache(&run_a, &fm, 10.0, false, &features);
+        assert_eq!(cache.stats().run_misses, 1);
+
+        let shaped_b = cache.shape_run_via_run_cache(&run_b, &fm, 10.0, false, &features);
+        let stats = cache.stats();
+        assert_eq!(
+            stats.run_misses, 2,
+            "same (face_id, ligatures, text) but different char_widths \
+             must not hit the run cache"
+        );
+        assert_eq!(stats.run_hits, 0);
+
+        assert_eq!(shaped_a.glyphs.len(), 1);
+        assert_eq!(shaped_b.glyphs.len(), 1);
+        assert_eq!(
+            shaped_a.glyphs[0].cell_width, 1,
+            "run_a's own glyph must keep its own width"
+        );
+        assert_eq!(
+            shaped_b.glyphs[0].cell_width, 2,
+            "run_b's own glyph must keep its own width (2), not leak \
+             run_a's cached width (1)"
+        );
     }
 
     #[test]
