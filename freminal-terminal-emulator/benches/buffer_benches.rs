@@ -212,6 +212,35 @@ fn bench_parse_sgr_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_parse_osc9
+// ---------------------------------------------------------------
+fn bench_parse_osc9(c: &mut Criterion) {
+    let payloads: &[(&str, &[u8])] = &[
+        ("notification", b"\x1b]9;Build finished\x1b\\"),
+        ("progress", b"\x1b]9;4;1;50\x1b\\"),
+    ];
+
+    let mut group = c.benchmark_group("bench_parse_osc9");
+    for &(name, payload) in payloads {
+        group.throughput(Throughput::Bytes(payload.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("parser_push", name),
+            payload,
+            |b, payload| {
+                b.iter_batched(
+                    FreminalAnsiParser::new,
+                    |mut parser| {
+                        std::hint::black_box(parser.push(payload));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_parse_cup_writes — parser + handler together
 // ---------------------------------------------------------------
 fn bench_parse_cup_writes(c: &mut Criterion) {
@@ -715,6 +744,7 @@ criterion_group!(
     targets =
         bench_parse_plain_text,
         bench_parse_sgr_heavy,
+        bench_parse_osc9,
         bench_parse_cup_writes,
         bench_parse_bursty,
         bench_handle_incoming_data,
