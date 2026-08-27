@@ -25,6 +25,12 @@
 //!   draws toast label/icon text through the shared instanced foreground
 //!   shader (issue #433). Companion to `toast_pass`; see `toast_text_pass`
 //!   module docs.
+//! - `profiling` (feature `frame-profiling`, Task 125.4) — the live
+//!   render-work profiling foundation: [`profiling::RenderWorkClass`],
+//!   [`profiling::ChangedRowBucket`], [`profiling::UploadByteCounts`], and
+//!   [`profiling::LiveRenderProfile`]'s pane-frame-token state machine.
+//!   Not yet wired to any renderer/widget call site — see that module's
+//!   docs.
 
 pub mod errors;
 pub mod gl_facade;
@@ -45,6 +51,8 @@ mod headless_workloads;
 pub mod pixel_golden;
 #[cfg(all(target_os = "linux", feature = "gl-pixel"))]
 pub mod pixel_harness;
+#[cfg(feature = "frame-profiling")]
+pub mod profiling;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;

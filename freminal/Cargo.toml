@@ -201,7 +201,10 @@ validation = []
 # with this feature entirely absent from the crate graph, since timing calls
 # in the frame path would otherwise perturb the very thing being measured.
 # Enables `freminal-windowing/frame-profiling` so one flag turns on both
-# crates' instrumentation.
+# crates' instrumentation. Task 125.4 adds the live render-work profiling
+# foundation (`gui::renderer::profiling`: `RenderWorkClass`,
+# `ChangedRowBucket`, `UploadByteCounts`, `LiveRenderProfile`) behind this
+# same flag; it is not yet wired to any call site (125.5/125.6 do that).
 frame-profiling = ["freminal-windowing/frame-profiling"]
 # Enables the `Recording` arm of `gui::renderer::gl_facade::Gl` (Task 123),
 # which logs each GL call instead of issuing it, for the Task 123

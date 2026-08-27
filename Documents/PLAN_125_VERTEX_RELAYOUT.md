@@ -525,6 +525,14 @@ PTY/snapshot boundary; do not alter damage decisions.
 
 Stop: report the tested state-machine API; await review before 125.5.
 
+**Complete.** Added the feature-gated `LiveRenderProfile` state machine with
+monotonic pane-frame tokens, a bounded 120-record queue, cumulative resolved-
+class, changed-row-bucket, and upload-byte totals, and the shared 120-
+observation flush cadence. Tests cover painted and superseded-unpainted frames
+plus late, duplicate, out-of-order, queue-eviction, and bucket-boundary cases.
+The module remains entirely absent from default-feature builds and has no live
+renderer or widget wiring yet.
+
 ### 125.5 — Live rebuild outcomes and changed-row histogram
 
 Scope: `freminal/src/gui/renderer/profiling.rs`,
