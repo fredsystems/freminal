@@ -549,6 +549,9 @@ impl super::FreminalGui {
             KeyAction::NewWindow => {
                 win.pending_new_window = true;
             }
+            KeyAction::QuitAll => {
+                win.pending_quit_all = true;
+            }
             KeyAction::ToggleRecording => {
                 // Runtime recording toggle: starts a new FREC v2 file with
                 // the current topology snapshotted into the header, or

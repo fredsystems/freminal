@@ -24,6 +24,7 @@
 use std::time::{Duration, SystemTime};
 
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandStatus};
+use freminal_windowing::App as _;
 
 use super::panes::{Pane, PaneId};
 use super::tabs::TabId;
@@ -460,6 +461,65 @@ impl super::FreminalGui {
         win: &super::window::PerWindowState,
     ) -> Vec<RunningCommandInfo> {
         self.gather_running_for_window(win)
+    }
+
+    /// Handle a `QuitAll` request (issue #509): close every open window,
+    /// having first snapshotted the complete multi-window session topology
+    /// exactly once.
+    ///
+    /// Closing windows one at a time let each earlier close remove itself
+    /// from `self.windows` before the "auto-save when I'm the last window"
+    /// check in `on_close_requested` ran, so only the last-closed window's
+    /// topology ever survived into `last_session.toml`. This saves the full
+    /// topology up front instead — `current_window` is the window whose
+    /// `update()` this runs inside, which `self.windows` does not currently
+    /// contain (see `build_layout`'s doc comment), so it is passed
+    /// separately — then seeds `quit_all_pending` with every window in this
+    /// batch (including `current_window_id`) so `on_close_requested`'s
+    /// per-window check does not re-fire for any of them and overwrite the
+    /// correct save with a shrinking one as the batch proceeds. See
+    /// `quit_all_pending`'s doc comment for why membership, not a sticky
+    /// flag, is what lets a vetoed window's later, independent close still
+    /// auto-save correctly.
+    ///
+    /// Every *other* open window (including an open Settings window) is
+    /// closed here, synchronously, through the same `on_close_requested`
+    /// guard a normal OS close uses — a running foreground command or
+    /// unsaved settings edit still opens its confirmation dialog instead of
+    /// being silently discarded. A vetoed window's dialog needs a repaint to
+    /// appear, since this is not that window's own render pass.
+    ///
+    /// `current_window` itself is asked to close via
+    /// `ViewportCommand::Close` so it goes through the ordinary
+    /// winit-driven close path once `update()` returns — the same path the
+    /// single-window "Quit" menu item already uses — rather than being
+    /// closed directly here where `self.windows` does not yet contain it.
+    pub(in crate::gui) fn quit_all_windows(
+        &mut self,
+        ctx: &egui::Context,
+        current_window_id: freminal_windowing::WindowId,
+        current_window: &super::window::PerWindowState,
+        handle: &freminal_windowing::WindowHandle<'_>,
+    ) {
+        self.maybe_auto_save_session(Some(current_window));
+
+        let other_window_ids: Vec<_> = self.windows.keys().copied().collect();
+        self.quit_all_pending
+            .extend(other_window_ids.iter().copied());
+        self.quit_all_pending.insert(current_window_id);
+
+        for wid in other_window_ids {
+            if self.on_close_requested(wid) {
+                handle.close_window(wid);
+            } else {
+                // Vetoed: `on_close_requested` opened that window's own
+                // close-guard (or unsaved-settings) dialog in place. Wake it
+                // so the dialog actually renders.
+                handle.request_repaint(wid);
+            }
+        }
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 

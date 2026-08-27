@@ -202,6 +202,22 @@ struct FreminalGui {
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
 
+    /// Windows whose `on_close_requested` call is still expected as part of
+    /// an in-flight `QuitAll` batch (issue #509), seeded by
+    /// `quit_all_windows` in `close_guard.rs` with every window open at the
+    /// moment `QuitAll` fired (including the one it was invoked from).
+    ///
+    /// `on_close_requested` removes its own `window_id` from this set the
+    /// moment it runs, regardless of outcome, and consults membership to
+    /// decide whether to skip its own "auto-save when I'm the last window"
+    /// check — see the comment at that check. Membership, not a sticky
+    /// flag, is what lets a *later*, independent close of a window that
+    /// this batch vetoed (e.g. a running-command guard the user goes on to
+    /// resolve on its own) be judged as an ordinary single-window close
+    /// rather than still "part of a batch": by then its entry is already
+    /// gone, so the normal auto-save-on-last-window behavior applies to it.
+    quit_all_pending: std::collections::HashSet<WindowId>,
+
     /// Persisted ephemeral UI window geometry for the Settings window
     /// and each main terminal window.  Loaded from `window_state.toml`
     /// at startup: the settings entry is consulted when the settings
@@ -478,6 +494,7 @@ impl FreminalGui {
             settings_window_id: None,
             pending_settings_window: false,
             pending_focus_settings: false,
+            quit_all_pending: std::collections::HashSet::new(),
             window_state: freminal_common::window_state::window_state_path()
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)
