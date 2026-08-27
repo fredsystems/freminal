@@ -34,6 +34,14 @@ mod egui_integration;
 mod event_loop;
 mod frame_paint;
 mod gl_context;
+// Task 125.7: the asynchronous GPU timestamp-query foundation (bounded
+// ring lifecycle + capability detection). Feature-gated identically to
+// `frame-profiling` -- test/measurement infrastructure with no default-build
+// presence, and not yet wired to any live GL context or paint path (that is
+// 125.8/125.9). Independent of `frame-profiling`: this measures actual GPU
+// execution time via `GL_TIMESTAMP` queries, not CPU wall-clock phases.
+#[cfg(feature = "gpu-profiling")]
+pub mod gpu_profiling;
 // Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
 // builds entirely, and `target_os = "linux"` because the Mesa + Xvfb stack it
 // needs is Linux-only by design (the same precedent as `pkgs.perf` being

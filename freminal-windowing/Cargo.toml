@@ -38,6 +38,15 @@ frame-profiling = []
 # `target_os = "linux"`-gated at the module, so enabling it elsewhere is a
 # no-op rather than a compile error.
 gl-offscreen = []
+# Asynchronous GPU timestamp-query foundation (Task 125.7): a bounded
+# `GpuQueryRing<Q>` lifecycle state machine plus pure capability detection
+# (desktop OpenGL 3.3+ or `GL_ARB_timer_query`; GLES/unsupported report
+# `Unavailable`). NOT enabled by default -- it is measurement infrastructure
+# with no default-build presence, mirroring `frame-profiling`'s rationale.
+# The state machine itself never touches a concrete GL context (driven
+# entirely through the `GpuQuerySource` trait), so this feature adds no new
+# dependency and no unsafe code.
+gpu-profiling = []
 
 [[example]]
 name = "hello"

@@ -225,3 +225,7 @@ gl-recording = []
 # `target_os = "linux"`-gated) and needs Mesa plus a live $DISPLAY, so it is
 # NOT enabled by default and its tests skip when no context can be created.
 gl-pixel = ["gl-recording", "freminal-windowing/gl-offscreen"]
+# Forwards to `freminal-windowing/gpu-profiling` (Task 125.7): the
+# asynchronous GPU timestamp-query foundation. NOT enabled by default; not
+# yet wired to any renderer call site (125.8/125.9 do that).
+gpu-profiling = ["freminal-windowing/gpu-profiling"]

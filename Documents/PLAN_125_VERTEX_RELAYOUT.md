@@ -664,6 +664,16 @@ performance evidence; do not add a second renderer path.
 
 Stop: report the lifecycle API and zero same-frame-read tests; await review.
 
+**Complete.** Added the feature-gated, GL-independent `GpuQueryRing<Q>` with
+pure desktop/GLES capability detection, bounded asynchronous issue/poll
+transitions, delayed availability checks, explicit pending-handle destruction,
+and saturating drop accounting. Same-frame polls never consult the query
+source, results are read only after end-query availability succeeds, and a
+full-ring rejection returns both query handles to the caller for destruction.
+Twenty-two fake-handle tests cover capability parsing, delayed completion,
+slot reuse, drops, rejected ownership, and cleanup; default and Windows builds
+remain clean.
+
 ### 125.8 — Terminal upload and draw GPU timing
 
 Scope: new `freminal/src/gui/renderer/gpu_profiling.rs`;
