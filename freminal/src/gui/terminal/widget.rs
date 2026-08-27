@@ -449,6 +449,35 @@ pub(super) fn compute_command_block_hover_rows(
     Some((s_screen.min(e_screen), s_screen.max(e_screen)))
 }
 
+/// Resolve the (column, row) cell under the pointer for URL-hover purposes,
+/// or `None` when the pointer is not actually over this pane.
+///
+/// Every pane in a split runs `write_input_to_terminal` against the same
+/// window-wide event queue, so `view_state.mouse_position` can hold a
+/// position that belongs to a sibling pane rather than this one (issue
+/// #510: a URL on a pane's top row got "stuck" hovered when the pointer
+/// moved into the pane stacked above it). Requiring containment here --
+/// not just a `Some`/`None` check on `mouse_position` -- is what stops a
+/// stale out-of-pane position from resolving, via
+/// `encode_egui_mouse_pos_as_usize`'s edge clamp, to this pane's row/column
+/// 0 and reviving a stale cached URL. Mirrors the equivalent guard in
+/// `compute_command_block_hover_rows` for the sibling gutter-hover feature.
+pub(super) fn cell_under_pointer_for_url_hover(
+    mouse_position: Option<Pos2>,
+    terminal_rect: Rect,
+    character_size: (f32, f32),
+) -> Option<(usize, usize)> {
+    let pos = mouse_position?;
+    if !terminal_rect.contains(pos) {
+        return None;
+    }
+    Some(encode_egui_mouse_pos_as_usize(
+        pos,
+        character_size,
+        terminal_rect.min,
+    ))
+}
+
 /// Outcome of a scrollbar render+interaction pass. `new_offset` is the
 /// scroll offset the user dragged to (if any). `rendered` is whether the
 /// thumb was actually painted this frame. `hovered` is the
@@ -4184,13 +4213,11 @@ impl FreminalTerminalWidget {
         //   4. Click detection always runs against the cached URL so that
         //      Ctrl+click works even when the mouse has not moved.
         if snap.has_urls {
-            if let Some(mouse_position) = view_state.mouse_position {
-                let (col, row) = encode_egui_mouse_pos_as_usize(
-                    mouse_position,
-                    (logical_cell_w, logical_cell_h),
-                    terminal_rect.min,
-                );
-
+            if let Some((col, row)) = cell_under_pointer_for_url_hover(
+                view_state.mouse_position,
+                terminal_rect,
+                (logical_cell_w, logical_cell_h),
+            ) {
                 let cell = (col, row);
                 let cell_changed = cache.previous_hover_cell != Some(cell);
                 // Pointer identity comparison for the snapshot's char buffer.
@@ -4279,8 +4306,10 @@ impl FreminalTerminalWidget {
                     }
                 }
             } else {
-                // Mouse left the terminal area. Only the URL-hover cache is
-                // cleared here; the icon itself is resolved once below.
+                // Mouse left the terminal area, or (issue #510) is over a
+                // sibling pane and never actually entered this one. Only the
+                // URL-hover cache is cleared here; the icon itself is
+                // resolved once below.
                 cache.previous_hover_cell = None;
                 cache.cached_hovered_url = None;
             }
@@ -6228,6 +6257,78 @@ impl InputSuppressors {
             && !self.context_menu
             && !self.command_history
             && !self.scrollbar_drag
+    }
+}
+
+#[cfg(test)]
+mod url_hover_pane_bounds_tests {
+    //! Issue #510: a URL on a pane's top row must not stay "hovered" once
+    //! the pointer moves into a sibling pane stacked above it. Every pane
+    //! runs against the same window-wide `PointerMoved` queue, so
+    //! `view_state.mouse_position` alone cannot be trusted to mean "over
+    //! this pane" -- containment must be checked explicitly.
+    use super::*;
+
+    /// 10px logical cells, pane/terminal rect both `(0,0)-(100,100)` (no
+    /// gutter inset, unlike the command-block tests above).
+    fn terminal_rect() -> Rect {
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0))
+    }
+
+    #[test]
+    fn pointer_inside_rect_resolves_to_a_cell() {
+        let rect = terminal_rect();
+        // (25, 35) -> column 2, row 3 at 10px cells.
+        let pos = egui::pos2(25.0, 35.0);
+        assert_eq!(
+            cell_under_pointer_for_url_hover(Some(pos), rect, (10.0, 10.0)),
+            Some((2, 3))
+        );
+    }
+
+    #[test]
+    fn pointer_above_the_pane_is_rejected_not_clamped_to_row_zero() {
+        let rect = terminal_rect();
+        // A position belonging to a sibling pane stacked above this one:
+        // above `rect.min.y`. Before the #510 fix this clamped to row 0
+        // instead of being rejected outright.
+        let pos = egui::pos2(25.0, -40.0);
+        assert_eq!(
+            cell_under_pointer_for_url_hover(Some(pos), rect, (10.0, 10.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_left_of_the_pane_is_rejected_not_clamped_to_column_zero() {
+        let rect = terminal_rect();
+        let pos = egui::pos2(-40.0, 25.0);
+        assert_eq!(
+            cell_under_pointer_for_url_hover(Some(pos), rect, (10.0, 10.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn pointer_below_or_right_of_the_pane_is_rejected() {
+        let rect = terminal_rect();
+        assert_eq!(
+            cell_under_pointer_for_url_hover(Some(egui::pos2(25.0, 500.0)), rect, (10.0, 10.0)),
+            None
+        );
+        assert_eq!(
+            cell_under_pointer_for_url_hover(Some(egui::pos2(500.0, 25.0)), rect, (10.0, 10.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn no_mouse_position_is_rejected() {
+        let rect = terminal_rect();
+        assert_eq!(
+            cell_under_pointer_for_url_hover(None, rect, (10.0, 10.0)),
+            None
+        );
     }
 }
 
