@@ -253,11 +253,14 @@ The maintainer resolved the workload and parity semantics on 2026-08-26:
   attribution. If the fdinfo fields are absent or too coarse to distinguish
   the workloads, the cross-terminal GPU verdict is `INCONCLUSIVE`, never
   inferred from llvmpipe or CPU time.
-- **Controlled geometry/config:** the same stable Hyprland tiled allocation and
-  a verified matching 124x31 PTY grid, CaskaydiaCove Nerd Font at 12 pt,
-  opaque background, no background image, no user shader, no cursor trail, the
-  same clean interactive shell/prompt, and isolated config/state directories.
-  Ligatures stay enabled for all three terminals.
+- **Controlled geometry/config:** the same stable Hyprland tiled allocation,
+  with each actual PTY grid recorded, CaskaydiaCove Nerd Font at 12 pt, opaque
+  background, no background image, no user shader, no cursor trail, the same
+  clean interactive shell/prompt, and isolated config/state directories.
+  Backend integer-pixel font metrics prevent an exact common grid without
+  unequal font sizes; synthetic workloads stay within the common 124x31 region,
+  while `btop` is explicitly product-level. Ligatures stay enabled for all
+  three terminals.
 - **Chrome topology:** four tabs, with the active tab containing a 2x2 pane
   layout. The other tabs and all inactive panes are idle.
 - **Pointer workload:** a timed physical-device capture, because compositor
@@ -368,14 +371,14 @@ spawning anything. `perf stat` must collect `task-clock`,
 `task-clock:u`, `task-clock:k`, `cycles`, `instructions`,
 `context-switches`, and exact wakeups. This host already has
 `sched:sched_wakeup`; tracefs is mounted `root:root` mode `0700`, so the driver
-must run only the system-wide, PID-filtered scheduler tracepoint collector via
+must run only the system-wide, terminal-thread-filtered scheduler tracepoint collector via
 `sudo` after an explicit `sudo -v` preflight. Do not remount tracefs or weaken
-its permissions. Count `sched:sched_wakeup` events whose target PID/TID belongs
-to the measured terminal process tree, and keep the ordinary per-process
+its permissions. Count `sched:sched_wakeup` events whose target TID belongs
+to the mapped terminal GUI process, and keep the ordinary per-process
 `perf stat` counters unprivileged. In parallel, use
 `amdgpu_top --json --process --no-pc` to identify the discrete Navi 31 device
-and the measured process's DRM clients, then difference cumulative
-`drm-engine-gfx` time from those clients' `/proc/<pid>/fdinfo/*` records over
+and the measured GUI process's DRM clients, then difference cumulative
+`drm-engine-gfx` time from that process's `/proc/<pid>/fdinfo/*` records over
 the same steady interval. Record a monitor-only control to quantify collector
 overhead. `summarize.py` performs the deterministic bootstrap rule above with
 seed 125 and 10,000 resamples.
@@ -402,15 +405,17 @@ The exact workload matrix is:
 
 Deliverable: hermetic configs, runnable scripts, deterministic summary output,
 and an updated `PROFILING.md` command/reference section. A dry run must prove
-all three terminals resolve to the matched 124x31 grid and intended discrete GPU;
-that wakeups are counted for the complete terminal process tree; and that each
+all three terminals report valid grids in the same tiled bounds and use the
+intended discrete GPU;
+that wakeups are counted for all terminal GUI threads, excluding workload
+descendants; and that each
 terminal exposes cumulative GFX engine time through DRM fdinfo. If fdinfo is
 absent or remains below its measurable resolution under the active control,
 the preflight records cross-terminal GPU parity as unavailable rather than
 substituting device-wide utilization.
 
 Verification: run `bash -n` on `workloads.sh` and `run-matrix.sh`; run
-`python -m py_compile
+`python3 -m py_compile
 assets/profiling/task125/summarize.py`; run each driver's preflight and one
 10-second smoke sample per terminal; `cargo test --all`; `cargo clippy
 --all-targets --all-features -- -D warnings`; `cargo machete`; markdownlint
@@ -424,6 +429,26 @@ utilization to one terminal process; do not commit raw machine captures.
 
 Stop: report preflight/smoke results and any host prerequisite. Do not start
 screening or confirmation yet.
+
+**Complete.** The fixtures use the NixOS system `bash-interactive` under an
+isolated HOME/XDG environment, pre-seed only Freminal's onboarding-complete
+state, and track mapped GUI and separately-reparented shell PIDs by PID plus
+start time. No pattern-based process cleanup remains. Hyprland's stable tiled
+slot is the geometry control; observed smoke grids were Freminal 124x31,
+WezTerm 138x31, and Ghostty 140x33. Exact common-grid calibration was rejected
+because Ghostty's integer-pixel steps skip the target and unequal font sizes
+would be a worse confound. Synthetic workloads stay within 124x31; `btop` is
+product-level.
+
+The staged protocol replaces the original four-hour exhaustive matrix: a
+roughly 34-minute non-pointer screen, a separate roughly four-minute physical-
+pointer screen, then seven 60-second confirmations only for selected workloads.
+Scheduler wakeups use the existing root-only `sched:sched_wakeup` tracepoint
+with a terminal-thread filter; workload descendants are excluded from terminal
+CPU accounting. Per-process AMD DRM fdinfo was available for all three smoke
+runs. Ten-second collector controls recorded complete perf, wakeup, CPU tick,
+GPU engine-time, and grid rows for Freminal, WezTerm, and Ghostty. These smoke
+numbers validate plumbing only and are not parity findings.
 
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 

@@ -4,10 +4,10 @@
 set -euo pipefail
 
 readonly TASK125_SYSTEM_BASH="/run/current-system/sw/bin/bash"
-declare -grx TASK125_ROWS=31
-declare -grx TASK125_COLS=124
 TASK125_BTOP_BIN=$(command -v btop)
 readonly TASK125_BTOP_BIN
+declare -gx TASK125_NEW_WINDOW_ADDRESS=''
+declare -gx TASK125_NEW_WINDOW_PID=''
 
 task125_require_system_bash() {
 	if [[ ! -x "${TASK125_SYSTEM_BASH}" ]]; then
@@ -63,38 +63,22 @@ task125_render_fixtures() {
 	unset TASK125_FORCE_TERMINAL_ROWS TASK125_FORCE_TERMINAL_COLS
 }
 
-task125_focus_pid() {
-	local root=$1 address active
+task125_wait_focused() {
+	local address=$1 active
 	for _ in {1..50}; do
-		address=$(task125_window_address "${root}" || true)
-		if [[ -n ${address} ]]; then
-			hyprctl dispatch focuswindow "address:${address}" >/dev/null
-			active=$(hyprctl activewindow -j | jq -r '.address')
-			[[ ${active} == "${address}" ]] && return 0
-		fi
+		active=$(hyprctl activewindow -j | jq -r '.address')
+		[[ ${active} == "${address}" ]] && return 0
 		sleep 0.1
 	done
-	printf 'could not focus a window owned by process tree %s\n' "${root}" >&2
-	return 1
-}
-
-task125_window_address() {
-	local root=$1 pid address
-	while read -r pid; do
-		address=$(hyprctl clients -j | jq -r --argjson pid "${pid}" \
-			'.[] | select(.pid == $pid) | .address' | sed -n '1p')
-		[[ -n ${address} ]] && printf '%s\n' "${address}" && return 0
-	done < <(task125_descendants "${root}")
+	printf 'new window %s did not become focused; refusing synthetic input\n' "${address}" >&2
 	return 1
 }
 
 task125_pty_path() {
-	local root=$1 pid target
-	while read -r pid; do
-		target=$(readlink "/proc/${pid}/fd/0" 2>/dev/null || true)
-		[[ ${target} == /dev/pts/* ]] && printf '%s\n' "${target}" && return 0
-	done < <(task125_descendants "${root}")
-	printf 'no PTY found in process tree %s\n' "${root}" >&2
+	local shell_pid=$1 target
+	target=$(readlink "/proc/${shell_pid}/fd/0" 2>/dev/null || true)
+	[[ ${target} == /dev/pts/* ]] && printf '%s\n' "${target}" && return 0
+	printf 'shell PID %s has no PTY on fd 0\n' "${shell_pid}" >&2
 	return 1
 }
 
@@ -112,6 +96,27 @@ task125_wait_ready() {
 		fi
 		sleep 0.1
 	done
+}
+
+task125_wait_new_window() {
+	local baseline_file=$1 expected_class=$2 expected_config=$3 timeout_seconds=${4:-15}
+	local address pid class
+	local end=$((SECONDS + timeout_seconds))
+	while ((SECONDS < end)); do
+		while IFS=$'\t' read -r address pid class; do
+			if [[ ${class} == "${expected_class}" ]] &&
+				! grep -Fxq -- "${address}" "${baseline_file}" &&
+				tr '\0' '\n' <"/proc/${pid}/environ" 2>/dev/null |
+				grep -Fxq -- "XDG_CONFIG_HOME=${expected_config}"; then
+				TASK125_NEW_WINDOW_ADDRESS=${address}
+				TASK125_NEW_WINDOW_PID=${pid}
+				return 0
+			fi
+		done < <(hyprctl clients -j | jq -r '.[] | [.address, (.pid | tostring), .class] | @tsv')
+		sleep 0.1
+	done
+	printf 'timed out waiting for a newly mapped Hyprland client\n' >&2
+	return 1
 }
 
 task125_type_loop() {
@@ -156,12 +161,6 @@ task125_start_workload() {
 	btop)
 		wtype "'${TASK125_BTOP_BIN}' --config '${run_dir}/btop.conf' --force-utf --update 1000" -k Return
 		;;
-	scrollback)
-		wtype "seq 1 10000" -k Return
-		sleep 2
-		task125_scroll_loop "${duration}" &
-		printf '%s\n' "$!"
-		;;
 	sustained-output)
 		wtype "while :; do seq 1 200; sleep 0.02; done" -k Return
 		;;
@@ -172,14 +171,18 @@ task125_start_workload() {
 	esac
 }
 
-task125_descendants() {
+task125_descendants_one() {
 	local root=$1 child_file child
 	printf '%s\n' "${root}"
 	child_file="/proc/${root}/task/${root}/children"
 	[[ -r "${child_file}" ]] || return 0
 	for child in $(<"${child_file}"); do
-		task125_descendants "${child}"
+		task125_descendants_one "${child}"
 	done
+}
+
+task125_descendants() {
+	task125_descendants_one "$1"
 }
 
 task125_terminate_tree() {

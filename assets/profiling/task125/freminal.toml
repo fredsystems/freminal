@@ -9,9 +9,9 @@
 # default behavior, not a stripped-down configuration.
 #
 # Geometry is controlled by Hyprland's stable tiled allocation at the fixed
-# spawn location. The runner verifies the resulting PTY grid before every
-# sample; fixture font/cell metrics are tuned so all three terminals resolve
-# to the same grid in that allocation.
+# spawn location. The runner records the resulting PTY grid before every
+# sample. Synthetic workloads stay within the common 124x31 region; differing
+# backend font metrics are recorded rather than hidden by unequal font sizes.
 
 version = 1
 

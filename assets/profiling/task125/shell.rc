@@ -51,27 +51,20 @@ export BASH_COMPAT=""
 # Never interpreted as a command; purely informational.
 export TASK125_SESSION="@TASK125_MARKER@"
 
-# Report the resulting kernel-visible PTY window size so the preflight can
-# confirm every terminal actually landed on the pinned 120x40 grid rather
-# than being resized by a tiling window manager after launch (see the
-# "Host prerequisite" note in Documents/PROFILING.md).
+# Report the kernel-visible PTY window size. Hyprland supplies the same tiled
+# pixel bounds to every terminal, but backend font metrics produce different
+# row/column counts; the driver records those counts rather than forcing an
+# unequal font size (see "Task 125 parity fixtures" in PROFILING.md).
 if [ -n "${TASK125_GRID_REPORT_FILE:-}" ]; then
-    if [ -n "${TASK125_EXPECTED_ROWS:-}" ] && [ -n "${TASK125_EXPECTED_COLS:-}" ]; then
-        for _ in {1..50}; do
-            read -r current_rows current_cols < <(stty size 2>/dev/null) || true
-            if [ "${current_rows:-}" = "${TASK125_EXPECTED_ROWS}" ] \
-                && [ "${current_cols:-}" = "${TASK125_EXPECTED_COLS}" ]; then
-                break
-            fi
-            sleep 0.1
-        done
-    fi
     stty size >"${TASK125_GRID_REPORT_FILE}" 2>/dev/null || true
 fi
 
 # Signal readiness to the driver: workloads that drive input via `wtype`
 # poll for this file before sending any keystrokes, so we never type into a
 # terminal whose shell has not finished initializing yet.
+if [ -n "${TASK125_SHELL_PID_FILE:-}" ]; then
+    printf '%s\n' "$$" >"${TASK125_SHELL_PID_FILE}"
+fi
 if [ -n "${TASK125_READY_FILE:-}" ]; then
     : >"${TASK125_READY_FILE}"
 fi

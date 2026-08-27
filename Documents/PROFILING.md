@@ -311,10 +311,14 @@ cursor modes are separate fixtures. Scrollback capacity has headroom above the
 
 Hyprland controls geometry. Every test window spawns into the same tiled slot
 with the pointer left at the same position, so outer pixel bounds are stable
-between runs. `stty` against the spawned shell's PTY is the final gate. Fixture
-font/cell metrics are calibrated during smoke testing so all three terminals
-resolve to the same 124x31 grid; a different grid is rejected before warm-up
-or measurement.
+between runs. The driver persists the first sample's Hyprland monitor,
+workspace, position, and size tuple and rejects any later sample in that series
+that differs. `stty` against the spawned shell's PTY records each terminal's
+actual grid. CaskaydiaCove's integer-pixel metrics differ by backend, so forcing
+an exact common grid would require unequal font sizes or coarse cell-width
+steps; that is a worse confound than recording the difference. Synthetic
+workloads stay within the common 124x31 region. `btop` remains a product-level
+same-window-size workload and is not claimed to be cell-count-normalized.
 
 ### Window-spawn discipline
 
@@ -322,6 +326,14 @@ Running `preflight` opens no window:
 
 ```sh
 assets/profiling/task125/run-matrix.sh preflight
+```
+
+`collector-preflight` also opens no window. It validates the unprivileged perf
+events and the privileged scheduler tracepoint syntax; it may request sudo
+authentication:
+
+```sh
+assets/profiling/task125/run-matrix.sh collector-preflight
 ```
 
 Every command that opens a GUI prints the terminal, cursor mode, workload,
@@ -342,6 +354,15 @@ Smoke one terminal at a time only after giving that notice:
 assets/profiling/task125/run-matrix.sh smoke freminal blink
 assets/profiling/task125/run-matrix.sh smoke wezterm blink
 assets/profiling/task125/run-matrix.sh smoke ghostty blink
+```
+
+Collector smoke commands add a 10-second counter interval after the warm-up.
+The one-terminal form is for diagnosis; the three-terminal form checks the
+complete matched collection path:
+
+```sh
+assets/profiling/task125/run-matrix.sh collector-smoke-one freminal /tmp/task125-one
+assets/profiling/task125/run-matrix.sh collector-smoke /tmp/task125-all
 ```
 
 Teardown is PID/start-time scoped. The driver records the launched PID and
@@ -380,22 +401,34 @@ confidence interval excludes zero.
 
 ### Scheduler and GPU counters
 
-Ordinary process counters remain unprivileged: task-clock, cycles,
-instructions, and context switches come from `perf stat`; user and system CPU
-time come from differenced `/proc/<pid>/stat` ticks across the complete process
-tree.
+Task-clock, cycles, and instructions use unprivileged `perf stat`; user and
+system CPU time come from differenced `/proc/<pid>/stat` ticks. With this host's
+`perf_event_paranoid=2`, an unprivileged context-switch event is forced to
+user-only and reports zero because the switch occurs in kernel context, so a
+separate privileged per-process `perf stat` records context switches. The
+measured target is the
+mapped terminal GUI process and all of its threads, not descendants: charging
+the fixture shell, `btop`, or output generator to the terminal would invalidate
+the comparison. Separately tracked shell roots exist only for safe teardown.
 
 The kernel already provides `sched:sched_wakeup`, but this host mounts tracefs
 as `root:root` mode `0700`. The driver performs `sudo -v` before opening any
-window and runs only the system-wide, target-PID/TID-filtered wakeup collector
+window and runs only the system-wide, terminal-thread-filtered wakeup collector
 through `sudo`. It never remounts or changes tracefs permissions, and never
 relables context switches as wakeups.
+
+The wakeup filter and integrity baseline are built from the same thread-list
+snapshot after warm-up. A different thread list at interval end invalidates the
+sample. A thread created and destroyed entirely inside the interval cannot be
+detected by endpoint comparison; this is a residual limitation of aggregate
+`perf stat` filtering and must be considered if later profiles show dynamic
+thread creation.
 
 For external GPU comparison, `amdgpu_top --json --process --no-pc` discovers
 the discrete Navi 31 device and process DRM clients without enabling GRBM
 polling. The metric is the difference in cumulative `drm-engine-gfx` time from
-the measured process tree's `/proc/<pid>/fdinfo/*` entries, deduplicated by DRM
-client id. The process tree must have an open file descriptor on the expected
+the mapped GUI process's `/proc/<pid>/fdinfo/*` entries, deduplicated by DRM
+client id. The GUI process must have an open file descriptor on the expected
 discrete-GPU render node. Device-wide utilization is not attributed to one
 terminal. If per-process fdinfo is absent or remains below measurable
 resolution under an active control, cross-terminal GPU parity is
