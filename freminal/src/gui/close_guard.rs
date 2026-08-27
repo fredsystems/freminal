@@ -474,9 +474,13 @@ impl super::FreminalGui {
     /// topology up front instead — `current_window` is the window whose
     /// `update()` this runs inside, which `self.windows` does not currently
     /// contain (see `build_layout`'s doc comment), so it is passed
-    /// separately — then sets `quit_all_in_progress` so that per-window
-    /// check does not re-fire and overwrite the correct save with a
-    /// shrinking one as the batch proceeds.
+    /// separately — then seeds `quit_all_pending` with every window in this
+    /// batch (including `current_window_id`) so `on_close_requested`'s
+    /// per-window check does not re-fire for any of them and overwrite the
+    /// correct save with a shrinking one as the batch proceeds. See
+    /// `quit_all_pending`'s doc comment for why membership, not a sticky
+    /// flag, is what lets a vetoed window's later, independent close still
+    /// auto-save correctly.
     ///
     /// Every *other* open window (including an open Settings window) is
     /// closed here, synchronously, through the same `on_close_requested`
@@ -493,13 +497,17 @@ impl super::FreminalGui {
     pub(in crate::gui) fn quit_all_windows(
         &mut self,
         ctx: &egui::Context,
+        current_window_id: freminal_windowing::WindowId,
         current_window: &super::window::PerWindowState,
         handle: &freminal_windowing::WindowHandle<'_>,
     ) {
         self.maybe_auto_save_session(Some(current_window));
-        self.quit_all_in_progress = true;
 
         let other_window_ids: Vec<_> = self.windows.keys().copied().collect();
+        self.quit_all_pending
+            .extend(other_window_ids.iter().copied());
+        self.quit_all_pending.insert(current_window_id);
+
         for wid in other_window_ids {
             if self.on_close_requested(wid) {
                 handle.close_window(wid);

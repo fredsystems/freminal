@@ -869,51 +869,13 @@ impl freminal_windowing::App for FreminalGui {
                         }
                     }
 
-                    let win = PerWindowState {
-                        tabs: TabManager::new(tab),
+                    let win = Self::new_per_window_state(
+                        tab,
                         terminal_widget,
-                        last_window_title: String::from("Freminal"),
                         os_dark_mode,
-                        style_cache: None,
-                        pending_close_pane: false,
-                        pending_focus_direction: None,
-                        border_drag: None,
-                        held_pointer_button: None,
-                        published: super::published_frame_state::PublishedFrameState::new(),
-                        shader_last_mtime: None,
                         window_post,
-                        toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
                         repaint_handle,
-                        pending_new_window: false,
-                        pending_quit_all: false,
-                        pending_geometry: None,
-                        last_known_size: None,
-                        last_known_position: None,
-                        renaming_tab: None,
-                        rename_buffer: String::new(),
-                        dragging_tab: None,
-                        last_tab_rects: Vec::new(),
-                        pending_menu_actions: Vec::new(),
-                        paste_dialog: super::paste_guard::PasteDialog::default(),
-                        broadcast_dialog: super::broadcast_guard::BroadcastConfirmDialog::default(),
-                        close_dialog: super::close_guard::CloseGuardDialog::default(),
-                        pending_force_close: false,
-                        pending_raw_keys: Vec::new(),
-                        pending_frame_damage: freminal_windowing::FrameDamage::Full,
-                        pending_terminal_band_range: 0..0,
-                        present_region: std::sync::Arc::new(std::sync::Mutex::new(
-                            freminal_windowing::PresentRegion::default(),
-                        )),
-                        previous_active_pane_key: None,
-                        pending_chrome_damage: freminal_windowing::ChromeDamage::Changed,
-                        chrome_settle_pending: false,
-                        prev_dismissible_presence: chrome_damage::DismissiblePresence::default(),
-                        prev_chrome_tab_snapshot: chrome_damage::ChromeTabSnapshot::default(),
-                        prev_window_focused: false,
-                        chrome_frames_rendered: 0,
-                        pending_terminal_requested_delay: None,
-                        frame_stats: super::window::FrameStats::default(),
-                    };
+                    );
                     self.windows.insert(window_id, win);
 
                     self.emit_window_create_recording(window_id, inner_size);
@@ -937,6 +899,15 @@ impl freminal_windowing::App for FreminalGui {
     /// close, or the owning terminal window's — issue #401), or the window
     /// has a running foreground command pending confirmation (Task 98).
     fn on_close_requested(&mut self, window_id: WindowId) -> bool {
+        // Consume this window's membership in an in-flight `QuitAll` batch
+        // (issue #509), if any -- unconditionally, up front, regardless of
+        // which branch below ultimately resolves this call. That is what
+        // makes membership self-clearing rather than sticky: a LATER,
+        // independent close of this same window (e.g. after the user
+        // resolves a guard dialog this very call opened) finds no entry
+        // here and is judged as an ordinary single-window close.
+        let in_quit_all_batch = self.quit_all_pending.remove(&window_id);
+
         // Settings window closed (via OS close button).
         if self.settings_window_id == Some(window_id) {
             // Consult the unsaved-changes guard.  When dirty, the modal
@@ -1041,7 +1012,7 @@ impl freminal_windowing::App for FreminalGui {
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1 && !self.quit_all_in_progress {
+        if remaining_terminal_windows == 1 && !in_quit_all_batch {
             self.maybe_auto_save_session(None);
         }
 
@@ -1534,7 +1505,7 @@ impl freminal_windowing::App for FreminalGui {
         // ── Quit all windows (issue #509) ────────────────────────────────────
         if win.pending_quit_all {
             win.pending_quit_all = false;
-            self.quit_all_windows(ctx, &win, handle);
+            self.quit_all_windows(ctx, window_id, &win, handle);
         }
 
         // ── Apply pending window geometry from layout engine ─────────────────
