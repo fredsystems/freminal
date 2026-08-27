@@ -31,12 +31,13 @@ rebuild, across every stage of the pipeline that is NOT yet
 per-row-incremental. These are the load-bearing benchmarks for that
 work:
 
-| Stage                          | Group ID                     | Defining function                  | What it isolates                                                                                                            |
-| ------------------------------ | ---------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Snapshot build (flatten/merge) | `bench_build_snapshot`       | `bench_build_snapshot`             | `build_snapshot_80x24_partial_dirty` sub-bench: 1-of-24-rows dirty vs. clean/full-dirty                                     |
-| Glyph shaping                  | `shaping_ligatures`          | `bench_shaping_ligatures`          | `shape_visible_partial_dirty_200x50` sub-bench: `ShapingCache` IS per-row content-hashed, so only the changed row re-shapes |
-| Background vertex instances    | `instanced_bg_partial_dirty` | `bench_bg_instances_partial_dirty` | `build_bg_instances_all_rows` vs. `build_bg_instances_one_row` — quantifies recoverable headroom; NOT itself incremental    |
-| Foreground vertex instances    | `instanced_fg_partial_dirty` | `bench_fg_instances_partial_dirty` | `build_fg_instances_all_rows` vs. `build_fg_instances_one_row` — same headroom framing for `build_foreground_instances`     |
+| Stage                          | Group ID                           | Defining function                  | What it isolates                                                                                                            |
+| ------------------------------ | ---------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Snapshot build (flatten/merge) | `bench_build_snapshot`             | `bench_build_snapshot`             | `build_snapshot_80x24_partial_dirty` sub-bench: 1-of-24-rows dirty vs. clean/full-dirty                                     |
+| Glyph shaping                  | `shaping_ligatures`                | `bench_shaping_ligatures`          | `shape_visible_partial_dirty_200x50` sub-bench: `ShapingCache` IS per-row content-hashed, so only the changed row re-shapes |
+| Background vertex instances    | `instanced_bg_partial_dirty`       | `bench_bg_instances_partial_dirty` | All-default, 10%-sparse, and dense corpora; all 50 rows vs. one middle row with preallocated outputs                        |
+| Foreground vertex instances    | `instanced_fg_partial_dirty`       | `bench_fg_instances_partial_dirty` | Warm-atlas steady-state construction for all 50 rows vs. one middle row; NOT itself incremental                             |
+| Foreground atlas rasterization | `instanced_fg_atlas_rasterization` | `bench_fg_atlas_rasterization`     | Cold-atlas full-screen foreground build, separate from steady-state vertex construction                                     |
 
 The plain (non-`_partial_dirty`) `instanced_bg` / `instanced_fg`
 groups (functions `bench_bg_instances` / `bench_fg_instances`, below)
@@ -100,22 +101,23 @@ name (the historical `feed_data_*` / `build_snapshot_*` naming in the
 old catalog referred to `BenchmarkId` labels or stale names, not the
 actual group IDs — corrected below).
 
-| Change area                                                             | Group ID                          | Defining function                  |
-| ----------------------------------------------------------------------- | --------------------------------- | ---------------------------------- |
-| Data-feed, plain-text incremental (scrolling shell)                     | `render_terminal_text`            | `bench_feed_data_incremental`      |
-| Data-feed, ANSI/SGR-heavy (dense TUI)                                   | `render_terminal_text_ansi_heavy` | `bench_feed_data_ansi_heavy`       |
-| Data-feed, bursty chunking pattern                                      | `render_terminal_text_bursty`     | `bench_feed_data_bursty`           |
-| `build_snapshot()` after an ANSI-heavy feed                             | `render_terminal_text_snapshot`   | `bench_build_snapshot_after_feed`  |
-| ArcSwap store/load (snapshot transport)                                 | `render_terminal_text_arcswap`    | `bench_arcswap_roundtrip`          |
-| Glyph shaping, ligatures on/off, cache hit, partial-dirty               | `shaping_ligatures`               | `bench_shaping_ligatures`          |
-| Fold-placeholder line shaping (Task 72.10)                              | `shape_placeholder_line`          | `bench_shape_placeholder_line`     |
-| Background vertex-instance build (80x24, 200x50)                        | `instanced_bg`                    | `bench_bg_instances`               |
-| Foreground vertex-instance build (80x24, 200x50)                        | `instanced_fg`                    | `bench_fg_instances`               |
-| Background vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_bg_partial_dirty`      | `bench_bg_instances_partial_dirty` |
-| Foreground vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_fg_partial_dirty`      | `bench_fg_instances_partial_dirty` |
-| Chrome style build (`build_visuals`, theme/profile switch cost)         | `build_visuals`                   | `bench_build_visuals`              |
-| Kitty image animation frame-tick selection                              | `image_animation_tick`            | `bench_image_animation_tick`       |
-| Kitty image-quad vertex generation                                      | `build_image_verts`               | `bench_build_image_verts`          |
+| Change area                                                             | Group ID                           | Defining function                  |
+| ----------------------------------------------------------------------- | ---------------------------------- | ---------------------------------- |
+| Data-feed, plain-text incremental (scrolling shell)                     | `render_terminal_text`             | `bench_feed_data_incremental`      |
+| Data-feed, ANSI/SGR-heavy (dense TUI)                                   | `render_terminal_text_ansi_heavy`  | `bench_feed_data_ansi_heavy`       |
+| Data-feed, bursty chunking pattern                                      | `render_terminal_text_bursty`      | `bench_feed_data_bursty`           |
+| `build_snapshot()` after an ANSI-heavy feed                             | `render_terminal_text_snapshot`    | `bench_build_snapshot_after_feed`  |
+| ArcSwap store/load (snapshot transport)                                 | `render_terminal_text_arcswap`     | `bench_arcswap_roundtrip`          |
+| Glyph shaping, ligatures on/off, cache hit, partial-dirty               | `shaping_ligatures`                | `bench_shaping_ligatures`          |
+| Fold-placeholder line shaping (Task 72.10)                              | `shape_placeholder_line`           | `bench_shape_placeholder_line`     |
+| Background vertex-instance build (80x24, 200x50)                        | `instanced_bg`                     | `bench_bg_instances`               |
+| Foreground vertex-instance build (80x24, 200x50)                        | `instanced_fg`                     | `bench_fg_instances`               |
+| Background vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_bg_partial_dirty`       | `bench_bg_instances_partial_dirty` |
+| Foreground vertex instances, all-rows-vs-one-row headroom (#405 Part C) | `instanced_fg_partial_dirty`       | `bench_fg_instances_partial_dirty` |
+| Foreground cold-atlas rasterization                                     | `instanced_fg_atlas_rasterization` | `bench_fg_atlas_rasterization`     |
+| Chrome style build (`build_visuals`, theme/profile switch cost)         | `build_visuals`                    | `bench_build_visuals`              |
+| Kitty image animation frame-tick selection                              | `image_animation_tick`             | `bench_image_animation_tick`       |
+| Kitty image-quad vertex generation                                      | `build_image_verts`                | `bench_build_image_verts`          |
 
 ## Where the rest of the policy lives
 

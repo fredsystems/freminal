@@ -486,6 +486,16 @@ region; do not use these synthetic numbers as live upload evidence.
 Stop: report before/after tables and measured one-row/all-row ceilings; await
 review before 125.10 consumes them.
 
+**Complete.** The steady-state foreground benchmark now reuses a prewarmed
+atlas and measures 151.90 us for all 50 rows against 3.0308 us for one middle
+row, a 50.1x construction ceiling. The separated cold-atlas group measures
+977.31 us for the same full-screen corpus. Background construction measures
+134.86 ns / 14.239 ns for all-default, 6.6333 us / 141.26 ns for 10%-sparse,
+and 18.239 us / 361.78 ns for dense all-row / one-row cases. The preserved
+all-default baselines changed by +0.25% and +1.46%, within Criterion's noise
+threshold; the foreground changes of -83.13% and -99.59% are the intended
+removal of cold-atlas work rather than production speedups.
+
 ### 125.4 — Feature-gated live render-work profiling foundation
 
 Scope: new `freminal/src/gui/renderer/profiling.rs`;
