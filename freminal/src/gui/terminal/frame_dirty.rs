@@ -181,6 +181,33 @@ impl ChangedRows {
     pub(super) const fn any(&self) -> bool {
         !matches!(self, Self::None)
     }
+
+    /// The literal changed-row count for a [`VertexRebuild::Bounded`]
+    /// frame, as recorded by the live render-work profiler (Task 125.5):
+    /// [`Self::Rows`]'s length, or `0` for [`Self::None`] (a
+    /// selection/hover/search-only bounded frame with no row-epoch change
+    /// at all — see `crate::gui::renderer::profiling::RenderWorkClass::Bounded`'s
+    /// zero-bucket doc, which keeps that case distinct from
+    /// `RenderWorkClass::Reuse` precisely because it still took the
+    /// bounded path).
+    ///
+    /// [`Self::All`] never reaches this call site in practice —
+    /// `evaluate_frame_dirty_state`'s `bounded_change` provably excludes
+    /// it before [`VertexRebuild::Bounded`] is ever selected — but the
+    /// fallback here is `0` rather than a panic: a wrong profiling count
+    /// is a cosmetic defect in a `#[cfg(feature = "frame-profiling")]`
+    /// diagnostic, not a rendering correctness bug, so it does not
+    /// warrant treating an unreachable-in-practice shape as a hard error.
+    ///
+    /// Feature-gated (its only caller, `widget.rs`'s live-profiling call
+    /// site, is) rather than left compiled-but-unused in a default build.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) const fn bounded_row_count(&self) -> usize {
+        match self {
+            Self::Rows(rows) => rows.len(),
+            Self::None | Self::All => 0,
+        }
+    }
 }
 
 /// Compare this frame's per-row content epochs against the epochs recorded
@@ -1174,6 +1201,32 @@ mod evaluate_frame_dirty_state_tests {
     fn identical_epochs_report_no_change() {
         let epochs: Arc<[u64]> = Arc::from(vec![1_u64, 2, 3]);
         assert_eq!(diff_row_epochs(Some(&epochs), &epochs), ChangedRows::None);
+    }
+
+    // ── ChangedRows::bounded_row_count (Task 125.5's live profiling) ────
+
+    #[cfg(feature = "frame-profiling")]
+    #[test]
+    fn bounded_row_count_of_rows_is_its_length() {
+        assert_eq!(ChangedRows::Rows(vec![2, 5, 9]).bounded_row_count(), 3);
+        assert_eq!(ChangedRows::Rows(Vec::new()).bounded_row_count(), 0);
+    }
+
+    /// `ChangedRows::None` -- a selection/hover/search-only bounded frame
+    /// with no row-epoch change at all -- must resolve to `0`, not be
+    /// mistaken for "not bounded at all".
+    #[cfg(feature = "frame-profiling")]
+    #[test]
+    fn bounded_row_count_of_none_is_zero() {
+        assert_eq!(ChangedRows::None.bounded_row_count(), 0);
+    }
+
+    /// `ChangedRows::All` never reaches this call site in practice (see
+    /// the method's doc), but the fallback must still be `0`, not a panic.
+    #[cfg(feature = "frame-profiling")]
+    #[test]
+    fn bounded_row_count_of_all_is_zero() {
+        assert_eq!(ChangedRows::All.bounded_row_count(), 0);
     }
 
     /// The justification for deleting `last_rendered_line_widths` (Task

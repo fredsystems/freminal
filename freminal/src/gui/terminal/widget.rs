@@ -58,6 +58,15 @@ use super::{
 use conv2::{ApproxFrom, ConvUtil, RoundToZero};
 use egui_glow::CallbackFn;
 use std::sync::{Arc, Mutex};
+
+// Task 125.5: live render-work profiling is entirely absent from a default
+// build -- no field, no branch -- see `RenderState::live_profile` and its
+// call sites below, all gated on the same feature.
+#[cfg(feature = "frame-profiling")]
+use super::super::renderer::profiling::{
+    LiveRenderProfile, PaneFrameToken, RawRebuildDecision, ReevaluatedRebuild, UploadByteCounts,
+    resolve_render_work_class,
+};
 use std::time::Duration;
 use tracing::error;
 
@@ -1319,6 +1328,16 @@ pub struct RenderState {
     /// `Some(PendingGpuOp::Clear)` → clear the current image.
     /// `None` → no pending change this frame.
     pub(super) pending_bg_image: Option<PendingGpuOp<std::path::PathBuf>>,
+    /// Live, feature-gated render-work profile for this pane (Task 125.4's
+    /// state machine; Task 125.5 wires `show()` and this pane's
+    /// `PaintCallback` into it). Both need to reach the SAME instance --
+    /// `show()` computes the raw/resolved classification and starts a
+    /// fresh token every call; the paint callback finalizes it -- and
+    /// `RenderState` is already the `Arc<Mutex<...>>` both share (see
+    /// this struct's own threading-invariant doc above). Entirely absent
+    /// from a default build.
+    #[cfg(feature = "frame-profiling")]
+    pub(super) live_profile: LiveRenderProfile,
 }
 
 impl RenderState {
@@ -1367,7 +1386,58 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
         window_post,
         pending_bg_image: None,
+        #[cfg(feature = "frame-profiling")]
+        live_profile: LiveRenderProfile::new(),
     }))
+}
+
+/// Emit the Task 125.5 live render-work profile's periodic flush summary,
+/// if (and only if) `profile` currently has one pending.
+///
+/// Two call sites in [`FreminalTerminalWidget::show`] invoke this: right
+/// after `show()`'s own [`LiveRenderProfile::start`] call (which may have
+/// just finalized a stale, superseded token as unpainted and crossed a
+/// [`LiveRenderProfile::FLUSH_EVERY`] boundary doing so), and inside the
+/// pane's `PaintCallback` right after [`LiveRenderProfile::complete`]
+/// (the normal case, where the boundary is crossed by a painted
+/// completion). [`LiveRenderProfile::take_flush_signal`] is the single
+/// stateful, one-shot source of truth both share, so whichever call site
+/// happens to run first after a crossing consumes the signal and actually
+/// logs; the other observes nothing pending and logs nothing -- this
+/// helper exists precisely so that "check the signal, and log if it's
+/// set" is written once rather than duplicated at both call sites (and so
+/// the two can never drift into logging the same boundary twice or
+/// checking it with different field sets).
+#[cfg(feature = "frame-profiling")]
+fn maybe_log_live_render_profile_flush(
+    profile: &mut LiveRenderProfile,
+    pane_id: crate::gui::panes::PaneId,
+) {
+    if !profile.take_flush_signal() {
+        return;
+    }
+    tracing::debug!(
+        target: LiveRenderProfile::LOG_TARGET,
+        pane_id = ?pane_id,
+        painted = profile.painted_count(),
+        unpainted = profile.unpainted_count(),
+        observations = profile.observation_count(),
+        raw_cursor_only = profile.raw_counts().cursor_only,
+        raw_bounded = profile.raw_counts().bounded,
+        raw_reevaluate_full_rebuild = profile.raw_counts().reevaluate_full_rebuild,
+        resolved_reuse = profile.class_counts().reuse,
+        resolved_cursor_only = profile.class_counts().cursor_only,
+        resolved_bounded = profile.class_counts().bounded,
+        resolved_full = profile.class_counts().full,
+        changed_row_histogram = ?profile.row_bucket_counts(),
+        "live render-work profile (task 125.5): cumulative raw \
+         VertexRebuild decisions vs. resolved render-work class, and the \
+         changed-row histogram, for this pane since its RenderState was \
+         created -- flushed every LiveRenderProfile::FLUSH_EVERY \
+         finalized observations, whichever of `start`'s stale-token sweep \
+         or the paint callback's `complete` happened to cross the \
+         boundary"
+    );
 }
 
 /// Per-pane dirty-tracking cache for the terminal render pipeline.
@@ -3050,6 +3120,35 @@ impl FreminalTerminalWidget {
             h.finish()
         };
 
+        // Task 125.5: one live-profiling observation begins per `show()`
+        // call, once the raw/resolved rebuild outcome for THIS frame is
+        // known below. `LiveRenderProfile::start` is given that raw/resolved
+        // classification directly and retains it internally, so only the
+        // resulting token needs to be carried forward to the paint
+        // callback -- see `LiveRenderProfile::complete`'s doc for why it
+        // takes back only the token and uploads, not the classification a
+        // second time.
+        //
+        // Stays `None` on a `skip_draw` frame and permanently on a
+        // non-`frame-profiling` build. `skip_draw` is deliberately NOT
+        // classified into an observation of its own: `evaluate_frame_dirty_state`
+        // never runs on such a frame, so there is no `VertexRebuild`
+        // decision to mirror into a `RawRebuildDecision` -- the pane's
+        // `PaintCallback` (still registered unconditionally below) simply
+        // redraws whatever GPU buffers already exist, which is not CPU
+        // render work this profiler measures. This is the "explicitly
+        // justified" alternative to starting a token for every `show()`
+        // call: forcing a classification here would misrepresent a frame
+        // where no rebuild decision was made at all. Whenever a token IS
+        // started below, the very same `show()` call unconditionally
+        // registers the matching `PaintCallback` a token could complete
+        // (see the registration further down) -- so a started token is
+        // never orphaned by construction; the only way it goes unpainted
+        // is the genuine `FrameDamage::None` case `LiveRenderProfile`'s
+        // module doc describes, which this state machine already handles.
+        #[cfg(feature = "frame-profiling")]
+        let mut profiling_token: Option<PaneFrameToken> = None;
+
         if !snap.skip_draw {
             // See `evaluate_frame_dirty_state`'s doc for the full rationale
             // behind every flag and translation computed here; this call
@@ -3159,6 +3258,48 @@ impl FreminalTerminalWidget {
                     }
                 }
             };
+
+            // Task 125.5: the raw `VertexRebuild` decision and its
+            // resolved render-work class are both known now -- before
+            // either candidate branch below runs -- so record them into a
+            // fresh profile token here. `ChangedRows::bounded_row_count`
+            // supplies `VertexRebuild::Bounded`'s row count (including the
+            // `ChangedRows::None` zero case); `full_rebuild`'s `Some`/`None`
+            // resolution supplies `ReevaluateFullRebuild`'s outcome.
+            // Profiling reads these already-computed decisions; it does
+            // not recompute or influence them.
+            #[cfg(feature = "frame-profiling")]
+            {
+                let raw = match dirty.rebuild {
+                    VertexRebuild::CursorOnly => RawRebuildDecision::CursorOnly,
+                    VertexRebuild::Bounded => RawRebuildDecision::Bounded {
+                        changed_row_count: dirty.changed_rows.bounded_row_count(),
+                    },
+                    VertexRebuild::ReevaluateFullRebuild => {
+                        RawRebuildDecision::ReevaluateFullRebuild {
+                            resolved: if matches!(full_rebuild, Some(FullRebuildDamage::Full)) {
+                                ReevaluatedRebuild::Full
+                            } else {
+                                ReevaluatedRebuild::Reuse
+                            },
+                        }
+                    }
+                };
+                let class = resolve_render_work_class(raw);
+                let mut guard = render_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let token = guard.live_profile.start(raw, class);
+                // The stale-token sweep inside `start` above may have just
+                // finalized a PREVIOUS token as unpainted and crossed a
+                // `FLUSH_EVERY` boundary doing so -- check here, not only
+                // from the paint callback's `complete` call site below, or
+                // that boundary is lost forever (Task 125.5 regression
+                // fix; see `LiveRenderProfile::take_flush_signal`'s doc).
+                maybe_log_live_render_profile_flush(&mut guard.live_profile, pane_id);
+                drop(guard);
+                profiling_token = Some(token);
+            }
 
             if matches!(dirty.rebuild, VertexRebuild::CursorOnly) {
                 // Fast path: build just the cursor quad and stash it.
@@ -3875,6 +4016,38 @@ impl FreminalTerminalWidget {
                             restore_fbo,
                         );
                     });
+                }
+
+                // Task 125.5: finalize this frame's live-profiling
+                // observation now that the actual GL draw above has run.
+                // `complete` takes back only the token and the upload
+                // counts -- the raw/resolved classification was already
+                // recorded by `start` above, against this exact token, so
+                // it cannot be reported differently here.
+                // `UploadByteCounts::default()` (all-zero) is the correct
+                // value for an observation this subtask does not yet
+                // measure -- Task 125.6 replaces it with the real
+                // per-buffer upload-byte counts from the draw calls above,
+                // without changing anything else about this call site.
+                // `profiling_token` is `None` on a `skip_draw` frame (no
+                // rebuild decision was made, so there is nothing to
+                // finalize) and permanently on a non-`frame-profiling`
+                // build; a callback that is never invoked at all (this
+                // closure's body never runs) leaves its token pending, and
+                // the NEXT `show()` call's `LiveRenderProfile::start`
+                // finalizes it as unpainted -- see that type's module doc.
+                #[cfg(feature = "frame-profiling")]
+                if let Some(token) = profiling_token {
+                    rs.live_profile.complete(token, UploadByteCounts::default());
+                    // Also checked right after `start()` above -- see that
+                    // call site's comment for why a boundary crossed by
+                    // the stale-token sweep inside `start` would otherwise
+                    // never be logged. `maybe_log_live_render_profile_flush`
+                    // itself only actually logs once per crossed boundary
+                    // (`LiveRenderProfile::take_flush_signal` consumes the
+                    // signal), so calling it from both sites cannot
+                    // produce a duplicate log line.
+                    maybe_log_live_render_profile_flush(&mut rs.live_profile, pane_id);
                 }
             })),
         });
@@ -5176,6 +5349,8 @@ mod subtask_1_7_tests {
             bg_image_mode: freminal_common::config::BackgroundImageMode::Cover,
             window_post: Arc::new(Mutex::new(WindowPostRenderer::new())),
             pending_bg_image: None,
+            #[cfg(feature = "frame-profiling")]
+            live_profile: LiveRenderProfile::new(),
         };
         assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
         assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");
@@ -5272,6 +5447,170 @@ mod subtask_1_7_tests {
             !cache.observe_row_epochs(&epochs_b_clone_values),
             "a distinct allocation with identical epoch values is NOT a new \
              observation"
+        );
+    }
+}
+
+/// Task 125.5: `RenderState::live_profile`'s token lifecycle through the
+/// exact `Arc<Mutex<RenderState>>` API `show()` and the pane `PaintCallback`
+/// share — a fresh, GL-context-free `RenderState` locked twice (once per
+/// side), never a real rendered frame.
+#[cfg(all(test, feature = "frame-profiling"))]
+mod live_profiling_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::gui::renderer::profiling::{PaneFrameOutcome, RenderWorkClass};
+
+    /// A freshly constructed pane's `live_profile` starts with no pending
+    /// token and zero observations — mirrors a pane's very first `show()`
+    /// call.
+    #[test]
+    fn fresh_render_state_has_no_pending_profiling_token() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.pending(), None);
+        assert_eq!(rs.live_profile.observation_count(), 0);
+    }
+
+    /// End-to-end token lifecycle through the SAME `Arc<Mutex<RenderState>>`
+    /// `show()` and the paint callback share: `show()`'s side resolves the
+    /// raw decision into a class via [`resolve_render_work_class`] (the
+    /// same mapping the `widget.rs` call site uses) and starts a token;
+    /// the paint callback's side re-locks later and finalizes that SAME
+    /// token with the default (all-zero) uploads Task 125.5 always
+    /// reports (Task 125.6 will replace that with real counts).
+    #[test]
+    fn token_lifecycle_through_the_render_state_shared_by_show_and_the_paint_callback() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        // `show()`'s side: the raw decision and resolved class are known
+        // up front and supplied directly to `start`.
+        let raw = RawRebuildDecision::Bounded {
+            changed_row_count: 5,
+        };
+        let class = resolve_render_work_class(raw);
+        let token = render_state.lock().unwrap().live_profile.start(raw, class);
+
+        // The paint callback's side: a later, separate lock, finalizing
+        // the token `show()` started above with only the token and the
+        // upload counts -- the classification is not supplied again (it
+        // cannot disagree with what `start` already recorded).
+        let finalized = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .complete(token, UploadByteCounts::default());
+        assert!(finalized);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.pending(), None);
+        assert_eq!(rs.live_profile.painted_count(), 1);
+        assert_eq!(rs.live_profile.raw_counts().bounded, 1);
+        assert_eq!(rs.live_profile.class_counts().bounded, 1);
+        assert_eq!(rs.live_profile.row_bucket_counts().five_to_eight, 1);
+        assert_eq!(rs.live_profile.upload_totals().total(), 0);
+    }
+
+    /// A pane whose paint callback never runs this frame (the
+    /// `FrameDamage::None` case `LiveRenderProfile`'s module doc
+    /// describes) leaves its token pending until the SAME pane's next
+    /// `show()` call starts a new one — exactly what a skipped paint
+    /// callback looks like from `RenderState`'s side, without needing an
+    /// actual skipped GL frame. The superseded token's classification
+    /// (Task 125.5 regression fix) must survive into the finalized
+    /// unpainted record and the cumulative raw/resolved totals.
+    #[test]
+    fn an_uninvoked_callback_leaves_its_token_finalized_as_unpainted_by_the_next_start() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        let raw = RawRebuildDecision::ReevaluateFullRebuild {
+            resolved: ReevaluatedRebuild::Reuse,
+        };
+        let class = RenderWorkClass::Reuse;
+        let first_token = render_state.lock().unwrap().live_profile.start(raw, class);
+        // The pane's next `show()` call begins a new observation before
+        // the first one's paint callback ever completed it.
+        let _second_token = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.unpainted_count(), 1);
+        assert_eq!(rs.live_profile.raw_counts().reevaluate_full_rebuild, 1);
+        assert_eq!(rs.live_profile.class_counts().reuse, 1);
+        assert_eq!(rs.live_profile.upload_totals().total(), 0);
+        let records: Vec<_> = rs.live_profile.records().copied().collect();
+        drop(rs);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].token, first_token);
+        assert_eq!(
+            records[0].outcome,
+            PaneFrameOutcome::Unpainted { raw, class }
+        );
+    }
+
+    /// Regression test (Task 125.5 review): the flush signal a boundary
+    /// crossing latches is observable through the SAME
+    /// `Arc<Mutex<RenderState>>` API `show()` and the paint callback
+    /// share, regardless of which side's finalization crosses it --
+    /// mirrors `maybe_log_live_render_profile_flush`'s two call sites in
+    /// `show()` without needing a real rendered frame.
+    #[test]
+    fn flush_signal_crossed_by_a_stale_token_sweep_is_observable_through_render_state() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        for _ in 0..(LiveRenderProfile::FLUSH_EVERY - 1) {
+            let token = render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+            render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .complete(token, UploadByteCounts::default());
+        }
+        assert!(
+            !render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal()
+        );
+
+        // The 120th observation is finalized by a superseding `start()`
+        // call (`show()`'s side), not by `complete()` (the paint
+        // callback's side).
+        let _stale_120th = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+        let _next_token = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+
+        assert!(
+            render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal(),
+            "the boundary crossed by the stale-token sweep inside `start` \
+             must be observable through the same RenderState the paint \
+             callback would otherwise check"
+        );
+        assert!(
+            !render_state
+                .lock()
+                .unwrap()
+                .live_profile
+                .take_flush_signal()
         );
     }
 }

@@ -563,6 +563,16 @@ the PTY thread; do not infer upload bytes yet.
 Stop: report a synthetic log covering all resolved classes; await review
 before 125.6.
 
+**Complete.** The raw `VertexRebuild` decision and resolved reuse, cursor-only,
+bounded, or full class are captured once per renderable pane `show()` and
+finalized by the matching paint callback. Pending observations retain their
+classification, so a callback suppressed by `FrameDamage::None` is finalized
+on the next token as zero-upload while still contributing to raw/resolved
+counts and the changed-row histogram. A one-shot flush signal preserves every
+120-observation boundary whether completion occurs in `start()` or the paint
+callback. Feature-gated tests cover every mapping, bounded zero-row handling,
+painted/unpainted token flow, and the superseded-token flush boundary.
+
 ### 125.6 — Actual live per-buffer upload-byte attribution
 
 Scope: `freminal/src/gui/renderer/profiling.rs`,
