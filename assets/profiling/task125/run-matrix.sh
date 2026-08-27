@@ -17,6 +17,7 @@ readonly CONFIRM_WARMUP=10
 readonly CONFIRM_DURATION=60
 readonly CONFIRM_REPEATS=7
 readonly AMDGPU_PCI="0000:03:00.0"
+readonly TASK125_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::task_125::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info'
 SAMPLE_WARMUP=${SCREEN_WARMUP}
 SAMPLE_DURATION=${SCREEN_DURATION}
 SAMPLE_REPEATS=${SCREEN_REPEATS}
@@ -35,6 +36,7 @@ usage() {
 		'  run-matrix.sh preflight' \
 		'  run-matrix.sh collector-preflight' \
 		'  run-matrix.sh smoke TERMINAL CURSOR [--assume-ready]' \
+		'  run-matrix.sh profile-smoke [--assume-ready]' \
 		'  run-matrix.sh collector-smoke-one TERMINAL [OUTPUT_DIR] [--assume-ready]' \
 		'  run-matrix.sh collector-smoke [OUTPUT_DIR] [--assume-ready]' \
 		'  run-matrix.sh screen [OUTPUT_DIR] [--assume-ready]' \
@@ -346,8 +348,10 @@ launch_terminal() {
 	freminal)
 		expected_class=freminal
 		expected_exe_root=$(realpath -m "${freminal_bin}")
-		isolated_env "${run_dir}" "${freminal_bin}" --config "${run_dir}/freminal.toml" -- \
-			"${TASK125_SYSTEM_BASH}" --noprofile --rcfile "${run_dir}/shell.rc" -i &
+		isolated_env "${run_dir}" env RUST_LOG="${TASK125_FREMINAL_RUST_LOG}" \
+			"${freminal_bin}" --config "${run_dir}/freminal.toml" -- \
+			"${TASK125_SYSTEM_BASH}" --noprofile --rcfile "${run_dir}/shell.rc" -i \
+			>"${run_dir}/freminal.stdout.log" 2>"${run_dir}/freminal.stderr.log" &
 		;;
 	wezterm)
 		expected_class=org.wezfurlong.wezterm
@@ -449,8 +453,40 @@ smoke() {
 	else
 		printf 'unavailable\n' >"${run_dir}/gpu-process-status"
 	fi
+	if [[ ${terminal} == freminal ]]; then
+		printf 'Freminal profiling output: %s\n' "${run_dir}/freminal.stdout.log"
+	fi
 	printf 'Smoke window is correctly sized and will close in 5 seconds.\n'
 	sleep 5
+	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
+	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
+		task125_terminate_tree \
+			"${LAUNCHED_SHELL_PID}" "${OWNED_START_TIMES[${LAUNCHED_SHELL_PID}]}"
+	fi
+}
+
+profile_smoke() {
+	SAMPLE_WARMUP=5
+	SAMPLE_DURATION=10
+	interaction_notice freminal blink sustained-output
+	local run_dir pid output
+	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-task125-profile-smoke.XXXXXX")
+	launch_terminal freminal blink profile-smoke "${run_dir}"
+	pid=${LAUNCHED_PID}
+	task125_start_workload sustained-output "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
+	sleep "$((SAMPLE_WARMUP + SAMPLE_DURATION))"
+	verify_grid "${run_dir}"
+	task125_verify_process_gpu "${pid}"
+	output=$(<"${run_dir}/freminal.stdout.log")
+	[[ ${output} == *'Active OpenGL renderer: AMD Radeon RX 7900 XTX'* ]] || {
+		printf 'profile smoke did not record the expected Navi 31 renderer\n' >&2
+		return 1
+	}
+	[[ ${output} == *'live render-work profile (task 125.5/125.6)'* ]] || {
+		printf 'profile smoke did not record a Task 125 live-render summary\n' >&2
+		return 1
+	}
+	printf 'Profile smoke validated: %s\n' "${run_dir}/freminal.stdout.log"
 	task125_terminate_tree "${pid}" "${OWNED_START_TIMES[${pid}]}"
 	if [[ ${LAUNCHED_SHELL_PID} != "${pid}" ]]; then
 		task125_terminate_tree \
@@ -672,6 +708,9 @@ main() {
 			return 2
 		}
 		smoke "$1" "$2"
+		;;
+	profile-smoke)
+		profile_smoke
 		;;
 	screen)
 		run_screen "$@"

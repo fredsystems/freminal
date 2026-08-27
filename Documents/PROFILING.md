@@ -356,6 +356,14 @@ assets/profiling/task125/run-matrix.sh smoke wezterm blink
 assets/profiling/task125/run-matrix.sh smoke ghostty blink
 ```
 
+After changing feature-gated live profiling, use the sustained-output smoke to
+force at least one 120-observation summary. It opens one Freminal window and
+validates both the discrete renderer identity and the summary before cleanup:
+
+```sh
+assets/profiling/task125/run-matrix.sh profile-smoke
+```
+
 Collector smoke commands add a 10-second counter interval after the warm-up.
 The one-terminal form is for diagnosis; the three-terminal form checks the
 complete matched collection path:
@@ -392,6 +400,13 @@ assets/profiling/task125/run-matrix.sh screen /tmp/freminal-task125-screen
 assets/profiling/task125/run-matrix.sh pointer-screen /tmp/freminal-task125-pointer
 assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idle-blink btop
 ```
+
+Freminal runs receive a narrow `RUST_LOG` filter inside the otherwise-clean
+environment. Its Task 121 frame summaries and Task 125 live-render summaries
+are written to `freminal.stdout.log` in that sample's external raw directory;
+WezTerm and Ghostty do not receive the Rust logging environment. Keeping the
+log beside each sample preserves pane/frame attribution without reading the
+operator's normal logging configuration or mixing sequential runs.
 
 Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
 summary uses seed 125 and 10,000 bootstrap resamples. Screening selects work; a

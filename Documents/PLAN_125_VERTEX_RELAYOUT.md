@@ -450,6 +450,27 @@ runs. Ten-second collector controls recorded complete perf, wakeup, CPU tick,
 GPU engine-time, and grid rows for Freminal, WezTerm, and Ghostty. These smoke
 numbers validate plumbing only and are not parity findings.
 
+### 125.C1 — Capture isolated feature-gated profiling logs
+
+Scope: `assets/profiling/task125/run-matrix.sh` and `Documents/PROFILING.md`.
+
+Surface point: discovered during the 125.6 live smoke after commit `06d1118f`.
+The fixture's `env -i` launch discarded `RUST_LOG`, while its config fixed file
+logging at `info`, so the required `debug`-level Task-125 profile summaries
+could neither be emitted nor associated with an individual raw sample.
+
+What: pass a narrow Freminal-only `RUST_LOG` filter inside the isolated launch,
+redirect Freminal stdout/stderr into each external sample directory, and add a
+one-window sustained-output smoke that forces a 120-observation summary.
+WezTerm and Ghostty retain their existing clean environments. Verify with
+ShellCheck and the smoke's checks for the real AMD renderer plus at least one
+Task-125 live-render summary. No raw capture is committed.
+
+**Complete.** The runner now captures Task 121 frame summaries and Task 125
+live-render summaries in each Freminal sample's external raw directory without
+enabling Rust logging for either peer terminal. `profile-smoke` uses the
+existing sustained-output fixture and validates renderer and summary identity.
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
