@@ -550,6 +550,8 @@ limit = 10000
 #
 #   Window management:
 #     new_window      = "Ctrl+Shift+N"  (open a new OS window with an initial tab)
+#     quit_all        = "Ctrl+Shift+Q"  (close every open window and quit; saves the
+#                                        full multi-window session before closing)
 #
 #   Scrollback:
 #     scroll_page_up   = "Shift+PageUp"

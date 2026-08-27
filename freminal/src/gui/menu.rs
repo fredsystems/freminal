@@ -71,30 +71,7 @@ impl super::FreminalGui {
         any_menu_open: &mut bool,
     ) {
         let freminal_resp = ui.menu_button("Freminal", |ui| {
-            if ui
-                .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
-                .clicked()
-            {
-                if self.settings_window_id.is_some() {
-                    // Settings window already exists — focus it.
-                    self.pending_focus_settings = true;
-                } else if !self.settings_modal.is_open && !self.pending_settings_window {
-                    let families = win.terminal_widget.monospace_families();
-                    self.settings_modal
-                        .open(&self.config, families, win.os_dark_mode);
-                    self.settings_modal
-                        .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
-                    self.settings_owner = Some(window_id);
-                    self.pending_settings_window = true;
-                }
-                ui.close();
-            }
-
-            ui.separator();
-
-            if ui.button("Quit").clicked() {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-            }
+            self.show_freminal_menu(ui, win, window_id);
         });
         if freminal_resp.inner.is_some() {
             *any_menu_open = true;
@@ -244,6 +221,47 @@ impl super::FreminalGui {
                     ui.close();
                 }
             }
+        }
+    }
+
+    /// Render the "Freminal" dropdown menu contents.
+    fn show_freminal_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        win: &mut PerWindowState,
+        window_id: super::WindowId,
+    ) {
+        if ui
+            .add(self.menu_button_for("Settings...", KeyAction::OpenSettings))
+            .clicked()
+        {
+            if self.settings_window_id.is_some() {
+                // Settings window already exists — focus it.
+                self.pending_focus_settings = true;
+            } else if !self.settings_modal.is_open && !self.pending_settings_window {
+                let families = win.terminal_widget.monospace_families();
+                self.settings_modal
+                    .open(&self.config, families, win.os_dark_mode);
+                self.settings_modal
+                    .set_base_font_defs(win.terminal_widget.base_font_defs().clone());
+                self.settings_owner = Some(window_id);
+                self.pending_settings_window = true;
+            }
+            ui.close();
+        }
+
+        ui.separator();
+
+        if ui.button("Quit").clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        if ui
+            .add(self.menu_button_for("Quit All", KeyAction::QuitAll))
+            .clicked()
+        {
+            win.pending_quit_all = true;
+            ui.close();
         }
     }
 

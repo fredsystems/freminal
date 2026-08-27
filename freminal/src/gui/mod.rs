@@ -202,6 +202,20 @@ struct FreminalGui {
     /// Set to `true` when the existing settings window should be focused.
     pending_focus_settings: bool,
 
+    /// Set to `true` for the remainder of the process once a `QuitAll`
+    /// (issue #509) has run its up-front full-topology session save.
+    ///
+    /// `on_close_requested`'s own "auto-save when I'm the last window"
+    /// check consults this to avoid re-saving a shrinking topology as each
+    /// window in the batch closes — see the comment at that check and
+    /// `quit_all_windows` in `close_guard.rs`. Deliberately never reset:
+    /// in the success path the process exits immediately after; in the
+    /// veto path (a running command blocked one window) the periodic
+    /// session-autosave timer remains the safety net regardless, matching
+    /// `maybe_auto_save_session`'s existing "shutdown save is a
+    /// non-load-bearing convenience" design.
+    quit_all_in_progress: bool,
+
     /// Persisted ephemeral UI window geometry for the Settings window
     /// and each main terminal window.  Loaded from `window_state.toml`
     /// at startup: the settings entry is consulted when the settings
@@ -478,6 +492,7 @@ impl FreminalGui {
             settings_window_id: None,
             pending_settings_window: false,
             pending_focus_settings: false,
+            quit_all_in_progress: false,
             window_state: freminal_common::window_state::window_state_path()
                 .as_deref()
                 .map(freminal_common::window_state::WindowState::load_or_default)

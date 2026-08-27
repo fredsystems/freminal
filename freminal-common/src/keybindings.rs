@@ -27,6 +27,7 @@
 //! | `Ctrl+Shift+W`     | Close Tab        |
 //! | `Ctrl+Shift+,`     | Open Settings    |
 //! | `Ctrl+Shift+N`     | New Window       |
+//! | `Ctrl+Shift+Q`     | Quit All         |
 //! | `Shift+PageUp`     | Scroll Page Up   |
 //! | `Shift+PageDown`   | Scroll Page Down |
 //!
@@ -729,6 +730,19 @@ pub enum KeyAction {
     OpenSettings,
     /// Open a new OS window with an initial tab.
     NewWindow,
+    /// Close every open OS window, ending the process.
+    ///
+    /// Unlike closing windows one at a time (including via the per-window
+    /// "Quit" menu item, which only closes the OS window it was invoked
+    /// from), `QuitAll` snapshots the complete multi-window session
+    /// topology once, before any window is torn down, then closes each
+    /// window through the normal close-guard path (so a running foreground
+    /// command in any pane still prompts). This exists because closing
+    /// windows individually made only the last-closed window's topology
+    /// survive into the auto-saved session — see issue #509.
+    ///
+    /// Default binding: `Ctrl+Shift+Q`.
+    QuitAll,
 
     // -- Scrollback ---------------------------------------------------------
     /// Scroll up by one page.
@@ -904,6 +918,7 @@ impl KeyAction {
             Self::ToggleMenuBar => "toggle_menu_bar",
             Self::OpenSettings => "open_settings",
             Self::NewWindow => "new_window",
+            Self::QuitAll => "quit_all",
             Self::ScrollPageUp => "scroll_page_up",
             Self::ScrollPageDown => "scroll_page_down",
             Self::ScrollToTop => "scroll_to_top",
@@ -977,6 +992,7 @@ impl KeyAction {
             Self::ToggleMenuBar => "Toggle Menu Bar",
             Self::OpenSettings => "Open Settings",
             Self::NewWindow => "New Window",
+            Self::QuitAll => "Quit All",
             Self::ScrollPageUp => "Scroll Page Up",
             Self::ScrollPageDown => "Scroll Page Down",
             Self::ScrollToTop => "Scroll to Top",
@@ -1047,6 +1063,7 @@ impl KeyAction {
         Self::ToggleMenuBar,
         Self::OpenSettings,
         Self::NewWindow,
+        Self::QuitAll,
         Self::ScrollPageUp,
         Self::ScrollPageDown,
         Self::ScrollToTop,
@@ -1129,6 +1146,7 @@ impl FromStr for KeyAction {
             "toggle_menu_bar" => Ok(Self::ToggleMenuBar),
             "open_settings" => Ok(Self::OpenSettings),
             "new_window" => Ok(Self::NewWindow),
+            "quit_all" => Ok(Self::QuitAll),
             "scroll_page_up" => Ok(Self::ScrollPageUp),
             "scroll_page_down" => Ok(Self::ScrollPageDown),
             "scroll_to_top" => Ok(Self::ScrollToTop),
@@ -1550,6 +1568,11 @@ fn register_window_bindings(map: &mut BindingMap) {
         KeyCombo::new(BindingKey::N, BindingModifiers::CTRL_SHIFT),
         KeyAction::NewWindow,
     );
+    // Close every open window and quit the process (issue #509).
+    map.bind(
+        KeyCombo::new(BindingKey::Q, BindingModifiers::CTRL_SHIFT),
+        KeyAction::QuitAll,
+    );
 }
 
 /// Register layout management bindings.
@@ -1877,7 +1900,7 @@ mod tests {
         // roundtrip test above covers ALL, and name() is exhaustive.
         assert_eq!(
             KeyAction::ALL.len(),
-            62,
+            63,
             "KeyAction::ALL should contain all variants"
         );
     }
@@ -2265,6 +2288,13 @@ mod tests {
     }
 
     #[test]
+    fn default_quit_all_binding() {
+        let map = BindingMap::default();
+        let combo = KeyCombo::new(BindingKey::Q, BindingModifiers::CTRL_SHIFT);
+        assert_eq!(map.lookup(&combo), Some(KeyAction::QuitAll));
+    }
+
+    #[test]
     fn default_binding_total_count() {
         // The default map should have a known number of bindings.
         // This catches silent additions or removals.
@@ -2277,14 +2307,14 @@ mod tests {
         //        + ScrollLineUp(1) + ScrollLineDown(1)
         //        + SplitVertical(1) + SplitHorizontal(1) + ClosePane(1)
         //        + FocusPaneLeft/Down/Up/Right(4) + ResizePaneLeft/Down/Up/Right(4)
-        //        + ZoomPane(1) + NewWindow(1) + ClearScrollback(1)
+        //        + ZoomPane(1) + NewWindow(1) + QuitAll(1) + ClearScrollback(1)
         //        + ToggleRecording(1) + UnfoldAll(1)
         //        + CopyLastCommandOutput(1) + ShowCommandHistory(1)
-        //        + ToggleBroadcastInput(1) = 48
+        //        + ToggleBroadcastInput(1) = 49
         assert_eq!(
             map.len(),
-            48,
-            "default binding map should have exactly 48 bindings"
+            49,
+            "default binding map should have exactly 49 bindings"
         );
     }
 

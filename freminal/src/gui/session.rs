@@ -105,7 +105,14 @@ impl FreminalGui {
     /// Skips saving when the user launched with an ad-hoc command
     /// (`freminal -- vim foo`): those panes run a one-shot program and are not
     /// meaningfully restorable.  Failures are logged but never fatal.
-    pub(super) fn maybe_auto_save_session(&mut self) {
+    ///
+    /// `extra_win` is threaded straight through to [`Self::build_layout`]: it
+    /// is the window that was removed from `self.windows` for the duration
+    /// of the current `update()` frame (see `build_layout`'s doc comment),
+    /// so passing it here is what lets a save taken *during* that window's
+    /// own frame still capture that window (issue #509's `QuitAll`, which
+    /// must snapshot the complete topology before any window closes).
+    pub(super) fn maybe_auto_save_session(&mut self, extra_win: Option<&window::PerWindowState>) {
         if !self.args.command.is_empty() {
             return;
         }
@@ -118,7 +125,7 @@ impl FreminalGui {
         // Build the session layout and serialize it in memory so we can
         // fingerprint the exact bytes we would write.  No disk read-back: the
         // fingerprint compares against the last value *we* wrote this run.
-        let layout = self.build_layout("Last Session", None);
+        let layout = self.build_layout("Last Session", extra_win);
         let toml_str = match layout.to_toml_string() {
             Ok(s) => s,
             Err(e) => {
@@ -216,7 +223,7 @@ impl FreminalGui {
             .session_save_due
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
-            self.maybe_auto_save_session();
+            self.maybe_auto_save_session(None);
         }
     }
 

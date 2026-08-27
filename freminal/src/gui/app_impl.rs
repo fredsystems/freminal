@@ -885,6 +885,7 @@ impl freminal_windowing::App for FreminalGui {
                         toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
                         repaint_handle,
                         pending_new_window: false,
+                        pending_quit_all: false,
                         pending_geometry: None,
                         last_known_size: None,
                         last_known_position: None,
@@ -1026,13 +1027,22 @@ impl freminal_windowing::App for FreminalGui {
         // periodic save already wrote the current state, so this shutdown call
         // is a no-op — by design, so we no longer depend on a write surviving
         // an abrupt teardown.
+        // Skipped when a `QuitAll` (issue #509) is in flight: that path
+        // already wrote the complete multi-window topology up front, before
+        // any window was removed from `self.windows`. Without this guard,
+        // this per-window check re-fires as each subsequent window in the
+        // same batch reaches "I'm the last one left" against a `self.windows`
+        // that has been shrinking one close at a time, overwriting the
+        // correct save with a series of progressively smaller ones — the
+        // exact bug `QuitAll` exists to fix. See `quit_all_windows` in
+        // `close_guard.rs`.
         let remaining_terminal_windows = self
             .windows
             .keys()
             .filter(|&&wid| Some(wid) != self.settings_window_id)
             .count();
-        if remaining_terminal_windows == 1 {
-            self.maybe_auto_save_session();
+        if remaining_terminal_windows == 1 && !self.quit_all_in_progress {
+            self.maybe_auto_save_session(None);
         }
 
         // Capture geometry of every still-open terminal window (including
@@ -1519,6 +1529,12 @@ impl freminal_windowing::App for FreminalGui {
         if win.pending_new_window {
             win.pending_new_window = false;
             self.spawn_new_window(handle);
+        }
+
+        // ── Quit all windows (issue #509) ────────────────────────────────────
+        if win.pending_quit_all {
+            win.pending_quit_all = false;
+            self.quit_all_windows(ctx, &win, handle);
         }
 
         // ── Apply pending window geometry from layout engine ─────────────────
@@ -4525,6 +4541,7 @@ impl FreminalGui {
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
             repaint_handle,
             pending_new_window: false,
+            pending_quit_all: false,
             pending_geometry: None,
             last_known_size: None,
             last_known_position: None,

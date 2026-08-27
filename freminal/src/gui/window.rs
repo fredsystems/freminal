@@ -356,6 +356,11 @@ pub(super) struct PerWindowState {
     /// `update()` where `WindowHandle` is available.
     pub(super) pending_new_window: bool,
 
+    /// Set to `true` by the `QuitAll` key action or menu; consumed in
+    /// `update()` where `self.windows` (every other open window) and
+    /// `WindowHandle` are both available (issue #509).
+    pub(super) pending_quit_all: bool,
+
     /// If set, send resize + reposition viewport commands on the next frame.
     ///
     /// Populated by the layout engine when applying a layout to an existing
