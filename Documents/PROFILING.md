@@ -279,6 +279,129 @@ cumulative mean read 388 µs/frame while the differenced steady-state window was
 measurements, the three findings, and the known gaps in the Finding 3 spike. Do
 not re-derive those numbers and do not restate them more strongly than §2A does.
 
+## Task 125 parity fixtures
+
+Task 125 compares Freminal with pinned WezTerm and Ghostty binaries under
+matched configurations. The fixtures live under `assets/profiling/task125/` and
+must not read normal terminal, shell, or `btop` configuration.
+
+### Shell and environment
+
+All three terminals run
+`/run/current-system/sw/bin/bash --noprofile --rcfile <fixture> -i`. The absolute
+path is load-bearing: a Nix development shell places the non-interactive Bash
+derivation on `PATH`, while the NixOS system path resolves the complete
+`bash-interactive` build needed for correct PTY/readline behavior. The driver
+uses `env -i` with an isolated `HOME` and XDG directory set, so selecting the
+system binary does not source the operator's profile or inherit their shell
+configuration.
+
+Each Freminal run pre-seeds only
+`$XDG_STATE_HOME/freminal/state.toml`'s `first_run_complete = true`. Without
+that bit, a deliberately fresh XDG state opens the welcome modal and measures
+onboarding chrome instead of the requested workload. No other application
+state is reused or seeded.
+
+The controlled terminal state is a matched PTY grid in Hyprland's stable tiled
+allocation, CaskaydiaCove Nerd Font at 12
+points, 1.05 line height, enabled ligatures, opaque background, block cursor,
+no cursor trail, no background image, and no custom shader. Blink and steady
+cursor modes are separate fixtures. Scrollback capacity has headroom above the
+10,000-line scrolling corpus in every terminal.
+
+Hyprland controls geometry. Every test window spawns into the same tiled slot
+with the pointer left at the same position, so outer pixel bounds are stable
+between runs. `stty` against the spawned shell's PTY is the final gate. Fixture
+font/cell metrics are calibrated during smoke testing so all three terminals
+resolve to the same 124x31 grid; a different grid is rejected before warm-up
+or measurement.
+
+### Window-spawn discipline
+
+Running `preflight` opens no window:
+
+```sh
+assets/profiling/task125/run-matrix.sh preflight
+```
+
+Every command that opens a GUI prints the terminal, cursor mode, workload,
+warm-up, and expected interaction first, then waits for confirmation unless
+`--assume-ready` was explicitly supplied. An automation agent must additionally
+notify the maintainer in chat before invoking such a command; the script prompt
+does not replace that notification.
+
+Hyprland initially places the small new window under the current pointer. The
+resulting startup pointer events are expected and excluded by the warm-up. For
+all non-pointer workloads, leave the spawned window focused and do not type,
+click, resize, or move the pointer over it. Pointer workloads are separate and
+prompt when physical movement must begin.
+
+Smoke one terminal at a time only after giving that notice:
+
+```sh
+assets/profiling/task125/run-matrix.sh smoke freminal blink
+assets/profiling/task125/run-matrix.sh smoke wezterm blink
+assets/profiling/task125/run-matrix.sh smoke ghostty blink
+```
+
+Teardown is PID/start-time scoped. The driver records the launched PID and
+`/proc/<pid>/stat` start time, discovers only its descendants, sends `TERM`, and
+uses `KILL` only for surviving members of that exact tree. Process-name and
+pattern-based cleanup (`pkill`, `killall`, or `pkill -f`) is forbidden.
+
+### Staged parity protocol
+
+Do not run seven 60-second captures for every workload.
+
+1. `screen` runs three 20-second samples after a five-second warm-up for every
+   non-pointer workload. It spawns 81 windows and takes approximately 34
+   minutes.
+2. `pointer-screen` runs the same short protocol for pointer motion, separately
+   because every sample needs physical maintainer interaction. It spawns nine
+   windows and takes approximately four minutes.
+3. `confirm` runs seven 60-second samples after a 10-second warm-up only for
+   workloads whose screen is noisy, shows a meaningful gap, or controls a
+   remediation decision. One confirmed workload takes approximately 24
+   minutes.
+
+Commands write raw captures outside the repository:
+
+```sh
+assets/profiling/task125/run-matrix.sh screen /tmp/freminal-task125-screen
+assets/profiling/task125/run-matrix.sh pointer-screen /tmp/freminal-task125-pointer
+assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idle-blink btop
+```
+
+Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
+summary uses seed 125 and 10,000 bootstrap resamples. Screening selects work; a
+material final gap is declared only from confirmation when the paired median
+task-clock delta is at least 0.5 ms per wall-second and its bootstrap 95%
+confidence interval excludes zero.
+
+### Scheduler and GPU counters
+
+Ordinary process counters remain unprivileged: task-clock, cycles,
+instructions, and context switches come from `perf stat`; user and system CPU
+time come from differenced `/proc/<pid>/stat` ticks across the complete process
+tree.
+
+The kernel already provides `sched:sched_wakeup`, but this host mounts tracefs
+as `root:root` mode `0700`. The driver performs `sudo -v` before opening any
+window and runs only the system-wide, target-PID/TID-filtered wakeup collector
+through `sudo`. It never remounts or changes tracefs permissions, and never
+relables context switches as wakeups.
+
+For external GPU comparison, `amdgpu_top --json --process --no-pc` discovers
+the discrete Navi 31 device and process DRM clients without enabling GRBM
+polling. The metric is the difference in cumulative `drm-engine-gfx` time from
+the measured process tree's `/proc/<pid>/fdinfo/*` entries, deduplicated by DRM
+client id. The process tree must have an open file descriptor on the expected
+discrete-GPU render node. Device-wide utilization is not attributed to one
+terminal. If per-process fdinfo is absent or remains below measurable
+resolution under an active control, cross-terminal GPU parity is
+`INCONCLUSIVE`; Freminal's later asynchronous GL queries still provide internal
+attribution but cannot prove peer parity.
+
 ## What this cannot measure
 
 - **Pixels.** There is no headless-GL or pixel-readback harness — the "436.9

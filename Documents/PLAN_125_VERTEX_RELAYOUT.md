@@ -237,22 +237,27 @@ The maintainer resolved the workload and parity semantics on 2026-08-26:
   and Ghostty `1.3.1` at
   `/nix/store/ij9fvnhfj710aafmlav1psl434cw5wqc-ghostty-1.3.1/bin/ghostty`.
   Record the Freminal commit and active GL renderer with every capture.
-- **CPU parity:** seven 60-second steady samples after a 10-second warm-up,
-  interleaving terminal order between repeats. A gap is material only when the
-  deterministic 10,000-resample bootstrap 95% confidence interval for the
-  median paired task-clock delta excludes zero **and** the median delta is at
-  least 0.5 ms task-clock per wall-second (0.05% of one core). Smaller
-  statistically separable residuals must still be explained.
+- **CPU parity:** use a staged protocol. Screen every non-pointer workload with
+  three 20-second steady samples after a 5-second warm-up, interleaving terminal
+  order; run pointer screening separately with explicit maintainer interaction.
+  Then run seven 60-second samples after a 10-second warm-up only for workloads
+  whose screen shows a meaningful/noisy gap or whose result controls a
+  remediation gate. A confirmation gap is material only when the deterministic
+  10,000-resample bootstrap 95% confidence interval for the median paired
+  task-clock delta excludes zero **and** the median delta is at least 0.5 ms
+  task-clock per wall-second (0.05% of one core). Smaller statistically
+  separable residuals must still be explained.
 - **GPU parity:** use cumulative per-process AMD DRM fdinfo engine time for
   matched cross-terminal comparison, with `amdgpu_top` for device/process
   discovery and asynchronous OpenGL timestamp queries inside Freminal for
   attribution. If the fdinfo fields are absent or too coarse to distinguish
   the workloads, the cross-terminal GPU verdict is `INCONCLUSIVE`, never
   inferred from llvmpipe or CPU time.
-- **Controlled geometry/config:** 120x40 terminal cells, CaskaydiaCove Nerd
-  Font at 12 pt, opaque background, no background image, no user shader, no
-  cursor trail, the same clean interactive shell/prompt, and isolated
-  config/state directories. Ligatures stay enabled for all three terminals.
+- **Controlled geometry/config:** the same stable Hyprland tiled allocation and
+  a verified matching 124x31 PTY grid, CaskaydiaCove Nerd Font at 12 pt,
+  opaque background, no background image, no user shader, no cursor trail, the
+  same clean interactive shell/prompt, and isolated config/state directories.
+  Ligatures stay enabled for all three terminals.
 - **Chrome topology:** four tabs, with the active tab containing a 2x2 pane
   layout. The other tabs and all inactive panes are idle.
 - **Pointer workload:** a timed physical-device capture, because compositor
@@ -355,9 +360,11 @@ Scope: new files under `assets/profiling/task125/` only:
 What: encode the activation decisions above as isolated competitor configs and
 one driver. The driver records binary/store versions, Freminal commit, CPU/GPU,
 kernel, compositor, display refresh, terminal grid, and renderer string before
-each run; rejects software renderers; performs a 10-second warm-up; captures
-seven interleaved 60-second samples; and writes machine-readable raw output
-outside the repository. `perf stat` must collect `task-clock`,
+each run; rejects software renderers; supports the three-repeat/20-second
+screening pass and selective seven-repeat/60-second confirmation pass described
+above; and writes machine-readable raw output outside the repository. It must
+print the expected window count/duration and interaction requirements before
+spawning anything. `perf stat` must collect `task-clock`,
 `task-clock:u`, `task-clock:k`, `cycles`, `instructions`,
 `context-switches`, and exact wakeups. This host already has
 `sched:sched_wakeup`; tracefs is mounted `root:root` mode `0700`, so the driver
@@ -387,14 +394,15 @@ The exact workload matrix is:
    PageUp/PageDown through `wtype` at a fixed cadence;
 7. sustained PTY output using the Task-124 control
    `while :; do seq 1 200; sleep 0.02; done`;
-8. physical pointer motion over inert terminal content, timed for 60 seconds
-   and reported with Freminal's observed event rate; and
+8. physical pointer motion over inert terminal content, timed for 20 seconds in
+   screening and 60 seconds in confirmation, run separately from unattended
+   workloads and reported with Freminal's observed event rate; and
 9. four-tab/2x2-pane idle chrome, once with the active cursor blinking and once
    steady.
 
 Deliverable: hermetic configs, runnable scripts, deterministic summary output,
 and an updated `PROFILING.md` command/reference section. A dry run must prove
-all three terminals resolve to 120x40 cells and the intended discrete GPU;
+all three terminals resolve to the matched 124x31 grid and intended discrete GPU;
 that wakeups are counted for the complete terminal process tree; and that each
 terminal exposes cumulative GFX engine time through DRM fdinfo. If fdinfo is
 absent or remains below its measurable resolution under the active control,
@@ -414,8 +422,8 @@ do not treat llvmpipe as performance evidence; do not silently substitute a
 wakeup proxy; do not remount or chmod tracefs; do not attribute device-wide GPU
 utilization to one terminal process; do not commit raw machine captures.
 
-Stop: report preflight/smoke results and any host prerequisite. Do not start the
-seven-repeat matrix yet.
+Stop: report preflight/smoke results and any host prerequisite. Do not start
+screening or confirmation yet.
 
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
@@ -641,9 +649,12 @@ Stop: report phase timings and capability; await review before 125.10.
 Scope: `Documents/PLAN_125_VERTEX_RELAYOUT.md` only. Raw captures remain
 outside the repository.
 
-What: run all workloads from 125.2 against the three pinned binaries, seven
-60-second steady samples each after warm-up, with terminal order interleaved.
-For Freminal run both `frame-profiling` and `gpu-profiling`; verify the active
+What: run the three-repeat/20-second screening matrix from 125.2 against the
+three pinned binaries, with terminal order interleaved. Run pointer screening
+as a separate maintainer-interactive session. Select confirmation workloads
+from the screen, record why each was selected or closed, then run seven
+60-second samples only for the selected workloads. For Freminal run both
+`frame-profiling` and `gpu-profiling`; verify the active
 renderer is the discrete Navi 31 and `LIBGL_ALWAYS_SOFTWARE` is unset. Record
 external task-clock, user/kernel time, cycles, instructions, context switches,
 wakeups, external per-process GPU samples, frame rate plus CPU cost/frame,

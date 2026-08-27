@@ -1,0 +1,77 @@
+#!/run/current-system/sw/bin/bash
+# shell.rc — Task 125.2 hermetic interactive shell fixture.
+#
+# Sourced via `/run/current-system/sw/bin/bash --noprofile --rcfile shell.rc
+# -i` for every one of the three measured terminals (Freminal, WezTerm,
+# Ghostty), so all workloads
+# run against the *same* prompt, history policy, and environment rather than
+# each terminal's ambient shell config (which would confound the parity
+# comparison with unrelated dotfile cost). Never sources the operator's real
+# `~/.bashrc` or `~/.bash_profile`.
+#
+# This file is a template consumed by workloads.sh's `render_fixture`. The
+# only substituted token is @TASK125_MARKER@, replaced with a short label
+# identifying the terminal + run so captured PTY output can be attributed
+# unambiguously in raw logs. Every other line is byte-identical across the
+# three rendered copies.
+
+# The path above is deliberate. A Nix development shell exposes the
+# non-interactive Bash derivation on PATH; it lacks the interactive build's
+# complete terminal/readline behavior and produces visible control-sequence
+# noise in this PTY fixture. The NixOS system Bash resolves to the
+# bash-interactive derivation. The launch driver still supplies an isolated
+# HOME/XDG environment, so choosing the system binary does not source the
+# operator's profile.
+
+# Do not treat this as a login shell config; keep startup deterministic and
+# side-effect free.
+unset BASH_ENV ENV PROMPT_COMMAND
+HISTFILE=/dev/null
+HISTSIZE=0
+HISTFILESIZE=0
+unset HISTCONTROL HISTIGNORE
+
+# A short, static prompt. No git/VCS status, no command timing, no
+# conditional colour logic -- those are themselves variable-cost work this
+# task must not accidentally fold into the terminal-rendering measurement.
+PS1='task125$ '
+PS2='> '
+
+# Deterministic locale/formatting; avoids locale-dependent glyph shaping
+# differences between the three terminals.
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+
+# Disable bash's own command-not-found helper and mail check; both are
+# extraneous I/O unrelated to the workload under test.
+unset MAILCHECK
+export BASH_COMPAT=""
+
+# Identifies this session in raw captures (terminal name + sample index).
+# Never interpreted as a command; purely informational.
+export TASK125_SESSION="@TASK125_MARKER@"
+
+# Report the resulting kernel-visible PTY window size so the preflight can
+# confirm every terminal actually landed on the pinned 120x40 grid rather
+# than being resized by a tiling window manager after launch (see the
+# "Host prerequisite" note in Documents/PROFILING.md).
+if [ -n "${TASK125_GRID_REPORT_FILE:-}" ]; then
+    if [ -n "${TASK125_EXPECTED_ROWS:-}" ] && [ -n "${TASK125_EXPECTED_COLS:-}" ]; then
+        for _ in {1..50}; do
+            read -r current_rows current_cols < <(stty size 2>/dev/null) || true
+            if [ "${current_rows:-}" = "${TASK125_EXPECTED_ROWS}" ] \
+                && [ "${current_cols:-}" = "${TASK125_EXPECTED_COLS}" ]; then
+                break
+            fi
+            sleep 0.1
+        done
+    fi
+    stty size >"${TASK125_GRID_REPORT_FILE}" 2>/dev/null || true
+fi
+
+# Signal readiness to the driver: workloads that drive input via `wtype`
+# poll for this file before sending any keystrokes, so we never type into a
+# terminal whose shell has not finished initializing yet.
+if [ -n "${TASK125_READY_FILE:-}" ]; then
+    : >"${TASK125_READY_FILE}"
+fi

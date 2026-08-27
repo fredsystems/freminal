@@ -1,0 +1,60 @@
+# freminal.toml — Task 125.2 hermetic parity fixture (template).
+#
+# Rendered by workloads.sh's `render_fixture` into an isolated per-run
+# directory before every capture; never edited in place and never pointed at
+# from a real $XDG_CONFIG_HOME. Tokens (`@..@`) are substituted at render
+# time; see Documents/PROFILING.md, "Task 125 parity fixtures" for the full
+# list and the settings this file deliberately does NOT pin (paste guard,
+# notifications, command blocks) because Task 125 measures product-level
+# default behavior, not a stripped-down configuration.
+#
+# Geometry is controlled by Hyprland's stable tiled allocation at the fixed
+# spawn location. The runner verifies the resulting PTY grid before every
+# sample; fixture font/cell metrics are tuned so all three terminals resolve
+# to the same grid in that allocation.
+
+version = 1
+
+[font]
+family = "CaskaydiaCove Nerd Font"
+size = 12.0
+ligatures = true
+line_height = 1.05
+
+[cursor]
+# Shape is pinned to "block" so all three terminals use the same glyph-free
+# cursor primitive. Blink is the one axis the workload matrix varies
+# (workloads 1/2 and 9's two sub-variants); @CURSOR_BLINK@ is substituted
+# with "true" or "false" per rendered copy.
+shape = "block"
+blink = @CURSOR_BLINK@
+trail = false
+trail_duration_ms = 150
+
+[theme]
+mode = "dark"
+dark_name = "catppuccin-mocha"
+light_name = "catppuccin-latte"
+
+[logging]
+level = "info"
+
+[scrollback]
+limit = 20000
+
+[ui]
+hide_menu_bar = false
+background_opacity = 1.0
+auto_detect_urls = true
+
+[startup]
+# Never restore or persist a session from a previous run in this isolated
+# $XDG_CONFIG_HOME; each capture starts from the same single default pane.
+restore_last_session = false
+
+[keybindings]
+# Measurement-only topology controls shared by all three fixtures.
+new_tab = "F6"
+split_vertical = "F7"
+split_horizontal = "F8"
+focus_pane_left = "F9"
