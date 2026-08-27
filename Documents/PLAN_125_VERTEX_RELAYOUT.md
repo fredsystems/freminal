@@ -625,6 +625,16 @@ second transfer; do not include toast buffers in terminal-buffer categories.
 
 Stop: report synthetic exact-byte checks and one live smoke log; await review.
 
+**Complete.** Actual GL upload sites now return only transferred payload bytes,
+excluding orphan-allocation calls, and the pane callback attributes background,
+foreground, decoration, image-vertex, image-texture, full-atlas, and atlas-
+subrectangle bytes to its matching resolved work class. Recording-facade tests
+pin every category, skip/error paths, cursor-only behavior, and the orphaning
+double-count trap. The 125.C1 real-AMD sustained-output smoke produced periodic
+reconcilable logs; at 840 observations it reported 7,438,540 total bytes:
+3,183,596 foreground, 51,408 decoration, 4,194,304 full-atlas, and 9,232 atlas-
+subrectangle bytes, with all other categories zero for that corpus.
+
 ### 125.7 — Asynchronous GPU timestamp-query foundation
 
 Scope: new `freminal-windowing/src/gpu_profiling.rs`;

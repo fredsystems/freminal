@@ -1391,8 +1391,8 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
     }))
 }
 
-/// Emit the Task 125.5 live render-work profile's periodic flush summary,
-/// if (and only if) `profile` currently has one pending.
+/// Emit the Task 125.5/125.6 live render-work profile's periodic flush
+/// summary, if (and only if) `profile` currently has one pending.
 ///
 /// Two call sites in [`FreminalTerminalWidget::show`] invoke this: right
 /// after `show()`'s own [`LiveRenderProfile::start`] call (which may have
@@ -1408,6 +1408,14 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
 /// set" is written once rather than duplicated at both call sites (and so
 /// the two can never drift into logging the same boundary twice or
 /// checking it with different field sets).
+///
+/// Task 125.6 extends the line with real upload-byte totals: the overall
+/// total, the per-buffer-category breakdown [`LiveRenderProfile::upload_totals`]
+/// owns, and the per-resolved-class byte distribution
+/// [`LiveRenderProfile::class_upload_totals`] owns -- dividing the latter
+/// by the matching `resolved_*` count above gives an average
+/// bytes-per-frame figure per class, which is the reconciliation this
+/// pair of fields exists to make possible.
 #[cfg(feature = "frame-profiling")]
 fn maybe_log_live_render_profile_flush(
     profile: &mut LiveRenderProfile,
@@ -1416,6 +1424,8 @@ fn maybe_log_live_render_profile_flush(
     if !profile.take_flush_signal() {
         return;
     }
+    let uploads = profile.upload_totals();
+    let class_bytes = profile.class_upload_totals();
     tracing::debug!(
         target: LiveRenderProfile::LOG_TARGET,
         pane_id = ?pane_id,
@@ -1430,13 +1440,26 @@ fn maybe_log_live_render_profile_flush(
         resolved_bounded = profile.class_counts().bounded,
         resolved_full = profile.class_counts().full,
         changed_row_histogram = ?profile.row_bucket_counts(),
-        "live render-work profile (task 125.5): cumulative raw \
-         VertexRebuild decisions vs. resolved render-work class, and the \
-         changed-row histogram, for this pane since its RenderState was \
-         created -- flushed every LiveRenderProfile::FLUSH_EVERY \
-         finalized observations, whichever of `start`'s stale-token sweep \
-         or the paint callback's `complete` happened to cross the \
-         boundary"
+        upload_bytes_total = uploads.total(),
+        upload_bytes_background_instance_vbo = uploads.background_instance_vbo_bytes,
+        upload_bytes_foreground_instance_vbo = uploads.foreground_instance_vbo_bytes,
+        upload_bytes_decoration_vbo = uploads.decoration_vbo_bytes,
+        upload_bytes_image_vertex_vbo = uploads.image_vertex_vbo_bytes,
+        upload_bytes_image_texture = uploads.image_texture_bytes,
+        upload_bytes_atlas_full = uploads.atlas_full_bytes,
+        upload_bytes_atlas_subrect = uploads.atlas_subrect_bytes,
+        upload_bytes_by_class_reuse = class_bytes.reuse,
+        upload_bytes_by_class_cursor_only = class_bytes.cursor_only,
+        upload_bytes_by_class_bounded = class_bytes.bounded,
+        upload_bytes_by_class_full = class_bytes.full,
+        "live render-work profile (task 125.5/125.6): cumulative raw \
+         VertexRebuild decisions vs. resolved render-work class, the \
+         changed-row histogram, and real per-buffer-category and \
+         per-resolved-class upload-byte totals, for this pane since its \
+         RenderState was created -- flushed every \
+         LiveRenderProfile::FLUSH_EVERY finalized observations, whichever \
+         of `start`'s stale-token sweep or the paint callback's \
+         `complete` happened to cross the boundary"
     );
 }
 
@@ -3934,6 +3957,16 @@ impl FreminalTerminalWidget {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+                // Task 125.6: exactly the uploads the draw call below
+                // issues, assigned exactly once inside whichever arm runs.
+                // Declared here (rather than a default-initialized `let
+                // mut`) so a future arm added without an assignment fails
+                // to compile instead of silently finalizing with a stale
+                // value. Entirely absent from a default build -- see
+                // `DrawUploadCounts`'s doc in `gui::renderer::gpu`.
+                #[cfg(feature = "frame-profiling")]
+                let frame_uploads: UploadByteCounts;
+
                 if is_cursor_only {
                     // Cursor-only fast path: bg/fg/image are unchanged and
                     // simply redrawn from the last full rebuild's slot.
@@ -3965,6 +3998,38 @@ impl FreminalTerminalWidget {
                     // used to emit `rs_ref.image_verts` last time.
                     let draw_order = &rs_ref.image_draw_order;
 
+                    // Task 125.6: the `frame-profiling` arm captures
+                    // `draw_with_cursor_only_update`'s returned upload-byte
+                    // measurement (dropping the closure body's trailing
+                    // semicolon makes it the closure's — and so
+                    // `draw_scissored_to_present_region`'s — return
+                    // value); the default arm issues the identical call
+                    // and discards its (unconditionally computed, but
+                    // here-unused) return, exactly as before this
+                    // subtask.
+                    #[cfg(feature = "frame-profiling")]
+                    {
+                        frame_uploads = draw_scissored_to_present_region(gl, region, || {
+                            renderer.draw_with_cursor_only_update(
+                                gl,
+                                atlas,
+                                deco_verts,
+                                bg_len,
+                                fg_len,
+                                img_len,
+                                draw_order,
+                                vp.width_px,
+                                vp.height_px,
+                                cw,
+                                ch,
+                                opacity,
+                                bg_image_opacity,
+                                bg_image_mode,
+                                restore_fbo,
+                            )
+                        });
+                    }
+                    #[cfg(not(feature = "frame-profiling"))]
                     draw_scissored_to_present_region(gl, region, || {
                         renderer.draw_with_cursor_only_update(
                             gl,
@@ -3996,6 +4061,33 @@ impl FreminalTerminalWidget {
                     let rs_ref: &mut RenderState = &mut rs;
                     let renderer = &mut rs_ref.renderer;
                     let atlas = &mut rs_ref.atlas;
+                    // Task 125.6: see the `is_cursor_only` arm above for
+                    // why the two cfg arms differ only in whether the
+                    // closure's return value is bound.
+                    #[cfg(feature = "frame-profiling")]
+                    {
+                        frame_uploads = draw_scissored_to_present_region(gl, region, || {
+                            renderer.draw_with_verts(
+                                gl,
+                                atlas,
+                                &rs_ref.bg_instances,
+                                &rs_ref.deco_verts,
+                                &rs_ref.fg_instances,
+                                &rs_ref.image_verts,
+                                &rs_ref.image_draw_order,
+                                &rs_ref.snap_images,
+                                vp.width_px,
+                                vp.height_px,
+                                cw,
+                                ch,
+                                opacity,
+                                bg_image_opacity,
+                                bg_image_mode,
+                                restore_fbo,
+                            )
+                        });
+                    }
+                    #[cfg(not(feature = "frame-profiling"))]
                     draw_scissored_to_present_region(gl, region, || {
                         renderer.draw_with_verts(
                             gl,
@@ -4018,27 +4110,25 @@ impl FreminalTerminalWidget {
                     });
                 }
 
-                // Task 125.5: finalize this frame's live-profiling
+                // Task 125.5/125.6: finalize this frame's live-profiling
                 // observation now that the actual GL draw above has run.
                 // `complete` takes back only the token and the upload
                 // counts -- the raw/resolved classification was already
                 // recorded by `start` above, against this exact token, so
-                // it cannot be reported differently here.
-                // `UploadByteCounts::default()` (all-zero) is the correct
-                // value for an observation this subtask does not yet
-                // measure -- Task 125.6 replaces it with the real
-                // per-buffer upload-byte counts from the draw calls above,
-                // without changing anything else about this call site.
-                // `profiling_token` is `None` on a `skip_draw` frame (no
-                // rebuild decision was made, so there is nothing to
-                // finalize) and permanently on a non-`frame-profiling`
-                // build; a callback that is never invoked at all (this
-                // closure's body never runs) leaves its token pending, and
-                // the NEXT `show()` call's `LiveRenderProfile::start`
-                // finalizes it as unpainted -- see that type's module doc.
+                // it cannot be reported differently here. `frame_uploads`
+                // is exactly what the draw call issued (Task 125.6): real
+                // per-buffer/per-texture byte counts, not an estimate from
+                // any buffer's length. `profiling_token` is `None` on a
+                // `skip_draw` frame (no rebuild decision was made, so
+                // there is nothing to finalize) and permanently on a
+                // non-`frame-profiling` build; a callback that is never
+                // invoked at all (this closure's body never runs) leaves
+                // its token pending, and the NEXT `show()` call's
+                // `LiveRenderProfile::start` finalizes it as unpainted --
+                // see that type's module doc.
                 #[cfg(feature = "frame-profiling")]
                 if let Some(token) = profiling_token {
-                    rs.live_profile.complete(token, UploadByteCounts::default());
+                    rs.live_profile.complete(token, frame_uploads);
                     // Also checked right after `start()` above -- see that
                     // call site's comment for why a boundary crossed by
                     // the stale-token sweep inside `start` would otherwise
@@ -5477,8 +5567,12 @@ mod live_profiling_tests {
     /// raw decision into a class via [`resolve_render_work_class`] (the
     /// same mapping the `widget.rs` call site uses) and starts a token;
     /// the paint callback's side re-locks later and finalizes that SAME
-    /// token with the default (all-zero) uploads Task 125.5 always
-    /// reports (Task 125.6 will replace that with real counts).
+    /// token with all-zero uploads -- this test is exercising the token
+    /// lifecycle itself, not upload-byte attribution, so a zero
+    /// [`UploadByteCounts`] is simply the input, not a placeholder; see
+    /// `render_state_level_wiring_of_a_real_upload_byte_counts_value`
+    /// below for the Task 125.6 case that pins non-zero attribution
+    /// flowing through the same API.
     #[test]
     fn token_lifecycle_through_the_render_state_shared_by_show_and_the_paint_callback() {
         let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
@@ -5612,6 +5706,50 @@ mod live_profiling_tests {
                 .live_profile
                 .take_flush_signal()
         );
+    }
+
+    /// Task 125.6: a real, non-zero, multi-category [`UploadByteCounts`]
+    /// completed through the SAME `Arc<Mutex<RenderState>>` API `show()`
+    /// and the pane's paint callback share must reach both
+    /// `upload_totals()` (the per-buffer-category breakdown) and
+    /// `class_upload_totals()` (the per-resolved-class breakdown) intact
+    /// -- proving the `RenderState`-level plumbing this subtask's
+    /// production call site (`FreminalTerminalWidget::show`'s paint
+    /// callback) relies on, independent of any real GL draw.
+    #[test]
+    fn render_state_level_wiring_of_a_real_upload_byte_counts_value() {
+        let render_state = new_render_state(Arc::new(Mutex::new(WindowPostRenderer::new())));
+
+        let raw = RawRebuildDecision::ReevaluateFullRebuild {
+            resolved: ReevaluatedRebuild::Full,
+        };
+        let class = resolve_render_work_class(raw);
+        assert_eq!(class, RenderWorkClass::Full);
+        let token = render_state.lock().unwrap().live_profile.start(raw, class);
+
+        let uploads = UploadByteCounts {
+            background_instance_vbo_bytes: 100,
+            foreground_instance_vbo_bytes: 200,
+            decoration_vbo_bytes: 24,
+            image_vertex_vbo_bytes: 96,
+            image_texture_bytes: 64,
+            atlas_full_bytes: 4096,
+            atlas_subrect_bytes: 0,
+        };
+        let finalized = render_state
+            .lock()
+            .unwrap()
+            .live_profile
+            .complete(token, uploads);
+        assert!(finalized);
+
+        let rs = render_state.lock().unwrap();
+        assert_eq!(rs.live_profile.upload_totals(), uploads);
+        assert_eq!(rs.live_profile.upload_totals().total(), uploads.total());
+        assert_eq!(rs.live_profile.class_upload_totals().full, uploads.total());
+        assert_eq!(rs.live_profile.class_upload_totals().reuse, 0);
+        assert_eq!(rs.live_profile.class_upload_totals().bounded, 0);
+        assert_eq!(rs.live_profile.class_upload_totals().cursor_only, 0);
     }
 }
 

@@ -19,11 +19,18 @@
 //! naming `gui::terminal::frame_dirty::VertexRebuild` directly (that type is
 //! `pub(super)`-scoped to `gui::terminal` and unreachable from here -- see
 //! [`RawRebuildDecision`]'s doc for why a mirror, not an import, is
-//! correct). 125.6 still owns real per-buffer upload-byte attribution: the
-//! `widget.rs` paint callback currently finalizes every observation with
-//! [`UploadByteCounts::default`] (all-zero), which is the correct value for
-//! an observation this subtask does not yet measure, not a placeholder that
-//! silently under-reports a real upload.
+//! correct). Task 125.6 completes real per-buffer upload-byte attribution:
+//! `gui::renderer::gpu::TerminalRenderer::draw_with_verts` and
+//! `draw_with_cursor_only_update` now return the exact bytes their own GL
+//! upload calls issued, and the `widget.rs` paint callback finalizes each
+//! observation with that real [`UploadByteCounts`] instead of
+//! [`UploadByteCounts::default`] -- an uninvoked callback (the
+//! `FrameDamage::None` case) still finalizes as zero-upload, which remains
+//! correct because it is true: no GL upload was ever issued for it. 125.6
+//! also adds [`RenderWorkClassUploadTotals`], attributing cumulative upload
+//! bytes to each resolved [`RenderWorkClass`] so a later reconciliation
+//! pass can divide bytes by [`RenderWorkClassCounts`] to get an
+//! average-bytes-per-frame figure per class.
 //!
 //! # Why a token, not a plain counter
 //!
@@ -452,6 +459,48 @@ impl UploadByteCounts {
     }
 }
 
+/// Cumulative upload-byte totals attributed to each resolved
+/// [`RenderWorkClass`] (Task 125.6).
+///
+/// Distinct from both [`UploadByteCounts`] (a per-buffer-category
+/// breakdown for ONE observation) and [`RenderWorkClassCounts`]
+/// (occurrence counts per class): this type answers "how many total
+/// upload bytes did each resolved class account for", which -- divided by
+/// the matching [`RenderWorkClassCounts`] field -- is what lets a later
+/// reconciliation pass compute an average bytes-per-frame figure per
+/// class. An unpainted completion attributes `0` bytes here (it issued no
+/// GL upload at all, the same value its implicit zero-upload is already
+/// worth), so this total always reconciles against the SAME
+/// `painted_count + unpainted_count` observations [`RenderWorkClassCounts`]
+/// does, not a painted-only subset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderWorkClassUploadTotals {
+    /// Total upload bytes across every [`RenderWorkClass::Reuse`] completion.
+    pub reuse: u64,
+    /// Total upload bytes across every [`RenderWorkClass::CursorOnly`]
+    /// completion.
+    pub cursor_only: u64,
+    /// Total upload bytes across every [`RenderWorkClass::Bounded`]
+    /// completion (any bucket).
+    pub bounded: u64,
+    /// Total upload bytes across every [`RenderWorkClass::Full`] completion.
+    pub full: u64,
+}
+
+impl RenderWorkClassUploadTotals {
+    /// Attribute `bytes` total upload bytes to `class`'s running total,
+    /// saturating rather than overflowing.
+    const fn record(&mut self, class: RenderWorkClass, bytes: u64) {
+        let field = match class {
+            RenderWorkClass::Reuse => &mut self.reuse,
+            RenderWorkClass::CursorOnly => &mut self.cursor_only,
+            RenderWorkClass::Bounded(_) => &mut self.bounded,
+            RenderWorkClass::Full => &mut self.full,
+        };
+        *field = field.saturating_add(bytes);
+    }
+}
+
 /// What became of one [`PaneFrameToken`] (125.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneFrameOutcome {
@@ -560,6 +609,9 @@ pub struct LiveRenderProfile {
     row_bucket_counts: ChangedRowHistogram,
     /// Cumulative upload-byte totals since creation.
     upload_totals: UploadByteCounts,
+    /// Cumulative upload-byte totals since creation, attributed to each
+    /// resolved [`RenderWorkClass`] (Task 125.6).
+    class_upload_totals: RenderWorkClassUploadTotals,
     /// Painted completions since creation.
     painted_count: u64,
     /// Unpainted finalizations since creation.
@@ -671,6 +723,8 @@ impl LiveRenderProfile {
         self.pending = None;
         self.record_classification(pending.raw, pending.class);
         self.upload_totals = self.upload_totals.merge(uploads);
+        self.class_upload_totals
+            .record(pending.class, uploads.total());
         self.painted_count = self.painted_count.saturating_add(1);
         self.note_observation();
         self.push_record(PaneFrameRecord {
@@ -690,6 +744,13 @@ impl LiveRenderProfile {
     /// end-of-frame sweep for a token that egui never painted.
     fn finalize_unpainted(&mut self, pending: PendingObservation) {
         self.record_classification(pending.raw, pending.class);
+        // Explicit zero-byte attribution (Task 125.6), not a silent skip:
+        // an unpainted observation issued no GL upload at all, so it must
+        // reconcile against `class_upload_totals` at the same granularity
+        // `class_counts` already does -- see `RenderWorkClassUploadTotals`'s
+        // doc for why this is a real (if numerically no-op) contribution,
+        // not a gap in the accounting.
+        self.class_upload_totals.record(pending.class, 0);
         self.unpainted_count = self.unpainted_count.saturating_add(1);
         self.note_observation();
         self.push_record(PaneFrameRecord {
@@ -780,6 +841,13 @@ impl LiveRenderProfile {
         self.upload_totals
     }
 
+    /// Cumulative upload-byte totals since creation, attributed to each
+    /// resolved [`RenderWorkClass`] (Task 125.6).
+    #[must_use]
+    pub const fn class_upload_totals(&self) -> RenderWorkClassUploadTotals {
+        self.class_upload_totals
+    }
+
     /// Painted completions since creation.
     #[must_use]
     pub const fn painted_count(&self) -> u64 {
@@ -830,7 +898,8 @@ mod tests {
 
     use super::{
         ChangedRowBucket, LiveRenderProfile, PaneFrameOutcome, RawRebuildDecision,
-        ReevaluatedRebuild, RenderWorkClass, UploadByteCounts, resolve_render_work_class,
+        ReevaluatedRebuild, RenderWorkClass, RenderWorkClassUploadTotals, UploadByteCounts,
+        resolve_render_work_class,
     };
 
     fn sample_uploads(total: u64) -> UploadByteCounts {
@@ -1338,5 +1407,116 @@ mod tests {
         assert_eq!(profile.class_counts().full, 1);
         assert_eq!(profile.class_counts().reuse, 1);
         assert_eq!(profile.row_bucket_counts().zero, 1);
+    }
+
+    // ── RenderWorkClassUploadTotals (Task 125.6) ───────────────────────
+
+    #[test]
+    fn render_work_class_upload_totals_default_is_zero() {
+        let totals = RenderWorkClassUploadTotals::default();
+        assert_eq!(totals.reuse, 0);
+        assert_eq!(totals.cursor_only, 0);
+        assert_eq!(totals.bounded, 0);
+        assert_eq!(totals.full, 0);
+    }
+
+    #[test]
+    fn a_painted_completion_attributes_its_total_bytes_to_the_resolved_class() {
+        let mut profile = LiveRenderProfile::new();
+
+        let token = profile.start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+        profile.complete(token, sample_uploads(42));
+
+        let raw = RawRebuildDecision::Bounded {
+            changed_row_count: 3,
+        };
+        let class = resolve_render_work_class(raw);
+        let token = profile.start(raw, class);
+        profile.complete(token, sample_uploads(7));
+
+        let token = profile.start(full_raw(), RenderWorkClass::Full);
+        profile.complete(token, sample_uploads(100));
+
+        let totals = profile.class_upload_totals();
+        assert_eq!(totals.cursor_only, 42);
+        assert_eq!(totals.bounded, 7);
+        assert_eq!(totals.full, 100);
+        assert_eq!(totals.reuse, 0);
+    }
+
+    #[test]
+    fn multiple_painted_completions_of_the_same_class_accumulate_bytes() {
+        let mut profile = LiveRenderProfile::new();
+
+        for total in [10_u64, 20, 30] {
+            let token = profile.start(full_raw(), RenderWorkClass::Full);
+            profile.complete(token, sample_uploads(total));
+        }
+
+        assert_eq!(profile.class_upload_totals().full, 60);
+        assert_eq!(profile.class_counts().full, 3);
+    }
+
+    /// Regression-shape test (mirrors 125.5's unpainted-classification
+    /// fix): an unpainted (superseded) observation must still be
+    /// attributed to `class_upload_totals` -- with exactly zero bytes,
+    /// since it issued no GL upload at all -- so the per-class byte total
+    /// reconciles against the SAME `class_counts` denominator a later
+    /// bytes-per-frame calculation would divide by.
+    #[test]
+    fn an_unpainted_observation_attributes_zero_bytes_to_its_resolved_class() {
+        let mut profile = LiveRenderProfile::new();
+
+        let stale = profile.start(reuse_raw(), RenderWorkClass::Reuse);
+        let _next = profile.start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+
+        assert_eq!(profile.unpainted_count(), 1);
+        assert_eq!(profile.class_counts().reuse, 1);
+        assert_eq!(profile.class_upload_totals().reuse, 0);
+        assert_eq!(profile.upload_totals().total(), 0);
+
+        // The stale token's outcome is unpainted, not painted -- confirms
+        // this is genuinely the zero-upload path, not a completion that
+        // happened to report zero bytes.
+        let records: Vec<_> = profile.records().collect();
+        assert_eq!(records[0].token, stale);
+        assert!(matches!(
+            records[0].outcome,
+            PaneFrameOutcome::Unpainted { .. }
+        ));
+    }
+
+    #[test]
+    fn class_upload_totals_and_upload_totals_reconcile_across_mixed_observations() {
+        let mut profile = LiveRenderProfile::new();
+
+        // Two painted `Full` completions with real uploads.
+        for total in [50_u64, 25] {
+            let token = profile.start(full_raw(), RenderWorkClass::Full);
+            profile.complete(token, sample_uploads(total));
+        }
+        // One `Full` observation that never gets completed and is
+        // superseded (unpainted, zero bytes).
+        let _stale = profile.start(full_raw(), RenderWorkClass::Full);
+        let next = profile.start(RawRebuildDecision::CursorOnly, RenderWorkClass::CursorOnly);
+        profile.complete(next, UploadByteCounts::default());
+
+        // Cross-check: the sum of every category in `upload_totals()`
+        // equals the sum across every class in `class_upload_totals()` --
+        // two independent breakdowns of the exact same underlying bytes.
+        let by_category = profile.upload_totals().total();
+        let by_class = profile.class_upload_totals();
+        let by_class_sum = by_class
+            .reuse
+            .saturating_add(by_class.cursor_only)
+            .saturating_add(by_class.bounded)
+            .saturating_add(by_class.full);
+        assert_eq!(by_category, 75);
+        assert_eq!(by_class_sum, 75);
+        assert_eq!(by_class.full, 75);
+        assert_eq!(by_class.cursor_only, 0);
+        // Three `Full` observations (two painted, one unpainted) were
+        // classified, but only 75 bytes total were ever uploaded.
+        assert_eq!(profile.class_counts().full, 3);
     }
 }
