@@ -6,6 +6,7 @@
 use super::font_manager;
 use super::hover_cursor::HoverAffordance;
 use super::icons::ChromeIcon;
+use super::visual_preview::{PreviewTrigger, VisualPreview};
 use egui::{self, ComboBox, DragValue, FontData, FontDefinitions, FontFamily, Panel, Slider, Ui};
 use freminal_common::config::{
     self, BackgroundImageMode, Config, CursorShapeConfig, GutterPosition, TabBarPosition,
@@ -87,24 +88,25 @@ pub enum SettingsAction {
     /// The user clicked Apply — the new config has been saved to disk and
     /// should be adopted live.
     Applied,
-    /// The user changed the theme in the dropdown — apply it temporarily
-    /// so they can preview it in the terminal.  Carries the new theme slug.
-    PreviewTheme(String),
-    /// The modal was closed without Apply while a preview was active —
-    /// revert to the original theme.  Carries the original theme slug and
-    /// the original opacity (in case opacity was also previewed).
-    RevertTheme(String, f32),
-    /// The user changed the opacity slider — apply it temporarily so they
-    /// can preview the effect in real time.
-    PreviewOpacity(f32),
-    /// The modal was closed without Apply while opacity was being previewed —
-    /// revert to the original value.
-    RevertOpacity(f32),
-    /// The user changed the chrome style profile (Modern/Retro) in the UI tab —
-    /// apply it temporarily so they can preview the restyle live. Carries the
-    /// chosen profile. Not persisted here (112.13 wires config persistence);
-    /// this only drives the runtime `gui_theme` the style hook reads.
-    PreviewProfile(freminal_common::gui_theme::StyleProfile),
+    /// The theme, background opacity, and/or chrome style profile should be
+    /// reflected live in the running app right now.
+    ///
+    /// Carries a **whole-state snapshot** ([`VisualPreview`]), not a
+    /// per-option event: the caller diffs it against whatever it last
+    /// applied and only redoes the work for fields that actually changed.
+    /// This single variant covers both preview (the draft changed) and
+    /// revert (the modal closed without applying, so the caller re-previews
+    /// the committed config) — there is no separate `Revert*` variant, which
+    /// is what makes a forgotten revert for a newly-added previewable option
+    /// structurally impossible. See [`VisualPreview`]'s doc for the design
+    /// rationale and the bug this replaced.
+    ///
+    /// The accompanying [`PreviewTrigger`] (issue #452 phase C) is metadata
+    /// about *timing*, not a second revert mechanism: it tells the caller
+    /// whether this snapshot is an in-progress edit (debounce expensive
+    /// fields normally) or a revert (apply expensive fields immediately and
+    /// discard any pending debounce stash).
+    Preview(VisualPreview, PreviewTrigger),
     /// The user clicked "Test Notification" in the Notifications tab — route
     /// a sample notification through the current draft `[notifications]`
     /// config so the user can verify routing without running a command.
@@ -247,19 +249,20 @@ pub struct SettingsModal {
     /// string is displayed as a banner explaining why editing is disabled.
     read_only_reason: Option<String>,
 
-    /// Active theme slug when the modal was opened (computed from the live
-    /// config's `active_slug(os_dark_mode)`).  Used to detect whether a
-    /// preview is active and to revert on Cancel.
-    original_theme_slug: String,
-
     /// The OS dark/light preference at the time the modal was last opened or
-    /// `show()` was called.  Used to resolve `ThemeMode::Auto` to the correct
-    /// active slug for preview/revert comparison.
+    /// `show()` / `show_standalone()` was called.  Used to resolve
+    /// `ThemeMode::Auto` to the correct active slug when constructing a
+    /// [`VisualPreview`].
     os_dark_mode: bool,
 
-    /// Background opacity when the modal was opened.  Used to detect
-    /// whether opacity preview is active and to revert on Cancel.
-    original_opacity: f32,
+    /// The [`VisualPreview`] matching the currently committed config —
+    /// re-baselined by [`Self::open()`], [`Self::sync_from_config()`], and
+    /// [`Self::commit_draft()`]. Closing the modal without applying returns
+    /// `SettingsAction::Preview(self.committed_preview.clone(), PreviewTrigger::Revert)`,
+    /// i.e. "preview the committed config again" — this is the entire
+    /// revert mechanism; see [`VisualPreview`]'s doc for why there is no
+    /// separate per-option revert.
+    committed_preview: VisualPreview,
 
     /// Sorted list of monospaced font family names available on the system.
     /// Populated once when the modal is opened via [`Self::open()`].
@@ -312,17 +315,6 @@ pub struct SettingsModal {
     /// `SettingsAction::TestPaste` so the app can open the confirm dialog with
     /// sample content using the draft `[paste_guard]` config.
     pending_test_paste: bool,
-
-    /// The chrome style profile (Modern/Retro) currently selected in the UI
-    /// tab's profile picker. In-memory only at this stage — config persistence
-    /// is wired in 112.13. Tracks the picker's selection so the control renders
-    /// the active choice; changing it sets `pending_preview_profile`.
-    draft_profile: freminal_common::gui_theme::StyleProfile,
-
-    /// Set by `show_ui_tab` when the user changes the style-profile picker.
-    /// Consumed by `show` / `show_standalone` which return it as
-    /// `SettingsAction::PreviewProfile` so the chrome restyles live.
-    pending_preview_profile: Option<freminal_common::gui_theme::StyleProfile>,
 }
 
 impl SettingsModal {
@@ -337,9 +329,8 @@ impl SettingsModal {
             config_path,
             log_dir_display: String::new(),
             read_only_reason: None,
-            original_theme_slug: String::new(),
             os_dark_mode: false,
-            original_opacity: 1.0,
+            committed_preview: VisualPreview::from_config(&Config::default(), false),
             monospace_families: Vec::new(),
             base_font_defs: None,
             preview_registered: None,
@@ -350,8 +341,6 @@ impl SettingsModal {
             pending_close: PendingClose::None,
             pending_test_notification: false,
             pending_test_paste: false,
-            draft_profile: freminal_common::gui_theme::StyleProfile::default(),
-            pending_preview_profile: None,
         }
     }
 
@@ -363,11 +352,7 @@ impl SettingsModal {
     /// Preserves the currently-selected tab and other transient UI state.
     pub(super) fn sync_from_config(&mut self, live_config: &Config) {
         self.draft = live_config.clone();
-        self.original_theme_slug = live_config.theme.active_slug(self.os_dark_mode).to_string();
-        self.original_opacity = live_config.ui.background_opacity;
-        // Seed the profile picker from the persisted chrome profile (112.13) so
-        // it reflects the active choice rather than always showing the default.
-        self.draft_profile = live_config.chrome.profile;
+        self.committed_preview = VisualPreview::from_config(live_config, self.os_dark_mode);
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
     }
@@ -472,7 +457,8 @@ impl SettingsModal {
     /// family names available on the system (from `FontManager::enumerate_monospace_families`).
     ///
     /// `os_dark_mode` reflects the current OS light/dark preference and is used to
-    /// resolve `ThemeMode::Auto` to the correct active slug for preview/revert.
+    /// resolve `ThemeMode::Auto` to the correct active slug for the committed
+    /// [`VisualPreview`] baseline.
     pub fn open(
         &mut self,
         live_config: &Config,
@@ -484,8 +470,7 @@ impl SettingsModal {
         self.status_message = None;
         self.monospace_families = monospace_families;
         self.os_dark_mode = os_dark_mode;
-        self.original_theme_slug = live_config.theme.active_slug(os_dark_mode).to_string();
-        self.original_opacity = live_config.ui.background_opacity;
+        self.committed_preview = VisualPreview::from_config(live_config, os_dark_mode);
         self.log_dir_display = config::log_dir().map_or_else(
             || "(unable to determine log directory)".to_string(),
             |p| p.display().to_string(),
@@ -506,8 +491,6 @@ impl SettingsModal {
         };
 
         self.key_recording = KeyRecordingState::Idle;
-        // Seed the profile picker from the persisted chrome profile (112.13).
-        self.draft_profile = live_config.chrome.profile;
         self.baseline_toml = Self::serialize_for_baseline(live_config);
         self.pending_close = PendingClose::None;
         self.is_open = true;
@@ -543,7 +526,8 @@ impl SettingsModal {
     ///   1. Replace its live config with `self.applied_config()`.
     ///   2. Hot-reload any settings that can change at runtime.
     ///
-    /// `os_dark_mode` is used to resolve `ThemeMode::Auto` for preview/revert.
+    /// `os_dark_mode` is used to resolve `ThemeMode::Auto` for the
+    /// [`VisualPreview`] snapshot.
     /// Render the settings UI as a standalone window (fills the entire egui context).
     ///
     /// Unlike [`show()`], which creates a floating `egui::Window` inside a parent
@@ -557,8 +541,7 @@ impl SettingsModal {
 
         let mut action = SettingsAction::None;
 
-        let theme_before = self.draft.theme.active_slug(self.os_dark_mode).to_string();
-        let opacity_before = self.draft.ui.background_opacity;
+        let preview_before = VisualPreview::from_config(&self.draft, self.os_dark_mode);
 
         let mut root_ui = egui::Ui::new(
             ctx.clone(),
@@ -626,35 +609,27 @@ impl SettingsModal {
             return SettingsAction::TestPaste;
         }
 
-        if let Some(profile) = self.pending_preview_profile.take()
-            && action != SettingsAction::Applied
-        {
-            return SettingsAction::PreviewProfile(profile);
-        }
-
+        // Closing without applying must ALWAYS re-preview the committed
+        // config, even when the draft (`preview_before`) already matches it
+        // byte-for-byte. `VisualPreview` only covers state compared via the
+        // draft; it does not see the debounced font/background-image/shader
+        // holders in `FreminalGui`, which can have already pushed a value to
+        // the renderer that the draft no longer reflects (e.g. a shader path
+        // typed, settled, then retyped back to the committed value before a
+        // *second* debounce settles). Gating this dispatch on
+        // `committed_preview != preview_before` used to skip it entirely in
+        // that case, leaving the stale pushed value live with no way to
+        // revert it (issue #452 post-review Blocker 1). The revert is safe
+        // and cheap to always emit: `apply_visual_preview` diffs against
+        // `self.applied_preview` and the debounce holders' own baselines, so
+        // every field that already matches is a no-op.
         if !self.is_open && action != SettingsAction::Applied {
-            let theme_changed = self.original_theme_slug != theme_before;
-            let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
-            if theme_changed {
-                return SettingsAction::RevertTheme(
-                    self.original_theme_slug.clone(),
-                    self.original_opacity,
-                );
-            } else if opacity_changed {
-                return SettingsAction::RevertOpacity(self.original_opacity);
-            }
-            return action;
+            return SettingsAction::Preview(self.committed_preview.clone(), PreviewTrigger::Revert);
         }
 
-        if (self.draft.ui.background_opacity - opacity_before).abs() > f32::EPSILON
-            && action != SettingsAction::Applied
-        {
-            return SettingsAction::PreviewOpacity(self.draft.ui.background_opacity);
-        }
-
-        let theme_after = self.draft.theme.active_slug(self.os_dark_mode).to_string();
-        if theme_after != theme_before && action != SettingsAction::Applied {
-            return SettingsAction::PreviewTheme(theme_after);
+        let preview_after = VisualPreview::from_config(&self.draft, self.os_dark_mode);
+        if preview_after != preview_before && action != SettingsAction::Applied {
+            return SettingsAction::Preview(preview_after, PreviewTrigger::Edit);
         }
 
         action
@@ -673,10 +648,9 @@ impl SettingsModal {
         let mut action = SettingsAction::None;
         let mut open = self.is_open;
 
-        // Snapshot the active theme slug and opacity before rendering so we
-        // can detect whether the user changed either this frame.
-        let theme_before = self.draft.theme.active_slug(self.os_dark_mode).to_string();
-        let opacity_before = self.draft.ui.background_opacity;
+        // Snapshot the previewable state before rendering so we can detect
+        // whether the user changed any of it this frame.
+        let preview_before = VisualPreview::from_config(&self.draft, self.os_dark_mode);
 
         // Build an opaque window frame so the settings modal is never
         // affected by background_opacity (which lowers window_fill alpha
@@ -767,39 +741,17 @@ impl SettingsModal {
             return SettingsAction::TestPaste;
         }
 
-        if let Some(profile) = self.pending_preview_profile.take()
-            && action != SettingsAction::Applied
-        {
-            return SettingsAction::PreviewProfile(profile);
-        }
-
+        // See the matching comment in `show_standalone` for why this must
+        // be unconditional rather than gated on `committed_preview !=
+        // preview_before` (issue #452 post-review Blocker 1).
         if !self.is_open && action != SettingsAction::Applied {
-            let theme_changed = self.original_theme_slug != theme_before;
-            let opacity_changed = (self.original_opacity - opacity_before).abs() > f32::EPSILON;
-            // Theme revert carries the original opacity so the caller can
-            // restore both in a single action.
-            if theme_changed {
-                return SettingsAction::RevertTheme(
-                    self.original_theme_slug.clone(),
-                    self.original_opacity,
-                );
-            } else if opacity_changed {
-                return SettingsAction::RevertOpacity(self.original_opacity);
-            }
-            return action;
+            return SettingsAction::Preview(self.committed_preview.clone(), PreviewTrigger::Revert);
         }
 
-        // If the opacity slider changed this frame, signal a live preview.
-        if (self.draft.ui.background_opacity - opacity_before).abs() > f32::EPSILON
-            && action != SettingsAction::Applied
-        {
-            return SettingsAction::PreviewOpacity(self.draft.ui.background_opacity);
-        }
-
-        // If the active theme slug changed this frame, signal a live preview.
-        let theme_after = self.draft.theme.active_slug(self.os_dark_mode).to_string();
-        if theme_after != theme_before && action != SettingsAction::Applied {
-            return SettingsAction::PreviewTheme(theme_after);
+        // If any previewable field changed this frame, signal a live preview.
+        let preview_after = VisualPreview::from_config(&self.draft, self.os_dark_mode);
+        if preview_after != preview_before && action != SettingsAction::Applied {
+            return SettingsAction::Preview(preview_after, PreviewTrigger::Edit);
         }
 
         action
@@ -827,6 +779,18 @@ impl SettingsModal {
     #[must_use]
     pub(super) fn draft_active_theme_slug(&self, os_dark_mode: bool) -> String {
         self.draft.theme.active_slug(os_dark_mode).to_string()
+    }
+
+    /// The OS dark/light preference last observed by this modal (via
+    /// `open()` or the most recent `show()` / `show_standalone()` call).
+    ///
+    /// Used by callers that need to construct a [`VisualPreview`] reference
+    /// outside of the preview flow itself -- e.g. after "Reload Config" --
+    /// with the same OS-dark reference the Settings window's own preview
+    /// snapshots use.
+    #[must_use]
+    pub(super) const fn os_dark_mode(&self) -> bool {
+        self.os_dark_mode
     }
 
     /// The draft `[paste_guard]` config, so the "Test Paste" button can preview
@@ -1224,34 +1188,32 @@ impl SettingsModal {
 
     /// Render the chrome style-profile picker (Modern / Retro).
     ///
-    /// Changing the selection sets `pending_preview_profile`, which
-    /// `show` / `show_standalone` return as `SettingsAction::PreviewProfile`
-    /// for a live restyle, and writes the choice into the draft config
-    /// (`draft.chrome.profile`) so it is persisted on Apply (Task 112.13).
+    /// Writes directly into `draft.chrome.profile`, so it is persisted on
+    /// Apply like any other draft field. The top-level before/after
+    /// `VisualPreview` diff in `show` / `show_standalone` notices the change
+    /// and returns `SettingsAction::Preview` for a live restyle -- this
+    /// picker does not need its own change-detection copy or one-shot signal.
     fn show_style_profile_picker(&mut self, ui: &mut Ui) {
         use freminal_common::gui_theme::StyleProfile;
 
         ui.label("Chrome Style:");
-        let before = self.draft_profile;
         ComboBox::from_id_salt("chrome_style_profile")
-            .selected_text(match self.draft_profile {
+            .selected_text(match self.draft.chrome.profile {
                 StyleProfile::Modern => "Modern",
                 StyleProfile::Retro => "Retro",
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Modern, "Modern")
-                    .clickable();
-                ui.selectable_value(&mut self.draft_profile, StyleProfile::Retro, "Retro")
+                ui.selectable_value(
+                    &mut self.draft.chrome.profile,
+                    StyleProfile::Modern,
+                    "Modern",
+                )
+                .clickable();
+                ui.selectable_value(&mut self.draft.chrome.profile, StyleProfile::Retro, "Retro")
                     .clickable();
             })
             .response
             .clickable();
-        if self.draft_profile != before {
-            self.pending_preview_profile = Some(self.draft_profile);
-            // Persist into the draft so Apply (which saves `self.draft`) writes
-            // the chosen profile to config.
-            self.draft.chrome.profile = self.draft_profile;
-        }
         ui.add_space(4.0);
         ui.colored_label(
             ui.visuals().weak_text_color(),
@@ -1441,17 +1403,11 @@ impl SettingsModal {
     /// Replace the draft with a default config, as the "Reset to Defaults"
     /// button does.
     ///
-    /// `draft_profile` is the chrome-style picker's own copy of
-    /// `draft.chrome.profile`, kept separate so the picker can detect a change
-    /// and emit a live preview. It is synced on open and whenever the user
-    /// moves the picker -- but a reset moves `draft.chrome.profile` underneath
-    /// it without the picker being touched, so it must be re-synced here.
-    /// Otherwise the picker keeps displaying the pre-reset profile while Apply
-    /// writes the default one, and the change-detection in
-    /// `show_style_profile_picker` sees no difference to correct.
+    /// The style-profile picker reads `draft.chrome.profile` directly (no
+    /// separate copy to re-sync), so a reset is picked up by the picker and
+    /// by the top-level `VisualPreview` diff exactly like any other field.
     fn reset_draft_to_defaults(&mut self) {
         self.draft = Config::default();
-        self.draft_profile = self.draft.chrome.profile;
         self.status_message = Some("Reset to defaults (not saved yet)".to_string());
     }
 
@@ -2681,20 +2637,18 @@ impl SettingsModal {
     /// clean baseline, so a subsequent Cancel has nothing to revert and the
     /// unsaved-changes guard stays quiet.
     ///
-    /// Crucially this also re-baselines `original_theme_slug` /
-    /// `original_opacity`, the values the close path reverts a live preview
-    /// to. Once the user has committed, the committed appearance *is* the
-    /// original; without this, applying a new theme and then cancelling would
-    /// revert the terminal to the theme in force when the dialog was first
-    /// opened, silently undoing a change already written to disk.
+    /// Crucially this also re-baselines `committed_preview`, the snapshot the
+    /// close path reverts a live preview to. Once the user has committed, the
+    /// committed appearance *is* the baseline; without this, applying a new
+    /// theme and then cancelling would revert the terminal to the appearance
+    /// in force when the dialog was first opened, silently undoing a change
+    /// already written to disk.
     fn commit_draft(&mut self) -> SettingsAction {
         match config::save_config(&self.draft, self.config_path.as_deref()) {
             Ok(()) => {
                 self.status_message = None;
                 self.baseline_toml = Self::serialize_for_baseline(&self.draft);
-                self.original_theme_slug =
-                    self.draft.theme.active_slug(self.os_dark_mode).to_string();
-                self.original_opacity = self.draft.ui.background_opacity;
+                self.committed_preview = VisualPreview::from_config(&self.draft, self.os_dark_mode);
                 self.pending_close = PendingClose::None;
                 SettingsAction::Applied
             }
@@ -2726,6 +2680,20 @@ impl SettingsModal {
             self.status_message = Some("Settings applied.".to_string());
         }
         action
+    }
+
+    /// Set the status message shown at the bottom of the Settings window to
+    /// a live-preview notice (issue #452 phase D).
+    ///
+    /// Distinct call site from [`Self::commit_draft`]'s save-failure/success
+    /// messages, but the same field and the same rendering. A shader-path
+    /// preview that fails to compile is routed here instead of a toast (the
+    /// surface a user still typing a path would otherwise flood one keystroke
+    /// at a time), while a committed (Apply) failure keeps the toast --
+    /// see `visual_preview::ShaderErrorRoute`. Never persists anything: this
+    /// only updates the in-memory status line the window already renders.
+    pub(super) fn set_preview_status_message(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
     }
 
     // ── Startup tab ──────────────────────────────────────────────────────────
@@ -3202,20 +3170,15 @@ mod tests {
         live.font.size = 42.0;
         modal.open(&live, Vec::new(), false);
 
-        // Call the real reset rather than re-implementing it here: an inline
-        // `modal.draft = Config::default()` is what let the profile-picker
-        // desync below go unnoticed.
         modal.reset_draft_to_defaults();
         assert!((modal.draft.font.size - 12.0).abs() < f32::EPSILON);
     }
 
-    /// The chrome-style picker keeps its own copy of `draft.chrome.profile`.
-    /// A reset moves the draft underneath it, and the picker's own
-    /// change-detection cannot notice, so the reset must re-sync it. Without
-    /// this the picker displays the pre-reset profile while Apply writes the
-    /// default one.
+    /// The style-profile picker reads `draft.chrome.profile` directly (no
+    /// separate copy to keep in sync -- see `visual_preview`'s doc for why
+    /// that copy was removed), so a reset is reflected immediately.
     #[test]
-    fn reset_to_defaults_resyncs_the_style_profile_picker() {
+    fn reset_to_defaults_resets_the_style_profile() {
         use freminal_common::gui_theme::StyleProfile;
 
         let mut modal = SettingsModal::new(None);
@@ -3223,15 +3186,11 @@ mod tests {
         // Open with a non-default profile so a reset has something to change.
         live.chrome.profile = StyleProfile::Retro;
         modal.open(&live, Vec::new(), false);
-        assert_eq!(modal.draft_profile, StyleProfile::Retro);
+        assert_eq!(modal.draft.chrome.profile, StyleProfile::Retro);
 
         modal.reset_draft_to_defaults();
 
-        assert_eq!(
-            modal.draft_profile, modal.draft.chrome.profile,
-            "the picker must show what Apply would save"
-        );
-        assert_eq!(modal.draft_profile, Config::default().chrome.profile);
+        assert_eq!(modal.draft.chrome.profile, Config::default().chrome.profile);
     }
 
     #[test]
@@ -3247,31 +3206,9 @@ mod tests {
         use freminal_common::gui_theme::StyleProfile;
         let modal = SettingsModal::new(None);
         assert_eq!(
-            modal.draft_profile,
+            modal.draft.chrome.profile,
             StyleProfile::Modern,
             "the chrome style picker must default to Modern"
-        );
-        assert!(
-            modal.pending_preview_profile.is_none(),
-            "no profile preview is pending on a fresh modal"
-        );
-    }
-
-    #[test]
-    fn pending_preview_profile_round_trips() {
-        use freminal_common::gui_theme::StyleProfile;
-        // Simulate the picker selecting Retro: the UI tab sets
-        // `pending_preview_profile`; `show`/`show_standalone` then take it and
-        // return a PreviewProfile action.
-        let mut modal = SettingsModal::new(None);
-        modal.draft_profile = StyleProfile::Retro;
-        modal.pending_preview_profile = Some(StyleProfile::Retro);
-
-        let taken = modal.pending_preview_profile.take();
-        assert_eq!(taken, Some(StyleProfile::Retro));
-        assert!(
-            modal.pending_preview_profile.is_none(),
-            "taking the pending preview clears it (one-shot signal)"
         );
     }
 
@@ -3584,13 +3521,13 @@ mod tests {
     }
 
     #[test]
-    fn sync_from_config_updates_draft_and_originals() {
+    fn sync_from_config_updates_draft_and_committed_preview() {
         let mut modal = SettingsModal::new(None);
         // Seed the modal with an initial config via open() so os_dark_mode
-        // and the original_* fields are initialised.
+        // and committed_preview are initialised.
         let initial = Config::default();
         modal.open(&initial, Vec::new(), false);
-        let initial_opacity = modal.original_opacity;
+        let initial_opacity = modal.committed_preview.background_opacity;
 
         // Build a mutated config and sync.  Use a distinguishable opacity
         // and theme slug so we can verify the draft updates.
@@ -3602,10 +3539,9 @@ mod tests {
             (modal.draft.ui.background_opacity - reloaded.ui.background_opacity).abs()
                 < f32::EPSILON
         );
-        assert!((modal.original_opacity - reloaded.ui.background_opacity).abs() < f32::EPSILON);
         assert_eq!(
-            modal.original_theme_slug,
-            reloaded.theme.active_slug(modal.os_dark_mode).to_string()
+            modal.committed_preview,
+            VisualPreview::from_config(&reloaded, modal.os_dark_mode)
         );
     }
 
@@ -3677,19 +3613,19 @@ mod tests {
     #[test]
     fn apply_rebaselines_the_revert_target() {
         let (mut modal, _dir) = modal_with_temp_config();
-        let opened_with = modal.original_opacity;
+        let opened_with = modal.committed_preview.background_opacity;
 
         modal.draft.ui.background_opacity = 0.25;
         let _ = modal.apply_without_dismissing();
 
         assert!(
-            (modal.original_opacity - 0.25).abs() < f32::EPSILON,
+            (modal.committed_preview.background_opacity - 0.25).abs() < f32::EPSILON,
             "the applied value is the new revert target, was {opened_with}"
         );
         assert_eq!(
-            modal.original_theme_slug,
-            modal.draft.theme.active_slug(modal.os_dark_mode),
-            "the applied theme is the new revert target"
+            modal.committed_preview,
+            VisualPreview::from_config(&modal.draft, modal.os_dark_mode),
+            "the applied state is the new revert target"
         );
     }
 

@@ -35,6 +35,7 @@ use super::rendering;
 use super::tabs::{Tab, TabManager};
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
+use super::visual_preview::{self, ShaderErrorRoute};
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
 
@@ -1423,6 +1424,16 @@ impl freminal_windowing::App for FreminalGui {
             let settings_action = self.settings_modal.show_standalone(ctx, os_dark);
             self.handle_settings_action(&settings_action, handle, window_id);
 
+            // Check whether a stashed debounced-preview value -- font,
+            // background image path, or shader path (issues #452 phases C
+            // and D) -- has settled. This runs every frame regardless of
+            // `settings_action` because a stable draft produces no further
+            // `SettingsAction::Preview` on its own -- the scheduled
+            // `request_repaint_after` wake that fires once a debounce
+            // interval elapses relies entirely on this call to actually
+            // apply the settled value.
+            self.tick_visual_preview_debounces(handle);
+
             // Track the settings window's current geometry so we can restore
             // it the next time it is opened.  We query the windowing layer
             // directly rather than `ctx.input().viewport()` because the
@@ -1444,11 +1455,26 @@ impl freminal_windowing::App for FreminalGui {
             if !self.settings_modal.is_open {
                 // Drop the live chrome preview override: the session is over.
                 // On Apply the committed theme now flows via the snapshot; on
-                // Cancel the RevertTheme broadcast restored it. Clearing also
-                // re-enables per-window Auto-mode theming, which a pinned global
-                // override cannot represent. The follow-up repaints scheduled by
-                // the Apply / Revert dispatch cover the snapshot catch-up.
+                // Cancel the `SettingsAction::Preview(committed_config)`
+                // broadcast restored it. Clearing also re-enables per-window
+                // Auto-mode theming, which a pinned global override cannot
+                // represent. The follow-up repaints scheduled by the
+                // Apply / preview dispatch cover the snapshot catch-up.
                 self.preview_theme = None;
+                // Reset the shader-error route unconditionally, regardless of
+                // what it held immediately beforehand. `apply_new_config`
+                // (the Apply path) already resets this, but Cancel/X/Discard
+                // do not otherwise pass through it, and
+                // `apply_preview_shader_path_immediate`'s own revert can
+                // legitimately skip resetting it (its early return when the
+                // debounce baseline already matches the committed value).
+                // Without this, a settle that last routed to
+                // `ShaderErrorRoute::SettingsStatus` could stay stuck there
+                // with the window closed, silently dropping a later genuine
+                // shader hot-reload compile error into an invisible status
+                // message (issue #452 post-review Blocker 2). See
+                // `shader_error_route_on_settings_close`'s doc.
+                self.shader_error_route = visual_preview::shader_error_route_on_settings_close();
                 self.persist_window_state();
                 self.settings_window_id = None;
                 self.settings_owner = None;
@@ -1526,6 +1552,14 @@ impl freminal_windowing::App for FreminalGui {
         // Drained here every frame (71.4 bug fix): previously only ran in the
         // subsequent-window branch of `on_window_created`, which never fires
         // for the first/only window and never re-runs after window creation.
+        //
+        // Where the drained error is surfaced depends on `self.shader_error_route`
+        // (issue #452 phase D): a committed change (Apply / Reload Config,
+        // the initial config, `hot_reload`, or a preview revert) keeps the
+        // original toast behaviour, but a shader path still being live-edited
+        // in the Settings window routes to that window's own status message
+        // instead -- a user typing a path would otherwise get a toast per
+        // keystroke on every open terminal window.
         {
             let err = {
                 let mut wpr = win
@@ -1535,7 +1569,18 @@ impl freminal_windowing::App for FreminalGui {
                 wpr.last_error.take()
             };
             if let Some(msg) = err {
-                self.push_error_toast("Shader error", Some(msg));
+                match self.shader_error_route {
+                    ShaderErrorRoute::SettingsStatus => {
+                        self.settings_modal
+                            .set_preview_status_message(format!("Shader error: {msg}"));
+                        if let Some(settings_window_id) = self.settings_window_id {
+                            handle.request_repaint(settings_window_id);
+                        }
+                    }
+                    ShaderErrorRoute::Toast => {
+                        self.push_error_toast("Shader error", Some(msg));
+                    }
+                }
             }
         }
 

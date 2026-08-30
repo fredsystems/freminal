@@ -5008,6 +5008,166 @@ impl FreminalTerminalWidget {
                 std::process::exit(1);
             })
     }
+
+    /// Live-preview an expensive font change (family and/or line height) via
+    /// a full [`FontManager::rebuild`] (issue #452 phase C).
+    ///
+    /// Callers reserve this for changes that actually touch family or line
+    /// height -- a size-only change should go through the cheaper
+    /// [`Self::apply_font_zoom`] instead, exactly as it does for Ctrl+Scroll
+    /// zoom. `FontManager::rebuild` reads only `config.font.family` /
+    /// `config.font.size` / `config.font.line_height`, so it is safe to
+    /// build a throwaway [`Config`] carrying just those three values rather
+    /// than threading the caller's real (uncommitted) config through here.
+    ///
+    /// Returns `true` if any font-related state was invalidated, in which
+    /// case the caller must clear each pane's `RenderState::atlas` and
+    /// `PaneRenderCache::invalidate_content()`. As with
+    /// [`Self::apply_config_changes`], no resize event is sent here -- the
+    /// normal resize-detection logic notices the character-dimension
+    /// mismatch on the next frame and sends the correct
+    /// `InputEvent::Resize` on its own.
+    pub fn apply_font_preview_rebuild(
+        &mut self,
+        family: Option<&str>,
+        size: f32,
+        line_height: f32,
+    ) -> bool {
+        let pixels_per_point = self.font_manager.pixels_per_point();
+        let mut synthetic_config = Config::default();
+        synthetic_config.font.family = family.map(str::to_owned);
+        synthetic_config.font.size = size;
+        synthetic_config.font.line_height = line_height;
+        self.font_manager
+            .rebuild(&synthetic_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during font preview: {e}");
+                std::process::exit(1);
+            })
+            .font_changed()
+    }
+
+    /// Live-preview the OpenType ligature toggle (issue #452 phase B)
+    /// without a full [`FontManager::rebuild`].
+    ///
+    /// Ligatures only change which shaping features `rustybuzz` applies --
+    /// no new fonts are loaded and no metrics change -- so calling the full
+    /// config-apply path (which reparses font files) would be wasted work on
+    /// every preview edit. This only flips the cached toggle `show()` reads
+    /// each frame. Returns `true` when the value actually changed, so the
+    /// caller knows whether to invalidate the pane atlases: a ligature
+    /// change alters shaping output, so previously-shaped lines must
+    /// re-shape to be visible.
+    pub const fn set_ligatures_preview(&mut self, enabled: bool) -> bool {
+        if self.toggles.ligatures == enabled {
+            return false;
+        }
+        self.toggles.ligatures = enabled;
+        true
+    }
+
+    /// Live-preview the cursor trail toggle and its duration (issue #452
+    /// phase B).
+    ///
+    /// Both are GUI-side render parameters `show()` reads each frame
+    /// (`CursorFrameInputs::trail_enabled` / `CursorFrameInputs::trail_duration`)
+    /// -- there is no PTY round trip and no glyph shaping is affected, so no
+    /// atlas invalidation is needed either.
+    pub fn set_cursor_trail_preview(&mut self, trail: bool, duration_ms: u32) {
+        self.toggles.cursor_trail = trail;
+        self.cursor_trail_duration = Duration::from_millis(u64::from(duration_ms));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod visual_preview_tests {
+    //! Tests for the cheap, GUI-side preview setters used by
+    //! `apply_visual_preview` (issue #452 phase B): `set_ligatures_preview`
+    //! and `set_cursor_trail_preview`. Both avoid the full
+    //! `apply_config_changes[_no_ctx]` path, so they need their own
+    //! coverage that the cached toggles actually change (or correctly
+    //! report no change).
+    //!
+    //! Also covers `apply_font_preview_rebuild` (issue #452 phase C), the
+    //! expensive counterpart applied only once the debounce in
+    //! `visual_preview::DebouncedPreview` settles.
+
+    use super::FreminalTerminalWidget;
+    use freminal_common::config::Config;
+    use std::time::Duration;
+
+    fn widget() -> FreminalTerminalWidget {
+        let ctx = egui::Context::default();
+        FreminalTerminalWidget::new(&ctx, &Config::default())
+            .expect("widget construction must succeed with the bundled default font")
+    }
+
+    #[test]
+    fn set_ligatures_preview_updates_toggle_and_reports_change() {
+        let mut widget = widget();
+        assert!(widget.toggles.ligatures, "default config enables ligatures");
+
+        assert!(
+            !widget.set_ligatures_preview(true),
+            "setting to the already-active value must report no change"
+        );
+        assert!(widget.toggles.ligatures);
+
+        assert!(
+            widget.set_ligatures_preview(false),
+            "setting to a different value must report a change"
+        );
+        assert!(!widget.toggles.ligatures);
+    }
+
+    #[test]
+    fn set_cursor_trail_preview_updates_toggle_and_duration() {
+        let mut widget = widget();
+
+        widget.set_cursor_trail_preview(true, 250);
+        assert!(widget.toggles.cursor_trail);
+        assert_eq!(widget.cursor_trail_duration, Duration::from_millis(250));
+
+        widget.set_cursor_trail_preview(false, 400);
+        assert!(!widget.toggles.cursor_trail);
+        assert_eq!(widget.cursor_trail_duration, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn apply_font_preview_rebuild_reports_change_on_size_only() {
+        let mut widget = widget();
+        let default_size = Config::default().font.size;
+
+        assert!(
+            !widget.apply_font_preview_rebuild(
+                None,
+                default_size,
+                Config::default().font.line_height
+            ),
+            "re-applying the already-active values must report no change"
+        );
+
+        assert!(
+            widget.apply_font_preview_rebuild(
+                None,
+                default_size + 4.0,
+                Config::default().font.line_height
+            ),
+            "a genuine size change must report a change"
+        );
+    }
+
+    #[test]
+    fn apply_font_preview_rebuild_reports_change_on_line_height_only() {
+        let mut widget = widget();
+        let default = Config::default().font;
+
+        assert!(
+            widget.apply_font_preview_rebuild(None, default.size, default.line_height + 0.2),
+            "a genuine line-height change must report a change"
+        );
+    }
 }
 
 /// Convert a [`PointerShape`] (from [`TerminalSnapshot`]) to the corresponding

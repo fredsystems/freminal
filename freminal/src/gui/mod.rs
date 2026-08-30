@@ -63,6 +63,7 @@ mod session;
 mod settings_dispatch;
 mod tab_spawning;
 mod toast;
+mod visual_preview;
 mod welcome;
 pub(crate) mod window;
 mod window_lifecycle;
@@ -154,8 +155,51 @@ struct FreminalGui {
     /// re-themes too), but chrome no longer depends on the GUI happening to
     /// read the post-`ThemeChange` snapshot — which was racy and intermittent.
     /// `None` means "use the active snapshot's theme" (the steady state).
-    /// Set on `PreviewTheme` / `RevertTheme`, cleared on Apply.
+    /// Set whenever `SettingsAction::Preview` carries a changed theme
+    /// (including a revert-by-repreviewing-the-committed-config), cleared
+    /// on Apply.
     preview_theme: Option<&'static freminal_common::themes::ThemePalette>,
+
+    /// The [`visual_preview::VisualPreview`] most recently applied to the
+    /// running app, whether via `SettingsAction::Preview` or a full config
+    /// commit (Apply / Reload Config). `apply_visual_preview` diffs each new
+    /// `SettingsAction::Preview` against this so it only redoes the work for
+    /// fields that actually changed, then stores the new value here.
+    applied_preview: visual_preview::VisualPreview,
+
+    /// Time-based debounce holder for the font family/size/line-height
+    /// preview fields (issue #452 phase C).
+    ///
+    /// Unlike every other field `apply_visual_preview` handles, these three
+    /// are expensive enough (`FontManager::rebuild` reparses font faces and
+    /// clears five caches) that applying them on every intermediate
+    /// slider/keystroke value would be wasteful or visibly janky. See
+    /// `visual_preview::DebouncedPreview` for the decision logic and
+    /// `settings_dispatch::FreminalGui::tick_font_preview_debounce` for how
+    /// a settled value gets applied even when the user has stopped editing
+    /// (no further `SettingsAction::Preview` fires on its own in that case).
+    font_preview_debounce: visual_preview::DebouncedPreview<visual_preview::FontPreview>,
+
+    /// Time-based debounce holder for the background-image-path preview
+    /// field (issue #452 phase D). Reuses `visual_preview::DebouncedPreview`
+    /// unchanged (issue #452 phase C's generic design) -- see its module
+    /// doc and `settings_dispatch::FreminalGui::tick_visual_preview_debounces`
+    /// for how a settled value gets applied even when the user has stopped
+    /// editing.
+    background_image_preview_debounce: visual_preview::DebouncedPreview<Option<std::path::PathBuf>>,
+
+    /// Time-based debounce holder for the shader-path preview field (issue
+    /// #452 phase D). Same generic holder as `background_image_preview_debounce`
+    /// and `font_preview_debounce`, parameterized over a different `T`.
+    shader_preview_debounce: visual_preview::DebouncedPreview<Option<std::path::PathBuf>>,
+
+    /// Where a drained `renderer::WindowPostRenderer::last_error` should be
+    /// surfaced this frame (issue #452 phase D): a toast on every terminal
+    /// window (the existing, default behaviour -- correct for a committed
+    /// change) or the Settings window's own status message (a shader path
+    /// still being live-edited). Updated every time a shader source is
+    /// pushed to `pending_shader`; see `visual_preview::ShaderErrorRoute`.
+    shader_error_route: visual_preview::ShaderErrorRoute,
 
     /// CLI arguments needed for spawning new PTY tabs.
     args: Args,
@@ -488,6 +532,19 @@ impl FreminalGui {
         // `config` is moved into the struct literal below.
         let gui_theme = config.chrome.profile.defaults();
 
+        // No window (and therefore no OS dark/light preference) exists yet
+        // at construction time, so seed with `false` -- matching
+        // `SettingsModal::new()`'s own default `os_dark_mode`. This is
+        // corrected on the first `apply_new_config` / Settings preview,
+        // exactly like `SettingsModal::os_dark_mode` is.
+        let applied_preview = visual_preview::VisualPreview::from_config(&config, false);
+        let font_preview_debounce =
+            visual_preview::DebouncedPreview::new(applied_preview.font.clone());
+        let background_image_preview_debounce =
+            visual_preview::DebouncedPreview::new(applied_preview.background_image_path.clone());
+        let shader_preview_debounce =
+            visual_preview::DebouncedPreview::new(applied_preview.shader_path.clone());
+
         let app = Self {
             windows: HashMap::new(),
             binding_map,
@@ -495,6 +552,11 @@ impl FreminalGui {
             config,
             gui_theme,
             preview_theme: None,
+            applied_preview,
+            font_preview_debounce,
+            background_image_preview_debounce,
+            shader_preview_debounce,
+            shader_error_route: visual_preview::ShaderErrorRoute::default(),
             args,
             settings_modal: SettingsModal::new(config_path.clone()),
             pane_id_gen: Arc::new(Mutex::new(panes::PaneIdGenerator::new(1))),
