@@ -6,6 +6,7 @@
 use conv2::ConvUtil;
 
 use crate::buffer_states::command_block::CommandStatus;
+use crate::buffer_states::progress::ProgressState;
 
 /// A complete terminal color palette.
 ///
@@ -166,6 +167,58 @@ impl ThemePalette {
                 None => self.ansi[3],
             },
             CommandStatus::Unknown => self.ansi[7],
+        }
+    }
+
+    /// Resolve the fill color for an OSC 9;4 [`ProgressState`] (issue #507,
+    /// phase B2).
+    ///
+    /// Deliberately reuses the **existing** gutter overrides/fallbacks
+    /// (per the phase B2 plan: no new `ThemePalette` fields for ~25
+    /// themes) rather than introducing dedicated `progress_*` fields. The
+    /// mapping mirrors the Windows taskbar (`ITaskbarList3`) progress-state
+    /// colors this `ConEmu`-style protocol was modelled on -- see
+    /// <https://ghostty.org/docs/vt/osc/conemu> -- so the fallback hues are
+    /// not arbitrary reuse, they are the same semantic color the protocol's
+    /// own reference implementation uses for each state:
+    ///
+    /// - [`ProgressState::InProgress`] -> `TBPF_NORMAL` (green) -> reuses
+    ///   [`Self::gutter_success`], falling back to normal-green (`ansi[2]`).
+    /// - [`ProgressState::Error`] -> `TBPF_ERROR` (red) -> reuses
+    ///   [`Self::gutter_failure`], falling back to normal-red (`ansi[1]`).
+    /// - [`ProgressState::Paused`] -> `TBPF_PAUSED` (yellow) -> reuses
+    ///   [`Self::gutter_running`], falling back to normal-yellow (`ansi[3]`)
+    ///   -- the color happens to line up with the gutter's own "still
+    ///   running" fallback even though the two concepts differ.
+    /// - [`ProgressState::Indeterminate`] -> `TBPF_INDETERMINATE` (a blue
+    ///   marquee upstream). Freminal draws this state as a static full-width
+    ///   bar with no marquee animation (see the terminal widget's rendering
+    ///   doc for why), but keeps the same hue: always the palette's
+    ///   normal-blue ANSI color (`ansi[4]`). No override exists for this
+    ///   state -- a marching indicator is not a "status" a user would want
+    ///   to recolor the way success/failure/running are.
+    /// - [`ProgressState::Inactive`] is never drawn (callers gate on
+    ///   `state() != Inactive` before calling this), but a total function
+    ///   still needs a value: falls back to the same neutral
+    ///   normal-white (`ansi[7]`) [`Self::gutter_color_for`] uses for
+    ///   [`CommandStatus::Unknown`].
+    #[must_use]
+    pub const fn progress_color_for(&self, state: ProgressState) -> (u8, u8, u8) {
+        match state {
+            ProgressState::InProgress => match self.gutter_success {
+                Some(c) => c,
+                None => self.ansi[2],
+            },
+            ProgressState::Error => match self.gutter_failure {
+                Some(c) => c,
+                None => self.ansi[1],
+            },
+            ProgressState::Paused => match self.gutter_running {
+                Some(c) => c,
+                None => self.ansi[3],
+            },
+            ProgressState::Indeterminate => self.ansi[4],
+            ProgressState::Inactive => self.ansi[7],
         }
     }
 
@@ -2060,6 +2113,64 @@ mod tests {
         assert_eq!(t.gutter_color_for(CommandStatus::Running), (7, 8, 9));
         // Unknown is unaffected by overrides.
         assert_eq!(t.gutter_color_for(CommandStatus::Unknown), t.ansi[7]);
+    }
+
+    // --- Progress-state color resolver (issue #507, phase B2) ------------
+
+    #[test]
+    fn progress_color_for_falls_back_to_ansi_when_unset() {
+        let t = CATPPUCCIN_MOCHA;
+        assert_eq!(t.progress_color_for(ProgressState::InProgress), t.ansi[2]);
+        assert_eq!(t.progress_color_for(ProgressState::Error), t.ansi[1]);
+        assert_eq!(t.progress_color_for(ProgressState::Paused), t.ansi[3]);
+        assert_eq!(
+            t.progress_color_for(ProgressState::Indeterminate),
+            t.ansi[4]
+        );
+        assert_eq!(t.progress_color_for(ProgressState::Inactive), t.ansi[7]);
+    }
+
+    #[test]
+    fn progress_color_for_reuses_gutter_overrides_when_set() {
+        // No dedicated `progress_*` fields exist (deliberately, per the
+        // phase B2 plan) -- setting the gutter overrides must be enough to
+        // recolor the matching progress states too.
+        let mut t = CATPPUCCIN_MOCHA;
+        t.gutter_success = Some((1, 2, 3));
+        t.gutter_failure = Some((4, 5, 6));
+        t.gutter_running = Some((7, 8, 9));
+        assert_eq!(t.progress_color_for(ProgressState::InProgress), (1, 2, 3));
+        assert_eq!(t.progress_color_for(ProgressState::Error), (4, 5, 6));
+        assert_eq!(t.progress_color_for(ProgressState::Paused), (7, 8, 9));
+        // Indeterminate has no override and is unaffected.
+        assert_eq!(
+            t.progress_color_for(ProgressState::Indeterminate),
+            t.ansi[4]
+        );
+    }
+
+    #[test]
+    fn progress_color_for_states_are_pairwise_distinct_on_a_raw_palette() {
+        // A theme with no gutter overrides still needs each active state to
+        // read as visually distinct -- otherwise a user cannot tell
+        // in-progress from error from paused from indeterminate at a
+        // glance. Uses a palette with no overrides (any shipped theme
+        // qualifies per `all_themes_default_gutter_overrides_to_none`).
+        let t = CATPPUCCIN_MOCHA;
+        let colors = [
+            t.progress_color_for(ProgressState::InProgress),
+            t.progress_color_for(ProgressState::Error),
+            t.progress_color_for(ProgressState::Paused),
+            t.progress_color_for(ProgressState::Indeterminate),
+        ];
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(
+                    colors[i], colors[j],
+                    "progress states {i} and {j} resolved to the same color: {colors:?}"
+                );
+            }
+        }
     }
 
     // --- Chrome-role resolver (112.3c) -----------------------------------

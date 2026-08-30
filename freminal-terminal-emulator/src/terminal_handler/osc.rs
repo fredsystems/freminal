@@ -151,6 +151,17 @@ impl TerminalHandler {
                 self.pointer_shape = *shape;
             }
 
+            // OSC 9;4 — ConEmu-style progress-state update (issue #507).
+            //
+            // A direct field mutation, not a `window_commands` push:
+            // `window_commands` is a fire-once event queue and the wrong
+            // transport for this level-triggered state, which is read back
+            // out of the handler on every snapshot via `progress()` instead.
+            AnsiOscType::Progress(update) => {
+                self.progress.apply(*update);
+                self.progress_updated_at = Some(std::time::Instant::now());
+            }
+
             // OSC 9 / OSC 777 — desktop notification.  Forward to the GUI via
             // the window-command channel; the GUI's notification router
             // (Task 76.4) applies the `[notifications]` routing policy.

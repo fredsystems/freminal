@@ -16,10 +16,18 @@
 //! Chunk reassembly, transport to the GUI, and reverse-write are handled
 //! downstream (Tasks 99.3+).
 //!
+//! OSC 9 also carries the conflicting `ConEmu` progress-report sub-protocol
+//! (`9;4;<state>[;<value>]`, issue #507). A valid progress report produces an
+//! [`AnsiOscType::Progress`] carrying a typed
+//! [`freminal_common::buffer_states::progress::ProgressUpdate`] instead of a
+//! notification; a `4;`-prefixed body that does not match the progress wire
+//! form falls through and remains ordinary OSC 9 notification text.
+//!
 //! Wire formats:
 //!
 //! ```text
 //! OSC 9 ; <body>                                        ST   (iTerm2 / WezTerm)
+//! OSC 9 ; 4 ; <state> [ ; <value> ]                     ST   (ConEmu progress)
 //! OSC 777 ; notify ; <title> ; <body>                   ST   (urxvt)
 //! OSC 99  ; <colon-sep key=value metadata> ; <payload>  ST   (kitty)
 //! ```
@@ -35,15 +43,16 @@
 use crate::ansi_components::tracer::SequenceTracer;
 use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
 use freminal_common::buffer_states::osc_notify_99::parse_osc_99;
+use freminal_common::buffer_states::progress::ProgressUpdate;
 use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
 /// Handle OSC 9 (`iTerm2` / `WezTerm` notification).
 ///
 /// The entire payload after the leading `9;` is the notification body unless
-/// it is the conflicting `ConEmu` progress-report form `9;4;<state>[;<value>]`.
-/// Progress reports are recognized and silently consumed because Freminal
-/// does not currently expose progress state in its chrome. An empty
-/// notification body is also silently consumed (nothing useful to display).
+/// it is the conflicting `ConEmu` progress-report form `9;4;<state>[;<value>]`,
+/// in which case it is parsed into a typed [`ProgressUpdate`] and emitted as
+/// [`AnsiOscType::Progress`] instead (issue #507). An empty notification body
+/// is silently consumed (nothing useful to display).
 pub(super) fn handle_osc_notify_9(
     raw_params: &[u8],
     seq_trace: &SequenceTracer,
@@ -60,9 +69,14 @@ pub(super) fn handle_osc_notify_9(
     };
 
     let body_bytes = &raw_params[first_semi + 1..];
-    if body_bytes.starts_with(b"4;") && is_conemu_progress_report(body_bytes) {
+    if body_bytes.starts_with(b"4;")
+        && let Some(update) = parse_conemu_progress_report(body_bytes)
+    {
+        output.push(TerminalOutput::OscResponse(AnsiOscType::Progress(update)));
         return;
     }
+    // A `4;`-prefixed body that doesn't match the progress wire form falls
+    // through: it is ordinary notification text.
 
     let Some(body) = decode_utf8(body_bytes, seq_trace) else {
         return;
@@ -83,30 +97,57 @@ pub(super) fn handle_osc_notify_9(
     }));
 }
 
-/// Identify the ConEmu/Windows Terminal progress sub-protocol without
-/// swallowing ordinary OSC 9 notification text that happens to start with
-/// `4;`.
-fn is_conemu_progress_report(payload: &[u8]) -> bool {
+/// Parse the ConEmu/Windows Terminal progress sub-protocol
+/// `4;<state>[;<value>]` into a typed [`ProgressUpdate`].
+///
+/// Returns `None` when the payload does not match the progress-report wire
+/// form — including a state outside `0..=4`, a trailing field beyond
+/// `s;v`, an explicit-but-empty value field, or a value outside `0..=100` —
+/// in which case the caller must treat the entire body as ordinary OSC 9
+/// notification text rather than silently dropping it.
+fn parse_conemu_progress_report(payload: &[u8]) -> Option<ProgressUpdate> {
     let mut fields = payload.split(|&byte| byte == b';');
-    let Some(subcommand) = fields.next() else {
-        return false;
-    };
-    let Some(state) = fields.next() else {
-        return false;
-    };
+    let subcommand = fields.next()?;
+    let state = fields.next()?;
     if subcommand != b"4" || !matches!(state, [b'0'..=b'4']) {
-        return false;
+        return None;
     }
 
-    let progress = fields.next();
-    fields.next().is_none()
-        && progress.is_none_or(|value| {
-            !value.is_empty()
-                && std::str::from_utf8(value)
-                    .ok()
-                    .and_then(|value| value.parse::<u8>().ok())
-                    .is_some_and(|value| value <= 100)
-        })
+    let value_field = fields.next();
+    if fields.next().is_some() {
+        // More than `s;v` present — malformed.
+        return None;
+    }
+
+    let value: Option<u8> = match value_field {
+        None => None,
+        Some(raw) => {
+            if raw.is_empty() {
+                return None;
+            }
+            let parsed = std::str::from_utf8(raw).ok()?.parse::<u8>().ok()?;
+            if parsed > 100 {
+                return None;
+            }
+            Some(parsed)
+        }
+    };
+
+    match state {
+        b"0" => Some(ProgressUpdate::Clear),
+        // Freminal's reading of an underspecified case: the spec does not
+        // define what an omitted `v` means for state 1 (In progress) —
+        // unlike states 2 and 4, which explicitly say "unchanged" — so we
+        // treat an omitted value as 0 rather than leaving the previous
+        // value in place.
+        b"1" => Some(ProgressUpdate::InProgress(value.unwrap_or(0))),
+        b"2" => Some(ProgressUpdate::Error(value)),
+        b"3" => Some(ProgressUpdate::Indeterminate),
+        b"4" => Some(ProgressUpdate::Paused(value)),
+        // Unreachable given the `matches!` guard above, but kept exhaustive
+        // rather than panicking or asserting on a byte pattern.
+        _ => None,
+    }
 }
 
 /// Handle OSC 777 (urxvt notification).
@@ -259,6 +300,7 @@ mod tests {
     use super::super::tracer::SequenceTracer;
     use freminal_common::buffer_states::osc::{AnsiOscType, OscNotifySource};
     use freminal_common::buffer_states::osc_notify_99::{Osc99Command, Osc99PayloadType};
+    use freminal_common::buffer_states::progress::ProgressUpdate;
     use freminal_common::buffer_states::terminal_output::TerminalOutput;
 
     fn feed_osc(payload: &[u8]) -> Vec<TerminalOutput> {
@@ -283,6 +325,14 @@ mod tests {
                 body,
             }) => (*source, title, body.as_str()),
             other => panic!("expected Notify, got: {other:?}"),
+        }
+    }
+
+    fn expect_progress(output: &[TerminalOutput]) -> ProgressUpdate {
+        assert_eq!(output.len(), 1, "expected one output, got: {output:?}");
+        match &output[0] {
+            TerminalOutput::OscResponse(AnsiOscType::Progress(update)) => *update,
+            other => panic!("expected Progress, got: {other:?}"),
         }
     }
 
@@ -317,15 +367,69 @@ mod tests {
     }
 
     #[test]
-    fn osc9_conemu_progress_reports_are_consumed() {
-        for payload in [
-            b"9;4;1;0\x1b\\".as_slice(),
-            b"9;4;1;100\x1b\\".as_slice(),
-            b"9;4;0;0\x1b\\".as_slice(),
-        ] {
-            let output = feed_osc(payload);
-            assert!(output.is_empty(), "got: {output:?}");
-        }
+    fn osc9_progress_clear() {
+        let output = feed_osc(b"9;4;0\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Clear);
+    }
+
+    #[test]
+    fn osc9_progress_clear_with_explicit_value() {
+        // The spec table doesn't define a value for s=0; freminal still
+        // validates a trailing `v` field the same way it does for every
+        // other state, and simply ignores the value once state 0 is
+        // resolved to `Clear`.
+        let output = feed_osc(b"9;4;0;0\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Clear);
+    }
+
+    #[test]
+    fn osc9_progress_in_progress_with_value() {
+        let output = feed_osc(b"9;4;1;42\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(42));
+    }
+
+    #[test]
+    fn osc9_progress_in_progress_at_100() {
+        let output = feed_osc(b"9;4;1;100\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(100));
+    }
+
+    #[test]
+    fn osc9_progress_in_progress_value_omitted_defaults_to_zero() {
+        // Freminal's reading of the underspecified omitted-value case for
+        // state 1 (see the parser's doc comment).
+        let output = feed_osc(b"9;4;1\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::InProgress(0));
+    }
+
+    #[test]
+    fn osc9_progress_error_with_value() {
+        let output = feed_osc(b"9;4;2;10\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Error(Some(10)));
+    }
+
+    #[test]
+    fn osc9_progress_error_value_omitted() {
+        let output = feed_osc(b"9;4;2\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Error(None));
+    }
+
+    #[test]
+    fn osc9_progress_indeterminate() {
+        let output = feed_osc(b"9;4;3\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Indeterminate);
+    }
+
+    #[test]
+    fn osc9_progress_paused_with_value() {
+        let output = feed_osc(b"9;4;4;5\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Paused(Some(5)));
+    }
+
+    #[test]
+    fn osc9_progress_paused_value_omitted() {
+        let output = feed_osc(b"9;4;4\x1b\\");
+        assert_eq!(expect_progress(&output), ProgressUpdate::Paused(None));
     }
 
     #[test]
@@ -344,6 +448,70 @@ mod tests {
         assert_eq!(source, OscNotifySource::Osc9);
         assert_eq!(*title, None);
         assert_eq!(body, "4;1;101");
+    }
+
+    #[test]
+    fn osc9_progress_state_out_of_range_remains_notification_text() {
+        let output = feed_osc(b"9;4;5;10\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;5;10");
+    }
+
+    #[test]
+    fn osc9_progress_empty_value_field_remains_notification_text() {
+        let output = feed_osc(b"9;4;1;\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;");
+    }
+
+    #[test]
+    fn osc9_progress_extra_field_remains_notification_text() {
+        let output = feed_osc(b"9;4;1;50;extra\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;50;extra");
+    }
+
+    #[test]
+    fn osc9_progress_non_numeric_value_remains_notification_text() {
+        let output = feed_osc(b"9;4;1;abc\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;1;abc");
+    }
+
+    #[test]
+    fn osc9_progress_absent_state_field_remains_notification_text() {
+        // `9;4` — no second `;` at all, so the notification body is
+        // exactly `"4"`. `body_bytes.starts_with(b"4;")` in
+        // `handle_osc_notify_9` requires the semicolon, so this never even
+        // reaches `parse_conemu_progress_report` — it is ordinary OSC 9
+        // notification text from the start.
+        let output = feed_osc(b"9;4\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4");
+    }
+
+    #[test]
+    fn osc9_progress_empty_state_field_remains_notification_text() {
+        // `9;4;` — the state field is present but empty. Unlike the
+        // omitted-VALUE cases above (`9;4;1;`), `parse_conemu_progress_report`
+        // requires `state` to match `[b'0'..=b'4']`, exactly one byte in
+        // range; an empty slice never matches, so this falls through to
+        // notification text with the full `"4;"` body preserved.
+        let output = feed_osc(b"9;4;\x07");
+        let (source, title, body) = expect_notify(&output);
+        assert_eq!(source, OscNotifySource::Osc9);
+        assert_eq!(*title, None);
+        assert_eq!(body, "4;");
     }
 
     #[test]

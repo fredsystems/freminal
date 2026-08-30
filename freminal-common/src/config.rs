@@ -41,6 +41,7 @@ pub struct Config {
     pub command_blocks: CommandBlocksConfig,
     pub notifications: NotificationsConfig,
     pub chrome: ChromeConfig,
+    pub progress: ProgressConfig,
     #[serde(default, skip_serializing_if = "KeybindingsConfig::is_empty")]
     pub keybindings: KeybindingsConfig,
 
@@ -87,6 +88,7 @@ impl Default for Config {
             command_blocks: CommandBlocksConfig::default(),
             notifications: NotificationsConfig::default(),
             chrome: ChromeConfig::default(),
+            progress: ProgressConfig::default(),
             keybindings: KeybindingsConfig::default(),
             managed_by: None,
             startup: StartupConfig::default(),
@@ -1198,6 +1200,30 @@ pub struct ChromeConfig {
 }
 
 // ------------------------------------------------------------------------------------------------
+//  Progress (OSC 9;4 indicator)
+// ------------------------------------------------------------------------------------------------
+
+/// Configuration for the per-pane OSC 9;4 progress indicator.
+///
+/// This gates **display only**. Recognition and parsing of OSC 9;4 progress
+/// reports happen unconditionally regardless of this setting (see issue
+/// #502); disabling it only suppresses the rendered progress bar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgressConfig {
+    /// Whether the per-pane OSC 9;4 progress indicator is drawn.
+    ///
+    /// Default: `true`.
+    pub enabled: bool,
+}
+
+impl Default for ProgressConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 //  Startup / Layout
 // ------------------------------------------------------------------------------------------------
 
@@ -1575,6 +1601,7 @@ struct ConfigPartial {
     pub command_blocks: Option<CommandBlocksConfig>,
     pub notifications: Option<NotificationsConfig>,
     pub chrome: Option<ChromeConfig>,
+    pub progress: Option<ProgressConfig>,
     pub keybindings: Option<KeybindingsConfig>,
     pub managed_by: Option<String>,
     pub startup: Option<StartupConfig>,
@@ -1639,6 +1666,9 @@ impl Config {
         }
         if let Some(chrome) = partial.chrome {
             self.chrome = chrome;
+        }
+        if let Some(progress) = partial.progress {
+            self.progress = progress;
         }
         if let Some(keybindings) = partial.keybindings {
             // Merge override maps: later layers add to / overwrite earlier ones.
@@ -2688,6 +2718,45 @@ routing_info = \"system\"
         );
     }
 
+    // ── Progress config tests ────────────────────────────────────────
+
+    #[test]
+    fn progress_config_defaults_to_enabled() {
+        assert!(
+            ProgressConfig::default().enabled,
+            "progress indicator should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn progress_round_trips_through_toml() {
+        let mut cfg = Config::default();
+        cfg.progress.enabled = false;
+
+        let toml = toml::to_string_pretty(&cfg).expect("serialise config");
+        let parsed: Config = toml::from_str(&toml).expect("re-parse");
+        assert!(!parsed.progress.enabled);
+    }
+
+    #[test]
+    fn progress_config_apply_partial() {
+        let mut cfg = Config::default();
+        assert!(cfg.progress.enabled);
+
+        let partial: ConfigPartial = toml::from_str(
+            r"
+[progress]
+enabled = false
+",
+        )
+        .expect("valid TOML");
+        cfg.apply_partial(partial);
+        assert!(
+            !cfg.progress.enabled,
+            "[progress] must merge through ConfigPartial"
+        );
+    }
+
     #[test]
     fn notification_routing_serializes_as_snake_case() {
         #[derive(Serialize)]
@@ -3479,6 +3548,7 @@ mode = "none"
         original.command_blocks.enabled = !Config::default().command_blocks.enabled;
         original.notifications.enabled = !Config::default().notifications.enabled;
         original.chrome.profile = crate::gui_theme::StyleProfile::Retro;
+        original.progress.enabled = !Config::default().progress.enabled;
         original
             .keybindings
             .overrides
@@ -3565,6 +3635,10 @@ mode = "none"
             "chrome section dropped"
         );
         assert_eq!(
+            loaded.progress.enabled, original.progress.enabled,
+            "progress section dropped"
+        );
+        assert_eq!(
             loaded.keybindings.overrides.get("copy").map(String::as_str),
             Some("Ctrl+Shift+C"),
             "keybindings section dropped"
@@ -3606,6 +3680,7 @@ mode = "none"
             command_blocks: _,
             notifications: _,
             chrome: _,
+            progress: _,
             keybindings: _,
             managed_by: _,
             startup: _,

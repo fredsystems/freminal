@@ -851,6 +851,75 @@ fn a_change_survives_the_snapshots_the_gui_never_renders() {
     );
 }
 
+// ─── progress (OSC 9;4, issue #507) ──────────────────────────────────────────
+
+#[test]
+fn progress_is_inactive_by_default() {
+    let (mut emu, _rx) = make_emulator();
+    let snap = emu.build_snapshot();
+    assert!(
+        !snap.progress.is_active(),
+        "progress must be inactive on the first snapshot"
+    );
+    assert_eq!(snap.progress.percent(), 0);
+}
+
+#[test]
+fn progress_reflects_osc94_in_progress() {
+    use freminal_common::buffer_states::progress::ProgressState;
+
+    let (mut emu, _rx) = make_emulator();
+    // OSC 9 ; 4 ; 1 ; 42  BEL  — In progress, 42%.
+    emu.handle_incoming_data(b"\x1b]9;4;1;42\x07");
+    let snap = emu.build_snapshot();
+
+    assert_eq!(snap.progress.state(), ProgressState::InProgress);
+    assert_eq!(snap.progress.percent(), 42);
+}
+
+#[test]
+fn progress_survives_intervening_unrelated_snapshots() {
+    use freminal_common::buffer_states::progress::ProgressState;
+
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]9;4;1;10\x07");
+    let _ = emu.build_snapshot();
+
+    // Unrelated activity that doesn't touch progress.
+    emu.handle_incoming_data(b"more text");
+    let snap = emu.build_snapshot();
+
+    assert_eq!(snap.progress.state(), ProgressState::InProgress);
+    assert_eq!(snap.progress.percent(), 10);
+}
+
+#[test]
+fn progress_cleared_via_osc94_state_zero() {
+    use freminal_common::buffer_states::progress::ProgressState;
+
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]9;4;1;50\x07");
+    emu.handle_incoming_data(b"\x1b]9;4;0\x07");
+    let snap = emu.build_snapshot();
+
+    assert_eq!(snap.progress.state(), ProgressState::Inactive);
+    assert_eq!(snap.progress.percent(), 0);
+}
+
+#[test]
+fn progress_full_reset_clears_snapshot_progress() {
+    use freminal_common::buffer_states::progress::ProgressState;
+
+    let (mut emu, _rx) = make_emulator();
+    emu.handle_incoming_data(b"\x1b]9;4;1;80\x07");
+    // ESC c — RIS (full reset).
+    emu.handle_incoming_data(b"\x1bc");
+    let snap = emu.build_snapshot();
+
+    assert_eq!(snap.progress.state(), ProgressState::Inactive);
+    assert_eq!(snap.progress.percent(), 0);
+}
+
 #[test]
 fn entering_the_alternate_screen_changes_row_epochs() {
     let (mut emu, _rx) = make_emulator();

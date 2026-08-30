@@ -1802,6 +1802,32 @@ impl SettingsModal {
              command's status (green = success, red = failure, yellow = \
              running). \"Off\" hides the gutter and reclaims its width for text.",
         );
+
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // ── Progress Indicator section ───────────────────────────────────────
+        ui.heading("Progress Indicator");
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Per-pane progress bar driven by OSC 9;4 (ConEmu-style) progress \
+             reports.",
+        );
+        ui.add_space(8.0);
+
+        ui.checkbox(
+            &mut self.draft.progress.enabled,
+            "Show OSC 9;4 progress indicator",
+        )
+        .clickable();
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "When disabled, OSC 9;4 progress reports are still parsed but no \
+             progress bar is drawn.",
+        );
     }
 
     fn show_bell_tab(&mut self, ui: &mut Ui) {
@@ -3380,6 +3406,17 @@ mod tests {
         assert!(applied.notifications.enabled);
         assert_eq!(applied.notifications.command_finished_template, "{command}");
         assert!(applied.bell.on_command_finished);
+    }
+
+    #[test]
+    fn progress_enabled_persists_through_draft() {
+        let mut modal = SettingsModal::new(None);
+        let cfg = Config::default();
+        modal.open(&cfg, Vec::new(), false);
+        assert!(modal.draft.progress.enabled, "default is enabled");
+        modal.draft.progress.enabled = false;
+        let applied = modal.draft.clone();
+        assert!(!applied.progress.enabled);
     }
 
     #[test]

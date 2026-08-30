@@ -7,7 +7,9 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::buffer_states::{ftcs::FtcsMarker, pointer_shape::PointerShape, url::Url};
+use crate::buffer_states::{
+    ftcs::FtcsMarker, pointer_shape::PointerShape, progress::ProgressUpdate, url::Url,
+};
 use std::fmt;
 
 /// iTerm2 inline image dimension specification.
@@ -375,6 +377,14 @@ pub enum AnsiOscType {
     /// fully-parsed [`crate::buffer_states::osc_notify_99::Osc99Command`].
     /// Chunk reassembly / transport / GUI are handled downstream (Tasks 99.3+).
     Notify99(crate::buffer_states::osc_notify_99::Osc99Command),
+    /// OSC 9;4 — ConEmu-style progress-state update (issue #507).
+    ///
+    /// Parsed from `OSC 9 ; 4 ; s [ ; v ] ST` by the OSC 9 handler. Carries
+    /// the wire-form [`ProgressUpdate`], which the terminal handler resolves
+    /// against the pane's current `ProgressReport` (the "unchanged when
+    /// omitted" rows of the spec table require the previous value, which
+    /// only the handler — not this stateless parser type — holds).
+    Progress(ProgressUpdate),
 }
 
 /// Which OSC sequence produced a one-way text notification, so the GUI can
@@ -447,6 +457,7 @@ impl std::fmt::Display for AnsiOscType {
                 "Notify(source={source:?}, title={title:?}, body={body:?})"
             ),
             Self::Notify99(cmd) => write!(f, "Notify99(id={:?})", cmd.id),
+            Self::Progress(update) => write!(f, "Progress({update:?})"),
         }
     }
 }
@@ -1155,6 +1166,14 @@ mod tests {
         .to_string();
         assert!(s.contains("Notify"), "got: {s}");
         assert!(s.contains("hello"), "got: {s}");
+    }
+
+    #[test]
+    fn display_ansi_osc_progress() {
+        use crate::buffer_states::progress::ProgressUpdate;
+        let s = AnsiOscType::Progress(ProgressUpdate::InProgress(42)).to_string();
+        assert!(s.contains("Progress"), "got: {s}");
+        assert!(s.contains("42"), "got: {s}");
     }
 
     #[test]

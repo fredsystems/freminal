@@ -43,6 +43,7 @@ use freminal_common::{
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
+        progress::ProgressReport,
         row_number::RowNumber,
         tchar::TChar,
         terminal_output::{TabClearMode, TerminalOutput},
@@ -61,6 +62,7 @@ use freminal_common::{
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::image_store::{ImagePlacement, ImageProtocol};
@@ -265,6 +267,19 @@ pub struct TerminalHandler {
     /// Defaults to `PointerShape::Default` (OS default arrow).
     /// Reset to `Default` by `OSC 22 ; ST` (empty name) or full reset.
     pointer_shape: PointerShape,
+    /// Current progress state reported via OSC 9;4 (issue #507).
+    ///
+    /// Defaults to inactive/0%. Updated by applying successive
+    /// [`freminal_common::buffer_states::progress::ProgressUpdate`]s to the
+    /// resolved [`ProgressReport`]. Cleared by full and soft reset.
+    progress: ProgressReport,
+    /// Time of the last OSC 9;4 progress update, if any.
+    ///
+    /// `None` until the first progress update arrives. Used by
+    /// [`Self::expire_stale_progress`] to enforce
+    /// [`Self::PROGRESS_STALE_TIMEOUT`] — the protocol gives the terminal no
+    /// way to detect that a program died without clearing its progress.
+    progress_updated_at: Option<Instant>,
     /// In-progress iTerm2 multipart file transfer, if any.
     ///
     /// Set by `ITerm2MultipartBegin`, appended by `ITerm2FilePart`, consumed
@@ -441,6 +456,8 @@ impl TerminalHandler {
             bg_color_override: None,
             cursor_color_override: None,
             pointer_shape: PointerShape::Default,
+            progress: ProgressReport::default(),
+            progress_updated_at: None,
             multipart_state: None,
             kitty_state: None,
             virtual_placements: HashMap::new(),
@@ -515,6 +532,66 @@ impl TerminalHandler {
         self.pointer_shape
     }
 
+    /// Get the current progress state reported via OSC 9;4 (issue #507).
+    ///
+    /// Returns inactive/0% when no progress report has been received, or
+    /// after [`Self::expire_stale_progress`] has reset a stale one.
+    #[must_use]
+    pub const fn progress(&self) -> ProgressReport {
+        self.progress
+    }
+
+    /// Staleness timeout for OSC 9;4 progress reports.
+    ///
+    /// The `ConEmu` progress protocol gives the terminal no way to detect
+    /// that a program died without clearing its progress (`s=0`), so a
+    /// progress indicator left active by a crashed program would otherwise
+    /// persist forever. Ghostty uses the same hardcoded ~15 second timeout
+    /// for this reason (<https://ghostty.org/docs/vt/osc/conemu>).
+    pub const PROGRESS_STALE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// Reset the progress report to inactive/0% if it has not been updated
+    /// within [`Self::PROGRESS_STALE_TIMEOUT`].
+    ///
+    /// A no-op when no progress report is active, or when the last update
+    /// is still within the timeout window.
+    pub fn expire_stale_progress(&mut self) {
+        if !self.progress.is_active() {
+            return;
+        }
+        let Some(updated_at) = self.progress_updated_at else {
+            return;
+        };
+        if updated_at.elapsed() >= Self::PROGRESS_STALE_TIMEOUT {
+            self.progress = ProgressReport::default();
+            self.progress_updated_at = None;
+        }
+    }
+
+    /// How long until the current progress report goes stale, or `None`
+    /// when no progress is active.
+    ///
+    /// Lets a caller (the PTY consumer's idle-wake arm) re-arm an exact
+    /// deadline for [`Self::expire_stale_progress`] instead of polling at a
+    /// fixed interval — a program that reports progress for minutes or
+    /// hours would otherwise keep the PTY thread waking on a fixed cadence
+    /// for the whole run. Returns `None` when no progress report is active,
+    /// or when one is active but has never been stamped (should not happen
+    /// in practice — `is_active()` only becomes true via an OSC 9;4 update,
+    /// which always stamps `progress_updated_at`). Saturates to
+    /// [`std::time::Duration::ZERO`] rather than underflowing when the
+    /// deadline has already passed, so a caller can always treat the result
+    /// as "arm immediately" rather than needing to special-case elapsed
+    /// deadlines.
+    #[must_use]
+    pub fn time_until_progress_stale(&self) -> Option<std::time::Duration> {
+        if !self.progress.is_active() {
+            return None;
+        }
+        let updated_at = self.progress_updated_at?;
+        Some(Self::PROGRESS_STALE_TIMEOUT.saturating_sub(updated_at.elapsed()))
+    }
+
     /// Full terminal reset (RIS — Reset to Initial State).
     ///
     /// Restores the handler and buffer to initial startup state.
@@ -550,6 +627,8 @@ impl TerminalHandler {
         self.bg_color_override = None;
         self.cursor_color_override = None;
         self.pointer_shape = PointerShape::Default;
+        self.progress = ProgressReport::default();
+        self.progress_updated_at = None;
         self.allow_column_mode_switch = AllowColumnModeSwitch::AllowColumnModeSwitch;
         self.virtual_placements.clear();
         self.real_placements.clear();
@@ -620,6 +699,11 @@ impl TerminalHandler {
     /// vertical scroll region resets would be an inconsistent margin
     /// state.
     ///
+    /// Table 5-9 also predates OSC 9;4 progress reporting. freminal
+    /// additionally clears the OSC 9;4 progress state here — this is
+    /// freminal-private state with no VT510 representation at all, cleared
+    /// because issue #507 requires it, not because Table 5-9 mandates it.
+    ///
     /// ## Known hole: `saved_character_replace` caveat
     /// This sets `saved_character_replace` to `None` — meaning "no DECSC
     /// has been recorded" — rather than to `Some(default charset)`. As a
@@ -671,6 +755,12 @@ impl TerminalHandler {
 
         // G0 DEC Special Graphics -> default (off).
         self.character_replace = DecSpecialGraphics::default();
+
+        // Not on VT510 Table 5-9 — this is freminal-private state (OSC 9;4
+        // progress, issue #507), cleared here because issue #507 requires
+        // DECSTR to reset it, not because the spec mandates it.
+        self.progress = ProgressReport::default();
+        self.progress_updated_at = None;
     }
 
     /// Get a reference to the underlying buffer
@@ -2819,6 +2909,210 @@ mod tests {
             freminal_common::buffer_states::pointer_shape::PointerShape::Default,
             "full_reset must clear pointer_shape to Default"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // OSC 9;4 — progress state (issue #507)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn progress_default_on_new() {
+        let handler = TerminalHandler::new(80, 24);
+        assert_eq!(
+            handler.progress(),
+            freminal_common::buffer_states::progress::ProgressReport::default(),
+            "initial progress must be inactive/0%"
+        );
+    }
+
+    #[test]
+    fn progress_osc94_updates_state_and_value() {
+        use freminal_common::buffer_states::progress::{ProgressState, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(42)));
+
+        assert_eq!(handler.progress().state(), ProgressState::InProgress);
+        assert_eq!(handler.progress().percent(), 42);
+    }
+
+    #[test]
+    fn progress_osc94_stamps_update_time() {
+        use freminal_common::buffer_states::progress::ProgressUpdate;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        assert!(handler.progress_updated_at.is_none());
+
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(1)));
+
+        assert!(
+            handler.progress_updated_at.is_some(),
+            "OSC 9;4 must stamp progress_updated_at"
+        );
+    }
+
+    #[test]
+    fn progress_error_retains_value_when_omitted() {
+        use freminal_common::buffer_states::progress::{ProgressState, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(30)));
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::Error(None)));
+
+        assert_eq!(handler.progress().state(), ProgressState::Error);
+        assert_eq!(
+            handler.progress().percent(),
+            30,
+            "Error(None) must retain the previous value"
+        );
+    }
+
+    #[test]
+    fn progress_full_reset_clears_progress() {
+        use freminal_common::buffer_states::progress::{ProgressReport, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(75)));
+        handler.full_reset();
+
+        assert_eq!(
+            handler.progress(),
+            ProgressReport::default(),
+            "full_reset must clear progress to inactive/0%"
+        );
+        assert!(
+            handler.progress_updated_at.is_none(),
+            "full_reset must clear progress_updated_at"
+        );
+    }
+
+    #[test]
+    fn progress_soft_reset_clears_progress() {
+        use freminal_common::buffer_states::progress::{ProgressReport, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(75)));
+        handler.soft_reset();
+
+        assert_eq!(
+            handler.progress(),
+            ProgressReport::default(),
+            "soft_reset must clear progress to inactive/0% (issue #507)"
+        );
+        assert!(
+            handler.progress_updated_at.is_none(),
+            "soft_reset must clear progress_updated_at"
+        );
+    }
+
+    #[test]
+    fn time_until_progress_stale_none_when_inactive() {
+        let handler = TerminalHandler::new(80, 24);
+        assert!(
+            handler.time_until_progress_stale().is_none(),
+            "no active progress must yield None"
+        );
+    }
+
+    #[test]
+    fn time_until_progress_stale_close_to_full_timeout_when_fresh() {
+        use freminal_common::buffer_states::progress::ProgressUpdate;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(1)));
+
+        let remaining = handler
+            .time_until_progress_stale()
+            .expect("a freshly-updated active progress report must have a remaining duration");
+
+        assert!(
+            remaining <= TerminalHandler::PROGRESS_STALE_TIMEOUT,
+            "remaining time must not exceed the full timeout"
+        );
+        // Generous slack for slow CI machines; the important property is
+        // "close to the full timeout", not an exact value.
+        assert!(
+            remaining
+                >= TerminalHandler::PROGRESS_STALE_TIMEOUT
+                    .saturating_sub(std::time::Duration::from_secs(5)),
+            "remaining time must be close to the full timeout for a fresh update"
+        );
+    }
+
+    #[test]
+    fn time_until_progress_stale_zero_when_deadline_already_passed() {
+        use freminal_common::buffer_states::progress::ProgressUpdate;
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(50)));
+
+        // Backdate the update time past the staleness timeout instead of
+        // sleeping in the test.
+        let backdate = TerminalHandler::PROGRESS_STALE_TIMEOUT + std::time::Duration::from_secs(1);
+        handler.progress_updated_at = Some(
+            Instant::now()
+                .checked_sub(backdate)
+                .expect("backdated instant must not underflow"),
+        );
+
+        assert_eq!(
+            handler.time_until_progress_stale(),
+            Some(std::time::Duration::ZERO),
+            "an already-past deadline must saturate to ZERO, not underflow"
+        );
+    }
+
+    #[test]
+    fn expire_stale_progress_is_noop_when_inactive() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.expire_stale_progress();
+        assert_eq!(
+            handler.progress(),
+            freminal_common::buffer_states::progress::ProgressReport::default()
+        );
+    }
+
+    #[test]
+    fn expire_stale_progress_is_noop_within_timeout() {
+        use freminal_common::buffer_states::progress::{ProgressState, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(50)));
+
+        handler.expire_stale_progress();
+
+        assert_eq!(
+            handler.progress().state(),
+            ProgressState::InProgress,
+            "a fresh progress report must not be expired"
+        );
+        assert_eq!(handler.progress().percent(), 50);
+    }
+
+    #[test]
+    fn expire_stale_progress_resets_after_timeout() {
+        use freminal_common::buffer_states::progress::{ProgressReport, ProgressUpdate};
+
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_osc(&AnsiOscType::Progress(ProgressUpdate::InProgress(50)));
+
+        // Backdate the update time past the staleness timeout instead of
+        // sleeping in the test.
+        let backdate = TerminalHandler::PROGRESS_STALE_TIMEOUT + std::time::Duration::from_secs(1);
+        handler.progress_updated_at = Some(
+            Instant::now()
+                .checked_sub(backdate)
+                .expect("backdated instant must not underflow"),
+        );
+
+        handler.expire_stale_progress();
+
+        assert_eq!(
+            handler.progress(),
+            ProgressReport::default(),
+            "a stale progress report must be reset to inactive/0%"
+        );
+        assert!(handler.progress_updated_at.is_none());
     }
 
     // ------------------------------------------------------------------

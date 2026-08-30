@@ -468,6 +468,16 @@ limit = 10000
 # guard_app_quit = true
 
 ## ##############################################################################
+# PROGRESS INDICATOR (OSC 9;4)
+## ##############################################################################
+[progress]
+# Whether the per-pane OSC 9;4 progress indicator is drawn. Recognition and
+# parsing of OSC 9;4 progress reports is unconditional regardless of this
+# setting -- this only gates whether the progress bar is rendered.
+# Default: true.
+# enabled = true
+
+## ##############################################################################
 # STARTUP & LAYOUTS
 ## ##############################################################################
 

@@ -176,6 +176,10 @@ let
           ;
       };
 
+      progressSection = lib.filterAttrs (_: v: v != null) {
+        inherit (s.progress) enabled;
+      };
+
       keybindingsSection = s.keybindings;
 
       shaderSection = lib.filterAttrs (_: v: v != null) {
@@ -214,6 +218,7 @@ let
       }
       // lib.optionalAttrs (commandBlocksSection != { }) { command_blocks = commandBlocksSection; }
       // lib.optionalAttrs (notificationsSection != { }) { notifications = notificationsSection; }
+      // lib.optionalAttrs (progressSection != { }) { progress = progressSection; }
       // lib.optionalAttrs (startupSection != { }) { startup = startupSection; }
       // lib.optionalAttrs (onboardingSection != { }) { onboarding = onboardingSection; }
       // lib.optionalAttrs (keybindingsSection != { }) { keybindings = keybindingsSection; };
@@ -1053,6 +1058,19 @@ in
             Routing for the "config reloaded" toast: "toast" (in-app only)
             or "disabled" (suppress).
             Null uses the default ("toast").
+          '';
+        };
+      };
+
+      progress = {
+        enabled = mkOption {
+          type = types.nullOr types.bool;
+          default = null;
+          description = ''
+            Whether the per-pane OSC 9;4 progress indicator is drawn.
+            Recognition and parsing of OSC 9;4 progress reports is
+            unconditional regardless of this setting; it only gates display.
+            Null uses the default (true).
           '';
         };
       };
