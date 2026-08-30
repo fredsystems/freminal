@@ -153,6 +153,14 @@ pub enum TerminalOutput {
     RestoreCursor,
     CursorToLowerLeftCorner,
     ResetDevice,
+    /// DECSTR — Soft Terminal Reset (`CSI ! p`).
+    ///
+    /// Resets a subset of modes and attributes to their power-on defaults
+    /// (see Table 5-9, VT510 Programmer Reference). Unlike `ResetDevice`
+    /// (RIS), this does not clear screen content, scrollback, images, the
+    /// palette, the window title, tab stops, or the alternate-screen flag,
+    /// and it does not move the live cursor.
+    SoftReset,
     MemoryLock,
     MemoryUnlock,
     DeviceControlString(Vec<u8>),
@@ -321,6 +329,7 @@ impl std::fmt::Display for TerminalOutput {
             Self::RestoreCursor => write!(f, "RestoreCursor"),
             Self::CursorToLowerLeftCorner => write!(f, "CursorToLowerLeftCorner"),
             Self::ResetDevice => write!(f, "ResetDevice"),
+            Self::SoftReset => write!(f, "SoftReset"),
             Self::MemoryLock => write!(f, "MemoryLock"),
             Self::MemoryUnlock => write!(f, "MemoryUnlock"),
             Self::DeviceControlString(data) => {
@@ -449,6 +458,7 @@ mod tests {
     #[test]
     fn display_misc_unit_variants() {
         assert_eq!(TerminalOutput::ResetDevice.to_string(), "ResetDevice");
+        assert_eq!(TerminalOutput::SoftReset.to_string(), "SoftReset");
         assert_eq!(TerminalOutput::MemoryLock.to_string(), "MemoryLock");
         assert_eq!(TerminalOutput::MemoryUnlock.to_string(), "MemoryUnlock");
         assert_eq!(TerminalOutput::Index.to_string(), "Index");

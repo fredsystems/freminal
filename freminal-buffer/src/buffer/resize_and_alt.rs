@@ -1126,6 +1126,17 @@ impl Buffer {
     /// Cursor movement is also constrained to the scroll region boundaries.
     ///
     /// Per DEC spec: enabling or disabling DECOM homes the cursor.
+    ///
+    /// This homing must stay **unconditional** (no early return when `mode`
+    /// equals the current `decom_enabled`): `TerminalHandler::soft_reset`
+    /// (DECSTR) relies on this call always homing the cursor so it can
+    /// capture that homed position into the saved-cursor (DECSC) state
+    /// before restoring the live cursor to where it actually was. Adding a
+    /// no-op-when-unchanged guard here would silently break that in the
+    /// common case (DECOM already off), with no compiler error to catch it.
+    /// The regression test `test_decrc_after_decstr_restores_home_with_default_attributes`
+    /// (`freminal-terminal-emulator/tests/terminal_handler_integration.rs`)
+    /// would fail if this guarantee were violated.
     pub fn set_decom(&mut self, mode: Decom) {
         self.decom_enabled = mode;
         // DEC spec: changing DECOM homes the cursor to position (1,1) in the

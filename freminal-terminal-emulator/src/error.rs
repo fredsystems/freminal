@@ -140,4 +140,6 @@ pub enum ParserFailures {
     UnhandledCBTCommand(String),
     #[error("Invalid repeat character (REP) sequence: {0}")]
     UnhandledREPCommand(String),
+    #[error("Invalid soft terminal reset (DECSTR) sequence: {0}")]
+    UnhandledDECSTRCommand(String),
 }

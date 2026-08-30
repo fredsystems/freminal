@@ -1,5 +1,18 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-05 — issue #507 — implementing DECSTR (`CSI ! p`,
+Soft Terminal Reset, scoped into #507 for clearing per-pane progress state
+on soft reset) surfaced two pre-existing gaps that were not previously
+tracked in this document: KAM (keyboard action mode) has no representation
+in freminal (added to "CSI Standard Mode Gaps" below), and DECSCA (select
+character attribute) has no effect because the buffer's cell model has no
+per-cell protected-character bit, which as a consequence also leaves
+DECSED/DECSEL (selective erase) unimplemented (added to "Buffer Semantics
+Gaps" below). Neither is a regression from DECSTR; both were already true
+and are now recorded. See `Documents/ESCAPE_SEQUENCE_COVERAGE.md` for the
+full DECSTR row and `TerminalHandler::soft_reset` for the complete list of
+Table 5-9 items freminal does not model.
+
 Last updated: 2026-10-04 — Task 125.C6 review — recorded five known
 divergences from xterm in cursor save/restore (DECSC/DECRC, `CSI s`/`CSI u`,
 `?1048`/`?1049`) and one in Sixel placement under DECSDM (`?80`); see "Buffer
@@ -129,7 +142,8 @@ The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
   (no platform source) — all tracked upstream, unscheduled
 - **Charset gaps:** SO/SI (G1 rendering), G2/G3 switching
-- **Rare/low-priority:** SRM standard mode, ?1034, functional ?1001 hilite tracking;
+- **Rare/low-priority:** SRM and KAM standard modes, ?1034, functional ?1001
+  hilite tracking, DECSCA/selective-erase (no per-cell protected bit);
   five narrow xterm divergences in cursor save/restore (DECSC per-screen slots,
   DECRC with nothing saved, DECOM re-clamp, saved attribute set, resize with the
   alternate screen active) and Sixel placement under DECSDM (see below)
@@ -183,6 +197,13 @@ to the screen on restore). Reference: xterm `cursor.c` (`CursorSave`,
 | DECRC and DECOM                          | ⬜         | 🚧   | —       | xterm saves the origin-mode flag with the cursor (`DECSC_FLAGS`) and restores it, then clamps the restored position to the scroll region when origin mode is on. Freminal neither saves nor restores DECOM and clamps to the screen only, so a position saved under a different DECOM/DECSTBM state can land outside the region it would be in xterm.      |
 | DECSC saved state                        | ⬜         | 🚧   | —       | Besides the position, xterm saves its `DECSC_FLAGS` (attribute flags, origin mode, DECSCA protection) and the pending-wrap flag (`do_wrap`). Freminal saves the position, the SGR state carried by `CursorState` (weight, decorations, colours, hyperlink) and the character set; it does not save DECOM or the pending-wrap flag (DECSCA is unsupported). |
 | Saved cursor on resize, alternate active | ⬜         | 🚧   | —       | xterm adjusts the main screen's saved cursor when the terminal is resized while the alternate screen is active (`AdjustSavedCursor`). Freminal clamps a saved screen position to the new size only when it is restored.                                                                                                                                    |
+
+One further gap, unrelated to cursor save/restore, surfaced during the DECSTR
+(Soft Terminal Reset, issue #507) audit:
+
+| Feature                                    | Importance | Type | Planned | Notes                                                                                                                                                                       |
+| ------------------------------------------- | ---------- | ---- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| DECSCA / selective erase (protected cells) | ⬜         | ⬜   | —       | No per-cell protected-character bit exists in the buffer's cell model, so DECSCA (`CSI Ps " q`) has no effect; DECSED (`CSI ? Ps J`) and DECSEL (`CSI ? Ps K`) selective erase are unimplemented as a consequence |
 
 ---
 
@@ -247,9 +268,10 @@ G0 with DEC Special Graphics (`ESC ( 0`) and US ASCII (`ESC ( B`) both work corr
 
 ## CSI Standard Mode Gaps
 
-| Mode | Name                    | Importance | Planned | Notes                             |
-| ---- | ----------------------- | ---------- | ------- | --------------------------------- |
-| 12   | SRM — Send/Receive Mode | ⬜         | —       | Not implemented; rare in practice |
+| Mode | Name                          | Importance | Planned | Notes                                                                                            |
+| ---- | ----------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------- |
+| 2    | KAM — Keyboard Action Mode    | ⬜         | —       | Not implemented; no keyboard-lock state exists in freminal (surfaced by the DECSTR audit, issue #507) |
+| 12   | SRM — Send/Receive Mode       | ⬜         | —       | Not implemented; rare in practice                                                                  |
 
 LNM (mode 20) and IRM (mode 4) are implemented.
 
@@ -326,8 +348,10 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | SRM standard mode        | Extremely rare in modern terminal output            | —       |
 | DECSC/DECRC xterm parity | Five narrow divergences; see Buffer Semantics Gaps  | —       |
 | Sixel placement (DECSDM) | xterm draws at screen home; Freminal at the cursor  | —       |
+| KAM standard mode        | Rare; no keyboard-lock state exists in freminal     | —       |
 | ?1001 hilite tracking    | Obsolete mouse mode                                 | —       |
 | ?1034 interpret-meta key | Niche compatibility                                 | —       |
+| DECSCA / selective erase | No per-cell protected-character bit in buffer model | —       |
 | 8-bit C1 default on      | Modern terminals always use 7-bit sequences         | —       |
 
 ---

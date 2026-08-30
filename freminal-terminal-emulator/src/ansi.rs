@@ -1754,10 +1754,22 @@ mod tests {
     #[test]
     fn csi_completely_unknown_sequence_produces_invalid() {
         let mut p = FreminalAnsiParser::new();
-        // CSI with strange intermediate bytes
-        let result = p.push(b"\x1b[!p"); // DECSTR (soft terminal reset) — might be valid
+        // CSI with a genuinely unhandled final byte + strange intermediate.
+        // `!p` used to live here, but that is now DECSTR (soft terminal
+        // reset) — see `csi_bang_p_is_decstr_soft_reset` below.
+        let result = p.push(b"\x1b[!z");
         assert_eq!(p.inner, ParserInner::Empty);
         let _ = result;
+    }
+
+    #[test]
+    fn csi_bang_p_is_decstr_soft_reset() {
+        // `CSI ! p` is DECSTR (soft terminal reset), not an unhandled
+        // sequence — see `ansi_parser_inner_csi_finished_decstr`.
+        let mut p = FreminalAnsiParser::new();
+        let result = p.push(b"\x1b[!p");
+        assert_eq!(p.inner, ParserInner::Empty);
+        assert_eq!(result, vec![TerminalOutput::SoftReset]);
     }
 
     // ── OSC parser Invalid path (lines 504-519) ────────────────────────────

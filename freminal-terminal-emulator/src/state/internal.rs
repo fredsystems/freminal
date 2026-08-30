@@ -619,6 +619,23 @@ impl TerminalState {
             self.window_commands.clear();
         }
 
+        // ── DECSTR (CSI ! p) — soft terminal reset ─────────────────────
+        //
+        // The handler has already applied its subset of Table 5-9 of the
+        // VT510 Programmer Reference. Of the `TerminalState`-owned mode
+        // fields, only DECCKM (cursor keys) and DECNKM (keypad) are on that
+        // table, so only those two are reset here. Unlike the RIS block
+        // above, this deliberately does NOT reset mouse tracking, bracketed
+        // paste, focus reporting, synchronized updates, DECSCNM, or any
+        // other mode in `TerminalModes` — none of those are in Table 5-9.
+        if parsed
+            .iter()
+            .any(|o| matches!(o, TerminalOutput::SoftReset))
+        {
+            self.modes.cursor_key = Decckm::Ansi;
+            self.modes.keypad_mode = KeypadMode::Numeric;
+        }
+
         // Drain window commands queued by the new handler into the shared vec
         // so that the GUI's existing drain loop in handle_window_manipulation
         // can consume them.
@@ -803,6 +820,56 @@ mod tests {
         state.sync_mode_flags(&TerminalOutput::ApplicationKeypadMode);
         state.sync_mode_flags(&TerminalOutput::NormalKeypadMode);
         assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+    }
+
+    // ── DECSTR (CSI ! p) — soft terminal reset, TerminalState-owned modes ──
+
+    #[test]
+    fn decstr_resets_decckm_and_keypad_mode() {
+        use freminal_common::buffer_states::modes::keypad::KeypadMode;
+        let mut state = TerminalState::default();
+
+        // Put DECCKM (cursor keys) and DECNKM (keypad) into their non-default
+        // "application" states.
+        state.modes.cursor_key = Decckm::Application;
+        state.modes.keypad_mode = KeypadMode::Application;
+
+        state.handle_incoming_data(b"\x1b[!p");
+
+        assert_eq!(
+            state.modes.cursor_key,
+            Decckm::Ansi,
+            "DECSTR must reset DECCKM to Normal (Ansi)"
+        );
+        assert_eq!(
+            state.modes.keypad_mode,
+            KeypadMode::Numeric,
+            "DECSTR must reset DECNKM to Numeric characters"
+        );
+    }
+
+    #[test]
+    fn decstr_does_not_reset_unrelated_modes() {
+        use freminal_common::buffer_states::modes::mouse::MouseTrack;
+        let mut state = TerminalState::default();
+
+        // Mouse tracking is not in Table 5-9; DECSTR must leave it alone.
+        state.modes.mouse_tracking = MouseTrack::XtMseX11;
+        state.modes.bracketed_paste =
+            freminal_common::buffer_states::modes::rl_bracket::RlBracket::Enabled;
+
+        state.handle_incoming_data(b"\x1b[!p");
+
+        assert_eq!(
+            state.modes.mouse_tracking,
+            MouseTrack::XtMseX11,
+            "DECSTR must not reset mouse tracking"
+        );
+        assert_eq!(
+            state.modes.bracketed_paste,
+            freminal_common::buffer_states::modes::rl_bracket::RlBracket::Enabled,
+            "DECSTR must not reset bracketed paste"
+        );
     }
 
     // ── leftover UTF-8 reassembly ────────────────────────────────────────────

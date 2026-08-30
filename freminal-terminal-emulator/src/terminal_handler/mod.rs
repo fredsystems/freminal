@@ -561,6 +561,118 @@ impl TerminalHandler {
         self.pending_notifications.clear();
     }
 
+    /// Soft terminal reset (DECSTR — `CSI ! p`).
+    ///
+    /// Resets the subset of modes, margins, and attributes listed in
+    /// Table 5-9 of the VT510 Programmer Reference
+    /// (<https://vt100.net/docs/vt510-rm/DECSTR.html>) to their power-on
+    /// defaults. Unlike [`Self::full_reset`] (RIS), this does **not** clear
+    /// screen content, scrollback, images, the palette, colour overrides,
+    /// the window title, the working directory, command blocks, tab stops,
+    /// the Kitty keyboard stack, or the alternate-screen flag — and it does
+    /// **not** move the live cursor.
+    ///
+    /// ## Table 5-9 items implemented here
+    /// - DECTCEM (text cursor enable) → cursor enabled
+    /// - IRM (insert/replace) → replace mode
+    /// - DECOM (origin mode) → absolute (off), without moving the live cursor
+    /// - DECAWM (autowrap) → **no** autowrap — note this is *not* the
+    ///   `Decawm` enum's `Default` (which is `AutoWrap`)
+    /// - DECNRCM (national replacement character sets) → disabled
+    /// - DECSTBM (top/bottom margins) → top = row 1, bottom = page length
+    /// - G0 DEC Special Graphics → default (off)
+    /// - SGR (select graphic rendition) → normal rendition, for
+    ///   subsequently-written characters
+    /// - DECSC (saved cursor state) → home position, so a subsequent DECRC
+    ///   restores there
+    ///
+    /// KAM (keyboard action mode, unlocked) has no representation in
+    /// freminal and is a no-op (see the list below). DECCKM (cursor keys)
+    /// and DECNKM (keypad) are owned by `TerminalState`, not
+    /// `TerminalHandler`, and are reset by the caller
+    /// (`TerminalState::handle_incoming_data`) when it observes
+    /// `TerminalOutput::SoftReset`.
+    ///
+    /// ## Table 5-9 items NOT modelled by freminal — deliberate no-ops
+    /// freminal has no representation for these, so DECSTR does not (and
+    /// cannot) touch them:
+    /// - KAM (keyboard action mode) — no keyboard-lock state exists
+    /// - DECSCA (select character attribute) — no per-cell
+    ///   protected-character bit exists
+    /// - DECAUPSS (assign user preference supplemental set) — no
+    ///   user-preference charset exists
+    /// - DECSASD (select active status display) — no status-line display
+    ///   exists
+    /// - DECKPM (keyboard position mode) — always character-code mode
+    /// - DECRLM (cursor direction) — always left-to-right
+    /// - DECPCTERM mode — not implemented
+    /// - Full G1/G2/G3 character-set designation — freminal only models a
+    ///   single G0 DEC-special-graphics toggle, not independent G0–G3 slots
+    ///
+    /// ## Deliberate deviation from Table 5-9
+    /// Table 5-9 predates DECSLRM (left/right margins). freminal
+    /// additionally resets DECLRMM to `Disabled` and the left/right
+    /// margins to full width here. This is *not* required by Table 5-9;
+    /// it is a documented deviation: freminal targets xterm compatibility,
+    /// DECSTBM (the vertical scroll region) is reset by the table, and per
+    /// the DECLRMM specification, resetting DECLRMM reverts the margins to
+    /// the page borders — leaving a horizontal margin active while the
+    /// vertical scroll region resets would be an inconsistent margin
+    /// state.
+    ///
+    /// ## Known hole: `saved_character_replace` caveat
+    /// This sets `saved_character_replace` to `None` — meaning "no DECSC
+    /// has been recorded" — rather than to `Some(default charset)`. As a
+    /// result, if a program designates G0 as DEC Special Graphics and then
+    /// issues DECRC (`ESC 8`) without an intervening DECSC (`ESC 7`),
+    /// `handle_restore_cursor`'s `if let Some(saved) =
+    /// &self.saved_character_replace` branch is skipped and the graphics
+    /// charset survives the DECRC instead of being reset to default. This
+    /// is inherited, unchanged, from [`Self::full_reset`] (RIS), which sets
+    /// the same field to `None` for the same reason — DECSTR intentionally
+    /// matches that existing precedent rather than diverging from it.
+    pub fn soft_reset(&mut self) {
+        self.show_cursor = Dectcem::Show;
+        self.insert_mode = Irm::Replace;
+        self.buffer.set_wrap(Decawm::NoAutoWrap);
+        self.nrc_mode = Decnrcm::NrcDisabled;
+
+        // Capture the live cursor's current screen position up front — every
+        // step below that touches DECOM or the scroll region homes the
+        // cursor as a side effect, and DECSTR must not move the live cursor.
+        let live_pos = self.buffer.cursor_screen_pos();
+
+        // DECOM -> Absolute (off). `Buffer::set_decom` homes the cursor as a
+        // side effect; capture that homed position into the *saved* cursor
+        // (DECSC state) via `save_cursor()` before undoing the side effect —
+        // Table 5-9 wants DECSC to be at home position after DECSTR, and the
+        // saved cursor's attributes are already default (nothing else in
+        // this codebase mutates them outside a save/restore round trip).
+        self.buffer.set_decom(Decom::NormalCursor);
+        self.buffer.save_cursor();
+        self.saved_character_replace = None;
+
+        // DECSTBM -> top = 1, bottom = page length. Also homes the cursor;
+        // restored below along with DECOM's homing.
+        self.buffer.reset_scroll_region_to_full();
+
+        // Deliberate deviation from Table 5-9 (see doc comment above):
+        // disabling DECLRMM also resets the left/right margins to full
+        // width, for consistency with the DECSTBM reset just above.
+        self.buffer.set_declrmm(Declrmm::Disabled);
+
+        // Restore the live cursor to exactly where it was.
+        self.buffer
+            .set_cursor_pos(Some(live_pos.x), Some(live_pos.y));
+
+        // SGR -> normal rendition, for subsequently-written characters.
+        self.current_format = FormatTag::default();
+        self.buffer.set_format(FormatTag::default());
+
+        // G0 DEC Special Graphics -> default (off).
+        self.character_replace = DecSpecialGraphics::default();
+    }
+
     /// Get a reference to the underlying buffer
     #[must_use]
     pub const fn buffer(&self) -> &Buffer {
@@ -1808,6 +1920,9 @@ impl TerminalHandler {
             }
             TerminalOutput::ResetDevice => {
                 self.full_reset();
+            }
+            TerminalOutput::SoftReset => {
+                self.soft_reset();
             }
             TerminalOutput::MemoryLock => {
                 tracing::warn!("MemoryLock not yet implemented (ignored)");
