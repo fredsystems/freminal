@@ -1,5 +1,20 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-05 — issue #507 — the "OSC 9;4 ConEmu progress UI"
+gap is closed. Per-pane OSC 9;4 progress state is now resolved into a typed
+`ProgressReport`, transported on `TerminalSnapshot`, and rendered as a bar
+across the top of each pane (static, non-animated, for indeterminate),
+gated for display only by the new `[progress] enabled` config option and
+cleared on `s=0`, RIS, and DECSTR; a hardcoded 15s staleness timeout
+(matching ghostty) covers programs that die without clearing their
+progress. The "OSC gaps" summary bullet, the "OSC 9;4 ConEmu progress UI"
+row in the OSC Gaps table, and the "OSC 9;4 ConEmu progress UI" row in the
+Priority 2 roadmap table are all removed. No tab-level aggregation was
+built; if a tab-level summary is added later, the agreed rule is
+worst-state-wins (Error > Paused > Indeterminate > In progress > Inactive).
+See `Documents/ESCAPE_SEQUENCE_COVERAGE.md` for the full coverage-row
+update.
+
 Last updated: 2026-10-05 — issue #507 — implementing DECSTR (`CSI ! p`,
 Soft Terminal Reset, scoped into #507 for clearing per-pane progress state
 on soft reset) surfaced two pre-existing gaps that were not previously
@@ -135,8 +150,7 @@ Task 101 encoding-only wins (super modifier, F13–F35, modifier-keys-as-keys un
 F3 → `CSI 13 ~`), and Task 114's raw-winit delivery of keypad/media/print/pause/menu keys.
 The lock-key half of Task 114 was reverted (see below). The remaining gaps are:
 
-- **OSC gaps:** OSC 66 (recognized but no effect); OSC 9;4 ConEmu per-pane
-  progress state and visual presentation (recognized and silently consumed)
+- **OSC gaps:** OSC 66 (recognized but no effect)
 - **Keyboard gaps:** `caps_lock`/`num_lock` decoration bits + CapsLock/NumLock/ScrollLock
   transition events (reverted — not producible uniformly across platforms),
   ISO_Level3/5_Shift (no winit `KeyCode` variant), and hyper/meta modifier bits
@@ -173,7 +187,6 @@ the prior panel-fill-only white inversion.
 | -------------------------- | ---------- | ---- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | OSC 66                     | ⬜         | ⬜   | —              | ColorScheme Notification (Contour) — recognized/silently consumed; DECRPM ?2031 is the query path we implement                                                                                                      |
 | OSC 133 UI                 | 🟨         | 🚧   | v0.9.0 Task 73 | Markers A/B/C/D parsed and stored; fold/copy/hover/duration overlays shipped under Task 72; gutter rendering remains under Task 73                                                                                  |
-| OSC 9;4 ConEmu progress UI | ⬜         | ⬜   | issue #507     | Valid reports are recognized and silently consumed (issue #502), but Freminal does not retain per-pane progress state or render it. Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
 
 ---
 
@@ -338,7 +351,6 @@ during CSI sequence parsing, per ECMA-48. This is verified by unit tests. This i
 | Item                           | Rationale                                                                                                                                                                    | Planned    |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | XTGETTCAP capability expansion | Common queries we currently decline: `indn` (indent N), `query-os-name` (Kitty extension). Both protocol-correct with `0+r<hex>`; recognising them is a cosmetic improvement | —          |
-| OSC 9;4 ConEmu progress UI     | Reports are safely consumed after issue #502, but Freminal does not retain or display the per-pane progress state                                                            | issue #507 |
 
 ### Priority 3 — Low priority / optional
 

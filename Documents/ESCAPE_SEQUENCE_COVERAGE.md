@@ -2,6 +2,26 @@
 
 ## Last updated
 
+Last updated: 2026-10-05 — issue #507 — per-pane OSC 9;4 progress-report
+state and indicator implemented, closing the gap previously described in
+the `OSC 9 ; 4 ; state ; progress` row below. Progress reports resolve into
+a typed `ProgressReport` (`ProgressState` + `percent`) by applying a
+parser-level `ProgressUpdate` wire form, preserving the ConEmu/ghostty
+value-retention rule where the error, indeterminate, and paused states
+leave the percentage unchanged when `v` is omitted. State is per-pane,
+transported on `TerminalSnapshot` following the `cursor_color_override` /
+`pointer_shape` precedent, and rendered as a bar across the top of each
+pane inside that pane's own painter pass, contributing a bounded damage
+`Region` rather than a full repaint. Indeterminate renders a static
+full-width bar — deliberately not animated, since a moving sweep would
+break the fixed-rect assumption the damage merge depends on. A hardcoded
+15s staleness timeout (matching ghostty) clears a stalled report, checked
+from both `build_snapshot()` and the PTY consumer's idle arm (armed for
+the exact remaining deadline). Cleared on `s=0`, on RIS, and on DECSTR.
+Display is gated by the new `[progress] enabled` config option (default
+`true`); recognition and parsing remain unconditional, as issue #502 made
+them.
+
 Last updated: 2026-10-05 — issue #507 — DECSTR (`CSI ! p`, Soft Terminal
 Reset) implemented, scoped into #507 because #507 requires clearing
 per-pane progress state on soft reset. Resets DECTCEM, IRM, DECOM (without
@@ -310,7 +330,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | OSC 7 ; URI                  | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`                                                                                                                                                                                                                                                            |
 | OSC 8 ; params ; URI BEL     | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata                                                                                                                                                                                                                                                                   |
 | OSC 9 ; body BEL             | Desktop notification (iTerm2) | ✅     | Body parsed into `AnsiOscType::Notify` (source-tagged `OscNotifySource::Osc9`); routed by GUI per `[notifications]` config (Task 76), honouring the `notifications.osc_9` enable toggle (issue #433).                                                                                                                       |
-| OSC 9 ; 4 ; state ; progress | Progress state (ConEmu)       | ⬜     | Valid reports are recognized and silently consumed rather than misrouted as desktop notifications (issue #502). Per-pane progress state and UI remain unimplemented (issue #507); see [ESCAPE_SEQUENCE_GAPS.md](./ESCAPE_SEQUENCE_GAPS.md). Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
+| OSC 9 ; 4 ; state ; progress | Progress state (ConEmu)       | ✅     | Typed five-state parsing (inactive/in-progress/error/indeterminate/paused) with the ConEmu value-retention rule (states 2/3/4 keep the previous value when `v` is omitted); per-pane state carried on `TerminalSnapshot`; rendered as a bar across the top of each pane with a static (non-animated) indeterminate presentation; hardcoded 15s staleness timeout; cleared on `s=0`, RIS, and DECSTR; display gated by `[progress] enabled` (recognition/parsing stay unconditional) (issue #507). Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
 | OSC 10 ; ? BEL               | Foreground color query/set    | ✅     | Query returns theme fg (or dynamic override); set stores override                                                                                                                                                                                                                                                           |
 | OSC 11 ; ? BEL               | Background color query/set    | ✅     | Query returns theme bg (or dynamic override); set stores override                                                                                                                                                                                                                                                           |
 | OSC 12 ; color               | Set/query cursor color        | ✅     | Set/query/reset via `cursor_color_override`; snapshotted and consumed by renderer                                                                                                                                                                                                                                           |
@@ -475,7 +495,6 @@ The gaps that remain are either low-priority polish or require significant new i
 3. **Standard mode SRM (12)** — Rare in practice.
 4. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
 5. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).
-6. **OSC 9;4 ConEmu progress-report UI** — Valid progress reports are recognized and silently consumed, but per-pane progress state and visual presentation remain unimplemented (issue #507).
 
 ---
 
