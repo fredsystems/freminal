@@ -1546,18 +1546,6 @@ impl freminal_windowing::App for FreminalGui {
         // the next frame.
         win.drain_retired_gl(gl);
 
-        // ── Spawn new window ─────────────────────────────────────────────────
-        if win.pending_new_window {
-            win.pending_new_window = false;
-            self.spawn_new_window(handle);
-        }
-
-        // ── Quit all windows (issue #509) ────────────────────────────────────
-        if win.pending_quit_all {
-            win.pending_quit_all = false;
-            self.quit_all_windows(ctx, window_id, &win, handle);
-        }
-
         // ── Apply pending window geometry from layout engine ─────────────────
         if let Some((size_opt, pos_opt)) = win.pending_geometry.take() {
             use conv2::ConvUtil as _;
@@ -1728,6 +1716,13 @@ impl freminal_windowing::App for FreminalGui {
         match process_dead_panes(&mut win, &self.recording_swap) {
             DeadPaneOutcome::Continue => {}
             DeadPaneOutcome::CloseWindow => {
+                // Reinserts without draining `win.lifecycle_requests` (issue
+                // #512). Currently safe: both writers (the menu render and
+                // the deferred key-action dispatch) run later in `update()`,
+                // after this point, so nothing has been requested yet this
+                // frame. Any request already pending from a previous frame
+                // simply survives on `win` and is drained on the next one —
+                // moot here anyway, since this window is closing.
                 self.windows.insert(window_id, win);
                 ctx.send_viewport_cmd(ViewportCommand::Close);
                 return;
@@ -1746,6 +1741,12 @@ impl freminal_windowing::App for FreminalGui {
                 // `PerWindowState` — including, since #436, its chrome cache and
                 // self-dismissal settle state — leaving the window rendering a
                 // blank/fatal-error surface forever. Reinsert before returning.
+                //
+                // This also reinserts without draining `win.lifecycle_requests`
+                // (issue #512), which is safe for the same reason as the
+                // `CloseWindow` arm above: both writers run later in `update()`,
+                // so nothing pending can be lost — it survives on `win` and is
+                // drained on the next frame.
                 self.windows.insert(window_id, win);
                 return;
             };
@@ -4076,6 +4077,42 @@ impl freminal_windowing::App for FreminalGui {
 
         trace!("{}", frame_time);
 
+        // ── Window-lifecycle requests (issue #512) ───────────────────────────
+        //
+        // Both requests below are raised from two places: the Freminal menu
+        // (during the menu-bar render, above) and `dispatch_deferred_action`
+        // for the equivalent key binding (further down, inside the
+        // `CentralPanel` closure). They are drained HERE, at the very end of
+        // the frame, so that both writers are observed in the same `update()`
+        // pass that raised them.
+        //
+        // This drain used to sit near the top of `update()`, upstream of both
+        // writers above. Several statements ran in between there and here —
+        // chrome-damage sampling, the chrome warm-up counter, the shader-error
+        // drain, and more — but none of them write these requests, so the
+        // read was still upstream of both places that could set them for the
+        // current frame. That meant a request could never be observed in its
+        // own frame and depended on some later event scheduling another one.
+        // Clicking a menu item happens to schedule that frame (the dropdown
+        // closes); an otherwise-idle key press does not. That is issue #512:
+        // `QuitAll` via the menu worked, via `Ctrl+Shift+Q` it silently did
+        // nothing. `NewWindow` had the identical defect, merely less visibly.
+        //
+        // Placement is load-bearing in the other direction too: this must stay
+        // BEFORE the reinsert below, because `quit_all_windows` reads
+        // `self.windows.keys()` as "every *other* window" and relies on the
+        // current window still being absent from the map.
+        let requests = win.lifecycle_requests.take();
+
+        if requests.wants_new_window() {
+            self.spawn_new_window(handle);
+        }
+
+        if requests.wants_quit_all() {
+            debug!("QuitAll: consuming pending flag on window {window_id:?}");
+            self.quit_all_windows(ctx, window_id, &win, handle);
+        }
+
         // Reinsert per-window state before returning.
         self.windows.insert(window_id, win);
 
@@ -4577,8 +4614,7 @@ impl FreminalGui {
             window_post,
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
             repaint_handle,
-            pending_new_window: false,
-            pending_quit_all: false,
+            lifecycle_requests: super::window_lifecycle::WindowLifecycleRequests::default(),
             pending_geometry: None,
             last_known_size: None,
             last_known_position: None,

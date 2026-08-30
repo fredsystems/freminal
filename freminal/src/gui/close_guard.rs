@@ -504,14 +504,19 @@ impl super::FreminalGui {
         self.maybe_auto_save_session(Some(current_window));
 
         let other_window_ids: Vec<_> = self.windows.keys().copied().collect();
+        tracing::debug!(
+            "QuitAll: invoked from window {current_window_id:?}; other windows in self.windows: {other_window_ids:?}"
+        );
         self.quit_all_pending
             .extend(other_window_ids.iter().copied());
         self.quit_all_pending.insert(current_window_id);
 
         for wid in other_window_ids {
             if self.on_close_requested(wid) {
+                tracing::debug!("QuitAll: queueing close for window {wid:?}");
                 handle.close_window(wid);
             } else {
+                tracing::debug!("QuitAll: window {wid:?} vetoed its close; repainting it");
                 // Vetoed: `on_close_requested` opened that window's own
                 // close-guard (or unsaved-settings) dialog in place. Wake it
                 // so the dialog actually renders.

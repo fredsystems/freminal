@@ -5,7 +5,7 @@
 
 use egui;
 use freminal_terminal_emulator::io::InputEvent;
-use tracing::{error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::window::PerWindowState;
 
@@ -525,10 +525,11 @@ impl super::FreminalGui {
                 }
             }
             KeyAction::NewWindow => {
-                win.pending_new_window = true;
+                win.lifecycle_requests.request_new_window();
             }
             KeyAction::QuitAll => {
-                win.pending_quit_all = true;
+                debug!("QuitAll: requested via key binding on window {window_id:?}");
+                win.lifecycle_requests.request_quit_all();
             }
             KeyAction::ToggleRecording => {
                 // Runtime recording toggle: starts a new FREC v2 file with

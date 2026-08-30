@@ -6,6 +6,7 @@
 use egui;
 use freminal_common::config::TabTitlePolicy;
 use freminal_common::keybindings::KeyAction;
+use tracing::debug;
 
 use super::TabBarAction;
 use super::hover_cursor::HoverAffordance;
@@ -103,7 +104,7 @@ impl super::FreminalGui {
                 .add(self.menu_button_for("New Window", KeyAction::NewWindow))
                 .clicked()
             {
-                win.pending_new_window = true;
+                win.lifecycle_requests.request_new_window();
                 ui.close();
             }
         });
@@ -260,7 +261,8 @@ impl super::FreminalGui {
             .add(self.menu_button_for("Quit All", KeyAction::QuitAll))
             .clicked()
         {
-            win.pending_quit_all = true;
+            debug!("QuitAll: requested via menu on window {window_id:?}");
+            win.lifecycle_requests.request_quit_all();
             ui.close();
         }
     }

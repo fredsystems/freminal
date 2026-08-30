@@ -65,6 +65,7 @@ mod tab_spawning;
 mod toast;
 mod welcome;
 pub(crate) mod window;
+mod window_lifecycle;
 
 use tracing::error;
 

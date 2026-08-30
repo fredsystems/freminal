@@ -16,6 +16,7 @@ use super::{
     tabs::TabId,
     tabs::TabManager,
     terminal::FreminalTerminalWidget,
+    window_lifecycle::WindowLifecycleRequests,
 };
 
 /// Pending window geometry from layout engine: `(size_px, position_px)`.
@@ -352,14 +353,20 @@ pub(super) struct PerWindowState {
     /// so PTY threads repaint the correct window.
     pub(super) repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
 
-    /// Set to `true` by the `NewWindow` key action or menu; consumed in
-    /// `update()` where `WindowHandle` is available.
-    pub(super) pending_new_window: bool,
-
-    /// Set to `true` by the `QuitAll` key action or menu; consumed in
-    /// `update()` where `self.windows` (every other open window) and
-    /// `WindowHandle` are both available (issue #509).
-    pub(super) pending_quit_all: bool,
+    /// Window-lifecycle requests (new window / quit all), raised by the
+    /// `NewWindow` / `QuitAll` key actions or the equivalent menu items.
+    ///
+    /// Drained via [`WindowLifecycleRequests::take`] at the very end of
+    /// `update()` in `app_impl.rs` — immediately before `win` is reinserted
+    /// into `self.windows`, where `WindowHandle` and (for `QuitAll`)
+    /// `self.windows` (every other open window) are both available. That
+    /// placement is load-bearing, and specifically NOT near the top of
+    /// `update()` where an earlier version of this drain used to sit: both
+    /// writers (the menu render and the deferred key-action dispatch) run
+    /// earlier in the same `update()` pass, so the drain must be downstream
+    /// of both or a request set this frame is missed (issue #512). See
+    /// [`WindowLifecycleRequests`]'s module doc for the full history.
+    pub(super) lifecycle_requests: WindowLifecycleRequests,
 
     /// If set, send resize + reposition viewport commands on the next frame.
     ///
