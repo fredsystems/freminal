@@ -349,10 +349,19 @@
                 version = "unstable-${cargo-bundle-src.shortRev or "dirty"}";
                 src = cargo-bundle-src;
                 # Upstream stopped committing Cargo.lock after v0.9.0, so we
-                # vendor one here (regenerate with `cargo generate-lockfile`
-                # against the input source after a `nix flake update`).  The
-                # source tree has no lockfile, so copy ours in for the build's
-                # own cargo invocation too.
+                # vendor one here.  The source tree has no lockfile, so copy
+                # ours in for the build's own cargo invocation too.
+                #
+                # To refresh it after a `nix flake update cargo-bundle-src`,
+                # copy this file into a checkout of the input at the new rev
+                # and run `cargo metadata` there -- do NOT use
+                # `cargo generate-lockfile` or `cargo update`.  Both re-resolve
+                # from scratch, and cargo refuses to newly select a yanked
+                # version; cargo-bundle depends on `dmg_layout`, whose every
+                # published version is yanked, so a from-scratch resolve always
+                # fails.  Seeding this lock first lets cargo keep the existing
+                # dmg_layout pin and resolve only what upstream actually added.
+                # The update-flakes workflow does this automatically.
                 cargoLock.lockFile = ./nix/cargo-bundle.lock;
                 postPatch = ''
                   cp ${./nix/cargo-bundle.lock} Cargo.lock
