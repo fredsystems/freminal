@@ -97,8 +97,35 @@ jobs:
           git clone --quiet "https://github.com/${owner}/${repo}.git" "${workdir}"
           git -C "${workdir}" checkout --quiet "${rev}"
 
+          # Seed the vendored lock so cargo *reconciles* it against
+          # upstream's Cargo.toml rather than resolving from scratch.
+          #
+          # `cargo generate-lockfile` (and `cargo update`) re-resolve every
+          # dependency, and cargo refuses to newly select a yanked version.
+          # cargo-bundle depends unconditionally on `dmg_layout`, and every
+          # published version of it (0.1.0, 0.2.0) is yanked, so a
+          # from-scratch resolve cannot succeed at all:
+          #
+          #   error: failed to select a version for the requirement
+          #          `dmg_layout = "^0.1.0"` / version 0.1.0 is yanked
+          #
+          # Yanked crates stay downloadable and cargo honours one that is
+          # already pinned in a lockfile -- it only refuses to pick one
+          # afresh. Starting from our lock therefore keeps the existing
+          # dmg_layout pin and resolves only genuinely new dependencies.
+          # There is no `--allow-yanked` or `cargo update --exclude` to do
+          # this any other way.
+          #
+          # Side effect, and the reason this is the right default anyway:
+          # transitive deps are no longer bumped to newest on every input
+          # bump, so the diff is limited to what upstream's manifest
+          # actually changed. This lock exists only to build a dev-shell
+          # tool reproducibly, not to track upstream dependency freshness.
+          cp nix/cargo-bundle.lock "${workdir}/Cargo.lock"
+
           nix shell nixpkgs#cargo nixpkgs#rustc -c \
-            cargo generate-lockfile --manifest-path "${workdir}/Cargo.toml"
+            cargo metadata --manifest-path "${workdir}/Cargo.toml" \
+              --format-version 1 >/dev/null
 
           if ! cmp -s "${workdir}/Cargo.lock" nix/cargo-bundle.lock; then
             cp "${workdir}/Cargo.lock" nix/cargo-bundle.lock
