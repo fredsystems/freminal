@@ -3,11 +3,11 @@
     "cargo-bundle-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1787486524,
-        "narHash": "sha256-XuMBK+PNqN5JYm0YVdg0cpHeoeDNnhK0xH9pyI83afc=",
+        "lastModified": 1789931357,
+        "narHash": "sha256-jsWT97qrLU9nyADObnEuXeHJSltBxObVxPcThRpa4DE=",
         "owner": "burtonageo",
         "repo": "cargo-bundle",
-        "rev": "7aad90910ad74848c794f4e873ad5d04d0270b01",
+        "rev": "787d710686480cea32960bcd4d9f762c2f9bbd53",
         "type": "github"
       },
       "original": {
