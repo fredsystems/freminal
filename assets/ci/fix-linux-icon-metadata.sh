@@ -109,6 +109,20 @@ PY
 	local appdir="${workdir}/squashfs-root"
 	unsquashfs -o "${offset}" -d "${appdir}" "${appimage_abs}" >/dev/null
 
+	# cargo-bundle >= 0.12.0 packs the squashfs with the pure-Rust appimage-rs
+	# crate, which never sets the root inode's header, so backhand's default
+	# NodeHeader leaves the AppDir root at mode 0000.  unsquashfs (running
+	# unprivileged on CI) faithfully recreates that, after which nothing
+	# inside the AppDir can be read or written ("Permission denied").
+	# Normalise the root to 0755 -- what appimagetool / cargo-bundle 0.11
+	# produced -- which also gives the repacked AppImage a sane root mode,
+	# since mksquashfs takes the root mode from the source directory.
+	chmod 0755 "${appdir}"
+
+	# In cargo-bundle >= 0.12.0 the root .desktop is a symlink into
+	# usr/share/applications, so this cp writes through to that file; on
+	# older layouts it is a regular file.  Either way both copies end up
+	# canonical.
 	cp "${DESKTOP_SRC}" "${appdir}/freminal.desktop"
 	if [[ -e "${appdir}/usr/share/applications/freminal.desktop" ]]; then
 		cp "${DESKTOP_SRC}" "${appdir}/usr/share/applications/freminal.desktop"
