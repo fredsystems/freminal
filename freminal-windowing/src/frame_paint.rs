@@ -838,6 +838,40 @@ fn tessellate_head_band_tail(
     }
 }
 
+/// Run the app's UI pass and return egui's output together with the app's
+/// per-frame signals.
+///
+/// egui 0.35 replaced `Context::run` (closure took `&Context`) with
+/// `Context::run_ui` (closure takes the root `&mut Ui`). Our `App` trait
+/// still works in terms of `&Context`; `Ui` derefs to `Context`, so deref
+/// explicitly rather than relying on a silent coercion. The one closure both
+/// runs the app's `update` and captures its signals, which avoids two
+/// simultaneous `&mut app` borrows in the caller.
+///
+/// Extracted from [`paint_frame_impl`] solely to keep that function under
+/// clippy's `too_many_lines` threshold, per `freminal-extend-or-extract`;
+/// nothing here touches GL.
+fn run_ui_pass<S, F>(
+    surface: &S,
+    ctx: &egui::Context,
+    raw_input: egui::RawInput,
+    mut ui_fn: F,
+) -> (egui::FullOutput, crate::FrameSignals)
+where
+    S: FrameSurface,
+    F: FnMut(&egui::Context, &glow::Context) -> crate::FrameSignals,
+{
+    let mut signals = crate::FrameSignals {
+        frame_damage: crate::FrameDamage::Full,
+        band_range: 0..0,
+        terminal_requested_delay: None,
+    };
+    let full_output = ctx.run_ui(raw_input, |root_ui| {
+        signals = ui_fn(&*root_ui, surface.glow());
+    });
+    (full_output, signals)
+}
+
 /// Paint one egui frame into `surface`.
 ///
 /// Runs the app's `ui_fn`, decides whether this frame may skip the clear
@@ -850,12 +884,69 @@ fn tessellate_head_band_tail(
 /// [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame),
 /// the caller. This split is what lets 124.19b's offscreen pixel harness
 /// drive the paint path against a pbuffer without a real `winit::Window`.
+///
+/// Without `gpu-profiling` this is also the window path's entry point. With
+/// it, the window path calls [`paint_frame_impl`] directly (to pass a phase
+/// marker), so this no-marker wrapper only exists for the offscreen harness;
+/// it is compiled out where nothing would call it rather than carrying a
+/// dead-code suppression.
+#[cfg(any(
+    not(feature = "gpu-profiling"),
+    all(target_os = "linux", feature = "gl-offscreen")
+))]
 pub fn paint_frame<S, F>(
     surface: &S,
     ctx: &egui::Context,
     painter: &mut egui_glow::Painter,
     request: PaintFrameRequest<'_>,
     ui_fn: F,
+) -> PaintFrameOutput
+where
+    S: FrameSurface,
+    F: FnMut(&egui::Context, &glow::Context) -> crate::FrameSignals,
+{
+    #[cfg(feature = "gpu-profiling")]
+    {
+        paint_frame_impl(surface, ctx, painter, request, ui_fn, &mut |_| {})
+    }
+    #[cfg(not(feature = "gpu-profiling"))]
+    {
+        paint_frame_impl(surface, ctx, painter, request, ui_fn)
+    }
+}
+
+/// Emit one [`crate::gpu_profiling::FramePhaseBoundary`] to `phase_marker`
+/// (Task 125.9). Expands to nothing without the `gpu-profiling` feature --
+/// the marker parameter does not exist then either -- so a default build
+/// carries no trace of the instrumentation.
+macro_rules! mark_phase {
+    ($phase_marker:ident, $boundary:ident) => {
+        #[cfg(feature = "gpu-profiling")]
+        {
+            $phase_marker($crate::gpu_profiling::FramePhaseBoundary::$boundary);
+        }
+    };
+}
+
+/// The body of [`paint_frame`], with an optional GPU-timing phase marker.
+///
+/// Under `gpu-profiling`, `phase_marker` is called with each of the eight
+/// [`crate::gpu_profiling::FramePhaseBoundary`] values, in order, on a frame
+/// that paints (and never on a [`crate::FrameDamage::None`] frame, which
+/// submits no GPU work). It is called inline between the existing GL calls
+/// and must itself only issue timestamp queries. [`paint_frame`] passes a
+/// no-op marker; [`EguiState::run_frame`](crate::egui_integration::EguiState::run_frame)
+/// passes one that feeds a
+/// [`FrameGpuTiming`](crate::gpu_profiling::FrameGpuTiming).
+pub fn paint_frame_impl<S, F>(
+    surface: &S,
+    ctx: &egui::Context,
+    painter: &mut egui_glow::Painter,
+    request: PaintFrameRequest<'_>,
+    ui_fn: F,
+    #[cfg(feature = "gpu-profiling")] phase_marker: &mut dyn FnMut(
+        crate::gpu_profiling::FramePhaseBoundary,
+    ),
 ) -> PaintFrameOutput
 where
     S: FrameSurface,
@@ -868,22 +959,6 @@ where
         present_flag,
         damage_history,
     } = request;
-    let mut ui_fn = ui_fn;
-
-    // egui 0.35 replaced `Context::run` (closure took `&Context`) with
-    // `Context::run_ui` (closure takes the root `&mut Ui`).  Our `App`
-    // trait still works in terms of `&Context`; `Ui` derefs to `Context`,
-    // so deref explicitly rather than relying on a silent coercion.
-    //
-    // The closure both runs the app's `update` and returns this frame's
-    // signals (damage report, terminal-band range, and the app's own
-    // requested repaint delay); we capture them here to decide the
-    // clear/present path and the head/band/tail split below. Running
-    // both inside the one closure avoids two simultaneous `&mut app`
-    // borrows in the caller.
-    let mut frame_damage = crate::FrameDamage::Full;
-    let mut band_range: std::ops::Range<usize> = 0..0;
-    let mut terminal_requested_delay: Option<std::time::Duration> = None;
     // Task 121 frame-profiling harness: `run_ui` itself calls into
     // `ui_fn` (and therefore `App::update`), so this timing is an upper
     // bound on freminal's own per-frame `update()` cost as observed from
@@ -892,13 +967,11 @@ where
     let run_ui_start = std::time::Instant::now();
     // `mut` because the texture-delta application below drains
     // `full_output.textures_delta` in place (egui 0.36 / #8356 — see the
-    // comment at the drain site).
-    let mut full_output = ctx.run_ui(raw_input, |root_ui| {
-        let signals = ui_fn(&*root_ui, surface.glow());
-        frame_damage = signals.frame_damage;
-        band_range = signals.band_range;
-        terminal_requested_delay = signals.terminal_requested_delay;
-    });
+    // comment at the drain site). The signals carry this frame's damage
+    // report, terminal-band range, and the app's own requested repaint
+    // delay, used below to decide the clear/present path and the
+    // head/band/tail split.
+    let (mut full_output, signals) = run_ui_pass(surface, ctx, raw_input, ui_fn);
     #[cfg(feature = "frame-profiling")]
     let run_ui_elapsed = run_ui_start.elapsed();
 
@@ -959,7 +1032,7 @@ where
     // lazy closure here rather than a plain `u32`.
     let resolved = ResolvedPartialPresent::resolve(
         surface,
-        frame_damage,
+        signals.frame_damage,
         damage_history,
         size_px,
         pixels_per_point,
@@ -1001,7 +1074,8 @@ where
     // dropped, unread, with `full_output` at the end of this function).
     let (mut head_primitives, mut band_primitives, mut tail_primitives) = if should_paint {
         let shapes = std::mem::take(&mut full_output.shapes);
-        let tessellated = tessellate_head_band_tail(ctx, &shapes, band_range, pixels_per_point);
+        let tessellated =
+            tessellate_head_band_tail(ctx, &shapes, signals.band_range, pixels_per_point);
         #[cfg(feature = "frame-profiling")]
         {
             tessellate_elapsed = tessellated.elapsed;
@@ -1012,6 +1086,7 @@ where
     };
 
     if should_paint {
+        mark_phase!(phase_marker, TotalStart);
         clear_clip_and_publish(
             surface,
             clear_color,
@@ -1078,9 +1153,15 @@ where
     if should_paint {
         #[cfg(feature = "frame-profiling")]
         let paint_start = std::time::Instant::now();
+        mark_phase!(phase_marker, HeadStart);
         painter.paint_primitives(size_px, pixels_per_point, &head_primitives);
+        mark_phase!(phase_marker, HeadEnd);
+        mark_phase!(phase_marker, BandStart);
         painter.paint_primitives(size_px, pixels_per_point, &band_primitives);
+        mark_phase!(phase_marker, BandEnd);
+        mark_phase!(phase_marker, TailStart);
         painter.paint_primitives(size_px, pixels_per_point, &tail_primitives);
+        mark_phase!(phase_marker, TailEnd);
         #[cfg(feature = "frame-profiling")]
         {
             paint_elapsed = paint_start.elapsed();
@@ -1089,6 +1170,9 @@ where
     for id in full_output.textures_delta.free.drain() {
         painter.free_texture(id);
     }
+    if should_paint {
+        mark_phase!(phase_marker, TotalEnd);
+    }
 
     PaintFrameOutput {
         platform_output: full_output.platform_output,
@@ -1096,7 +1180,7 @@ where
         presentation,
         #[cfg(any(feature = "frame-profiling", feature = "gl-offscreen"))]
         decision: resolved.reported_decision(),
-        terminal_requested_delay,
+        terminal_requested_delay: signals.terminal_requested_delay,
         #[cfg(feature = "frame-profiling")]
         profiling: PaintFrameProfiling {
             run_ui: run_ui_elapsed,
@@ -1636,5 +1720,259 @@ mod tests {
             DamageHistory::MAX_DEPTH,
             "pushing beyond MAX_DEPTH must evict the oldest entry, not grow unbounded"
         );
+    }
+}
+
+// Task 125.9: the phase-marker contract of `paint_frame_impl`, exercised
+// against a real (offscreen, llvmpipe) GL context. Quadruple-gated: the
+// marker only exists under `gpu-profiling`, and the offscreen stack under
+// `gl-offscreen` + Linux (see `lib.rs`). Correctness only -- no timing here
+// is performance evidence.
+#[cfg(all(
+    test,
+    target_os = "linux",
+    feature = "gl-offscreen",
+    feature = "gpu-profiling"
+))]
+mod phase_marker_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use egui::{Color32, LayerId, pos2, vec2};
+    use glow::HasContext;
+
+    use super::{DamageHistory, PaintFrameRequest, PartialPresentSupport, paint_frame_impl};
+    use crate::frame_paint_harness::HarnessSurface;
+    use crate::gl_context_offscreen::OffscreenGl;
+    use crate::gpu_profiling::{
+        FrameGpuTiming, FramePhaseBoundary, GlowTimestampSource, GpuTimerCapability,
+        detect_from_glow,
+    };
+    use crate::{FrameDamage, FrameSignals};
+
+    const CANVAS: u32 = 64;
+
+    /// The eight boundaries of a painted frame, in the order they must fire.
+    const EXPECTED_ORDER: [FramePhaseBoundary; 8] = [
+        FramePhaseBoundary::TotalStart,
+        FramePhaseBoundary::HeadStart,
+        FramePhaseBoundary::HeadEnd,
+        FramePhaseBoundary::BandStart,
+        FramePhaseBoundary::BandEnd,
+        FramePhaseBoundary::TailStart,
+        FramePhaseBoundary::TailEnd,
+        FramePhaseBoundary::TotalEnd,
+    ];
+
+    /// Mirrors the `FREMINAL_REQUIRE_GL` convention of
+    /// `frame_paint_harness`'s tests: skip without a GL stack, fail loudly
+    /// when the environment promised one.
+    fn gl_context_required() -> bool {
+        std::env::var("FREMINAL_REQUIRE_GL").is_ok_and(|v| v != "0" && !v.is_empty())
+    }
+
+    /// Everything `paint_frame_impl` needs, kept alive across frames.
+    struct Rig {
+        gl: std::sync::Arc<glow::Context>,
+        surface: HarnessSurface,
+        ctx: egui::Context,
+        painter: egui_glow::Painter,
+        history: DamageHistory,
+    }
+
+    impl Rig {
+        fn new_or_skip(what: &str) -> Option<Self> {
+            let off = match OffscreenGl::new(CANVAS, CANVAS) {
+                Ok(off) => off,
+                Err(e) => {
+                    assert!(
+                        !gl_context_required(),
+                        "{what}: no offscreen GL context ({e}) despite \
+                         FREMINAL_REQUIRE_GL being set -- broken runner, not \
+                         a reason to skip"
+                    );
+                    eprintln!("SKIP {what}: no GL context ({e})");
+                    return None;
+                }
+            };
+            let gl = off.gl_arc();
+            let surface = HarnessSurface::new(off, PartialPresentSupport::Supported, 1);
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(1.0);
+            let painter = egui_glow::Painter::new(std::sync::Arc::clone(&gl), "", None, false)
+                .expect("painter");
+            Some(Self {
+                gl,
+                surface,
+                ctx,
+                painter,
+                history: DamageHistory::new(),
+            })
+        }
+
+        /// Paint one frame declaring `damage`, forwarding every phase
+        /// boundary to `marker`.
+        fn paint(&mut self, damage: FrameDamage, marker: &mut dyn FnMut(FramePhaseBoundary)) {
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(64.0, 64.0))),
+                ..Default::default()
+            };
+            let request = PaintFrameRequest {
+                size_px: [CANVAS, CANVAS],
+                raw_input,
+                clear_color: [0.0, 0.0, 0.0, 1.0],
+                present_flag: None,
+                damage_history: &mut self.history,
+            };
+            let ui_fn = move |ctx: &egui::Context, _gl: &glow::Context| {
+                let painter = ctx.layer_painter(LayerId::background());
+                // Shape 0 = head, shape 1 = band, shape 2 = tail.
+                for (i, color) in [Color32::RED, Color32::GREEN, Color32::BLUE]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let x = f32::from(u8::try_from(i).unwrap_or(0)) * 10.0;
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(pos2(x, 0.0), vec2(8.0, 8.0)),
+                        0.0,
+                        color,
+                    );
+                }
+                FrameSignals {
+                    frame_damage: damage.clone(),
+                    band_range: 1..2,
+                    terminal_requested_delay: None,
+                }
+            };
+            let _ = paint_frame_impl(
+                &self.surface,
+                &self.ctx,
+                &mut self.painter,
+                request,
+                ui_fn,
+                marker,
+            );
+        }
+    }
+
+    #[test]
+    fn a_painted_frame_emits_the_eight_boundaries_in_order() {
+        let Some(mut rig) = Rig::new_or_skip("phase-marker-order") else {
+            return;
+        };
+        let mut seen: Vec<FramePhaseBoundary> = Vec::new();
+
+        rig.paint(FrameDamage::Full, &mut |b| seen.push(b));
+
+        assert_eq!(seen, EXPECTED_ORDER);
+    }
+
+    #[test]
+    fn a_none_frame_emits_no_boundary_at_all() {
+        let Some(mut rig) = Rig::new_or_skip("phase-marker-none") else {
+            return;
+        };
+        let mut seen: Vec<FramePhaseBoundary> = Vec::new();
+
+        // A painted baseline first, then the frame under test.
+        rig.paint(FrameDamage::Full, &mut |_| {});
+        rig.paint(FrameDamage::None, &mut |b| seen.push(b));
+
+        assert_eq!(
+            seen,
+            [],
+            "a FrameDamage::None frame submits no GPU work and must issue no marker"
+        );
+    }
+
+    #[test]
+    fn each_frame_emits_its_own_complete_sequence() {
+        let Some(mut rig) = Rig::new_or_skip("phase-marker-repeat") else {
+            return;
+        };
+        let mut seen: Vec<FramePhaseBoundary> = Vec::new();
+
+        rig.paint(FrameDamage::Full, &mut |b| seen.push(b));
+        rig.paint(FrameDamage::None, &mut |b| seen.push(b));
+        rig.paint(FrameDamage::Full, &mut |b| seen.push(b));
+
+        let mut expected = EXPECTED_ORDER.to_vec();
+        expected.extend_from_slice(&EXPECTED_ORDER);
+        assert_eq!(seen, expected);
+    }
+
+    /// End to end over real GL: the same marker wiring `EguiState::run_frame`
+    /// uses (lazy `begin_frame` on `TotalStart`, `mark` for every boundary),
+    /// interleaved with skipped frames. Capability depends on the driver, so
+    /// the assertions branch on it -- correctness of the lifecycle (no
+    /// same-frame read, no leak, bounded pending) is what is checked, never a
+    /// timing value.
+    #[test]
+    fn the_real_gl_pipeline_completes_samples_on_later_frames_and_leaks_nothing() {
+        let Some(mut rig) = Rig::new_or_skip("phase-marker-real-gl") else {
+            return;
+        };
+        let gl = std::sync::Arc::clone(&rig.gl);
+        let mut timing: FrameGpuTiming<glow::Query> = detect_from_glow(&gl);
+        let capability = timing.capability();
+
+        let painted_frames = 8_u64;
+        for i in 0..painted_frames {
+            let mut frame = 0_u64;
+            let mut marker = |boundary: FramePhaseBoundary| {
+                let mut source = GlowTimestampSource::new(&gl);
+                if boundary == FramePhaseBoundary::TotalStart {
+                    frame = timing.begin_frame(&mut source);
+                }
+                timing.mark(boundary, frame, &mut source);
+            };
+            rig.paint(FrameDamage::Full, &mut marker);
+            // A skipped frame in between: no marker, so no poll either.
+            if i % 2 == 0 {
+                rig.paint(FrameDamage::None, &mut |_| {});
+            }
+            // Test-only: make the GPU retire the frame so availability can
+            // become true on a later poll.
+            unsafe { gl.finish() };
+        }
+
+        // One more painted frame so the last issued samples get polled.
+        let mut frame = 0_u64;
+        let mut marker = |boundary: FramePhaseBoundary| {
+            let mut source = GlowTimestampSource::new(&gl);
+            if boundary == FramePhaseBoundary::TotalStart {
+                frame = timing.begin_frame(&mut source);
+            }
+            timing.mark(boundary, frame, &mut source);
+        };
+        rig.paint(FrameDamage::Full, &mut marker);
+
+        let report = timing.report();
+        eprintln!("phase-marker-real-gl: {report:?}");
+        assert_eq!(report.capability, capability);
+        assert_eq!(report.dropped_sample_count, 0);
+        match capability {
+            GpuTimerCapability::Available => {
+                assert!(
+                    report.total_sample_count > 0,
+                    "an available context must have completed samples after \
+                     {painted_frames} painted frames and a finish; got {report:?}"
+                );
+                assert!(
+                    report.last_latency_frames >= 1,
+                    "no result may be read on its own issue frame; got {report:?}"
+                );
+                assert!(
+                    report.pending_sample_count <= 4 * 3,
+                    "pending must stay bounded; got {report:?}"
+                );
+            }
+            GpuTimerCapability::Unavailable => {
+                assert_eq!(report.total_sample_count, 0);
+                assert_eq!(report.pending_sample_count, 0);
+            }
+        }
+
+        timing.shutdown(&mut GlowTimestampSource::new(&gl));
+        assert_eq!(timing.report().pending_sample_count, 0);
     }
 }

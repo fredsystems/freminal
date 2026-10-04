@@ -796,7 +796,7 @@ Update this section as tasks complete:
 | 122  | 2026-07-30 | 2026-08-03 | All subtasks done (19, incl. 3 added); merged via PR #472; 121.17 seam (122.15)  |
 | 123  | 2026-08-21 | 2026-08-23 | All subtasks incl. 123.6b; both phases built; both obligations discharged        |
 | 124  | 2026-08-23 | 2026-08-26 | All subtasks complete; merged to main via PR #503 (`5ec7e42d`)                   |
-| 125  | 2026-08-26 |            | v0.12.0; measurement phase 125.1-125.8 done; 125.9-125.10 remain                 |
+| 125  | 2026-08-26 |            | v0.12.0; measurement phase 125.1-125.9 done; 125.10 remains                      |
 
 ---
 

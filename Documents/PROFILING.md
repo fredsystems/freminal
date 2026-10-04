@@ -359,8 +359,9 @@ assets/profiling/task125/run-matrix.sh smoke ghostty blink
 After changing feature-gated live profiling, use the sustained-output smoke to
 force at least one 120-observation summary. It opens one Freminal window and
 validates the discrete renderer identity, the task 125.5/125.6 live-render
-summary, and the task 125.8 GPU timing flush before cleanup -- `FREMINAL_BIN`
-must therefore be built with `--features frame-profiling,gpu-profiling`:
+summary, and the task 125.8 and 125.9 GPU timing flushes before cleanup --
+`FREMINAL_BIN` must therefore be built with
+`--features frame-profiling,gpu-profiling`:
 
 ```sh
 assets/profiling/task125/run-matrix.sh profile-smoke
@@ -411,7 +412,7 @@ assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idl
 
 Freminal runs receive a narrow `RUST_LOG` filter inside the otherwise-clean
 environment. Its Task 121 frame summaries, Task 125 live-render summaries, and
-Task 125.8 GPU timing flushes are written to `freminal.stdout.log` in that
+Task 125.8 and 125.9 GPU timing flushes are written to `freminal.stdout.log` in that
 sample's external raw directory; WezTerm and Ghostty do not receive the Rust
 logging environment. Keeping the log beside each sample preserves pane/frame
 attribution without reading the operator's normal logging configuration or
@@ -458,6 +459,59 @@ terminal. If per-process fdinfo is absent or remains below measurable
 resolution under an active control, cross-terminal GPU parity is
 `INCONCLUSIVE`; Freminal's later asynchronous GL queries still provide internal
 attribution but cannot prove peer parity.
+
+### Chrome and total-frame GPU timing (Task 125.9)
+
+Build with `--features gpu-profiling` (independent of `frame-profiling`). Each
+window measures four asynchronous GPU timestamp pairs per painted frame and
+logs a flush every 60 completed total-frame samples under the target
+`freminal_windowing::task_125::gpu_timing`, with the message
+`Task 125.9 chrome and frame GPU timing flush`. Enable it with
+`RUST_LOG=freminal_windowing::task_125::gpu_timing=debug`; `run-matrix.sh`
+already does. The terminal renderer's own upload and draw timings (Task 125.8)
+use the separate target `freminal::task_125::gpu_timing`.
+
+| Field | Meaning |
+| --- | --- |
+| `window_id` | The window that owns the GL context the queries ran on |
+| `renderer` | `GL_RENDERER` string, read once at window creation |
+| `capability` | `Available` (desktop GL 3.3+ or `GL_ARB_timer_query`) or `Unavailable` (GLES, older GL); `Unavailable` issues no queries and every counter stays zero |
+| `chrome_ns_total`, `chrome_sample_count` | Cumulative chrome GPU time: head plus tail. The count is the lower of the head and tail completed counts |
+| `band_ns_total`, `band_sample_count` | Cumulative terminal-band GPU time |
+| `total_ns_total`, `total_sample_count` | Cumulative whole-frame GPU time |
+| `last_latency_frames` | Painted frames between issue and availability for the latest sample |
+| `dropped_sample_count` | Samples rejected because the 64-slot ring was full |
+| `pending_sample_count` | Samples issued but not yet read back |
+
+All totals are cumulative since window creation; divide by the matching sample
+count for a mean. Read them with these rules:
+
+- **Intervals are GPU-timeline elapsed time between two timestamps, not busy
+  time.** They include GPU idle gaps: while the CPU is still recording work
+  inside a span (for example the terminal callback's vertex rebuild and
+  upload during the band), the GPU may wait and that wait is inside the
+  interval. A large band value with a small Task 125.8 upload + draw value
+  therefore points at CPU-side recording cost inside the band, not GPU
+  shading cost.
+- **Chrome is head plus tail.** The two spans are measured separately and
+  summed; the band between them is excluded.
+- **The band is a cross-check, never a subtraction substitute.** Compare it
+  with the Task 125.8 `terminal_upload` + `terminal_draw` figures; do not
+  derive either one by subtracting from the other, or from the total.
+- **The total spans the clear, the texture sets, the three paints, and the
+  texture frees.** It excludes the buffer swap, `pre_present_notify`, and any
+  compositor or scan-out latency, none of which is GPU execution of the
+  frame's own commands.
+- **A `FrameDamage::None` frame issues no sample.** It submits no GPU work
+  (it still applies egui texture deltas, which are not timed), so it is
+  absent from every count and does not advance the latency clock.
+- **Latency is per window and in painted frames.** The unit is not window
+  frames and not milliseconds. A result is never read on the frame that issued
+  it; `last_latency_frames` of `0` is therefore a bug.
+- **llvmpipe numbers are never performance evidence.** A software rasteriser
+  validates that the lifecycle is correct (samples complete on a later frame,
+  nothing leaks, nothing drops); its durations say nothing about a real GPU.
+  Findings use real-hardware runs only.
 
 ## What this cannot measure
 

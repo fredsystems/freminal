@@ -1,7 +1,7 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
 > **STATUS: IN PROGRESS — measurement phase activated 2026-08-26;
-> 125.1–125.8 complete, 125.9–125.10 remain.** The measurement phase is
+> 125.1–125.9 complete, 125.10 remains.** The measurement phase is
 > decomposed below against the post-Task-124 codebase. No remediation is
 > selected or decomposed yet. Fixed-stride relayout remains
 > one conditional branch, not the task goal, and cannot affect cursor-only
@@ -865,6 +865,32 @@ time swap/compositor latency as GPU execution; do not make unsupported query
 capability fatal to normal rendering; do not use llvmpipe numbers in findings.
 
 Stop: report phase timings and capability; await review before 125.10.
+
+**Complete.** `freminal-windowing/src/gpu_profiling.rs` gains a GL-free
+`FrameGpuTiming<Q>` state machine (ring capacity 64, four samples per painted
+frame: `chrome_head`, `terminal_band`, `chrome_tail`, `frame_total`), a
+`GpuTimestampSource` trait, a named `FramePhaseBoundary` enum, and a thin
+`glow` source; one instance per `EguiState`, capability detected once in
+`EguiState::new`, and pending queries destroyed in `destroy_painter`, which has
+a real production caller on every window close. `paint_frame_impl` takes a
+feature-gated boundary marker; `paint_frame` keeps its signature for the
+frame-paint harness. Boundaries are issued only when the frame paints:
+`TotalStart` before the clear, `HeadStart` after texture uploads, back-to-back
+pairs between head/band and band/tail, `TailEnd`, and `TotalEnd` after the
+texture frees, so the swap is untimed and `FrameDamage::None` issues and polls
+nothing. No paint, clear, or texture call moved; `run_ui_pass` was extracted
+only to keep `paint_frame_impl` under the line limit. Flushes log under
+`freminal_windowing::task_125::gpu_timing` every 60 completed total samples;
+`run-matrix.sh` allowlists that target and `profile-smoke` asserts it. Scope
+was widened by the orchestrator to the runner, the stale `lib.rs` module doc,
+and the `gpu-profiling` comment in `freminal-windowing/Cargo.toml`. Fourteen
+pure and four offscreen tests cover order, delayed availability, drops,
+unavailable capability, shutdown, and painted/None sequences; the windowing
+offscreen suite (144) and the Task 123 pixel harness (11) pass unchanged on
+llvmpipe as correctness only. The 2026-10-04 real-AMD `profile-smoke` produced
+12 flushes each from 125.8 and 125.9 over 720 painted frames, latency 1, zero
+drops, capability `Available`; the band interval (1.11 ms total) sits just
+above 125.8's terminal upload plus draw (1.01 ms), as a cross-check expects.
 
 ### 125.10 — Execute the parity matrix and close the remediation gate
 

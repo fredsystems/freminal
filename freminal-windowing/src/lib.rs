@@ -37,9 +37,11 @@ mod gl_context;
 // Task 125.7: the asynchronous GPU timestamp-query foundation (bounded
 // ring lifecycle + capability detection). Feature-gated identically to
 // `frame-profiling` -- test/measurement infrastructure with no default-build
-// presence, and not yet wired to any live GL context or paint path (that is
-// 125.8/125.9). Independent of `frame-profiling`: this measures actual GPU
-// execution time via `GL_TIMESTAMP` queries, not CPU wall-clock phases.
+// presence. Task 125.8 drives the ring from the terminal renderer (in the
+// `freminal` crate); Task 125.9 drives it from `paint_frame`'s head/band/tail
+// phase markers and `EguiState::run_frame`. Independent of
+// `frame-profiling`: this measures actual GPU execution time via
+// `GL_TIMESTAMP` queries, not CPU wall-clock phases.
 #[cfg(feature = "gpu-profiling")]
 pub mod gpu_profiling;
 // Task 123 Phase 2. Double-gated: `gl-offscreen` keeps it out of production
