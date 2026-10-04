@@ -387,7 +387,12 @@ The unattended workloads include `sustained-output` (a 200-line burst every
 20 ms, replacing the whole view each time) and `streaming-output` (one
 fixed-width line every 20 ms, scrolling the view by one row as `tail -f` or
 `cargo build` does); the pair separates dense full-redraw throughput from
-one-line scroll cost. `sustained-output-marked` repeats the `sustained-output`
+one-line scroll cost. Because `sustained-output` repeats `seq 1 200`, its
+visible screen is identical after every burst, and a terminal that detects
+unchanged pixels may skip drawing; `sustained-output-varying` (confirm-only,
+not in `screen`) prints `seq n n+199` with `n` advancing each burst so every
+frame changes, and is the dense-throughput comparison to cite.
+`sustained-output-marked` repeats the `sustained-output`
 burst pattern with each burst wrapped in OSC 133 marks (`A`, a fixed prompt
 text, `B`, `C` before the `seq` and `D;0` after), so every terminal records
 prompts and command blocks, and every 25th burst idles for 0.15 s instead of

@@ -1,7 +1,7 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: IN PROGRESS — measurement phase complete (125.1–125.10);
-> remediation phase (125.11–125.18) activated 2026-10-04.** The measurement phase is
+> **STATUS: PENDING MERGE — measurement (125.1–125.10) and remediation
+> (125.11–125.18) complete 2026-10-04; see "Closure".** The measurement phase is
 > decomposed below against the post-Task-124 codebase. No remediation is
 > selected or decomposed yet. Fixed-stride relayout remains
 > one conditional branch, not the task goal, and cannot affect cursor-only
@@ -1222,7 +1222,7 @@ read-only pass and ruled on by the orchestrator. File references are as of
 2. **`RowNumber(u64)`** in new `freminal-common/src/buffer_states/row_number.rs`
    (common because `CommandBlock` is shared with the GUI). Explicit arithmetic
    only (`new`, `get`, `checked_add`, `saturating_add`, `rows_after(base) ->
-   Option<usize>`, saturating `offset(i64)`, `is_alternate`); no operator
+Option<usize>`, saturating `offset(i64)`, `is_alternate`); no operator
    impls, no raw casts. A row's number is `base + i`; numbers are never reused
    after front eviction (a trailing blank-padding `pop` may re-issue). RIS and
    ED 3 advance `base` rather than reset it. Alternate-screen rows use a
@@ -1457,6 +1457,63 @@ and an idle gap that engages compression; run the seven-repeat confirmation for
 `sustained-output` and the new variant against both peers; record verdicts.
 Task 125 closes only if Freminal is at or below WezTerm on `sustained-output`
 with a CI excluding a regression, and no screened workload regressed.
+
+## Closure (125.18, 2026-10-04)
+
+Identity: Freminal at `be0e8d1e` plus the `sustained-output-varying` workload;
+peers, GPU, compositor, and control grids as in the 125.10 Findings. All 156
+external samples valid; every Freminal sample on 124x31 (chrome panes as
+before).
+
+Protocol deviation, recorded: the re-screen and the first confirmation ran a
+`target/release/freminal` that had been rebuilt with default features between
+the featured build and the run (cause not identified; no hook builds release),
+so those Freminal numbers are the product build without profiling overhead and
+carry no live profile. The `sustained-output-varying` confirmation used a
+separately built featured binary
+(`CARGO_TARGET_DIR=/tmp/opencode/t125-profiled`) and therefore includes
+profiling overhead.
+
+### Re-screen (3 x 20 s, 99 samples)
+
+Every workload's paired delta against the slower peer is negative (Freminal
+cheaper) with a confidence interval excluding zero, except `sparse-row`
+(delta -1.43 ms/s, CI [-5.18, 0.06], not material). No workload regressed
+against the 125.10 screen. Freminal medians (CPU ms/s): idle-blink 1.0,
+idle-steady 0.1, typing 16.3, sparse-row 10.6, btop 2.4, scrollback 6.4,
+streaming-output 17.9, chrome-blink 1.3, chrome-steady 0.1.
+
+### Confirmation (7 x 60 s)
+
+| Workload                 | Freminal CPU / GPU | WezTerm     | Ghostty     |
+| ------------------------ | ------------------ | ----------- | ----------- |
+| sustained-output         | 8.9 / 0.43         | 19.2 / 13.1 | 37.5 / 18.6 |
+| sustained-output-marked  | 17.4 / 8.95        | 17.7 / 11.0 | 39.3 / 18.5 |
+| sustained-output-varying | 24.3 / 11.1        | 32.0 / 13.5 | 41.3 / 20.0 |
+
+(Median ms per wall-second.) Paired deltas against Ghostty: -28.6, -22.2, and
+-16.7 ms/s, each CI excluding zero. Before the remediation `sustained-output`
+was 428.9 ms/s.
+
+`sustained-output` repeats `seq 1 200`, so the visible screen is identical
+after every burst; with the 125.14-125.16 changes Freminal recognises this
+(757 of 840 frames `FrameDamage::None` in a profiled check) and draws almost
+nothing, which flatters it relative to peers that redraw. The
+`sustained-output-varying` workload (`seq n n+199`, advancing each burst) was
+added to remove that effect: Freminal painted 3,800 of 4,200 frames (1,716
+bounded and 2,066 full rebuilds) and still used the least CPU and GPU of the
+three, with profiling overhead included. That is the decisive dense-throughput
+result.
+
+### Verdict
+
+**CONFIRMED and remediated.** The scrollback-eviction gap is closed: Freminal
+is below WezTerm and Ghostty on every sustained-output variant and on every
+screened workload except `sparse-row`, where it is statistically level with
+the slower peer. Buffer-level, a 200-line burst at capacity fell from 4.39 ms
+to about 118 us, and eviction no longer scales with retained rows. Open
+follow-ups are the numbered cleanups 125.C6, C7, C8, C10, C11, and C12; none
+gates this task.
 
 ---
 

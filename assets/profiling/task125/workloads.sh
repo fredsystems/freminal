@@ -170,6 +170,9 @@ task125_start_workload() {
 		# Freminal's 100 ms idle tick, so scrollback compression engages.
 		wtype "n=0; while :; do printf '\\033]133;A\\007Task125 prompt>\\033]133;B\\007\\033]133;C\\007'; seq 1 200; printf '\\033]133;D;0\\007'; if ((++n % 25)); then sleep 0.02; else sleep 0.15; fi; done" -k Return
 		;;
+	sustained-output-varying)
+		wtype "n=1; while :; do seq \$n \$((n + 199)); n=\$((n + 200)); sleep 0.02; done" -k Return
+		;;
 	streaming-output)
 		wtype "n=0; while :; do printf 'Task125 stream line %08d\\n' \"\$((++n))\"; sleep 0.02; done" -k Return
 		;;

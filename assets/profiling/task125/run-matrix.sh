@@ -522,7 +522,7 @@ prepare_workload_before_warmup() {
 	chrome-blink | chrome-steady)
 		task125_setup_chrome_topology
 		;;
-	btop | sparse-row | sustained-output | sustained-output-marked | streaming-output)
+	btop | sparse-row | sustained-output | sustained-output-varying | sustained-output-marked | streaming-output)
 		task125_start_workload "${workload}" "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
 		;;
 	scrollback)
