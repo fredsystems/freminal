@@ -996,6 +996,85 @@ before any remediation activation.
   every safe remediation's measured ceiling. Every smaller statistically
   separable residual remains documented even when it does not force code.
 
+## Findings (125.10, 2026-10-04)
+
+Identity: Freminal `d704366e` release build with `frame-profiling` and
+`gpu-profiling`; WezTerm `0-unstable-2026-09-17` and Ghostty `1.3.1` at the
+re-pinned store paths; AMD Radeon RX 7900 XTX (radeonsi, navi31); Hyprland
+0.56.2; control grids Freminal 124x31, WezTerm 138x31, Ghostty 140x33 (chrome
+panes 61-69x14-15). Raw captures are under `/tmp/opencode/t125-screen/` and
+`/tmp/opencode/t125-confirm/`, not committed.
+
+### Screen (3 x 20 s, all 90 samples valid)
+
+Medians per wall-second: CPU task-clock ms, AMD fdinfo GFX ms, wakeups.
+
+| Workload         | Freminal           | WezTerm            | Ghostty            |
+| ---------------- | ------------------ | ------------------ | ------------------ |
+| idle-blink       | 1.1 / 0.35 / 26    | 4.0 / 3.20 / 139   | 1.5 / 0.35 / 33    |
+| idle-steady      | 0.1 / 0.00 / 2     | 0.1 / 0.00 / 2     | 1.5 / 0.35 / 32    |
+| typing           | 20.2 / 11.0 / 1014 | 30.0 / 16.5 / 1028 | 27.7 / 9.1 / 894   |
+| sparse-row       | 10.5 / 5.9 / 430   | 12.2 / 6.7 / 355   | 13.1 / 4.3 / 310   |
+| btop             | 2.6 / 0.45 / 35    | 10.5 / 7.0 / 164   | 3.7 / 1.05 / 89    |
+| scrollback       | 6.7 / 0.32 / 93    | 34.1 / 4.3 / 215   | 9.4 / 1.85 / 119   |
+| sustained-output | 433 / 11.2 / 810   | 19.7 / 13.2 / 649  | 37.5 / 18.7 / 1136 |
+| streaming-output | 18.2 / 11.8 / 812  | 27.2 / 15.8 / 639  | 34.5 / 14.3 / 772  |
+| chrome-blink     | 1.3 / 0.32 / 26    | 5.3 / 3.4 / 141    | 1.5 / 0.34 / 31    |
+| chrome-steady    | 0.1 / 0.00 / 2     | 0.1 / 0.00 / 2     | 1.4 / 0.35 / 32    |
+
+Only `sustained-output` screened material against the slower peer; every other
+workload's paired delta was negative (Freminal cheaper) with a confidence
+interval excluding zero, so none was selected for confirmation.
+
+### Confirmation: sustained-output (7 x 60 s, all 21 samples valid)
+
+Freminal 428.9 ms/s (425.7 user, 2.8 kernel), IPC 1.14; WezTerm 19.9; Ghostty
+37.1. Paired delta against Ghostty +390.4 ms/s, bootstrap 95% CI
+[381.8, 405.6]: **material**. GPU time is the lowest of the three (11.3 ms/s).
+
+Attribution: windowing and app frame profiles put the GUI thread at about
+180 us per frame (run_ui 72, tessellate 7, paint 32, swap about 65), roughly
+11 ms/s at 60 fps. A 15-second `perf record` attributes 97.7% of samples to the
+`freminal-pty-consumer` thread and 96.5% of all samples to `memmove`, under
+`Vec::drain` of `Row` and `Option<RowCacheEntry>` in
+`Buffer::enforce_scrollback_limit` (`freminal-buffer/src/buffer/resize_and_alt.rs`).
+Once scrollback is full, every line feed drains the overflow row from the front
+of `rows`, `row_cache`, and the row-block map, shifting about 10,000 entries per
+line. At about 10,000 lines/s this is the whole gap. It is a buffer
+data-structure cost, not rendering.
+
+### Gate verdicts
+
+- **Idle/chrome bypass, cursor-blink decoupling:** REFUTED. Blinking idle and
+  four-tab chrome are at or below both peers.
+- **Retained chrome output:** REFUTED, same evidence.
+- **Fixed-stride per-row uploads:** REFUTED. No workload shows a GPU or upload
+  gap; Freminal's GPU time is lowest or within the peer range everywhere.
+- **Incremental CPU row construction:** REFUTED. GUI-thread cost is about
+  11 ms/s even under sustained output, and typing/sparse/streaming are cheaper
+  than both peers.
+- **Persistent GPU buffers:** REFUTED, no GPU or driver gap.
+- **Scheduling / wakeups:** REFUTED. Wakeups are within the peer range; the
+  sparse-row excess (430 vs 355/310) carries lower CPU than both peers.
+- **Presentation/compositor:** REFUTED, no kernel-time or GPU gap.
+- **Scroll-aware row reuse (125.C4):** REFUTED. `streaming-output` is the
+  cheapest of the three despite one-line scrolls resolving to dense rebuilds.
+- **Scrollback eviction (new, outside the original list):** CONFIRMED. The
+  sole material gap. Candidate remediations: (a) evict in batches, letting
+  scrollback overshoot by a fixed chunk before one drain, which amortises the
+  shift by the chunk size and is a small change with a bounded memory cost;
+  (b) make `rows` and its parallel structures ring buffers (`VecDeque` or an
+  offset index), removing the shift entirely at the cost of touching every
+  row-index consumer. Both need buffer tests for row-index, prompt/block, and
+  image accounting across eviction, the `buffer_benches` scrollback-push
+  benchmark, and a matched `sustained-output` re-capture.
+- **Pointer workload:** INCONCLUSIVE. The maintainer-interactive pointer screen
+  has not been run.
+- **Accept residual:** not applicable while the eviction gap is open.
+
+Stop: awaiting maintainer selection of the eviction remediation and a decision
+on running the pointer screen.
+
 ---
 
 ## Verification for the measurement phase
