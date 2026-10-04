@@ -3084,7 +3084,7 @@ mod tests {
             TabTitlePolicy::CustomWins,
             TabTitlePolicy::OscWins,
         ] {
-            assert!(!tab_title_policy_label(policy).is_empty());
+            assert_ne!(tab_title_policy_label(policy), "");
         }
     }
 

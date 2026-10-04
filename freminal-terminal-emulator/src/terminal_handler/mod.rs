@@ -2459,7 +2459,7 @@ mod tests {
 
         // After take, window_commands should be empty
         let cmds2 = handler.take_window_commands();
-        assert!(cmds2.is_empty());
+        assert_eq!(cmds2, []);
     }
 
     // ── Palette (OSC 4 / OSC 104) tests ─────────────────────────────────
@@ -4131,7 +4131,7 @@ mod tests {
     fn take_tmux_reparse_queue() {
         let mut handler = TerminalHandler::new(80, 24);
         let queue = handler.take_tmux_reparse_queue();
-        assert!(queue.is_empty());
+        assert_eq!(queue, [] as [Vec<u8>; 0]);
     }
 
     // ------------------------------------------------------------------

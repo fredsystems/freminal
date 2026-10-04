@@ -526,12 +526,12 @@ mod tests {
 
         // Frame 11: source has not yet marked the query available.
         let completed = ring.poll(11, &mut source);
-        assert!(completed.is_empty());
+        assert_eq!(completed, []);
         assert_eq!(ring.len(), 1, "sample must remain pending");
 
         // Frame 12: still not available.
         let completed = ring.poll(12, &mut source);
-        assert!(completed.is_empty());
+        assert_eq!(completed, []);
         assert_eq!(ring.len(), 1);
 
         // Frame 13: now available.
@@ -564,7 +564,7 @@ mod tests {
         ring.issue(PHASE, 1, 2, 42);
         let completed = ring.poll(42, &mut source);
 
-        assert!(completed.is_empty());
+        assert_eq!(completed, []);
         assert_eq!(ring.len(), 1, "same-frame sample must stay pending");
         assert!(
             source.availability_calls.is_empty(),
@@ -586,8 +586,8 @@ mod tests {
         // Not available yet: read_result_ns must never be called (the
         // fake's own assert would panic if the ring got this wrong).
         let completed = ring.poll(1, &mut source);
-        assert!(completed.is_empty());
-        assert!(source.read_calls.is_empty());
+        assert_eq!(completed, []);
+        assert_eq!(source.read_calls, []);
 
         // Now available: reads happen, and only now.
         source.mark_available(1, 10);
@@ -653,7 +653,7 @@ mod tests {
         // reach handles 3/4, because it never stored them. The caller is
         // the only path to destroying them, exactly as the trait doc
         // requires.
-        assert!(source.destroy_calls.is_empty());
+        assert_eq!(source.destroy_calls, []);
         source.destroy_query(start);
         source.destroy_query(end);
         assert_eq!(source.destroy_calls, vec![3, 4]);

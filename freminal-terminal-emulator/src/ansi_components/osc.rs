@@ -591,21 +591,21 @@ mod tests {
     fn osc13_mouse_foreground_silently_consumed() {
         // OSC 13 — MouseForeground — known but unimplemented
         let output = feed_osc(b"13;?\x07");
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn osc14_mouse_background_silently_consumed() {
         // OSC 14 — MouseBackground — known but unimplemented
         let output = feed_osc(b"14;?\x07");
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn osc66_color_scheme_notification_silently_consumed() {
         // OSC 66 — ColorSchemeNotification — known but unimplemented
         let output = feed_osc(b"66;dark\x07");
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ------------------------------------------------------------------
@@ -616,7 +616,7 @@ mod tests {
     fn unknown_osc_target_silently_consumed() {
         // OSC 999 — totally unknown target
         let output = feed_osc(b"999;whatever\x07");
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ------------------------------------------------------------------
@@ -776,7 +776,7 @@ mod tests {
         // but it IS logged at warn (with the raw sequence) so a new/unknown
         // OSC 133 variant surfaces for auditing rather than vanishing.
         let output = feed_osc(b"133;Z\x07");
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]

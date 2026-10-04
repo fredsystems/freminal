@@ -602,13 +602,13 @@ mod tests {
     fn compute_no_folds_when_set_empty() {
         let blocks = [make_block(1, 0, Some(1), Some(5))];
         let folded = HashSet::new();
-        assert!(compute_fold_ranges(&blocks, &folded).is_empty());
+        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
     }
 
     #[test]
     fn compute_no_folds_when_blocks_empty() {
         let folded = set(&[1, 2, 3]);
-        assert!(compute_fold_ranges(&[], &folded).is_empty());
+        assert_eq!(compute_fold_ranges(&[], &folded), []);
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
         // (e.g. block has scrolled out of scrollback).
         let blocks = [make_block(1, 0, Some(1), Some(3))];
         let folded = set(&[99]);
-        assert!(compute_fold_ranges(&blocks, &folded).is_empty());
+        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
     }
 
     #[test]
@@ -708,7 +708,7 @@ mod tests {
         // command_start_row > end_row should not happen but must be dropped.
         let blocks = [make_block(1, 0, Some(10), Some(5))];
         let folded = set(&[1]);
-        assert!(compute_fold_ranges(&blocks, &folded).is_empty());
+        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
     }
 
     #[test]
@@ -1246,7 +1246,7 @@ mod tests {
         // is fully visible.
         let m3 = RowMap::new(17, &t3);
         assert_eq!(m3.rendered_row_count(), 17);
-        assert!(m3.ranges().is_empty());
+        assert_eq!(m3.ranges(), []);
     }
 
     // ── end-to-end: compute_fold_ranges feeding RowMap ──────────────────

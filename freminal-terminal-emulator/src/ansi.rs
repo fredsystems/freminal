@@ -766,7 +766,7 @@ mod tests {
         out.clear();
         data.clear();
         assert!(p.ansi_parser_inner_empty(b'A', &mut data, &mut out).is_ok());
-        assert!(data.is_empty()); // correct: data is only pushed in FreminalAnsiParser::push
+        assert_eq!(data, []); // correct: data is only pushed in FreminalAnsiParser::push
     }
 
     // -------------------------------------------------------------------------
@@ -1784,7 +1784,7 @@ mod tests {
         assert!(matches!(p.inner, ParserInner::Osc(_)));
         let trace = p.current_trace_str();
         // Trace should contain the OSC sequence bytes
-        assert!(!trace.is_empty());
+        assert_ne!(trace, "");
     }
 
     #[test]
@@ -1794,7 +1794,7 @@ mod tests {
         p.push(b"\x1b[1");
         assert!(matches!(p.inner, ParserInner::Csi(_)));
         let trace = p.current_trace_str();
-        assert!(!trace.is_empty());
+        assert_ne!(trace, "");
     }
 
     #[test]
@@ -1804,7 +1804,7 @@ mod tests {
         p.push(b"\x1b(");
         assert!(matches!(p.inner, ParserInner::Standard(_)));
         let trace = p.current_trace_str();
-        assert!(!trace.is_empty());
+        assert_ne!(trace, "");
     }
 
     #[test]
@@ -1814,7 +1814,7 @@ mod tests {
         p.push(b"\x1bP$q");
         assert!(matches!(p.inner, ParserInner::Dcs(_)));
         let trace = p.current_trace_str();
-        assert!(!trace.is_empty());
+        assert_ne!(trace, "");
     }
 
     #[test]
@@ -1824,7 +1824,7 @@ mod tests {
         p.push(b"\x1b_partial");
         assert!(matches!(p.inner, ParserInner::Apc(_)));
         let trace = p.current_trace_str();
-        assert!(!trace.is_empty());
+        assert_ne!(trace, "");
     }
 
     #[test]
@@ -1833,7 +1833,7 @@ mod tests {
         assert!(matches!(p.inner, ParserInner::Empty));
         let trace = p.current_trace_str();
         // Empty state uses the parser's own trace, which should be empty initially
-        assert!(trace.is_empty());
+        assert_eq!(trace, "");
     }
 
     // ── 8-bit C1 controls: more specific cases ─────────────────────────────

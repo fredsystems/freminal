@@ -1934,7 +1934,7 @@ mod tests {
 
     #[test]
     fn all_themes_is_non_empty() {
-        assert!(!all_themes().is_empty());
+        assert_ne!(all_themes(), [] as [&ThemePalette; 0]);
     }
 
     #[test]

@@ -545,7 +545,7 @@ mod tests {
         assert!(data.report_activation);
         assert!(!data.focus_on_activation);
         assert!(data.close_report);
-        assert!(data.button_labels.is_empty());
+        assert_eq!(data.button_labels, [] as [String; 0]);
     }
 
     // ── 99.9: button-label extraction ────────────────────────────────────────
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn split_button_labels_empty_input_yields_empty_vec() {
-        assert!(split_button_labels(b"").is_empty());
+        assert_eq!(split_button_labels(b""), [] as [String; 0]);
     }
 
     #[test]

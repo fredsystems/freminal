@@ -219,14 +219,14 @@ mod tests {
     fn shell_info_missing_semicolon_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_shell_info(b"1338HISTFILE=/x", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn shell_info_unrecognised_subcommand_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_shell_info(b"1338;UNKNOWN=bar", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -236,13 +236,13 @@ mod tests {
         let mut raw = b"1338;HISTFILE=".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
         super::handle_osc_shell_info(&raw, &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn shell_info_histfile_empty_value_direct_call() {
         let mut output = Vec::new();
         super::handle_shell_info_histfile(b"", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

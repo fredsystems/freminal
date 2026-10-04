@@ -50,7 +50,7 @@ mod tests {
         let result = ansi_parser_inner_csi_finished_decrqm(b"?1", b"$", b'p', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
         // Should push at least one Mode output
-        assert!(!output.is_empty());
+        assert_ne!(output, []);
         assert!(matches!(output[0], TerminalOutput::Mode(_)));
     }
 
@@ -60,7 +60,7 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'h', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert!(!output.is_empty());
+        assert_ne!(output, []);
         assert!(matches!(output[0], TerminalOutput::Mode(_)));
     }
 
@@ -70,7 +70,7 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'l', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert!(!output.is_empty());
+        assert_ne!(output, []);
         assert!(matches!(output[0], TerminalOutput::Mode(_)));
     }
 
@@ -80,6 +80,6 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_decrqm(b"?25", &[], b'x', &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

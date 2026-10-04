@@ -598,7 +598,7 @@ pub(super) fn handle_scrollbar(
     // Position: scroll_offset 0 = bottom, max = top.
     let scrollable_track = track_height - thumb_height;
     let position_fraction = scroll_offset.approx_as::<f32>().unwrap_or(0.0) / max_f;
-    let thumb_top = track_top + scrollable_track * (1.0 - position_fraction);
+    let thumb_top = scrollable_track.mul_add(1.0 - position_fraction, track_top);
 
     let thumb_rect = Rect::from_min_max(
         Pos2::new(track_left, thumb_top),

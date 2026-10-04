@@ -3320,7 +3320,7 @@ mod incremental_merge_tests {
         }
 
         let (_chars, tags, _row_offsets, url_indices) = &first;
-        assert!(!url_indices.is_empty());
+        assert_ne!(url_indices.as_slice(), []);
         assert!(
             url_indices
                 .iter()

@@ -729,7 +729,7 @@ mod tests {
     fn build_instances_empty_run_slice_produces_no_instances() {
         let mut renderer = ToastTextRenderer::new();
         let mut fm = test_font_manager();
-        assert!(renderer.build_instances(&[], &mut fm).is_empty());
+        assert_eq!(renderer.build_instances(&[], &mut fm), []);
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod tests {
         let mut renderer = ToastTextRenderer::new();
         let mut fm = test_font_manager();
         let instances = renderer.build_instances(&[sample_run("")], &mut fm);
-        assert!(instances.is_empty());
+        assert_eq!(instances, []);
     }
 
     #[test]

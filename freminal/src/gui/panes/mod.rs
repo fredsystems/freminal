@@ -1783,7 +1783,7 @@ mod tests {
         assert_eq!(pane.id, PaneId(5));
         assert_eq!(pane.title, "my pane");
         assert!(!pane.bell_active);
-        assert!(pane.title_stack.is_empty());
+        assert_eq!(pane.title_stack, [] as [String; 0]);
         assert_eq!(pane.view_state.scroll_offset, 0);
         assert!(!pane.echo_off.load(std::sync::atomic::Ordering::Relaxed));
     }

@@ -5032,7 +5032,7 @@ mod tests {
                         list.all_entries().skip(band_shape_start).cloned().collect()
                     })
             });
-            assert!(!extracted.is_empty());
+            assert_ne!(extracted, []);
         });
         full_output.textures_delta.clear();
 

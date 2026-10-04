@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(cmd.control.src_height, Some(100));
         assert_eq!(cmd.control.image_id, Some(42));
         // Payload is base64-decoded
-        assert!(!cmd.payload.is_empty());
+        assert_ne!(cmd.payload, []);
     }
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(cmd.control.action, Some(KittyAction::Delete));
         assert_eq!(cmd.control.delete_target, Some(KittyDeleteTarget::All));
         assert!(!cmd.control.delete_free_data, "lowercase 'a' keeps data");
-        assert!(cmd.payload.is_empty());
+        assert_eq!(cmd.payload, []);
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
         let apc = make_apc("a=d,d=i,i=5", "");
         let cmd = parse_kitty_graphics(&apc).unwrap();
 
-        assert!(cmd.payload.is_empty());
+        assert_eq!(cmd.payload, []);
     }
 
     #[test]
@@ -1020,7 +1020,7 @@ mod tests {
         ];
         for e in &errors {
             let s = format!("{e}");
-            assert!(!s.is_empty());
+            assert_ne!(s, "");
         }
     }
 

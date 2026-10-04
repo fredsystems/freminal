@@ -370,7 +370,7 @@ mod tests {
         // File= args without ':' separator before base64 data
         let payload = b"1337;File=inline=1\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -378,7 +378,7 @@ mod tests {
         // File= with colon but empty base64 payload → empty after decode → no output
         let payload = b"1337;File=inline=1:\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
                 assert_eq!(data.size, None);
                 assert_eq!(data.width, None);
                 assert_eq!(data.height, None);
-                assert!(data.data.is_empty()); // no payload for begin
+                assert_eq!(data.data, []); // no payload for begin
             }
             other => panic!("Expected ITerm2MultipartBegin, got: {other:?}"),
         }
@@ -480,7 +480,7 @@ mod tests {
         // MultipartFile= with nothing after '=' → empty args → no output
         let payload = b"1337;MultipartFile=\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -503,7 +503,7 @@ mod tests {
         // Invalid base64 → decode fails → no output
         let payload = b"1337;FilePart=!!!invalid!!!\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -621,7 +621,7 @@ mod tests {
         let mut output = Vec::new();
         // No ';' in raw_params at all
         super::handle_osc_iterm2(b"1337File=inline=1", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Line 71: handle_osc_iterm2 — unrecognised sub-command ───────────────
@@ -650,7 +650,7 @@ mod tests {
     fn file_missing_colon_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_iterm2_file(b"inline=1", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 154-155: File= non-UTF-8 args ─────────────────────────────────
@@ -661,7 +661,7 @@ mod tests {
         let mut raw = vec![0xFF, 0xFE, b':'];
         raw.extend_from_slice(b"QUFB"); // "AAA" in base64
         super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 162-163: File= non-UTF-8 base64 payload ──────────────────────
@@ -672,7 +672,7 @@ mod tests {
         let mut raw = b"inline=1:".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
         super::handle_osc_iterm2_file(&raw, &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 168-170: File= base64 decode failure ──────────────────────────
@@ -681,7 +681,7 @@ mod tests {
         let mut output = Vec::new();
         // Valid UTF-8 args and payload, but payload is not valid base64
         super::handle_osc_iterm2_file(b"inline=1:!!!not-base64!!!", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 174-176: File= empty payload after base64 decode ──────────────
@@ -690,7 +690,7 @@ mod tests {
         let mut output = Vec::new();
         // Empty base64 decodes to empty bytes
         super::handle_osc_iterm2_file(b"inline=1:", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 195-196: MultipartFile= non-UTF-8 args ────────────────────────
@@ -698,7 +698,7 @@ mod tests {
     fn multipart_begin_non_utf8_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_iterm2_multipart_begin(&[0xFF, 0xFE], &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Line 202: MultipartFile= empty args ─────────────────────────────────
@@ -706,7 +706,7 @@ mod tests {
     fn multipart_begin_empty_args_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_iterm2_multipart_begin(b"", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Lines 221-222: FilePart= non-UTF-8 base64 ──────────────────────────
@@ -714,7 +714,7 @@ mod tests {
     fn file_part_non_utf8_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_iterm2_file_part(&[0xFF, 0xFE], &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     // ── Line 230: FilePart= base64 decode failure ───────────────────────────
@@ -722,6 +722,6 @@ mod tests {
     fn file_part_bad_base64_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_iterm2_file_part(b"!!!invalid!!!", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

@@ -309,12 +309,12 @@ mod tests {
 
     #[test]
     fn empty_input() {
-        assert!(detect("").is_empty());
+        assert_eq!(detect(""), [] as [&str; 0]);
     }
 
     #[test]
     fn no_url_input() {
-        assert!(detect("just a plain sentence").is_empty());
+        assert_eq!(detect("just a plain sentence"), [] as [&str; 0]);
     }
 
     #[test]
@@ -326,7 +326,7 @@ mod tests {
     fn scheme_only_is_dropped() {
         // `https://` alone has nothing after the slashes, regex requires at
         // least one non-whitespace byte → no match.
-        assert!(detect("https:// is not a url").is_empty());
+        assert_eq!(detect("https:// is not a url"), [] as [&str; 0]);
     }
 
     #[test]

@@ -3577,7 +3577,7 @@ mod tests {
             draw_order.is_empty(),
             "draw_order should be cleared on the empty-input path"
         );
-        assert!(verts.is_empty());
+        assert_eq!(verts, []);
     }
 
     /// A single placed image yields exactly one entry in `draw_order`.

@@ -731,7 +731,7 @@ mod tests {
         // `w` (0x77) is a valid CSI terminator but not dispatched to any handler
         let result = parser.ansiparser_inner_csi(b'w', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -771,7 +771,7 @@ mod tests {
         }
         let result = parser.ansiparser_inner_csi(b'W', &mut output);
         assert_eq!(result, ParserOutcome::Finished);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
         assert_eq!(parser.sequence, b"1;2W");
         assert_eq!(parser.format_raw_csi(), "\\x1b[1;2W");
     }

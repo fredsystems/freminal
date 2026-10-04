@@ -429,14 +429,14 @@ mod tests {
         let mut raw = b"9;".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
         super::handle_osc_notify_9(&raw, &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn notify9_missing_semicolon_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_notify_9(b"9", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -445,14 +445,14 @@ mod tests {
         let mut raw = b"777;".to_vec();
         raw.extend_from_slice(&[0xFF, 0xFE, 0xFD]);
         super::handle_osc_notify_777(&raw, &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
     fn notify777_missing_semicolon_direct_call() {
         let mut output = Vec::new();
         super::handle_osc_notify_777(b"777", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -550,6 +550,6 @@ mod tests {
         let mut output = Vec::new();
         // "foo=bar" has a multi-char key → InvalidMetadata
         super::handle_osc_notify_99(b"99;foo=bar;body", &tracer(), &mut output);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

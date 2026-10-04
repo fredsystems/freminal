@@ -4117,7 +4117,7 @@ mod image_tests {
     #[test]
     fn set_image_cell_extends_row_if_needed() {
         let mut row = Row::new(10);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         let placement = ImagePlacement {
             image_id: 42,
@@ -4157,7 +4157,7 @@ mod image_tests {
         };
         // Column 10 is beyond width 5 — should be a no-op.
         row.set_image_cell(10, placement, FormatTag::default());
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── Cell image accessors ─────────────────────────────────────────
@@ -7511,7 +7511,7 @@ mod column_scroll_and_misc_tests {
         buf.rows.clear();
         buf.row_cache.clear();
         let placements = buf.visible_image_placements(0);
-        assert!(placements.is_empty());
+        assert_eq!(placements, []);
     }
 
     // ── has_visible_images ──
@@ -7917,7 +7917,7 @@ mod resize_and_insert_tests {
         );
 
         // Tags should cover the full range.
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
         // Row offsets should have 3 entries.
         assert_eq!(row_offsets.len(), 3);
     }
@@ -7978,7 +7978,7 @@ mod resize_and_insert_tests {
         // Extract block from col 10 to 15 — beyond width.
         let text = buf.extract_block_text(0, 10, 0, 15);
         // Should be empty or just whitespace since cols are out of range.
-        assert!(text.trim().is_empty());
+        assert_eq!(text.trim(), "");
     }
 }
 
@@ -8835,7 +8835,7 @@ mod coverage_gap_tests {
             "expected at least 2 newlines between 3 rows, got {newline_count}"
         );
         // Tags should cover all positions
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
     }
 
     // -----------------------------------------------------------------------
@@ -8963,7 +8963,7 @@ mod coverage_gap_tests {
             newlines.len()
         );
         // All chars should be covered by tags
-        assert!(!tags.is_empty());
+        assert_ne!(tags, []);
     }
 
     #[test]

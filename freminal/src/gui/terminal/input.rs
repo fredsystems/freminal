@@ -3583,7 +3583,7 @@ mod raw_key_tests {
 
         drain_pending_raw_keys(&mut pending, &tx, &snap, false, &[]);
 
-        assert!(pending.is_empty());
+        assert_eq!(pending, []);
         assert!(rx.try_recv().is_err());
     }
 

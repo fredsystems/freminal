@@ -708,7 +708,7 @@ mod tests {
     fn search_empty_query_returns_no_matches() {
         let chars = make_chars(&["hello world"]);
         let (matches, err) = run_search("", false, false, &chars);
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
         assert!(err.is_none());
     }
 
@@ -767,7 +767,7 @@ mod tests {
         let chars = make_chars(&["hello world"]);
         let (matches, err) = run_search("xyz", false, false, &chars);
         assert!(err.is_none());
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     #[test]
@@ -798,7 +798,7 @@ mod tests {
     fn search_invalid_regex_returns_error() {
         let chars = make_chars(&["hello"]);
         let (matches, err) = run_search(r"[invalid", true, false, &chars);
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
         assert!(err.is_some());
     }
 
@@ -807,7 +807,7 @@ mod tests {
         let chars = make_chars(&["hello"]);
         let (matches, err) = run_search(r"\d+", true, false, &chars);
         assert!(err.is_none());
-        assert!(matches.is_empty());
+        assert_eq!(matches, []);
     }
 
     // ── run_search: case sensitivity ───────────────────────────────────────
@@ -968,9 +968,9 @@ mod tests {
         };
         state.close();
         assert!(!state.is_open);
-        assert!(state.matches.is_empty());
+        assert_eq!(state.matches, []);
         assert_eq!(state.current_match, 0);
-        assert!(state.last_searched_query.is_empty());
+        assert_eq!(state.last_searched_query, "");
         assert!(!state.last_searched_regex);
         assert!(!state.last_searched_case_sensitive);
         assert!(state.cached_full_buffer.is_none());

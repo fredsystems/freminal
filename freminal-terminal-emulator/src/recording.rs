@@ -1570,8 +1570,8 @@ mod tests {
         let parsed = read_frec_file(&path);
 
         assert_eq!(parsed.metadata, metadata);
-        assert!(parsed.events.is_empty());
-        assert!(parsed.seek_index.is_empty());
+        assert_eq!(parsed.events, []);
+        assert_eq!(parsed.seek_index, []);
         assert_eq!(parsed.total_duration_us, 0);
         assert_eq!(parsed.total_events, 0);
     }
@@ -1627,7 +1627,7 @@ mod tests {
         assert_eq!(parsed.events[2].timestamp_us, 3000);
 
         // First event should create a seek entry.
-        assert!(!parsed.seek_index.is_empty());
+        assert_ne!(parsed.seek_index, []);
         assert_eq!(parsed.seek_index[0].timestamp_us, 1000);
     }
 

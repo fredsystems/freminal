@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn osc_notify99_single_done_title_pushes_window_command() {
         let mut handler = TerminalHandler::new(80, 24);
-        assert!(handler.window_commands.is_empty());
+        assert_eq!(handler.window_commands, []);
 
         let cmd = Osc99Command {
             payload: b"Hello".to_vec(),
@@ -535,7 +535,7 @@ mod tests {
                 assert_eq!(data.title.as_deref(), Some("Hello"));
                 assert_eq!(data.occasion, None, "default Always maps to None");
                 assert_eq!(data.expire_ms, None, "default -1 maps to None");
-                assert!(data.button_labels.is_empty());
+                assert_eq!(data.button_labels, [] as [String; 0]);
             }
             other => panic!("expected Notification99, got: {other:?}"),
         }

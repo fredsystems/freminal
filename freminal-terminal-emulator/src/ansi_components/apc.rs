@@ -129,7 +129,7 @@ mod tests {
             let result = parser.apc_parser_inner(b, &mut output);
             assert!(matches!(result, ParserOutcome::Continue));
         }
-        assert!(output.is_empty());
+        assert_eq!(output, []);
         // Feed ST: ESC \
         parser.apc_parser_inner(0x1b, &mut output);
         let result = parser.apc_parser_inner(b'\\', &mut output);
@@ -149,7 +149,7 @@ mod tests {
             let result = parser.apc_parser_inner(b, &mut output);
             assert!(matches!(result, ParserOutcome::Continue));
         }
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]

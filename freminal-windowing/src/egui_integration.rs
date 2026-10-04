@@ -1229,8 +1229,8 @@ mod tests {
         let band_shapes = &shapes[start..end];
         let tail_shapes = &shapes[end..];
 
-        assert!(head_shapes.is_empty());
-        assert!(band_shapes.is_empty());
+        assert_eq!(head_shapes, []);
+        assert_eq!(band_shapes, []);
         assert_eq!(tail_shapes.len(), shapes.len());
     }
 

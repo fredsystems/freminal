@@ -1025,13 +1025,13 @@ mod tests {
     #[test]
     fn round_trip_blank_sparse_row() {
         let row = Row::new(80);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
         assert_round_trip_exact(&row);
 
         let compact = CompactRow::from_row(&row).unwrap();
-        assert!(compact.tag_runs.is_empty());
-        assert!(compact.wide_runs.is_empty());
-        assert!(compact.chars.is_empty());
+        assert_eq!(compact.tag_runs, []);
+        assert_eq!(compact.wide_runs, []);
+        assert_eq!(compact.chars, [] as [TChar; 0]);
     }
 
     // -----------------------------------------------------------------------

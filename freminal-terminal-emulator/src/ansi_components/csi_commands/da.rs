@@ -127,7 +127,7 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_da(b"1", &[], &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -172,7 +172,7 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_da(b">1;2", &[], &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -193,6 +193,6 @@ mod tests {
         let mut output = Vec::new();
         let result = ansi_parser_inner_csi_finished_da(b"0", b"!", &mut output);
         assert!(matches!(result, ParserOutcome::InvalidParserFailure(_)));
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 }

@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn empty_input_produces_empty_output() {
-        assert!(build_toast_verts(&[]).is_empty());
+        assert_eq!(build_toast_verts(&[]), []);
     }
 
     #[test]

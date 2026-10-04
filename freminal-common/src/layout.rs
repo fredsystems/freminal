@@ -438,15 +438,15 @@ impl Layout {
 
         let map_pane = |p: &LayoutPane| -> LayoutPane {
             LayoutPane {
-                directory: p.directory.as_deref().map(&substitute),
-                command: p.command.as_deref().map(&substitute),
-                shell: p.shell.as_deref().map(&substitute),
+                directory: p.directory.as_deref().map(substitute),
+                command: p.command.as_deref().map(substitute),
+                shell: p.shell.as_deref().map(substitute),
                 env: p
                     .env
                     .iter()
                     .map(|(k, v)| (k.clone(), substitute(v)))
                     .collect(),
-                title: p.title.as_deref().map(&substitute),
+                title: p.title.as_deref().map(substitute),
                 id: p.id.clone(),
                 parent: p.parent.clone(),
                 position: p.position,
@@ -458,7 +458,7 @@ impl Layout {
 
         let map_tab = |t: &LayoutTab| -> LayoutTab {
             LayoutTab {
-                title: t.title.as_deref().map(&substitute),
+                title: t.title.as_deref().map(substitute),
                 // custom_name is a literal user rename; no variable
                 // substitution is applied (see Task 95 decisions).
                 custom_name: t.custom_name.clone(),

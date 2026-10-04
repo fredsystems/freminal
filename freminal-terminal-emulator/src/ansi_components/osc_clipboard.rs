@@ -117,7 +117,7 @@ mod tests {
         // OSC 52 ; c ; !!!invalid!!! BEL — invalid base64 → warn, no output
         let payload = b"52;c;!!!invalid!!!\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
         // OSC 52 BEL — only one param, no payload
         let payload = b"52\x07";
         let output = feed_osc(payload);
-        assert!(output.is_empty());
+        assert_eq!(output, []);
     }
 
     #[test]

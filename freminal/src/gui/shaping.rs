@@ -1320,7 +1320,7 @@ mod tests {
         let chars: Vec<TChar> = vec![];
         let lines = split_into_lines(&chars);
         assert_eq!(lines.len(), 1); // One empty trailing line.
-        assert!(lines[0].is_empty());
+        assert_eq!(lines[0], [] as [TChar; 0]);
     }
 
     #[test]

@@ -321,7 +321,6 @@ impl TabManager {
     }
 
     /// Return an iterator over all tabs (in display order).
-    #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Tab> + ExactSizeIterator {
         self.tabs.iter()
     }

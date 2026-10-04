@@ -718,7 +718,7 @@ mod tests {
     fn merge_entries_no_seed_no_recent_returns_empty() {
         let recent = VecDeque::new();
         let texts = HashMap::new();
-        assert!(merge_entries(None, &recent, &texts).is_empty());
+        assert_eq!(merge_entries(None, &recent, &texts), []);
     }
 
     #[test]
@@ -804,7 +804,7 @@ mod tests {
         recent.push_back(finished_block(0, Some(1), Some(2), Some(0)));
         let texts = HashMap::new();
         let merged = merge_entries(None, &recent, &texts);
-        assert!(merged.is_empty());
+        assert_eq!(merged, []);
     }
 
     #[test]
@@ -934,7 +934,7 @@ mod tests {
     #[test]
     fn filter_entries_no_matches_returns_empty() {
         let entries = vec![seed_entry("ls"), seed_entry("pwd")];
-        assert!(filter_entries(&entries, "xyz-unmatched").is_empty());
+        assert_eq!(filter_entries(&entries, "xyz-unmatched"), []);
     }
 
     #[test]
@@ -961,7 +961,7 @@ mod tests {
         };
         state.open();
         assert!(state.is_open);
-        assert!(state.query.is_empty());
+        assert_eq!(state.query, "");
         assert_eq!(state.selected, 0);
     }
 
@@ -974,7 +974,7 @@ mod tests {
         };
         state.close();
         assert!(!state.is_open);
-        assert!(state.query.is_empty());
+        assert_eq!(state.query, "");
         assert_eq!(state.selected, 0);
     }
 

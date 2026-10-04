@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     fn zero_size_is_empty() {
-        assert!(generate_alpha('\u{2588}', 0, 10).is_empty());
+        assert_eq!(generate_alpha('\u{2588}', 0, 10), []);
         assert!(generate_alpha('\u{2588}', 10, 0).iter().all(|&b| b == 0));
     }
 }

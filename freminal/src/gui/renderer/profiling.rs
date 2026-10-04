@@ -811,7 +811,6 @@ impl LiveRenderProfile {
 
     /// The most recently finalized records, oldest first, bounded to
     /// [`Self::RECORD_QUEUE_CAPACITY`] entries.
-    #[must_use]
     pub fn records(&self) -> impl DoubleEndedIterator<Item = &PaneFrameRecord> + '_ {
         self.records.iter()
     }

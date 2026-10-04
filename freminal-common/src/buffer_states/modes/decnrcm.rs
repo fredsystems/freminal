@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn decnrcm_display() {
-        assert!(!format!("{}", Decnrcm::NrcEnabled).is_empty());
-        assert!(!format!("{}", Decnrcm::NrcDisabled).is_empty());
-        assert!(!format!("{}", Decnrcm::Query).is_empty());
+        assert_ne!(format!("{}", Decnrcm::NrcEnabled), "");
+        assert_ne!(format!("{}", Decnrcm::NrcDisabled), "");
+        assert_ne!(format!("{}", Decnrcm::Query), "");
     }
 }

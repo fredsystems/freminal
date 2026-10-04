@@ -747,9 +747,9 @@ impl Buffer {
             b.prompt_start_row = new_prompt;
             // Optional later fields are remapped where present; if a field no
             // longer maps it is cleared rather than left dangling.
-            b.command_start_row = b.command_start_row.and_then(&map_start_row);
-            b.output_start_row = b.output_start_row.and_then(&map_start_row);
-            b.end_row = b.end_row.and_then(&map_end_row);
+            b.command_start_row = b.command_start_row.and_then(map_start_row);
+            b.output_start_row = b.output_start_row.and_then(map_start_row);
+            b.end_row = b.end_row.and_then(map_end_row);
             true
         });
     }

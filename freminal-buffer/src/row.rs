@@ -1774,7 +1774,7 @@ mod tests {
         let tag = FormatTag::default();
         let text: Vec<TChar> = b"hello".iter().map(|&b| TChar::Ascii(b)).collect();
         row.insert_text(0, &text, &tag);
-        assert!(!row.cells().is_empty());
+        assert_ne!(row.cells(), []);
 
         row.clear_with_tag(&tag);
         // With a default tag, the sparse representation stores no cells
@@ -1952,7 +1952,7 @@ mod tests {
     #[test]
     fn cells_mut_push_appends_cell() {
         let mut row = Row::new(10);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         row.cells_mut_push(Cell::new(TChar::Ascii(b'X'), FormatTag::default()));
         assert_eq!(row.cells().len(), 1);
@@ -2430,7 +2430,7 @@ mod tests {
         let image_id = crate::image_store::next_image_id();
         let mut row = Row::new(5);
         row.set_image_cell(5, make_image_placement(image_id), FormatTag::default());
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     #[test]
@@ -2551,10 +2551,10 @@ mod tests {
         // But n == 0 is guarded. This line is effectively unreachable.
         // Test the existing early returns instead.
         row.insert_spaces_at(0, 0, &tag);
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
 
         row.insert_spaces_at(10, 5, &tag); // col >= width
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── erase_cells_at: continuation with no head in walk-back (line 617) ─
@@ -2708,7 +2708,7 @@ mod tests {
         let mut row = Row::new(5);
         let tag = FormatTag::default();
         row.insert_spaces_at_with_right_limit(0, 1, &tag, 0); // limit=0 → col>=limit
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
     }
 
     // ── insert_text: wide chars that wrap around row boundary ────────────
@@ -2952,7 +2952,7 @@ mod tests {
         row.compact();
 
         row.clear();
-        assert!(row.cells().is_empty());
+        assert_eq!(row.cells(), []);
         // `clear()` always produces `Live` storage (see its doc comment).
         assert!(!row.is_compact());
     }
