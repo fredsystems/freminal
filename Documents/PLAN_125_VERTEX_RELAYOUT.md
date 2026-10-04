@@ -1410,6 +1410,15 @@ Scope: `freminal-buffer/src/buffer/flatten.rs` and its tests.
 What: key the visible-window merge cache by logical row so eviction no longer
 forces a full re-merge; oracle tests at capacity rotation must still match.
 
+**Complete.** `MergeWindowFp` is keyed by the window's first `RowNumber`
+plus length; the eviction-path nulls in `enforce_scrollback_limit` and the
+test-only `scroll_up` are gone, while the confined `scroll_slice_*` rotation
+nulls remain. New oracle tests cover identical-content rows at capacity and an
+ED 3 that leaves the window unchanged (now a cache hit); a mutation keying the
+start physically fails four tests. Pixel harness 11/11 (not claimed to cover
+the change). As predicted, no CPU change: eviction and emulator benchmarks are
+within run-to-run noise of 125.15.
+
 ### 125.17 — Snapshot and GUI coordinates
 
 Scope: `freminal-terminal-emulator` snapshot, `freminal` GUI selection and fold

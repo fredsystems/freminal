@@ -171,10 +171,16 @@ pub struct Buffer {
     /// Three complementary mechanisms together cover every way the row cache's
     /// *content* can change out from under a cached merge:
     ///
-    /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): visible
-    ///    window bounds (`visible_start`/`visible_end`) plus
-    ///    `auto_detect_urls`. Any resize/scroll of the window itself, or a
-    ///    detection toggle, changes `fp` and forces a full merge.
+    /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): the logical
+    ///    [`RowNumber`]
+    ///    of the window's first row, the window's length, and
+    ///    `auto_detect_urls`. A row keeps its number for as long as it is
+    ///    retained, so an equal fingerprint means window position `r` holds
+    ///    the same row as when the merge was cached, whatever was evicted
+    ///    from the front in between. A resize, a scroll of the window onto
+    ///    different rows, front eviction that moves the window onto
+    ///    different rows (every line feed at scrollback capacity), or a
+    ///    detection toggle all change `fp` and force a full merge.
     /// 2. **`first_rebuilt_row`** (recomputed on every call): any row in the
     ///    window that is `dirty` or has a `None` cache entry. Catches
     ///    ordinary per-row edits.
@@ -185,30 +191,22 @@ pub struct Buffer {
     ///      was built from, without marking every affected row dirty or
     ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
     ///      [`Buffer::enter_alternate`], and [`Buffer::leave_alternate`].
-    ///    - **Confined in-place row rotation**: `scroll_slice_up`,
-    ///      `scroll_slice_down`, and `scroll_up` (`scroll.rs`), and
-    ///      `enforce_scrollback_limit` (`resize_and_alt.rs`). These
-    ///      relocate already-clean, non-`None` cache entries between row
-    ///      indices (a moved row keeps its cached representation, only its
-    ///      index changes) without marking the moved rows dirty, and
-    ///      without changing `self.rows.len()`: the three `scroll.rs` sites
-    ///      net to the same length via a shift or a `remove`+`push`, and
-    ///      `enforce_scrollback_limit` nets to the same length because its
-    ///      front `drain` of `overflow` rows is paired, in the same line
-    ///      feed, with a `push_row` of one new row at the bottom once
-    ///      scrollback is at capacity — so *neither* `fp` *nor*
-    ///      `first_rebuilt_row` observes that row content moved to a
-    ///      different index. Each of these four functions contains its own
-    ///      `self.merge_cache = None;` at the point where the rotation
-    ///      happens; that line is load-bearing, **not** a redundant
-    ///      leftover safe to delete — removing it would let a cached
-    ///      incremental merge serve stale, pre-rotation content at the
-    ///      rotated indices. See [`flatten::MergeCache`]'s doc comment for
-    ///      the debug-only oracle cross-check that backstops this case, and
+    ///    - **Confined in-place row rotation**: `scroll_slice_up` and
+    ///      `scroll_slice_down` (`scroll.rs`). These relocate already-clean,
+    ///      non-`None` cache entries between row indices (a moved row keeps
+    ///      its cached representation, only its index changes) without
+    ///      marking the moved rows dirty and without renumbering anything:
+    ///      the rows keep their numbers while the content under those
+    ///      numbers rotates, so *neither* `fp` *nor* `first_rebuilt_row`
+    ///      observes it. Each contains its own `self.merge_cache = None;` at
+    ///      the point where the rotation happens; that line is
+    ///      load-bearing, **not** a redundant leftover safe to delete —
+    ///      removing it would let a cached incremental merge serve stale,
+    ///      pre-rotation content at the rotated indices. See
+    ///      [`flatten::MergeCache`]'s doc comment for the debug-only oracle
+    ///      cross-check that backstops this case, and
     ///      `incremental_merge_tests` in `flatten.rs` for the regression
-    ///      tests exercising it directly (including
-    ///      `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
-    ///      for the `enforce_scrollback_limit` site specifically).
+    ///      tests exercising it directly.
     ///
     /// The `_columns` scroll variants (`scroll_slice_up_columns`/
     /// `_down_columns`, used when DECLRMM confines a scroll horizontally)
@@ -218,18 +216,23 @@ pub struct Buffer {
     /// an existing cache entry to a different index, so mechanism (2)
     /// already catches them.
     ///
-    /// Deliberately NOT invalidated here (relying on `fp` instead):
-    /// `erase_scrollback`'s front drain (`scroll.rs`) and the row-append
-    /// sites in `lines.rs`. `erase_scrollback` only runs its drain when
-    /// `visible_start > 0` and always collapses `visible_start` to `0`
-    /// (everything above the live view is discarded, not rotated in
-    /// place), so the *absolute* `visible_start`/`visible_end` bounds
-    /// `visible_window_bounds` returns always change — unlike
-    /// `enforce_scrollback_limit`, there is no case where the window
-    /// bounds net out unchanged. The `lines.rs` append sites only ever grow
-    /// `self.rows.len()` with no compensating removal, which likewise
-    /// always changes the window bounds. Both cases make `fp` mismatch, so
-    /// a full merge is forced without an explicit `None`.
+    /// **Front eviction needs no explicit invalidation** (Task 125.16):
+    /// `enforce_scrollback_limit`, `scroll_up`, and `erase_scrollback` all go
+    /// through [`Buffer::evict_front_rows`], which removes rows without
+    /// renumbering the survivors and advances the store's base. At scrollback
+    /// capacity the physical window bounds are unchanged after each
+    /// push-and-evict line feed, but the window's first logical row number is
+    /// not, so mechanism (1) sees the slide. Where the eviction leaves the
+    /// window on the very same rows (`erase_scrollback` drops only rows above
+    /// the window), the fingerprint is unchanged and the cached merge is
+    /// correctly reused. The row-append sites in `lines.rs` change the window
+    /// length, which likewise changes `fp`. The one way a row number is
+    /// re-issued is `RowStore::pop` of trailing blank padding; the row pushed
+    /// at that number has a `None` cache entry, so mechanism (2) covers it.
+    ///
+    /// A stale `fp` match is a correctness hazard rather than a missed
+    /// optimisation, so every fast-path use is cross-checked against the
+    /// full-merge oracle in debug builds (see [`flatten::MergeCache`]).
     pub(in crate::buffer) merge_cache: Option<MergeCache>,
 
     /// Task 124.10: source of the per-row **content epoch** stamps stored in

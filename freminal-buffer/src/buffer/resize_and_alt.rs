@@ -996,26 +996,14 @@ impl Buffer {
         // rows kept.
         let overflow = self.evict_front_rows(overflow);
 
-        // Task #405 fix: once scrollback is at capacity, every line feed
-        // pushes one row at the bottom (via `push_row`/`handle_lf`) and this
-        // drain then removes `overflow` rows from the front in the same
-        // logical step, netting `self.rows.len()` unchanged. Because
-        // `visible_window_bounds` (and therefore `MergeWindowFp`) derives
-        // purely from `rows.len()` and `height` — both unchanged here — the
-        // fingerprint the next flatten computes is numerically IDENTICAL to
-        // the one the stale `merge_cache` was built against, even though
-        // every surviving row's identity just shifted down by `overflow`.
-        // This is the same confined-rotation bug class as `scroll_up`
-        // (`scroll.rs`, see its own `merge_cache = None` and the
-        // explanation in `Buffer::merge_cache`'s field doc): the fingerprint
-        // and `first_rebuilt_row` checks cannot observe an index shift that
-        // isn't accompanied by a `rows.len()` change or a dirty/`None`
-        // marking. Null the cache to force a full re-merge next flatten.
-        //
-        // Only reachable here, inside the `overflow > 0` branch — the
-        // early-return above (`self.rows.len() <= max_rows`) drains nothing
-        // and must not pay this cost on every line feed.
-        self.merge_cache = None;
+        // Task #405 / 125.16: once scrollback is at capacity, every line feed
+        // pushes one row at the bottom and this eviction then removes
+        // `overflow` rows from the front in the same logical step, netting
+        // `self.rows.len()` unchanged. No explicit `merge_cache` invalidation
+        // is needed: the surviving rows keep their logical numbers and the
+        // eviction advances the store's base, so the merge fingerprint (keyed
+        // by the window's first row number, see `flatten::MergeWindowFp`)
+        // observes that the window now starts on a different row.
 
         // --- Adjust cursor row index ---
         //

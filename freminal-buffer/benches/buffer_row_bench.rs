@@ -631,15 +631,14 @@ fn bench_lf_heavy(c: &mut Criterion) {
 // Benchmark: steady-state LF at scrollback capacity — `merge_cache`
 // rotation invalidation cost (Task #405).
 //
-// `enforce_scrollback_limit` (`resize_and_alt.rs`) now sets
-// `self.merge_cache = None` every time a line feed's push+drain rotation
-// happens with scrollback already at capacity (see
+// At scrollback capacity every line feed evicts a row, so the visible
+// window's first logical row number advances and the merge-cache
+// fingerprint (keyed by that number since Task 125.16) misses (see
 // `Buffer::merge_cache`'s field doc and the
 // `incremental_merge_matches_oracle_after_scrollback_capacity_rotation`
-// regression test in `flatten.rs`) — this is the correctness fix, but it
-// also means the very next `visible_as_tchars_and_tags` flatten can no
-// longer take the incremental fast path and must fully re-merge the whole
-// visible window instead. This benchmark isolates that worst case: a
+// regression test in `flatten.rs`). The very next
+// `visible_as_tchars_and_tags` flatten therefore cannot take the
+// incremental fast path and must fully re-merge the whole visible window. This benchmark isolates that worst case: a
 // buffer already sitting at its scrollback cap, then one LF (which always
 // rotates) immediately followed by one flatten, repeated every iteration
 // so the flatten never gets to reuse a warm cache. Two window heights are

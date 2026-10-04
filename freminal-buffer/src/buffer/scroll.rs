@@ -697,19 +697,10 @@ impl Buffer {
         let new_row = Row::new(self.width);
         self.rows.push(new_row);
 
-        // Task 121 Part C fix: `rows.evict_front(1)` + `rows.push(new_row)`
-        // nets to the same `self.rows.len()`, and every already-clean
-        // row-cache entry above index 0 shifts down by one index in
-        // lockstep with its row's content — without any of the moved rows
-        // being marked dirty or `None`. This is the same confined
-        // in-place-rotation bug class as `scroll_slice_up`/`_down` (see
-        // `Buffer::merge_cache`'s field doc, which explicitly names
-        // `scroll_up` as part of the confirmed gap): the fingerprint and
-        // first-rebuilt-row invalidation cannot observe the identity shift,
-        // so a cached incremental merge would serve stale, pre-shift row
-        // content. Null the merge cache to force a full re-merge next
-        // flatten.
-        self.merge_cache = None;
+        // No explicit `merge_cache` invalidation (Task 125.16): the eviction
+        // above advances the row store's base, so a merge cached before this
+        // call has a different first-row logical number than the window the
+        // next flatten sees. See `Buffer::merge_cache`'s field doc.
 
         // DO NOT move the cursor in alternate buffer
         if self.kind == BufferType::Primary {
