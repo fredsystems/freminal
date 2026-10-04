@@ -13,6 +13,7 @@ use freminal_common::buffer_states::{
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
+    row_number::RowNumber,
     tchar::TChar,
     url::Url,
 };
@@ -27,6 +28,7 @@ use crate::{
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
+pub use reflow_remap::ReflowRemap;
 use row_store::RowStore;
 
 #[cfg(test)]
@@ -44,7 +46,11 @@ mod flatten;
 mod images;
 mod lifecycle;
 mod lines;
+mod reflow_remap;
 mod resize_and_alt;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod row_number_tests;
 mod row_store;
 mod scroll;
 mod tabs;
@@ -292,9 +298,26 @@ pub struct Buffer {
     /// in / returned from `enter_alternate` / `leave_alternate`.
     pub(in crate::buffer) saved_primary: Option<SavedPrimaryState>,
 
+    /// First row number of the *next* alternate-screen session (Task 125.14).
+    ///
+    /// The alternate screen's rows are numbered in their own namespace
+    /// starting at [`RowNumber::ALTERNATE_BASE`], and this counter advances
+    /// past every alternate session's rows when it ends, so an alternate row
+    /// number is never re-issued across sessions (a mark left over from an
+    /// earlier session can never alias a row of a later one).
+    pub(in crate::buffer) next_alt_base: RowNumber,
+
+    /// Row translation produced by width-changing reflows since the last
+    /// [`Buffer::take_reflow_remap`], for consumers that keep row numbers
+    /// outside the buffer (the emulator's kitty placement table).
+    pub(in crate::buffer) pending_reflow_remap: Option<ReflowRemap>,
+
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
     /// Independent of the alternate-screen save (`saved_primary`).
-    pub(in crate::buffer) saved_cursor: Option<CursorState>,
+    ///
+    /// The saved row is a stable [`RowNumber`], so it stays attached to its
+    /// content across scrollback eviction (Task 125.14).
+    pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
 
     /// Current format tag to apply to inserted text.
     pub(in crate::buffer) current_tag: FormatTag,
@@ -348,11 +371,15 @@ pub struct Buffer {
     /// common case).
     pub(in crate::buffer) image_cell_count: usize,
 
-    /// Buffer-relative row indices where OSC 133 `PromptStart` markers fired.
+    /// Logical row numbers where OSC 133 `PromptStart` markers fired.
     ///
-    /// Maintained atomically with row drains: when rows are removed from the
-    /// front, all indices are shifted down and entries that fell off are dropped.
-    pub(in crate::buffer) prompt_rows: Vec<usize>,
+    /// Stable [`RowNumber`]s: eviction never rewrites them. Marks are appended
+    /// in the order they fire, which is *usually* ascending but not
+    /// guaranteed (a shell can redraw a prompt above an earlier one), so
+    /// eviction pruning ([`Buffer::prune_evicted_marks`]) only trims the
+    /// leading run of evicted marks and consumers must filter any stale
+    /// out-of-order entry themselves (`RowNumber::rows_after(base)`).
+    pub(in crate::buffer) prompt_rows: Vec<RowNumber>,
 
     /// OSC 133 command blocks, stored oldest-first.
     ///
@@ -361,9 +388,10 @@ pub struct Buffer {
     /// Capped at `scrollback_limit` entries; when the cap is reached the oldest
     /// block is evicted before inserting a new one.
     ///
-    /// Row indices inside each block are buffer-relative (same coordinate space
-    /// as `prompt_rows`).  They are adjusted atomically with row drains via
-    /// [`Buffer::adjust_prompt_rows`].
+    /// Row fields inside each block are stable [`RowNumber`]s (same coordinate
+    /// space as `prompt_rows`); eviction never rewrites them. Blocks whose
+    /// prompt row has been evicted are pruned from the front by
+    /// [`Buffer::prune_evicted_marks`].
     pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
 
     /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
@@ -427,7 +455,7 @@ pub struct SavedPrimaryState {
     /// Right margin (DECSLRM) at the time of the switch.
     pub(in crate::buffer) scroll_region_right: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
-    pub(in crate::buffer) saved_cursor: Option<CursorState>,
+    pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
     /// Saved image store from the primary buffer.
     pub(in crate::buffer) image_store: ImageStore,
     /// Saved image cell count from the primary buffer.
@@ -9195,7 +9223,7 @@ mod task_113_smoke {
         let last_content_row_before = buf.rows.len() - 1;
         assert_eq!(
             buf.command_blocks()[0].end_row,
-            Some(last_content_row_before),
+            Some(buf.row_number_at(last_content_row_before)),
             "precondition: end_row points at the last content row"
         );
 
@@ -9206,7 +9234,7 @@ mod task_113_smoke {
         let last_content_row_after = buf.rows.len() - 1;
         assert_eq!(
             buf.command_blocks()[0].end_row,
-            Some(last_content_row_after),
+            Some(buf.row_number_at(last_content_row_after)),
             "reflow must remap command_block end_row to the new layout \
              (block points at {:?}, last content row is {last_content_row_after})",
             buf.command_blocks()[0].end_row,
@@ -9236,19 +9264,22 @@ mod task_113_smoke {
     // output region [output_start_row, end_row] is a valid ascending span
     // inside the buffer, and all indices are in range.
     fn assert_block_rows_sane(buf: &Buffer) {
-        let len = buf.rows.len();
+        // Every stored number must resolve to a retained row.
+        let idx = |n: RowNumber| {
+            buf.row_index_of(n)
+                .unwrap_or_else(|| panic!("row number {n} does not resolve to a retained row"))
+        };
         for b in buf.command_blocks() {
-            assert!(b.prompt_start_row < len, "prompt_start_row in range");
+            let prompt = idx(b.prompt_start_row);
             if let Some(c) = b.command_start_row {
-                assert!(c < len, "command_start_row in range");
+                let _ = idx(c);
             }
             if let (Some(o), Some(e)) = (b.output_start_row, b.end_row) {
-                assert!(o < len && e < len, "output region in range");
+                let (o, e) = (idx(o), idx(e));
                 assert!(o <= e, "output_start_row {o} must be <= end_row {e}");
                 assert!(
-                    b.prompt_start_row <= o,
-                    "prompt_start_row {} must be <= output_start_row {o}",
-                    b.prompt_start_row
+                    prompt <= o,
+                    "prompt_start_row {prompt} must be <= output_start_row {o}",
                 );
             }
         }
@@ -9531,24 +9562,24 @@ mod scrollback_compaction_tests {
             "scrollback limit must still be enforced with compaction active"
         );
 
-        // Every surviving prompt-row / command-block index must be in range
-        // and internally ordered — i.e. compaction did not corrupt the
-        // drain-and-shift bookkeeping in `adjust_prompt_rows`.
+        // Every surviving prompt-row / command-block number must resolve to a
+        // retained row and be internally ordered — i.e. compaction did not
+        // corrupt the eviction bookkeeping (`prune_evicted_marks`).
         for &row in buf.prompt_rows() {
             assert!(
-                row < buf.rows.len(),
-                "prompt row {row} out of bounds after drain (rows.len()={})",
+                buf.row_index_of(row).is_some(),
+                "prompt row {row} does not resolve after drain (rows.len()={})",
                 buf.rows.len()
             );
         }
         for block in buf.command_blocks() {
-            assert!(block.prompt_start_row < buf.rows.len());
+            assert!(buf.row_index_of(block.prompt_start_row).is_some());
             if let Some(cmd_start) = block.command_start_row {
                 assert!(block.prompt_start_row <= cmd_start);
-                assert!(cmd_start < buf.rows.len());
+                assert!(buf.row_index_of(cmd_start).is_some());
             }
             if let Some(end) = block.end_row {
-                assert!(end < buf.rows.len());
+                assert!(buf.row_index_of(end).is_some());
             }
         }
     }

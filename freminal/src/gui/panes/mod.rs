@@ -1587,6 +1587,7 @@ pub fn pane_at_pos(layout: &[(PaneId, Rect)], pos: Point) -> Option<PaneId> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ── should_focus_pane tests (Task 110) ───────────────────────────
 
@@ -1804,7 +1805,11 @@ mod tests {
     fn push_recent_command_below_cap_appends_in_order() {
         let mut pane = dummy_pane(PaneId(0), "p");
         for _ in 0..5 {
-            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+            pane.push_recent_command(CommandBlock::new_running(
+                RowNumber::ZERO,
+                None,
+                String::new(),
+            ));
         }
         assert_eq!(pane.recent_commands.len(), 5);
     }
@@ -1816,7 +1821,7 @@ mod tests {
         let total = RECENT_COMMANDS_CAP + 10;
         let mut ids = Vec::with_capacity(total);
         for _ in 0..total {
-            let block = CommandBlock::new_running(0, None, String::new());
+            let block = CommandBlock::new_running(RowNumber::ZERO, None, String::new());
             ids.push(block.id);
             pane.push_recent_command(block);
         }
@@ -1843,11 +1848,19 @@ mod tests {
     fn push_recent_command_at_exact_cap_does_not_evict() {
         let mut pane = dummy_pane(PaneId(0), "p");
         for _ in 0..RECENT_COMMANDS_CAP {
-            pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+            pane.push_recent_command(CommandBlock::new_running(
+                RowNumber::ZERO,
+                None,
+                String::new(),
+            ));
         }
         assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
         // The next push must evict exactly one entry.
-        pane.push_recent_command(CommandBlock::new_running(0, None, String::new()));
+        pane.push_recent_command(CommandBlock::new_running(
+            RowNumber::ZERO,
+            None,
+            String::new(),
+        ));
         assert_eq!(pane.recent_commands.len(), RECENT_COMMANDS_CAP);
     }
 

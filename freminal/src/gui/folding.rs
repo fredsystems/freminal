@@ -53,7 +53,12 @@
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 
-use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+use freminal_common::buffer_states::{
+    command_block::{CommandBlock, CommandBlockId},
+    row_number::RowNumber,
+};
+
+use super::command_blocks::BlockRows;
 
 /// A contiguous range of snapshot rows that should be collapsed into a
 /// single placeholder row in the rendered view.
@@ -119,6 +124,10 @@ impl FoldRange {
 ///   `command_start_row` is `Some`, AND
 /// - the resolved start row `<= end_row`.
 ///
+/// `row_base` is the snapshot's row base, used to resolve each block's
+/// logical row numbers to the buffer-absolute indices the ranges are
+/// expressed in.
+///
 /// IDs in `folded_blocks` that do not correspond to any block in
 /// `command_blocks` (e.g. because the block has scrolled out of
 /// scrollback) are silently ignored — the [`super::view_state::ViewState`]
@@ -131,6 +140,7 @@ impl FoldRange {
 #[must_use]
 pub fn compute_fold_ranges<S: BuildHasher>(
     command_blocks: &[CommandBlock],
+    row_base: RowNumber,
     folded_blocks: &HashSet<CommandBlockId, S>,
 ) -> Vec<FoldRange> {
     if folded_blocks.is_empty() || command_blocks.is_empty() {
@@ -147,8 +157,13 @@ pub fn compute_fold_ranges<S: BuildHasher>(
             // `command_start_row` for shell integrations that don't emit
             // OSC 133 C; in that case the command line is folded with the
             // output (the pre-fix behaviour) rather than refusing to fold.
-            let start = b.output_start_row.or(b.command_start_row)?;
-            let end = b.end_row?;
+            //
+            // The block's stored rows are logical numbers; resolve them to
+            // the snapshot's retained buffer indices (a block whose prompt
+            // row was evicted no longer exists, so it is not folded).
+            let rows = BlockRows::resolve(b, row_base)?;
+            let start = rows.output_start.or(rows.command_start)?;
+            let end = rows.end?;
             if start > end {
                 return None;
             }
@@ -566,16 +581,22 @@ mod tests {
     use super::*;
     use freminal_common::buffer_states::command_block::CommandBlock;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     fn make_block(
         id: u64,
         prompt: usize,
         cmd_start: Option<usize>,
         end: Option<usize>,
     ) -> CommandBlock {
-        let mut b = CommandBlock::new_running(prompt, None, String::new());
+        let mut b = CommandBlock::new_running(rn(prompt), None, String::new());
         b.id = CommandBlockId(id);
-        b.command_start_row = cmd_start;
-        b.end_row = end;
+        b.command_start_row = cmd_start.map(rn);
+        b.end_row = end.map(rn);
         b
     }
 
@@ -588,7 +609,7 @@ mod tests {
         end: Option<usize>,
     ) -> CommandBlock {
         let mut b = make_block(id, prompt, cmd_start, end);
-        b.output_start_row = output_start;
+        b.output_start_row = output_start.map(rn);
         b
     }
 
@@ -602,13 +623,13 @@ mod tests {
     fn compute_no_folds_when_set_empty() {
         let blocks = [make_block(1, 0, Some(1), Some(5))];
         let folded = HashSet::new();
-        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
+        assert_eq!(compute_fold_ranges(&blocks, RowNumber::ZERO, &folded), []);
     }
 
     #[test]
     fn compute_no_folds_when_blocks_empty() {
         let folded = set(&[1, 2, 3]);
-        assert_eq!(compute_fold_ranges(&[], &folded), []);
+        assert_eq!(compute_fold_ranges(&[], RowNumber::ZERO, &folded), []);
     }
 
     #[test]
@@ -618,7 +639,7 @@ mod tests {
         ];
         let folded = set(&[1]);
         assert!(
-            compute_fold_ranges(&blocks, &folded).is_empty(),
+            compute_fold_ranges(&blocks, RowNumber::ZERO, &folded).is_empty(),
             "running blocks must never be folded"
         );
     }
@@ -631,7 +652,7 @@ mod tests {
         ];
         let folded = set(&[1]);
         assert!(
-            compute_fold_ranges(&blocks, &folded).is_empty(),
+            compute_fold_ranges(&blocks, RowNumber::ZERO, &folded).is_empty(),
             "blocks without command_start_row must be skipped"
         );
     }
@@ -642,14 +663,14 @@ mod tests {
         // (e.g. block has scrolled out of scrollback).
         let blocks = [make_block(1, 0, Some(1), Some(3))];
         let folded = set(&[99]);
-        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
+        assert_eq!(compute_fold_ranges(&blocks, RowNumber::ZERO, &folded), []);
     }
 
     #[test]
     fn compute_emits_range_for_completed_folded_block() {
         let blocks = [make_block(1, 0, Some(1), Some(5))];
         let folded = set(&[1]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].command_block_id, CommandBlockId(1));
         assert_eq!(ranges[0].start_row, 1);
@@ -664,7 +685,7 @@ mod tests {
         // row 1 visible above the placeholder.
         let blocks = [make_block_with_output(1, 1, Some(1), Some(2), Some(5))];
         let folded = set(&[1]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 1);
         assert_eq!(
             ranges[0].start_row, 2,
@@ -683,7 +704,7 @@ mod tests {
         // contract.
         let blocks = [make_block_with_output(1, 0, Some(1), None, Some(5))];
         let folded = set(&[1]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].start_row, 1);
         assert_eq!(ranges[0].end_row, 5);
@@ -697,7 +718,7 @@ mod tests {
             make_block(1, 0, Some(1), Some(5)),
         ];
         let folded = set(&[1, 2]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].start_row, 1);
         assert_eq!(ranges[1].start_row, 11);
@@ -708,7 +729,7 @@ mod tests {
         // command_start_row > end_row should not happen but must be dropped.
         let blocks = [make_block(1, 0, Some(10), Some(5))];
         let folded = set(&[1]);
-        assert_eq!(compute_fold_ranges(&blocks, &folded), []);
+        assert_eq!(compute_fold_ranges(&blocks, RowNumber::ZERO, &folded), []);
     }
 
     #[test]
@@ -720,7 +741,7 @@ mod tests {
             make_block(2, 5, Some(6), Some(15)), // 6..=15 overlaps with 1
         ];
         let folded = set(&[1, 2]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 1, "overlapping later range must be dropped");
         assert_eq!(ranges[0].command_block_id, CommandBlockId(1));
     }
@@ -734,7 +755,7 @@ mod tests {
             make_block(2, 0, Some(6), Some(10)), // 6..=10  (adjacent)
         ];
         let folded = set(&[1, 2]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 2);
         assert_eq!(ranges[0].end_row, 5);
         assert_eq!(ranges[1].start_row, 6);
@@ -1218,7 +1239,11 @@ mod tests {
         // user scrolls, the *visible portion* of the fold shrinks/grows,
         // but the placeholder text must always report the full 34 lines
         // so the user is not misled about how much content is hidden.
-        let raw = compute_fold_ranges(&[make_block(1, 45, Some(46), Some(79))], &set(&[1]));
+        let raw = compute_fold_ranges(
+            &[make_block(1, 45, Some(46), Some(79))],
+            RowNumber::ZERO,
+            &set(&[1]),
+        );
         assert_eq!(raw.len(), 1);
         assert_eq!(raw[0].block_total_rows, 34);
 
@@ -1259,7 +1284,7 @@ mod tests {
             make_block(3, 10, Some(11), Some(14)), // foldable
         ];
         let folded = set(&[1, 2, 3]);
-        let ranges = compute_fold_ranges(&blocks, &folded);
+        let ranges = compute_fold_ranges(&blocks, RowNumber::ZERO, &folded);
         assert_eq!(ranges.len(), 2, "running block id 2 must be skipped");
 
         let map = RowMap::new(20, &ranges);
@@ -1269,5 +1294,35 @@ mod tests {
         assert_eq!(map.snapshot_to_rendered(0), Some(0));
         assert_eq!(map.snapshot_to_rendered(1), None);
         assert_eq!(map.snapshot_to_rendered(4), Some(2));
+    }
+
+    // ── logical row numbers (Task 125.14) ────────────────────────────────
+
+    #[test]
+    fn compute_resolves_block_rows_against_the_row_base() {
+        // Numbers 105..110 at base 100 are indices 5..10 (output starts at 107
+        // -> index 7).
+        let mut b = CommandBlock::new_running(RowNumber::new(105), None, String::new());
+        b.id = CommandBlockId(1);
+        b.command_start_row = Some(RowNumber::new(106));
+        b.output_start_row = Some(RowNumber::new(107));
+        b.end_row = Some(RowNumber::new(110));
+        let ranges = compute_fold_ranges(&[b], RowNumber::new(100), &set(&[1]));
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].start_row, 7);
+        assert_eq!(ranges[0].end_row, 10);
+        assert_eq!(ranges[0].block_total_rows, 4);
+    }
+
+    #[test]
+    fn compute_skips_a_block_whose_prompt_row_was_evicted() {
+        let mut b = CommandBlock::new_running(RowNumber::new(50), None, String::new());
+        b.id = CommandBlockId(1);
+        b.command_start_row = Some(RowNumber::new(51));
+        b.end_row = Some(RowNumber::new(60));
+        assert_eq!(
+            compute_fold_ranges(&[b], RowNumber::new(100), &set(&[1])),
+            []
+        );
     }
 }

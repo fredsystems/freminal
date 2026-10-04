@@ -41,6 +41,7 @@ use freminal_common::{
         modes::xtextscrn::{AltScreen47, SaveCursor1048, XtExtscrn},
         osc::ITerm2InlineImageData,
         pointer_shape::PointerShape,
+        row_number::RowNumber,
         tchar::TChar,
         terminal_output::{TabClearMode, TerminalOutput},
         terminal_sections::TerminalSections,
@@ -139,8 +140,13 @@ pub(crate) struct RealPlacement {
     pub image_id: u64,
     /// This placement's id (`p=`; 0 if unspecified).
     pub placement_id: u32,
-    /// Screen origin: the top-left cell row where the image was stamped.
-    pub origin_row: usize,
+    /// Screen origin: the top-left cell row where the image was stamped, as a
+    /// stable logical row number (Task 125.14). It stays attached to that row
+    /// as scrollback is evicted, and is translated through a reflow by
+    /// `TerminalHandler::apply_buffer_reflow_remap`. Convert to a retained
+    /// buffer index with `Buffer::row_index_of`; `None` means the row has
+    /// been evicted.
+    pub origin_row: RowNumber,
     /// Screen origin: the top-left cell column.
     pub origin_col: usize,
     /// Display size in cells.
@@ -517,6 +523,7 @@ impl TerminalHandler {
         self.buffer.full_reset();
         if prev_width != restore_width {
             self.buffer.set_column_mode(restore_width);
+            self.apply_buffer_reflow_remap();
             self.send_pty_resize(restore_width);
         }
         self.current_format = FormatTag::default();
@@ -1435,6 +1442,7 @@ impl TerminalHandler {
                         self.pre_deccolm_width = Some(self.buffer.terminal_width());
                     }
                     self.buffer.set_column_mode(132);
+                    self.apply_buffer_reflow_remap();
                     self.send_pty_resize(132);
                 }
                 Mode::Deccolm(Deccolm::Column80)
@@ -1446,6 +1454,7 @@ impl TerminalHandler {
                     // preceding CSI?3h).
                     let restore_width = self.pre_deccolm_width.take().unwrap_or(80);
                     self.buffer.set_column_mode(restore_width);
+                    self.apply_buffer_reflow_remap();
                     self.send_pty_resize(restore_width);
                 }
                 Mode::Deccolm(Deccolm::Query) => {

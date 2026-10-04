@@ -17,10 +17,12 @@ use freminal_common::buffer_states::{
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
+    row_number::RowNumber,
 };
 
 use crate::row::{Row, RowJoin, RowOrigin};
 
+use super::reflow_remap::{OldRowMeta, ReflowRemap};
 use super::{Buffer, RowStore, SavedPrimaryState};
 
 impl Buffer {
@@ -188,8 +190,16 @@ impl Buffer {
         if self.kind == BufferType::Alternate
             && let Some(saved) = self.saved_primary.take()
         {
-            let saved = Self::resize_saved_primary(saved, new_width, new_height);
+            let (saved, remap) = Self::resize_saved_primary(saved, new_width, new_height);
+            // The primary marks held in `self` belong to the store that was
+            // just reflowed / trimmed; translate them with it (primary marks
+            // were otherwise left pointing at pre-resize rows, Task 125.14).
+            let primary_base = saved.rows.base();
             self.saved_primary = Some(saved);
+            if let Some(remap) = remap {
+                self.record_reflow_remap(remap);
+            }
+            self.prune_marks_below(primary_base);
         }
 
         self.debug_assert_invariants();
@@ -204,11 +214,15 @@ impl Buffer {
     /// the existing resize logic (reflow, height adjust, scroll region
     /// validation, cursor clamping, scrollback limit enforcement) instead of
     /// duplicating it.
+    ///
+    /// Also returns the [`ReflowRemap`] of the reflow, if one happened, so the
+    /// caller can translate the primary-screen row references it holds
+    /// (prompt marks, command blocks, kitty placements) the same way.
     fn resize_saved_primary(
         saved: SavedPrimaryState,
         new_width: usize,
         new_height: usize,
-    ) -> SavedPrimaryState {
+    ) -> (SavedPrimaryState, Option<ReflowRemap>) {
         // Reconstruct a temporary primary Buffer from the saved state.
         let old_width = saved.rows.first().map_or(new_width, Row::max_width);
         let old_height = saved.height;
@@ -242,6 +256,8 @@ impl Buffer {
             auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,
+            next_alt_base: RowNumber::ALTERNATE_BASE,
+            pending_reflow_remap: None,
             saved_cursor: saved.saved_cursor,
             lnm_enabled: Lnm::LineFeed,
             wrap_enabled: Decawm::AutoWrap,
@@ -267,8 +283,9 @@ impl Buffer {
         };
 
         let new_offset = tmp.set_size(new_width, new_height, saved.scroll_offset);
+        let remap = tmp.pending_reflow_remap.take();
 
-        SavedPrimaryState {
+        let resized = SavedPrimaryState {
             rows: tmp.rows,
             cursor: tmp.cursor,
             scroll_offset: new_offset,
@@ -282,7 +299,8 @@ impl Buffer {
             image_cell_count: tmp.image_cell_count,
             blocks: tmp.blocks,
             next_block_id: tmp.next_block_id,
-        }
+        };
+        (resized, remap)
     }
 
     // Inherently large: the reflow algorithm walks every logical line, splits/joins rows at the
@@ -312,7 +330,11 @@ impl Buffer {
     ///
     /// 4. **Install the new rows.** `self.rows` is replaced with the reflow
     ///    result, `self.width` is updated, and the row cache is reset to
-    ///    all-`None` (every row is dirty after reflow).
+    ///    all-`None` (every row is dirty after reflow). The new rows get
+    ///    *fresh* logical row numbers (past the last pre-reflow number), and
+    ///    a [`ReflowRemap`] translating every old number is applied to the
+    ///    prompt marks, command blocks and saved cursor and kept for
+    ///    [`Buffer::take_reflow_remap`].
     ///
     /// The operation is O(total cells) — linear in the amount of text.
     pub fn reflow_to_width(&mut self, new_width: usize) {
@@ -332,6 +354,7 @@ impl Buffer {
 
         let old_cursor_y = self.cursor.pos.y;
         let old_cursor_x = self.cursor.pos.x;
+        let old_base = self.rows.base();
 
         // Take ownership of the old rows
         let old_rows = self.rows.take_rows();
@@ -360,8 +383,9 @@ impl Buffer {
         let mut cursor_logical_line: Option<usize> = None;
         let mut cursor_flat_offset: usize = 0;
 
-        // Per old row: (logical_line_idx, flat_offset_of_row_start, row_len).
-        let mut old_row_meta: Vec<(usize, usize, usize)> = Vec::with_capacity(old_rows_len);
+        // Per old row: its logical line, the flat offset of its first cell
+        // within that line, and its stored cell count.
+        let mut old_row_meta: Vec<OldRowMeta> = Vec::with_capacity(old_rows_len);
 
         // Running flat-cell offset of the current logical line, maintained
         // incrementally instead of re-summed from scratch on every row (that
@@ -381,7 +405,11 @@ impl Buffer {
             // the running total of cells already accumulated in `current_line`.
             let row_start_flat_offset = current_line_flat_len;
             let row_cell_count = row.stored_cell_count();
-            old_row_meta.push((logical_lines.len(), row_start_flat_offset, row_cell_count));
+            old_row_meta.push(OldRowMeta {
+                line: logical_lines.len(),
+                flat_start: row_start_flat_offset,
+                cells: row_cell_count,
+            });
 
             if old_row_idx == old_cursor_y {
                 cursor_logical_line = Some(logical_lines.len());
@@ -403,7 +431,7 @@ impl Buffer {
 
         // Per logical line: the index in `new_rows` at which that line's
         // re-wrapped rows begin.  Used together with `old_row_meta` to remap
-        // command-block / prompt row indices after reflow.
+        // command-block / prompt / placement row numbers after reflow.
         let mut line_new_starts: Vec<usize> = Vec::with_capacity(old_row_meta.len());
 
         for (line_idx, line) in logical_lines.into_iter().enumerate() {
@@ -629,6 +657,11 @@ impl Buffer {
         // decompressed everything the old `self.rows` referenced, so
         // `self.blocks` is empty here — `replace_all` likewise resets the
         // block map to match the new row count (Task 119.4).
+        //
+        // `replace_all` numbers the new rows from the old `next_number()`, so
+        // every pre-reflow row number is below the new base until the remap
+        // below translates it.
+        let new_row_cells: Vec<usize> = new_rows.iter().map(|r| r.characters().len()).collect();
         self.rows.replace_all(new_rows);
         // Task 121 Part C: the row cache was just replaced wholesale with
         // fresh entries for an entirely re-wrapped row layout — a stale
@@ -657,80 +690,34 @@ impl Buffer {
             self.cursor.pos.x = self.width.saturating_sub(1);
         }
 
-        // 5) Remap command-block and prompt-row indices (Task 113, Bug R).
-        //    These fields are buffer-absolute row indices; reflow changed the
-        //    row count, so they would otherwise point at the wrong rows,
+        // 5) Translate every stored row number (Task 113, Bug R; Task
+        //    125.14). Reflow changed the row boundaries, so command blocks,
+        //    prompt rows and the saved cursor would otherwise point at the
+        //    wrong rows (or, now that rows are renumbered, at nothing),
         //    corrupting the command-block gutter and fold layout.
-        self.remap_block_rows_after_reflow(&old_row_meta, &line_new_starts);
+        let remap = ReflowRemap::single(
+            old_base,
+            self.rows.base(),
+            old_row_meta,
+            line_new_starts,
+            new_row_cells,
+        );
+        self.record_reflow_remap(remap);
     }
 
-    /// Translate the buffer-absolute row indices stored on `command_blocks` and
-    /// `prompt_rows` to their post-reflow positions.
+    /// Apply a reflow's [`ReflowRemap`] to every row number the buffer holds
+    /// (prompt marks, command blocks, the saved cursor) and remember it for
+    /// [`Self::take_reflow_remap`].
     ///
-    /// `old_row_meta[r]` is `(logical_line_idx, flat_offset_of_row_start)` for
-    /// each old row `r`; `line_new_starts[line_idx]` is the index in the new
-    /// `self.rows` where that logical line's re-wrapped rows begin.  An old row
-    /// is mapped to the new row of its logical line whose cumulative cell span
-    /// contains the old row's first-cell flat offset — the same flat-offset
-    /// strategy the cursor remap uses.
-    ///
-    /// Block/prompt rows that no longer map onto a real row (their old index is
-    /// past the end of the pre-reflow buffer) are dropped, mirroring
-    /// `adjust_prompt_rows`, which drops fully-scrolled-out blocks.  Block
-    /// ordering and the `command_blocks` deque cap are preserved (this only
-    /// rewrites row fields and may drop whole entries; it never reorders).
-    fn remap_block_rows_after_reflow(
-        &mut self,
-        old_row_meta: &[(usize, usize, usize)],
-        line_new_starts: &[usize],
-    ) {
-        let new_len = self.rows.len();
-
-        // Translate a flat offset within a logical line to the new absolute row
-        // index whose cell span contains it.
-        let offset_to_new_row = |line_idx: usize, flat_offset: usize| -> Option<usize> {
-            let line_start = *line_new_starts.get(line_idx)?;
-            // The line's new rows span [line_start, line_end).
-            let line_end = line_new_starts
-                .get(line_idx + 1)
-                .copied()
-                .unwrap_or(new_len);
-
-            let mut acc = 0usize;
-            for new_idx in line_start..line_end {
-                let cells = self.rows[new_idx].characters().len();
-                // A zero-width row (empty logical line) still anchors offset 0.
-                if flat_offset < acc + cells.max(1) {
-                    return Some(new_idx);
-                }
-                acc += cells;
-            }
-            // Offset past the end of the line's content: clamp to the line's
-            // last new row (the cursor remap uses the same fallback).
-            Some(line_end.saturating_sub(1).max(line_start))
-        };
-
-        // A "start" field (prompt/command/output start) anchors to the FIRST
-        // cell of its old row, so it maps to the new row where that old row's
-        // content begins.
-        let map_start_row = |old_row: usize| -> Option<usize> {
-            let (line_idx, row_start, _len) = *old_row_meta.get(old_row)?;
-            offset_to_new_row(line_idx, row_start)
-        };
-
-        // An "end" field (`end_row`) marks the LAST row of a region (the GUI
-        // treats `[output_start_row, end_row]` as an inclusive range), so it
-        // anchors to the LAST cell of its old row — otherwise a row that
-        // re-wraps into several narrower rows would shrink the region to its
-        // first piece.
-        let map_end_row = |old_row: usize| -> Option<usize> {
-            let (line_idx, row_start, len) = *old_row_meta.get(old_row)?;
-            let last_cell = row_start + len.saturating_sub(1);
-            offset_to_new_row(line_idx, last_cell)
-        };
-
+    /// Marks that no longer map onto a real row (already evicted, or past the
+    /// end of the pre-reflow rows) are dropped, as fully-scrolled-out blocks
+    /// are by eviction pruning. Block ordering and the `command_blocks` deque
+    /// cap are preserved (this only rewrites row fields and may drop whole
+    /// entries; it never reorders). Only marks in the namespace the remap
+    /// renumbers are affected.
+    fn record_reflow_remap(&mut self, remap: ReflowRemap) {
         self.prompt_rows.retain_mut(|r| {
-            map_start_row(*r).is_some_and(|new_r| {
+            remap.map_start(*r).is_some_and(|new_r| {
                 *r = new_r;
                 true
             })
@@ -739,17 +726,48 @@ impl Buffer {
         self.command_blocks.retain_mut(|b| {
             // The prompt-start row anchors the block; if it cannot be mapped,
             // the block has no valid home and is dropped.
-            let Some(new_prompt) = map_start_row(b.prompt_start_row) else {
+            let Some(new_prompt) = remap.map_start(b.prompt_start_row) else {
                 return false;
             };
             b.prompt_start_row = new_prompt;
             // Optional later fields are remapped where present; if a field no
-            // longer maps it is cleared rather than left dangling.
-            b.command_start_row = b.command_start_row.and_then(map_start_row);
-            b.output_start_row = b.output_start_row.and_then(map_start_row);
-            b.end_row = b.end_row.and_then(map_end_row);
+            // longer maps it is cleared rather than left dangling. A "start"
+            // field anchors to the FIRST cell of its old row; `end_row` marks
+            // the LAST row of an inclusive region, so it anchors to the LAST
+            // cell of its old row (otherwise a row that re-wraps into several
+            // narrower rows would shrink the region to its first piece).
+            b.command_start_row = b.command_start_row.and_then(|r| remap.map_start(r));
+            b.output_start_row = b.output_start_row.and_then(|r| remap.map_start(r));
+            b.end_row = b.end_row.and_then(|r| remap.map_end(r));
             true
         });
+
+        // The saved cursor keeps its column (clamped on restore, as before)
+        // and follows its row. An unmappable row is left as is: it lies below
+        // the base and the restore clamps it to the oldest row.
+        if let Some(saved) = self.saved_cursor.as_mut()
+            && let Some(row) = remap.map_start(saved.row)
+        {
+            saved.row = row;
+        }
+
+        match self.pending_reflow_remap.as_mut() {
+            Some(pending) => pending.chain(remap),
+            None => self.pending_reflow_remap = Some(remap),
+        }
+    }
+
+    /// Take the translation produced by every reflow since the last call, or
+    /// `None` if there was none.
+    ///
+    /// The buffer applies the remap to the row numbers it owns itself (prompt
+    /// marks, command blocks, saved cursor). A consumer that keeps row numbers
+    /// elsewhere -- the emulator's kitty placement table -- calls this after
+    /// any operation that may reflow (a resize, DECCOLM) and translates its
+    /// own numbers with [`ReflowRemap::map_start`]. A number the remap cannot
+    /// translate lies below [`Buffer::row_base`]: its row is gone.
+    pub const fn take_reflow_remap(&mut self) -> Option<ReflowRemap> {
+        self.pending_reflow_remap.take()
     }
 
     /// Adjust the buffer rows for a new height and return the adjusted `scroll_offset`.
@@ -851,8 +869,8 @@ impl Buffer {
                     // The alternate screen never accumulates scrollback and
                     // so never compresses anything; the store drains the
                     // (all-`None`) block map in lockstep regardless.
-                    let evicted = self.rows.evict_front(excess).rows;
-                    self.adjust_prompt_rows(evicted);
+                    let _ = self.rows.evict_front(excess);
+                    self.prune_evicted_marks();
                     // Adjust cursor Y for the removed rows.
                     self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
                 }
@@ -994,7 +1012,7 @@ impl Buffer {
         // reclaim it immediately rather than leaking it in `self.blocks`
         // forever (Task 119.4).
         self.gc_unreferenced_blocks();
-        self.adjust_prompt_rows(overflow);
+        self.prune_evicted_marks();
 
         // Task #405 fix: once scrollback is at capacity, every line feed
         // pushes one row at the bottom (via `push_row`/`handle_lf`) and this
@@ -1172,7 +1190,14 @@ impl Buffer {
         // compressed. Moving rather than cloning is unobservable: the live
         // store is overwritten with the blank screen regardless, so the old
         // clone was only ever the saved copy's source.
-        let blank_screen: RowStore = (0..self.height).map(|_| Row::new(self.width)).collect();
+        //
+        // The alternate screen's rows are numbered in their own namespace,
+        // continuing past every earlier alternate session (Task 125.14), so a
+        // primary-screen row number can never alias an alternate row.
+        let blank_screen = RowStore::from_rows_at(
+            self.next_alt_base,
+            (0..self.height).map(|_| Row::new(self.width)),
+        );
         let saved = SavedPrimaryState {
             rows: std::mem::replace(&mut self.rows, blank_screen),
             cursor: self.cursor.clone(),
@@ -1237,7 +1262,11 @@ impl Buffer {
         if let Some(saved) = self.saved_primary.take() {
             // Restore saved primary state.
             let restored_offset = saved.scroll_offset;
+            // The next alternate session continues past this one's rows, and
+            // every mark taken during this one is dropped with its rows.
+            self.next_alt_base = self.rows.next_number();
             self.rows = saved.rows;
+            self.drop_alternate_marks();
             // Task 121 Part C: the row cache was just replaced wholesale with
             // the restored primary screen's cache — the alternate screen's
             // stale `merge_cache` must not be reused against it.

@@ -991,10 +991,11 @@ fn spawn_pty_consumer_thread(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     /// Helper: build a fresh `CommandBlock` with the given fid.
     fn block_with_fid(fid: &str) -> CommandBlock {
-        CommandBlock::new_running(0, None, fid.to_owned())
+        CommandBlock::new_running(RowNumber::ZERO, None, fid.to_owned())
     }
 
     #[test]

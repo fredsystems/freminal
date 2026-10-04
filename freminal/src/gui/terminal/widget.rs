@@ -289,7 +289,8 @@ impl FoldLayout {
             freminal_common::buffer_states::command_block::CommandBlockId,
         >,
     ) -> Self {
-        let raw_fold_ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let raw_fold_ranges =
+            compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
         let flat_window_start =
             super::coords::visible_window_start(snap).saturating_sub(snap.window_extra_rows);
         let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
@@ -357,6 +358,7 @@ fn gutter_block_id_at_pos(
             let buffer_row = layout.flat_window_start + snap_row;
             crate::gui::command_blocks::gutter_block_for_row(
                 &snap.command_blocks,
+                snap.row_base,
                 buffer_row,
                 running_extent,
             )
@@ -441,11 +443,14 @@ pub(super) fn compute_command_block_hover_rows(
         super::coords::visible_window_start(snap) + snap.term_height.saturating_sub(1);
     let block = crate::gui::command_blocks::gutter_block_for_row(
         &snap.command_blocks,
+        snap.row_base,
         buffer_row,
         running_extent,
     )?;
-    let start = block.command_start_row?;
-    let end = block.end_row.unwrap_or(running_extent);
+    // The block stores logical row numbers; resolve them to buffer indices.
+    let block_rows = crate::gui::command_blocks::BlockRows::resolve(block, snap.row_base)?;
+    let start = block_rows.command_start?;
+    let end = block_rows.end.unwrap_or(running_extent);
     // Clip [start, end] to the flattened window, then convert each endpoint
     // into screen-row space.  If the entire block sits inside a fold or is
     // scrolled off the top, None.
@@ -1027,10 +1032,7 @@ fn render_context_menu_area(
     // captured C marker and a recorded D marker.
     let command_output_range = view_state.context_menu_cell.and_then(|cell| {
         let block = super::input::find_block_containing_row(snap, cell.row)?;
-        match (block.output_start_row, block.end_row) {
-            (Some(start), Some(end)) if start <= end => Some((start, end)),
-            _ => None,
-        }
+        super::input::block_output_range(block, snap.row_base)
     });
 
     egui::Area::new(area_id)
@@ -4313,6 +4315,7 @@ impl FreminalTerminalWidget {
                             let buffer_row = win_start + snap_row;
                             crate::gui::command_blocks::gutter_status_for_row(
                                 &snap.command_blocks,
+                                snap.row_base,
                                 buffer_row,
                                 running_extent,
                             )
@@ -4399,6 +4402,7 @@ impl FreminalTerminalWidget {
                 let Some(last_visible_buffer_row) =
                     crate::gui::command_blocks::duration_label_anchor_row(
                         block,
+                        snap.row_base,
                         win_start,
                         win_end,
                         running_extent,
@@ -6561,6 +6565,7 @@ mod gutter_hover_trigger_tests {
     //! cells does not tint a command block.
     use super::*;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::{CommandBlocksConfig, GutterPosition};
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use std::time::SystemTime;
@@ -6577,10 +6582,10 @@ mod gutter_hover_trigger_tests {
         let block = CommandBlock {
             id: CommandBlockId::next(),
             fid: "t".to_owned(),
-            prompt_start_row: 1,
-            command_start_row: Some(1),
-            output_start_row: Some(2),
-            end_row: Some(3),
+            prompt_start_row: RowNumber::new(1),
+            command_start_row: Some(RowNumber::new(1)),
+            output_start_row: Some(RowNumber::new(2)),
+            end_row: Some(RowNumber::new(3)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,

@@ -1336,6 +1336,24 @@ to logical numbers; delete the eviction-time rewrite in `adjust_prompt_rows`.
 Regression tests prove each previously drifting reference stays attached to
 its row across eviction.
 
+**Complete.** `RowNumber` lives in `freminal-common`; `RowStore` carries
+`base`; prompts, command blocks, DECSC, image origins, and kitty placements hold
+numbers; `adjust_prompt_rows` is replaced by leading-run pruning; reflow returns
+a staged `ReflowRemap` consumed by the handler on every resize and DECCOLM path;
+the alternate screen has its own namespace; `rows_after` returns `None` across
+namespaces; the snapshot exports `row_base` and numbered marks, and the GUI
+resolves blocks through `BlockRows::resolve`. A code review found no blockers;
+its four fixes are applied. Additional accepted behaviour changes: DECRC
+restores to its content row only while that row is inside the visible window,
+otherwise it clamps to the window's top or bottom (never into off-screen
+scrollback; the xterm question remains 125.C6); command-block gutters, folds,
+and palette entries for primary blocks resolve to nothing while the alternate
+screen is up (previously primary indices were misapplied to alt rows); a kitty
+relative child whose origin is no longer retained is registered but not
+stamped. Benchmarks against `before_125_rowstore`: plain -0.8%, compressed
++0.6%, prompts -6.7%, image -1.7%, emulator burst -1.7%; snapshot benches
+unchanged.
+
 ### 125.15 — O(evicted) eviction
 
 Scope: `freminal-buffer`.

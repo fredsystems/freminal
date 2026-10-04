@@ -27,12 +27,24 @@
 //! [`RowStore::cache`] / [`RowStore::block_map`] and their `_mut` forms, or
 //! all at once, as disjoint borrows, through [`RowStore::split_mut`].
 //!
+//! # Logical row numbers (Task 125.14)
+//!
+//! The store also owns a `base`: the [`RowNumber`] of the row at index `0`.
+//! Row `i` is numbered `base + i`. Front eviction advances `base` by the number
+//! of rows removed, so a surviving row's number never changes; anything that
+//! must keep pointing at a row across eviction stores its [`RowNumber`] and
+//! converts back with [`RowStore::index_of`]. A number is never re-issued after
+//! front eviction (a trailing [`RowStore::pop`] does re-issue the popped row's
+//! number: that row was never durable content, only blank screen padding).
+//!
 //! Storage is currently three plain `Vec`s and eviction from the front drains
 //! all three (O(retained rows)). The public surface is deliberately shaped so
 //! a later change to the eviction mechanism changes this file's internals
 //! only.
 
 use std::ops::{Deref, DerefMut};
+
+use freminal_common::buffer_states::row_number::RowNumber;
 
 use crate::row::Row;
 
@@ -51,14 +63,58 @@ pub(in crate::buffer) struct EvictionReport {
 
 /// Rows, their flatten-cache entries, and their compressed-block references,
 /// kept index-parallel by construction. See the module docs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(in crate::buffer) struct RowStore {
     rows: Vec<Row>,
     cache: Vec<Option<RowCacheEntry>>,
     blocks: Vec<Option<BlockRowRef>>,
+    /// Logical number of the row at index `0`. See the module docs.
+    base: RowNumber,
 }
 
 impl RowStore {
+    // ----------------------------------------------------------------
+    // Logical row numbers
+    // ----------------------------------------------------------------
+
+    /// Logical number of the oldest retained row (index `0`).
+    pub(in crate::buffer) const fn base(&self) -> RowNumber {
+        self.base
+    }
+
+    /// Logical number the next pushed row would receive: `base + len`.
+    pub(in crate::buffer) fn next_number(&self) -> RowNumber {
+        self.base.saturating_add(self.rows.len())
+    }
+
+    /// Logical number of the row at `index`.
+    ///
+    /// Defined for any index, including one past the end (the number the next
+    /// pushed row will get); it is plain arithmetic, not a bounds check.
+    pub(in crate::buffer) fn number_of(&self, index: usize) -> RowNumber {
+        self.base.saturating_add(index)
+    }
+
+    /// Retained index of the row numbered `number`, or `None` when no such row
+    /// is stored: evicted (below `base`), not yet created (at or past
+    /// `next_number`), or in a different namespace.
+    pub(in crate::buffer) fn index_of(&self, number: RowNumber) -> Option<usize> {
+        number
+            .rows_after(self.base)
+            .filter(|&index| index < self.rows.len())
+    }
+
+    /// A store of `rows` whose first row is numbered `base`; every cache entry
+    /// and block reference is `None`.
+    pub(in crate::buffer) fn from_rows_at(
+        base: RowNumber,
+        rows: impl IntoIterator<Item = Row>,
+    ) -> Self {
+        let mut store: Self = rows.into_iter().collect();
+        store.base = base;
+        store
+    }
+
     // ----------------------------------------------------------------
     // Read access
     // ----------------------------------------------------------------
@@ -171,36 +227,63 @@ impl RowStore {
     /// their cache entries and block references.
     ///
     /// `BlockRowRef::offset_in_block` is block-relative, so removing the front
-    /// of the block map needs no remapping of the surviving references. The
-    /// caller remains responsible for any bookkeeping keyed on the removed
-    /// rows (image cell counts, compressed-block reclamation, prompt rows).
+    /// of the block map needs no remapping of the surviving references.
+    /// [`Self::base`] advances by the number of rows removed, so every
+    /// surviving row keeps its logical number. The caller remains responsible
+    /// for any bookkeeping keyed on the removed rows (image cell counts,
+    /// compressed-block reclamation).
     pub(in crate::buffer) fn evict_front(&mut self, n: usize) -> EvictionReport {
         let n = n.min(self.rows.len());
         self.rows.drain(..n);
         self.cache.drain(..n);
         self.blocks.drain(..n);
+        self.base = self.base.saturating_add(n);
         EvictionReport { rows: n }
     }
 
     /// Replace every row with `rows`, resetting the cache and block map to
     /// match: every entry `None`.
+    ///
+    /// The new rows are numbered from the *old* [`Self::next_number`], so no
+    /// row number is ever reused: anything still holding a number from the
+    /// replaced content falls below the new `base` and is detectably invalid
+    /// rather than aliasing a new row.
     pub(in crate::buffer) fn replace_all(&mut self, rows: Vec<Row>) {
-        *self = rows.into_iter().collect();
+        let base = self.next_number();
+        *self = Self::from_rows_at(base, rows);
     }
 
     /// Remove and return every row, leaving the store empty (all three tables
     /// empty, so still in lockstep). The cache entries and block references
-    /// are discarded with the store's old contents.
+    /// are discarded with the store's old contents. [`Self::base`] advances
+    /// past the removed rows so numbers are not reused.
     pub(in crate::buffer) fn take_rows(&mut self) -> Vec<Row> {
-        std::mem::take(self).rows
+        let next = self.next_number();
+        let taken = std::mem::take(self);
+        self.base = next;
+        taken.rows
     }
 
-    /// Remove every row, cache entry and block reference.
+    /// Remove every row, cache entry and block reference. [`Self::base`]
+    /// advances past the removed rows.
     #[cfg(test)]
     pub(in crate::buffer) fn clear_all(&mut self) {
+        self.base = self.next_number();
         self.rows.clear();
         self.cache.clear();
         self.blocks.clear();
+    }
+}
+
+impl Default for RowStore {
+    /// An empty store numbered from [`RowNumber::ZERO`].
+    fn default() -> Self {
+        Self {
+            rows: Vec::new(),
+            cache: Vec::new(),
+            blocks: Vec::new(),
+            base: RowNumber::ZERO,
+        }
     }
 }
 
@@ -243,7 +326,8 @@ impl<'a> IntoIterator for &'a mut RowStore {
 
 impl FromIterator<Row> for RowStore {
     /// Build a store from rows, giving each an empty cache entry and no block
-    /// reference.
+    /// reference. Numbering starts at [`RowNumber::ZERO`]; use
+    /// [`RowStore::from_rows_at`] for another base.
     fn from_iter<I: IntoIterator<Item = Row>>(iter: I) -> Self {
         let rows: Vec<Row> = iter.into_iter().collect();
         let len = rows.len();
@@ -251,6 +335,7 @@ impl FromIterator<Row> for RowStore {
             rows,
             cache: vec![None; len],
             blocks: vec![None; len],
+            base: RowNumber::ZERO,
         }
     }
 }
@@ -597,5 +682,140 @@ mod tests {
         assert_eq!(store.cache()[1].as_ref().map(|e| e.bytes.len()), Some(5));
         assert!(store.cache()[2..].iter().all(Option::is_none));
         assert!(store.block_map()[2..].iter().all(Option::is_none));
+    }
+
+    // ── Logical row numbers (Task 125.14) ───────────────────────────────
+
+    #[test]
+    fn default_and_from_iter_stores_are_numbered_from_zero() {
+        assert_eq!(RowStore::default().base(), RowNumber::ZERO);
+        let store = full_store(3);
+        assert_eq!(store.base(), RowNumber::ZERO);
+        assert_eq!(store.next_number(), RowNumber::new(3));
+    }
+
+    #[test]
+    fn from_rows_at_numbers_the_first_row_at_the_given_base() {
+        let store = RowStore::from_rows_at(RowNumber::new(40), (0..3).map(marked_row));
+        assert_eq!(store.base(), RowNumber::new(40));
+        assert_eq!(store.next_number(), RowNumber::new(43));
+        assert_eq!(store.number_of(2), RowNumber::new(42));
+        assert_lockstep(&store);
+    }
+
+    #[test]
+    fn number_of_and_index_of_are_inverse_within_the_stored_rows() {
+        let store = RowStore::from_rows_at(RowNumber::new(10), (0..4).map(marked_row));
+        for i in 0..4 {
+            assert_eq!(store.index_of(store.number_of(i)), Some(i));
+        }
+    }
+
+    #[test]
+    fn index_of_rejects_numbers_outside_the_stored_rows() {
+        let store = RowStore::from_rows_at(RowNumber::new(10), (0..4).map(marked_row));
+        assert_eq!(store.index_of(RowNumber::new(9)), None, "below the base");
+        assert_eq!(store.index_of(RowNumber::new(14)), None, "past the end");
+        assert_eq!(store.index_of(RowNumber::ZERO), None);
+        assert_eq!(
+            store.index_of(RowNumber::ALTERNATE_BASE),
+            None,
+            "other namespace"
+        );
+    }
+
+    #[test]
+    fn number_of_past_the_end_is_the_next_number() {
+        let store = full_store(3);
+        assert_eq!(store.number_of(3), store.next_number());
+    }
+
+    #[test]
+    fn evict_front_advances_the_base_and_keeps_surviving_numbers() {
+        let mut store = full_store(6);
+        let survivor = store.number_of(4);
+        let _ = store.evict_front(2);
+        assert_eq!(store.base(), RowNumber::new(2));
+        assert_eq!(store.index_of(survivor), Some(2));
+        assert_eq!(marker_of(&store[2]), 4, "the number still names row 4");
+        assert_eq!(store.index_of(RowNumber::new(1)), None, "evicted");
+    }
+
+    #[test]
+    fn evict_front_advances_the_base_by_the_clamped_count_only() {
+        let mut store = full_store(3);
+        let _ = store.evict_front(10);
+        assert_eq!(store.base(), RowNumber::new(3));
+        assert_eq!(store.next_number(), RowNumber::new(3));
+        let _ = store.evict_front(0);
+        assert_eq!(store.base(), RowNumber::new(3));
+    }
+
+    #[test]
+    fn numbers_are_not_reissued_after_front_eviction() {
+        let mut store = full_store(4);
+        let _ = store.evict_front(2);
+        store.push(marked_row(50));
+        store.push(marked_row(51));
+        // 4 rows existed (numbers 0..4); 2 evicted; 2 pushed: next numbers 4, 5.
+        assert_eq!(store.number_of(2), RowNumber::new(4));
+        assert_eq!(store.next_number(), RowNumber::new(6));
+        assert_eq!(store.index_of(RowNumber::new(0)), None);
+        assert_eq!(store.index_of(RowNumber::new(1)), None);
+    }
+
+    #[test]
+    fn pop_reissues_only_the_trailing_rows_number() {
+        let mut store = full_store(3);
+        let _ = store.pop();
+        assert_eq!(store.base(), RowNumber::ZERO, "pop never moves the base");
+        assert_eq!(store.next_number(), RowNumber::new(2));
+        store.push(marked_row(9));
+        assert_eq!(
+            store.number_of(2),
+            RowNumber::new(2),
+            "tail number re-issued"
+        );
+    }
+
+    #[test]
+    fn replace_all_numbers_the_new_rows_past_the_old_ones() {
+        let mut store = full_store(4);
+        let old_row = store.number_of(1);
+        store.replace_all(vec![marked_row(10), marked_row(11)]);
+        assert_eq!(
+            store.base(),
+            RowNumber::new(4),
+            "numbered from old next_number"
+        );
+        assert_eq!(store.index_of(old_row), None, "old numbers do not alias");
+        assert_eq!(store.index_of(RowNumber::new(5)), Some(1));
+    }
+
+    #[test]
+    fn take_rows_advances_the_base_past_the_removed_rows() {
+        let mut store = full_store(3);
+        let _ = store.take_rows();
+        assert_eq!(store.base(), RowNumber::new(3));
+        assert!(store.is_empty());
+        // A following replace_all keeps counting forward.
+        store.replace_all(vec![marked_row(1)]);
+        assert_eq!(store.base(), RowNumber::new(3));
+        assert_eq!(store.number_of(0), RowNumber::new(3));
+    }
+
+    #[test]
+    fn clear_all_advances_the_base_past_the_removed_rows() {
+        let mut store = full_store(4);
+        store.clear_all();
+        assert_eq!(store.base(), RowNumber::new(4));
+        assert_eq!(store.next_number(), RowNumber::new(4));
+    }
+
+    #[test]
+    fn clone_preserves_the_base() {
+        let mut store = full_store(5);
+        let _ = store.evict_front(3);
+        assert_eq!(store.clone().base(), RowNumber::new(3));
     }
 }

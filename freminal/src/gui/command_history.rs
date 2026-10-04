@@ -57,6 +57,7 @@ use freminal_terminal_emulator::io::InputEvent;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use tracing::{debug, error, trace, warn};
 
+use super::command_blocks::BlockRows;
 use super::panes::PaneId;
 use super::view_state::CommandHistoryState;
 
@@ -136,8 +137,11 @@ pub enum PaletteAction {
 /// place of internal newlines so the palette displays them compactly.
 #[must_use]
 pub fn extract_command_text(snap: &TerminalSnapshot, block: &CommandBlock) -> Option<String> {
-    let cmd_start_buf = block.command_start_row?;
-    let cmd_end_buf = block.output_start_row?;
+    // The block stores logical row numbers; resolve them to the snapshot's
+    // buffer-absolute indices (a block whose prompt row was evicted is gone).
+    let block_rows = BlockRows::resolve(block, snap.row_base)?;
+    let cmd_start_buf = block_rows.command_start?;
+    let cmd_end_buf = block_rows.output_start?;
     if cmd_end_buf < cmd_start_buf {
         trace!(
             "extract_command_text: degenerate row range {cmd_start_buf}..{cmd_end_buf} -- skipping"
@@ -581,6 +585,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::*;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ── Test helpers ────────────────────────────────────────────────
 
@@ -617,6 +622,12 @@ mod tests {
         snap
     }
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     fn finished_block(
         prompt_row: usize,
         cmd_start: Option<usize>,
@@ -626,10 +637,10 @@ mod tests {
         CommandBlock {
             id: CommandBlockId::next(),
             fid: "test".to_owned(),
-            prompt_start_row: prompt_row,
-            command_start_row: cmd_start,
-            output_start_row: output_start,
-            end_row: Some(output_start.unwrap_or(prompt_row) + 1),
+            prompt_start_row: rn(prompt_row),
+            command_start_row: cmd_start.map(rn),
+            output_start_row: output_start.map(rn),
+            end_row: Some(rn(output_start.unwrap_or(prompt_row) + 1)),
             exit_code,
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,

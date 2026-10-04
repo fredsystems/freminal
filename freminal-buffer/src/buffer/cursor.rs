@@ -10,8 +10,9 @@
 //! (`get_cursor_screen_pos`, `cursor_screen_y`), and DECSC/DECRC save/restore.
 
 use freminal_common::buffer_states::{
-    cursor::CursorPos,
+    cursor::{CursorPos, CursorState},
     modes::{declrmm::Declrmm, decom::Decom},
+    row_number::RowNumber,
 };
 
 use crate::row::{RowJoin, RowOrigin};
@@ -19,7 +20,60 @@ use crate::row::{RowJoin, RowOrigin};
 use super::clamped_offset;
 use crate::buffer::Buffer;
 
+/// A DECSC-saved cursor (Task 125.14).
+///
+/// `cursor.pos.y` is the retained index the cursor had when it was saved. It
+/// is kept only for the one case where it is still meaningful: a restore into
+/// a different row namespace (see [`Buffer::restore_cursor`]). Everywhere else
+/// the saved *row* is `row`, a stable [`RowNumber`], so eviction between save
+/// and restore cannot shift it onto a different row.
+#[derive(Debug, Clone)]
+pub(in crate::buffer) struct SavedCursor {
+    /// The cursor state at the time of the save.
+    pub(in crate::buffer) cursor: CursorState,
+    /// The logical number of the row the cursor was on.
+    pub(in crate::buffer) row: RowNumber,
+}
+
 impl Buffer {
+    /// Logical number of the oldest retained row of the active screen.
+    ///
+    /// Row `i` of [`Self::rows`] is numbered `row_base() + i`. Advances when
+    /// rows are evicted from the front; never moves backwards.
+    #[must_use]
+    pub const fn row_base(&self) -> RowNumber {
+        self.rows.base()
+    }
+
+    /// Logical number the next row appended to the active screen will get:
+    /// `row_base() + rows().len()`.
+    #[must_use]
+    pub fn next_row_number(&self) -> RowNumber {
+        self.rows.next_number()
+    }
+
+    /// Logical number of the row at retained index `index` of the active screen.
+    ///
+    /// Plain arithmetic: it does not check that `index` is in range.
+    #[must_use]
+    pub fn row_number_at(&self, index: usize) -> RowNumber {
+        self.rows.number_of(index)
+    }
+
+    /// Retained index of the row numbered `number`, or `None` if it is no
+    /// longer (or not yet) stored on the active screen: evicted, past the end,
+    /// or numbered in the other screen's namespace.
+    #[must_use]
+    pub fn row_index_of(&self, number: RowNumber) -> Option<usize> {
+        self.rows.index_of(number)
+    }
+
+    /// Logical number of the row the cursor is on.
+    #[must_use]
+    pub fn cursor_row_number(&self) -> RowNumber {
+        self.rows.number_of(self.cursor.pos.y)
+    }
+
     /// Set the cursor to an absolute buffer position without any DECOM or
     /// screen-relative translation.
     ///
@@ -156,7 +210,10 @@ impl Buffer {
     ///
     /// Saves the current cursor position (and associated `CursorState`).
     pub fn save_cursor(&mut self) {
-        self.saved_cursor = Some(self.cursor.clone());
+        self.saved_cursor = Some(SavedCursor {
+            cursor: self.cursor.clone(),
+            row: self.cursor_row_number(),
+        });
     }
 
     /// Implements DECRC – Restore Cursor.
@@ -165,15 +222,40 @@ impl Buffer {
     /// saved, this is a no-op.  The restored position is clamped to the
     /// current buffer dimensions so a resize between save and restore never
     /// produces an out-of-bounds cursor.
+    ///
+    /// The restored row is content-attached: the row that held the cursor at
+    /// save time, wherever eviction has since moved it. The cursor is never
+    /// restored outside the visible window, however, since writing into
+    /// off-screen scrollback is wrong:
+    ///
+    /// - the saved row resolves to a retained row inside the window: restored
+    ///   to it;
+    /// - the saved row is above the window (scrolled into scrollback, or
+    ///   evicted): restored to the window's top row;
+    /// - the saved row is past the end of the rows (they were popped, e.g. by
+    ///   a height grow reclaiming trailing padding): restored to the window's
+    ///   bottom row.
+    ///
+    /// A save made on the other screen (a different row namespace, so the row
+    /// cannot be located here) falls back to the retained index recorded at
+    /// save time, clamped into the window the same way.
     pub fn restore_cursor(&mut self) {
         if let Some(saved) = self.saved_cursor.clone() {
-            self.cursor = saved;
+            // The visible window is bottom-anchored: [top, bottom] inclusive.
+            let top = self.visible_window_start(0);
+            let bottom = self.rows.len().saturating_sub(1).max(top);
+            let row = if saved.row.is_alternate() == self.rows.base().is_alternate() {
+                // `None`: evicted (below the base), which is above any window.
+                saved.row.rows_after(self.rows.base()).unwrap_or(0)
+            } else {
+                saved.cursor.pos.y
+            };
+            self.cursor = saved.cursor;
             // Clamp to current dimensions after restore.
             if self.width > 0 {
                 self.cursor.pos.x = self.cursor.pos.x.min(self.width - 1);
             }
-            let max_row = self.rows.len().saturating_sub(1);
-            self.cursor.pos.y = self.cursor.pos.y.min(max_row);
+            self.cursor.pos.y = row.clamp(top, bottom);
             self.debug_assert_invariants();
         }
         // No saved cursor → silent no-op.

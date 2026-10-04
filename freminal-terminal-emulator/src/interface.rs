@@ -64,6 +64,7 @@ use freminal_common::buffer_states::modes::{
     decarm::Decarm, decbkm::Decbkm, decckm::Decckm, keypad::KeypadMode, lnm::Lnm,
     mouse::MouseEncoding, mouse::MouseTrack, rl_bracket::RlBracket,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 
 use freminal_common::{args::Args, buffer_states::tchar::TChar, send_or_log};
 
@@ -841,7 +842,8 @@ impl TerminalEmulator {
 
         let ftcs_state = self.internal.handler.ftcs_state();
         let last_exit_code = self.internal.handler.last_exit_code();
-        let prompt_rows = Arc::<[usize]>::from(self.internal.handler.buffer().prompt_rows());
+        let row_base = self.internal.handler.buffer().row_base();
+        let prompt_rows = Arc::<[RowNumber]>::from(self.internal.handler.buffer().prompt_rows());
         let command_blocks: Arc<[CommandBlock]> = self
             .internal
             .handler
@@ -954,6 +956,7 @@ impl TerminalEmulator {
             shell_histfile,
             ftcs_state,
             last_exit_code,
+            row_base,
             prompt_rows,
             command_blocks,
             theme,
@@ -2013,6 +2016,75 @@ mod tests {
             Some(0),
             "exit_code must be Some(0) — OscValue token must not be dropped"
         );
+    }
+
+    // ── logical row numbers in TerminalSnapshot (Task 125.14) ─────────────────
+
+    #[test]
+    fn build_snapshot_row_base_is_zero_before_any_eviction() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(None);
+        emu.handle_incoming_data(b"hello\r\n");
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.row_base, RowNumber::ZERO);
+        assert_eq!(snap.row_number_at(0), RowNumber::ZERO);
+        assert_eq!(snap.retained_index_of(RowNumber::ZERO), Some(0));
+    }
+
+    #[test]
+    fn build_snapshot_row_base_advances_with_eviction_and_marks_stay_attached() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        // A prompt mark and block on a row that survives the later eviction.
+        for i in 0..20 {
+            emu.handle_incoming_data(format!("pad {i}\r\n").as_bytes());
+        }
+        emu.handle_incoming_data(b"\x1b]133;A;freminal=1;fid=t1\x07");
+        emu.handle_incoming_data(b"prompt$ \r\n");
+        let first = emu.build_snapshot();
+        assert_eq!(first.row_base, RowNumber::ZERO);
+        assert_eq!(first.prompt_rows.len(), 1);
+        let mark = first.prompt_rows[0];
+        let Some(index_before) = first.retained_index_of(mark) else {
+            panic!("the mark must resolve before any eviction");
+        };
+
+        // Push past the scrollback limit so rows are evicted from the front,
+        // stopping as soon as the first few have gone (the mark's row, well
+        // below the top, must survive).
+        let evicted = (0..500).find_map(|i| {
+            emu.handle_incoming_data(format!("out {i}\r\n").as_bytes());
+            let snap = emu.build_snapshot();
+            (snap.row_base > RowNumber::ZERO).then_some(snap)
+        });
+        let Some(snap) = evicted else {
+            panic!("500 lines at a scrollback limit of 10 must evict rows");
+        };
+
+        assert!(
+            snap.row_base > RowNumber::ZERO,
+            "at capacity the snapshot's row base must advance (total_rows is frozen)"
+        );
+        assert_eq!(
+            snap.prompt_rows[0], mark,
+            "the exported number is unchanged"
+        );
+        let Some(index_after) = snap.retained_index_of(mark) else {
+            panic!("the mark's row is still retained");
+        };
+        assert!(index_after < index_before, "its retained index moved down");
+        assert_eq!(snap.command_blocks[0].prompt_start_row, mark);
+    }
+
+    #[test]
+    fn build_snapshot_evicted_mark_no_longer_resolves() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(5));
+        let before = emu.build_snapshot();
+        let first_row = before.row_number_at(0);
+        for i in 0..500 {
+            emu.handle_incoming_data(format!("line {i}\r\n").as_bytes());
+        }
+        let snap = emu.build_snapshot();
+        assert_eq!(snap.retained_index_of(first_row), None);
+        assert!(snap.row_base > first_row);
     }
 
     #[test]

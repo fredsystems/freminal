@@ -104,6 +104,11 @@ impl TerminalHandler {
         // Returns the saved scroll_offset from the primary screen; discarded here
         // because scroll_offset is owned by ViewState on the GUI side.
         let _restored_offset = self.buffer.leave_alternate();
+        // The alternate screen's rows are gone, and so are the placements
+        // that were recorded against them (the buffer drops its own
+        // alternate-screen marks the same way).
+        self.real_placements
+            .retain(|_, placement| !placement.origin_row.is_alternate());
         // Restore the main-screen KKP stack.
         if let Some(saved) = self.saved_kitty_keyboard_stack.take() {
             self.kitty_keyboard_stack = saved;
@@ -179,6 +184,9 @@ impl TerminalHandler {
         // scroll_offset is owned by ViewState on the GUI side; the PTY thread
         // always passes 0 when resizing.
         let _new_offset = self.buffer.set_size(width, height, 0);
+        // A width change reflows the buffer; carry the row numbers the
+        // handler itself holds (kitty placements) through the same remap.
+        self.apply_buffer_reflow_remap();
 
         if self.in_band_resize_enabled == InBandResizeMode::Set
             && (old_width != width || old_height != height)

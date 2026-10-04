@@ -26,6 +26,7 @@ use conv2::ValueFrom;
 use freminal_common::buffer_states::kitty_graphics::{
     KittyAction, KittyControlData, KittyGraphicsCommand, KittyResponseId, format_kitty_response,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 
 use freminal_buffer::image_store::{
     AnimationControl, AnimationRunMode, ImageProtocol, ImageSizeMode, InlineImage, SourceCrop,
@@ -605,7 +606,7 @@ impl TerminalHandler {
         &mut self,
         image_id: u64,
         placement_id: u32,
-        origin_row: usize,
+        origin_row: RowNumber,
         origin_col: usize,
         display_cols: usize,
         display_rows: usize,
@@ -640,7 +641,7 @@ impl TerminalHandler {
         &mut self,
         image_id: u64,
         placement_id: u32,
-        origin_row: usize,
+        origin_row: RowNumber,
         origin_col: usize,
         display_cols: usize,
         display_rows: usize,
@@ -1756,13 +1757,16 @@ impl TerminalHandler {
         v_offset: i32,
         z_index: i32,
     ) {
-        let origin_row = signed_cell_offset(parent_real.origin_row, v_offset);
+        // The parent's origin is a stable row number, so it still names the
+        // parent's row however far the buffer has scrolled since the parent
+        // was placed (Task 125.14).
+        let origin_row = parent_real.origin_row.offset(i64::from(v_offset));
         let origin_col = signed_cell_offset(parent_real.origin_col, h_offset);
 
         tracing::debug!(
             "Kitty graphics: relative placement child (image_id={child_image_id}, \
-             placement_id={child_pid}) stamped at ({origin_row},{origin_col}) \
-             (parent origin ({},{}) + H={h_offset},V={v_offset})",
+             placement_id={child_pid}) stamped at (row {origin_row},col {origin_col}) \
+             (parent origin (row {},col {}) + H={h_offset},V={v_offset})",
             parent_real.origin_row,
             parent_real.origin_col,
         );
@@ -1783,20 +1787,26 @@ impl TerminalHandler {
         // though it shares the parent's origin plus an offset.
         let placement_instance = next_placement_instance_id();
 
-        self.buffer.place_image_at(
-            child_image_id,
-            origin_row,
-            origin_col,
-            display_cols,
-            display_rows,
-            ImageProtocol::Kitty,
-            control.image_number,
-            control.placement_id,
-            z_index,
-            source_crop,
-            placement_instance,
-            subcell_offset,
-        );
+        // A child whose origin row is no longer retained (the parent was
+        // evicted, or a negative `V=` points above the oldest row) has
+        // nothing visible to stamp; it is still registered below so it can be
+        // cascade-deleted with its parent.
+        if let Some(origin_row_index) = self.buffer.row_index_of(origin_row) {
+            self.buffer.place_image_at(
+                child_image_id,
+                origin_row_index,
+                origin_col,
+                display_cols,
+                display_rows,
+                ImageProtocol::Kitty,
+                control.image_number,
+                control.placement_id,
+                z_index,
+                source_crop,
+                placement_instance,
+                subcell_offset,
+            );
+        }
 
         self.insert_real_placement(
             child_image_id,
@@ -1850,7 +1860,9 @@ impl TerminalHandler {
         self.insert_real_placement(
             child_image_id,
             child_pid,
-            0,
+            // Placeholder origin: nothing is stamped for a virtual-parent
+            // child, so its row is never read.
+            RowNumber::ZERO,
             0,
             display_cols,
             display_rows,
@@ -1945,6 +1957,25 @@ impl TerminalHandler {
         for key in &to_delete {
             self.buffer.clear_image_placements_by_id(key.0);
             self.real_placements.remove(key);
+        }
+    }
+
+    /// Translate the row numbers in `real_placements` through any reflow the
+    /// buffer has just performed (a resize, DECCOLM).
+    ///
+    /// Reflow renumbers every row, so an untranslated placement origin would
+    /// fall below the buffer's row base and stop resolving to its row. A
+    /// placement whose origin row the remap cannot translate (its row was
+    /// already evicted) is left as is: it is already below the base and
+    /// resolves to nothing, which is exactly right.
+    pub(super) fn apply_buffer_reflow_remap(&mut self) {
+        let Some(remap) = self.buffer.take_reflow_remap() else {
+            return;
+        };
+        for placement in self.real_placements.values_mut() {
+            if let Some(row) = remap.map_start(placement.origin_row) {
+                placement.origin_row = row;
+            }
         }
     }
 
@@ -3047,6 +3078,7 @@ mod tests {
     use freminal_buffer::row::Row;
 
     use super::super::TerminalHandler;
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ------------------------------------------------------------------
     // Kitty graphics direct transfer tests
@@ -4506,7 +4538,7 @@ mod tests {
             .copied()
             .expect("expected a RealPlacement for (42, 0)");
         assert_eq!(placement.image_id, 42);
-        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_row, RowNumber::new(5));
         assert_eq!(placement.origin_col, 3);
         assert_eq!(placement.parent, None);
     }
@@ -4618,7 +4650,7 @@ mod tests {
             .get(&(42, 5))
             .copied()
             .expect("expected a RealPlacement for (42, 5)");
-        assert_eq!(placement.origin_row, 5);
+        assert_eq!(placement.origin_row, RowNumber::new(5));
         assert_eq!(placement.origin_col, 3);
     }
 
@@ -4672,11 +4704,15 @@ mod tests {
             .copied()
             .expect("child B registered in real_placements");
         assert_eq!(child.parent, Some((42, 0)));
-        assert_eq!(child.origin_row, parent.origin_row + 1);
+        assert_eq!(child.origin_row, parent.origin_row.offset(1));
         assert_eq!(child.origin_col, parent.origin_col + 2);
 
         // The child's image cells are actually stamped at that offset.
-        let cell = &handler.buffer().rows()[child.origin_row].cells()[child.origin_col];
+        let child_row = handler
+            .buffer()
+            .row_index_of(child.origin_row)
+            .expect("child origin row is retained");
+        let cell = &handler.buffer().rows()[child_row].cells()[child.origin_col];
         assert!(cell.has_image(), "expected an image cell at child origin");
         assert_eq!(
             cell.image_placement().map(|p| p.image_id),
@@ -4769,9 +4805,19 @@ mod tests {
             "test setup must actually force a drain, or it can't distinguish \
              the fix from the bug"
         );
+        // Task 125.14: the recorded origin is a stable row NUMBER. It was
+        // taken at the pre-drain cursor row (row 19, base 0) and, being
+        // stable, still names the image's top row; that row's retained index
+        // after the drains is what the pre-125.14 test compared directly.
         assert_eq!(
-            placement.origin_row, expected_origin_row,
-            "100.14: origin_row must reflect the post-drain stamped row, not \
+            placement.origin_row,
+            RowNumber::new(19),
+            "origin_row must be the number of the row the image was stamped on"
+        );
+        assert_eq!(
+            handler.buffer().row_index_of(placement.origin_row),
+            Some(expected_origin_row),
+            "100.14: origin_row must resolve to the post-drain stamped row, not \
              the stale pre-call cursor row"
         );
         assert_eq!(
@@ -4784,7 +4830,11 @@ mod tests {
 
         // Ground truth: the image's cells are actually stamped at the
         // recorded origin.
-        let cell = &handler.buffer().rows()[placement.origin_row].cells()[placement.origin_col];
+        let origin_index = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("origin row is retained");
+        let cell = &handler.buffer().rows()[origin_index].cells()[placement.origin_col];
         assert!(
             cell.has_image(),
             "expected an image cell at the recorded origin_row/origin_col"
@@ -4793,6 +4843,208 @@ mod tests {
             cell.image_placement().map(|p| p.image_id),
             Some(77),
             "expected the stamped cell to reference image id 77"
+        );
+    }
+
+    /// Task 125.14: a recorded placement origin is a stable row NUMBER, so it
+    /// keeps naming the image's row when LATER output evicts rows above it
+    /// (the old physical origin drifted onto a different row).
+    #[test]
+    fn kitty_real_placement_stays_attached_to_its_row_across_eviction() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        grow_buffer_rows(&mut handler, 10);
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(61);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+        let placement = handler
+            .real_placements
+            .get(&(61, 0))
+            .copied()
+            .expect("expected a RealPlacement for (61, 0)");
+        let index_at_placement = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("origin row is retained at placement time");
+
+        // Later output evicts rows above the image (max 27 rows retained).
+        grow_buffer_rows(&mut handler, 20);
+        assert!(
+            handler.buffer().row_base() > RowNumber::ZERO,
+            "setup must evict rows"
+        );
+
+        let placement_after = handler
+            .real_placements
+            .get(&(61, 0))
+            .copied()
+            .expect("placement still recorded");
+        assert_eq!(
+            placement_after.origin_row, placement.origin_row,
+            "eviction must not rewrite the recorded origin"
+        );
+        let index_now = handler
+            .buffer()
+            .row_index_of(placement.origin_row)
+            .expect("the image's row is still retained");
+        assert!(index_now < index_at_placement, "eviction shifted the index");
+        assert!(
+            handler.buffer().rows()[index_now].cells()[placement.origin_col].has_image(),
+            "the recorded origin must still name the row holding the image"
+        );
+    }
+
+    /// Task 125.14: a relative placement made AFTER eviction resolves its
+    /// parent's row through the stable number, not through a drifted index.
+    #[test]
+    fn kitty_relative_child_lands_below_its_parent_after_eviction() {
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(80, 24).with_scrollback_limit(3);
+        handler.set_write_tx(tx);
+
+        grow_buffer_rows(&mut handler, 10);
+        let mut cmd_a = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd_a.control.image_id = Some(62);
+        cmd_a.control.display_cols = Some(2);
+        cmd_a.control.display_rows = Some(3);
+        handler.handle_kitty_graphics(cmd_a);
+        let _ = recv_response(&rx);
+        let parent = handler
+            .real_placements
+            .get(&(62, 0))
+            .copied()
+            .expect("parent registered");
+
+        grow_buffer_rows(&mut handler, 20);
+        assert!(
+            handler.buffer().row_base() > RowNumber::ZERO,
+            "setup must evict rows"
+        );
+
+        transmit_only(&mut handler, 63);
+        let _ = recv_response(&rx);
+        handler.handle_kitty_graphics(kitty_put_cmd(&KittyControlData {
+            image_id: Some(63),
+            parent_image_id: Some(62),
+            h_offset: Some(0),
+            v_offset: Some(1),
+            ..KittyControlData::default()
+        }));
+        let _ = recv_response(&rx);
+
+        let child = handler
+            .real_placements
+            .get(&(63, 0))
+            .copied()
+            .expect("child registered");
+        assert_eq!(child.origin_row, parent.origin_row.offset(1));
+        let child_index = handler
+            .buffer()
+            .row_index_of(child.origin_row)
+            .expect("child's row is retained");
+        let parent_index = handler
+            .buffer()
+            .row_index_of(parent.origin_row)
+            .expect("parent's row is retained");
+        assert_eq!(child_index, parent_index + 1);
+        assert_eq!(
+            handler.buffer().rows()[child_index].cells()[child.origin_col]
+                .image_placement()
+                .map(|p| p.image_id),
+            Some(63),
+            "the child's cells are stamped one row below the parent's origin"
+        );
+    }
+
+    /// Task 125.14: a width-changing reflow renumbers every row; the handler
+    /// carries its placement origins through the buffer's `ReflowRemap`.
+    #[test]
+    fn kitty_real_placement_follows_its_image_through_reflow() {
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        let mut handler = TerminalHandler::new(40, 6);
+        handler.set_write_tx(tx);
+
+        // A long line that re-wraps at the new width, so the rows below it
+        // change index.
+        handler.handle_data(&[b'x'; 70]);
+        handler.handle_newline();
+        handler.handle_carriage_return();
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.image_id = Some(64);
+        cmd.control.display_cols = Some(1);
+        cmd.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(cmd);
+        let before = handler
+            .real_placements
+            .get(&(64, 0))
+            .copied()
+            .expect("placement recorded");
+
+        handler.handle_resize(20, 6, 0, 0);
+
+        assert!(
+            handler.buffer().row_index_of(before.origin_row).is_none(),
+            "reflow renumbers rows, so the old number no longer resolves"
+        );
+        let after = handler
+            .real_placements
+            .get(&(64, 0))
+            .copied()
+            .expect("placement still recorded");
+        assert_ne!(after.origin_row, before.origin_row, "origin was remapped");
+        let index = handler
+            .buffer()
+            .row_index_of(after.origin_row)
+            .expect("the remapped origin resolves to a retained row");
+        assert!(
+            handler.buffer().rows()[index].cells()[after.origin_col].has_image(),
+            "the remapped origin must name the row now holding the image"
+        );
+        assert!(
+            handler.buffer_mut().take_reflow_remap().is_none(),
+            "the handler consumed the buffer's pending remap"
+        );
+    }
+
+    /// Task 125.14: placements recorded against the alternate screen are
+    /// dropped when it is left; primary-screen placements survive.
+    #[test]
+    fn leaving_the_alternate_screen_drops_alt_placements_only() {
+        let (mut handler, _rx) = kitty_handler();
+
+        let mut primary = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        primary.control.image_id = Some(65);
+        primary.control.display_cols = Some(1);
+        primary.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(primary);
+        assert!(handler.real_placements.contains_key(&(65, 0)));
+
+        handler.handle_enter_alternate();
+        let mut alt = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        alt.control.image_id = Some(66);
+        alt.control.display_cols = Some(1);
+        alt.control.display_rows = Some(1);
+        handler.handle_kitty_graphics(alt);
+        let alt_placement = handler
+            .real_placements
+            .get(&(66, 0))
+            .copied()
+            .expect("alt placement recorded");
+        assert!(alt_placement.origin_row.is_alternate());
+
+        handler.handle_leave_alternate();
+
+        assert!(
+            !handler.real_placements.contains_key(&(66, 0)),
+            "the alternate screen's placement must be dropped on leave"
+        );
+        assert!(
+            handler.real_placements.contains_key(&(65, 0)),
+            "the primary screen's placement must survive"
         );
     }
 
@@ -5189,7 +5441,7 @@ mod tests {
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child (99, 0), a single cell, registered with H=1, V=1.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5220,7 +5472,7 @@ mod tests {
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 2, 2);
 
         // Child with H=0, V=0.
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 0, 0, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 0, 0, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5251,7 +5503,7 @@ mod tests {
                 placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5272,13 +5524,13 @@ mod tests {
         grow_buffer_rows(&mut handler, 3);
 
         // Real (non-virtual) parent placement (42, 0).
-        handler.insert_real_placement(42, 0, 0, 0, 1, 1, None, 0, 0, 0, 1);
+        handler.insert_real_placement(42, 0, RowNumber::new(0), 0, 1, 1, None, 0, 0, 0, 1);
 
         // Child (99, 0) already stamped at (1, 0) — as 100.4a would have
         // done via `place_image_at` — with parent = (42, 0), h=1, v=1
         // (irrelevant here since the parent is real, not virtual).
         stamp_parent_placeholder_block(&mut handler, 99, 0, 1, 0, 1, 1);
-        handler.insert_real_placement(99, 0, 1, 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(1), 0, 1, 1, Some((42, 0)), 0, 1, 1, 1);
 
         let term_width = handler.win_size().0;
         let placements = handler.visible_image_placements_extended(0, 0);
@@ -5316,7 +5568,7 @@ mod tests {
                 placement_instance: 1,
             },
         );
-        handler.insert_real_placement(99, 0, 0, 0, 1, 1, Some((42, 0)), 0, 1, 0, 1);
+        handler.insert_real_placement(99, 0, RowNumber::new(0), 0, 1, 1, Some((42, 0)), 0, 1, 0, 1);
 
         // First position: parent placeholder at (2, 5).
         stamp_parent_placeholder_block(&mut handler, 42, 0, 2, 5, 1, 1);

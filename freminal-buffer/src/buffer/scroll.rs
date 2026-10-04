@@ -659,6 +659,7 @@ impl Buffer {
         self.image_cell_count -= self.rows[0].count_image_cells();
         // remove topmost row (and its cache entry and block reference)
         let _ = self.rows.evict_front(1);
+        self.prune_evicted_marks();
         // The removed row may have been the last reference to a compressed
         // block (this method is a whole-buffer row shift, unlike the
         // bounded `enforce_scrollback_limit`/`erase_scrollback` drains, but
@@ -713,14 +714,14 @@ impl Buffer {
                     .sum();
                 self.image_cell_count -= drained_images;
             }
-            let evicted = self.rows.evict_front(visible_start).rows;
+            let _ = self.rows.evict_front(visible_start);
             // Every compressed block only ever holds rows from scrollback
             // (never the visible window), so wiping all of scrollback here
             // always makes every block fully unreferenced — clear
             // `self.blocks` outright rather than the general-purpose
             // (slightly more expensive) `gc_unreferenced_blocks` scan.
             self.blocks.clear();
-            self.adjust_prompt_rows(evicted);
+            self.prune_evicted_marks();
 
             // Adjust cursor
             if self.cursor.pos.y >= visible_start {

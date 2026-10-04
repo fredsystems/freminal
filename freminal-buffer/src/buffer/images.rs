@@ -9,7 +9,9 @@
 //! cells within the buffer, including support for the Kitty graphics protocol
 //! and iTerm2 inline images.
 
-use freminal_common::buffer_states::{buffer_type::BufferType, format_tag::FormatTag};
+use freminal_common::buffer_states::{
+    buffer_type::BufferType, format_tag::FormatTag, row_number::RowNumber,
+};
 
 use crate::{
     image_store::{
@@ -24,20 +26,22 @@ use super::Buffer;
 /// scrollback trimming, plus the TRUE stamped origin of the image.
 ///
 /// `origin_row`/`origin_col` reflect where the image's top-left cell
-/// (`row_in_image == 0`, `col_in_image == 0`) actually landed *after* any
-/// `enforce_scrollback_limit` drain that occurred as part of this call —
-/// they are not simply the pre-call cursor position. Callers that need to
-/// record a placement's origin (e.g. Kitty relative-placement parents, Task
-/// 100.14) must use these fields rather than re-reading the cursor before
-/// calling `place_image`, since a scrollback drain during placement can
-/// shift the image upward relative to the pre-call cursor row.
+/// (`row_in_image == 0`, `col_in_image == 0`) actually landed. `origin_row` is
+/// a stable [`RowNumber`] (Task 125.14): it names the row itself, so it stays
+/// correct however many rows an `enforce_scrollback_limit` drain during this
+/// call (or a later eviction) removes above it. Convert it to a retained index
+/// with [`Buffer::row_index_of`]; `None` means the row has since been evicted.
+/// Callers that need to record a placement's origin (e.g. Kitty
+/// relative-placement parents, Task 100.14) must use these fields rather than
+/// re-reading the cursor before calling `place_image`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceImageResult {
     /// The (possibly adjusted) scroll offset, mirroring the value
     /// previously returned directly by `place_image`.
     pub scroll_offset: usize,
-    /// The row at which the image's top-left cell was actually stamped.
-    pub origin_row: usize,
+    /// The logical row number at which the image's top-left cell was
+    /// actually stamped.
+    pub origin_row: RowNumber,
     /// The column at which the image's top-left cell was actually stamped.
     pub origin_col: usize,
     /// The placement instance id (Task 100.18) this call stamped every
@@ -592,6 +596,11 @@ impl Buffer {
         // `enforce_scrollback_limit` trim excess from the top — this avoids
         // the infinite-loop problem where `scroll_up()` keeps rows.len()
         // constant.
+        //
+        // The origin is recorded as a stable row number, so the scrollback
+        // drains below need no compensation: `base_row` is re-derived from the
+        // number after each one.
+        let origin_row = self.cursor_row_number();
         let mut base_row = self.cursor.pos.y;
 
         for img_row in 0..display_rows {
@@ -634,11 +643,10 @@ impl Buffer {
 
         // Enforce scrollback limit — this may drain rows from the top.
         if self.kind == BufferType::Primary {
-            let rows_before = self.rows.len();
             current_offset = self.enforce_scrollback_limit(current_offset);
-            let drained = rows_before - self.rows.len();
-            // Adjust base_row for the drained rows.
-            base_row = base_row.saturating_sub(drained);
+            // An origin drained off the top clamps to the oldest row, as the
+            // hand-counted compensation this replaces did.
+            base_row = origin_row.rows_after(self.rows.base()).unwrap_or(0);
         }
 
         // Move cursor below the image, column 0 (iTerm2 behaviour).
@@ -650,10 +658,8 @@ impl Buffer {
             self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
 
             if self.kind == BufferType::Primary {
-                let rows_before = self.rows.len();
                 current_offset = self.enforce_scrollback_limit(current_offset);
-                let drained = rows_before - self.rows.len();
-                base_row = base_row.saturating_sub(drained);
+                base_row = origin_row.rows_after(self.rows.base()).unwrap_or(0);
             }
 
             final_row = base_row + display_rows;
@@ -668,7 +674,7 @@ impl Buffer {
         self.debug_assert_invariants();
         PlaceImageResult {
             scroll_offset: current_offset,
-            origin_row: base_row,
+            origin_row,
             origin_col: start_col,
             placement_instance,
         }

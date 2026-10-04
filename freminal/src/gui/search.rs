@@ -400,9 +400,17 @@ pub fn jump_to_prev_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
     let window_start = max_start.saturating_sub(snap.scroll_offset);
 
     // Find the last prompt row strictly above the current window start.
-    let target = snap.prompt_rows.iter().rev().find(|&&r| r < window_start)?;
+    // Prompt marks are logical row numbers; resolve each to a buffer index
+    // (a lingering mark whose row was evicted resolves to nothing and is
+    // skipped).
+    let target = snap
+        .prompt_rows
+        .iter()
+        .rev()
+        .filter_map(|&r| snap.retained_index_of(r))
+        .find(|&r| r < window_start)?;
 
-    let new_start = (*target).min(max_start);
+    let new_start = target.min(max_start);
     let new_scroll_offset = max_start
         .saturating_sub(new_start)
         .min(snap.max_scroll_offset);
@@ -433,9 +441,14 @@ pub fn jump_to_next_command(view_state: &mut ViewState, snap: &TerminalSnapshot)
     let window_start = max_start.saturating_sub(snap.scroll_offset);
 
     // Find the first prompt row strictly after the current window start.
-    let target = snap.prompt_rows.iter().find(|&&r| r > window_start)?;
+    // See `jump_to_prev_command` for the number -> index resolution.
+    let target = snap
+        .prompt_rows
+        .iter()
+        .filter_map(|&r| snap.retained_index_of(r))
+        .find(|&r| r > window_start)?;
 
-    let new_start = (*target).min(max_start);
+    let new_start = target.min(max_start);
     let new_scroll_offset = max_start
         .saturating_sub(new_start)
         .min(snap.max_scroll_offset);
@@ -667,6 +680,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::buffer_states::tchar::TChar;
 
     /// Build a `Vec<TChar>` from a slice of row strings.
@@ -1104,5 +1118,86 @@ mod tests {
         let expanded = expand_by_shadow_margin(area_rect, Shadow::NONE);
 
         assert_eq!(expanded, area_rect);
+    }
+
+    // ── jump-to-command with logical row numbers (Task 125.14) ───────────
+
+    /// A snapshot of `total_rows` rows, numbered from `base`, `term_height`
+    /// visible, scrolled `scroll_offset` rows back, carrying `marks` as its
+    /// prompt rows.
+    fn jump_snap(
+        base: u64,
+        total_rows: usize,
+        term_height: usize,
+        scroll_offset: usize,
+        marks: &[u64],
+    ) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.row_base = RowNumber::new(base);
+        snap.total_rows = total_rows;
+        snap.term_height = term_height;
+        snap.scroll_offset = scroll_offset;
+        snap.max_scroll_offset = total_rows - term_height;
+        snap.prompt_rows = Arc::from(
+            marks
+                .iter()
+                .copied()
+                .map(RowNumber::new)
+                .collect::<Vec<_>>(),
+        );
+        snap
+    }
+
+    #[test]
+    fn jump_to_prev_command_resolves_marks_against_the_row_base() {
+        // 100 rows numbered 1000..1100, 10 visible, live bottom: window top is
+        // index 90. Marks at numbers 1020 / 1050 are indices 20 / 50.
+        let snap = jump_snap(1000, 100, 10, 0, &[1020, 1050]);
+        let mut vs = ViewState::new();
+
+        let new_offset = jump_to_prev_command(&mut vs, &snap);
+
+        // Highest mark above the window is index 50 -> offset 90 - 50 = 40.
+        assert_eq!(new_offset, Some(40));
+        assert_eq!(vs.scroll_offset, 40);
+    }
+
+    #[test]
+    fn jump_to_next_command_resolves_marks_against_the_row_base() {
+        // Scrolled back 60 rows: window top is index 30.
+        let snap = jump_snap(1000, 100, 10, 60, &[1020, 1050, 1070]);
+        let mut vs = ViewState::new();
+
+        let new_offset = jump_to_next_command(&mut vs, &snap);
+
+        // Lowest mark below the window top (index 30) is index 50.
+        assert_eq!(new_offset, Some(40));
+    }
+
+    #[test]
+    fn jump_to_prev_command_skips_a_lingering_evicted_mark() {
+        // The mark at number 500 was evicted (below the base of 1000) but a
+        // stale entry can linger behind a retained one; it must not be treated
+        // as row 0.
+        let snap = jump_snap(1000, 100, 10, 0, &[1050, 500]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_prev_command(&mut vs, &snap), Some(40));
+    }
+
+    #[test]
+    fn jump_to_prev_command_with_only_evicted_marks_does_nothing() {
+        let snap = jump_snap(1000, 100, 10, 0, &[10, 20]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_prev_command(&mut vs, &snap), None);
+    }
+
+    #[test]
+    fn jump_to_next_command_with_only_evicted_marks_does_nothing() {
+        let snap = jump_snap(1000, 100, 10, 60, &[10, 20]);
+        let mut vs = ViewState::new();
+
+        assert_eq!(jump_to_next_command(&mut vs, &snap), None);
     }
 }

@@ -16,6 +16,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use super::row_number::RowNumber;
+
 /// Process-global monotonic counter for allocating `CommandBlockId` values.
 static NEXT_BLOCK_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -76,21 +78,24 @@ pub struct CommandBlock {
     /// on "most-recent-open" heuristics.
     pub fid: String,
 
-    /// Row of `OSC 133 A` (prompt start).
-    pub prompt_start_row: usize,
+    /// Row of `OSC 133 A` (prompt start), as a stable [`RowNumber`] that
+    /// survives scrollback eviction (Task 125.14).  Convert to a retained
+    /// index with the snapshot's `retained_index_of`; a number below the
+    /// snapshot's `row_base` has been evicted.
+    pub prompt_start_row: RowNumber,
 
     /// Row of `OSC 133 B` (end of prompt, start of user input).  May equal
     /// `prompt_start_row` for single-line prompts.  `None` until `B` is
     /// received.
-    pub command_start_row: Option<usize>,
+    pub command_start_row: Option<RowNumber>,
 
     /// Row of `OSC 133 C` (output start / command executing).  `None` until
     /// `C` is received.
-    pub output_start_row: Option<usize>,
+    pub output_start_row: Option<RowNumber>,
 
     /// Row of `OSC 133 D` (command finished).  `None` while the command is
     /// still running.
-    pub end_row: Option<usize>,
+    pub end_row: Option<RowNumber>,
 
     /// Exit code from `OSC 133 D ; <code>`.  `None` if not yet finished or
     /// if the shell omitted the code.
@@ -124,7 +129,7 @@ impl CommandBlock {
     /// freminal correlation ID, started right now (`SystemTime::now()`).
     /// Allocates a new `CommandBlockId`.
     #[must_use]
-    pub fn new_running(prompt_start_row: usize, cwd: Option<String>, fid: String) -> Self {
+    pub fn new_running(prompt_start_row: RowNumber, cwd: Option<String>, fid: String) -> Self {
         Self {
             id: CommandBlockId::next(),
             fid,
@@ -198,7 +203,7 @@ impl CommandBlock {
     /// Row range covered by this block: `(start, end)`.  `end` is `None`
     /// while running.  `start` is always `prompt_start_row`.
     #[must_use]
-    pub const fn row_range(&self) -> (usize, Option<usize>) {
+    pub const fn row_range(&self) -> (RowNumber, Option<RowNumber>) {
         (self.prompt_start_row, self.end_row)
     }
 }
@@ -255,11 +260,14 @@ mod tests {
     #[test]
     fn new_running_initializes_fields() {
         let before = SystemTime::now();
-        let block =
-            CommandBlock::new_running(7, Some("/home/user".to_string()), "test-fid".to_owned());
+        let block = CommandBlock::new_running(
+            RowNumber::new(7),
+            Some("/home/user".to_string()),
+            "test-fid".to_owned(),
+        );
         let after = SystemTime::now();
 
-        assert_eq!(block.prompt_start_row, 7);
+        assert_eq!(block.prompt_start_row, RowNumber::new(7));
         assert_eq!(block.cwd.as_deref(), Some("/home/user"));
         assert_eq!(block.fid, "test-fid");
         assert!(
@@ -275,20 +283,21 @@ mod tests {
 
     #[test]
     fn new_running_allocates_unique_ids() {
-        let b1 = CommandBlock::new_running(0, None, "fid-a".to_owned());
-        let b2 = CommandBlock::new_running(0, None, "fid-b".to_owned());
+        let b1 = CommandBlock::new_running(RowNumber::ZERO, None, "fid-a".to_owned());
+        let b2 = CommandBlock::new_running(RowNumber::ZERO, None, "fid-b".to_owned());
         assert_ne!(b1.id, b2.id, "each block must get a unique id");
     }
 
     #[test]
     fn new_running_preserves_cwd_none() {
-        let block = CommandBlock::new_running(0, None, "fid-c".to_owned());
+        let block = CommandBlock::new_running(RowNumber::ZERO, None, "fid-c".to_owned());
         assert!(block.cwd.is_none());
     }
 
     #[test]
     fn new_running_stores_fid() {
-        let block = CommandBlock::new_running(0, None, "my-correlation-id".to_owned());
+        let block =
+            CommandBlock::new_running(RowNumber::ZERO, None, "my-correlation-id".to_owned());
         assert_eq!(block.fid, "my-correlation-id");
     }
 
@@ -296,13 +305,13 @@ mod tests {
 
     #[test]
     fn status_fresh_block_is_running() {
-        let block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         assert_eq!(block.status(), CommandStatus::Running);
     }
 
     #[test]
     fn status_finished_exit_0_is_success() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(0);
         assert_eq!(block.status(), CommandStatus::Success);
@@ -310,7 +319,7 @@ mod tests {
 
     #[test]
     fn status_finished_exit_1_is_failure() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(1);
         assert_eq!(block.status(), CommandStatus::Failure(1));
@@ -318,7 +327,7 @@ mod tests {
 
     #[test]
     fn status_finished_exit_negative_is_failure() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = Some(-1);
         assert_eq!(block.status(), CommandStatus::Failure(-1));
@@ -326,7 +335,7 @@ mod tests {
 
     #[test]
     fn status_finished_no_exit_code_is_unknown() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.finished_at = Some(SystemTime::now());
         block.exit_code = None;
         assert_eq!(block.status(), CommandStatus::Unknown);
@@ -336,13 +345,13 @@ mod tests {
 
     #[test]
     fn duration_running_is_none() {
-        let block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         assert!(block.duration().is_none());
     }
 
     #[test]
     fn duration_finished_after_start_is_some_positive() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         // A command executed (C received) right at prompt start, ran 500ms.
         block.executed_at = Some(block.started_at);
         block.finished_at = Some(block.started_at + Duration::from_millis(500));
@@ -357,7 +366,7 @@ mod tests {
 
     #[test]
     fn duration_clock_skew_is_none() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         // Command executed, but finished_at is before executed_at — clock skew.
         block.executed_at = Some(block.started_at);
         block.finished_at = Some(block.started_at - Duration::from_secs(1));
@@ -372,7 +381,7 @@ mod tests {
         // Regression for 73.7: an instant command after a long pause at the
         // prompt must report only the execution time (C->D), not the time
         // the user spent typing/reading (A->C->D).
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         // User sat at the prompt for 30 s before the command executed...
         block.executed_at = Some(block.started_at + Duration::from_secs(30));
         // ...and the command itself took 5 ms.
@@ -395,7 +404,7 @@ mod tests {
         // command ran.  There is no execution interval, so duration() must
         // report None rather than measuring prompt-idle time from
         // started_at.
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         assert!(block.executed_at.is_none());
         // User idled 30s at the prompt then pressed Ctrl-C.
         block.finished_at = Some(block.started_at + Duration::from_secs(30));
@@ -410,13 +419,13 @@ mod tests {
     #[test]
     fn executed_false_until_output_start_received() {
         // Fresh block: only A received.
-        let block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         assert!(!block.executed(), "block with no C marker has not executed");
     }
 
     #[test]
     fn executed_true_once_executed_at_set() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.executed_at = Some(block.started_at + Duration::from_secs(1));
         assert!(block.executed(), "block with a C marker has executed");
     }
@@ -424,7 +433,7 @@ mod tests {
     #[test]
     fn executed_unaffected_by_finish_without_c() {
         // A -> D with no C (Ctrl-C on idle prompt) stays "not executed".
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.finished_at = Some(block.started_at + Duration::from_secs(5));
         block.exit_code = Some(130);
         assert!(
@@ -435,7 +444,7 @@ mod tests {
 
     #[test]
     fn duration_clock_skew_against_executed_at_is_none() {
-        let mut block = CommandBlock::new_running(0, None, "f1".to_owned());
+        let mut block = CommandBlock::new_running(RowNumber::ZERO, None, "f1".to_owned());
         block.executed_at = Some(block.started_at + Duration::from_secs(2));
         // finished_at before executed_at — skew relative to the new anchor.
         block.finished_at = Some(block.started_at + Duration::from_secs(1));
@@ -449,14 +458,17 @@ mod tests {
 
     #[test]
     fn row_range_running_block() {
-        let block = CommandBlock::new_running(5, None, "f1".to_owned());
-        assert_eq!(block.row_range(), (5, None));
+        let block = CommandBlock::new_running(RowNumber::new(5), None, "f1".to_owned());
+        assert_eq!(block.row_range(), (RowNumber::new(5), None));
     }
 
     #[test]
     fn row_range_finished_block() {
-        let mut block = CommandBlock::new_running(5, None, "f1".to_owned());
-        block.end_row = Some(12);
-        assert_eq!(block.row_range(), (5, Some(12)));
+        let mut block = CommandBlock::new_running(RowNumber::new(5), None, "f1".to_owned());
+        block.end_row = Some(RowNumber::new(12));
+        assert_eq!(
+            block.row_range(),
+            (RowNumber::new(5), Some(RowNumber::new(12)))
+        );
     }
 }

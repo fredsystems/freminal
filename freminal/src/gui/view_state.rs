@@ -1334,8 +1334,15 @@ pub(crate) fn line_boundaries(visible_chars: &[TChar], screen_row: usize) -> (us
 mod tests {
     use super::*;
     use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
+    use freminal_common::buffer_states::row_number::RowNumber;
 
     // ── Command-block folding ──────────────────────────────────────────
+
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
 
     fn make_block(
         id: u64,
@@ -1343,10 +1350,10 @@ mod tests {
         cmd_start: Option<usize>,
         end: Option<usize>,
     ) -> CommandBlock {
-        let mut b = CommandBlock::new_running(prompt, None, String::new());
+        let mut b = CommandBlock::new_running(rn(prompt), None, String::new());
         b.id = CommandBlockId(id);
-        b.command_start_row = cmd_start;
-        b.end_row = end;
+        b.command_start_row = cmd_start.map(rn);
+        b.end_row = end.map(rn);
         b
     }
 

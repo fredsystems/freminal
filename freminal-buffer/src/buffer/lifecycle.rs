@@ -15,6 +15,7 @@ use freminal_common::buffer_states::{
     cursor::CursorState,
     format_tag::FormatTag,
     modes::{decawm::Decawm, declrmm::Declrmm, decom::Decom, lnm::Lnm},
+    row_number::RowNumber,
 };
 
 use crate::{
@@ -22,7 +23,7 @@ use crate::{
     row::{Row, RowJoin, RowOrigin},
 };
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, RowStore};
 
 impl Buffer {
     /// Generate default tab stops at every 8 columns for the given width.
@@ -59,6 +60,8 @@ impl Buffer {
             auto_detect_urls: true,
             kind: BufferType::Primary,
             saved_primary: None,
+            next_alt_base: RowNumber::ALTERNATE_BASE,
+            pending_reflow_remap: None,
             saved_cursor: None,
             lnm_enabled: Lnm::LineFeed,
             wrap_enabled: Decawm::AutoWrap,
@@ -92,8 +95,36 @@ impl Buffer {
     ///
     /// Preserves `width`, `height`, and `scrollback_limit` (terminal geometry
     /// and user configuration).
+    ///
+    /// Row numbers are never reset: the fresh screen is numbered from past the
+    /// last row number issued on the screen being discarded, so a stale
+    /// [`RowNumber`] can never alias a post-reset row (Task 125.14).
     pub fn full_reset(&mut self) {
-        self.rows.replace_all(vec![Row::new(self.width)]);
+        // The primary namespace continues past the primary content being
+        // discarded (which, on the alternate screen, is parked in
+        // `saved_primary`); the alternate counter continues past the live
+        // alternate screen.
+        //
+        // `enter_alternate` always parks the primary store in `saved_primary`
+        // and `leave_alternate` is the only thing that takes it back, so on
+        // the alternate screen it is always present. If that invariant were
+        // ever broken the primary numbering is unrecoverable; the fallback
+        // restarts it at zero, which can alias only numbers held outside the
+        // buffer, and RIS clears every such holder (the marks below, the
+        // saved cursor, the handler's kitty placements).
+        debug_assert!(
+            self.kind == BufferType::Primary || self.saved_primary.is_some(),
+            "alternate screen active without a parked primary store"
+        );
+        let primary_next = match (self.kind, self.saved_primary.as_ref()) {
+            (BufferType::Alternate, Some(saved)) => saved.rows.next_number(),
+            (BufferType::Alternate, None) => RowNumber::ZERO,
+            (BufferType::Primary, _) => self.rows.next_number(),
+        };
+        if self.kind == BufferType::Alternate {
+            self.next_alt_base = self.rows.next_number();
+        }
+        self.rows = RowStore::from_rows_at(primary_next, [Row::new(self.width)]);
         // Task 121 Part C: the row cache above was just replaced wholesale
         // with fresh, unrelated content — a stale `merge_cache` (even one
         // whose `fp` coincidentally still matches, e.g. an unchanged
@@ -124,51 +155,118 @@ impl Buffer {
         self.image_cell_count = 0;
         self.prompt_rows.clear();
         self.command_blocks.clear();
+        self.pending_reflow_remap = None;
     }
 
     /// Record the current cursor row as a prompt-start marker.
     ///
     /// Called by `TerminalHandler` when an OSC 133 `PromptStart` fires.
     pub fn mark_prompt_row(&mut self) {
-        self.prompt_rows.push(self.cursor.pos.y);
+        self.prompt_rows.push(self.cursor_row_number());
     }
 
-    /// Buffer-relative row indices of all recorded prompt-start markers.
+    /// Logical row numbers of all recorded prompt-start markers.
+    ///
+    /// Stable across scrollback eviction: a number is never rewritten, it
+    /// simply falls below [`Buffer::row_base`] once its row is evicted
+    /// (convert with [`Buffer::row_index_of`], which yields `None` for such a
+    /// number). Order is the order the markers fired, which is not guaranteed
+    /// to be ascending.
     #[must_use]
-    pub fn prompt_rows(&self) -> &[usize] {
+    pub fn prompt_rows(&self) -> &[RowNumber] {
         &self.prompt_rows
     }
 
-    /// Shift all prompt-row markers down by `removed` and drop any that
-    /// fell below zero.  Called after draining rows from the front.
+    /// Drop the prompt marks and command blocks whose rows have been evicted.
     ///
-    /// Also adjusts `command_blocks`: blocks whose `prompt_start_row` is less
-    /// than `removed` have fully scrolled out and are removed.  All row
-    /// indices on surviving blocks are shifted down by `removed`.
-    pub(in crate::buffer) fn adjust_prompt_rows(&mut self, removed: usize) {
-        self.prompt_rows.retain_mut(|r| {
-            r.checked_sub(removed).is_some_and(|adjusted| {
-                *r = adjusted;
-                true
-            })
-        });
+    /// Called after every front eviction. Row numbers are stable, so nothing
+    /// is rewritten: this only trims the leading run of marks that now lie
+    /// below [`Buffer::row_base`] (O(1) when there is nothing to trim). A
+    /// block is dropped when its *prompt* row is evicted, as before.
+    ///
+    /// Marks are appended in the order they fire, which is usually but not
+    /// always ascending, so a stale mark behind a retained one stays until the
+    /// retained one is itself evicted; consumers must filter with
+    /// [`Buffer::row_index_of`] / `RowNumber::rows_after`.
+    ///
+    /// Only marks in the same namespace as the active store are considered:
+    /// primary marks held while the alternate screen is up are not "below"
+    /// the alternate base, they are simply another screen's.
+    pub(in crate::buffer) fn prune_evicted_marks(&mut self) {
+        self.prune_marks_below(self.rows.base());
+    }
 
-        self.command_blocks.retain_mut(|b| {
-            if b.prompt_start_row < removed {
-                // Block has fully scrolled out of the buffer.
+    /// [`Self::prune_evicted_marks`] against an explicit `base`, for the one
+    /// case where rows are evicted from a store other than the active one: a
+    /// resize on the alternate screen shrinks the parked primary store.
+    pub(in crate::buffer) fn prune_marks_below(&mut self, base: RowNumber) {
+        let evicted = |row: RowNumber| row.is_alternate() == base.is_alternate() && row < base;
+
+        let stale = self
+            .prompt_rows
+            .iter()
+            .take_while(|&&row| evicted(row))
+            .count();
+        if stale > 0 {
+            self.prompt_rows.drain(..stale);
+        }
+
+        while self
+            .command_blocks
+            .front()
+            .is_some_and(|block| evicted(block.prompt_start_row))
+        {
+            self.command_blocks.pop_front();
+        }
+    }
+
+    /// Forget every mark that belongs to the alternate screen: the alternate
+    /// screen's rows are discarded when it is left, so a mark in that
+    /// namespace has nothing left to point at.
+    ///
+    /// A block that started on the primary screen but recorded a later
+    /// boundary on the alternate screen keeps its primary fields and loses the
+    /// alternate ones.
+    ///
+    /// Note the interplay for a block finished while on the alternate screen:
+    /// [`Buffer::finish_command_block`] stamps `finished_at` and `exit_code`
+    /// and sets `end_row` to an alternate number, so clearing `end_row` here
+    /// leaves a block that is finished (`finished_at.is_some()`, so its status
+    /// is not `Running`) but has `end_row == None`. Consumers keyed on
+    /// `end_row.is_none()` therefore see it as having no row extent (not
+    /// foldable, gutter extends to the running extent), and the close guard,
+    /// which reads `status()` plus `output_start_row.is_some()`, does not
+    /// treat it as running because `status()` comes from `finished_at`. A
+    /// cleared `output_start_row` likewise means "no recorded output".
+    /// `finish_command_block` selects open blocks by `end_row.is_none()`, so a
+    /// later `D` carrying the same `fid` could match such a block again.
+    pub(in crate::buffer) fn drop_alternate_marks(&mut self) {
+        self.prompt_rows.retain(|row| !row.is_alternate());
+        self.command_blocks.retain_mut(|block| {
+            if block.prompt_start_row.is_alternate() {
                 return false;
             }
-            b.prompt_start_row = b.prompt_start_row.saturating_sub(removed);
-            b.command_start_row = b.command_start_row.map(|r| r.saturating_sub(removed));
-            b.output_start_row = b.output_start_row.map(|r| r.saturating_sub(removed));
-            b.end_row = b.end_row.map(|r| r.saturating_sub(removed));
+            for field in [
+                &mut block.command_start_row,
+                &mut block.output_start_row,
+                &mut block.end_row,
+            ] {
+                if field.is_some_and(RowNumber::is_alternate) {
+                    *field = None;
+                }
+            }
             true
         });
     }
 
     /// Drop prompt-row markers and command blocks whose `prompt_start_row`
-    /// falls within `[visible_start, visible_end)`, and clamp surviving
-    /// blocks whose later row fields fell inside the erased range.
+    /// falls within the retained-index range `[visible_start, visible_end)`
+    /// of the active screen, and clamp surviving blocks whose later row
+    /// fields fell inside the erased range.
+    ///
+    /// The range is converted to logical row numbers first, so only marks on
+    /// the active screen can match: erasing the alternate screen (ED 2) never
+    /// touches a primary-screen block.
     ///
     /// Called from [`Buffer::erase_display`] (CSI 2J) so that the duration
     /// overlay and command-block gutters do not continue to point at rows
@@ -185,25 +283,29 @@ impl Buffer {
         visible_start: usize,
         visible_end: usize,
     ) {
-        self.prompt_rows
-            .retain(|r| *r < visible_start || *r >= visible_end);
+        let start = self.rows.number_of(visible_start);
+        let end = self.rows.number_of(visible_end);
+        let in_erased = |row: RowNumber| row >= start && row < end;
 
-        let last_surviving = visible_start.saturating_sub(1);
+        self.prompt_rows.retain(|r| !in_erased(*r));
+
+        // The last row above the erased range; the oldest row itself when the
+        // range starts there (there is nothing above it to clamp to).
+        let last_surviving = if start > self.rows.base() {
+            start.offset(-1)
+        } else {
+            start
+        };
         self.command_blocks.retain_mut(|b| {
-            if b.prompt_start_row >= visible_start && b.prompt_start_row < visible_end {
+            if in_erased(b.prompt_start_row) {
                 // Block was started on a row that just got blanked.
                 return false;
             }
             // Block survives (prompt is in scrollback).  Clamp later fields
             // that pointed into the erased range so the block's row span
             // does not include now-blank rows.
-            let clamp = |r: usize| -> usize {
-                if r >= visible_start && r < visible_end {
-                    last_surviving
-                } else {
-                    r
-                }
-            };
+            let clamp =
+                |r: RowNumber| -> RowNumber { if in_erased(r) { last_surviving } else { r } };
             b.command_start_row = b.command_start_row.map(clamp);
             b.output_start_row = b.output_start_row.map(clamp);
             b.end_row = b.end_row.map(clamp);
@@ -214,7 +316,7 @@ impl Buffer {
     // ── OSC 133 command-block API ────────────────────────────────────────────
 
     /// Append a fresh [`CommandBlock`] to the end of `command_blocks`, with
-    /// `prompt_start_row = cursor.pos.y`, the given `cwd`, and the given
+    /// `prompt_start_row` set to the cursor's row number, the given `cwd`, and the given
     /// freminal correlation `fid`.  Allocates a new [`CommandBlockId`] via
     /// [`CommandBlockId::next`].
     ///
@@ -233,7 +335,7 @@ impl Buffer {
         if self.command_blocks.len() >= cap {
             self.command_blocks.pop_front();
         }
-        let block = CommandBlock::new_running(self.cursor.pos.y, cwd, fid);
+        let block = CommandBlock::new_running(self.cursor_row_number(), cwd, fid);
         let id = block.id;
         self.command_blocks.push_back(block);
         id
@@ -245,10 +347,11 @@ impl Buffer {
     /// No-op if no matching block exists (e.g. `B` arrived before `A` from us,
     /// or a foreign `B` marker slipped through).
     pub fn mark_command_start_row(&mut self, fid: &str) {
+        let row = self.cursor_row_number();
         for block in self.command_blocks.iter_mut().rev() {
             if block.fid == fid {
                 if block.command_start_row.is_none() {
-                    block.command_start_row = Some(self.cursor.pos.y);
+                    block.command_start_row = Some(row);
                 }
                 return;
             }
@@ -265,10 +368,11 @@ impl Buffer {
     /// duration (see [`CommandBlock::duration`]).  The user's typing time at
     /// the prompt (`started_at` -> `executed_at`) is thereby excluded.
     pub fn mark_output_start_row(&mut self, fid: &str) {
+        let row = self.cursor_row_number();
         for block in self.command_blocks.iter_mut().rev() {
             if block.fid == fid {
                 if block.output_start_row.is_none() {
-                    block.output_start_row = Some(self.cursor.pos.y);
+                    block.output_start_row = Some(row);
                     block.executed_at = Some(SystemTime::now());
                 }
                 return;
@@ -278,7 +382,7 @@ impl Buffer {
     }
 
     /// Finish the block whose `fid` matches and whose `end_row` is `None`,
-    /// by setting `end_row = cursor.pos.y`, `exit_code`, and
+    /// by setting `end_row` to the cursor's row number, `exit_code`, and
     /// `finished_at = Some(SystemTime::now())`.  Searches newest-to-oldest.
     /// No-op if no matching open block exists.
     ///
@@ -290,9 +394,10 @@ impl Buffer {
         exit_code: Option<i32>,
         fid: &str,
     ) -> Option<CommandBlock> {
+        let row = self.cursor_row_number();
         for block in self.command_blocks.iter_mut().rev() {
             if block.fid == fid && block.end_row.is_none() {
-                block.end_row = Some(self.cursor.pos.y);
+                block.end_row = Some(row);
                 block.exit_code = exit_code;
                 block.finished_at = Some(SystemTime::now());
                 return Some(block.clone());
@@ -460,7 +565,7 @@ mod command_block_tests {
         assert_eq!(buf.command_blocks.len(), 1);
         let block = buf.command_blocks.front().unwrap();
         assert_eq!(block.status(), CommandStatus::Running);
-        assert_eq!(block.prompt_start_row, 5);
+        assert_eq!(block.prompt_start_row, RowNumber::new(5));
         assert_eq!(block.cwd.as_deref(), Some("/x"));
         assert_eq!(block.fid, "fid1");
         assert!(block.command_start_row.is_none());
@@ -492,7 +597,7 @@ mod command_block_tests {
         buf.mark_command_start_row("fid1");
 
         let block = buf.command_blocks.front().unwrap();
-        assert_eq!(block.command_start_row, Some(3));
+        assert_eq!(block.command_start_row, Some(RowNumber::new(3)));
     }
 
     // ── 4: mark_command_start_row no-op when no matching block ───────────
@@ -517,7 +622,7 @@ mod command_block_tests {
         buf.mark_output_start_row("fid1");
 
         let block = buf.command_blocks.front().unwrap();
-        assert_eq!(block.output_start_row, Some(6));
+        assert_eq!(block.output_start_row, Some(RowNumber::new(6)));
     }
 
     // ── 73.7: OSC 133 C stamps executed_at so duration excludes prompt-wait
@@ -561,14 +666,14 @@ mod command_block_tests {
         buf.cursor.pos.y = 5;
         let finished = buf.finish_command_block(Some(0), "fid1").unwrap(); // D
 
-        assert_eq!(finished.end_row, Some(5));
+        assert_eq!(finished.end_row, Some(RowNumber::new(5)));
         assert_eq!(finished.exit_code, Some(0));
         assert!(finished.finished_at.is_some());
         assert_eq!(finished.status(), CommandStatus::Success);
 
         // The block in the deque must also be updated.
         let stored = buf.command_blocks.front().unwrap();
-        assert_eq!(stored.end_row, Some(5));
+        assert_eq!(stored.end_row, Some(RowNumber::new(5)));
         assert_eq!(stored.exit_code, Some(0));
         assert_eq!(stored.status(), CommandStatus::Success);
     }
@@ -600,8 +705,8 @@ mod command_block_tests {
 
         // The returned block must be the second one (fid-b).
         assert_eq!(finished.fid, "fid-b");
-        assert_eq!(finished.prompt_start_row, 2);
-        assert_eq!(finished.end_row, Some(4));
+        assert_eq!(finished.prompt_start_row, RowNumber::new(2));
+        assert_eq!(finished.end_row, Some(RowNumber::new(4)));
 
         // The first block must still be Running.
         let first = buf.command_blocks.front().unwrap();
@@ -625,45 +730,67 @@ mod command_block_tests {
         assert_eq!(blocks, vec![id1, id2, id3]);
     }
 
-    // ── 10: adjust_prompt_rows removes fully-scrolled-out blocks ─────────
+    // ── 10: eviction pruning removes fully-scrolled-out blocks ───────────
 
     #[test]
-    fn adjust_prompt_rows_removes_scrolled_out_blocks() {
+    fn prune_evicted_marks_removes_scrolled_out_blocks() {
         let mut buf = make_buf();
+        while buf.rows.len() < 25 {
+            buf.rows.push(crate::row::Row::new(buf.width));
+        }
         buf.cursor.pos.y = 5;
+        buf.mark_prompt_row();
         let _id = buf.start_command_block(None, "fid1".to_owned());
         buf.cursor.pos.y = 10;
         let _finished = buf.finish_command_block(Some(0), "fid1");
 
-        // Remove 20 rows from the front — block at rows 5..10 is gone.
-        buf.adjust_prompt_rows(20);
+        // Evict 20 rows from the front — block at rows 5..10 is gone.
+        let _ = buf.rows.evict_front(20);
+        buf.prune_evicted_marks();
 
         assert!(
             buf.command_blocks.is_empty(),
             "block should be evicted when its prompt row scrolls out"
         );
+        assert!(
+            buf.prompt_rows.is_empty(),
+            "prompt mark should be dropped when its row scrolls out"
+        );
     }
 
-    // ── 11: adjust_prompt_rows shifts surviving blocks ────────────────────
+    // ── 11: eviction never rewrites surviving blocks ──────────────────────
 
     #[test]
-    fn adjust_prompt_rows_shifts_surviving_blocks() {
+    fn prune_evicted_marks_leaves_surviving_blocks_untouched() {
         let mut buf = make_buf();
+        while buf.rows.len() < 45 {
+            buf.rows.push(crate::row::Row::new(buf.width));
+        }
         buf.cursor.pos.y = 30;
+        buf.mark_prompt_row();
         let _id = buf.start_command_block(None, "fid1".to_owned());
         buf.cursor.pos.y = 35;
         buf.mark_command_start_row("fid1");
         buf.cursor.pos.y = 40;
         let _finished = buf.finish_command_block(Some(0), "fid1");
 
-        // Remove 10 rows — block should survive and shift down by 10.
-        buf.adjust_prompt_rows(10);
+        // Evict 10 rows — the block survives and its numbers do NOT change:
+        // only the row *index* of each number moves.
+        let _ = buf.rows.evict_front(10);
+        buf.prune_evicted_marks();
 
         assert_eq!(buf.command_blocks.len(), 1);
         let block = buf.command_blocks.front().unwrap();
-        assert_eq!(block.prompt_start_row, 20);
-        assert_eq!(block.command_start_row, Some(25));
-        assert_eq!(block.end_row, Some(30));
+        assert_eq!(block.prompt_start_row, RowNumber::new(30));
+        assert_eq!(block.command_start_row, Some(RowNumber::new(35)));
+        assert_eq!(block.end_row, Some(RowNumber::new(40)));
+        assert_eq!(buf.prompt_rows(), &[RowNumber::new(30)]);
+        // The retained indices moved down by the 10 evicted rows.
+        assert_eq!(buf.row_index_of(block.prompt_start_row), Some(20));
+        assert_eq!(buf.row_index_of(RowNumber::new(35)), Some(25));
+        assert_eq!(buf.row_index_of(RowNumber::new(40)), Some(30));
+        // An evicted number resolves to nothing.
+        assert_eq!(buf.row_index_of(RowNumber::new(9)), None);
     }
 
     // ── 12: clear() empties command_blocks ───────────────────────────────
@@ -840,10 +967,10 @@ mod command_block_tests {
         let block = CommandBlock {
             id: CommandBlockId::next(),
             fid: "straddle".to_owned(),
-            prompt_start_row: visible_start - 1,
-            command_start_row: Some(visible_start),
-            output_start_row: Some(visible_start + 1),
-            end_row: Some(visible_start + 3),
+            prompt_start_row: buf.row_number_at(visible_start - 1),
+            command_start_row: Some(buf.row_number_at(visible_start)),
+            output_start_row: Some(buf.row_number_at(visible_start + 1)),
+            end_row: Some(buf.row_number_at(visible_start + 3)),
             started_at: SystemTime::now(),
             executed_at: Some(SystemTime::now()),
             finished_at: Some(SystemTime::now()),
@@ -856,10 +983,10 @@ mod command_block_tests {
 
         assert_eq!(buf.command_blocks.len(), 1, "scrollback block must survive");
         let b = &buf.command_blocks[0];
-        assert_eq!(b.prompt_start_row, visible_start - 1);
+        assert_eq!(b.prompt_start_row, buf.row_number_at(visible_start - 1));
         assert_eq!(
             b.end_row,
-            Some(visible_start - 1),
+            Some(buf.row_number_at(visible_start - 1)),
             "end_row inside erased range must clamp to last surviving row"
         );
     }

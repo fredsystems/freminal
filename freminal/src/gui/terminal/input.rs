@@ -21,6 +21,7 @@ use freminal_common::buffer_states::modes::{
     application_escape_key::ApplicationEscapeKey, decarm::Decarm, decbkm::Decbkm, decckm::Decckm,
     keypad::KeypadMode, lnm::Lnm, mouse::MouseTrack,
 };
+use freminal_common::buffer_states::row_number::RowNumber;
 use freminal_common::keybindings::{BindingKey, BindingMap, BindingModifiers, KeyAction, KeyCombo};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::{
@@ -44,6 +45,7 @@ use std::borrow::Cow;
 
 use super::coords::{encode_egui_mouse_pos, visible_window_start, visible_window_start_for};
 use super::widget::hit_test_placeholder;
+use crate::gui::command_blocks::BlockRows;
 use crate::gui::folding::{compute_extra_rows, compute_fold_ranges};
 
 /// Build an [`InputEvent::ScrollOffset`] for a target raw scroll offset,
@@ -61,7 +63,7 @@ pub fn scroll_event(
     let extra_rows = if folded_blocks.is_empty() {
         0
     } else {
-        let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+        let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
         let win_start = visible_window_start_for(snap, offset);
         compute_extra_rows(&ranges, win_start, snap.term_height)
     };
@@ -85,7 +87,7 @@ pub(super) fn screen_row_to_buffer_row(
     if folded_blocks.is_empty() && snap.window_extra_rows == 0 {
         return visible_window_start(snap) + screen_row;
     }
-    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
     let flat_window_start = visible_window_start(snap).saturating_sub(snap.window_extra_rows);
     let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
     let translated = crate::gui::folding::translate_ranges_to_snapshot(&ranges, flat_window_start);
@@ -126,7 +128,7 @@ pub(super) fn scrolled_offset(
             crate::gui::folding::ScrollDir::Down => current.saturating_sub(steps),
         };
     }
-    let ranges = compute_fold_ranges(&snap.command_blocks, folded_blocks);
+    let ranges = compute_fold_ranges(&snap.command_blocks, snap.row_base, folded_blocks);
     crate::gui::folding::apply_rendered_scroll(
         &ranges,
         snap.total_rows,
@@ -656,14 +658,19 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 /// all, in which case the keybinding silently no-ops.
 fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
     let cursor_row = snap.cursor_pos.y;
-    let is_completed = |b: &&CommandBlock| b.command_start_row.is_some() && b.end_row.is_some();
+    // Block rows are logical numbers; resolve them to the snapshot's buffer
+    // indices (a block whose prompt row was evicted no longer exists).
+    let rows_of = |b: &CommandBlock| BlockRows::resolve(b, snap.row_base);
+    let is_completed = |b: &&CommandBlock| {
+        rows_of(b).is_some_and(|r| r.command_start.is_some() && r.end.is_some())
+    };
 
     // Pass 1: cursor inside a completed block's body.
     if let Some(block) = snap.command_blocks.iter().filter(is_completed).find(|b| {
-        match (b.command_start_row, b.end_row) {
+        rows_of(b).is_some_and(|r| match (r.command_start, r.end) {
             (Some(start), Some(end)) => cursor_row >= start && cursor_row <= end,
             _ => false,
-        }
+        })
     }) {
         return Some(block.id);
     }
@@ -683,8 +690,15 @@ fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
 /// Blocks without an OSC 133 `C` marker (`output_start_row == None`) or
 /// still-running blocks (`end_row == None`) cannot have their output
 /// copied and return `None`.
-const fn block_output_range(block: &CommandBlock) -> Option<(usize, usize)> {
-    match (block.output_start_row, block.end_row) {
+///
+/// The bounds are buffer indices of the snapshot whose oldest retained row is
+/// numbered `row_base` (the block stores logical row numbers).
+pub(super) fn block_output_range(
+    block: &CommandBlock,
+    row_base: RowNumber,
+) -> Option<(usize, usize)> {
+    let rows = BlockRows::resolve(block, row_base)?;
+    match (rows.output_start, rows.end) {
         (Some(start), Some(end)) if start <= end => Some((start, end)),
         _ => None,
     }
@@ -701,7 +715,7 @@ pub(super) fn find_last_copyable_block(snap: &TerminalSnapshot) -> Option<&Comma
     snap.command_blocks
         .iter()
         .rev()
-        .find(|b| block_output_range(b).is_some())
+        .find(|b| block_output_range(b, snap.row_base).is_some())
 }
 
 /// Find the command block whose `[command_start_row, end_row]` row range
@@ -717,12 +731,12 @@ pub(super) fn find_block_containing_row(
     snap: &TerminalSnapshot,
     row: usize,
 ) -> Option<&CommandBlock> {
-    snap.command_blocks
-        .iter()
-        .find(|b| match (b.command_start_row, b.end_row) {
+    snap.command_blocks.iter().find(|b| {
+        BlockRows::resolve(b, snap.row_base).is_some_and(|r| match (r.command_start, r.end) {
             (Some(start), Some(end)) => row >= start && row <= end,
             _ => false,
         })
+    })
 }
 
 /// Send an `ExtractSelection` event covering the full-width rows
@@ -918,7 +932,7 @@ pub(super) fn dispatch_binding_action(
         }
         KeyAction::CopyLastCommandOutput => {
             if let Some(block) = find_last_copyable_block(snap)
-                && let Some((start_row, end_row)) = block_output_range(block)
+                && let Some((start_row, end_row)) = block_output_range(block, snap.row_base)
                 && send_extract_output_range(input_tx, snap, start_row, end_row)
             {
                 *clipboard_pending = true;
@@ -927,7 +941,7 @@ pub(super) fn dispatch_binding_action(
         KeyAction::CopyCommandOutputAtCursor => {
             let cursor_row = snap.cursor_pos.y;
             if let Some(block) = find_block_containing_row(snap, cursor_row)
-                && let Some((start_row, end_row)) = block_output_range(block)
+                && let Some((start_row, end_row)) = block_output_range(block, snap.row_base)
                 && send_extract_output_range(input_tx, snap, start_row, end_row)
             {
                 *clipboard_pending = true;
@@ -2880,15 +2894,21 @@ mod fold_target_tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     /// Build a completed command block occupying rows `[prompt..=end]`.
     fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
-            end_row: Some(end),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
+            end_row: Some(rn(end)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
@@ -2902,9 +2922,9 @@ mod fold_target_tests {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
             end_row: None,
             exit_code: None,
             cwd: None,
@@ -2922,6 +2942,35 @@ mod fold_target_tests {
             y: cursor_row,
         };
         s
+    }
+
+    #[test]
+    fn block_lookups_resolve_rows_against_the_snapshot_row_base() {
+        // Task 125.14: the block stores logical numbers 105..=110; at a row
+        // base of 100 those are buffer indices 5..=10.
+        let mut snap = snap_with(vec![completed(1, 105, 110)], 7);
+        snap.row_base = RowNumber::new(100);
+
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(1)));
+        assert_eq!(
+            find_block_containing_row(&snap, 7).map(|b| b.id),
+            Some(CommandBlockId(1))
+        );
+        assert!(
+            find_block_containing_row(&snap, 105).is_none(),
+            "the NUMBER 105 is not a buffer index here"
+        );
+        let block = find_last_copyable_block(&snap).unwrap();
+        assert_eq!(block_output_range(block, snap.row_base), Some((6, 10)));
+    }
+
+    #[test]
+    fn block_whose_prompt_was_evicted_is_not_selectable() {
+        let mut snap = snap_with(vec![completed(1, 50, 60)], 0);
+        snap.row_base = RowNumber::new(100);
+        assert_eq!(find_fold_target(&snap), None);
+        assert!(find_last_copyable_block(&snap).is_none());
+        assert!(find_block_containing_row(&snap, 0).is_none());
     }
 
     #[test]
@@ -3093,14 +3142,20 @@ mod scroll_window_tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
+    /// A row number for an index-valued test fixture (base 0, so number ==
+    /// index).
+    fn rn(n: usize) -> RowNumber {
+        RowNumber::new(u64::try_from(n).unwrap())
+    }
+
     fn completed(id: u64, prompt: usize, end: usize) -> CommandBlock {
         CommandBlock {
             id: CommandBlockId(id),
             fid: format!("test-{id}"),
-            prompt_start_row: prompt,
-            command_start_row: Some(prompt),
-            output_start_row: Some(prompt + 1),
-            end_row: Some(end),
+            prompt_start_row: rn(prompt),
+            command_start_row: Some(rn(prompt)),
+            output_start_row: Some(rn(prompt + 1)),
+            end_row: Some(rn(end)),
             exit_code: Some(0),
             cwd: None,
             started_at: SystemTime::UNIX_EPOCH,
