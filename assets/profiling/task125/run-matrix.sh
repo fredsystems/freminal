@@ -8,8 +8,8 @@ readonly SCRIPT_DIR
 # shellcheck source=assets/profiling/task125/workloads.sh
 source "${SCRIPT_DIR}/workloads.sh"
 
-readonly WEZTERM_BIN="/nix/store/fjd3yyncgw5wj0vv8wkvlibp5z4wqqzg-wezterm-0-unstable-2026-08-12/bin/wezterm"
-readonly GHOSTTY_BIN="/nix/store/ij9fvnhfj710aafmlav1psl434cw5wqc-ghostty-1.3.1/bin/ghostty"
+readonly WEZTERM_BIN="/nix/store/mmvpz8sgpp4gg1lwsjv68knvkzqmsdwk-wezterm-0-unstable-2026-09-17/bin/wezterm"
+readonly GHOSTTY_BIN="/nix/store/i5zqr903i6yb642h9amwh5174n5bmfc4-ghostty-1.3.1/bin/ghostty"
 readonly SCREEN_WARMUP=5
 readonly SCREEN_DURATION=20
 readonly SCREEN_REPEATS=3

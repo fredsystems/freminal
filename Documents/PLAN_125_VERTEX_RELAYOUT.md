@@ -233,11 +233,15 @@ The maintainer resolved the workload and parity semantics on 2026-08-26:
   driver/presentation-sensitive.
 - **Peer binaries:** use the installed binaries and record both their displayed
   versions and immutable Nix store paths: WezTerm
-  `0-unstable-2026-08-12` at
-  `/nix/store/fjd3yyncgw5wj0vv8wkvlibp5z4wqqzg-wezterm-0-unstable-2026-08-12/bin/wezterm`
+  `0-unstable-2026-09-17` at
+  `/nix/store/mmvpz8sgpp4gg1lwsjv68knvkzqmsdwk-wezterm-0-unstable-2026-09-17/bin/wezterm`
   and Ghostty `1.3.1` at
-  `/nix/store/ij9fvnhfj710aafmlav1psl434cw5wqc-ghostty-1.3.1/bin/ghostty`.
+  `/nix/store/i5zqr903i6yb642h9amwh5174n5bmfc4-ghostty-1.3.1/bin/ghostty`.
   Record the Freminal commit and active GL renderer with every capture.
+  Re-pinned by maintainer decision on 2026-10-04, before any screening
+  capture: the originally pinned WezTerm `0-unstable-2026-08-12`
+  (`fjd3yyncgw5w…`) and Ghostty `1.3.1` (`ij9fvnhfj710…`) store paths had been
+  garbage-collected after a system update.
 - **CPU parity:** use a staged protocol. Screen every non-pointer workload with
   three 20-second steady samples after a 5-second warm-up, interleaving terminal
   order; run pointer screening separately with explicit maintainer interaction.
