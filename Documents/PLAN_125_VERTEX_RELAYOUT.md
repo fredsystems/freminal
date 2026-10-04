@@ -400,9 +400,15 @@ The exact workload matrix is:
    `while :; do seq 1 200; sleep 0.02; done`;
 8. physical pointer motion over inert terminal content, timed for 20 seconds in
    screening and 60 seconds in confirmation, run separately from unattended
-   workloads and reported with Freminal's observed event rate; and
+   workloads and reported with Freminal's observed event rate;
 9. four-tab/2x2-pane idle chrome, once with the active cursor blinking and once
-   steady.
+   steady; and
+10. scrolling streaming output (added by 125.C4): one new line every 20 ms, so
+    each line scrolls the view by exactly one row. The typed command is:
+
+    ```sh
+    n=0; while :; do printf 'Task125 stream line %08d\n' "$((++n))"; sleep 0.02; done
+    ```
 
 Deliverable: hermetic configs, runnable scripts, deterministic summary output,
 and an updated `PROFILING.md` command/reference section. A dry run must prove
@@ -442,8 +448,9 @@ would be a worse confound. Synthetic workloads stay within 124x31; `btop` is
 product-level.
 
 The staged protocol replaces the original four-hour exhaustive matrix: a
-roughly 34-minute non-pointer screen, a separate roughly four-minute physical-
-pointer screen, then seven 60-second confirmations only for selected workloads.
+roughly 34-minute non-pointer screen (roughly 38 minutes after 125.C4 added a
+tenth workload), a separate roughly four-minute physical-pointer screen, then
+seven 60-second confirmations only for selected workloads.
 Scheduler wakeups use the existing root-only `sched:sched_wakeup` tracepoint
 with a terminal-thread filter; workload descendants are excluded from terminal
 CPU accounting. Per-process AMD DRM fdinfo was available for all three smoke
@@ -529,6 +536,41 @@ timing flush`, and noting in both the preflight failure message and
 **Complete.** The 125.8 real-AMD `profile-smoke` run on 2026-10-04 validated
 all three assertions (renderer identity, 125.5/125.6 summary, 125.8 GPU
 timing flush).
+
+### 125.C4 — Add a scrolling streaming-output workload
+
+Scope: `assets/profiling/task125/workloads.sh`,
+`assets/profiling/task125/run-matrix.sh`, `Documents/PROFILING.md`, and this
+document.
+
+Surface point: maintainer review of the 125.8 smoke on 2026-10-04 observed that
+`sustained-output` prints each 200-line burst at once, so every burst replaces
+the whole 31-row view.
+
+What: workload 7 (`sustained-output`) is a dense full-redraw throughput test,
+and workload 4 (`sparse-row`) updates one row in place without scrolling.
+Neither covers the most common real-world pattern: one new line at a time
+scrolling the view by one row (`tail -f`, `cargo build`, `journalctl -f`).
+A one-line scroll changes the content of every visible row although only one
+line is new, so this workload tests whether Freminal's damage model treats a
+one-line scroll as all-rows-changed -- an expected but unverified hypothesis;
+measurement decides -- and gates a possible scroll-aware row-reuse remediation
+(shifting or reusing existing row vertex data, or a GPU region copy, instead of
+a full rebuild). The change adds a `streaming-output` workload to
+`workloads.sh` (one fixed-width ASCII line every 20 ms with a monotonically
+increasing counter, narrower than the common 124-column grid), classifies it in
+`run-matrix.sh` as a non-pointer unattended workload started before warm-up
+beside `sustained-output`, includes it in the non-pointer `screen`, and
+documents it and the new screen duration (90 windows, roughly 38 minutes) in
+`PROFILING.md`. No raw capture is committed.
+
+**Complete.** A 15-second real-AMD smoke on 2026-10-04 ran the exact command
+directly in an isolated, onboarding-seeded Freminal with `frame-profiling` and
+`gpu-profiling`. It rendered cleanly and produced live profile and GPU timing
+flushes. Smoke indication only, not a finding: of 840 observations, all 317
+`Bounded` frames fell in the 17-32 changed-row bucket and none in the one-row
+bucket, and 435 resolved `Full`, consistent with the all-rows-changed
+hypothesis. 125.10 decides it under the matched protocol.
 
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
@@ -853,6 +895,8 @@ Deliverable: the complete matched parity matrix and explicit gates for:
 - idle/chrome bypass or cursor-blink decoupling;
 - retained chrome output that preserves current-frame hit testing;
 - fixed-stride per-row uploads;
+- scroll-aware row reuse (shift/reuse existing row vertex data or GPU region
+  copy on one-line scrolls);
 - incremental CPU row vertex construction;
 - mapped/persistent GPU buffers with capability fallback;
 - scheduling and unnecessary-wakeup elimination;
@@ -885,6 +929,10 @@ before any remediation activation.
   the observed class distribution, and the predicted CPU or GPU saving reaches
   the material floor. Preserve `DefaultBackground` no-fragment semantics and
   the cursor-last decoration invariant.
+- **Scroll reuse:** open when `streaming-output` shows a material paired CPU
+  or GPU gap and the live render-work profile shows one-line scrolls resolving
+  to full rebuilds or whole-buffer uploads. Preserve the `DefaultBackground`
+  no-fragment and cursor-last decoration invariants.
 - **Incremental CPU construction:** open when repaired row benchmarks and live
   changed-row histograms predict a material task-clock saving independent of
   upload bandwidth. It may open even if fixed stride does not.

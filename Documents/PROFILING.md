@@ -382,11 +382,17 @@ pattern-based cleanup (`pkill`, `killall`, or `pkill -f`) is forbidden.
 
 ### Staged parity protocol
 
+The unattended workloads include `sustained-output` (a 200-line burst every
+20 ms, replacing the whole view each time) and `streaming-output` (one
+fixed-width line every 20 ms, scrolling the view by one row as `tail -f` or
+`cargo build` does); the pair separates dense full-redraw throughput from
+one-line scroll cost.
+
 Do not run seven 60-second captures for every workload.
 
 1. `screen` runs three 20-second samples after a five-second warm-up for every
-   non-pointer workload. It spawns 81 windows and takes approximately 34
-   minutes.
+   non-pointer workload (ten, including `streaming-output`). It spawns 90
+   windows and takes approximately 38 minutes.
 2. `pointer-screen` runs the same short protocol for pointer motion, separately
    because every sample needs physical maintainer interaction. It spawns nine
    windows and takes approximately four minutes.

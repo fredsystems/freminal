@@ -164,6 +164,9 @@ task125_start_workload() {
 	sustained-output)
 		wtype "while :; do seq 1 200; sleep 0.02; done" -k Return
 		;;
+	streaming-output)
+		wtype "n=0; while :; do printf 'Task125 stream line %08d\\n' \"\$((++n))\"; sleep 0.02; done" -k Return
+		;;
 	*)
 		printf 'unknown workload: %s\n' "${workload}" >&2
 		return 2

@@ -513,7 +513,7 @@ prepare_workload_before_warmup() {
 	chrome-blink | chrome-steady)
 		task125_setup_chrome_topology
 		;;
-	btop | sparse-row | sustained-output)
+	btop | sparse-row | sustained-output | streaming-output)
 		task125_start_workload "${workload}" "${SAMPLE_DURATION}" "${run_dir}" >/dev/null
 		;;
 	scrollback)
@@ -628,7 +628,7 @@ run_screen() {
 	SAMPLE_REPEATS=${SCREEN_REPEATS}
 	run_series screen "${output_dir}" \
 		idle-blink idle-steady typing sparse-row btop scrollback sustained-output \
-		chrome-blink chrome-steady
+		streaming-output chrome-blink chrome-steady
 }
 
 run_pointer_screen() {
