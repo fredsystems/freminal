@@ -3,12 +3,17 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::measurement::WallTime;
+use criterion::{
+    BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
+};
 
 use freminal_buffer::buffer::Buffer;
 use freminal_buffer::compact_row::CompactRow;
 use freminal_buffer::compressed_block::CompressedBlock;
-use freminal_buffer::image_store::{AnimationControl, ImageSizeMode, ImageStore, InlineImage};
+use freminal_buffer::image_store::{
+    AnimationControl, ImageProtocol, ImageSizeMode, ImageStore, InlineImage,
+};
 use freminal_buffer::row::Row;
 use freminal_common::buffer_states::{
     cursor::StateColors,
@@ -195,6 +200,259 @@ fn bench_softwrap_heavy(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// Benchmarks: line-feed eviction at the real default scrollback capacity
+// (Task 125.12).
+//
+// Task 125.10 found that once scrollback is full, every line feed runs
+// `Buffer::enforce_scrollback_limit`, which front-drains `rows`, `row_cache`
+// and `row_block_map` (a memmove of ~10 000 entries per line feed) and then
+// scans the whole block map / every live cell. These benches measure that
+// steady-state eviction path at the DEFAULT 10 000-row limit (see
+// `Buffer::new` in `buffer/lifecycle.rs`), so the Task 125 `RowStore`
+// remediation (125.13-125.16) can be compared before/after under the named
+// Criterion baseline `before_125_rowstore`.
+//
+// They use only public `Buffer` methods (`insert_text`, `handle_cr`,
+// `handle_lf`, the prompt / command-block marks, `place_image`, and the idle
+// compaction / compression entry points) and never touch `rows`, `row_cache`
+// or `row_block_map`, so they compile unchanged across the RowStore refactor.
+//
+// Geometry is the 124x31 grid used by the Task 125.10 matched-protocol
+// capture. The timed unit is `EVICTION_LF_BURST` (200) lines, each a short
+// text insert followed by CR + LF (a real PTY's `\r\n` after ONLCR) — the
+// size of one `seq 1 200` style burst. Every LF in the burst evicts exactly
+// one row because the buffer already sits at `height + limit` rows.
+//
+// Harness choice: every scenario builds a FRESH buffer per iteration in the
+// untimed setup (`iter_batched_ref` + `BatchSize::PerIteration`) and the
+// buffer is dropped outside the timed span. A single reused buffer would stay
+// at capacity indefinitely, but it would not stay in the scenario's state: the
+// compressed blocks, the image and the prompt marks all scroll off the top
+// after enough bursts (each burst evicts 200 rows), silently degenerating
+// every scenario into `plain`. Rebuilding per iteration keeps all four
+// scenarios and the scaling sweep on one identical methodology, at the cost of
+// wall-clock time spent in (untimed) setup.
+// ---------------------------------------------------------------
+
+/// Width of the matched-protocol Freminal grid (Task 125.10).
+const EVICTION_WIDTH: usize = 124;
+
+/// Height of the matched-protocol Freminal grid (Task 125.10).
+const EVICTION_HEIGHT: usize = 31;
+
+/// Compiled-in default scrollback limit — mirrors `Buffer::new`
+/// (`lifecycle.rs`) and `ScrollbackConfig::default`.
+const EVICTION_DEFAULT_LIMIT: usize = 10_000;
+
+/// Lines per timed iteration (one `seq 1 200`-sized burst).
+const EVICTION_LF_BURST: usize = 200;
+
+/// A prompt mark / command block is recorded every this many filled lines in
+/// the `prompts` scenario (~500 marks across a 10 000-row scrollback).
+const EVICTION_PROMPT_INTERVAL: usize = 20;
+
+/// Which retained-state the eviction scenario carries in its scrollback.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvictionScenario {
+    /// Plain rows only.
+    Plain,
+    /// Whole scrollback compacted (Task 118) and compressed (Task 119).
+    Compressed,
+    /// OSC 133-style prompt marks and command blocks every
+    /// `EVICTION_PROMPT_INTERVAL` lines.
+    Prompts,
+    /// One inline image placed mid-scrollback.
+    Image,
+}
+
+/// Record one step of a prompt / command-block cycle for filled line `line`:
+/// prompt + command start on line 0 of the interval, output start on line 1,
+/// finish on the last line.
+fn drive_prompt_cycle(buf: &mut Buffer, line: usize) {
+    let phase = line % EVICTION_PROMPT_INTERVAL;
+    if phase > 1 && phase != EVICTION_PROMPT_INTERVAL - 1 {
+        return;
+    }
+    let fid = format!("bench-fid-{}", line / EVICTION_PROMPT_INTERVAL);
+    if phase == 0 {
+        buf.mark_prompt_row();
+        let _id = buf.start_command_block(None, fid.clone());
+        buf.mark_command_start_row(&fid);
+    } else if phase == 1 {
+        buf.mark_output_start_row(&fid);
+    } else {
+        let _ = buf.finish_command_block(Some(0), &fid);
+    }
+}
+
+/// Build a primary buffer sitting exactly at capacity (`height + limit` rows)
+/// in the requested scenario. Untimed setup.
+fn build_eviction_buffer(scenario: EvictionScenario, limit: usize) -> Buffer {
+    let mut buf = Buffer::new(EVICTION_WIDTH, EVICTION_HEIGHT).with_scrollback_limit(limit);
+
+    // Fill past capacity so the scrollback is at its steady-state cap before
+    // any timed work runs.
+    let total_lines = EVICTION_HEIGHT + limit + 8;
+    let image_line = total_lines / 2;
+    for i in 0..total_lines {
+        if scenario == EvictionScenario::Prompts {
+            drive_prompt_cycle(&mut buf, i);
+        }
+        if scenario == EvictionScenario::Image && i == image_line {
+            let _ = buf.place_image(
+                make_bench_image(1),
+                0,
+                ImageProtocol::Kitty,
+                None,
+                None,
+                0,
+                None,
+                1,
+                None,
+            );
+        }
+        let text: Vec<TChar> = format!("line{i:06}")
+            .bytes()
+            .cycle()
+            .take(EVICTION_WIDTH)
+            .map(TChar::Ascii)
+            .collect();
+        buf.insert_text(&text);
+        buf.handle_cr();
+        buf.handle_lf();
+    }
+
+    if scenario == EvictionScenario::Compressed {
+        // The two entry points the PTY idle tick drives, run to completion
+        // (usize::MAX budget) so the whole scrollback is compressed and the
+        // timed evictions hit compressed blocks.
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+        let _ = buf.compress_idle_scrollback(usize::MAX);
+    }
+
+    buf
+}
+
+/// Verify (once, outside any timing) that a scenario's buffer really is at
+/// capacity and really carries the state the scenario claims to measure.
+fn assert_eviction_scenario(scenario: EvictionScenario, limit: usize) {
+    let buf = build_eviction_buffer(scenario, limit);
+    let heap = buf.heap_bytes();
+    assert_eq!(
+        heap.total_rows,
+        EVICTION_HEIGHT + limit,
+        "scenario buffer must sit exactly at capacity"
+    );
+    match scenario {
+        EvictionScenario::Plain => {}
+        EvictionScenario::Compressed => assert!(
+            heap.blocks_bytes > 0,
+            "compressed scenario must hold compressed blocks"
+        ),
+        EvictionScenario::Prompts => {
+            assert!(
+                buf.prompt_rows().len() >= limit / EVICTION_PROMPT_INTERVAL - 2,
+                "prompts scenario must retain ~one mark per interval"
+            );
+            assert!(buf.command_blocks().len() >= limit / EVICTION_PROMPT_INTERVAL - 2);
+        }
+        EvictionScenario::Image => assert!(
+            buf.has_any_image_cell(),
+            "image scenario must retain image cells"
+        ),
+    }
+}
+
+/// The timed unit: one burst of `EVICTION_LF_BURST` short lines.
+fn eviction_burst(buf: &mut Buffer, payload: &[TChar]) {
+    for _ in 0..EVICTION_LF_BURST {
+        buf.insert_text(payload);
+        buf.handle_cr();
+        buf.handle_lf();
+    }
+}
+
+fn eviction_payload() -> Vec<TChar> {
+    b"sustained output burst line 12345"
+        .iter()
+        .copied()
+        .map(TChar::Ascii)
+        .collect()
+}
+
+fn run_eviction_scenario(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    id: BenchmarkId,
+    scenario: EvictionScenario,
+    limit: usize,
+    payload: &[TChar],
+) {
+    assert_eviction_scenario(scenario, limit);
+    group.bench_function(id, |b| {
+        b.iter_batched_ref(
+            || build_eviction_buffer(scenario, limit),
+            |buf| eviction_burst(buf, payload),
+            BatchSize::PerIteration,
+        );
+    });
+}
+
+// IDs: plain | compressed | prompts | image. Each times
+// `EVICTION_LF_BURST` (200) line feeds, each with a short text insert, on a
+// 124x31 buffer already at the default 10 000-row capacity.
+fn bench_lf_eviction_at_capacity(c: &mut Criterion) {
+    let payload = eviction_payload();
+    let mut group = c.benchmark_group("bench_lf_eviction_at_capacity");
+    group.throughput(Throughput::Elements(EVICTION_LF_BURST as u64));
+    // Per-group override of the file-wide 2 s: a single `image` burst takes
+    // ~370 ms (every LF rescans all live cells), so 10 samples need ~4.6 s.
+    // Without this Criterion warns it cannot finish in the default time.
+    group.measurement_time(Duration::from_secs(5));
+
+    for (name, scenario) in [
+        ("plain", EvictionScenario::Plain),
+        ("compressed", EvictionScenario::Compressed),
+        ("prompts", EvictionScenario::Prompts),
+        ("image", EvictionScenario::Image),
+    ] {
+        run_eviction_scenario(
+            &mut group,
+            BenchmarkId::from_parameter(name),
+            scenario,
+            EVICTION_DEFAULT_LIMIT,
+            &payload,
+        );
+    }
+
+    group.finish();
+}
+
+// Retained-row-count sweep: the `plain` scenario at scrollback limits 1 000,
+// 10 000 and 50 000, with identical timed work (one 200-line burst). If
+// eviction is O(retained rows) the per-burst time scales with the limit; if it
+// is O(evicted rows) the three IDs are flat.
+fn bench_lf_eviction_scaling(c: &mut Criterion) {
+    let payload = eviction_payload();
+    let mut group = c.benchmark_group("bench_lf_eviction_scaling");
+    group.throughput(Throughput::Elements(EVICTION_LF_BURST as u64));
+    // Per-group override of the file-wide 2 s: the 50 000-row burst takes
+    // ~20 ms and 10 samples exceed the default budget.
+    group.measurement_time(Duration::from_secs(3));
+
+    for limit in [1_000usize, 10_000, 50_000] {
+        run_eviction_scenario(
+            &mut group,
+            BenchmarkId::new("plain", limit),
+            EvictionScenario::Plain,
+            limit,
+            &payload,
+        );
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // Criterion bootstrap
 // ---------------------------------------------------------------
 fn bench_visible_flatten(c: &mut Criterion) {
@@ -338,8 +596,15 @@ fn bench_cursor_ops(c: &mut Criterion) {
 // Benchmark: LF until scrollback limit — stress handle_lf + limit enforcement
 // ---------------------------------------------------------------
 fn bench_lf_heavy(c: &mut Criterion) {
-    // Push 4 100 LFs (just past the default 4 000-line scrollback limit) to
-    // exercise `handle_lf` and `enforce_scrollback_limit` together.
+    // Push 4 100 LFs through `handle_lf` on a default `Buffer::new(80, 24)`.
+    //
+    // The compiled-in default scrollback limit is now 10 000 rows (Task 118
+    // raised it from 4 000), so 4 100 LFs no longer reach capacity: this
+    // bench measures buffer growth (`push_row` below the limit), NOT the
+    // `enforce_scrollback_limit` front-drain. The ID and workload are kept
+    // unchanged so historical baselines stay comparable. Eviction at the real
+    // default capacity is covered by `bench_lf_eviction_at_capacity` and
+    // `bench_lf_eviction_scaling` (Task 125.12).
     const LF_COUNT: usize = 4_100;
 
     let mut group = c.benchmark_group("bench_lf_heavy");
@@ -663,7 +928,9 @@ fn bench_erase_display_full(c: &mut Criterion) {
 // ---------------------------------------------------------------
 fn bench_lf_heavy_bce(c: &mut Criterion) {
     // Same workload as bench_lf_heavy but with a non-default background
-    // color set, exercising the BCE fill path in push_row / handle_lf.
+    // color set, exercising the BCE fill path in push_row / handle_lf. As
+    // with `bench_lf_heavy`, 4 100 LFs stay below the default 10 000-row
+    // scrollback limit, so no eviction occurs (see the note there).
     const LF_COUNT: usize = 4_100;
 
     let bce_tag = FormatTag {
@@ -1204,6 +1471,8 @@ criterion_group!(
         bench_scroll_into_compressed_region,
         bench_idle_compaction_tick,
         bench_idle_compression_tick,
+        bench_lf_eviction_at_capacity,
+        bench_lf_eviction_scaling,
 );
 
 criterion_main!(benches);

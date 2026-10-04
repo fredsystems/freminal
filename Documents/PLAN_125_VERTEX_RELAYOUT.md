@@ -1294,6 +1294,18 @@ emulator-level sustained-output ingest benchmark (`seq 1 200` bursts through
 `handle_incoming_data` at capacity). Correct the stale 4,000/4,100 comments.
 Capture a named Criterion baseline `before_125_rowstore`.
 
+**Complete.** Added `bench_lf_eviction_at_capacity/{plain,compressed,prompts,image}`
+and `bench_lf_eviction_scaling/plain/{1000,10000,50000}` in
+`buffer_row_bench.rs` (124x31, 200-line bursts, fresh at-capacity buffer per
+iteration so each scenario keeps its state), and
+`bench_sustained_output_at_capacity/seq_200_burst` in the emulator's
+`buffer_benches.rs`. Baseline `before_125_rowstore` (per 200-line burst): plain
+4.595 ms, compressed 17.08 ms, prompts 4.783 ms, image 368.8 ms; scaling
+0.485 / 4.497 / 20.05 ms at 1k / 10k / 50k retained rows (about 2 ns per
+retained row per line feed, linear); emulator burst 4.390 ms. Eviction is the
+whole ingest cost, and one image in scrollback makes it 80 times slower, which
+makes 125.15's incremental image accounting load-bearing.
+
 ### 125.13 — Introduce `RowStore` with identical behaviour
 
 Scope: `freminal-buffer` only.

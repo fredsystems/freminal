@@ -13,6 +13,8 @@
 //! - `build_snapshot()` on a pre-populated emulator
 //! - End-to-end alternate-screen transitions (parse `?1049h`/`?1049l` ->
 //!   `build_snapshot()`), issue #405 Part C item 4
+//! - Sustained output at the default 10,000-row scrollback capacity
+//!   (`handle_incoming_data()` with every line feed evicting a row), Task 125.12
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use freminal_terminal_emulator::{
@@ -497,6 +499,87 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------
+// bench_sustained_output_at_capacity — Task 125.12
+//
+// Task 125.10 found that sustained output (`seq`, `cat` of a large file) is
+// dominated by `Buffer::enforce_scrollback_limit` once scrollback is full:
+// every line feed front-drains the row storage. This group drives that path
+// end to end through the REAL parser and handler via `handle_incoming_data`,
+// on a 124x31 emulator (the Task 125.10 matched-protocol grid) whose
+// scrollback is already at the default 10,000-row capacity.
+//
+//   seq_200_burst
+//     Timed: one burst of the bytes `seq 1 200` produces on a real PTY,
+//     `1\r\n2\r\n...200\r\n` (the tty's ONLCR turns each LF into CR LF), fed
+//     through `TerminalState::handle_incoming_data` in a single call. Each of
+//     the 200 line feeds evicts one row.
+//
+// A fresh emulator is pre-filled in the untimed setup for every iteration
+// (`iter_batched_ref` + `BatchSize::PerIteration`), and dropped outside the
+// timed span, so every timed iteration starts from exactly the same
+// at-capacity state. The pre-fill is 10,100 lines — past the 10,031-row
+// (`height + limit`) capacity — and the setup asserts that.
+// ---------------------------------------------------------------
+fn bench_sustained_output_at_capacity(c: &mut Criterion) {
+    const WIDTH: usize = 124;
+    const HEIGHT: usize = 31;
+    const DEFAULT_LIMIT: usize = 10_000;
+    const FILL_LINES: usize = 10_100;
+    const BURST_LINES: usize = 200;
+
+    // Pre-fill payload: dense 80-column-ish lines as shell output would be.
+    let mut fill = Vec::with_capacity(FILL_LINES * 82);
+    for row in 0..FILL_LINES {
+        for col in 0..80 {
+            fill.push(b'a' + ((row + col) % 26) as u8);
+        }
+        fill.extend_from_slice(b"\r\n");
+    }
+
+    // `seq 1 BURST_LINES`, as it arrives from a PTY.
+    let mut burst = Vec::new();
+    for n in 1..=BURST_LINES {
+        burst.extend_from_slice(n.to_string().as_bytes());
+        burst.extend_from_slice(b"\r\n");
+    }
+
+    let build_at_capacity = || {
+        let mut emulator = TerminalEmulator::dummy_for_bench();
+        emulator.internal.set_win_size(WIDTH, HEIGHT, 8, 16);
+        emulator.internal.handle_incoming_data(&fill);
+        emulator
+    };
+
+    // Verify once, outside timing, that the setup really lands at capacity.
+    {
+        let emulator = build_at_capacity();
+        let buffer = emulator.internal.handler.buffer();
+        assert_eq!(buffer.scrollback_limit(), DEFAULT_LIMIT);
+        assert_eq!(
+            buffer.heap_bytes().total_rows,
+            HEIGHT + DEFAULT_LIMIT,
+            "emulator must sit exactly at the default scrollback capacity"
+        );
+    }
+
+    let mut group = c.benchmark_group("bench_sustained_output_at_capacity");
+    group.throughput(Throughput::Bytes(burst.len() as u64));
+    // Per-group override of the file-wide 2 s: a burst takes ~4.5 ms and 10
+    // samples with a fresh at-capacity emulator each exceed the default budget.
+    group.measurement_time(Duration::from_secs(3));
+
+    group.bench_function("seq_200_burst", |b| {
+        b.iter_batched_ref(
+            build_at_capacity,
+            |emulator| emulator.internal.handle_incoming_data(&burst),
+            BatchSize::PerIteration,
+        );
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------
 // bench_alt_screen_transition_e2e — end-to-end alternate-screen transition
 // cost, driven through the REAL parser and `build_snapshot()`.
 //
@@ -751,6 +834,7 @@ criterion_group!(
         bench_data_and_format_for_gui,
         bench_build_snapshot,
         bench_build_snapshot_with_scrollback,
+        bench_sustained_output_at_capacity,
         bench_alt_screen_transition_e2e,
         bench_scrollback_memory_realworld,
 );
