@@ -591,6 +591,31 @@ missing from the filter and remains a hard failure.
 
 **Complete.** ShellCheck clean; validated by the restarted screen.
 
+### 125.C6 — Verify DECSC saved-cursor semantics
+
+Surface point: 125.11 design. Freminal's DECSC saves a buffer position, so a
+restore is content-attached; xterm may store a screen-relative position. Not
+verified against a reference. 125.14 preserves today's semantics (clamped
+`RowNumber`). Fix scope: look up the xterm/DEC behaviour, then either keep or
+change it with a regression test and the escape-sequence docs. Open; must not
+block 125.11-125.18.
+
+### 125.C7 — Image placement cursor save/restore uses physical rows
+
+Surface point: 125.11 design. `graphics_kitty.rs:776-827`, `:1546`,
+`graphics_iterm2.rs:125-157`, and `graphics_sixel.rs:114-143` save a physical
+cursor row around `place_image` and restore it after an eviction may have
+occurred; kitty and iTerm2 pass it to a screen-relative setter. Fix: capture
+`cursor_screen_pos()` instead, with an eviction regression test. Open;
+schedule after 125.14.
+
+### 125.C8 — Kitty delete-by-cell `y=` treated as a physical row
+
+Surface point: 125.11 design. `graphics_kitty.rs:2542-2570` interprets `d=p` /
+`d=q` `y=` as a physical buffer row rather than a screen row. Fix scope: map
+through the visible window per the kitty spec, with a test at nonzero
+scrollback. Open; schedule after 125.14.
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
@@ -1145,6 +1170,116 @@ stored row index found in the workspace and its disposition.
 Deliverable: a decision record precise enough that 125.13-125.17 need no
 further design choices. Any choice that changes user-visible behaviour is
 flagged for the maintainer.
+
+**Complete (decision record, 2026-10-04).** Drafted against the code by a
+read-only pass and ruled on by the orchestrator. File references are as of
+`f5578e9e`.
+
+1. **Storage: moving-head contiguous `RowStore`** (new
+   `freminal-buffer/src/buffer/row_store.rs`): three parallel `Vec`s (`rows`,
+   `cache`, `blocks`) sharing one `head`, plus `base: RowNumber`. Logical
+   length is `rows.len() - head`; `Index<usize>` maps to `head + i`. Pushes go
+   to all three, so the "block map may lag" invariant and
+   `sync_row_block_map_len` are deleted. `evict_front(n)` replaces each evicted
+   slot with a zero-width placeholder row, `None`, `None` (freeing payloads at
+   once), then advances `head` and `base`. Compaction drains `..head` when
+   `head >= max(live / 2, 64)`; the constant is named and 125.15 may tune it in
+   `live/4..live` against 125.12. `VecDeque` is rejected: flatten needs single
+   `&mut [Row]` / `&mut [Option<RowCacheEntry>]` windows (`flatten.rs:604`,
+   `:682`, `:1220`; `mod.rs:618`), and `rows()` / `visible_rows()` can then stay
+   `&[Row]` for every emulator and GUI caller. Alternate-screen entry becomes an
+   O(1) `mem::replace` of the store (today a discarded deep clone).
+2. **`RowNumber(u64)`** in new `freminal-common/src/buffer_states/row_number.rs`
+   (common because `CommandBlock` is shared with the GUI). Explicit arithmetic
+   only (`new`, `get`, `checked_add`, `saturating_add`, `rows_after(base) ->
+   Option<usize>`, saturating `offset(i64)`, `is_alternate`); no operator
+   impls, no raw casts. A row's number is `base + i`; numbers are never reused
+   after front eviction (a trailing blank-padding `pop` may re-issue). RIS and
+   ED 3 advance `base` rather than reset it. Alternate-screen rows use a
+   separate `1 << 63` namespace with its own monotonic counter; alt-era marks
+   and placements are dropped on `leave_alternate`. Width-changing reflow
+   installs rows at `base = old.next_number()` and returns a `ReflowRemap`
+   (built from the existing `old_row_meta` / `line_new_starts` /
+   `map_start_row` data) applied to prompts, command blocks, saved cursor, image
+   extents, and, via `Buffer::take_reflow_remap()`, kitty placements. Anything
+   not remapped falls below `base` and is detectably invalid instead of aliasing
+   another row. `resize_saved_primary` must return its remap. Task 120's banded
+   reflow becomes `RowStore::replace_range -> ReflowRemap`; nothing here
+   forecloses it.
+3. **Cursor and scroll offset stay physical.** `cursor.pos.y` is a retained
+   index used by every write and is shifted by one scalar at eviction;
+   `scroll_offset` is bottom-relative and resets on output. Window-relative
+   state (`MergeCache` per-row vectors, snapshot `row_offsets` / `row_epochs` /
+   `cursor_pos` / `visible_image_placements`, scroll margins, `ViewState`
+   cursor animation, `frame_dirty` epochs) stays as is.
+4. **Become logical:** `prompt_rows`; all four `CommandBlock` row fields;
+   DECSC `saved_cursor` (content-attached, clamped on restore, preserving
+   today's intent without drift); `PlaceImageResult.origin_row` (its hand-coded
+   drain compensation is deleted); kitty `RealPlacement.origin_row`; the merge
+   fingerprint's window start; GUI selection anchor/end, `last_click_pos`,
+   `context_menu_cell`, search matches and staleness key;
+   `InputEvent::ExtractSelection` / `CopyCommandOutput` rows. `folded_blocks`
+   is id-keyed and unchanged.
+5. **Compression:** `BlockRowRef` is unchanged. `blocks` becomes
+   `HashMap<BlockId, BlockSlot { block, live_rows: u32 }>`; compression sets
+   `live_rows`, `evict_front` decrements per evicted ref and frees at zero, and
+   `gc_unreferenced_blocks` leaves the eviction path. `ensure_decompressed` keeps
+   its cold whole-buffer walk and removes the slot; recompression mints a new id.
+   Debug invariant: the sum of `live_rows` equals the count of `Some` refs.
+   Capacity-sized correctness tests use small limits in debug builds because
+   `debug_assert_invariants` is O(rows x cols); capacity behaviour belongs to the
+   release benchmarks.
+6. **Images: per-image stamp horizon.** `ImageStore` keeps each image's
+   greatest stamped logical row and an index ordered by it. Hooks: the three
+   stamp sites in `images.rs`; four widening sites where image cells can move
+   down in the window (`scroll_slice_up`/`_down` and their `_columns`
+   variants), guarded by `image_cell_count > 0`; and reflow. `evict_front` pops
+   images whose horizon is below the new base and drops non-retained ones. Cost
+   is O(evicted + dropped). The one-line fallback (scan when an image row is
+   evicted) is rejected because it is not O(evicted). Debug invariant: every
+   image cell lies at or below its image's horizon or inside the visible window.
+7. **Merge cache:** the fingerprint's start becomes a `RowNumber`, which removes
+   the `merge_cache = None` special case in eviction. A slid window already
+   misses the cache today, so **this subtask yields no CPU win**; its
+   acceptance is oracle tests, the Task 123 pixel harness, and no regression.
+   The nulls in the confined `scroll_slice_*` rotations stay.
+8. **Snapshot:** `TerminalSnapshot` gains `row_base: RowNumber`; `prompt_rows`
+   becomes `Arc<[RowNumber]>`; `command_blocks` carry `RowNumber` fields; helper
+   methods convert between numbers and retained indices at each GUI seam. The
+   search corpus reply carries `row_base`, and staleness keys on
+   `row_base + total_rows`, which advances at capacity where `total_rows`
+   freezes.
+9. **API:** `Buffer::rows()` returns `&[Row]`. `RowStore` provides
+   `Deref/DerefMut<Target = [Row]>`, iteration, `FromIterator<Row>`,
+   `cache()/cache_mut()/block_map()`, `split_mut()` for the disjoint flatten
+   borrows, `push/pop/evict_front/replace_all/clear_all`, and the number
+   conversions. `SavedPrimaryState` holds a `RowStore` with crate-private
+   fields. `heap_bytes` reports capacity including dead slots.
+10. **Migration (125.13):** call sites indexing, slicing, or iterating
+    `self.rows` compile through `Deref` (about 266 production and 278 test
+    lines); about 125 `row_cache` and 69 `row_block_map` production sites move
+    to accessors; tests assigning `b.rows = ...` keep working via
+    `FromIterator` and drop their `row_cache` lines.
+
+Accepted user-visible changes, all fixes or bounded: selections stay on their
+text during eviction; search refreshes at capacity; ED 2 on the alternate
+screen no longer drops primary command blocks; alt-screen resize remaps primary
+marks; kitty placements follow reflow; an image whose cells were all cleared may
+persist until its rows evict (bounded by scrollback and the quota); at capacity
+the epoch comparison may report fewer changed rows; `heap_bytes` includes dead
+slots.
+
+Scope corrections to the subtasks below: 125.14 also covers
+`freminal-common` (`row_number.rs`, `command_block.rs`) and the GUI and
+emulator readers of exported rows (`gui/command_blocks.rs`, `folding.rs`,
+`terminal/input.rs`, `terminal/widget.rs`, `command_history.rs`, `search.rs`,
+`interface.rs`), plus `ReflowRemap` and the alt namespace. 125.15 covers
+`row_store.rs`, `resize_and_alt.rs`, `compression.rs`, `lifecycle.rs`,
+`images.rs`, `image_store.rs`, and `scroll.rs`; marks are pruned from the front
+while below `base`, and consumers filter by `rows_after`. 125.17 covers the GUI
+stored state listed in item 4, `extract_text` / `extract_block_text`
+signatures, and the search corpus reply; the only drift "workaround" is the
+comment at `frame_dirty.rs:524-531`.
 
 ### 125.12 — Capacity benchmarks and baseline
 
