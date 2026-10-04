@@ -4778,7 +4778,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "hello");
         // Row 0 contains "hello" (plus trailing spaces to width 10).
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(result, "hello");
     }
 
@@ -4787,7 +4787,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcdefghij");
         // Extract columns 2..=5 → "cdef"
-        let result = buf.extract_text(0, 2, 0, 5);
+        let result = buf.extract_text(RowNumber::new(0), 2, RowNumber::new(0), 5);
         assert_eq!(result, "cdef");
     }
 
@@ -4799,7 +4799,7 @@ mod extract_text_tests {
         push_line(&mut buf, "line three");
 
         // Extract from row 0, col 0 to row 2, col 9 (full lines).
-        let result = buf.extract_text(0, 0, 2, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(2), 9);
         assert_eq!(result, "line one\nline two\nline three");
     }
 
@@ -4807,7 +4807,7 @@ mod extract_text_tests {
     fn start_row_beyond_buffer() {
         let buf = Buffer::new(10, 5);
         // Only 5 rows in a new buffer; asking for row 100 returns empty.
-        let result = buf.extract_text(100, 0, 100, 5);
+        let result = buf.extract_text(RowNumber::new(100), 0, RowNumber::new(100), 5);
         assert_eq!(result, "");
     }
 
@@ -4816,7 +4816,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "only");
         // end_row far beyond buffer → clamped to last row.
-        let result = buf.extract_text(0, 0, 999, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(999), 9);
         // Should extract all rows without panicking.
         assert!(result.contains("only"));
     }
@@ -4824,7 +4824,7 @@ mod extract_text_tests {
     #[test]
     fn empty_buffer() {
         let buf = Buffer::new(10, 3);
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         // A fresh buffer has rows of spaces; trailing spaces are trimmed.
         assert_eq!(result, "");
     }
@@ -4834,7 +4834,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(20, 5);
         push_line(&mut buf, "abc");
         // Row has "abc" + 17 spaces; extract_text trims trailing spaces.
-        let result = buf.extract_text(0, 0, 0, 19);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 19);
         assert_eq!(result, "abc");
     }
 
@@ -4843,7 +4843,7 @@ mod extract_text_tests {
         let mut buf = Buffer::new(5, 3);
         push_line(&mut buf, "hi");
         // start_col beyond the actual content should still not panic.
-        let result = buf.extract_text(0, 100, 0, 100);
+        let result = buf.extract_text(RowNumber::new(0), 100, RowNumber::new(0), 100);
         assert_eq!(result, "");
     }
 
@@ -4856,8 +4856,123 @@ mod extract_text_tests {
         let chars = vec![wide_char, ascii('x')];
         buf.insert_text(&chars);
 
-        let result = buf.extract_text(0, 0, 0, 9);
+        let result = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(result, "Ｗx");
+    }
+
+    // ── Task 125.17: logical row numbers across eviction ─────────────
+
+    /// A 3-row screen with 5 rows of scrollback (8 retained rows at most) that
+    /// has evicted exactly the leading `evicted` rows of the scripted lines
+    /// `line0`, `line1`, ...: the buffer holds the lines in order, and the
+    /// numbers recorded for them stay valid.
+    ///
+    /// Returns the buffer and the logical number of each line written, in
+    /// order, for the first `lines` lines.
+    fn small_buffer_with_lines(lines: usize) -> (Buffer, Vec<RowNumber>) {
+        let mut buf = Buffer::new(10, 3).with_scrollback_limit(5);
+        let mut numbers = Vec::new();
+        for i in 0..lines {
+            numbers.push(buf.cursor_row_number());
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        (buf, numbers)
+    }
+
+    #[test]
+    fn extract_text_follows_the_same_rows_across_eviction() {
+        // 5 lines: nothing evicted yet (6 rows incl. the cursor row <= 8).
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        assert_eq!(buf.row_base(), RowNumber::ZERO, "setup: no eviction yet");
+        let before = buf.extract_text(numbers[2], 0, numbers[3], 9);
+        assert_eq!(before, "line2\nline3");
+
+        // Push enough further lines to evict the first rows but keep 2 and 3.
+        push_line(&mut buf, "line5");
+        push_line(&mut buf, "line6");
+        push_line(&mut buf, "line7");
+        assert!(buf.row_base() > RowNumber::ZERO, "setup must evict rows");
+        assert!(
+            buf.row_base() <= numbers[2],
+            "setup must keep the selected rows retained"
+        );
+
+        let after = buf.extract_text(numbers[2], 0, numbers[3], 9);
+        assert_eq!(
+            after, before,
+            "the same logical rows must copy the same text"
+        );
+    }
+
+    #[test]
+    fn extract_text_start_evicted_clamps_to_oldest_row_column_zero() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        let base = buf.row_base();
+        assert!(base > numbers[1], "setup: rows 0 and 1 must be evicted");
+
+        // A start column that belonged to the vanished text must not apply to
+        // the clamped row: the clamp starts the oldest row at column 0.
+        let end = buf.row_number_at(1);
+        let clamped = buf.extract_text(numbers[0], 3, end, 9);
+        let expected = buf.extract_text(base, 0, end, 9);
+        assert_eq!(clamped, expected);
+        assert!(clamped.starts_with("line"), "got {clamped:?}");
+    }
+
+    #[test]
+    fn extract_text_range_wholly_evicted_is_empty() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        assert!(buf.row_base() > numbers[1], "setup: rows 0 and 1 evicted");
+        assert_eq!(buf.extract_text(numbers[0], 0, numbers[1], 9), "");
+    }
+
+    #[test]
+    fn extract_text_end_beyond_buffer_clamps_to_last_row() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        let text = buf.extract_text(numbers[1], 0, far, 9);
+        assert!(text.starts_with("line1\nline2"), "got {text:?}");
+    }
+
+    #[test]
+    fn extract_text_start_beyond_buffer_is_empty() {
+        let (buf, _) = small_buffer_with_lines(3);
+        let far = RowNumber::new(10_000);
+        assert_eq!(buf.extract_text(far, 0, far, 9), "");
+    }
+
+    #[test]
+    fn extract_text_other_namespace_rows_are_empty() {
+        let (buf, numbers) = small_buffer_with_lines(3);
+        let alt = RowNumber::ALTERNATE_BASE;
+        assert_eq!(buf.extract_text(alt, 0, alt, 9), "");
+        assert_eq!(buf.extract_text(numbers[0], 0, alt, 9), "");
+        assert_eq!(buf.extract_block_text(alt, 0, alt, 9), "");
+    }
+
+    #[test]
+    fn extract_block_text_follows_rows_and_keeps_columns_when_start_evicted() {
+        let (mut buf, numbers) = small_buffer_with_lines(5);
+        let before = buf.extract_block_text(numbers[2], 2, numbers[3], 3);
+        assert_eq!(before, "ne\nne");
+        for i in 5..12 {
+            push_line(&mut buf, &format!("line{i}"));
+        }
+        let base = buf.row_base();
+        assert!(base > numbers[1], "setup: rows 0 and 1 evicted");
+
+        // A block keeps its column range when its start row is clamped.
+        let end = buf.row_number_at(1);
+        let clamped = buf.extract_block_text(numbers[0], 2, end, 3);
+        let oldest_and_next = buf.extract_block_text(base, 2, end, 3);
+        assert_eq!(clamped, oldest_and_next);
+        assert!(clamped.starts_with("ne"), "got {clamped:?}");
     }
 }
 
@@ -4887,7 +5002,7 @@ mod extract_block_text_tests {
         // Single-row block selection: same as a normal extract over that row.
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "hello");
-        let result = buf.extract_block_text(0, 0, 0, 4);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(0), 4);
         assert_eq!(result, "hello");
     }
 
@@ -4896,7 +5011,7 @@ mod extract_block_text_tests {
         // Extract only columns 1..=3 of "abcde" → "bcd".
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcde");
-        let result = buf.extract_block_text(0, 1, 0, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 1, RowNumber::new(0), 3);
         assert_eq!(result, "bcd");
     }
 
@@ -4910,7 +5025,7 @@ mod extract_block_text_tests {
         push_line(&mut buf, "abcdefghij");
         push_line(&mut buf, "efghijklmn");
         push_line(&mut buf, "ijklmnopqr");
-        let result = buf.extract_block_text(0, 0, 2, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(2), 3);
         assert_eq!(
             result,
             "abcd
@@ -4925,7 +5040,7 @@ ijkl"
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "abcdefghij");
         // Passing end_col=1, start_col=3 → should extract cols 1..=3 = "bcd".
-        let result = buf.extract_block_text(0, 3, 0, 1);
+        let result = buf.extract_block_text(RowNumber::new(0), 3, RowNumber::new(0), 1);
         assert_eq!(result, "bcd");
     }
 
@@ -4936,7 +5051,7 @@ ijkl"
         push_line(&mut buf, "ab"); // row 0: "ab" + 8 spaces
         push_line(&mut buf, "cde"); // row 1: "cde" + 7 spaces
         // Extract cols 0..=9 (full width): trailing spaces must be stripped.
-        let result = buf.extract_block_text(0, 0, 1, 9);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(1), 9);
         assert_eq!(
             result,
             "ab
@@ -4947,7 +5062,7 @@ cde"
     #[test]
     fn start_row_beyond_buffer() {
         let buf = Buffer::new(10, 5);
-        let result = buf.extract_block_text(100, 0, 105, 9);
+        let result = buf.extract_block_text(RowNumber::new(100), 0, RowNumber::new(105), 9);
         assert_eq!(result, "");
     }
 
@@ -4956,7 +5071,7 @@ cde"
         let mut buf = Buffer::new(10, 5);
         push_line(&mut buf, "only");
         // end_row far beyond buffer → clamped, must not panic.
-        let result = buf.extract_block_text(0, 0, 999, 3);
+        let result = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(999), 3);
         assert!(result.contains("only"));
     }
 
@@ -4965,7 +5080,7 @@ cde"
         // Columns beyond the actual row width produce no characters (no panic).
         let mut buf = Buffer::new(5, 3);
         push_line(&mut buf, "hi");
-        let result = buf.extract_block_text(0, 10, 0, 20);
+        let result = buf.extract_block_text(RowNumber::new(0), 10, RowNumber::new(0), 20);
         assert_eq!(result, "");
     }
 
@@ -4978,7 +5093,7 @@ cde"
         push_line(&mut buf, "abcdefghij");
         push_line(&mut buf, "ABCDEFGHIJ");
         // Extract cols 3..=5 → "345", "def", "DEF".
-        let result = buf.extract_block_text(0, 3, 2, 5);
+        let result = buf.extract_block_text(RowNumber::new(0), 3, RowNumber::new(2), 5);
         assert_eq!(
             result,
             "345
@@ -7969,7 +8084,7 @@ mod resize_and_insert_tests {
     #[test]
     fn extract_text_start_row_out_of_bounds() {
         let buf = Buffer::new(10, 3);
-        let text = buf.extract_text(100, 0, 200, 5);
+        let text = buf.extract_text(RowNumber::new(100), 0, RowNumber::new(200), 5);
         assert_eq!(text, "");
     }
 
@@ -7983,7 +8098,7 @@ mod resize_and_insert_tests {
         // Manually overwrite cell 2 with NewLine.
         buf.rows[0].cells_mut()[2] = Cell::new(TChar::NewLine, FormatTag::default());
 
-        let text = buf.extract_text(0, 0, 0, 9);
+        let text = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(0), 9);
         assert_eq!(text, "AB", "extraction should stop at NewLine");
     }
 
@@ -7992,7 +8107,7 @@ mod resize_and_insert_tests {
     #[test]
     fn extract_block_text_start_row_out_of_bounds() {
         let buf = Buffer::new(10, 3);
-        let text = buf.extract_block_text(100, 0, 200, 5);
+        let text = buf.extract_block_text(RowNumber::new(100), 0, RowNumber::new(200), 5);
         assert_eq!(text, "");
     }
 
@@ -8004,7 +8119,7 @@ mod resize_and_insert_tests {
         buf.insert_text(&t("ABC"));
 
         // Extract block from col 10 to 15 — beyond width.
-        let text = buf.extract_block_text(0, 10, 0, 15);
+        let text = buf.extract_block_text(RowNumber::new(0), 10, RowNumber::new(0), 15);
         // Should be empty or just whitespace since cols are out of range.
         assert_eq!(text.trim(), "");
     }
@@ -8930,7 +9045,7 @@ mod coverage_gap_tests {
         // Insert a wide char followed by narrow
         buf.insert_text(&[TChar::from('あ'), TChar::Ascii(b'B')]);
 
-        let text = buf.extract_text(0, 0, 0, 4);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(0), 4);
         // Should contain the wide char and 'B', no duplicates from continuation
         assert!(text.contains('B'));
     }
@@ -9011,7 +9126,7 @@ mod coverage_gap_tests {
         // the continuation cell (line 3166-3167).
         let mut buf = alt_buf(10, 3);
         buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'A')]);
-        let text = buf.extract_text(0, 0, 0, 5);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(0), 5);
         assert!(text.contains('中'), "Should contain the wide char");
         assert!(text.contains('A'), "Should contain the ASCII char");
         // Should NOT contain any placeholder for the continuation
@@ -9026,7 +9141,7 @@ mod coverage_gap_tests {
         buf.handle_lf();
         buf.handle_cr();
         buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
-        let text = buf.extract_text(0, 0, 1, 5);
+        let text = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(1), 5);
         assert!(text.contains("AB"), "First row should have AB");
         assert!(text.contains("CD"), "Second row should have CD");
         assert!(text.contains('\n'), "Should have newline between rows");
@@ -9039,7 +9154,7 @@ mod coverage_gap_tests {
         // extract_block_text with a wide char should skip continuation (line 3224-3225).
         let mut buf = alt_buf(10, 3);
         buf.insert_text(&[TChar::from('中'), TChar::Ascii(b'X')]);
-        let text = buf.extract_block_text(0, 0, 0, 5);
+        let text = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(0), 5);
         assert!(text.contains('中'));
         assert!(text.contains('X'));
     }
@@ -9051,7 +9166,7 @@ mod coverage_gap_tests {
         buf.handle_lf();
         buf.handle_cr();
         buf.insert_text(&[TChar::Ascii(b'C'), TChar::Ascii(b'D')]);
-        let text = buf.extract_block_text(0, 0, 1, 3);
+        let text = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(1), 3);
         assert!(text.contains("AB"), "First row should have AB: {text:?}");
         assert!(text.contains("CD"), "Second row should have CD: {text:?}");
     }
@@ -9521,7 +9636,7 @@ mod scrollback_compaction_tests {
         );
 
         // Rows 0 and 1 are within scrollback (compacted); extract across them.
-        let extracted = buf.extract_text(0, 0, 1, 14);
+        let extracted = buf.extract_text(buf.row_number_at(0), 0, buf.row_number_at(1), 14);
         assert!(
             extracted.contains("line0000content"),
             "extract_text over compacted scrollback missing row 0: {extracted:?}"
@@ -9531,7 +9646,7 @@ mod scrollback_compaction_tests {
             "extract_text over compacted scrollback missing row 1: {extracted:?}"
         );
 
-        let block = buf.extract_block_text(0, 0, 1, 6);
+        let block = buf.extract_block_text(buf.row_number_at(0), 0, buf.row_number_at(1), 6);
         assert!(
             block.contains("line000"),
             "extract_block_text over compacted scrollback missing row 0: {block:?}"

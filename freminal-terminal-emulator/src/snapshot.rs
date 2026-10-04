@@ -39,6 +39,24 @@ use freminal_common::{
     themes::ThemePalette,
 };
 
+/// The stretch of the active screen's buffer that a snapshot, or a search
+/// corpus cut from the same buffer, covers: which row is the oldest retained
+/// one and how many rows are retained.
+///
+/// Two extents are equal only if they describe the same retained rows.
+/// `total_rows` alone is **not** enough to tell: at scrollback capacity it
+/// freezes while `row_base` keeps advancing by one per evicted row, so a
+/// corpus fetched a moment ago has the same `total_rows` as the live buffer
+/// but is made of different rows. Comparing the pair (Task 125.17) is what
+/// lets staleness checks notice that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferExtent {
+    /// Logical number of the oldest retained row (retained index `0`).
+    pub row_base: RowNumber,
+    /// Number of retained rows (scrollback + visible).
+    pub total_rows: usize,
+}
+
 /// A point-in-time snapshot of the terminal state, ready for the GUI to render.
 ///
 /// All expensive work (flattening rows → `Vec<TChar>` / `Vec<FormatTag>`) is
@@ -122,8 +140,9 @@ pub struct TerminalSnapshot {
     ///
     /// The GUI uses this together with `term_height` and `scroll_offset` to
     /// compute the *visible window start* index, which is needed to convert
-    /// between screen-relative row indices and buffer-absolute row indices
-    /// used by `SelectionState`.
+    /// between screen-relative row indices and retained buffer indices.
+    /// Anything the GUI stores across frames (selection, search matches) is
+    /// numbered with logical [`RowNumber`]s instead; see [`Self::row_base`].
     pub total_rows: usize,
 
     /// Logical row number of the oldest retained row (retained index `0`).
@@ -380,6 +399,15 @@ pub struct TerminalSnapshot {
 }
 
 impl TerminalSnapshot {
+    /// The extent of the buffer this snapshot was built from.
+    #[must_use]
+    pub const fn extent(&self) -> BufferExtent {
+        BufferExtent {
+            row_base: self.row_base,
+            total_rows: self.total_rows,
+        }
+    }
+
     /// The logical row number of the buffer row at retained index
     /// `retained_index` (`row_base + retained_index`).
     ///
@@ -531,6 +559,27 @@ mod tests {
         snap.total_rows = total_rows;
         snap.term_height = term_height;
         snap
+    }
+
+    #[test]
+    fn extent_pairs_row_base_with_total_rows() {
+        let snap = snap_at(100, 10, 3);
+        assert_eq!(
+            snap.extent(),
+            BufferExtent {
+                row_base: RowNumber::new(100),
+                total_rows: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn extent_differs_when_only_the_base_advances() {
+        // At scrollback capacity `total_rows` is frozen while the base
+        // advances; the two extents must still compare unequal.
+        let before = snap_at(100, 10, 3);
+        let after = snap_at(101, 10, 3);
+        assert_ne!(before.extent(), after.extent());
     }
 
     #[test]

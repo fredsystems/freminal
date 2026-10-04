@@ -442,16 +442,17 @@ impl TerminalEmulator {
 
     /// Extract text from the full buffer for a selection range.
     ///
-    /// Coordinates are buffer-absolute row indices and 0-indexed columns.
+    /// Rows are stable logical [`RowNumber`]s and columns are 0-indexed.
     /// When `is_block` is `true` the same `start_col`..=`end_col` column range
     /// is extracted from every row, producing a rectangular block of text.
-    /// Delegates to `Buffer::extract_text` or `Buffer::extract_block_text`.
+    /// Delegates to `Buffer::extract_text` or `Buffer::extract_block_text`,
+    /// which clamp a start row that has been evicted to the oldest retained row.
     #[must_use]
     pub fn extract_selection_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
         is_block: bool,
     ) -> String {
@@ -1140,7 +1141,7 @@ mod tests {
     fn extract_selection_text_empty_buffer() {
         let emu = make_headless();
         // An all-zero range on an empty buffer should return empty or whitespace.
-        let text = emu.extract_selection_text(0, 0, 0, 0, false);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::ZERO, 0, false);
         // We just care that it doesn't panic; the exact content depends on buffer state.
         let _ = text;
     }
@@ -1151,10 +1152,65 @@ mod tests {
         // Write "Hello" into the buffer.
         emu.handle_incoming_data(b"Hello");
         // Extract across row 0 columns 0-4.
-        let text = emu.extract_selection_text(0, 0, 0, 4, false);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::ZERO, 4, false);
         assert!(
             text.contains("Hello"),
             "expected 'Hello' in selection, got: {text:?}"
+        );
+    }
+
+    /// Task 125.17: a selection named by logical row numbers keeps copying the
+    /// same text after rows have been evicted from the front, and a start row
+    /// that has itself been evicted clamps to the oldest retained row.
+    #[test]
+    fn extract_selection_text_follows_rows_across_capacity_eviction() {
+        let (mut emu, _rx) = TerminalEmulator::new_headless(Some(10));
+        let _ = emu.set_win_size(20, 5, 8, 16);
+        for i in 0..8 {
+            emu.handle_incoming_data(format!("old {i}\r\n").as_bytes());
+        }
+        // Nothing is evicted yet; name the rows holding "old 6" and "old 7".
+        let find = |emu: &TerminalEmulator, text: &str| -> RowNumber {
+            let buf = emu.internal.handler.buffer();
+            (0..buf.rows().len())
+                .map(|i| buf.row_number_at(i))
+                .find(|&n| buf.extract_text(n, 0, n, 19) == text)
+                .unwrap_or_else(|| panic!("{text:?} is not in the buffer"))
+        };
+        let (first, last) = (find(&emu, "old 6"), find(&emu, "old 7"));
+        let before = emu.extract_selection_text(first, 0, last, 19, false);
+        assert_eq!(before, "old 6\nold 7");
+
+        // Push at capacity until the base has advanced, with the rows retained.
+        let mut evicted_base = None;
+        for i in 0..4 {
+            emu.handle_incoming_data(format!("new {i}\r\n").as_bytes());
+            let base = emu.build_snapshot().row_base;
+            if base > RowNumber::ZERO {
+                evicted_base = Some(base);
+                break;
+            }
+        }
+        let base = evicted_base.unwrap_or_else(|| {
+            for i in 4..8 {
+                emu.handle_incoming_data(format!("new {i}\r\n").as_bytes());
+            }
+            emu.build_snapshot().row_base
+        });
+        assert!(base > RowNumber::ZERO, "setup: rows must have been evicted");
+        assert!(
+            base <= first,
+            "setup: the selected rows must still be retained"
+        );
+
+        let after = emu.extract_selection_text(first, 0, last, 19, false);
+        assert_eq!(after, before, "same logical rows, same copied text");
+
+        // A start row that was evicted clamps to the oldest retained row.
+        let clamped = emu.extract_selection_text(RowNumber::ZERO, 4, last, 19, false);
+        assert!(
+            !clamped.is_empty() && clamped.ends_with("old 7"),
+            "evicted start must clamp, not drop the copy: {clamped:?}"
         );
     }
 
@@ -1164,7 +1220,7 @@ mod tests {
         // Write two lines.
         emu.handle_incoming_data(b"AB\r\nCD");
         // Block selection on column 0 only, rows 0-1.
-        let text = emu.extract_selection_text(0, 0, 1, 0, true);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::new(1), 0, true);
         // Block should give us column 0 from each row.
         let _ = text; // Content may vary; just verify no panic.
     }

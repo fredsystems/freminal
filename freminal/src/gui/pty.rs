@@ -19,12 +19,11 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use freminal_common::args::Args;
 use freminal_common::buffer_states::command_block::CommandBlock;
 use freminal_common::buffer_states::modes::theme::Theming;
-use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::buffer_states::window_manipulation::WindowManipulation;
 use freminal_common::pty_write::{FreminalTerminalSize, PtyWrite};
 use freminal_common::send_or_log;
 use freminal_terminal_emulator::interface::TerminalEmulator;
-use freminal_terminal_emulator::io::{InputEvent, PtyRead, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, PtyRead, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::recording::{EventPayload, RecordingSwap};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 use freminal_terminal_emulator::terminal_handler::TerminalHandler;
@@ -265,9 +264,10 @@ pub struct TabChannels {
     ///
     /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
     /// concatenates scrollback + visible `TChar` data and sends it here.
-    /// The first element of the tuple is `total_rows` at the time the buffer
-    /// was captured, used by the GUI to detect stale responses.
-    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
+    /// The reply carries the buffer extent (row base + row count) at the time
+    /// the corpus was captured, used by the GUI to detect stale responses and
+    /// to number matches.
+    pub search_buffer_rx: Receiver<SearchCorpus>,
 
     /// Signals that the PTY process has exited.
     ///
@@ -441,7 +441,7 @@ pub fn spawn_pty_tab(
     let (input_tx, input_rx) = unbounded::<InputEvent>();
     let (window_cmd_tx, window_cmd_rx) = unbounded::<WindowCommand>();
     let (clipboard_tx, clipboard_rx) = crossbeam_channel::bounded::<String>(1);
-    let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+    let (search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
     let (pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded::<()>(1);
     let (command_event_tx, command_event_rx) = unbounded::<CommandFinishedEvent>();
 
@@ -538,7 +538,7 @@ fn spawn_pty_consumer_thread(
     input_rx: Receiver<InputEvent>,
     window_cmd_tx: Sender<WindowCommand>,
     clipboard_tx: Sender<String>,
-    search_buffer_tx: Sender<(usize, Vec<TChar>)>,
+    search_buffer_tx: Sender<SearchCorpus>,
     child_exit_rx: Option<Receiver<()>>,
     arc_swap: Arc<ArcSwap<TerminalSnapshot>>,
     repaint_handle: Arc<OnceLock<(RepaintProxy, WindowId)>>,
@@ -685,7 +685,7 @@ fn spawn_pty_consumer_thread(
                 |emulator: &mut TerminalEmulator,
                  msg: std::result::Result<InputEvent, crossbeam_channel::RecvError>,
                  clipboard_tx: &crossbeam_channel::Sender<String>,
-                 search_buffer_tx: &crossbeam_channel::Sender<(usize, Vec<TChar>)>|
+                 search_buffer_tx: &crossbeam_channel::Sender<SearchCorpus>|
                  -> InputOutcome {
                     let Ok(event) = msg else {
                         info!("Input channel closed; consumer thread exiting");
@@ -783,9 +783,12 @@ fn spawn_pty_consumer_thread(
                             // be requested or the search result can stall while the
                             // terminal is otherwise idle and the cursor-blink wake
                             // is suppressed (classified Repaint, #459 review finding).
-                            let combined = emulator.internal.handler.search_corpus(0);
-                            let total_rows = emulator.internal.handler.buffer().rows().len();
-                            let _ = search_buffer_tx.send((total_rows, combined));
+                            // The reply carries the buffer extent it was cut
+                            // from (row base + row count), so the GUI can store
+                            // matches as stable row numbers and detect a stale
+                            // corpus even at scrollback capacity (Task 125.17).
+                            let corpus = emulator.internal.handler.search_corpus(0);
+                            let _ = search_buffer_tx.send(corpus);
                         }
                         InputEvent::ClearScrollback => {
                             // Drop every scrollback row; the visible display
@@ -1111,7 +1114,7 @@ mod tests {
             emu.handle_incoming_data(&read.buf[0..read.read_amount]);
         });
 
-        let text = emu.extract_selection_text(0, 0, 0, 5, false);
+        let text = emu.extract_selection_text(RowNumber::ZERO, 0, RowNumber::ZERO, 5, false);
         assert!(
             text.contains("ABCDEF"),
             "batched chunks must be parsed in arrival order; got: {text:?}"
@@ -1227,9 +1230,9 @@ mod tests {
         assert!(!input_event_needs_repaint(&InputEvent::FocusChange(true)));
         assert!(!input_event_needs_repaint(&InputEvent::FocusChange(false)));
         assert!(!input_event_needs_repaint(&InputEvent::ExtractSelection {
-            start_row: 0,
+            start_row: RowNumber::ZERO,
             start_col: 0,
-            end_row: 1,
+            end_row: RowNumber::new(1),
             end_col: 1,
             is_block: false,
         }));

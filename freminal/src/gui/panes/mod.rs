@@ -27,10 +27,9 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::buffer_states::command_block::{CommandBlock, CommandBlockId};
-use freminal_common::buffer_states::tchar::TChar;
 use freminal_common::geometry::{Point, Rect, point};
 use freminal_common::pty_write::PtyWrite;
-use freminal_terminal_emulator::io::{InputEvent, WindowCommand};
+use freminal_terminal_emulator::io::{InputEvent, SearchCorpus, WindowCommand};
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
 use super::pty::CommandFinishedEvent;
@@ -144,9 +143,10 @@ pub struct Pane {
     ///
     /// When the GUI sends `InputEvent::RequestSearchBuffer`, the PTY thread
     /// concatenates scrollback + visible `TChar` data and sends it here.
-    /// The first element of the tuple is `total_rows` at the time the buffer
-    /// was captured, used by the GUI to detect stale responses.
-    pub search_buffer_rx: Receiver<(usize, Vec<TChar>)>,
+    /// The reply carries the buffer extent (row base + row count) at the time
+    /// the corpus was captured, used by the GUI to detect stale responses and
+    /// to number matches.
+    pub search_buffer_rx: Receiver<SearchCorpus>,
 
     /// Signals that this pane's PTY process has exited.
     ///
@@ -1731,8 +1731,7 @@ mod tests {
         let (pty_write_tx, _pty_write_rx) = crossbeam_channel::unbounded();
         let (_window_cmd_tx, window_cmd_rx) = crossbeam_channel::unbounded();
         let (_clipboard_tx, clipboard_rx) = crossbeam_channel::bounded(1);
-        let (_search_buffer_tx, search_buffer_rx) =
-            crossbeam_channel::bounded::<(usize, Vec<TChar>)>(1);
+        let (_search_buffer_tx, search_buffer_rx) = crossbeam_channel::bounded::<SearchCorpus>(1);
         let (_pty_dead_tx, pty_dead_rx) = crossbeam_channel::bounded(1);
         let (_command_event_tx, command_event_rx) = crossbeam_channel::unbounded();
 

@@ -255,7 +255,7 @@ fn test_handle_incoming_data_resets_scroll() {
 // ─── extract_selection_text ──────────────────────────────────────────────────
 
 /// Text written to the terminal is extractable from the buffer via
-/// buffer-absolute row and column coordinates.
+/// logical row numbers and column coordinates.
 #[test]
 fn test_extract_selection_text() {
     let (mut emu, _rx) = make_emulator();
@@ -271,7 +271,7 @@ fn test_extract_selection_text() {
     // The visible window occupies the last `term_height` rows of the buffer.
     // With the default 100-row terminal and no scrollback, the first visible
     // row is buffer row 0.
-    let first_visible_row = total_rows.saturating_sub(snap.term_height);
+    let first_visible_row = snap.row_number_at(total_rows.saturating_sub(snap.term_height));
 
     // Extract columns 0–4 of the first visible row (should include "Hello").
     let text = emu.extract_selection_text(first_visible_row, 0, first_visible_row, 4, false);
@@ -289,7 +289,7 @@ fn test_extract_selection_empty() {
 
     // No data written; the first row of the buffer is all empty cells.
     let snap = emu.build_snapshot();
-    let first_row = snap.total_rows.saturating_sub(snap.term_height);
+    let first_row = snap.row_number_at(snap.total_rows.saturating_sub(snap.term_height));
 
     let text = emu.extract_selection_text(first_row, 0, first_row, 9, false);
     assert!(

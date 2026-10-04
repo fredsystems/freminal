@@ -12,20 +12,23 @@ use crate::gui::{
     mouse::PreviousMouseState,
     published_frame_state::PanePointerReportInputs,
     shaping::ShapedLine,
-    view_state::{CellCoord, ViewState},
+    view_state::{CellCoord, LogicalCell, ViewState},
 };
 
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{
-        command_block::CommandStatus, pointer_shape::PointerShape, tchar::TChar, url::Url,
+        command_block::CommandStatus, pointer_shape::PointerShape, row_number::RowNumber,
+        tchar::TChar, url::Url,
     },
     config::Config,
     send_or_log,
     themes::ThemePalette,
 };
 use freminal_terminal_emulator::{
-    InlineImage, LineWidth, io::InputEvent, snapshot::TerminalSnapshot,
+    InlineImage, LineWidth,
+    io::{InputEvent, SearchCorpus},
+    snapshot::TerminalSnapshot,
 };
 
 use egui::{self, Color32, Context, CursorIcon, Key, Pos2, Rect, Ui};
@@ -917,8 +920,8 @@ enum ContextMenuAction {
     /// Copy the output range `[start_row, end_row]` of the command block
     /// the right-click occurred inside, full-width per row.
     CopyCommandOutput {
-        start_row: usize,
-        end_row: usize,
+        start_row: RowNumber,
+        end_row: RowNumber,
     },
 }
 
@@ -1014,8 +1017,16 @@ fn render_context_menu_area(
 ) -> egui::InnerResponse<()> {
     let has_selection = view_state.selection.has_selection();
 
+    // The right-clicked cell is stored as a logical row, so it keeps pointing
+    // at the clicked text even if the menu stays open while rows are evicted.
+    // Resolve it against this frame's snapshot; a cell whose row has since
+    // been evicted resolves to nothing and offers no URL / command entries.
+    let context_cell = view_state
+        .context_menu_cell
+        .and_then(|cell| cell.resolve(snap));
+
     // Look up whether the right-clicked cell sits inside a URL span.
-    let url_under_cursor = view_state.context_menu_cell.and_then(|cell| {
+    let url_under_cursor = context_cell.and_then(|cell| {
         super::coords::url_at_cell(
             cell.row,
             cell.col,
@@ -1030,9 +1041,11 @@ fn render_context_menu_area(
     // OSC 133 command block.  Returns `(start_row, end_row)` of the
     // block's output region if the click was inside a block with a
     // captured C marker and a recorded D marker.
-    let command_output_range = view_state.context_menu_cell.and_then(|cell| {
+    let command_output_range = context_cell.and_then(|cell| {
         let block = super::input::find_block_containing_row(snap, cell.row)?;
-        super::input::block_output_range(block, snap.row_base)
+        let (start, end) = super::input::block_output_range(block, snap.row_base)?;
+        // The menu action carries stable row numbers, not indices.
+        Some((snap.row_number_at(start), snap.row_number_at(end)))
     });
 
     egui::Area::new(area_id)
@@ -1193,14 +1206,20 @@ fn dispatch_context_menu_action(
                 snap.height.saturating_sub(1),
             )
             .1;
-            view_state.selection.anchor = Some(CellCoord {
-                col: 0,
-                row: window_start,
-            });
-            view_state.selection.end = Some(CellCoord {
-                col: last_col,
-                row: last_row,
-            });
+            view_state.selection.anchor = Some(LogicalCell::at(
+                snap,
+                CellCoord {
+                    col: 0,
+                    row: window_start,
+                },
+            ));
+            view_state.selection.end = Some(LogicalCell::at(
+                snap,
+                CellCoord {
+                    col: last_col,
+                    row: last_row,
+                },
+            ));
             view_state.selection.is_selecting = false;
         }
         ContextMenuAction::OpenUrl(url) => {
@@ -1535,13 +1554,25 @@ pub struct PaneRenderCache {
     /// are re-resolved against the new palette.
     pub(super) previous_theme: Option<&'static ThemePalette>,
     /// The normalised selection from the last full vertex rebuild, used to
-    /// detect selection changes that require a full rebuild.
-    pub(super) previous_selection: Option<(CellCoord, CellCoord)>,
+    /// detect selection changes that require a full rebuild. Logical row
+    /// numbers (Task 125.17), so it is stable across eviction and scrolling.
+    pub(super) previous_selection: Option<(LogicalCell, LogicalCell)>,
+    /// The selection in snapshot-row space at the last full vertex rebuild:
+    /// `(start_col, start_row, end_col, end_row)` relative to the flattened
+    /// window, as `DirtyTrackingOutcome::screen_selection` reports it
+    /// (Task 125.17).
+    ///
+    /// [`Self::previous_selection`] is stable under eviction, so it cannot
+    /// notice a selection that stayed attached to its text while the window
+    /// slid beneath it and the highlight therefore moved on screen. Comparing
+    /// this window-relative form can. Updated in lockstep with
+    /// [`Self::previous_selection`] and reset everywhere it is.
+    pub(super) previous_screen_selection: Option<(usize, usize, usize, usize)>,
     /// The screen-row span (inclusive, `(min, max)`) the selection occupied
     /// at the last full vertex rebuild, in **screen**-row space, not
-    /// buffer-absolute (Task 124.14b-i).
+    /// logical-row space (Task 124.14b-i).
     ///
-    /// [`Self::previous_selection`] is buffer-absolute and
+    /// [`Self::previous_selection`] holds logical row numbers and
     /// `DirtyTrackingOutcome::screen_selection` is snapshot-row space, so a
     /// bounded-damage union built by naively comparing the two would be
     /// comparing coordinates from two different spaces. Translating the old
@@ -1593,7 +1624,7 @@ pub struct PaneRenderCache {
     /// Despite its name, this is already **screen**-row space:
     /// [`super::frame_dirty::compute_command_block_hover_rows`]'s final step
     /// calls `FoldLayout::rendered_to_screen` before returning. So unlike
-    /// selection -- whose [`Self::previous_selection`] is buffer-absolute and
+    /// selection -- whose [`Self::previous_selection`] is in logical-row space and
     /// needed a dedicated screen-space companion -- this field is unioned
     /// straight into [`build_bounded_damage`] with no conversion and no
     /// second field (Task 124.14b-ii).
@@ -1768,6 +1799,7 @@ impl PaneRenderCache {
             last_rendered_row_epochs: None,
             previous_theme: None,
             previous_selection: None,
+            previous_screen_selection: None,
             previous_selection_screen_rows: None,
             previous_text_blink_slow_visible: true,
             previous_text_blink_fast_visible: true,
@@ -2597,7 +2629,7 @@ impl FreminalTerminalWidget {
         cache: &mut PaneRenderCache,
         input_tx: &Sender<InputEvent>,
         clipboard_rx: &Receiver<String>,
-        search_buffer_rx: &Receiver<(usize, Vec<TChar>)>,
+        search_buffer_rx: &Receiver<SearchCorpus>,
         ui_overlay_open: bool,
         border_drag_active: bool,
         bg_opacity: f32,
@@ -3017,11 +3049,13 @@ impl FreminalTerminalWidget {
         // Search: request the full buffer from the PTY thread when needed,
         // then run (or re-run) the search against the cached corpus.
         let search_error: Option<String> = if view_state.search_state.is_open {
-            // Detect staleness: if total_rows changed, the cached buffer is out
-            // of date and we need a fresh copy from the PTY thread.
-            let total_rows_changed =
-                snap.total_rows != view_state.search_state.last_known_total_rows;
-            if total_rows_changed
+            // Detect staleness: if the buffer extent (row base + row count)
+            // changed, the cached buffer is out of date and we need a fresh
+            // copy from the PTY thread. `total_rows` alone is not enough: at
+            // scrollback capacity it freezes while `row_base` advances with
+            // every evicted row (Task 125.17).
+            let extent_changed = view_state.search_state.corpus_is_stale(snap.extent());
+            if extent_changed
                 && view_state.search_state.buffer_request_state
                     == crate::gui::view_state::BufferRequestState::Idle
             {
@@ -3037,13 +3071,13 @@ impl FreminalTerminalWidget {
             // Try to receive the full buffer (non-blocking). Drain queued
             // responses and only accept a buffer whose version matches the
             // current snapshot — otherwise re-request a fresh copy.
-            if let Some((buffer_total_rows, buf)) = search_buffer_rx.try_iter().last() {
+            if let Some(reply) = search_buffer_rx.try_iter().last() {
                 view_state.search_state.buffer_request_state =
                     crate::gui::view_state::BufferRequestState::Idle;
 
-                if buffer_total_rows == snap.total_rows {
-                    view_state.search_state.cached_full_buffer = Some(Arc::new(buf));
-                    view_state.search_state.last_known_total_rows = buffer_total_rows;
+                if reply.extent == snap.extent() {
+                    view_state.search_state.cached_full_buffer = Some(Arc::new(reply.chars));
+                    view_state.search_state.last_known_extent = Some(reply.extent);
                 } else {
                     // Stale response — discard and re-request.
                     view_state.search_state.cached_full_buffer = None;
@@ -3058,11 +3092,16 @@ impl FreminalTerminalWidget {
 
             // Run search if query/mode changed or we just got a new buffer.
             if view_state.search_state.needs_refresh() {
-                if let Some(ref buffer) = view_state.search_state.cached_full_buffer {
+                if let (Some(buffer), Some(extent)) = (
+                    view_state.search_state.cached_full_buffer.as_ref(),
+                    view_state.search_state.last_known_extent,
+                ) {
                     let query = view_state.search_state.query.clone();
                     let regex_mode = view_state.search_state.regex_mode;
                     let case_sensitive = view_state.search_state.case_sensitive;
-                    let (found, err) = run_search(&query, regex_mode, case_sensitive, buffer);
+                    // Corpus row `i` is buffer row `extent.row_base + i`.
+                    let (found, err) =
+                        run_search(&query, regex_mode, case_sensitive, buffer, extent.row_base);
                     view_state.search_state.matches = found;
                     view_state.search_state.current_match = 0;
                     view_state.search_state.mark_fresh();
@@ -3499,11 +3538,13 @@ impl FreminalTerminalWidget {
 
                     // Build search match highlights from the current search state.
                     // Only matches within the flattened window are included, with
-                    // rows converted from buffer-absolute to snapshot-relative.
-                    let win_start = flat_window_start;
+                    // rows converted from logical row numbers to snapshot-relative.
                     let snap_rows = snap.term_height.saturating_add(snap.window_extra_rows);
-                    let search_highlights_snap: Vec<MatchHighlight> =
-                        matches_to_highlights(&view_state.search_state, win_start, snap_rows);
+                    let search_highlights_snap: Vec<MatchHighlight> = matches_to_highlights(
+                        &view_state.search_state,
+                        snap.row_number_at(flat_window_start),
+                        snap_rows,
+                    );
                     // Translate from snapshot-row space to screen-row space and
                     // drop highlights inside folded ranges or scrolled off the top.
                     let search_highlights: Vec<MatchHighlight> =
@@ -3710,6 +3751,7 @@ impl FreminalTerminalWidget {
                     // advance on a frame that actually drew.
                     let previous_selection_screen_rows = cache.previous_selection_screen_rows;
                     cache.previous_selection = current_selection;
+                    cache.previous_screen_selection = screen_selection;
                     cache.previous_selection_screen_rows = current_selection_screen_rows;
                     cache.previous_text_blink_slow_visible = view_state.text_blink_slow_visible;
                     cache.previous_text_blink_fast_visible = view_state.text_blink_fast_visible;
@@ -6036,6 +6078,37 @@ mod build_bounded_damage_tests {
         );
     }
 
+    /// Task 125.17: a selection that stays attached to its text while the
+    /// window slides beneath it (eviction at scrollback capacity) is painted
+    /// on different screen rows each frame. The bounded damage must cover
+    /// both extents -- the rows the highlight left AND the rows it moved to --
+    /// even though no row changed and the selection itself did not. Here the
+    /// highlight moves from rows 3..=4 to rows 2..=3; the union is one merged
+    /// run over rows 2..=4, so the old bottom row (4) is repainted too.
+    #[test]
+    fn a_selection_slid_by_eviction_damages_the_old_and_the_new_rows() {
+        let layout = identity_layout(20);
+
+        let damage = build_bounded_damage(
+            &ChangedRows::None,
+            BoundedDamageSpans {
+                current_selection: Some((2, 3)),
+                previous_selection: Some((3, 4)),
+                ..no_spans()
+            },
+            &layout.row_map,
+            &layout,
+            geometry(),
+            EmptyBoundedDamage::Full,
+        );
+
+        assert_eq!(
+            damage,
+            PaneFrameDamage::Region(vec![expected_run(2, 4)]),
+            "the vacated row 4 and the newly covered row 2 must both be damaged"
+        );
+    }
+
     /// The clearing case: the current selection is `None` (nothing to
     /// draw this frame) but a previous selection was recorded. The union
     /// must still damage the previous selection's rows -- if it did not,
@@ -7166,14 +7239,21 @@ mod overlay_suppress_input_tests {
     /// drag would survive the drag ending instead of disappearing.
     #[test]
     fn border_drag_clears_phantom_selection() {
-        use crate::gui::view_state::{CellCoord, SelectionState};
+        use crate::gui::view_state::{LogicalCell, SelectionState};
+        use freminal_common::buffer_states::row_number::RowNumber;
 
         // Build a phantom in-progress selection exactly as described in
         // the root-cause diagnostic: one endpoint pinned at the mouse-down
         // anchor, the other tracking the drag, `is_selecting = true`.
         let make_phantom = || SelectionState {
-            anchor: Some(CellCoord { col: 2, row: 3 }),
-            end: Some(CellCoord { col: 9, row: 3 }),
+            anchor: Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(3),
+            }),
+            end: Some(LogicalCell {
+                col: 9,
+                row: RowNumber::new(3),
+            }),
             is_selecting: true,
             ..SelectionState::default()
         };
@@ -7188,8 +7268,20 @@ mod overlay_suppress_input_tests {
             "finalize_interrupted_drag must KEEP a real anchor != end range"
         );
         assert!(!finalized.is_selecting, "drag flag must be cleared");
-        assert_eq!(finalized.anchor, Some(CellCoord { col: 2, row: 3 }));
-        assert_eq!(finalized.end, Some(CellCoord { col: 9, row: 3 }));
+        assert_eq!(
+            finalized.anchor,
+            Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(3)
+            })
+        );
+        assert_eq!(
+            finalized.end,
+            Some(LogicalCell {
+                col: 9,
+                row: RowNumber::new(3)
+            })
+        );
 
         // Fix under test: when the suppression cause is a border drag, the
         // widget must call `clear()` instead, fully discarding the phantom

@@ -431,7 +431,7 @@ impl BlockRowRef {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use freminal_common::buffer_states::tchar::TChar;
+    use freminal_common::buffer_states::{row_number::RowNumber, tchar::TChar};
 
     use crate::row::Row;
 
@@ -581,13 +581,13 @@ mod tests {
         let visible_start = buf.visible_window_start(0);
         assert!(visible_start >= 2, "test needs at least 2 scrollback rows");
 
-        let before_text = buf.extract_text(0, 0, 1, 14);
-        let before_block = buf.extract_block_text(0, 0, 1, 6);
+        let before_text = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(1), 14);
+        let before_block = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(1), 6);
 
         assert!(buf.compress_scrollback_block(0, visible_start));
 
-        let after_text = buf.extract_text(0, 0, 1, 14);
-        let after_block = buf.extract_block_text(0, 0, 1, 6);
+        let after_text = buf.extract_text(RowNumber::new(0), 0, RowNumber::new(1), 14);
+        let after_block = buf.extract_block_text(RowNumber::new(0), 0, RowNumber::new(1), 6);
 
         assert_eq!(before_text, after_text);
         assert_eq!(before_block, after_block);

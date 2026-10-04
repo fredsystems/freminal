@@ -20,8 +20,13 @@ use std::{
 
 use conv2::ConvUtil;
 use egui;
-use freminal_common::buffer_states::{command_block::CommandBlockId, tchar::TChar};
-use freminal_terminal_emulator::{AnimationRunMode, InlineImage};
+use freminal_common::buffer_states::{
+    command_block::CommandBlockId, row_number::RowNumber, tchar::TChar,
+};
+use freminal_terminal_emulator::{
+    AnimationRunMode, InlineImage,
+    snapshot::{BufferExtent, TerminalSnapshot},
+};
 
 use super::mouse::ImmediateMouseReportState;
 
@@ -49,10 +54,85 @@ pub(crate) const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(400);
 pub(crate) const DOUBLE_CLICK_MAX_CELL_DISTANCE: usize = 1;
 
 /// A terminal cell coordinate (column, row), both 0-indexed.
+///
+/// `row` is a **retained buffer index** of one particular snapshot: row `0`
+/// is that snapshot's oldest retained row, so the same text has a different
+/// `row` after the buffer evicts rows from the front. That makes it the right
+/// space for per-frame row math (hit-testing, rendering, window offsets) and
+/// the wrong one to *store*. Anything that must outlive a frame holds a
+/// [`LogicalCell`] instead and converts at the seam with [`LogicalCell::at`]
+/// and [`LogicalCell::resolve`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellCoord {
     pub col: usize,
     pub row: usize,
+}
+
+/// A terminal cell addressed by a stable logical [`RowNumber`] (Task 125.17).
+///
+/// A row's number never changes while the row lives, so a stored
+/// `LogicalCell` -- a selection endpoint, the last click, the context-menu
+/// cell -- stays attached to its text when scrollback rows are evicted from
+/// the front. Unlike a [`CellCoord`] it needs no rewriting on eviction and
+/// cannot silently drift onto different text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogicalCell {
+    pub col: usize,
+    pub row: RowNumber,
+}
+
+/// Where a [`LogicalCell`]'s row stands relative to a snapshot's buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowResidency {
+    /// The row is retained: it has a buffer index in the snapshot.
+    Retained,
+    /// The row has been evicted from the front of the same screen's buffer.
+    Evicted,
+    /// The row cannot exist in this snapshot's buffer: it is numbered in the
+    /// other screen's namespace, or past the last row.
+    Foreign,
+}
+
+impl LogicalCell {
+    /// The logical cell at retained-index coordinate `cell` of `snap`.
+    #[must_use]
+    pub fn at(snap: &TerminalSnapshot, cell: CellCoord) -> Self {
+        Self {
+            col: cell.col,
+            row: snap.row_number_at(cell.row),
+        }
+    }
+
+    /// This cell's retained-index coordinate in `snap`, or `None` if its row
+    /// is not retained there (evicted, or in the other screen's namespace).
+    #[must_use]
+    pub fn resolve(self, snap: &TerminalSnapshot) -> Option<CellCoord> {
+        snap.retained_index_of(self.row)
+            .map(|row| CellCoord { col: self.col, row })
+    }
+
+    /// Classify this cell's row against `snap`'s buffer.
+    #[must_use]
+    pub fn residency(self, snap: &TerminalSnapshot) -> RowResidency {
+        if snap.retained_index_of(self.row).is_some() {
+            RowResidency::Retained
+        } else if self.row.is_alternate() == snap.row_base.is_alternate()
+            && self.row < snap.row_base
+        {
+            RowResidency::Evicted
+        } else {
+            RowResidency::Foreign
+        }
+    }
+
+    /// How many rows apart `self` and `other` are, or `None` if they are in
+    /// different row namespaces (no meaningful distance).
+    #[must_use]
+    pub fn row_distance(self, other: Self) -> Option<usize> {
+        self.row
+            .rows_after(other.row)
+            .or_else(|| other.row.rows_after(self.row))
+    }
 }
 
 /// Ephemeral, GUI-side wall-clock playback cursor for one animated image.
@@ -90,6 +170,11 @@ pub struct ImageAnimationTick {
 /// The selection is "active" when a drag is in progress (`is_selecting`), and
 /// "present" when anchor != end (i.e. something is highlighted).
 ///
+/// Endpoints are [`LogicalCell`]s (stable row numbers), so a selection stays
+/// attached to its text while scrollback rows are evicted. Use
+/// [`Self::reconcile`] to apply the eviction rules each frame and
+/// [`Self::resolved`] to read the endpoints back as retained buffer indices.
+///
 /// When `is_block` is `true` the selection is a rectangular block: every row
 /// from `anchor.row` to `end.row` is highlighted from
 /// `min(anchor.col, end.col)` to `max(anchor.col, end.col)`.  Block mode is
@@ -97,9 +182,9 @@ pub struct ImageAnimationTick {
 #[derive(Debug, Clone, Default)]
 pub struct SelectionState {
     /// The cell where the mouse button was pressed (fixed during drag).
-    pub anchor: Option<CellCoord>,
+    pub anchor: Option<LogicalCell>,
     /// The cell where the pointer currently is (updated during drag).
-    pub end: Option<CellCoord>,
+    pub end: Option<LogicalCell>,
     /// `true` while the primary button is held down and dragging.
     pub is_selecting: bool,
     /// `true` when the selection is a rectangular block (Alt+drag).
@@ -120,7 +205,7 @@ impl SelectionState {
     ///
     /// Returns `None` if there is no selection.
     #[must_use]
-    pub fn normalised(&self) -> Option<(CellCoord, CellCoord)> {
+    pub fn normalised(&self) -> Option<(LogicalCell, LogicalCell)> {
         let (a, e) = (self.anchor?, self.end?);
         if self.is_block {
             // Block mode: normalise rows only.  Keep the original column
@@ -129,11 +214,11 @@ impl SelectionState {
                 Some((a, e))
             } else {
                 Some((
-                    CellCoord {
+                    LogicalCell {
                         row: e.row,
                         col: a.col,
                     },
-                    CellCoord {
+                    LogicalCell {
                         row: a.row,
                         col: e.col,
                     },
@@ -143,6 +228,62 @@ impl SelectionState {
             Some((a, e))
         } else {
             Some((e, a))
+        }
+    }
+
+    /// The normalised selection as retained buffer indices of `snap`, or
+    /// `None` if there is no selection or an endpoint's row is not retained.
+    ///
+    /// Call [`Self::reconcile`] first: it clamps an evicted endpoint to the
+    /// oldest retained row, which this does not.
+    #[must_use]
+    pub fn resolved(&self, snap: &TerminalSnapshot) -> Option<(CellCoord, CellCoord)> {
+        let (start, end) = self.normalised()?;
+        Some((start.resolve(snap)?, end.resolve(snap)?))
+    }
+
+    /// Apply the eviction rules against `snap`'s buffer (Task 125.17).
+    ///
+    /// Endpoints are stable row numbers, so eviction never moves a selection
+    /// off its text. What eviction *can* do is remove that text:
+    ///
+    /// - an endpoint whose row has been evicted clamps to the oldest retained
+    ///   row -- to its first column for a linear selection, keeping its column
+    ///   for a block (a rectangle's columns belong to no particular row);
+    /// - if both endpoints have been evicted nothing of the selection remains
+    ///   and it is cleared;
+    /// - an endpoint that cannot exist in this buffer at all (the other
+    ///   screen's row namespace, e.g. after entering the alternate screen) can
+    ///   be neither shown nor copied, so the selection is cleared rather than
+    ///   left as an invisible phantom that would swallow the next click.
+    ///
+    /// This only applies eviction. The "text content changed" auto-clear is a
+    /// separate rule in `frame_dirty` and is unaffected.
+    pub fn reconcile(&mut self, snap: &TerminalSnapshot) {
+        let anchor = self.anchor.map(|c| c.residency(snap));
+        let end = self.end.map(|c| c.residency(snap));
+        if anchor == Some(RowResidency::Foreign) || end == Some(RowResidency::Foreign) {
+            self.clear();
+            return;
+        }
+        if anchor == Some(RowResidency::Evicted) && end == Some(RowResidency::Evicted) {
+            self.clear();
+            return;
+        }
+        let is_block = self.is_block;
+        let clamp = |cell: &mut Option<LogicalCell>| {
+            if let Some(cell) = cell {
+                cell.row = snap.row_base;
+                if !is_block {
+                    cell.col = 0;
+                }
+            }
+        };
+        if anchor == Some(RowResidency::Evicted) {
+            clamp(&mut self.anchor);
+        }
+        if end == Some(RowResidency::Evicted) {
+            clamp(&mut self.end);
         }
     }
 
@@ -217,16 +358,16 @@ impl SelectionState {
 
 /// A single search match span within the terminal buffer.
 ///
-/// Coordinates are in *buffer-absolute* space: `row` is 0-indexed from the
-/// first scrollback row (row 0 = oldest scrollback line).  `col_start` and
+/// `row` is a stable logical [`RowNumber`] (Task 125.17), so a match stays
+/// attached to its text while scrollback rows are evicted. `col_start` and
 /// `col_end` are inclusive display-column indices within that row.
 ///
 /// When rendering highlights, only matches whose row falls within the
 /// visible window are converted to screen-relative coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
-    /// Buffer-absolute row index (0 = first scrollback row).
-    pub row: usize,
+    /// Logical number of the matching row.
+    pub row: RowNumber,
     /// First matching column (inclusive).
     pub col_start: usize,
     /// Last matching column (inclusive).
@@ -264,7 +405,7 @@ pub struct SearchState {
     pub query: String,
     /// All matches found for the current query in the full buffer.
     ///
-    /// Match rows are buffer-absolute (0 = first scrollback row).
+    /// Match rows are stable logical row numbers.
     /// Empty when `query` is empty or no matches were found.
     pub matches: Vec<MatchSpan>,
     /// Index into `matches` indicating the "current" (focused) match.
@@ -290,11 +431,17 @@ pub struct SearchState {
     /// `matches` list.  When a new corpus is fetched from the PTY thread
     /// (because `total_rows` changed), the search is stale and must be re-run.
     pub cached_full_buffer: Option<Arc<Vec<TChar>>>,
-    /// The `total_rows` value when the cached buffer was fetched.
+    /// The buffer extent the cached corpus was cut from; `None` until one has
+    /// been accepted.
     ///
-    /// When the snapshot's `total_rows` changes, the cached buffer is stale
-    /// and a new `RequestSearchBuffer` should be sent to the PTY thread.
-    pub last_known_total_rows: usize,
+    /// When the snapshot's [`TerminalSnapshot::extent`] differs, the cached
+    /// corpus is stale and a new `RequestSearchBuffer` should be sent to the
+    /// PTY thread. The extent is the pair `(row_base, total_rows)` rather than
+    /// `total_rows` alone: at scrollback capacity `total_rows` freezes while
+    /// `row_base` advances with every evicted row, so `total_rows` alone left
+    /// the corpus (and every match) frozen on the rows that had been current
+    /// when capacity was reached.
+    pub last_known_extent: Option<BufferExtent>,
     /// Whether a `RequestSearchBuffer` has been sent and the response is
     /// still pending.  Prevents sending duplicate requests.
     pub buffer_request_state: BufferRequestState,
@@ -309,6 +456,21 @@ impl SearchState {
             || self.query != self.last_searched_query
             || self.regex_mode != self.last_searched_regex
             || self.case_sensitive != self.last_searched_case_sensitive
+    }
+
+    /// Whether the cached corpus no longer describes the live buffer, i.e. a
+    /// fresh [`InputEvent::RequestSearchBuffer`] is needed.
+    ///
+    /// `live` is the current snapshot's [`TerminalSnapshot::extent`]. True when
+    /// no corpus has been accepted yet or when its extent differs. See
+    /// [`Self::last_known_extent`] for why this compares `row_base` as well as
+    /// `total_rows`: at scrollback capacity `total_rows` is frozen, so a
+    /// row-count comparison alone never reports the corpus stale again.
+    ///
+    /// [`InputEvent::RequestSearchBuffer`]: freminal_terminal_emulator::io::InputEvent::RequestSearchBuffer
+    #[must_use]
+    pub fn corpus_is_stale(&self, live: BufferExtent) -> bool {
+        self.last_known_extent != Some(live)
     }
 
     /// Mark the current matches as up-to-date.
@@ -399,7 +561,7 @@ impl SearchState {
         self.last_searched_regex = false;
         self.last_searched_case_sensitive = false;
         self.cached_full_buffer = None;
-        self.last_known_total_rows = 0;
+        self.last_known_extent = None;
         self.buffer_request_state = BufferRequestState::Idle;
     }
 }
@@ -578,9 +740,9 @@ pub struct ViewState {
     /// double- and triple-clicks.  `None` until the first click arrives.
     pub last_click_time: Option<Instant>,
 
-    /// Buffer-absolute cell coordinate of the most-recent primary button
-    /// press, used for proximity checking in multi-click detection.
-    pub last_click_pos: Option<CellCoord>,
+    /// Logical cell of the most-recent primary button press, used for
+    /// proximity checking in multi-click detection.
+    pub last_click_pos: Option<LogicalCell>,
 
     /// Click multiplicity for the current multi-click sequence.
     ///
@@ -591,7 +753,7 @@ pub struct ViewState {
     pub click_count: u8,
 
     // ── Context menu ─────────────────────────────────────────────────
-    /// Cell coordinate of the most-recent right-click that should open the
+    /// Logical cell of the most-recent right-click that should open the
     /// context menu.
     ///
     /// Set to `Some(coord)` when:
@@ -601,7 +763,7 @@ pub struct ViewState {
     /// The widget's `show()` method reads this to decide whether to render
     /// the context menu and to look up the URL under the clicked cell.
     /// Cleared when the context menu closes.
-    pub context_menu_cell: Option<CellCoord>,
+    pub context_menu_cell: Option<LogicalCell>,
 
     /// Pixel position (in egui window coordinates) where the context menu
     /// should appear.  Captured at the moment of the right-click.
@@ -1001,15 +1163,17 @@ impl ViewState {
     ///
     /// Returns the new `click_count` so the caller can branch on single /
     /// double / triple click behaviour.
-    pub fn register_click(&mut self, coord: CellCoord, now: Instant) -> u8 {
+    pub fn register_click(&mut self, coord: LogicalCell, now: Instant) -> u8 {
         let is_multi = match (self.last_click_time, self.last_click_pos) {
             (Some(prev_time), Some(prev_pos)) => {
                 let elapsed = now.duration_since(prev_time);
                 let col_dist = coord.col.abs_diff(prev_pos.col);
-                let row_dist = coord.row.abs_diff(prev_pos.row);
+                // Clicks in different row namespaces have no distance, so
+                // they cannot be part of one multi-click sequence.
+                let row_dist = coord.row_distance(prev_pos);
                 elapsed <= DOUBLE_CLICK_TIMEOUT
                     && col_dist <= DOUBLE_CLICK_MAX_CELL_DISTANCE
-                    && row_dist <= DOUBLE_CLICK_MAX_CELL_DISTANCE
+                    && row_dist.is_some_and(|d| d <= DOUBLE_CLICK_MAX_CELL_DISTANCE)
             }
             _ => false,
         };
@@ -1404,8 +1568,14 @@ mod tests {
     #[test]
     fn fold_clears_selection() {
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { row: 0, col: 0 });
-        vs.selection.end = Some(CellCoord { row: 2, col: 5 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 5,
+            row: RowNumber::new(2),
+        });
         vs.fold(CommandBlockId(1));
         assert!(
             vs.selection.anchor.is_none(),
@@ -1417,8 +1587,14 @@ mod tests {
     #[test]
     fn unfold_noop_does_not_clear_selection() {
         let mut vs = ViewState::new();
-        vs.selection.anchor = Some(CellCoord { row: 0, col: 0 });
-        vs.selection.end = Some(CellCoord { row: 2, col: 5 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 5,
+            row: RowNumber::new(2),
+        });
         // Unfolding a block that was never folded is a no-op and must not
         // disturb the user's selection.
         vs.unfold(CommandBlockId(99));
@@ -1517,8 +1693,11 @@ mod tests {
 
     // ── register_click tests ──────────────────────────────────────────────
 
-    fn coord(col: usize, row: usize) -> CellCoord {
-        CellCoord { col, row }
+    fn coord(col: usize, row: u64) -> LogicalCell {
+        LogicalCell {
+            col,
+            row: RowNumber::new(row),
+        }
     }
 
     #[test]
@@ -1716,16 +1895,19 @@ mod tests {
         let mut vs = ViewState::new();
 
         // First click (single) — on 'h' at col 0, abs_row 0.
-        let click_coord = CellCoord { col: 0, row: 0 };
+        let click_coord = LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        };
         vs.register_click(click_coord, t);
         let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
-        vs.selection.anchor = Some(CellCoord {
+        vs.selection.anchor = Some(LogicalCell {
             col: anchor_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: end_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
         vs.selection.is_selecting = true;
 
@@ -1733,24 +1915,30 @@ mod tests {
         let count = vs.register_click(click_coord, t);
         assert_eq!(count, 2, "second click should be double");
         let (anchor_col, end_col) = word_boundaries(&chars, 0, 0);
-        vs.selection.anchor = Some(CellCoord {
+        vs.selection.anchor = Some(LogicalCell {
             col: anchor_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: end_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
 
         // "hello" is cols 0–4.
         assert_eq!(
             vs.selection.anchor,
-            Some(CellCoord { col: 0, row: 0 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            }),
             "anchor at word start"
         );
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 4, row: 0 }),
+            Some(LogicalCell {
+                col: 4,
+                row: RowNumber::new(0)
+            }),
             "end at word end"
         );
     }
@@ -1767,7 +1955,10 @@ mod tests {
         let t = Instant::now();
         let mut vs = ViewState::new();
 
-        let click_coord = CellCoord { col: 3, row: 0 };
+        let click_coord = LogicalCell {
+            col: 3,
+            row: RowNumber::new(0),
+        };
 
         // First click.
         vs.register_click(click_coord, t);
@@ -1778,24 +1969,30 @@ mod tests {
         assert_eq!(count, 3, "third click should be triple");
 
         let (start_col, end_col) = line_boundaries(&chars, 0);
-        vs.selection.anchor = Some(CellCoord {
+        vs.selection.anchor = Some(LogicalCell {
             col: start_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: end_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
 
         // Line spans cols 0–10 inclusive.
         assert_eq!(
             vs.selection.anchor,
-            Some(CellCoord { col: 0, row: 0 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            }),
             "anchor at line start"
         );
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 10, row: 0 }),
+            Some(LogicalCell {
+                col: 10,
+                row: RowNumber::new(0)
+            }),
             "end at line end"
         );
     }
@@ -1809,12 +2006,21 @@ mod tests {
 
         // Simulate double-click state left over.
         vs.click_count = 2;
-        vs.selection.anchor = Some(CellCoord { col: 0, row: 0 });
-        vs.selection.end = Some(CellCoord { col: 4, row: 0 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: 4,
+            row: RowNumber::new(0),
+        });
 
         // A new single click well past the timeout resets to 1.
         let far_future = t + DOUBLE_CLICK_TIMEOUT + Duration::from_millis(1);
-        let click_coord = CellCoord { col: 7, row: 2 };
+        let click_coord = LogicalCell {
+            col: 7,
+            row: RowNumber::new(2),
+        };
         let count = vs.register_click(click_coord, far_future);
         assert_eq!(count, 1, "click after timeout must reset to single");
 
@@ -1842,7 +2048,7 @@ mod tests {
         visible_chars: &[TChar],
         x: usize,
         y: usize,
-        abs_row: usize,
+        abs_row: RowNumber,
     ) -> usize {
         if vs.click_count >= 3 {
             let anchor_row = vs.selection.anchor.map_or(abs_row, |a| a.row);
@@ -1876,7 +2082,10 @@ mod tests {
         // Double-click on 'e' (col 1) — press selects "hello" (0–4).
         let t = Instant::now();
         let mut vs = ViewState::new();
-        let click_coord = CellCoord { col: 1, row: 0 };
+        let click_coord = LogicalCell {
+            col: 1,
+            row: RowNumber::new(0),
+        };
 
         // First click.
         vs.register_click(click_coord, t);
@@ -1886,33 +2095,39 @@ mod tests {
 
         // Press handler: set anchor/end to word boundaries.
         let (word_start, word_end) = word_boundaries(&chars, 0, 1);
-        vs.selection.anchor = Some(CellCoord {
+        vs.selection.anchor = Some(LogicalCell {
             col: word_start,
-            row: 0,
+            row: RowNumber::new(0),
         });
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: word_end,
-            row: 0,
+            row: RowNumber::new(0),
         });
         vs.selection.is_selecting = true;
 
         // Release at the same raw position (col 1) — no PointerMoved fired.
-        let end_col = release_end_col(&vs, &chars, 1, 0, 0);
-        vs.selection.end = Some(CellCoord {
+        let end_col = release_end_col(&vs, &chars, 1, 0, RowNumber::new(0));
+        vs.selection.end = Some(LogicalCell {
             col: end_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
         vs.selection.is_selecting = false;
 
         // Selection must still span the full word "hello" (0–4), NOT col 1.
         assert_eq!(
             vs.selection.anchor,
-            Some(CellCoord { col: 0, row: 0 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            }),
             "anchor must stay at word start"
         );
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 4, row: 0 }),
+            Some(LogicalCell {
+                col: 4,
+                row: RowNumber::new(0)
+            }),
             "end must stay at word end, not collapse to raw col"
         );
     }
@@ -1925,7 +2140,10 @@ mod tests {
         // Row 0 spans cols 0–10.
         let t = Instant::now();
         let mut vs = ViewState::new();
-        let click_coord = CellCoord { col: 3, row: 0 };
+        let click_coord = LogicalCell {
+            col: 3,
+            row: RowNumber::new(0),
+        };
 
         vs.register_click(click_coord, t);
         vs.register_click(click_coord, t);
@@ -1934,32 +2152,38 @@ mod tests {
 
         // Press handler: set anchor/end to line boundaries.
         let (line_start, line_end) = line_boundaries(&chars, 0);
-        vs.selection.anchor = Some(CellCoord {
+        vs.selection.anchor = Some(LogicalCell {
             col: line_start,
-            row: 0,
+            row: RowNumber::new(0),
         });
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: line_end,
-            row: 0,
+            row: RowNumber::new(0),
         });
         vs.selection.is_selecting = true;
 
         // Release at raw col 3 — no PointerMoved fired.
-        let end_col = release_end_col(&vs, &chars, 3, 0, 0);
-        vs.selection.end = Some(CellCoord {
+        let end_col = release_end_col(&vs, &chars, 3, 0, RowNumber::new(0));
+        vs.selection.end = Some(LogicalCell {
             col: end_col,
-            row: 0,
+            row: RowNumber::new(0),
         });
         vs.selection.is_selecting = false;
 
         assert_eq!(
             vs.selection.anchor,
-            Some(CellCoord { col: 0, row: 0 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            }),
             "anchor must stay at line start"
         );
         assert_eq!(
             vs.selection.end,
-            Some(CellCoord { col: 10, row: 0 }),
+            Some(LogicalCell {
+                col: 10,
+                row: RowNumber::new(0)
+            }),
             "end must stay at line end, not collapse to raw col"
         );
     }
@@ -1978,31 +2202,54 @@ mod tests {
         let mut vs = ViewState::new();
 
         // Double-click on "qux" (row 1, col 5) — abs_row = 1.
-        let click_coord = CellCoord { col: 5, row: 1 };
+        let click_coord = LogicalCell {
+            col: 5,
+            row: RowNumber::new(1),
+        };
         vs.register_click(click_coord, t);
         let count = vs.register_click(click_coord, t);
         assert_eq!(count, 2);
 
         // Press handler: anchor/end to "qux" word boundaries on row 1.
         let (ws, we) = word_boundaries(&chars, 1, 5);
-        vs.selection.anchor = Some(CellCoord { col: ws, row: 1 });
-        vs.selection.end = Some(CellCoord { col: we, row: 1 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: ws,
+            row: RowNumber::new(1),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: we,
+            row: RowNumber::new(1),
+        });
         vs.selection.is_selecting = true;
 
         // Drag upward to row 0, col 1 (inside "foo").
         // The drag handler snaps to word boundaries:
         // abs_row (0) < anchor_row (1), so use word_start.
         let (drag_word_start, _) = word_boundaries(&chars, 0, 1);
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: drag_word_start,
-            row: 0,
+            row: RowNumber::new(0),
         });
 
         // After normalisation, the selection should span from "foo" start
         // on row 0 to "qux" end on row 1.
         let (start, end) = vs.selection.normalised().unwrap();
-        assert_eq!(start, CellCoord { col: 0, row: 0 }, "start at 'foo' begin");
-        assert_eq!(end, CellCoord { col: 4, row: 1 }, "end at 'qux' anchor");
+        assert_eq!(
+            start,
+            LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            },
+            "start at 'foo' begin"
+        );
+        assert_eq!(
+            end,
+            LogicalCell {
+                col: 4,
+                row: RowNumber::new(1)
+            },
+            "end at 'qux' anchor"
+        );
     }
 
     /// Triple-click on row 1, then drag upward to row 0.  The end should
@@ -2016,7 +2263,10 @@ mod tests {
         let mut vs = ViewState::new();
 
         // Triple-click on row 1, col 2 — abs_row = 1.
-        let click_coord = CellCoord { col: 2, row: 1 };
+        let click_coord = LogicalCell {
+            col: 2,
+            row: RowNumber::new(1),
+        };
         vs.register_click(click_coord, t);
         vs.register_click(click_coord, t);
         let count = vs.register_click(click_coord, t);
@@ -2024,28 +2274,40 @@ mod tests {
 
         // Press handler: anchor/end to full line on row 1.
         let (ls, le) = line_boundaries(&chars, 1);
-        vs.selection.anchor = Some(CellCoord { col: ls, row: 1 });
-        vs.selection.end = Some(CellCoord { col: le, row: 1 });
+        vs.selection.anchor = Some(LogicalCell {
+            col: ls,
+            row: RowNumber::new(1),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: le,
+            row: RowNumber::new(1),
+        });
         vs.selection.is_selecting = true;
 
         // Drag upward to row 0, col 3.
         // abs_row (0) < anchor_row (1), so use line_start.
         let (drag_line_start, _) = line_boundaries(&chars, 0);
-        vs.selection.end = Some(CellCoord {
+        vs.selection.end = Some(LogicalCell {
             col: drag_line_start,
-            row: 0,
+            row: RowNumber::new(0),
         });
 
         // After normalisation: row 0 col 0 → row 1 col 4.
         let (start, end) = vs.selection.normalised().unwrap();
         assert_eq!(
             start,
-            CellCoord { col: 0, row: 0 },
+            LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            },
             "start at row 0 line begin"
         );
         assert_eq!(
             end,
-            CellCoord { col: 0, row: 1 },
+            LogicalCell {
+                col: 0,
+                row: RowNumber::new(1)
+            },
             "end at anchor row line start (anchor holds line end)"
         );
 
@@ -2054,7 +2316,10 @@ mod tests {
         // itself still points at the line start of row 1.
         assert_eq!(
             vs.selection.anchor,
-            Some(CellCoord { col: 0, row: 1 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(1)
+            }),
             "anchor stays at line start of row 1"
         );
     }
@@ -2399,8 +2664,14 @@ mod tests {
     #[test]
     fn selection_state_clear_resets_is_block() {
         let mut sel = SelectionState {
-            anchor: Some(CellCoord { col: 2, row: 0 }),
-            end: Some(CellCoord { col: 5, row: 3 }),
+            anchor: Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(0),
+            }),
+            end: Some(LogicalCell {
+                col: 5,
+                row: RowNumber::new(3),
+            }),
             is_selecting: false,
             is_block: true,
         };
@@ -2415,8 +2686,14 @@ mod tests {
     fn selection_state_has_selection_block_mode() {
         // has_selection only cares that anchor != end; is_block does not affect it.
         let sel = SelectionState {
-            anchor: Some(CellCoord { col: 1, row: 0 }),
-            end: Some(CellCoord { col: 3, row: 2 }),
+            anchor: Some(LogicalCell {
+                col: 1,
+                row: RowNumber::new(0),
+            }),
+            end: Some(LogicalCell {
+                col: 3,
+                row: RowNumber::new(2),
+            }),
             is_selecting: false,
             is_block: true,
         };
@@ -2430,14 +2707,311 @@ mod tests {
     fn selection_state_block_normalised_puts_earlier_row_first() {
         // Dragged from row 5 back to row 2 — normalised should flip them.
         let sel = SelectionState {
-            anchor: Some(CellCoord { col: 4, row: 5 }),
-            end: Some(CellCoord { col: 1, row: 2 }),
+            anchor: Some(LogicalCell {
+                col: 4,
+                row: RowNumber::new(5),
+            }),
+            end: Some(LogicalCell {
+                col: 1,
+                row: RowNumber::new(2),
+            }),
             is_selecting: false,
             is_block: true,
         };
         let (s, e) = sel.normalised().unwrap();
-        assert_eq!(s.row, 2, "normalised start row should be the smaller row");
-        assert_eq!(e.row, 5, "normalised end row should be the larger row");
+        assert_eq!(
+            s.row,
+            RowNumber::new(2),
+            "normalised start row should be the smaller row"
+        );
+        assert_eq!(
+            e.row,
+            RowNumber::new(5),
+            "normalised end row should be the larger row"
+        );
+    }
+
+    // ── Logical rows across eviction (Task 125.17) ───────────────────────
+
+    /// A snapshot of `total_rows` rows whose oldest retained row is numbered
+    /// `row_base`.
+    fn snap_at_base(row_base: u64, total_rows: usize) -> TerminalSnapshot {
+        let mut snap = TerminalSnapshot::empty();
+        snap.row_base = RowNumber::new(row_base);
+        snap.total_rows = total_rows;
+        snap.term_height = 5;
+        snap
+    }
+
+    fn lc(col: usize, row: u64) -> LogicalCell {
+        LogicalCell {
+            col,
+            row: RowNumber::new(row),
+        }
+    }
+
+    fn cc(col: usize, row: usize) -> CellCoord {
+        CellCoord { col, row }
+    }
+
+    #[test]
+    fn logical_cell_round_trips_through_a_snapshot() {
+        let snap = snap_at_base(100, 10);
+        let cell = LogicalCell::at(&snap, cc(4, 3));
+        assert_eq!(cell, lc(4, 103));
+        assert_eq!(cell.resolve(&snap), Some(cc(4, 3)));
+    }
+
+    #[test]
+    fn logical_cell_resolves_to_the_same_text_after_eviction() {
+        // The cell is taken while row 103 is retained index 3 ...
+        let cell = LogicalCell::at(&snap_at_base(100, 10), cc(4, 3));
+        // ... and two rows are evicted at capacity: total_rows is frozen,
+        // the base advanced, and the same text is now retained index 1.
+        let after = snap_at_base(102, 10);
+        assert_eq!(cell.resolve(&after), Some(cc(4, 1)));
+    }
+
+    #[test]
+    fn logical_cell_resolves_to_nothing_once_its_row_is_evicted() {
+        let cell = LogicalCell::at(&snap_at_base(100, 10), cc(4, 3));
+        assert_eq!(cell.resolve(&snap_at_base(104, 10)), None);
+    }
+
+    #[test]
+    fn logical_cell_residency_classifies_every_case() {
+        let snap = snap_at_base(100, 10);
+        assert_eq!(lc(0, 100).residency(&snap), RowResidency::Retained);
+        assert_eq!(lc(0, 109).residency(&snap), RowResidency::Retained);
+        assert_eq!(lc(0, 99).residency(&snap), RowResidency::Evicted);
+        assert_eq!(lc(0, 110).residency(&snap), RowResidency::Foreign);
+        let alt = LogicalCell {
+            col: 0,
+            row: RowNumber::ALTERNATE_BASE,
+        };
+        assert_eq!(alt.residency(&snap), RowResidency::Foreign);
+    }
+
+    #[test]
+    fn selection_stays_on_the_same_text_across_eviction() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(2, 103)),
+            end: Some(lc(5, 104)),
+            ..SelectionState::default()
+        };
+        let before = snap_at_base(100, 10);
+        assert_eq!(sel.resolved(&before), Some((cc(2, 3), cc(5, 4))));
+
+        // Capacity eviction: the base advances by two, total_rows is frozen.
+        let after = snap_at_base(102, 10);
+        sel.reconcile(&after);
+        assert_eq!(
+            sel.normalised(),
+            Some((lc(2, 103), lc(5, 104))),
+            "eviction must not rewrite the stored selection"
+        );
+        assert_eq!(
+            sel.resolved(&after),
+            Some((cc(2, 1), cc(5, 2))),
+            "the same text, two retained rows higher"
+        );
+    }
+
+    #[test]
+    fn evicted_anchor_clamps_to_the_first_retained_row_in_a_linear_selection() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(6, 101)),
+            end: Some(lc(2, 105)),
+            is_selecting: false,
+            is_block: false,
+        };
+        sel.reconcile(&snap_at_base(103, 10));
+        assert_eq!(
+            sel.anchor,
+            Some(lc(0, 103)),
+            "a linear selection starts the first retained row at column 0"
+        );
+        assert_eq!(sel.end, Some(lc(2, 105)), "the retained end is untouched");
+    }
+
+    #[test]
+    fn evicted_anchor_keeps_its_column_in_a_block_selection() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(6, 101)),
+            end: Some(lc(2, 105)),
+            is_selecting: false,
+            is_block: true,
+        };
+        sel.reconcile(&snap_at_base(103, 10));
+        assert_eq!(
+            sel.anchor,
+            Some(lc(6, 103)),
+            "a block's column bounds belong to the rectangle, not to a row"
+        );
+    }
+
+    #[test]
+    fn evicted_end_clamps_when_the_selection_was_made_upward() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(3, 106)),
+            end: Some(lc(8, 101)),
+            ..SelectionState::default()
+        };
+        sel.reconcile(&snap_at_base(103, 10));
+        assert_eq!(sel.end, Some(lc(0, 103)));
+        assert_eq!(sel.anchor, Some(lc(3, 106)));
+        assert!(sel.has_selection());
+    }
+
+    #[test]
+    fn selection_with_both_endpoints_evicted_is_cleared() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(1, 100)),
+            end: Some(lc(4, 102)),
+            is_selecting: true,
+            is_block: true,
+        };
+        sel.reconcile(&snap_at_base(110, 10));
+        assert_eq!(sel.anchor, None);
+        assert_eq!(sel.end, None);
+        assert!(!sel.is_selecting);
+        assert!(!sel.is_block);
+    }
+
+    #[test]
+    fn a_drag_in_progress_survives_its_anchor_being_evicted() {
+        // Anchor set, no end yet (pointer has not moved): nothing is "both
+        // evicted", so the drag keeps going from the clamped anchor.
+        let mut sel = SelectionState {
+            anchor: Some(lc(5, 100)),
+            end: None,
+            is_selecting: true,
+            is_block: false,
+        };
+        sel.reconcile(&snap_at_base(101, 10));
+        assert_eq!(sel.anchor, Some(lc(0, 101)));
+        assert!(sel.is_selecting);
+    }
+
+    #[test]
+    fn selection_in_the_other_screens_namespace_is_cleared() {
+        // E.g. a primary-screen selection when the alternate screen is up.
+        let mut sel = SelectionState {
+            anchor: Some(lc(1, 100)),
+            end: Some(lc(4, 102)),
+            ..SelectionState::default()
+        };
+        let mut alt = snap_at_base(0, 5);
+        alt.row_base = RowNumber::ALTERNATE_BASE;
+        sel.reconcile(&alt);
+        assert!(!sel.has_selection());
+        assert_eq!(sel.anchor, None);
+    }
+
+    #[test]
+    fn reconcile_leaves_a_fully_retained_selection_alone() {
+        let mut sel = SelectionState {
+            anchor: Some(lc(1, 102)),
+            end: Some(lc(4, 105)),
+            is_selecting: true,
+            is_block: true,
+        };
+        sel.reconcile(&snap_at_base(100, 10));
+        assert_eq!(sel.anchor, Some(lc(1, 102)));
+        assert_eq!(sel.end, Some(lc(4, 105)));
+        assert!(sel.is_selecting);
+        assert!(sel.is_block);
+    }
+
+    #[test]
+    fn resolved_is_none_while_an_endpoint_is_not_retained() {
+        let sel = SelectionState {
+            anchor: Some(lc(1, 100)),
+            end: Some(lc(4, 105)),
+            ..SelectionState::default()
+        };
+        // `resolved` does not clamp; `reconcile` does.
+        assert_eq!(sel.resolved(&snap_at_base(102, 10)), None);
+    }
+
+    #[test]
+    fn multi_click_proximity_uses_logical_row_distance() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        vs.register_click(coord(3, 105), t);
+        assert_eq!(vs.register_click(coord(3, 106), t), 2, "adjacent row");
+        let mut vs = ViewState::new();
+        vs.register_click(coord(3, 105), t);
+        assert_eq!(vs.register_click(coord(3, 108), t), 1, "three rows apart");
+    }
+
+    #[test]
+    fn clicks_in_different_row_namespaces_are_never_a_multi_click() {
+        let mut vs = ViewState::new();
+        let t = Instant::now();
+        vs.register_click(coord(3, 5), t);
+        let alt = LogicalCell {
+            col: 3,
+            row: RowNumber::ALTERNATE_BASE.saturating_add(5),
+        };
+        assert_eq!(vs.register_click(alt, t), 1);
+    }
+
+    // ── Search corpus staleness (Task 125.17) ────────────────────────────
+
+    #[test]
+    fn corpus_is_stale_until_one_has_been_accepted() {
+        let st = SearchState::default();
+        assert!(st.corpus_is_stale(BufferExtent {
+            row_base: RowNumber::ZERO,
+            total_rows: 0,
+        }));
+    }
+
+    #[test]
+    fn corpus_matching_the_live_extent_is_fresh() {
+        let extent = BufferExtent {
+            row_base: RowNumber::new(40),
+            total_rows: 100,
+        };
+        let st = SearchState {
+            last_known_extent: Some(extent),
+            ..SearchState::default()
+        };
+        assert!(!st.corpus_is_stale(extent));
+    }
+
+    /// The bug: at scrollback capacity `total_rows` is frozen, so keying
+    /// staleness on it alone never refreshed the corpus again. The base
+    /// advances with every evicted row, so the extent pair does notice.
+    #[test]
+    fn corpus_goes_stale_at_capacity_where_total_rows_is_frozen() {
+        let st = SearchState {
+            last_known_extent: Some(BufferExtent {
+                row_base: RowNumber::new(40),
+                total_rows: 100,
+            }),
+            ..SearchState::default()
+        };
+        assert!(st.corpus_is_stale(BufferExtent {
+            row_base: RowNumber::new(41),
+            total_rows: 100,
+        }));
+    }
+
+    #[test]
+    fn corpus_goes_stale_when_rows_are_added_below_capacity() {
+        let st = SearchState {
+            last_known_extent: Some(BufferExtent {
+                row_base: RowNumber::ZERO,
+                total_rows: 50,
+            }),
+            ..SearchState::default()
+        };
+        assert!(st.corpus_is_stale(BufferExtent {
+            row_base: RowNumber::ZERO,
+            total_rows: 51,
+        }));
     }
 
     // ── SelectionState::finalize_interrupted_drag tests (Task 116.3, defect 3a) ──
@@ -2448,20 +3022,32 @@ mod tests {
         // range (anchor != end) must KEEP anchor/end so the selection
         // survives — only `is_selecting` is cleared.
         let mut sel = SelectionState {
-            anchor: Some(CellCoord { col: 0, row: 0 }),
-            end: Some(CellCoord { col: 5, row: 0 }),
+            anchor: Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0),
+            }),
+            end: Some(LogicalCell {
+                col: 5,
+                row: RowNumber::new(0),
+            }),
             is_selecting: true,
             is_block: false,
         };
         sel.finalize_interrupted_drag();
         assert_eq!(
             sel.anchor,
-            Some(CellCoord { col: 0, row: 0 }),
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0)
+            }),
             "anchor must be unchanged"
         );
         assert_eq!(
             sel.end,
-            Some(CellCoord { col: 5, row: 0 }),
+            Some(LogicalCell {
+                col: 5,
+                row: RowNumber::new(0)
+            }),
             "end must be unchanged"
         );
         assert!(!sel.is_selecting, "is_selecting must be cleared");
@@ -2474,8 +3060,14 @@ mod tests {
         // starting cell (anchor == end) has no real range and must be
         // fully cleared rather than left stranded.
         let mut sel = SelectionState {
-            anchor: Some(CellCoord { col: 3, row: 1 }),
-            end: Some(CellCoord { col: 3, row: 1 }),
+            anchor: Some(LogicalCell {
+                col: 3,
+                row: RowNumber::new(1),
+            }),
+            end: Some(LogicalCell {
+                col: 3,
+                row: RowNumber::new(1),
+            }),
             is_selecting: true,
             is_block: false,
         };
@@ -2490,7 +3082,10 @@ mod tests {
         // Defect 3a: an anchor with no tracked end (e.g. interrupted before
         // the first `PointerMoved`) is not a real selection and must clear.
         let mut sel = SelectionState {
-            anchor: Some(CellCoord { col: 2, row: 2 }),
+            anchor: Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(2),
+            }),
             end: None,
             is_selecting: true,
             is_block: false,
@@ -2508,8 +3103,14 @@ mod tests {
         // "clear existing selection" branch a fresh primary press takes)
         // must fully reset the state so a new anchor/end can be set.
         let mut sel = SelectionState {
-            anchor: Some(CellCoord { col: 0, row: 0 }),
-            end: Some(CellCoord { col: 5, row: 0 }),
+            anchor: Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(0),
+            }),
+            end: Some(LogicalCell {
+                col: 5,
+                row: RowNumber::new(0),
+            }),
             is_selecting: true,
             is_block: false,
         };
@@ -2526,8 +3127,14 @@ mod tests {
         assert!(sel.end.is_none());
 
         // A fresh drag can now start without interference from stale state.
-        sel.anchor = Some(CellCoord { col: 1, row: 1 });
-        sel.end = Some(CellCoord { col: 1, row: 1 });
+        sel.anchor = Some(LogicalCell {
+            col: 1,
+            row: RowNumber::new(1),
+        });
+        sel.end = Some(LogicalCell {
+            col: 1,
+            row: RowNumber::new(1),
+        });
         sel.is_selecting = true;
         assert_eq!(sel.anchor, sel.end, "fresh point selection can be set");
     }
@@ -2823,7 +3430,7 @@ mod tests {
         let before = searched(
             "day",
             vec![MatchSpan {
-                row: 4,
+                row: RowNumber::new(4),
                 col_start: 10,
                 col_end: 12,
             }],
@@ -2831,7 +3438,7 @@ mod tests {
         let after = searched(
             "days",
             vec![MatchSpan {
-                row: 4,
+                row: RowNumber::new(4),
                 col_start: 10,
                 col_end: 13,
             }],
@@ -2854,12 +3461,12 @@ mod tests {
             "x",
             vec![
                 MatchSpan {
-                    row: 1,
+                    row: RowNumber::new(1),
                     col_start: 0,
                     col_end: 0,
                 },
                 MatchSpan {
-                    row: 2,
+                    row: RowNumber::new(2),
                     col_start: 0,
                     col_end: 0,
                 },
@@ -2902,7 +3509,7 @@ mod tests {
         let mut st = searched(
             "day",
             vec![MatchSpan {
-                row: 4,
+                row: RowNumber::new(4),
                 col_start: 10,
                 col_end: 12,
             }],
@@ -2918,7 +3525,7 @@ mod tests {
         );
 
         st.matches = vec![MatchSpan {
-            row: 4,
+            row: RowNumber::new(4),
             col_start: 10,
             col_end: 13,
         }];
@@ -2933,7 +3540,7 @@ mod tests {
         let a = searched(
             "hello",
             vec![MatchSpan {
-                row: 3,
+                row: RowNumber::new(3),
                 col_start: 1,
                 col_end: 5,
             }],
@@ -2941,7 +3548,7 @@ mod tests {
         let b = searched(
             "hello",
             vec![MatchSpan {
-                row: 3,
+                row: RowNumber::new(3),
                 col_start: 1,
                 col_end: 5,
             }],

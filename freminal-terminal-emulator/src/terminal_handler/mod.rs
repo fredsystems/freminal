@@ -5,6 +5,8 @@
 
 use crate::ansi_components::csi_commands::ed::EraseDisplayMode;
 use crate::ansi_components::csi_commands::el::EraseLineMode;
+use crate::io::SearchCorpus;
+use crate::snapshot::BufferExtent;
 use conv2::ValueFrom;
 use crossbeam_channel::Sender;
 use freminal_common::{
@@ -973,8 +975,15 @@ impl TerminalHandler {
     /// search would therefore leave every following idle snapshot minting a
     /// new, unstable set of epochs, indefinitely, with no second search
     /// required. See that method's doc comment for the full explanation.
+    ///
+    /// ## Task 125.17: the corpus carries the rows it was cut from
+    ///
+    /// The returned [`SearchCorpus`] pairs the characters with the buffer's
+    /// [`BufferExtent`], so corpus row `i` is buffer row `extent.row_base + i`.
+    /// Both are read here, in one call on the PTY thread, so they cannot
+    /// disagree.
     #[must_use]
-    pub fn search_corpus(&mut self, scroll_offset: usize) -> Vec<TChar> {
+    pub fn search_corpus(&mut self, scroll_offset: usize) -> SearchCorpus {
         let (visible_chars, _, _, _) = self
             .buffer
             .visible_as_tchars_and_tags_full_merge(scroll_offset);
@@ -986,7 +995,13 @@ impl TerminalHandler {
             corpus.push(TChar::NewLine);
         }
         corpus.extend(visible_chars);
-        corpus
+        SearchCorpus {
+            extent: BufferExtent {
+                row_base: self.buffer.row_base(),
+                total_rows: self.buffer.rows().len(),
+            },
+            chars: corpus,
+        }
     }
 
     /// Return the current cursor position in screen coordinates (0-indexed).
@@ -4557,7 +4572,9 @@ mod tests {
         handler.handle_data(b"A");
         handler.handle_repeat_character(3);
         // Should have written 'A' then repeated it 3 times = 4 total A's
-        let text = handler.buffer.extract_text(0, 0, 0, 3);
+        let text = handler
+            .buffer
+            .extract_text(RowNumber::new(0), 0, RowNumber::new(0), 3);
         assert_eq!(text, "AAAA");
     }
 

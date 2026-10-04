@@ -638,6 +638,14 @@ count over-states (the safe direction for horizons) and a cell-owned image may
 not be freed. Fix: account image cells before trimming, with a test. Open; not
 on the 125 critical path.
 
+### 125.C12 — Copy-command-output-at-cursor mixes coordinate spaces
+
+Surface point: 125.17. `CopyCommandOutputAtCursor` compares the screen-relative
+`cursor_pos.y` with buffer rows in `find_block_containing_row`, so it selects
+the wrong block whenever scrollback exists. Fix: resolve the cursor to a
+`RowNumber` through the snapshot first, with a test at nonzero scrollback.
+Open; not on the 125 critical path.
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
@@ -1427,6 +1435,18 @@ state.
 What: export logical numbers plus base in `TerminalSnapshot`; move GUI
 selection and fold ranges to logical numbers; remove the documented selection
 drift workaround. Windows cross-check required.
+
+**Complete.** GUI selection, last click, context-menu cell, and search
+matches are stored as `RowNumber`s and resolved at the seam;
+`ExtractSelection` and `Buffer::extract_*` take row numbers and clamp below the
+base. The search corpus carries a `BufferExtent { row_base, total_rows }`, and
+staleness keys on the pair (a sum would not change across ED 3). Selection
+damage also compares the window-relative selection, so a selection sliding
+over identical-epoch rows is repainted (mutation-checked). Additional accepted
+behaviour: a selection in the other screen's namespace is cleared. Files
+outside the listed scope changed only mechanically for the new types
+(`gui/actions.rs`, `gui/panes/mod.rs`, a `gui/tabs.rs` test helper,
+`benches/pane_resolution_bench.rs`). Cleanup 125.C12 recorded.
 
 ### 125.18 — Matched re-capture and closure
 

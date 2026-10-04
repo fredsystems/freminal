@@ -25,7 +25,7 @@ use conv2::ConvUtil;
 use egui::Rect;
 use freminal_terminal_emulator::snapshot::TerminalSnapshot;
 
-use crate::gui::view_state::{CellCoord, ImageAnimationTick, ViewState};
+use crate::gui::view_state::{ImageAnimationTick, LogicalCell, ViewState};
 
 use super::widget::{
     FoldLayout, PaneRenderCache, RenderState, compute_command_block_hover_rows,
@@ -276,9 +276,10 @@ pub(super) struct DirtyTrackingOutcome {
     /// unconditionally in that branch, alongside the selection's and
     /// hover's screen-row spans, to build the damage union.
     pub(super) changed_rows: ChangedRows,
-    /// The normalised selection for this frame (buffer-absolute rows),
-    /// after the content-change auto-clear rule has been applied.
-    pub(super) current_selection: Option<(CellCoord, CellCoord)>,
+    /// The normalised selection for this frame (stable logical rows), after
+    /// eviction clamping and the content-change auto-clear rule have been
+    /// applied.
+    pub(super) current_selection: Option<(LogicalCell, LogicalCell)>,
     /// The selection translated into snapshot-row space, clamped to the
     /// flattened window, for the renderer.
     pub(super) screen_selection: Option<(usize, usize, usize, usize)>,
@@ -294,7 +295,7 @@ pub(super) struct DirtyTrackingOutcome {
     /// directly as an index into the screen-indexed `rendered_shaped_lines`
     /// array at the `widget.rs` call site — the same array `selection`'s
     /// already-screen-space `screen_selection_rendered` indexes. So unlike
-    /// selection's `previous_selection` (buffer-absolute, needing a genuine
+    /// selection's `previous_selection` (logical-row space, needing a genuine
     /// per-frame translation and therefore a dedicated screen-space
     /// companion field), this value needs no further conversion to be
     /// unioned into [`build_bounded_damage`]'s row set, and needs no second
@@ -509,6 +510,12 @@ pub(super) fn evaluate_frame_dirty_state(
     let rows_changed = diff_row_epochs(cache.last_rendered_row_epochs.as_ref(), &snap.row_epochs);
     let content_changed = theme_changed || dims_changed || folds_changed || rows_changed.any();
 
+    // Apply the eviction rules to the stored selection first (Task 125.17):
+    // an evicted endpoint clamps to the oldest retained row, a selection with
+    // nothing left (or in another screen's row namespace) is cleared. The
+    // content-change auto-clear below is a separate rule and is unchanged.
+    view_state.selection.reconcile(snap);
+
     // Clear the selection when actual terminal text content changes so
     // stale highlights don't linger over shifted text. We use
     // `rows_changed.any()` here (Task 124.12; previously `snap.content_changed`)
@@ -521,14 +528,18 @@ pub(super) fn evaluate_frame_dirty_state(
     // visible window moves (user scrolling OR auto-scroll-to-bottom on
     // new PTY output), the flat content changes but the underlying
     // buffer text at the selected rows has not mutated.  Selection
-    // coordinates are buffer-absolute, so they remain valid across
-    // scroll offset changes.
+    // coordinates are stable logical row numbers, so they remain valid
+    // across scroll offset changes.
     //
-    // Edge case: if `enforce_scrollback_limit` evicts rows from the
-    // top of the buffer, all row indices shift and the selection may
-    // point to different text.  This is a pre-existing limitation
-    // shared by all finite-scrollback terminals; the proper fix is to
-    // adjust selection coordinates on eviction, not to clear here.
+    // Eviction (Task 125.17): at scrollback capacity
+    // `enforce_scrollback_limit` drops rows from the top of the buffer and
+    // every retained index shifts down. A selection stored as retained
+    // indices used to drift onto different text (or freeze while
+    // `total_rows` stayed constant); stored as `RowNumber`s it stays on its
+    // text, and `SelectionState::reconcile` (called just above this block)
+    // clamps an endpoint whose own row was evicted to the oldest retained
+    // row, or clears the selection when nothing of it remains. Nothing here
+    // compensates for eviction any more.
     //
     // We also exclude frames where a selection was just finalized by
     // a mouse release (`selection_committed_this_frame`). Input is
@@ -593,9 +604,8 @@ pub(super) fn evaluate_frame_dirty_state(
     // persist into subsequent frames (Task 116.2).
     view_state.selection_committed_this_frame = false;
 
-    // Check whether the selection has changed since the last frame.
+    // The selection's logical extent this frame (stable row numbers).
     let current_selection = view_state.selection.normalised();
-    let selection_changed = current_selection != cache.previous_selection;
 
     // Check whether search highlight state has changed since last frame.
     // Compares a fingerprint of everything that determines the highlight
@@ -604,7 +614,7 @@ pub(super) fn evaluate_frame_dirty_state(
     let search_epoch = view_state.search_state.render_epoch();
     let search_changed = search_epoch != cache.previous_search_epoch;
 
-    // Convert buffer-absolute selection coordinates to snapshot-row
+    // Convert the selection's retained-index coordinates to snapshot-row
     // space for the renderer.  `win_start` is the flattened window top
     // (it includes the fold extra rows); the snapshot covers `snap_rows`
     // rows.  Selection rows are later mapped snapshot → rendered →
@@ -630,7 +640,7 @@ pub(super) fn evaluate_frame_dirty_state(
     );
     let hover_changed = command_block_hover_rows_early != cache.previous_command_block_hover_rows;
 
-    let screen_selection = current_selection.and_then(|(s, e)| {
+    let screen_selection = view_state.selection.resolved(snap).and_then(|(s, e)| {
         // Clamp the selection to the flattened window.  If both start
         // and end are outside the window, there is nothing to
         // highlight on screen.
@@ -664,6 +674,23 @@ pub(super) fn evaluate_frame_dirty_state(
         };
         Some((s_col, s_row, e_col, e_row))
     });
+
+    // Has the selection changed since the last rebuild? Two comparisons, and
+    // both are needed (Task 125.17):
+    //
+    // - the logical one, which sees any edit to the selection itself;
+    // - the window-relative one, which sees a selection that did NOT change
+    //   but moved on screen because the window slid under it. Logical row
+    //   numbers do not change when rows are evicted at scrollback capacity
+    //   (or when the view scrolls), but the retained indices -- and so the
+    //   screen rows the highlight is painted on -- do. If neither the
+    //   content epochs nor the logical selection differ (a highlight over
+    //   rows whose content is identical frame to frame, such as blank rows),
+    //   nothing else would notice that the old rows must be repainted and
+    //   the new ones painted. Over-reporting here costs a bounded rebuild;
+    //   under-reporting leaves a stale highlight on screen.
+    let selection_changed = current_selection != cache.previous_selection
+        || screen_selection != cache.previous_screen_selection;
 
     // ── Cursor trail animation ─────────────────────────────────────
     // Update the animated cursor position.  When trail is enabled, the
@@ -907,6 +934,7 @@ mod evaluate_frame_dirty_state_tests {
     use super::*;
     use crate::gui::renderer::WindowPostRenderer;
     use crate::gui::view_state::SearchState;
+    use freminal_common::buffer_states::row_number::RowNumber;
     use freminal_common::config::CommandBlocksConfig;
     use freminal_terminal_emulator::snapshot::TerminalSnapshot;
     use freminal_terminal_emulator::{
@@ -1445,8 +1473,14 @@ mod evaluate_frame_dirty_state_tests {
         let cache = settled_cache(&snap, true, true);
 
         let mut view_state = ViewState::new();
-        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
-        view_state.selection.end = Some(CellCoord { col: 3, row: 0 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        view_state.selection.end = Some(LogicalCell {
+            col: 3,
+            row: RowNumber::new(0),
+        });
         let render_state = render_state_with_deco_verts(true);
 
         let outcome = call(&snap, &mut view_state, &cache, &render_state, true, true);
@@ -1488,8 +1522,16 @@ mod evaluate_frame_dirty_state_tests {
     fn selection_clear_alone_yields_bounded_rebuild() {
         let snap = base_snapshot();
         let mut cache = settled_cache(&snap, true, true);
-        cache.previous_selection =
-            Some((CellCoord { col: 0, row: 0 }, CellCoord { col: 3, row: 0 }));
+        cache.previous_selection = Some((
+            LogicalCell {
+                col: 0,
+                row: RowNumber::new(0),
+            },
+            LogicalCell {
+                col: 3,
+                row: RowNumber::new(0),
+            },
+        ));
 
         // `ViewState::new()` starts with no selection at all, so
         // `current_selection` is `None` -- this frame observes the
@@ -1519,6 +1561,224 @@ mod evaluate_frame_dirty_state_tests {
              bounded-damage path so the stale highlight's rows are \
              repainted, not silently reused unchanged"
         );
+    }
+
+    // ── Task 125.17: selection across eviction ───────────────────────────
+
+    /// [`base_snapshot`] whose oldest retained row is numbered `base`:
+    /// `total_rows` stays 5 (the scrollback-capacity case, where eviction
+    /// advances the base and the row count does not move).
+    fn snapshot_at_base(base: u64) -> TerminalSnapshot {
+        let mut snap = base_snapshot();
+        snap.row_base = RowNumber::new(base);
+        snap
+    }
+
+    /// Select `(col, logical_row)` to `(col, logical_row)`, committed.
+    fn select_rows(vs: &mut ViewState, from: (usize, u64), to: (usize, u64)) {
+        vs.selection.anchor = Some(LogicalCell {
+            col: from.0,
+            row: RowNumber::new(from.1),
+        });
+        vs.selection.end = Some(LogicalCell {
+            col: to.0,
+            row: RowNumber::new(to.1),
+        });
+        vs.selection.is_selecting = false;
+    }
+
+    /// A cache that has "rendered" `outcome`'s selection, as `show()`'s
+    /// rebuild body leaves it.
+    fn cache_after(snap: &TerminalSnapshot, outcome: &DirtyTrackingOutcome) -> PaneRenderCache {
+        let mut cache = settled_cache(snap, true, true);
+        cache.previous_selection = outcome.current_selection;
+        cache.previous_screen_selection = outcome.screen_selection;
+        cache
+    }
+
+    /// The case this subtask exists for. The window slides under a selection
+    /// that has NOT changed (same logical rows) -- eviction at scrollback
+    /// capacity: `row_base` advances, `total_rows` is frozen, and every
+    /// retained index drops by one, so the highlight must move up one screen
+    /// row. Row content is held identical (equal epochs) so nothing else can
+    /// notice: if `selection_changed` compared only the logical selection the
+    /// frame would report no change, take no bounded path, and leave the
+    /// highlight painted on the old rows.
+    #[test]
+    fn selection_moved_on_screen_by_eviction_alone_is_reported_changed_and_bounded() {
+        // Rows 102..=103 selected while the base is 100: screen rows 2..=3.
+        let snap_a = snapshot_at_base(100);
+        let mut view_state = ViewState::new();
+        select_rows(&mut view_state, (0, 102), (3, 103));
+        let render_state = render_state_with_deco_verts(true);
+        let first = call(
+            &snap_a,
+            &mut view_state,
+            &settled_cache(&snap_a, true, true),
+            &render_state,
+            true,
+            true,
+        );
+        assert_eq!(first.screen_selection, Some((0, 2, 3, 3)));
+        let cache = cache_after(&snap_a, &first);
+
+        // One row evicted: same text, same epochs, base 101 -> screen rows 1..=2.
+        let snap_b = snapshot_at_base(101);
+        let second = call(&snap_b, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            second.current_selection, first.current_selection,
+            "precondition: the logical selection did not change at all -- the \
+             selection stayed on its text"
+        );
+        assert_eq!(
+            second.screen_selection,
+            Some((0, 1, 3, 2)),
+            "the highlight follows the text up one screen row"
+        );
+        assert_eq!(
+            second.changed_rows,
+            ChangedRows::None,
+            "precondition: no row epoch differs, isolating the window slide"
+        );
+        assert!(
+            second.observations.selection_changed,
+            "a selection that moved on screen must be observed as changed"
+        );
+        assert_eq!(
+            second.rebuild,
+            VertexRebuild::Bounded,
+            "and it must take the bounded rebuild, whose damage unions the \
+             old (rows 2..=3) and new (rows 1..=2) screen rows"
+        );
+    }
+
+    /// The control for the test above: an identical snapshot (no slide) with
+    /// the same logical selection is a settled frame, so the added
+    /// window-relative comparison does not make every selection frame dirty.
+    #[test]
+    fn selection_that_did_not_move_is_not_reported_changed() {
+        let snap = snapshot_at_base(100);
+        let mut view_state = ViewState::new();
+        select_rows(&mut view_state, (0, 102), (3, 103));
+        let render_state = render_state_with_deco_verts(true);
+        let first = call(
+            &snap,
+            &mut view_state,
+            &settled_cache(&snap, true, true),
+            &render_state,
+            true,
+            true,
+        );
+        let cache = cache_after(&snap, &first);
+
+        let again = call(&snap, &mut view_state, &cache, &render_state, true, true);
+
+        assert!(!again.observations.selection_changed);
+        assert_eq!(again.screen_selection, first.screen_selection);
+    }
+
+    /// With content shifting as well (the usual capacity case: every row's
+    /// epoch changes as the window slides), the selection stays attached to
+    /// the same text. `scroll_changed` models the auto-scroll that moves the
+    /// window; the confirmation comparison also sees identical chars here,
+    /// so the unchanged content-change auto-clear leaves the selection alone.
+    #[test]
+    fn selection_stays_on_its_text_when_eviction_shifts_the_window() {
+        let snap_a = snapshot_at_base(100);
+        let mut view_state = ViewState::new();
+        select_rows(&mut view_state, (2, 103), (5, 104));
+        let render_state = render_state_with_deco_verts(true);
+        let first = call(
+            &snap_a,
+            &mut view_state,
+            &settled_cache(&snap_a, true, true),
+            &render_state,
+            true,
+            true,
+        );
+        assert_eq!(first.screen_selection, Some((2, 3, 5, 4)));
+        let cache = cache_after(&snap_a, &first);
+
+        // Two rows evicted: base 102, epochs all differ (content shifted).
+        let mut snap_b = snapshot_at_base(102);
+        snap_b.row_epochs = Arc::from(vec![3_u64, 4, 5, 6, 7]);
+        snap_b.scroll_changed = true;
+        let second = call(&snap_b, &mut view_state, &cache, &render_state, true, true);
+
+        assert_eq!(
+            second.current_selection, first.current_selection,
+            "eviction must not rewrite the stored selection"
+        );
+        assert_eq!(
+            second.screen_selection,
+            Some((2, 1, 5, 2)),
+            "the same text now sits two screen rows higher"
+        );
+        assert!(view_state.selection.has_selection());
+    }
+
+    /// An endpoint whose own row was evicted clamps to the oldest retained
+    /// row, at column 0 for a linear selection; the rest of the selection is
+    /// kept and still highlights.
+    #[test]
+    fn evicted_anchor_clamps_to_the_first_retained_row() {
+        let snap = snapshot_at_base(103);
+        let mut view_state = ViewState::new();
+        // Anchor on row 101 (evicted), end on row 104 (screen row 1).
+        select_rows(&mut view_state, (6, 101), (2, 104));
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &settled_cache(&snap, true, true),
+            &render_state,
+            true,
+            true,
+        );
+
+        assert_eq!(
+            view_state.selection.anchor,
+            Some(LogicalCell {
+                col: 0,
+                row: RowNumber::new(103),
+            }),
+            "the evicted anchor clamps to column 0 of the oldest retained row"
+        );
+        assert_eq!(
+            view_state.selection.end,
+            Some(LogicalCell {
+                col: 2,
+                row: RowNumber::new(104),
+            }),
+            "the retained endpoint is untouched"
+        );
+        assert_eq!(outcome.screen_selection, Some((0, 0, 2, 1)));
+    }
+
+    /// When both endpoints have been evicted nothing of the selection is
+    /// left, and it is cleared rather than left to highlight unrelated text.
+    #[test]
+    fn selection_with_both_endpoints_evicted_is_cleared() {
+        let snap = snapshot_at_base(110);
+        let mut view_state = ViewState::new();
+        select_rows(&mut view_state, (1, 101), (4, 105));
+        let render_state = render_state_with_deco_verts(true);
+
+        let outcome = call(
+            &snap,
+            &mut view_state,
+            &settled_cache(&snap, true, true),
+            &render_state,
+            true,
+            true,
+        );
+
+        assert!(!view_state.selection.has_selection());
+        assert_eq!(view_state.selection.anchor, None);
+        assert_eq!(outcome.current_selection, None);
+        assert_eq!(outcome.screen_selection, None);
     }
 
     /// The hover analogue of `selection_clear_alone_yields_bounded_rebuild`
@@ -1623,8 +1883,14 @@ mod evaluate_frame_dirty_state_tests {
         bump_one_row_epoch(&mut changed);
 
         let mut view_state = ViewState::new();
-        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
-        view_state.selection.end = Some(CellCoord { col: 3, row: 0 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        view_state.selection.end = Some(LogicalCell {
+            col: 3,
+            row: RowNumber::new(0),
+        });
         let render_state = render_state_with_deco_verts(true);
 
         let outcome = call(&changed, &mut view_state, &cache, &render_state, true, true);
@@ -1913,8 +2179,14 @@ mod evaluate_frame_dirty_state_tests {
 
     /// Put a committed (not in-progress) selection on `view_state`.
     fn with_committed_selection(view_state: &mut ViewState) {
-        view_state.selection.anchor = Some(CellCoord { col: 2, row: 1 });
-        view_state.selection.end = Some(CellCoord { col: 8, row: 3 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 2,
+            row: RowNumber::new(1),
+        });
+        view_state.selection.end = Some(LogicalCell {
+            col: 8,
+            row: RowNumber::new(3),
+        });
         view_state.selection.is_selecting = false;
         view_state.selection_committed_this_frame = false;
     }
@@ -1988,7 +2260,7 @@ mod evaluate_frame_dirty_state_tests {
     }
 
     /// A pure scroll never invalidates a selection: coordinates are
-    /// buffer-absolute, so the same text is still selected.
+    /// stable logical row numbers, so the same text is still selected.
     #[test]
     fn scroll_change_does_not_discard_a_selection() {
         let mut snap = base_snapshot();
@@ -2066,8 +2338,14 @@ mod evaluate_frame_dirty_state_tests {
         let snap = base_snapshot();
         let cache = settled_cache(&snap, true, true);
         let mut view_state = ViewState::new();
-        view_state.selection.anchor = Some(CellCoord { col: 0, row: 0 });
-        view_state.selection.end = Some(CellCoord { col: 3, row: 0 });
+        view_state.selection.anchor = Some(LogicalCell {
+            col: 0,
+            row: RowNumber::new(0),
+        });
+        view_state.selection.end = Some(LogicalCell {
+            col: 3,
+            row: RowNumber::new(0),
+        });
         let render_state = render_state_with_deco_verts(true);
 
         let outcome = call(&snap, &mut view_state, &cache, &render_state, false, true);

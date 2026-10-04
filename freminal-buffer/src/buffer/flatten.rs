@@ -1895,29 +1895,79 @@ impl Buffer {
         self.height
     }
 
+    /// Resolve a logical row range to retained indices for text extraction.
+    ///
+    /// `start_row` / `end_row` are stable [`RowNumber`]s (Task 125.17), so a
+    /// selection taken before an eviction still names the same text after it.
+    ///
+    /// - A `start_row` that has been evicted (below [`Self::row_base`]) clamps
+    ///   to the oldest retained row and is reported as
+    ///   [`ExtractStart::ClampedToOldest`], so the caller can begin that row at
+    ///   column `0` rather than at a column that belonged to vanished text.
+    /// - An `end_row` past the last retained row clamps to the last row.
+    /// - `None` when nothing is extractable: either endpoint lies in the other
+    ///   screen's row namespace, `start_row` is past the last retained row, or
+    ///   `end_row` has itself been evicted (the whole range is gone).
+    fn resolve_extract_range(
+        &self,
+        start_row: RowNumber,
+        end_row: RowNumber,
+    ) -> Option<ExtractRange> {
+        let base = self.row_base();
+        if start_row.is_alternate() != base.is_alternate()
+            || end_row.is_alternate() != base.is_alternate()
+        {
+            return None;
+        }
+        let len = self.rows.len();
+        // Both rows share `base`'s namespace, so plain ordering against `base`
+        // is meaningful: a row below it has been evicted.
+        let end = end_row.rows_after(base)?.min(len.checked_sub(1)?);
+        let (start, start_edge) = if start_row < base {
+            (0, ExtractStart::ClampedToOldest)
+        } else {
+            (start_row.rows_after(base)?, ExtractStart::Exact)
+        };
+        if start >= len {
+            return None;
+        }
+        Some(ExtractRange {
+            start,
+            end,
+            start_edge,
+        })
+    }
+
     /// Extract the text content of a selection range from the buffer.
     ///
-    /// Coordinates are buffer-absolute row indices (0 = first row in the full
-    /// buffer including scrollback). Columns are 0-indexed cell positions.
-    /// The range is inclusive on both ends: `[start_row, start_col]` through
-    /// `[end_row, end_col]`.
+    /// Rows are stable logical [`RowNumber`]s (the same numbering as
+    /// [`Self::row_base`]), so a range stays attached to its text when rows
+    /// are evicted from the front. A `start_row` that has been evicted clamps
+    /// to the oldest retained row, beginning at column `0`; a range whose
+    /// `end_row` has been evicted yields an empty string. Columns are 0-indexed
+    /// cell positions. The range is inclusive on both ends:
+    /// `[start_row, start_col]` through `[end_row, end_col]`.
     ///
     /// Trailing whitespace on each row is trimmed (standard terminal behaviour).
     /// Rows are separated by `'\n'`.
     #[must_use]
     pub fn extract_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
     ) -> String {
         use std::fmt::Write as _;
 
-        if start_row >= self.rows.len() {
+        let Some(range) = self.resolve_extract_range(start_row, end_row) else {
             return String::new();
-        }
-        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+        };
+        let (start_row, end_row) = (range.start, range.end);
+        let start_col = match range.start_edge {
+            ExtractStart::Exact => start_col,
+            ExtractStart::ClampedToOldest => 0,
+        };
 
         let mut result = String::new();
 
@@ -1969,21 +2019,26 @@ impl Buffer {
     /// `col_min = start_col.min(end_col)` and `col_max = start_col.max(end_col)`.
     /// Rows are joined with `\n`.  Trailing whitespace is trimmed per row.
     ///
+    /// Rows are logical [`RowNumber`]s with the same clamping as
+    /// [`Self::extract_text`]; a block keeps its column range when its start
+    /// row is clamped, because the columns of a rectangle do not belong to any
+    /// one row.
+    ///
     /// This is the copy behaviour for Alt+drag (block/rectangular) selections.
     #[must_use]
     pub fn extract_block_text(
         &self,
-        start_row: usize,
+        start_row: RowNumber,
         start_col: usize,
-        end_row: usize,
+        end_row: RowNumber,
         end_col: usize,
     ) -> String {
         use std::fmt::Write as _;
 
-        if start_row >= self.rows.len() {
+        let Some(range) = self.resolve_extract_range(start_row, end_row) else {
             return String::new();
-        }
-        let end_row = end_row.min(self.rows.len().saturating_sub(1));
+        };
+        let (start_row, end_row) = (range.start, range.end);
         let col_min = start_col.min(end_col);
         let col_max = start_col.max(end_col);
 
@@ -2021,6 +2076,29 @@ impl Buffer {
 
         result
     }
+}
+
+/// How the start of an extraction range was resolved.
+///
+/// A named enum rather than a `bool` so the "start row was evicted" case is
+/// visible at each use site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractStart {
+    /// The start row is retained; its start column applies as given.
+    Exact,
+    /// The start row was evicted and clamped to the oldest retained row.
+    ClampedToOldest,
+}
+
+/// A logical extraction range resolved to retained indices.
+#[derive(Debug, Clone, Copy)]
+struct ExtractRange {
+    /// Retained index of the first row to extract.
+    start: usize,
+    /// Retained index of the last row to extract (inclusive).
+    end: usize,
+    /// Whether `start` is the requested row or a clamp to the oldest row.
+    start_edge: ExtractStart,
 }
 
 /// Convert a byte range into a character range using a `byte_to_char` map.
@@ -3845,7 +3923,8 @@ mod incremental_merge_tests {
         );
         let content_rows = height - 1;
         for (k, absolute_row) in (visible_start..visible_end).enumerate() {
-            let actual_row_text = buf.extract_text(absolute_row, 0, absolute_row, width - 1);
+            let number = buf.row_number_at(absolute_row);
+            let actual_row_text = buf.extract_text(number, 0, number, width - 1);
             let expected = if k < content_rows {
                 // Bottom-most content line is `line{total_lines-1}`, sitting
                 // one row above the trailing blank; walk upward from there.
@@ -3869,7 +3948,10 @@ mod incremental_merge_tests {
     fn window_texts(buf: &Buffer, width: usize) -> Vec<String> {
         let (start, end) = buf.visible_window_bounds(0, 0);
         (start..end)
-            .map(|row| buf.extract_text(row, 0, row, width - 1))
+            .map(|row| {
+                let number = buf.row_number_at(row);
+                buf.extract_text(number, 0, number, width - 1)
+            })
             .collect()
     }
 
