@@ -164,6 +164,12 @@ task125_start_workload() {
 	sustained-output)
 		wtype "while :; do seq 1 200; sleep 0.02; done" -k Return
 		;;
+	sustained-output-marked)
+		# The shell, not wtype, turns the octal escapes into OSC 133 marks
+		# (\033 = ESC, \007 = BEL). Every 25th burst idles 0.15 s, longer than
+		# Freminal's 100 ms idle tick, so scrollback compression engages.
+		wtype "n=0; while :; do printf '\\033]133;A\\007Task125 prompt>\\033]133;B\\007\\033]133;C\\007'; seq 1 200; printf '\\033]133;D;0\\007'; if ((++n % 25)); then sleep 0.02; else sleep 0.15; fi; done" -k Return
+		;;
 	streaming-output)
 		wtype "n=0; while :; do printf 'Task125 stream line %08d\\n' \"\$((++n))\"; sleep 0.02; done" -k Return
 		;;

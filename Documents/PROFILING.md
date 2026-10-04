@@ -387,13 +387,20 @@ The unattended workloads include `sustained-output` (a 200-line burst every
 20 ms, replacing the whole view each time) and `streaming-output` (one
 fixed-width line every 20 ms, scrolling the view by one row as `tail -f` or
 `cargo build` does); the pair separates dense full-redraw throughput from
-one-line scroll cost.
+one-line scroll cost. `sustained-output-marked` repeats the `sustained-output`
+burst pattern with each burst wrapped in OSC 133 marks (`A`, a fixed prompt
+text, `B`, `C` before the `seq` and `D;0` after), so every terminal records
+prompts and command blocks, and every 25th burst idles for 0.15 s instead of
+0.02 s. That gap exceeds Freminal's 100 ms idle tick, so scrollback
+compaction and compression engage. All three terminals receive identical
+bytes; the shell, not `wtype`, expands the `\033` and `\007` escapes.
 
 Do not run seven 60-second captures for every workload.
 
 1. `screen` runs three 20-second samples after a five-second warm-up for every
-   non-pointer workload (ten, including `streaming-output`). It spawns 90
-   windows and takes approximately 38 minutes.
+   non-pointer workload (eleven, including `streaming-output` and
+   `sustained-output-marked`). It spawns 99 windows and takes approximately 41
+   minutes.
 2. `pointer-screen` runs the same short protocol for pointer motion, separately
    because every sample needs physical maintainer interaction. It spawns nine
    windows and takes approximately four minutes.
