@@ -517,6 +517,75 @@ impl Buffer {
             "image_cell_count {} != actual image cells {}",
             self.image_cell_count, actual_image_cells
         );
+
+        self.debug_assert_block_live_rows();
+        self.debug_assert_image_horizons();
+    }
+
+    /// Every compressed block's `live_rows` equals the number of block-map
+    /// entries naming it, and every block-map entry names a stored block
+    /// (Task 125.15). O(rows).
+    #[cfg(debug_assertions)]
+    fn debug_assert_block_live_rows(&self) {
+        let mut referenced: HashMap<crate::buffer::BlockId, u32> = HashMap::new();
+        for block_ref in self.rows.block_map().iter().flatten() {
+            *referenced.entry(block_ref.block_id()).or_insert(0) += 1;
+        }
+        debug_assert_eq!(
+            referenced.len(),
+            self.blocks.len(),
+            "{} blocks are referenced by rows but {} are stored",
+            referenced.len(),
+            self.blocks.len()
+        );
+        for (id, slot) in &self.blocks {
+            debug_assert_eq!(
+                referenced.get(id).copied(),
+                Some(slot.live_rows),
+                "block {id:?} live_rows {} != rows referencing it {:?}",
+                slot.live_rows,
+                referenced.get(id)
+            );
+        }
+    }
+
+    /// Every image cell lies on a row at or below its image's stamp horizon
+    /// (Task 125.15), which is what lets eviction free an image without
+    /// scanning cells. Images absent from the store are skipped (their cells
+    /// have nothing to keep alive), as are protocol-retained Kitty images (see
+    /// the exemption below). O(rows x cols).
+    #[cfg(debug_assertions)]
+    fn debug_assert_image_horizons(&self) {
+        if self.image_cell_count == 0 {
+            return;
+        }
+        for (row_idx, row) in self.rows.iter().enumerate() {
+            let number = self.rows.number_of(row_idx);
+            for cell in row.cells_for_image_scan() {
+                let Some(placement) = cell.image_placement() else {
+                    continue;
+                };
+                // A Kitty image is exempt: its cells can be stamped before the
+                // image is transmitted (placeholders) or outlive a removal and
+                // re-transmission of the same id, so a Kitty image may
+                // legitimately have no horizon covering them. Its data is
+                // protocol-retained, so eviction never frees it and the
+                // horizon is not needed for correctness.
+                if !self.image_store.contains(placement.image_id)
+                    || self.image_store.is_protocol_retained(placement.image_id)
+                {
+                    continue;
+                }
+                debug_assert!(
+                    self.image_store
+                        .horizon_of(placement.image_id)
+                        .is_some_and(|horizon| number <= horizon),
+                    "image {} has a cell on row {number} above its stamp horizon {:?}",
+                    placement.image_id,
+                    self.image_store.horizon_of(placement.image_id)
+                );
+            }
+        }
     }
 
     // In release builds this is a no-op, so we can call it freely.
@@ -745,7 +814,7 @@ mod command_block_tests {
         let _finished = buf.finish_command_block(Some(0), "fid1");
 
         // Evict 20 rows from the front — block at rows 5..10 is gone.
-        let _ = buf.rows.evict_front(20);
+        let _ = buf.evict_front_rows(20);
         buf.prune_evicted_marks();
 
         assert!(
@@ -776,7 +845,7 @@ mod command_block_tests {
 
         // Evict 10 rows — the block survives and its numbers do NOT change:
         // only the row *index* of each number moves.
-        let _ = buf.rows.evict_front(10);
+        let _ = buf.evict_front_rows(10);
         buf.prune_evicted_marks();
 
         assert_eq!(buf.command_blocks.len(), 1);

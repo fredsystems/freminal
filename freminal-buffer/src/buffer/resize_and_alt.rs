@@ -674,6 +674,9 @@ impl Buffer {
         // counter stays accurate regardless of how reflow may have clipped or
         // merged cells.
         self.image_cell_count = self.rows.iter().map(Row::count_image_cells).sum();
+        // The rows were renumbered, so every image's stamp horizon (Task
+        // 125.15) named a pre-reflow row: recompute them from the new cells.
+        self.rebuild_image_horizons();
 
         // 4) Remap cursor position based on reflow tracking.
         if let (Some(cy), Some(cx)) = (new_cursor_y, new_cursor_x) {
@@ -860,17 +863,10 @@ impl Buffer {
                 // scroll_region_top/bottom directly without an offset).
                 let excess = self.rows.len().saturating_sub(new_height);
                 if excess > 0 {
-                    // Account for image cells in the drained rows.
-                    if self.image_cell_count > 0 {
-                        let drained_images: usize =
-                            self.rows[..excess].iter().map(Row::count_image_cells).sum();
-                        self.image_cell_count -= drained_images;
-                    }
                     // The alternate screen never accumulates scrollback and
-                    // so never compresses anything; the store drains the
+                    // so never compresses anything; the store evicts the
                     // (all-`None`) block map in lockstep regardless.
-                    let _ = self.rows.evict_front(excess);
-                    self.prune_evicted_marks();
+                    let _ = self.evict_front_rows(excess);
                     // Adjust cursor Y for the removed rows.
                     self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
                 }
@@ -991,28 +987,14 @@ impl Buffer {
         let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
         // --- Drop the oldest rows (and their cache entries) ---
-        // First, account for any image cells in the rows being drained.
-        // `Row::count_image_cells` already short-circuits for both
-        // Task-118 compact rows and Task-119 evicted (compressed) rows
-        // without decompacting/decompressing, since neither can ever hold
-        // an image cell.
-        if self.image_cell_count > 0 {
-            let drained_images: usize = self.rows[..overflow]
-                .iter()
-                .map(Row::count_image_cells)
-                .sum();
-            self.image_cell_count -= drained_images;
-        }
-        // `offset_in_block` is block-relative, not buffer-absolute (see
-        // `BlockRowRef`'s doc), so draining the front of the block map
-        // needs no index remapping — surviving rows keep referencing the
-        // same block at the same in-block offset.
-        let overflow = self.rows.evict_front(overflow).rows;
-        // A block whose every row was just drained is now unreferenced;
-        // reclaim it immediately rather than leaking it in `self.blocks`
-        // forever (Task 119.4).
-        self.gc_unreferenced_blocks();
-        self.prune_evicted_marks();
+        //
+        // `evict_front_rows` settles everything keyed on the dropped rows --
+        // the image-cell counter, the compressed blocks' live-row counts (a
+        // block whose every row was drained is freed, Task 119.4), the images
+        // whose last row went (Task 125.15 stamp horizon) and the marks that
+        // pointed at them -- in time proportional to the rows dropped, not the
+        // rows kept.
+        let overflow = self.evict_front_rows(overflow);
 
         // Task #405 fix: once scrollback is at capacity, every line feed
         // pushes one row at the bottom (via `push_row`/`handle_lf`) and this
@@ -1034,12 +1016,6 @@ impl Buffer {
         // early-return above (`self.rows.len() <= max_rows`) drains nothing
         // and must not pay this cost on every line feed.
         self.merge_cache = None;
-
-        // --- Garbage-collect images no longer referenced by any row ---
-        if !self.image_store.is_empty() {
-            self.image_store
-                .retain_referenced(self.rows.iter().map(Row::cells_for_image_scan));
-        }
 
         // --- Adjust cursor row index ---
         //

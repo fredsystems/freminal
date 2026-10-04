@@ -616,6 +616,28 @@ Surface point: 125.11 design. `graphics_kitty.rs:2542-2570` interprets `d=p` /
 through the visible window per the kitty spec, with a test at nonzero
 scrollback. Open; schedule after 125.14.
 
+### 125.C9 — `scroll_slice_*` deducted image cells from the wrong row
+
+Surface point: 125.15. `scroll_slice_up` / `_down` deducted `image_cell_count`
+for the moved row instead of the overwritten one, so the count could reach zero
+while an image cell still existed. **Complete** in 125.15, with four
+regression tests.
+
+### 125.C10 — Idle compaction re-compacts compressed rows
+
+Surface point: 125.15. `compact_idle_scrollback` calls `row.compact()` on rows
+already evicted to a compressed block, tripping the `cells_ref` debug assertion;
+no release impact. Fix: skip `evicted_to_block` rows, with a debug-build test.
+Open; not on the 125 critical path.
+
+### 125.C11 — `Row::erase_cells_at` trims image cells uncounted
+
+Surface point: 125.15. Trailing default-tag blank trimming also removes image
+cells (default-tag spaces) without decrementing `image_cell_count`, so the
+count over-states (the safe direction for horizons) and a cell-owned image may
+not be freed. Fix: account image cells before trimming, with a test. Open; not
+on the 125 critical path.
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
@@ -1362,6 +1384,24 @@ What: switch `RowStore` eviction to the 125.11 mechanism; replace
 `gc_unreferenced_blocks` and `image_store.retain_referenced` on the eviction
 path with incremental counts. Benchmarks from 125.12 must show eviction cost
 independent of retained-row count.
+
+**Complete.** `RowStore` evicts by advancing a moving head (placeholder
+slots, payloads freed at once) and compacts at `max(live / 2, 64)` dead slots;
+a 1/2/4/8 divisor sweep over 1M line feeds was flat within 3%, so the default
+stands. Compressed blocks carry `live_rows` released per evicted run, and
+`gc_unreferenced_blocks` is gone. Images use the stamp horizon with restamps on
+every downward cell move (one restamp per multi-line IL/SD, skipped unless a
+horizon lies in range); `scroll_slice_up` needs none because cells only move to
+lower numbers. A focused review found no path that drops a referenced image;
+its fixes are applied: cell-owned images are freed when all their cells are
+cleared (in-place sixel/iTerm2 animation no longer accumulates), ED 3 no longer
+clears blocks still referenced by straddling rows, and the horizon debug
+invariant exempts protocol-retained Kitty images. Shared bookkeeping lives in
+new `buffer/eviction.rs`. Per 200-line burst against `before_125_rowstore`:
+plain 4.595 ms to 232 us, compressed 17.08 ms to 177 us, prompts 4.783 ms to
+233 us, image 368.8 ms to 261 us; scaling 170 / 246 / 262 us at 1k / 10k / 50k
+retained rows (previously 0.485 / 4.497 / 20.05 ms); emulator burst 4.390 ms to
+118 us. Cleanups: 125.C9 (fixed here), 125.C10, 125.C11.
 
 ### 125.16 — Merge cache across eviction
 

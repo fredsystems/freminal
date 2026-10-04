@@ -19,17 +19,22 @@ use freminal_common::buffer_states::{
 };
 
 use crate::{
-    compressed_block::CompressedBlock,
     image_store::ImageStore,
     response::InsertResponse,
     row::{Row, RowJoin, RowOrigin},
 };
 
+use compression::BlockSlot;
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
 pub use reflow_remap::ReflowRemap;
 use row_store::RowStore;
+
+// Named only by intra-doc links on `BlockId`, `BlockRowRef` and the block
+// fields; the code itself reaches blocks through `BlockSlot::block`.
+#[cfg(doc)]
+use crate::compressed_block::CompressedBlock;
 
 #[cfg(test)]
 use crate::cell::Cell;
@@ -42,6 +47,7 @@ use freminal_common::buffer_states::{
 mod compression;
 mod cursor;
 mod erase;
+mod eviction;
 mod flatten;
 mod images;
 mod lifecycle;
@@ -395,7 +401,8 @@ pub struct Buffer {
     pub(in crate::buffer) command_blocks: std::collections::VecDeque<CommandBlock>,
 
     /// Deep-cold scrollback rows compressed with LZ4 (Task 119 — Scrollback
-    /// Compression), keyed by [`BlockId`].
+    /// Compression), keyed by [`BlockId`], each with the number of live rows
+    /// still referencing it (Task 125.15; see [`BlockSlot`]).
     ///
     /// Only rows below the visible window that are already Task-118
     /// [`Row::is_compact`] are ever compressed, via the explicit,
@@ -404,7 +411,7 @@ pub struct Buffer {
     /// is removed the moment any of its rows is read
     /// (`Buffer::ensure_decompressed`): a row is never both compressed and
     /// live at the same time (single residency).
-    pub(in crate::buffer) blocks: HashMap<BlockId, CompressedBlock>,
+    pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
 
     /// Monotonic counter used to mint fresh [`BlockId`]s for
     /// `Buffer::compress_scrollback_block`. Reset only by [`Buffer::new`]
@@ -464,7 +471,7 @@ pub struct SavedPrimaryState {
     /// 119). The alternate screen never accumulates scrollback and so never
     /// compresses anything; this is empty for as long as the alternate
     /// screen is active and is restored verbatim on `leave_alternate`.
-    pub(in crate::buffer) blocks: HashMap<BlockId, CompressedBlock>,
+    pub(in crate::buffer) blocks: HashMap<BlockId, BlockSlot>,
     /// Saved [`Buffer::next_block_id`] counter from the primary buffer.
     pub(in crate::buffer) next_block_id: u32,
 }
@@ -732,7 +739,11 @@ impl Buffer {
             row_cache_bytes += entry.auto_urls.capacity() * core::mem::size_of::<AutoUrlRange>();
         }
 
-        let blocks_bytes: usize = self.blocks.values().map(CompressedBlock::heap_bytes).sum();
+        let blocks_bytes: usize = self
+            .blocks
+            .values()
+            .map(|slot| slot.block.heap_bytes())
+            .sum();
 
         BufferHeapBreakdown {
             rows_bytes,

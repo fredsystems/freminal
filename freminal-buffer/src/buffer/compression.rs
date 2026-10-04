@@ -24,7 +24,7 @@
 //! removes it from `self.blocks`, so a block is never both compressed and
 //! live at the same time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use conv2::ValueFrom;
@@ -49,31 +49,47 @@ use super::{BlockId, BlockRowRef, Buffer};
 /// benches, not here.
 const BLOCK_SIZE: usize = 256;
 
-impl Buffer {
-    /// Drop every entry in `self.blocks` that is no longer referenced by any
-    /// entry in the row store's block map.
-    ///
-    /// A drain (`Buffer::enforce_scrollback_limit`'s front-of-buffer
-    /// eviction, `Buffer::erase_scrollback`, `Buffer::scroll_up`) can remove
-    /// every row that referenced a given compressed block without ever
-    /// calling `Buffer::ensure_decompressed` on it — the block's bytes would
-    /// otherwise sit in `self.blocks` forever, unreferenced and
-    /// unreachable, leaking exactly the memory compression exists to save.
-    /// Called after every such drain to keep `self.blocks` containing only
-    /// live, referenced blocks.
-    pub(in crate::buffer) fn gc_unreferenced_blocks(&mut self) {
-        if self.blocks.is_empty() {
-            return;
-        }
-        let referenced: HashSet<BlockId> = self
-            .rows
-            .block_map()
-            .iter()
-            .filter_map(|entry| entry.map(BlockRowRef::block_id))
-            .collect();
-        self.blocks.retain(|id, _| referenced.contains(id));
-    }
+/// One compressed block together with the number of buffer rows that still
+/// reference it (Task 125.15).
+///
+/// `live_rows` is the count of `Some(BlockRowRef)` entries in the row store's
+/// block map that name this block. [`Buffer::compress_scrollback_block`] sets
+/// it to the number of rows it evicted into the block; front eviction
+/// ([`release_block_rows`]) decrements it per evicted row and frees the block
+/// when it reaches zero, so reclaiming a fully-drained block is O(rows
+/// evicted) instead of a whole-buffer reachability scan. The counts are
+/// verified against the block map by `Buffer::debug_assert_invariants`.
+#[derive(Debug, Clone)]
+pub(in crate::buffer) struct BlockSlot {
+    /// The compressed rows.
+    pub(in crate::buffer) block: CompressedBlock,
+    /// How many live rows reference this block.
+    pub(in crate::buffer) live_rows: u32,
+}
 
+/// Account for `rows` rows that referenced block `id` having been evicted from
+/// the front of the buffer, freeing the block once nothing references it.
+///
+/// A free function over the map (not a `Buffer` method) so the eviction
+/// closure can borrow `Buffer::blocks` while `Buffer::rows` is mutably
+/// borrowed. An unknown `id` is ignored: the block was already removed (for
+/// example by [`Buffer::ensure_decompressed`], which also clears the
+/// references).
+pub(in crate::buffer) fn release_block_rows(
+    blocks: &mut HashMap<BlockId, BlockSlot>,
+    id: BlockId,
+    rows: u32,
+) {
+    let Some(slot) = blocks.get_mut(&id) else {
+        return;
+    };
+    slot.live_rows = slot.live_rows.saturating_sub(rows);
+    if slot.live_rows == 0 {
+        blocks.remove(&id);
+    }
+}
+
+impl Buffer {
     /// Compress up to `budget` rows of already-Task-118-compact, cold
     /// scrollback into LZ4 blocks, returning the number of rows *newly
     /// compressed*.
@@ -232,6 +248,7 @@ impl Buffer {
         // `Buffer::next_block_id`.
         self.next_block_id = self.next_block_id.saturating_add(1);
 
+        let mut live_rows: u32 = 0;
         for (i, row_idx) in (start..end).enumerate() {
             // `count` is bounded by a single compression call's row span
             // (never remotely close to `u32::MAX`); degrade to `u32::MAX`
@@ -242,9 +259,10 @@ impl Buffer {
             self.rows[row_idx].evict_to_block();
             self.rows.block_map_mut()[row_idx] = Some(BlockRowRef::new(block_id, offset_in_block));
             self.rows.invalidate(row_idx);
+            live_rows = live_rows.saturating_add(1);
         }
 
-        self.blocks.insert(block_id, block);
+        self.blocks.insert(block_id, BlockSlot { block, live_rows });
 
         self.debug_assert_invariants();
         true
@@ -283,7 +301,7 @@ impl Buffer {
         }
 
         for block_id in block_ids {
-            let Some(block) = self.blocks.remove(&block_id) else {
+            let Some(BlockSlot { block, .. }) = self.blocks.remove(&block_id) else {
                 // Already restored by an earlier iteration (can't happen
                 // with a `HashSet` of distinct ids, but `self.blocks` may
                 // simply have no entry for a dangling reference — treat
@@ -361,10 +379,11 @@ impl Buffer {
         row_idx: usize,
     ) -> std::borrow::Cow<'_, [Cell]> {
         if let Some(Some(block_ref)) = self.rows.block_map().get(row_idx).copied()
-            && let Some(block) = self.blocks.get(&block_ref.block_id())
+            && let Some(slot) = self.blocks.get(&block_ref.block_id())
         {
             let mut scratch = Vec::new();
-            let cells = block
+            let cells = slot
+                .block
                 .decompress_into(&mut scratch)
                 .and_then(|rows| {
                     let offset = usize::value_from(block_ref.offset_in_block()).ok()?;
@@ -948,5 +967,260 @@ mod tests {
         // Fully compressed already: further calls must do no busy-work.
         assert_eq!(buf.compress_idle_scrollback(usize::MAX), 0);
         assert_eq!(buf.compress_idle_scrollback(usize::MAX), 0);
+    }
+
+    // ── Live-row counts (Task 125.15) ───────────────────────────────────
+
+    /// Evict `n` rows from the front and keep the cursor on its row, as every
+    /// production caller of `evict_front_rows` does for itself.
+    fn evict(buf: &mut Buffer, n: usize) -> usize {
+        let evicted = buf.evict_front_rows(n);
+        buf.cursor.pos.y = buf.cursor.pos.y.saturating_sub(evicted);
+        evicted
+    }
+
+    /// Number of block-map entries across the live rows that name a block.
+    fn rows_referencing_blocks(buf: &Buffer) -> usize {
+        buf.rows.block_map().iter().flatten().count()
+    }
+
+    /// Sum of every stored block's `live_rows`.
+    fn total_live_rows(buf: &Buffer) -> usize {
+        buf.blocks
+            .values()
+            .map(|slot| usize::value_from(slot.live_rows).unwrap())
+            .sum()
+    }
+
+    /// The single block's id, asserting exactly one is stored.
+    fn only_block_id(buf: &Buffer) -> BlockId {
+        assert_eq!(buf.blocks.len(), 1);
+        *buf.blocks.keys().next().unwrap()
+    }
+
+    #[test]
+    fn compression_sets_live_rows_to_the_rows_it_evicted() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 6, "test needs scrollback");
+
+        assert!(buf.compress_scrollback_block(0, 4));
+        assert!(buf.compress_scrollback_block(4, 2));
+
+        assert_eq!(buf.blocks.len(), 2);
+        let mut counts: Vec<u32> = buf.blocks.values().map(|s| s.live_rows).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![2, 4]);
+        assert_eq!(total_live_rows(&buf), rows_referencing_blocks(&buf));
+    }
+
+    #[test]
+    fn evicting_every_row_of_a_block_frees_it() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        assert!(buf.compress_scrollback_block(0, 6));
+        assert_eq!(only_block_id_live_rows(&buf), 6);
+
+        assert_eq!(evict(&mut buf, 6), 6);
+
+        assert!(buf.blocks.is_empty(), "a fully evicted block must be freed");
+        assert_eq!(rows_referencing_blocks(&buf), 0);
+        buf.debug_assert_invariants();
+    }
+
+    fn only_block_id_live_rows(buf: &Buffer) -> u32 {
+        buf.blocks[&only_block_id(buf)].live_rows
+    }
+
+    #[test]
+    fn evicting_part_of_a_block_keeps_it_with_a_reduced_count() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        assert!(buf.compress_scrollback_block(0, 6));
+        let id = only_block_id(&buf);
+
+        assert_eq!(evict(&mut buf, 2), 2);
+
+        assert_eq!(buf.blocks[&id].live_rows, 4);
+        assert_eq!(rows_referencing_blocks(&buf), 4);
+        buf.debug_assert_invariants();
+
+        // The survivors still decompress to the right content: offsets are
+        // block-relative, so evicting the front never remapped them.
+        let (chars, ..) = buf.scrollback_as_tchars_and_tags(0);
+        let text: String = chars
+            .iter()
+            .map(|c| match c {
+                TChar::Ascii(b) => char::from(*b),
+                _ => '?',
+            })
+            .collect();
+        assert!(text.contains("line0002"), "row 2 must survive: {text}");
+        assert!(!text.contains("line0001"), "row 1 was evicted: {text}");
+    }
+
+    #[test]
+    fn a_bisected_block_is_freed_only_when_its_last_row_goes() {
+        let mut buf = buffer_with_compact_scrollback(14);
+        assert!(buf.compress_scrollback_block(0, 4));
+        assert!(buf.compress_scrollback_block(4, 4));
+        assert_eq!(buf.blocks.len(), 2);
+
+        // 6 rows: all of block 0 and the first two rows of block 1.
+        assert_eq!(evict(&mut buf, 6), 6);
+        assert_eq!(buf.blocks.len(), 1, "block 0 freed, block 1 bisected");
+        assert_eq!(only_block_id_live_rows(&buf), 2);
+        buf.debug_assert_invariants();
+
+        assert_eq!(evict(&mut buf, 2), 2);
+        assert!(buf.blocks.is_empty());
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn a_run_of_rows_from_one_block_is_released_in_one_call() {
+        // The store coalesces consecutive evicted rows of one block into a
+        // single release; the buffer-level count must still come out exact.
+        let mut buf = buffer_with_compact_scrollback(20);
+        assert!(buf.compress_scrollback_block(0, 8));
+        assert!(buf.compress_scrollback_block(8, 8));
+        assert_eq!(evict(&mut buf, 12), 12);
+        assert_eq!(only_block_id_live_rows(&buf), 4);
+        assert_eq!(total_live_rows(&buf), rows_referencing_blocks(&buf));
+    }
+
+    #[test]
+    fn decompress_then_recompress_gets_a_new_block_id_and_count() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        assert!(buf.compress_scrollback_block(0, 6));
+        let first = only_block_id(&buf);
+
+        buf.ensure_decompressed(0..6);
+        assert!(buf.blocks.is_empty(), "decompression removes the slot");
+        assert_eq!(rows_referencing_blocks(&buf), 0);
+
+        assert!(buf.compress_scrollback_block(0, 6));
+        let second = only_block_id(&buf);
+        assert_ne!(first, second, "recompression mints a new id");
+        assert_eq!(buf.blocks[&second].live_rows, 6);
+
+        // Evicting the rows frees the new block; the old id is long gone.
+        assert_eq!(evict(&mut buf, 6), 6);
+        assert!(buf.blocks.is_empty());
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn decompressing_through_a_partly_evicted_block_clears_every_reference() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        assert!(buf.compress_scrollback_block(0, 6));
+        assert_eq!(evict(&mut buf, 2), 2);
+
+        buf.ensure_decompressed(0..buf.rows.len());
+
+        assert!(buf.blocks.is_empty());
+        assert_eq!(rows_referencing_blocks(&buf), 0);
+        buf.debug_assert_invariants();
+    }
+
+    #[test]
+    fn erase_scrollback_leaves_no_block_and_no_reference() {
+        let mut buf = buffer_with_compact_scrollback(20);
+        let visible_start = buf.visible_window_start(0);
+        assert!(buf.compress_scrollback_block(0, visible_start / 2));
+        assert!(
+            buf.compress_scrollback_block(visible_start / 2, visible_start - visible_start / 2)
+        );
+        assert_eq!(buf.blocks.len(), 2);
+
+        buf.erase_scrollback();
+
+        assert!(buf.blocks.is_empty());
+        assert_eq!(rows_referencing_blocks(&buf), 0);
+        buf.debug_assert_invariants();
+    }
+
+    /// Eviction through the real hot path (`enforce_scrollback_limit`), with
+    /// compressed rows at the front, keeps every block's count equal to the
+    /// rows that reference it; the debug invariant asserts this on every line.
+    #[test]
+    fn counts_stay_exact_through_scrollback_limit_eviction() {
+        let mut buf = Buffer::new(20, 3).with_scrollback_limit(40);
+        push_numbered_lines(&mut buf, 38);
+        let _ = buf.compact_idle_scrollback(usize::MAX);
+        let _ = buf.compress_idle_scrollback(usize::MAX);
+        let initial_blocks = buf.blocks.len();
+        assert!(initial_blocks > 0, "the test must exercise blocks");
+
+        let mut freed = false;
+        for round in 0..10 {
+            push_numbered_lines(&mut buf, 6);
+            assert_eq!(
+                total_live_rows(&buf),
+                rows_referencing_blocks(&buf),
+                "round {round}"
+            );
+            freed |= buf.blocks.len() < initial_blocks;
+        }
+        assert!(freed, "eviction must have released at least one block");
+        assert_eq!(buf.rows.len(), 3 + 40, "limit stays exact");
+    }
+
+    /// The count survives an alternate-screen round trip: the blocks are
+    /// parked with the primary rows and restored with them.
+    #[test]
+    fn counts_survive_an_alternate_screen_round_trip() {
+        let mut buf = buffer_with_compact_scrollback(12);
+        assert!(buf.compress_scrollback_block(0, 6));
+        buf.enter_alternate(0);
+        let _ = buf.leave_alternate();
+        assert_eq!(only_block_id_live_rows(&buf), 6);
+        buf.debug_assert_invariants();
+    }
+
+    /// ED 3 must not discard a block that still has rows in the visible
+    /// window. Growing the window upward over compressed rows leaves them
+    /// compressed until something reads them, so the block straddles the
+    /// scrollback boundary when `erase_scrollback` evicts everything above it.
+    #[test]
+    fn erase_scrollback_keeps_a_block_that_straddles_the_visible_window() {
+        let mut buf = buffer_with_compact_scrollback(14);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 8, "test needs scrollback");
+        assert!(buf.compress_scrollback_block(0, visible_start));
+        let id = only_block_id(&buf);
+
+        // Grow the window over the last compressed rows.
+        let _ = buf.set_size(20, 3 + 4, 0);
+        let new_start = buf.visible_window_start(0);
+        assert!(
+            new_start > 0 && new_start < visible_start,
+            "the window must now reach into the block: {new_start} vs {visible_start}"
+        );
+
+        buf.erase_scrollback();
+
+        // The rows still in the window keep their compressed content.
+        let straddling = visible_start - new_start;
+        assert_eq!(buf.blocks.len(), 1, "the block must survive ED 3");
+        assert_eq!(
+            buf.blocks[&id].live_rows,
+            u32::value_from(straddling).unwrap()
+        );
+        assert_eq!(rows_referencing_blocks(&buf), straddling);
+        buf.debug_assert_invariants();
+
+        // And they still read back correctly.
+        let (chars, ..) = buf.visible_as_tchars_and_tags(0);
+        let text: String = chars
+            .iter()
+            .map(|c| match c {
+                TChar::Ascii(b) => char::from(*b),
+                _ => '?',
+            })
+            .collect();
+        assert!(
+            text.contains(&format!("line{new_start:04}")),
+            "the first surviving row must be intact: {text}"
+        );
+        assert!(buf.blocks.is_empty(), "reading restored the block");
     }
 }

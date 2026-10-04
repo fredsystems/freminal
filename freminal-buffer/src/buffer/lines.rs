@@ -383,9 +383,7 @@ impl Buffer {
                 let max_lines = self.scroll_region_bottom.saturating_sub(y) + 1;
                 let count = n.min(max_lines);
 
-                for _ in 0..count {
-                    self.scroll_slice_down_confined(y, self.scroll_region_bottom);
-                }
+                self.scroll_slice_down_confined_n(y, self.scroll_region_bottom, count);
 
                 self.debug_assert_invariants();
             }
@@ -401,9 +399,7 @@ impl Buffer {
                 let row = t + offset;
 
                 let count = n.min(b - row + 1);
-                for _ in 0..count {
-                    self.scroll_slice_down_confined(row, b);
-                }
+                self.scroll_slice_down_confined_n(row, b, count);
 
                 self.debug_assert_invariants();
             }
