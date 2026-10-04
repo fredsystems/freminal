@@ -358,7 +358,9 @@ assets/profiling/task125/run-matrix.sh smoke ghostty blink
 
 After changing feature-gated live profiling, use the sustained-output smoke to
 force at least one 120-observation summary. It opens one Freminal window and
-validates both the discrete renderer identity and the summary before cleanup:
+validates the discrete renderer identity, the task 125.5/125.6 live-render
+summary, and the task 125.8 GPU timing flush before cleanup -- `FREMINAL_BIN`
+must therefore be built with `--features frame-profiling,gpu-profiling`:
 
 ```sh
 assets/profiling/task125/run-matrix.sh profile-smoke
@@ -402,11 +404,12 @@ assets/profiling/task125/run-matrix.sh confirm /tmp/freminal-task125-confirm idl
 ```
 
 Freminal runs receive a narrow `RUST_LOG` filter inside the otherwise-clean
-environment. Its Task 121 frame summaries and Task 125 live-render summaries
-are written to `freminal.stdout.log` in that sample's external raw directory;
-WezTerm and Ghostty do not receive the Rust logging environment. Keeping the
-log beside each sample preserves pane/frame attribution without reading the
-operator's normal logging configuration or mixing sequential runs.
+environment. Its Task 121 frame summaries, Task 125 live-render summaries, and
+Task 125.8 GPU timing flushes are written to `freminal.stdout.log` in that
+sample's external raw directory; WezTerm and Ghostty do not receive the Rust
+logging environment. Keeping the log beside each sample preserves pane/frame
+attribution without reading the operator's normal logging configuration or
+mixing sequential runs.
 
 Terminal order rotates by repeat to reduce thermal/order bias. The deterministic
 summary uses seed 125 and 10,000 bootstrap resamples. Screening selects work; a

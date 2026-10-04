@@ -138,7 +138,19 @@ fn init_dominates_a_single_frame() {
 
     let frame = Metrics::of(&record_steady_state(&standard(), 1).expect("frame records"));
 
-    assert_eq!(init.total, 261, "one-time GL setup call count");
+    // Task 125.8: with `gpu-profiling`, `TerminalRenderer::init` also reads
+    // `GL_VERSION` once to detect timer-query capability. The recording
+    // arm's empty version string resolves `Unavailable`, so that is the
+    // only extra call; no query is ever issued.
+    let expected_init_calls = if cfg!(feature = "gpu-profiling") {
+        262
+    } else {
+        261
+    };
+    assert_eq!(
+        init.total, expected_init_calls,
+        "one-time GL setup call count"
+    );
     assert_eq!(init.draws, 0, "init draws nothing");
     assert_eq!(init.state_changes, 30);
     assert!(

@@ -17,10 +17,19 @@
 /// **47** and omitted two call sites: `create_program` (`gpu.rs:1614`) and
 /// `create_shader` (`gpu.rs:1643`), both written as multi-line method
 /// chains (`gl` on one line, `.create_program()` / `.create_shader(..)` on
-/// the next) that the plan's grep-based audit missed. The audited figure
-/// enumerated here is **49**.
+/// the next) that the plan's grep-based audit missed. 123.1's audited
+/// figure was **49**.
 ///
-/// Adding a 50th entry to this array means a new GL call was introduced
+/// Task 125.8 added **7** methods for the asynchronous GPU timestamp-query
+/// adapter (`gui::renderer::gpu_profiling::PaneGpuTimingProfile`):
+/// `create_query` / `delete_query` (query object lifecycle),
+/// `query_counter` (issues a `GL_TIMESTAMP`), `get_query_parameter_u32` /
+/// `get_query_parameter_u64` (non-blocking availability check and 64-bit
+/// result read), and `get_parameter_string` / `supported_extensions`
+/// (capability detection from the real desktop GL version and extension
+/// set). The current, audited figure is **56**.
+///
+/// Adding a 57th entry to this array means a new GL call was introduced
 /// somewhere in the crate — that is a deliberate act and should be
 /// reviewed, not waved through. There is no automated check that this
 /// array itself stays exhaustive against future call sites (that guard
@@ -29,7 +38,7 @@
 /// guards the narrower, checkable invariant that no *new file* starts
 /// calling `glow::HasContext` methods outside the facade without going
 /// through [`NOT_YET_MIGRATED`](tests::NOT_YET_MIGRATED).
-pub const GL_CALL_SURFACE: [&str; 49] = [
+pub const GL_CALL_SURFACE: [&str; 56] = [
     "active_texture",
     "attach_shader",
     "bind_buffer",
@@ -46,12 +55,14 @@ pub const GL_CALL_SURFACE: [&str; 49] = [
     "create_buffer",
     "create_framebuffer",
     "create_program",
+    "create_query",
     "create_shader",
     "create_texture",
     "create_vertex_array",
     "delete_buffer",
     "delete_framebuffer",
     "delete_program",
+    "delete_query",
     "delete_shader",
     "delete_texture",
     "delete_vertex_array",
@@ -61,15 +72,20 @@ pub const GL_CALL_SURFACE: [&str; 49] = [
     "enable",
     "enable_vertex_attrib_array",
     "framebuffer_texture_2d",
+    "get_parameter_string",
     "get_program_info_log",
     "get_program_link_status",
+    "get_query_parameter_u32",
+    "get_query_parameter_u64",
     "get_shader_compile_status",
     "get_shader_info_log",
     "get_uniform_location",
     "link_program",
     "pixel_store_i32",
+    "query_counter",
     "scissor",
     "shader_source",
+    "supported_extensions",
     "tex_image_2d",
     "tex_parameter_i32",
     "tex_sub_image_2d",
@@ -284,7 +300,7 @@ mod tests {
 
     #[test]
     fn call_surface_is_sorted_and_unique() {
-        // The length itself is enforced by the array's `[&str; 49]` type
+        // The length itself is enforced by the array's `[&str; 56]` type
         // parameter and is a compile-time constant, so it needs no
         // separate assertion here — only sortedness (and, by extension,
         // uniqueness) is a runtime property worth checking.

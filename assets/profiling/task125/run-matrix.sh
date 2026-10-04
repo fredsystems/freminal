@@ -17,7 +17,7 @@ readonly CONFIRM_WARMUP=10
 readonly CONFIRM_DURATION=60
 readonly CONFIRM_REPEATS=7
 readonly AMDGPU_PCI="0000:03:00.0"
-readonly TASK125_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::task_125::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info'
+readonly TASK125_FREMINAL_RUST_LOG='none,freminal::frame_profiling=debug,freminal::task_125::live_render_profile=debug,freminal_windowing::frame_profiling=debug,freminal_windowing::gl_context=info,freminal::task_125::gpu_timing=debug'
 SAMPLE_WARMUP=${SCREEN_WARMUP}
 SAMPLE_DURATION=${SCREEN_DURATION}
 SAMPLE_REPEATS=${SCREEN_REPEATS}
@@ -280,6 +280,7 @@ preflight() {
 	fi
 	if [[ ! -x "${FREMINAL_BIN:-${PWD}/target/release/freminal}" ]]; then
 		printf 'Set FREMINAL_BIN or build target/release/freminal before a GUI run.\n' >&2
+		printf 'profile-smoke additionally requires a build with --features frame-profiling,gpu-profiling.\n' >&2
 		return 1
 	fi
 	printf 'Tracefs access is intentionally root-only; measurement capture will request sudo -v.\n'
@@ -469,6 +470,7 @@ profile_smoke() {
 	SAMPLE_WARMUP=5
 	SAMPLE_DURATION=10
 	interaction_notice freminal blink sustained-output
+	printf 'FREMINAL_BIN must be built with --features frame-profiling,gpu-profiling: this validation requires both the task 125.5/125.6 live-render-work summary and the task 125.8 GPU timing flush log lines.\n'
 	local run_dir pid output
 	run_dir=$(mktemp -d "${TMPDIR:-/tmp}/freminal-task125-profile-smoke.XXXXXX")
 	launch_terminal freminal blink profile-smoke "${run_dir}"
@@ -484,6 +486,10 @@ profile_smoke() {
 	}
 	[[ ${output} == *'live render-work profile (task 125.5/125.6)'* ]] || {
 		printf 'profile smoke did not record a Task 125 live-render summary\n' >&2
+		return 1
+	}
+	[[ ${output} == *'Task 125.8 terminal GPU timing flush'* ]] || {
+		printf 'profile smoke did not record a Task 125.8 GPU timing flush\n' >&2
 		return 1
 	}
 	printf 'Profile smoke validated: %s\n' "${run_dir}/freminal.stdout.log"

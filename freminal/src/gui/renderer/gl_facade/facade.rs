@@ -95,7 +95,7 @@ impl<'a> Gl<'a> {
     /// has no [`RecordingState`] to construct.
     #[cfg(feature = "gl-recording")]
     #[must_use]
-    pub const fn recording() -> Self {
+    pub fn recording() -> Self {
         Self {
             inner: GlTarget::Recording(RecordingState::new()),
         }
@@ -328,6 +328,26 @@ impl Gl<'_> {
         }
     }
 
+    /// Task 125.8: creates a query object (`glGenQueries` via glow's
+    /// `create_query`), used for asynchronous GPU timestamp queries
+    /// (`glow::TIMESTAMP`). Fabricates a deterministic handle under
+    /// `gl-recording`, in the same per-type monotonic-counter style as the
+    /// other six `create_*` methods above.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn create_query(&self) -> Result<glow::Query, String> {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.create_query() },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => {
+                state.record(GlCall {
+                    method: "create_query",
+                    payload: GlCallPayload::None,
+                });
+                Ok(state.next_query())
+            }
+        }
+    }
+
     pub(crate) unsafe fn create_shader(&self, shader_type: u32) -> Result<glow::Shader, String> {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.create_shader(shader_type) },
@@ -398,6 +418,22 @@ impl Gl<'_> {
             #[cfg(feature = "gl-recording")]
             GlTarget::Recording(state) => state.record(GlCall {
                 method: "delete_program",
+                payload: GlCallPayload::None,
+            }),
+        }
+    }
+
+    /// Task 125.8: destroys a query object (`glDeleteQueries`). Called
+    /// exactly once for every handle a [`freminal_windowing::gpu_profiling::GpuQueryRing`]
+    /// ever accepted, once its result has been read or the ring is torn
+    /// down -- see that type's `GpuQuerySource::destroy_query` contract.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn delete_query(&self, query: glow::Query) {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.delete_query(query) },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => state.record(GlCall {
+                method: "delete_query",
                 payload: GlCallPayload::None,
             }),
         }
@@ -532,6 +568,45 @@ impl Gl<'_> {
         }
     }
 
+    /// Task 125.8: reads a string-valued GL parameter
+    /// (`glGetString`/`glGetStringi` via glow's `get_parameter_string`).
+    /// Used to read `glow::VERSION` and `glow::RENDERER` for GPU timer
+    /// capability detection and reporting -- see
+    /// `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`.
+    ///
+    /// For `glow::VERSION`, the `gl-recording` arm reports exactly
+    /// [`super::recording::RecordingState::gl_version_string`] -- empty by
+    /// default, which fails to parse and so resolves
+    /// [`freminal_windowing::gpu_profiling::GpuTimerCapability::Unavailable`],
+    /// **deliberately**: the many other recording-driven test suites in
+    /// this crate that never call
+    /// [`super::recording::RecordingState::set_gl_version_string`] must see
+    /// zero query-related GL calls from capability detection, so their
+    /// existing call counts are unaffected by this feature's addition. A
+    /// test that wants `Available` capability calls
+    /// `set_gl_version_string` explicitly first. For every other
+    /// parameter (in practice, only `glow::RENDERER`), the `gl-recording`
+    /// arm reports a fixed placeholder -- its value is never parsed, only
+    /// logged.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn get_parameter_string(&self, parameter: u32) -> String {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.get_parameter_string(parameter) },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => {
+                state.record(GlCall {
+                    method: "get_parameter_string",
+                    payload: GlCallPayload::None,
+                });
+                if parameter == glow::VERSION {
+                    state.gl_version_string()
+                } else {
+                    "Recording".to_owned()
+                }
+            }
+        }
+    }
+
     pub(crate) unsafe fn get_program_info_log(&self, program: glow::Program) -> String {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.get_program_info_log(program) },
@@ -560,6 +635,58 @@ impl Gl<'_> {
                 // A plausible success value so a headless driver run does
                 // not take an error path.
                 true
+            }
+        }
+    }
+
+    /// Task 125.8: non-blocking availability check
+    /// (`glGetQueryObjectuiv(query, GL_QUERY_RESULT_AVAILABLE)`). Callers
+    /// must never treat this as an invitation to read a result before it
+    /// returns non-zero -- see
+    /// `freminal_windowing::gpu_profiling::GpuQuerySource::is_result_available`'s
+    /// contract. The `gl-recording` arm reports a query available exactly
+    /// when the test-only [`super::recording::RecordingState::mark_query_available`]
+    /// has been called for it, and unavailable (never a plausible-success
+    /// default) otherwise -- unlike the shader/program query methods
+    /// above, a fabricated "always available" answer here would make the
+    /// no-premature-read invariant untestable.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn get_query_parameter_u32(&self, query: glow::Query, parameter: u32) -> u32 {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.get_query_parameter_u32(query, parameter) },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => {
+                state.record(GlCall {
+                    method: "get_query_parameter_u32",
+                    payload: GlCallPayload::None,
+                });
+                u32::from(state.query_is_available(query))
+            }
+        }
+    }
+
+    /// Task 125.8: reads a 64-bit query result
+    /// (`glGetQueryObjectui64v(query, GL_QUERY_RESULT)`). Callers must only
+    /// call this after [`Self::get_query_parameter_u32`] with
+    /// `GL_QUERY_RESULT_AVAILABLE` has returned non-zero for the same
+    /// query. The `gl-recording` arm returns the exact nanosecond value
+    /// [`super::recording::RecordingState::mark_query_available`] recorded
+    /// for `query`, or `0` if it was never marked (a safe, non-panicking
+    /// fallback per the crate's panic-free-production rule -- the
+    /// no-premature-read invariant is enforced by
+    /// `freminal_windowing::gpu_profiling::GpuQueryRing`, not by this
+    /// facade method).
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn get_query_parameter_u64(&self, query: glow::Query, parameter: u32) -> u64 {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.get_query_parameter_u64(query, parameter) },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => {
+                state.record(GlCall {
+                    method: "get_query_parameter_u64",
+                    payload: GlCallPayload::None,
+                });
+                state.query_result_ns(query)
             }
         }
     }
@@ -636,6 +763,24 @@ impl Gl<'_> {
         }
     }
 
+    /// Task 125.8: issues a GPU timestamp
+    /// (`glQueryCounter(query, GL_TIMESTAMP)`). Callers use this -- never
+    /// `begin_query`/`end_query` with `GL_TIME_ELAPSED` -- so that
+    /// upload/draw boundaries can be marked with independent, non-nested
+    /// timestamp pairs rather than a single elapsed-query span that cannot
+    /// represent two adjacent, non-overlapping phases at once.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn query_counter(&self, query: glow::Query, target: u32) {
+        match &self.inner {
+            GlTarget::Real(gl) => unsafe { gl.query_counter(query, target) },
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => state.record(GlCall {
+                method: "query_counter",
+                payload: GlCallPayload::None,
+            }),
+        }
+    }
+
     pub(crate) unsafe fn scissor(&self, x: i32, y: i32, width: i32, height: i32) {
         match &self.inner {
             GlTarget::Real(gl) => unsafe { gl.scissor(x, y, width, height) },
@@ -655,6 +800,39 @@ impl Gl<'_> {
                 method: "shader_source",
                 payload: GlCallPayload::None,
             }),
+        }
+    }
+
+    /// Task 125.8: reads the context's supported-extension set
+    /// (`glow::HasContext::supported_extensions`, itself parsed once by
+    /// `glow` at context creation from `GL_EXTENSIONS`/`glGetStringi`). Used
+    /// alongside [`Self::get_parameter_string`] (with `glow::VERSION`) for GPU
+    /// timer capability detection (`GL_ARB_timer_query` on a pre-3.3
+    /// desktop context) -- see
+    /// `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`.
+    ///
+    /// Unlike every other facade method, `glow::HasContext::supported_extensions`
+    /// is not `unsafe` and returns a borrowed `&HashSet<String>` tied to the
+    /// context's own lifetime. This method returns an **owned** clone
+    /// instead: capability detection runs once per renderer lifetime (not
+    /// once per frame), so the clone's cost is immaterial, and an owned
+    /// return sidesteps threading the `Real`/`Recording` split through a
+    /// borrow whose lifetime the `Recording` arm has no backing context to
+    /// provide. Kept `unsafe fn` regardless, for the same call-site
+    /// consistency reason [`Self::get_parameter_string`] is -- see this
+    /// module's doc.
+    #[cfg(any(feature = "gl-recording", feature = "gpu-profiling"))]
+    pub(crate) unsafe fn supported_extensions(&self) -> std::collections::HashSet<String> {
+        match &self.inner {
+            GlTarget::Real(gl) => gl.supported_extensions().clone(),
+            #[cfg(feature = "gl-recording")]
+            GlTarget::Recording(state) => {
+                state.record(GlCall {
+                    method: "supported_extensions",
+                    payload: GlCallPayload::None,
+                });
+                std::collections::HashSet::new()
+            }
         }
     }
 
@@ -912,7 +1090,7 @@ mod tests {
     /// observable consequence of that layout guarantee, and this test pins
     /// both.
     ///
-    /// The same single-variant fact makes every one of the 49 methods'
+    /// The same single-variant fact makes every one of the 56 methods'
     /// `match &self.inner { .. }` *irrefutable*: with one variant there is
     /// nothing to discriminate. A single-arm match over a single-variant
     /// enum has no condition to test, so there is no branch for the

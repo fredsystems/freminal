@@ -67,6 +67,10 @@ use super::super::renderer::profiling::{
     LiveRenderProfile, PaneFrameToken, RawRebuildDecision, ReevaluatedRebuild, UploadByteCounts,
     resolve_render_work_class,
 };
+// Task 125.8: asynchronous terminal GPU upload/draw timing is entirely
+// absent from a default build -- see `gui::renderer::gpu_profiling`'s doc.
+#[cfg(feature = "gpu-profiling")]
+use super::super::renderer::gpu_profiling::LOG_TARGET as GPU_TIMING_LOG_TARGET;
 use std::time::Duration;
 use tracing::error;
 
@@ -4138,6 +4142,31 @@ impl FreminalTerminalWidget {
                     // signal), so calling it from both sites cannot
                     // produce a duplicate log line.
                     maybe_log_live_render_profile_flush(&mut rs.live_profile, pane_id);
+                }
+
+                // Task 125.8: log this pane's asynchronous GPU upload/draw
+                // timing flush, if one is due. Independent of
+                // `frame-profiling`/`profiling_token` -- GPU timing samples
+                // are issued and polled unconditionally by the draw call
+                // above whenever `gpu-profiling` is enabled, regardless of
+                // whether this frame also carried a live-render-work
+                // observation.
+                #[cfg(feature = "gpu-profiling")]
+                if let Some(report) = rs.renderer.take_gpu_timing_flush() {
+                    tracing::debug!(
+                        target: GPU_TIMING_LOG_TARGET,
+                        pane_id = ?pane_id,
+                        renderer = %report.renderer_string,
+                        capability = ?report.capability,
+                        upload_ns_total = report.upload_ns_total,
+                        upload_sample_count = report.upload_sample_count,
+                        draw_ns_total = report.draw_ns_total,
+                        draw_sample_count = report.draw_sample_count,
+                        last_latency_frames = report.last_latency_frames,
+                        dropped_sample_count = report.dropped_sample_count,
+                        unavailable_sample_count = report.unavailable_sample_count,
+                        "Task 125.8 terminal GPU timing flush"
+                    );
                 }
             })),
         });

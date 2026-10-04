@@ -1,8 +1,9 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: PLANNED — measurement phase activated 2026-08-26.** The
-> measurement phase is decomposed below against the post-Task-124 codebase.
-> No remediation is selected or decomposed yet. Fixed-stride relayout remains
+> **STATUS: IN PROGRESS — measurement phase activated 2026-08-26;
+> 125.1–125.8 complete, 125.9–125.10 remain.** The measurement phase is
+> decomposed below against the post-Task-124 codebase. No remediation is
+> selected or decomposed yet. Fixed-stride relayout remains
 > one conditional branch, not the task goal, and cannot affect cursor-only
 > idle frames.
 >
@@ -471,6 +472,64 @@ live-render summaries in each Freminal sample's external raw directory without
 enabling Rust logging for either peer terminal. `profile-smoke` uses the
 existing sustained-output fixture and validates renderer and summary identity.
 
+### 125.C2 — TerminalRenderer GL resources are never destroyed
+
+Scope: `freminal/src/gui/renderer/gpu.rs` (`TerminalRenderer::destroy`) and
+wherever a pane's `RenderState` is dropped across the GUI binary; the exact
+fix scope is not yet determined and must be investigated, not assumed.
+
+Surface point: found during the 125.8 review, pre-existing and predating
+Task 125.
+
+What: `TerminalRenderer::destroy` has no production caller -- a repo-wide
+search finds no `.destroy(` call reaching it; the only production
+`.destroy()` call in the GL-facing code is `egui_integration.rs`'s own
+painter teardown. Closing a pane, tab, or window therefore never deletes
+that pane's programs, VAOs, VBOs, atlas/image textures, or (under
+`gpu-profiling`) pending GPU timer queries; every one of those GL objects is
+reclaimed only when the whole GL context tears down. `toast_pass` and
+`toast_text_pass` may share the same gap and must be checked, not assumed
+clear.
+
+Impact: a GL object leak proportional to the number of panes opened over a
+session. It also makes 125.8's `PaneGpuTimingProfile::shutdown` path
+unreachable in a live run -- the cleanup it performs (destroying pending
+query handles before GL teardown) currently only runs in this module's own
+tests, never in production.
+
+Scope of fix: wherever a pane's `RenderState` is dropped needs a
+GL-context-current destroy path scheduled for it. `Drop` itself has no GL
+context available, so this likely needs a deferred-destroy queue drained
+from inside a paint callback rather than a direct call from `Drop`. Whether
+an existing teardown pattern can be reused is unverified.
+
+Scheduling: not part of the Task 125 measurement phase; must not block
+125.9 or 125.10. Status: open, not complete.
+
+### 125.C3 — Capture the 125.8 GPU timing log target
+
+Scope: `assets/profiling/task125/run-matrix.sh` and
+`Documents/PROFILING.md`.
+
+Surface point: found during 125.8 smoke preparation, following the same
+class of gap 125.C1 fixed for the task 125.5/125.6 summary.
+
+What: the runner's `TASK125_FREMINAL_RUST_LOG` filter starts from `none`
+and allowlists only specific targets; it omitted
+`freminal::task_125::gpu_timing`, so the task 125.8 GPU timing flush this
+subtask's log line is emitted under could never reach `freminal.stdout.log`
+even with `gpu-profiling` enabled. `profile-smoke` also did not assert the
+flush's presence, so the gap was silent. Fixed by adding
+`freminal::task_125::gpu_timing=debug` to the filter, adding a third
+`profile-smoke` assertion for the literal text `Task 125.8 terminal GPU
+timing flush`, and noting in both the preflight failure message and
+`profile-smoke`'s own pre-run notice that `FREMINAL_BIN` must be built with
+`--features frame-profiling,gpu-profiling` for these checks to pass.
+
+**Complete.** The 125.8 real-AMD `profile-smoke` run on 2026-10-04 validated
+all three assertions (renderer identity, 125.5/125.6 summary, 125.8 GPU
+timing flush).
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
@@ -706,6 +765,33 @@ Prohibitions: do not alter production call order or payloads; do not nest
 not weaken the raw-GL guard to hide new renderer calls.
 
 Stop: report query latency/drop counts and real-GPU smoke timing; await review.
+
+**Complete.** The GL facade grew from 49 to 56 methods (query create/delete,
+`query_counter` with `GL_TIMESTAMP`, availability and 64-bit result reads,
+and `GL_VERSION`/extension capability probes), with recording-arm support
+and tests, and `PLAN_123` updated to the 56-entry surface.
+`PaneGpuTimingProfile` (`freminal/src/gui/renderer/gpu_profiling.rs`) adapts
+125.7's ring per pane: timestamp pairs bracket the upload commands and the
+draw commands in both `draw_with_verts` and `draw_with_cursor_only_update`,
+with the upload-end and draw-start timestamps issued back to back at the
+boundary; no `TIME_ELAPSED`, no same-frame or blocking read. Capability is
+detected once per GL-resource lifetime in `TerminalRenderer::init`; under
+`gpu-profiling` that adds one `GL_VERSION` read, so
+`headless_workloads::init_dominates_a_single_frame` pins 262 calls with the
+feature and 261 without. Interpretation recorded: "aggregate all panes" is
+met by profiling every pane uniformly under one log target with `pane_id`
+attached, aggregated post hoc, because 125.7's phase type cannot carry a
+pane id. Query latency is counted in that pane's own drawn frames, not
+window frames, and must not be compared across panes. Smokes on 2026-10-04
+(both release builds with `frame-profiling,gpu-profiling`): real AMD
+(Radeon RX 7900 XTX, radeonsi) via `run-matrix.sh profile-smoke`: 12
+flushes, 720 upload and 720 draw samples, `last_latency_frames=1`
+throughout, zero dropped samples, alongside a 125.5/125.6 summary; llvmpipe
+(LLVM 21.1.8) under the `gl-pixel` shell, with the runner's isolated config
+and seeded onboarding state: capability `Available`, 15 flushes, latency 1,
+zero drops — a correctness check only, no performance claim. `TerminalRenderer::destroy` (and therefore the profile's `shutdown`)
+has no production caller; recorded as 125.C2. The runner log-target gap is
+125.C3.
 
 ### 125.9 — Chrome and total-frame GPU timing
 

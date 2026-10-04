@@ -39,6 +39,11 @@ use freminal_terminal_emulator::InlineImage;
 #[cfg(feature = "frame-profiling")]
 use super::profiling::UploadByteCounts;
 
+// Task 125.8: the per-pane asynchronous GPU timing adapter, feature-gated
+// the same way `gui::renderer::gpu_profiling` itself is.
+#[cfg(feature = "gpu-profiling")]
+use super::gpu_profiling::{GpuTimingReport, PaneGpuTimingProfile};
+
 /// The per-callback upload-byte measurement [`TerminalRenderer::draw_with_verts`]
 /// and [`TerminalRenderer::draw_with_cursor_only_update`] return (Task
 /// 125.6).
@@ -240,6 +245,17 @@ pub struct TerminalRenderer {
     /// capacity against a fresh buffer would skip an orphan the new,
     /// zero-sized storage genuinely needs.
     deco_vbo_allocated_bytes: [usize; 2],
+
+    /// Task 125.8: this pane's asynchronous GPU upload/draw timing
+    /// adapter. Capability is detected once per GL-resource lifetime, in
+    /// [`Self::init`] (which runs lazily inside the first paint callback,
+    /// so the context is current); the ring is drained and every pending
+    /// handle destroyed once, in [`Self::destroy`]. Entirely inert (no GL
+    /// call issued) unless capability detection resolves
+    /// `freminal_windowing::gpu_profiling::GpuTimerCapability::Available` --
+    /// see [`PaneGpuTimingProfile`]'s doc.
+    #[cfg(feature = "gpu-profiling")]
+    gpu_profile: PaneGpuTimingProfile,
 }
 
 impl Default for TerminalRenderer {
@@ -297,6 +313,8 @@ impl TerminalRenderer {
             vbo_index: 0,
             deco_vbo_index: 0,
             deco_vbo_allocated_bytes: [0, 0],
+            #[cfg(feature = "gpu-profiling")]
+            gpu_profile: PaneGpuTimingProfile::new(),
         }
     }
 
@@ -322,6 +340,12 @@ impl TerminalRenderer {
         self.init_atlas_texture(gl)?;
         self.init_image_pass(gl)?;
         self.init_bg_image_pass(gl)?;
+
+        // Task 125.8: detect GPU timer capability once, from the real
+        // context this pane will draw through for the rest of its
+        // lifetime.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.detect_capability(gl);
 
         self.initialized = true;
         Ok(())
@@ -612,6 +636,15 @@ impl TerminalRenderer {
             return;
         }
 
+        // Task 125.8: poll last frame's GPU timing samples and issue this
+        // frame's upload-phase start timestamp, strictly before the first
+        // upload GL command below -- see `PaneGpuTimingProfile`'s doc for
+        // the mandated call sequence.
+        #[cfg(feature = "gpu-profiling")]
+        let gpu_timing_frame = self.gpu_profile.begin_frame(gl);
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.begin_upload(gl);
+
         // 1. Sync atlas texture to the GPU.
         //
         // Task 125.6: `sync_atlas` reports exactly the bytes its own
@@ -661,6 +694,14 @@ impl TerminalRenderer {
         #[cfg(not(feature = "frame-profiling"))]
         self.upload_img_verts(gl, image_verts, buf_idx);
 
+        // Task 125.8: the upload phase ends here -- every upload GL command
+        // above has been issued and no draw GL command has been issued yet.
+        // Issues the upload phase's end timestamp and the draw phase's
+        // start timestamp back to back, so "upload excludes draw" and "draw
+        // begins after uploads" hold by construction.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_upload_begin_draw(gl, gpu_timing_frame);
+
         // 3. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
         let vp_h = gl_f32_i32(viewport_height);
@@ -682,6 +723,13 @@ impl TerminalRenderer {
         self.draw_decorations(gl, deco_verts.len(), vp_w, vp_h, deco_buf_idx);
         self.draw_foreground(gl, fg_instances.len(), vp_w, vp_h, buf_idx);
         self.draw_images(gl, image_verts.len(), image_draw_order, vp_w, vp_h, buf_idx);
+
+        // Task 125.8: the draw phase ends here -- every terminal draw GL
+        // command above has been issued. The framebuffer-restore bind
+        // below is bookkeeping, not a terminal draw command, so it is
+        // deliberately excluded from the timed span.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_draw(gl, gpu_timing_frame);
 
         // 4. Restore egui's framebuffer binding.
         unsafe {
@@ -766,6 +814,14 @@ impl TerminalRenderer {
             return;
         }
 
+        // Task 125.8: see `draw_with_verts` for the mandated call sequence
+        // and why this call ordering makes the upload/draw phase boundary
+        // hold by construction.
+        #[cfg(feature = "gpu-profiling")]
+        let gpu_timing_frame = self.gpu_profile.begin_frame(gl);
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.begin_upload(gl);
+
         // 1. Sync atlas (may have new glyphs from a previous frame).
         #[cfg(feature = "frame-profiling")]
         let (atlas_full_bytes, atlas_subrect_bytes) = self.sync_atlas(gl, atlas);
@@ -790,6 +846,10 @@ impl TerminalRenderer {
         let deco_bytes = self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
         #[cfg(not(feature = "frame-profiling"))]
         self.upload_deco_verts(gl, deco_verts, deco_buf_idx);
+
+        // Task 125.8: upload phase ends here -- see `draw_with_verts`.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_upload_begin_draw(gl, gpu_timing_frame);
 
         // 2. Draw in order: bg image → cell backgrounds → decorations → foreground → images.
         let vp_w = gl_f32_i32(viewport_width);
@@ -816,6 +876,10 @@ impl TerminalRenderer {
             vp_h,
             buf_idx,
         );
+
+        // Task 125.8: draw phase ends here -- see `draw_with_verts`.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.end_draw(gl, gpu_timing_frame);
 
         // 3. Restore egui's framebuffer binding.
         unsafe {
@@ -1603,7 +1667,31 @@ impl TerminalRenderer {
             }
         }
 
+        // Task 125.8: destroy every still-pending GPU timing query handle
+        // (including a half-issued in-flight pair) before this pane's GL
+        // resources are torn down.
+        #[cfg(feature = "gpu-profiling")]
+        self.gpu_profile.shutdown(gl);
+
         self.initialized = false;
+    }
+
+    /// Take this pane's GPU timing flush report, if one is due (Task
+    /// 125.8).
+    ///
+    /// Callers (`gui::terminal::widget`) call this right after invoking
+    /// [`Self::draw_with_verts`] or [`Self::draw_with_cursor_only_update`],
+    /// exactly mirroring how `LiveRenderProfile::take_flush_signal` is
+    /// consumed right after that draw call finishes. `None` means no flush
+    /// is due this call (the common case); `Some` hands back a snapshot
+    /// the caller logs with its own pane id, since `TerminalRenderer` has
+    /// no pane id of its own to attach.
+    #[cfg(feature = "gpu-profiling")]
+    #[must_use]
+    pub fn take_gpu_timing_flush(&mut self) -> Option<GpuTimingReport> {
+        self.gpu_profile
+            .take_flush_signal()
+            .then(|| self.gpu_profile.report())
     }
 }
 

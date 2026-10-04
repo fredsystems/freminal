@@ -51,7 +51,7 @@ hot, so it ships together):
   pointer suppression, the chrome-cache decision, the shaping levers, GPU orphaning, the
   bool-to-struct fix and the `sync_atlas` defect — are independent leaves. Broken down in
   `Documents/PLAN_124_RENDER_EFFICIENCY.md`.
-- **Task 125 — Performance Parity and Residual Remediation** (measurement phase planned):
+- **Task 125 — Performance Parity and Residual Remediation** (measurement phase in progress):
   explain and close Freminal's remaining CPU/GPU gap against matched
   WezTerm and Ghostty workloads. The former fixed-stride relayout is one conditional branch,
   not the governing goal: it cannot improve idle, and Task 124 did not capture the live
@@ -87,16 +87,16 @@ before executing.
 
 ## Task Summary
 
-| #   | Feature                                      | Scope  | Status   | Depends On     |
-| --- | -------------------------------------------- | ------ | -------- | -------------- |
-| 118 | Compact Cell Representation                  | Medium | Complete | None           |
-| 119 | Scrollback Compression (LZ4)                 | Large  | Complete | Task 118       |
-| 120 | Compression-Aware Windowed Reflow            | Large  | Stub     | Tasks 118, 119 |
-| 121 | Performance Remediation                      | Large  | Complete | None           |
-| 122 | Orchestration Extraction                     | Large  | Complete | None           |
-| 123 | GL Pipeline Measurement Harness              | Large  | Complete | Task 122       |
-| 124 | Damage Model Remediation                     | Large  | Complete | Task 123       |
-| 125 | Performance Parity and Residual Remediation  | Large  | Planned  | Task 124       |
+| #   | Feature                                     | Scope  | Status      | Depends On     |
+| --- | ------------------------------------------- | ------ | ----------- | -------------- |
+| 118 | Compact Cell Representation                 | Medium | Complete    | None           |
+| 119 | Scrollback Compression (LZ4)                | Large  | Complete    | Task 118       |
+| 120 | Compression-Aware Windowed Reflow           | Large  | Stub        | Tasks 118, 119 |
+| 121 | Performance Remediation                     | Large  | Complete    | None           |
+| 122 | Orchestration Extraction                    | Large  | Complete    | None           |
+| 123 | GL Pipeline Measurement Harness             | Large  | Complete    | Task 122       |
+| 124 | Damage Model Remediation                    | Large  | Complete    | Task 123       |
+| 125 | Performance Parity and Residual Remediation | Large  | In progress | Task 124       |
 
 ---
 

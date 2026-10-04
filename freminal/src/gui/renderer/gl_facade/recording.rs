@@ -15,6 +15,7 @@
 //! Task 123, `PLAN_123_GL_MEASUREMENT_HARNESS.md`, subtask 123.2.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 use conv2::ConvUtil;
@@ -26,7 +27,7 @@ use super::surface::{DRAW_CALL_METHODS, STATE_CHANGE_METHODS, UPLOAD_METHODS};
 /// The plan permits either one enum variant per method or a single record
 /// type plus an opcode, and forbids fields 123.8's assertions do not need.
 /// 123.8 needs draw-call count, state-change count, upload count **and
-/// byte volume**; this payload carries exactly that without 49 variants of
+/// byte volume**; this payload carries exactly that without 56 variants of
 /// mostly-unused arguments. It also avoids sentinel-zero fields on
 /// non-upload, non-draw calls — per the `state-representation` skill, a
 /// variant that is simply absent beats a `bytes: 0` / `vertices: 0` field
@@ -34,7 +35,7 @@ use super::surface::{DRAW_CALL_METHODS, STATE_CHANGE_METHODS, UPLOAD_METHODS};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlCallPayload {
     /// Neither an upload nor a draw — the overwhelming majority of the
-    /// 49-method surface (binds, enables, shader/program lifecycle,
+    /// 56-method surface (binds, enables, shader/program lifecycle,
     /// uniforms, queries).
     None,
     /// An upload; `bytes` is the payload size actually handed to the
@@ -88,6 +89,30 @@ pub struct RecordingState {
     next_texture: Cell<u32>,
     next_framebuffer: Cell<u32>,
     next_uniform_location: Cell<u32>,
+    /// Task 125.8: monotonic counter fabricating `glow::Query` handles for
+    /// `create_query`, the same per-type-counter style as the six handle
+    /// types above.
+    next_query: Cell<u32>,
+    /// Task 125.8: which fabricated query handles a test (or the
+    /// `gpu_profiling` adapter's own test suite) has declared "available",
+    /// and the nanosecond value each should report -- see
+    /// [`Self::mark_query_available`]. Absent from this map means "not yet
+    /// available", the correct default for a query that was just issued.
+    query_results: RefCell<HashMap<glow::Query, u64>>,
+    /// Task 125.8: the string [`super::facade::Gl::get_parameter_string`]'s
+    /// `Recording` arm reports for `glow::VERSION`. Defaults to empty,
+    /// which `freminal_windowing::gpu_profiling::parse_gl_version_string`
+    /// cannot parse, so
+    /// `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
+    /// conservatively resolves `Unavailable` on a fresh recording session
+    /// by default -- **deliberately**, so the many other recording-driven
+    /// test suites in this crate (Task 123's headless call-count workload
+    /// assertions among them) that never call
+    /// [`Self::set_gl_version_string`] see zero query-related GL calls and
+    /// their existing, hand-derived call counts stay exactly as they were
+    /// before Task 125.8. Only a test that explicitly opts in via
+    /// [`Self::set_gl_version_string`] observes `Available` capability.
+    gl_version_string: RefCell<String>,
 }
 
 impl Default for RecordingState {
@@ -103,7 +128,7 @@ impl RecordingState {
     /// purely for consistency, since `NativeUniformLocation` wraps a plain
     /// `u32` with no non-zero requirement.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
             next_buffer: Cell::new(1),
@@ -113,6 +138,9 @@ impl RecordingState {
             next_texture: Cell::new(1),
             next_framebuffer: Cell::new(1),
             next_uniform_location: Cell::new(1),
+            next_query: Cell::new(1),
+            query_results: RefCell::new(HashMap::new()),
+            gl_version_string: RefCell::new(String::new()),
         }
     }
 
@@ -269,6 +297,73 @@ impl RecordingState {
         let current = self.next_uniform_location.get();
         self.next_uniform_location.set(current.wrapping_add(1));
         glow::NativeUniformLocation(current)
+    }
+
+    /// Fabricate the next `glow::Query` (Task 125.8).
+    pub(super) fn next_query(&self) -> glow::Query {
+        glow::NativeQuery(Self::bump(&self.next_query))
+    }
+
+    /// Override the string [`super::facade::Gl::get_parameter_string`]'s
+    /// `Recording` arm reports for `glow::VERSION` (Task 125.8). Test/
+    /// adapter-support API, mirroring [`Self::mark_query_available`]: a
+    /// test that wants `gui::renderer::gpu_profiling::PaneGpuTimingProfile::detect_capability`
+    /// to resolve `Available` against a recording session calls this with
+    /// a parseable desktop version string (e.g. `"4.6.0 Recording"`)
+    /// before calling `detect_capability`. See [`Self::gl_version_string`]'s
+    /// doc on the field for why the default is deliberately empty
+    /// (unparsable) instead.
+    pub fn set_gl_version_string(&self, version: impl Into<String>) {
+        *self.gl_version_string.borrow_mut() = version.into();
+    }
+
+    /// The current fabricated `GL_VERSION` string (Task 125.8) -- empty
+    /// until [`Self::set_gl_version_string`] is called. Backs the
+    /// `Recording` arm of `Gl::get_parameter_string(glow::VERSION)`.
+    pub(super) fn gl_version_string(&self) -> String {
+        self.gl_version_string.borrow().clone()
+    }
+
+    /// Declare `query`'s result available, with the given nanosecond value
+    /// (Task 125.8). Purely a test/adapter-support API: production code
+    /// never calls this (a real driver decides availability on its own
+    /// schedule); it exists so a deterministic test -- or the
+    /// `gpu_profiling` adapter's own test suite -- can simulate a query's
+    /// result becoming ready on a specific later poll, exactly the
+    /// "delayed availability" scenario
+    /// `freminal_windowing::gpu_profiling::GpuQueryRing` is built to
+    /// handle. Before this is called for a given `query`, both
+    /// [`super::facade::Gl::get_query_parameter_u32`] (with
+    /// `GL_QUERY_RESULT_AVAILABLE`, via the `Recording` arm) reports
+    /// unavailable (`0`) and
+    /// [`super::facade::Gl::get_query_parameter_u64`] reports `0` for it.
+    pub fn mark_query_available(&self, query: glow::Query, result_ns: u64) {
+        self.query_results.borrow_mut().insert(query, result_ns);
+    }
+
+    /// Whether `query` has been marked available via
+    /// [`Self::mark_query_available`] (Task 125.8). Backs the `Recording`
+    /// arm of `Gl::get_query_parameter_u32(query, GL_QUERY_RESULT_AVAILABLE)`.
+    pub(super) fn query_is_available(&self, query: glow::Query) -> bool {
+        self.query_results.borrow().contains_key(&query)
+    }
+
+    /// The nanosecond value marked for `query` via
+    /// [`Self::mark_query_available`], or `0` if it was never marked (Task
+    /// 125.8). Backs the `Recording` arm of
+    /// `Gl::get_query_parameter_u64(query, GL_QUERY_RESULT)`. The
+    /// no-premature-read invariant is enforced by
+    /// `freminal_windowing::gpu_profiling::GpuQueryRing` (never reads a
+    /// result before availability succeeds), not by this method -- a
+    /// non-panicking `0` fallback keeps this recording-support code itself
+    /// free of `unwrap`/`expect`/`panic!`, per the crate's panic-free
+    /// production rule.
+    pub(super) fn query_result_ns(&self, query: glow::Query) -> u64 {
+        self.query_results
+            .borrow()
+            .get(&query)
+            .copied()
+            .unwrap_or(0)
     }
 }
 

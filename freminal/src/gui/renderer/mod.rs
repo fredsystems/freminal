@@ -31,10 +31,18 @@
 //!   [`profiling::LiveRenderProfile`]'s pane-frame-token state machine.
 //!   Not yet wired to any renderer/widget call site — see that module's
 //!   docs.
+//! - `gpu_profiling` (feature `gpu-profiling`, Task 125.8) — the per-pane
+//!   asynchronous GPU timestamp-query adapter,
+//!   [`gpu_profiling::PaneGpuTimingProfile`], built over 125.7's
+//!   `freminal_windowing::gpu_profiling::GpuQueryRing`. Wired into
+//!   [`gpu::TerminalRenderer`]'s init/draw/destroy lifecycle; see that
+//!   module's docs for the exact upload/draw timestamp boundaries.
 
 pub mod errors;
 pub mod gl_facade;
 pub mod gpu;
+#[cfg(feature = "gpu-profiling")]
+pub mod gpu_profiling;
 #[cfg(feature = "gl-recording")]
 pub mod headless;
 #[cfg(all(test, feature = "gl-recording"))]
