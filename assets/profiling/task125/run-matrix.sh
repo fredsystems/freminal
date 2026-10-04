@@ -202,11 +202,16 @@ capture_collectors() {
 	wait "${context_pid}"
 	wait "${wake_pid}"
 	task125_tree_tids "${root}" >"${run_dir}/tids-after"
-	if ! cmp -s "${run_dir}/tids-before" "${run_dir}/tids-after"; then
-		printf 'terminal GUI thread set changed during capture; sample is invalid\n' >&2
+	# Threads that exit mid-capture were in the wakeup filter from the start,
+	# and their CPU time folds into the process, so exits are recorded but do
+	# not invalidate the sample. A new TID would be missing from the filter.
+	if [[ -n $(comm -13 <(sort "${run_dir}/tids-before") <(sort "${run_dir}/tids-after")) ]]; then
+		printf 'terminal GUI thread created during capture; sample is invalid\n' >&2
 		printf 'invalid-thread-set\n' >"${run_dir}/collector-stage"
 		return 1
 	fi
+	comm -23 <(sort "${run_dir}/tids-before") <(sort "${run_dir}/tids-after") | wc -l \
+		>"${run_dir}/exited-tids"
 	cpu_after=$(task125_tree_cpu_ticks "${root}")
 	gpu_after=$(task125_drm_gfx_ns "${root}")
 	printf '%s\n' "$((gpu_after - gpu_before))" >"${run_dir}/gpu-gfx-ns"

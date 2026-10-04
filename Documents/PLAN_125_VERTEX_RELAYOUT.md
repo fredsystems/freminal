@@ -576,6 +576,21 @@ flushes. Smoke indication only, not a finding: of 840 observations, all 317
 bucket, and 435 resolved `Full`, consistent with the all-rows-changed
 hypothesis. 125.10 decides it under the matched protocol.
 
+### 125.C5 — Allow thread exits during a capture
+
+Scope: `assets/profiling/task125/run-matrix.sh`.
+
+Surface point: the first 125.10 screen on 2026-10-04 aborted on Ghostty's first
+sample: 29 startup worker threads exited during capture and none were created,
+and the runner rejected any thread-set change.
+
+What: exited threads were in the wakeup filter from the start and their CPU
+time folds into the process, so exits no longer invalidate a sample; the exit
+count is written to `exited-tids`. A thread created during capture would be
+missing from the filter and remains a hard failure.
+
+**Complete.** ShellCheck clean; validated by the restarted screen.
+
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
 Scope: `freminal/benches/render_loop_bench.rs` and
