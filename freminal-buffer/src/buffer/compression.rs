@@ -17,8 +17,8 @@
 //! ## Single residency
 //!
 //! A row is always in exactly one of three states: `Live`, Task-118
-//! `Compact` (in `self.rows[i]`, `row_block_map[i] == None`), or compressed
-//! (`row_block_map[i] == Some(_)`, real content lives only in
+//! `Compact` (in `self.rows[i]`, `block_map()[i] == None`), or compressed
+//! (`block_map()[i] == Some(_)`, real content lives only in
 //! `self.blocks`). [`Buffer::ensure_decompressed`] restores a touched block
 //! back to `Compact` (not `Live` — preserving the Task-118 memory win) and
 //! removes it from `self.blocks`, so a block is never both compressed and
@@ -50,20 +50,8 @@ use super::{BlockId, BlockRowRef, Buffer};
 const BLOCK_SIZE: usize = 256;
 
 impl Buffer {
-    /// Pad `row_block_map` up to `self.rows.len()` with `None`, healing any
-    /// lag introduced by the handful of row-append call sites outside this
-    /// module (see the field doc on `Buffer::row_block_map`). A cheap no-op
-    /// once `row_block_map` has already caught up, which is the common case
-    /// — every append site this module (and `resize_and_alt.rs`/`scroll.rs`)
-    /// owns keeps it eagerly in lockstep.
-    pub(in crate::buffer) fn sync_row_block_map_len(&mut self) {
-        if self.row_block_map.len() < self.rows.len() {
-            self.row_block_map.resize(self.rows.len(), None);
-        }
-    }
-
     /// Drop every entry in `self.blocks` that is no longer referenced by any
-    /// entry in `self.row_block_map`.
+    /// entry in the row store's block map.
     ///
     /// A drain (`Buffer::enforce_scrollback_limit`'s front-of-buffer
     /// eviction, `Buffer::erase_scrollback`, `Buffer::scroll_up`) can remove
@@ -78,7 +66,8 @@ impl Buffer {
             return;
         }
         let referenced: HashSet<BlockId> = self
-            .row_block_map
+            .rows
+            .block_map()
             .iter()
             .filter_map(|entry| entry.map(BlockRowRef::block_id))
             .collect();
@@ -130,7 +119,6 @@ impl Buffer {
         if self.kind == BufferType::Alternate || budget == 0 {
             return 0;
         }
-        self.sync_row_block_map_len();
 
         let visible_start = self.visible_window_start(0);
         if visible_start == 0 {
@@ -187,7 +175,7 @@ impl Buffer {
         };
         row.is_compact()
             && !row.is_evicted()
-            && self.row_block_map.get(idx).copied().flatten().is_none()
+            && self.rows.block_map().get(idx).copied().flatten().is_none()
     }
 
     /// Compress rows `[start, start + count)` into a single new
@@ -210,8 +198,6 @@ impl Buffer {
         if count == 0 {
             return false;
         }
-        self.sync_row_block_map_len();
-
         let Some(end) = start.checked_add(count) else {
             return false;
         };
@@ -254,10 +240,8 @@ impl Buffer {
             // conversion.
             let offset_in_block = u32::value_from(i).unwrap_or(u32::MAX);
             self.rows[row_idx].evict_to_block();
-            self.row_block_map[row_idx] = Some(BlockRowRef::new(block_id, offset_in_block));
-            if row_idx < self.row_cache.len() {
-                self.row_cache[row_idx] = None;
-            }
+            self.rows.block_map_mut()[row_idx] = Some(BlockRowRef::new(block_id, offset_in_block));
+            self.rows.invalidate(row_idx);
         }
 
         self.blocks.insert(block_id, block);
@@ -268,7 +252,7 @@ impl Buffer {
 
     /// Ensure every row in `range` has real, readable content: decompress
     /// (once) every distinct compressed block referenced by
-    /// `self.row_block_map[range]`, restoring every row across the **whole
+    /// the row store's block map over `range`, restoring every row across the **whole
     /// buffer** that references it back to Task-118 `Compact` storage — not
     /// just the rows inside `range`.
     ///
@@ -290,13 +274,11 @@ impl Buffer {
     /// (called there over the *entire* buffer — deliberately unoptimized;
     /// Task 120 makes that fast, this subtask only needs it correct).
     pub(in crate::buffer) fn ensure_decompressed(&mut self, range: Range<usize>) {
-        self.sync_row_block_map_len();
-
-        let end = range.end.min(self.row_block_map.len());
+        let end = range.end.min(self.rows.block_map().len());
         let start = range.start.min(end);
 
         let mut block_ids: HashSet<BlockId> = HashSet::new();
-        for r in self.row_block_map[start..end].iter().flatten() {
+        for r in self.rows.block_map()[start..end].iter().flatten() {
             block_ids.insert(r.block_id());
         }
 
@@ -312,7 +294,7 @@ impl Buffer {
             match block.decompress_into(&mut self.decompress_scratch) {
                 Some(rows) => {
                     for i in 0..self.rows.len() {
-                        let Some(Some(r)) = self.row_block_map.get(i).copied() else {
+                        let Some(Some(r)) = self.rows.block_map().get(i).copied() else {
                             continue;
                         };
                         if r.block_id() != block_id {
@@ -323,13 +305,13 @@ impl Buffer {
                             self.rows[i].restore_from_compact(compact);
                         } else {
                             // Corrupt/impossible: the offset baked into
-                            // `row_block_map` doesn't exist in the
+                            // the block map doesn't exist in the
                             // decompressed row list. Best-effort recovery
                             // (see `Row::abandon_eviction`) rather than a
                             // panic: leave the row blank but readable.
                             self.rows[i].abandon_eviction();
                         }
-                        self.row_block_map[i] = None;
+                        self.rows.block_map_mut()[i] = None;
                     }
                 }
                 None => {
@@ -341,14 +323,14 @@ impl Buffer {
                     // asserting/panicking forever on a row nothing can ever
                     // restore.
                     for i in 0..self.rows.len() {
-                        let Some(Some(r)) = self.row_block_map.get(i).copied() else {
+                        let Some(Some(r)) = self.rows.block_map().get(i).copied() else {
                             continue;
                         };
                         if r.block_id() != block_id {
                             continue;
                         }
                         self.rows[i].abandon_eviction();
-                        self.row_block_map[i] = None;
+                        self.rows.block_map_mut()[i] = None;
                     }
                 }
             }
@@ -378,7 +360,7 @@ impl Buffer {
         &self,
         row_idx: usize,
     ) -> std::borrow::Cow<'_, [Cell]> {
-        if let Some(Some(block_ref)) = self.row_block_map.get(row_idx).copied()
+        if let Some(Some(block_ref)) = self.rows.block_map().get(row_idx).copied()
             && let Some(block) = self.blocks.get(&block_ref.block_id())
         {
             let mut scratch = Vec::new();
@@ -503,8 +485,8 @@ mod tests {
         for i in 0..visible_start {
             assert!(buf.rows[i].is_evicted(), "row {i} should be evicted");
             assert!(
-                buf.row_block_map[i].is_some(),
-                "row_block_map[{i}] should reference the new block"
+                buf.rows.block_map()[i].is_some(),
+                "block_map()[{i}] should reference the new block"
             );
         }
         for i in visible_start..buf.rows.len() {
@@ -512,7 +494,7 @@ mod tests {
                 !buf.rows[i].is_evicted(),
                 "visible row {i} must be untouched"
             );
-            assert!(buf.row_block_map[i].is_none());
+            assert!(buf.rows.block_map()[i].is_none());
         }
     }
 
@@ -546,7 +528,7 @@ mod tests {
         assert!(buf.blocks.is_empty(), "block must be removed after a read");
         for i in 0..visible_start {
             assert!(!buf.rows[i].is_evicted());
-            assert!(buf.row_block_map[i].is_none());
+            assert!(buf.rows.block_map()[i].is_none());
         }
     }
 
@@ -566,7 +548,7 @@ mod tests {
         assert!(buf.blocks.is_empty());
         for i in 0..visible_start {
             assert!(!buf.rows[i].is_evicted());
-            assert!(buf.row_block_map[i].is_none());
+            assert!(buf.rows.block_map()[i].is_none());
             assert!(
                 buf.rows[i].is_compact(),
                 "row {i} should restore to Compact, not Live"
@@ -640,9 +622,9 @@ mod tests {
         assert!(compressed.rows.len() <= max_rows);
         assert_eq!(compressed.rows.len(), plain.rows.len());
         assert_eq!(
-            compressed.row_block_map.len(),
+            compressed.rows.block_map().len(),
             compressed.rows.len(),
-            "row_block_map must stay index-parallel to rows after a drain"
+            "block map must stay index-parallel to rows after a drain"
         );
 
         let (chars_c, tags_c, offsets_c, urls_c) = compressed.scrollback_as_tchars_and_tags(0);
@@ -674,7 +656,7 @@ mod tests {
                 assert!(buf.compress_scrollback_block(0, visible_start));
             }
             buf.set_size(8, 3, 0);
-            buf.rows.clone()
+            buf.rows.to_vec()
         }
 
         let compressed = build_and_reflow(true);
@@ -710,7 +692,10 @@ mod tests {
             buf.blocks.is_empty(),
             "alt screen must start with no blocks"
         );
-        assert_eq!(buf.row_block_map.iter().filter(|e| e.is_some()).count(), 0);
+        assert_eq!(
+            buf.rows.block_map().iter().filter(|e| e.is_some()).count(),
+            0
+        );
 
         let _ = buf.leave_alternate();
 
@@ -757,8 +742,8 @@ mod tests {
         buf.erase_scrollback();
 
         assert!(buf.blocks.is_empty());
-        assert_eq!(buf.row_block_map.len(), buf.rows.len());
-        assert!(buf.row_block_map.iter().all(Option::is_none));
+        assert_eq!(buf.rows.block_map().len(), buf.rows.len());
+        assert!(buf.rows.block_map().iter().all(Option::is_none));
     }
 
     /// Regression (119.4 code review, CRITICAL-1): scrolling back into a
@@ -852,7 +837,7 @@ mod tests {
 
         for i in 0..visible_start {
             assert!(buf.rows[i].is_evicted(), "row {i} should be evicted");
-            assert!(buf.row_block_map[i].is_some());
+            assert!(buf.rows.block_map()[i].is_some());
         }
         for i in visible_start..buf.rows.len() {
             assert!(!buf.rows[i].is_evicted(), "visible row {i} untouched");
@@ -884,7 +869,7 @@ mod tests {
         assert!(buf.blocks.is_empty());
         for i in 0..visible_start {
             assert!(!buf.rows[i].is_evicted());
-            assert!(buf.row_block_map.get(i).copied().flatten().is_none());
+            assert!(buf.rows.block_map().get(i).copied().flatten().is_none());
         }
     }
 
@@ -949,7 +934,7 @@ mod tests {
                 !buf.rows[i].is_evicted(),
                 "visible row {i} must never be compressed"
             );
-            assert!(buf.row_block_map.get(i).copied().flatten().is_none());
+            assert!(buf.rows.block_map().get(i).copied().flatten().is_none());
         }
     }
 

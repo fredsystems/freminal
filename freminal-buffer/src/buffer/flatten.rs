@@ -12,7 +12,8 @@
 //!
 //! ## Per-row flatten cache
 //!
-//! Each entry in [`Buffer::row_cache`](super::Buffer::row_cache) is a
+//! Each entry in the row cache (the cache table of `Buffer::rows`, see
+//! `RowStore::cache`) is a
 //! [`RowCacheEntry`] that bundles:
 //!
 //! - `chars`: flat per-row `TChar` sequence (wide-continuation cells skipped)
@@ -155,7 +156,7 @@ pub struct RowCacheEntry {
     ///
     /// Every `set_image_cell_at` / `place_image` / `place_image_at` /
     /// `clear_image_placements_*` site in `images.rs` sets `row.dirty` and
-    /// clears `row_cache[i]`, so this is always refreshed in the same pass
+    /// clears the row's cache entry, so this is always refreshed in the same pass
     /// that rebuilds the rest of the entry.
     ///
     /// [`Cell::image_cell`]: crate::cell::Cell::image_cell
@@ -601,8 +602,9 @@ impl Buffer {
             auto_detect,
         };
 
-        let rows_slice = &mut self.rows[visible_start..visible_end];
-        let cache_slice = &mut self.row_cache[visible_start..visible_end];
+        let (rows, cache, _) = self.rows.split_mut();
+        let rows_slice = &mut rows[visible_start..visible_end];
+        let cache_slice = &mut cache[visible_start..visible_end];
         let merge_cache = &mut self.merge_cache;
         let epoch_counter = &mut self.row_epoch_counter;
 
@@ -678,9 +680,10 @@ impl Buffer {
         // window.
         self.ensure_decompressed(visible_start..visible_end);
         let auto_detect = self.auto_detect_urls;
+        let (rows, cache, _) = self.rows.split_mut();
         Self::rows_as_tchars_and_tags_cached(
-            &mut self.rows[visible_start..visible_end],
-            &mut self.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
         )
     }
@@ -1216,9 +1219,10 @@ impl Buffer {
         self.ensure_decompressed(0..visible_start);
 
         let auto_detect = self.auto_detect_urls;
+        let (rows, cache, _) = self.rows.split_mut();
         let result = Self::rows_as_tchars_and_tags_cached(
-            &mut self.rows[..visible_start],
-            &mut self.row_cache[..visible_start],
+            &mut rows[..visible_start],
+            &mut cache[..visible_start],
             auto_detect,
         );
 
@@ -1240,9 +1244,9 @@ impl Buffer {
         // Visible rows are never in this slice (`..visible_start` excludes
         // them), so their cache is untouched: they re-render every frame and
         // must stay warm.
-        for (row, entry) in self.rows[..visible_start]
+        for (row, entry) in rows[..visible_start]
             .iter_mut()
-            .zip(self.row_cache[..visible_start].iter_mut())
+            .zip(cache[..visible_start].iter_mut())
         {
             if row.is_compact() {
                 *entry = None;
@@ -2499,7 +2503,7 @@ mod scrollback_eviction_tests {
 
         for (row, entry) in buf.rows[..visible_start]
             .iter()
-            .zip(buf.row_cache[..visible_start].iter())
+            .zip(buf.rows.cache()[..visible_start].iter())
         {
             if row.is_compact() {
                 assert!(
@@ -2527,14 +2531,18 @@ mod scrollback_eviction_tests {
         // Warm the visible row cache first.
         let _ = buf.visible_as_tchars_and_tags(0);
         assert!(
-            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            buf.rows.cache()[visible_start..]
+                .iter()
+                .all(Option::is_some),
             "sanity: visible row cache should be populated before the scrollback flatten"
         );
 
         let _ = buf.scrollback_as_tchars_and_tags(0);
 
         assert!(
-            buf.row_cache[visible_start..].iter().all(Option::is_some),
+            buf.rows.cache()[visible_start..]
+                .iter()
+                .all(Option::is_some),
             "a scrollback flatten must not evict the visible window's row cache"
         );
     }
@@ -2613,7 +2621,7 @@ mod scrollback_eviction_tests {
         // Eviction only targets `is_compact()` rows; a Live (opt-out) row's
         // cache is left untouched.
         assert!(
-            buf.row_cache[0].is_some(),
+            buf.rows.cache()[0].is_some(),
             "a non-compact (image) scrollback row's cache must not be evicted"
         );
         assert!(!buf.rows[0].is_compact());
@@ -2934,14 +2942,15 @@ mod incremental_merge_equivalence_tests {
         // directly (bypassing `merge_cache` entirely), so gating must stay
         // disabled here too — same as the real `merge_row_caches_full`
         // (scrollback/full-merge) callers.
+        let (rows, cache, _) = buf.rows.split_mut();
         let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
-            &mut buf.rows[visible_start..visible_end],
-            &mut buf.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
             false,
         );
         let actual =
-            Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined);
+            Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined);
 
         assert_eq!(
             expected, actual,
@@ -3153,13 +3162,14 @@ mod incremental_merge_tests {
         let (visible_start, visible_end) = buf.visible_window_bounds(0, 0);
         buf.ensure_decompressed(visible_start..visible_end);
         let auto_detect = buf.auto_detect_urls;
+        let (rows, cache, _) = buf.rows.split_mut();
         let (refined, _first_rebuilt_row) = Buffer::refresh_row_cache_and_refine_wrapped_urls(
-            &mut buf.rows[visible_start..visible_end],
-            &mut buf.row_cache[visible_start..visible_end],
+            &mut rows[visible_start..visible_end],
+            &mut cache[visible_start..visible_end],
             auto_detect,
             false,
         );
-        Buffer::merge_row_caches_full(&buf.row_cache[visible_start..visible_end], &refined)
+        Buffer::merge_row_caches_full(&buf.rows.cache()[visible_start..visible_end], &refined)
     }
 
     /// Minimal deterministic linear congruential generator (mirrors the one
@@ -3745,7 +3755,7 @@ mod incremental_merge_tests {
     /// `scroll_slice_up`/`_down` and whole-buffer `scroll_up` proven above.
     /// Once scrollback is at capacity, every LF pushes a new row at the
     /// bottom and then drains `overflow` rows from the front
-    /// (`self.rows.drain(0..overflow)` + `self.row_cache.drain(0..overflow)`),
+    /// (`self.rows.evict_front(overflow)`, which drains the cache table too),
     /// netting `rows.len()` unchanged. Since `visible_window_bounds` derives
     /// purely from `rows.len()` and `height` (both unchanged), the resulting
     /// `MergeWindowFp` is numerically IDENTICAL to the fingerprint the

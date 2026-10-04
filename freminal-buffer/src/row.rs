@@ -381,7 +381,7 @@ impl Row {
 
     /// Best-effort recovery from a corrupt/unreadable compressed block
     /// (`CompressedBlock::decompress_into` returned `None`, or the block's
-    /// row count disagreed with `Buffer::row_block_map` — both should be
+    /// row count disagreed with the row store's block map — both should be
     /// impossible per `CompressedBlock`'s own internal consistency checks).
     ///
     /// Clears [`Row::is_evicted`] without restoring any real content,

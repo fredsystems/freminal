@@ -80,9 +80,7 @@ impl Buffer {
             if !had_image {
                 self.image_cell_count += 1;
             }
-            if row_idx < self.row_cache.len() {
-                self.row_cache[row_idx] = None;
-            }
+            self.rows.invalidate(row_idx);
         }
     }
 
@@ -100,7 +98,8 @@ impl Buffer {
     /// Clear all image placements from every cell in the buffer.
     pub fn clear_all_image_placements(&mut self) {
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: an evicted (or Task-118 compact) row provably holds
             // no image cells, so skip it — reading its cells would trip
             // `cells_mut`'s eviction debug_assert (and needlessly decompact a
@@ -118,9 +117,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -129,7 +126,8 @@ impl Buffer {
     /// Clear all image placements for a specific image ID from every cell.
     pub fn clear_image_placements_by_id(&mut self, image_id: u64) {
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
@@ -147,9 +145,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -167,7 +163,8 @@ impl Buffer {
     /// narrowing (Task 100.20).
     pub fn clear_image_placements_by_placement(&mut self, image_id: u64, placement_id: u32) {
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
@@ -185,9 +182,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -213,9 +208,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                self.rows.invalidate(i);
             }
         }
         self.image_cell_count -= cleared;
@@ -237,9 +230,7 @@ impl Buffer {
         }
         if cleared > 0 {
             row.dirty = true;
-            if row_idx < self.row_cache.len() {
-                self.row_cache[row_idx] = None;
-            }
+            self.rows.invalidate(row_idx);
             self.image_cell_count -= cleared;
         }
     }
@@ -255,7 +246,8 @@ impl Buffer {
     /// Clear all image placements whose Kitty image number matches `number`.
     pub fn clear_image_placements_by_number(&mut self, number: u32) {
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
@@ -273,9 +265,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -393,9 +383,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                self.rows.invalidate(i);
             }
         }
         self.image_cell_count -= cleared;
@@ -429,7 +417,8 @@ impl Buffer {
         let instance = placement.placement_instance;
 
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
@@ -447,9 +436,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -459,7 +446,8 @@ impl Buffer {
     /// Clear all image placements with the given z-index.
     pub fn clear_image_placements_by_z_index(&mut self, z: i32) {
         let mut cleared = 0usize;
-        for (i, row) in self.rows.iter_mut().enumerate() {
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
@@ -474,9 +462,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if i < self.row_cache.len() {
-                    self.row_cache[i] = None;
-                }
+                *entry = None;
             }
         }
         self.image_cell_count -= cleared;
@@ -592,9 +578,7 @@ impl Buffer {
             }
             if changed {
                 row.dirty = true;
-                if row_idx < self.row_cache.len() {
-                    self.row_cache[row_idx] = None;
-                }
+                self.rows.invalidate(row_idx);
             }
         }
 
@@ -618,13 +602,11 @@ impl Buffer {
                 self.push_row(RowOrigin::HardBreak, RowJoin::NewLogicalLine);
             }
 
+            // Invalidate the row cache for this row.
+            self.rows.invalidate(target_row);
+
             let row = &mut self.rows[target_row];
             row.dirty = true;
-
-            // Invalidate the row cache for this row.
-            if target_row < self.row_cache.len() {
-                self.row_cache[target_row] = None;
-            }
 
             let mut placed_count = 0usize;
             for img_col in 0..effective_cols {

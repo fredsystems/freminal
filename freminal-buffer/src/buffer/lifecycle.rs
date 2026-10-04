@@ -42,13 +42,10 @@ impl Buffer {
         // visible area to always contain `height` rows, most of which were
         // blank — the GUI's stick_to_bottom would then display those trailing
         // blank rows instead of the actual content at the top.
-        let rows = vec![Row::new(width)];
-        let row_cache = vec![None];
-        let row_block_map = vec![None];
+        let rows = std::iter::once(Row::new(width)).collect();
 
         Self {
             rows,
-            row_cache,
             merge_cache: None,
             row_epoch_counter: 0,
             width,
@@ -79,7 +76,6 @@ impl Buffer {
             command_blocks: VecDeque::new(),
             blocks: HashMap::new(),
             next_block_id: 0,
-            row_block_map,
             decompress_scratch: Vec::new(),
         }
     }
@@ -97,19 +93,18 @@ impl Buffer {
     /// Preserves `width`, `height`, and `scrollback_limit` (terminal geometry
     /// and user configuration).
     pub fn full_reset(&mut self) {
-        self.rows = vec![Row::new(self.width)];
-        self.row_cache = vec![None];
-        // Task 121 Part C: `row_cache` above was just replaced wholesale
+        self.rows.replace_all(vec![Row::new(self.width)]);
+        // Task 121 Part C: the row cache above was just replaced wholesale
         // with fresh, unrelated content — a stale `merge_cache` (even one
         // whose `fp` coincidentally still matches, e.g. an unchanged
         // width/height reset) must not be reused against it.
         self.merge_cache = None;
         // Task 119: discard every compressed block and reset the per-row
-        // map/id counter in lockstep with the row reset above — a full
+        // id counter alongside the row reset above (which already reset the
+        // per-row block map) — a full
         // reset wipes all scrollback, so no compressed content survives it.
         self.blocks.clear();
         self.next_block_id = 0;
-        self.row_block_map = vec![None];
         self.cursor = CursorState::default();
         self.current_tag = FormatTag::default();
         self.kind = BufferType::Primary;
@@ -390,33 +385,22 @@ impl Buffer {
             );
         }
 
-        // Cache length must always match rows length.
+        // The flatten cache and the compressed-block map are index-parallel
+        // to `rows`. `RowStore` keeps them so by construction (every
+        // structural edit moves all three together), so this is a
+        // belt-and-braces check on that guarantee.
         debug_assert_eq!(
-            self.row_cache.len(),
+            self.rows.cache().len(),
             self.rows.len(),
-            "row_cache length {} != rows length {}",
-            self.row_cache.len(),
+            "row cache length {} != rows length {}",
+            self.rows.cache().len(),
             self.rows.len()
         );
-
-        // Task 119: `row_block_map` must be index-parallel to `rows`, same
-        // as `row_cache` above, with one deliberate relaxation: unlike
-        // `row_cache`, it may transiently lag *shorter* immediately after a
-        // handful of row-append call sites outside the compression
-        // subsystem run (three in `lines.rs`, two test-only ones in
-        // `lifecycle.rs` — see the field doc on `Buffer::row_block_map`).
-        // Every mutating entry point this module owns keeps it eagerly in
-        // sync; the few call sites that don't are always simple appends of
-        // a fresh, never-compressed row, and `Buffer::sync_row_block_map_len`
-        // pads the gap with `None` (the exactly-correct value) the next
-        // time compression code touches it. A strict `==` here would fire
-        // on that entirely benign, self-healing lag. It must never be
-        // *longer* than `rows`: nothing removes rows without also
-        // shrinking `row_block_map` in this module.
-        debug_assert!(
-            self.row_block_map.len() <= self.rows.len(),
-            "row_block_map length {} must never exceed rows length {}",
-            self.row_block_map.len(),
+        debug_assert_eq!(
+            self.rows.block_map().len(),
+            self.rows.len(),
+            "row block map length {} != rows length {}",
+            self.rows.block_map().len(),
             self.rows.len()
         );
 
@@ -445,8 +429,6 @@ impl Buffer {
         // the trailing blank cells on the wrapped continuation row retain the
         // non-default background instead of being transparent.
         self.rows.push(row);
-        self.row_cache.push(None);
-        self.row_block_map.push(None);
     }
 }
 
@@ -811,7 +793,6 @@ mod command_block_tests {
         // Pre-grow rows so cursor positions are addressable.
         while buf.rows.len() < buf.height {
             buf.rows.push(crate::row::Row::new(buf.width));
-            buf.row_cache.push(None);
         }
         buf.cursor.pos.y = 3;
         let _id = buf.start_command_block(None, "fid-clear".to_owned());
@@ -848,7 +829,6 @@ mod command_block_tests {
         let target_rows = buf.height + 3;
         while buf.rows.len() < target_rows {
             buf.rows.push(crate::row::Row::new(buf.width));
-            buf.row_cache.push(None);
         }
         let visible_start = buf.visible_window_start(0);
         assert!(

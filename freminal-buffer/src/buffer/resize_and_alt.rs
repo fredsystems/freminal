@@ -21,7 +21,7 @@ use freminal_common::buffer_states::{
 
 use crate::row::{Row, RowJoin, RowOrigin};
 
-use super::{Buffer, SavedPrimaryState};
+use super::{Buffer, RowStore, SavedPrimaryState};
 
 impl Buffer {
     /// Resize the terminal buffer and return the adjusted `scroll_offset`.
@@ -154,7 +154,8 @@ impl Buffer {
         // TUI on the alternate screen) renders with stale row data after a
         // resize, causing gaps, uncolored cells, and mispositioned content.
         if width_changed {
-            for (i, row) in self.rows.iter_mut().enumerate() {
+            let (rows, cache, _) = self.rows.split_mut();
+            for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
                 row.set_max_width(new_width);
                 // On the alternate screen (which skips reflow) a shrink leaves
                 // stale cells beyond the new width in row.cells.  flatten_row
@@ -165,7 +166,7 @@ impl Buffer {
                 // call unconditionally (including on grow).
                 row.truncate_cells_to_width(new_width);
                 row.dirty = true;
-                self.row_cache[i] = None;
+                *entry = None;
             }
         }
 
@@ -214,7 +215,6 @@ impl Buffer {
 
         let mut tmp = Self {
             rows: saved.rows,
-            row_cache: saved.row_cache,
             // This is a throwaway temporary `Buffer` reconstructed fresh
             // from `SavedPrimaryState` on every call (`SavedPrimaryState`
             // has no `merge_cache` field of its own to restore), so there
@@ -263,7 +263,6 @@ impl Buffer {
             // scrollback blocks correctly in lockstep.
             blocks: saved.blocks,
             next_block_id: saved.next_block_id,
-            row_block_map: saved.row_block_map,
             decompress_scratch: Vec::new(),
         };
 
@@ -271,7 +270,6 @@ impl Buffer {
 
         SavedPrimaryState {
             rows: tmp.rows,
-            row_cache: tmp.row_cache,
             cursor: tmp.cursor,
             scroll_offset: new_offset,
             height: new_height,
@@ -284,7 +282,6 @@ impl Buffer {
             image_cell_count: tmp.image_cell_count,
             blocks: tmp.blocks,
             next_block_id: tmp.next_block_id,
-            row_block_map: tmp.row_block_map,
         }
     }
 
@@ -314,7 +311,7 @@ impl Buffer {
     ///    and inherits the original `RowOrigin` of its logical line.
     ///
     /// 4. **Install the new rows.** `self.rows` is replaced with the reflow
-    ///    result, `self.width` is updated, and `self.row_cache` is reset to
+    ///    result, `self.width` is updated, and the row cache is reset to
     ///    all-`None` (every row is dirty after reflow).
     ///
     /// The operation is O(total cells) — linear in the amount of text.
@@ -337,7 +334,7 @@ impl Buffer {
         let old_cursor_x = self.cursor.pos.x;
 
         // Take ownership of the old rows
-        let old_rows = std::mem::take(&mut self.rows);
+        let old_rows = self.rows.take_rows();
         let old_rows_len = old_rows.len();
 
         // Note: reflow reads each row's cells exactly once via the flatten
@@ -622,22 +619,23 @@ impl Buffer {
         }
 
         // 3) Install the new rows and update width
-        self.rows = new_rows;
+        //
         // All rows are freshly constructed (dirty=true by construction), so
-        // the entire cache is invalid.  Reset it to match the new row count.
-        self.row_cache = vec![None; self.rows.len()];
-        // Task 121 Part C: `row_cache` was just replaced wholesale with
+        // the entire cache is invalid; `replace_all` resets the cache to match
+        // the new row count.
+        //
+        // Every new row is freshly built `Live` content (never compressed);
+        // the `ensure_decompressed` call at the top of this function already
+        // decompressed everything the old `self.rows` referenced, so
+        // `self.blocks` is empty here — `replace_all` likewise resets the
+        // block map to match the new row count (Task 119.4).
+        self.rows.replace_all(new_rows);
+        // Task 121 Part C: the row cache was just replaced wholesale with
         // fresh entries for an entirely re-wrapped row layout — a stale
         // `merge_cache` (which could coincidentally still have a matching
         // `fp` if the window's row count happens to land on the same
         // bounds post-reflow) must not be reused against it.
         self.merge_cache = None;
-        // Every new row is freshly built `Live` content (never compressed);
-        // the `ensure_decompressed` call at the top of this function already
-        // decompressed everything the old `self.rows` referenced, so
-        // `self.blocks` is empty here — reset `row_block_map` to match the
-        // new row count (Task 119.4).
-        self.row_block_map = vec![None; self.rows.len()];
         self.width = new_width;
         // Reflow rebuilds all rows from scratch; recount image cells so the
         // counter stays accurate regardless of how reflow may have clipped or
@@ -771,8 +769,6 @@ impl Buffer {
                 let grow = new_height.saturating_sub(self.rows.len());
                 for _ in 0..grow {
                     self.rows.push(Row::new(self.width));
-                    self.row_cache.push(None);
-                    self.row_block_map.push(None);
                 }
             } else {
                 // Primary buffer: the visible window is anchored to the BOTTOM
@@ -827,9 +823,13 @@ impl Buffer {
             // the genuinely-newly-visible rows stale.  Invalidate the new
             // visible window instead.
             let new_visible_start = self.rows.len().saturating_sub(new_height);
-            for i in new_visible_start..self.rows.len() {
-                self.rows[i].dirty = true;
-                self.row_cache[i] = None;
+            let (rows, cache, _) = self.rows.split_mut();
+            for (row, entry) in rows[new_visible_start..]
+                .iter_mut()
+                .zip(cache[new_visible_start..].iter_mut())
+            {
+                row.dirty = true;
+                *entry = None;
             }
         } else if new_height < old_height {
             if self.kind == BufferType::Alternate {
@@ -849,15 +849,10 @@ impl Buffer {
                         self.image_cell_count -= drained_images;
                     }
                     // The alternate screen never accumulates scrollback and
-                    // so never compresses anything, but keep
-                    // `row_block_map` index-parallel regardless (Task 119).
-                    // Sync *before* draining `rows` (sync depends on the
-                    // pre-drain `rows.len()`).
-                    self.sync_row_block_map_len();
-                    self.rows.drain(0..excess);
-                    self.row_cache.drain(0..excess);
-                    self.row_block_map.drain(0..excess);
-                    self.adjust_prompt_rows(excess);
+                    // so never compresses anything; the store drains the
+                    // (all-`None`) block map in lockstep regardless.
+                    let evicted = self.rows.evict_front(excess).rows;
+                    self.adjust_prompt_rows(evicted);
                     // Adjust cursor Y for the removed rows.
                     self.cursor.pos.y = self.cursor.pos.y.saturating_sub(excess);
                 }
@@ -908,20 +903,15 @@ impl Buffer {
     /// stops at the first non-pristine row from the bottom, so it never touches
     /// BCE-filled rows, content, or scrollback.
     fn reclaim_trailing_blank_padding(&mut self) {
-        // Task 119: heal any lag (see the field doc on `row_block_map`)
-        // before popping it in lockstep with `rows`/`row_cache` below.
-        self.sync_row_block_map_len();
         while self.rows.len() > self.cursor.pos.y + 1 {
             // Safe: loop guard guarantees rows.len() >= 2 here.
             let Some(last) = self.rows.last() else { break };
             if last.origin == RowOrigin::ScrollFill && last.characters().is_empty() {
                 // A pristine ScrollFill row has no cells, so it holds no image
-                // cells; image_cell_count needs no adjustment.  Keep row_cache
-                // (and row_block_map — always `None` here, these rows are
-                // never compressed) in lockstep with rows.
+                // cells; image_cell_count needs no adjustment.  The store pops
+                // the cache entry and block reference (always `None` here,
+                // these rows are never compressed) in lockstep with the row.
                 self.rows.pop();
-                self.row_cache.pop();
-                self.row_block_map.pop();
             } else {
                 break;
             }
@@ -982,10 +972,6 @@ impl Buffer {
         // out all their scrollback, snap them to live view.
         let adjusted_offset = scroll_offset.saturating_sub(overflow);
 
-        // Task 119: heal any lag in `row_block_map` (see its field doc)
-        // before draining it in lockstep with `rows`/`row_cache` below.
-        self.sync_row_block_map_len();
-
         // --- Drop the oldest rows (and their cache entries) ---
         // First, account for any image cells in the rows being drained.
         // `Row::count_image_cells` already short-circuits for both
@@ -999,13 +985,11 @@ impl Buffer {
                 .sum();
             self.image_cell_count -= drained_images;
         }
-        self.rows.drain(0..overflow);
-        self.row_cache.drain(0..overflow);
         // `offset_in_block` is block-relative, not buffer-absolute (see
-        // `BlockRowRef`'s doc), so draining the front of `row_block_map`
+        // `BlockRowRef`'s doc), so draining the front of the block map
         // needs no index remapping — surviving rows keep referencing the
         // same block at the same in-block offset.
-        self.row_block_map.drain(0..overflow);
+        let overflow = self.rows.evict_front(overflow).rows;
         // A block whose every row was just drained is now unreferenced;
         // reclaim it immediately rather than leaking it in `self.blocks`
         // forever (Task 119.4).
@@ -1171,19 +1155,26 @@ impl Buffer {
         }
 
         // Save primary state (rows + cursor + scroll_offset + cache).
-        // Task 119: also move `blocks`/`row_block_map` over verbatim — the
-        // alternate screen never accumulates scrollback and so never
-        // compresses anything, so it starts (and stays) with an empty
-        // `blocks` map and an all-`None` `row_block_map`.
+        // Task 119: also move `blocks` over verbatim (the per-row block
+        // references travel inside the `RowStore`) — the alternate screen
+        // never accumulates scrollback and so never compresses anything, so
+        // it starts (and stays) with an empty `blocks` map and an all-`None`
+        // block map.
         // `next_block_id` is a buffer-wide monotonic counter, not something
         // that is meaningfully "primary" or "alternate"; it is saved here
         // purely so `resize_saved_primary`'s reconstructed temporary
         // `Buffer` has a value to use, not because the alternate screen
         // ever advances it (it can't: `compress_scrollback_block` always
         // no-ops there — no scrollback exists to compress).
+        // The primary rows (with their cache entries and block references) are
+        // *moved* into the saved state and replaced by a fresh blank screen of
+        // exactly `height` rows, all dirty (`None` cache entries) and none
+        // compressed. Moving rather than cloning is unobservable: the live
+        // store is overwritten with the blank screen regardless, so the old
+        // clone was only ever the saved copy's source.
+        let blank_screen: RowStore = (0..self.height).map(|_| Row::new(self.width)).collect();
         let saved = SavedPrimaryState {
-            rows: self.rows.clone(),
-            row_cache: self.row_cache.clone(),
+            rows: std::mem::replace(&mut self.rows, blank_screen),
             cursor: self.cursor.clone(),
             scroll_offset,
             height: self.height,
@@ -1196,18 +1187,17 @@ impl Buffer {
             image_cell_count: self.image_cell_count,
             blocks: std::mem::take(&mut self.blocks),
             next_block_id: self.next_block_id,
-            row_block_map: std::mem::take(&mut self.row_block_map),
         };
         self.saved_primary = Some(saved);
 
         // Switch to alternate buffer.
         self.kind = BufferType::Alternate;
 
-        // Fresh screen: exactly `height` empty rows, all dirty (None cache entries).
-        self.rows = vec![Row::new(self.width); self.height];
-        self.row_cache = vec![None; self.height];
-        self.row_block_map = vec![None; self.height];
-        // Task 121 Part C: `row_cache` was just replaced wholesale with a
+        // Fresh screen: exactly `height` empty rows, all dirty (None cache
+        // entries) — installed above via the `mem::replace` into
+        // `saved.rows`.
+        //
+        // Task 121 Part C: the row cache was just replaced wholesale with a
         // fresh, blank alternate screen — the primary screen's stale
         // `merge_cache` must not be reused against it (a matching `fp` here
         // would be entirely coincidental).
@@ -1248,8 +1238,7 @@ impl Buffer {
             // Restore saved primary state.
             let restored_offset = saved.scroll_offset;
             self.rows = saved.rows;
-            self.row_cache = saved.row_cache;
-            // Task 121 Part C: `row_cache` was just replaced wholesale with
+            // Task 121 Part C: the row cache was just replaced wholesale with
             // the restored primary screen's cache — the alternate screen's
             // stale `merge_cache` must not be reused against it.
             self.merge_cache = None;
@@ -1263,7 +1252,6 @@ impl Buffer {
             self.image_cell_count = saved.image_cell_count;
             self.blocks = saved.blocks;
             self.next_block_id = saved.next_block_id;
-            self.row_block_map = saved.row_block_map;
 
             self.debug_assert_invariants();
             restored_offset

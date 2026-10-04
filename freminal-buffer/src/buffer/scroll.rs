@@ -389,7 +389,8 @@ impl Buffer {
             self.rows[row_idx] = next;
             // Rotate the cache entry in lockstep: a moved row keeps its cached
             // flat representation (it hasn't changed content, only position).
-            self.row_cache[row_idx] = self.row_cache[row_idx + 1].take();
+            let cache = self.rows.cache_mut();
+            cache[row_idx] = cache[row_idx + 1].take();
         }
 
         // The original rows[last] was not shifted (the loop only copies
@@ -401,9 +402,9 @@ impl Buffer {
         // See `push_row` comment for rationale.
         self.rows[last] = new_row;
         // New blank row at `last` — no cached representation yet.
-        self.row_cache[last] = None;
+        self.rows.cache_mut()[last] = None;
 
-        // Task 121 Part C fix: this loop rotates already-clean `row_cache`
+        // Task 121 Part C fix: this loop rotates already-clean row-cache
         // entries between row indices (a moved row's cache moves with it)
         // without marking the moved rows dirty or nulling their cache, and
         // without changing `self.rows.len()`. Neither the visible-window
@@ -430,7 +431,8 @@ impl Buffer {
             let prev = self.rows[row_idx - 1].clone();
             self.rows[row_idx] = prev;
             // Rotate the cache entry in lockstep.
-            self.row_cache[row_idx] = self.row_cache[row_idx - 1].take();
+            let cache = self.rows.cache_mut();
+            cache[row_idx] = cache[row_idx - 1].take();
         }
 
         // The original rows[first] was not shifted (the loop only copies
@@ -442,10 +444,10 @@ impl Buffer {
         // See `push_row` comment for rationale.
         self.rows[first] = new_row;
         // New blank row at `first` — no cached representation yet.
-        self.row_cache[first] = None;
+        self.rows.cache_mut()[first] = None;
 
         // Task 121 Part C fix: same rationale as the equivalent comment in
-        // `scroll_slice_up` — this loop rotates already-clean `row_cache`
+        // `scroll_slice_up` — this loop rotates already-clean row-cache
         // entries between row indices without dirtying the moved rows or
         // changing `self.rows.len()`, which the fingerprint + first-rebuilt
         // -row invalidation cannot observe. Null the merge cache to force a
@@ -511,12 +513,12 @@ impl Buffer {
                 }
             }
             row.mark_dirty();
-            self.row_cache[row_idx] = None;
+            self.rows.cache_mut()[row_idx] = None;
         }
         // Blank [left_col, right_col] on the last row.
         let row = &mut self.rows[last];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
-        self.row_cache[last] = None;
+        self.rows.cache_mut()[last] = None;
 
         // Adjust image_cell_count for any images lost during the shift/erase.
         if images_before > 0 {
@@ -580,12 +582,12 @@ impl Buffer {
                 }
             }
             row.mark_dirty();
-            self.row_cache[row_idx] = None;
+            self.rows.cache_mut()[row_idx] = None;
         }
         // Blank [left_col, right_col] on the first row.
         let row = &mut self.rows[first];
         row.erase_cells_at(left_col, right_col - left_col + 1, &tag);
-        self.row_cache[first] = None;
+        self.rows.cache_mut()[first] = None;
 
         // Adjust image_cell_count for any images lost during the shift/erase.
         if images_before > 0 {
@@ -655,13 +657,8 @@ impl Buffer {
     pub fn scroll_up(&mut self) {
         // Deduct any image cells in the row about to be removed.
         self.image_cell_count -= self.rows[0].count_image_cells();
-        // Task 119: heal any lag before removing/pushing it in lockstep
-        // with `rows`/`row_cache` below (see `row_block_map`'s field doc).
-        self.sync_row_block_map_len();
-        // remove topmost row (and its cache entry)
-        self.rows.remove(0);
-        self.row_cache.remove(0);
-        self.row_block_map.remove(0);
+        // remove topmost row (and its cache entry and block reference)
+        let _ = self.rows.evict_front(1);
         // The removed row may have been the last reference to a compressed
         // block (this method is a whole-buffer row shift, unlike the
         // bounded `enforce_scrollback_limit`/`erase_scrollback` drains, but
@@ -674,12 +671,10 @@ impl Buffer {
         // rationale as `push_row` and `scroll_slice_up`/`_down`.
         let new_row = Row::new(self.width);
         self.rows.push(new_row);
-        self.row_cache.push(None);
-        self.row_block_map.push(None);
 
-        // Task 121 Part C fix: `rows.remove(0)` + `rows.push(new_row)` nets
-        // to the same `self.rows.len()`, and every already-clean
-        // `row_cache` entry above index 0 shifts down by one index in
+        // Task 121 Part C fix: `rows.evict_front(1)` + `rows.push(new_row)`
+        // nets to the same `self.rows.len()`, and every already-clean
+        // row-cache entry above index 0 shifts down by one index in
         // lockstep with its row's content — without any of the moved rows
         // being marked dirty or `None`. This is the same confined
         // in-place-rotation bug class as `scroll_slice_up`/`_down` (see
@@ -718,20 +713,14 @@ impl Buffer {
                     .sum();
                 self.image_cell_count -= drained_images;
             }
-            // Task 119: heal any lag *before* any of the three parallel
-            // vecs are drained (sync depends on `self.rows.len()`, so it
-            // must run while that still reflects the pre-drain length).
-            self.sync_row_block_map_len();
-            self.rows.drain(0..visible_start);
-            self.row_cache.drain(0..visible_start);
+            let evicted = self.rows.evict_front(visible_start).rows;
             // Every compressed block only ever holds rows from scrollback
             // (never the visible window), so wiping all of scrollback here
             // always makes every block fully unreferenced — clear
             // `self.blocks` outright rather than the general-purpose
             // (slightly more expensive) `gc_unreferenced_blocks` scan.
-            self.row_block_map.drain(0..visible_start);
             self.blocks.clear();
-            self.adjust_prompt_rows(visible_start);
+            self.adjust_prompt_rows(evicted);
 
             // Adjust cursor
             if self.cursor.pos.y >= visible_start {

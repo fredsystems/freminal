@@ -27,6 +27,7 @@ use crate::{
 pub(in crate::buffer) use flatten::MergeCache;
 pub use flatten::{ArcFlattenResult, AutoUrlRange, RowCacheEntry};
 pub use images::PlaceImageResult;
+use row_store::RowStore;
 
 #[cfg(test)]
 use crate::cell::Cell;
@@ -44,6 +45,7 @@ mod images;
 mod lifecycle;
 mod lines;
 mod resize_and_alt;
+mod row_store;
 mod scroll;
 mod tabs;
 
@@ -80,10 +82,9 @@ fn clamped_offset(base: usize, delta: i32, lo: usize, hi: usize) -> usize {
 /// field's doc).
 ///
 /// The type is `pub` only so it can appear in the (also `pub`)
-/// [`SavedPrimaryState::blocks`]/[`SavedPrimaryState::row_block_map`]
-/// fields without a private-type-in-public-interface error; its field stays
-/// private, so nothing outside `crate::buffer` can construct, inspect, or
-/// match on one — it is an opaque handle everywhere else.
+/// [`SavedPrimaryState::blocks`] field without a private-type-in-public-interface
+/// error; its field stays private, so nothing outside `crate::buffer` can
+/// construct, inspect, or match on one — it is an opaque handle everywhere else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(u32);
 
@@ -96,7 +97,7 @@ pub struct BlockId(u32);
 /// `Buffer::erase_scrollback`) for free: draining rows from the front of
 /// `self.rows` never changes any surviving row's position *within* its own
 /// block, so no index remapping is needed on drain (only the front-drain of
-/// `Buffer::row_block_map` itself, in lockstep with `rows`/`row_cache`).
+/// the block map inside `Buffer::rows`, in lockstep with the rows themselves).
 ///
 /// `pub` for the same private-type-in-public-interface reason as
 /// [`BlockId`]; both fields stay private (opaque outside `crate::buffer`).
@@ -114,16 +115,29 @@ pub struct BlockRowRef {
 /// subtracting `visible_window_start(scroll_offset)`.
 #[derive(Debug)]
 pub struct Buffer {
-    /// All rows in this buffer: scrollback + visible region.
+    /// All rows in this buffer: scrollback + visible region, together with
+    /// the two per-row side tables that must stay index-parallel with them
+    /// (Task 125.13). See [`RowStore`].
+    ///
     /// In the primary buffer, this grows until `scrollback_limit` is hit.
     /// In the alternate buffer, this always has exactly `height` rows.
-    pub(in crate::buffer) rows: Vec<Row>,
-
-    /// Per-row flat-representation cache.  Index matches `self.rows`.
-    /// `None` = dirty (must be re-flattened on next snapshot).
-    /// `Some(entry)` = clean cached flat representation for that row, see
-    /// [`RowCacheEntry`].
-    pub(in crate::buffer) row_cache: Vec<Option<RowCacheEntry>>,
+    ///
+    /// The side tables are reached through [`RowStore::cache`] and
+    /// [`RowStore::block_map`] (and their `_mut` forms):
+    ///
+    /// - **Flatten cache** — `None` = dirty (must be re-flattened on next
+    ///   snapshot); `Some(entry)` = clean cached flat representation for that
+    ///   row, see [`RowCacheEntry`].
+    /// - **Compressed-block references** — `None` means the row is not
+    ///   currently compressed (it may be `Live` or Task-118
+    ///   [`Row::is_compact`]); `Some` means the row's real content has been
+    ///   evicted into the referenced block in `self.blocks` (see
+    ///   [`Row::is_evicted`]) and the row itself holds only a diagnostic
+    ///   placeholder.
+    ///
+    /// Every structural edit goes through a [`RowStore`] method, so all three
+    /// tables always have the same length.
+    pub(in crate::buffer) rows: RowStore,
 
     /// Task 121 Part C: incremental cache of the last **merge** (Step 2 of
     /// [`Buffer::visible_as_tchars_and_tags_extended`]) computed over the
@@ -142,7 +156,7 @@ pub struct Buffer {
     ///
     /// ## Invalidation
     ///
-    /// Three complementary mechanisms together cover every way `row_cache`'s
+    /// Three complementary mechanisms together cover every way the row cache's
     /// *content* can change out from under a cached merge:
     ///
     /// 1. **Window fingerprint** ([`flatten::MergeCache::fp`]): visible
@@ -154,7 +168,7 @@ pub struct Buffer {
     ///    ordinary per-row edits.
     /// 3. **Explicit `self.merge_cache = None`**, at sites where (1) and (2)
     ///    cannot observe that cached content is stale:
-    ///    - **Wholesale `row_cache` replacement** — the new content's
+    ///    - **Wholesale row-cache replacement** — the new content's
     ///      *identity* differs from what a stale, fp-matching `MergeCache`
     ///      was built from, without marking every affected row dirty or
     ///      `None`: [`Buffer::full_reset`], [`Buffer::reflow_to_width`],
@@ -188,7 +202,7 @@ pub struct Buffer {
     /// `_down_columns`, used when DECLRMM confines a scroll horizontally)
     /// do **not** need an explicit `merge_cache = None`: unlike the
     /// row-granular rotations above, they call `row.mark_dirty()` and set
-    /// `row_cache[i] = None` on every row they touch instead of relocating
+    /// a `None` cache entry on every row they touch instead of relocating
     /// an existing cache entry to a different index, so mechanism (2)
     /// already catches them.
     ///
@@ -373,27 +387,6 @@ pub struct Buffer {
     /// stop minting new ids rather than silently reusing one.
     pub(in crate::buffer) next_block_id: u32,
 
-    /// Per-row reference into `self.blocks`, index-parallel to `self.rows` /
-    /// `self.row_cache` (same maintained-in-lockstep invariant those two
-    /// already have). `None` means the row is not currently compressed (it
-    /// may be `Live` or Task-118 [`Row::is_compact`]); `Some` means the
-    /// row's real content has been evicted into the referenced block (see
-    /// [`Row::is_evicted`]) and `self.rows[i]` holds only a diagnostic
-    /// placeholder.
-    ///
-    /// May transiently lag *shorter* than `self.rows` immediately after a
-    /// row is appended by a code path outside the compression subsystem
-    /// (namely three direct `self.rows.push` sites in `lines.rs`, and two
-    /// test-only ones in `lifecycle.rs`, none of which know about this
-    /// field). Every such append is always a fresh, never-compressed `Live`
-    /// row, so padding the gap with `None` on next access
-    /// (`Buffer::sync_row_block_map_len`) is exactly the correct value —
-    /// not a workaround for missing data. It can never lag *longer* than
-    /// `self.rows`: nothing removes rows without this module's involvement
-    /// (`erase.rs`/`cursor.rs`/`tabs.rs`/`images.rs` only mutate existing
-    /// rows' content in place, never the row count).
-    pub(in crate::buffer) row_block_map: Vec<Option<BlockRowRef>>,
-
     /// Reusable scratch buffer for [`CompressedBlock::decompress_into`],
     /// avoiding a fresh allocation on every block decompression inside
     /// `Buffer::ensure_decompressed`. Purely a transient perf buffer with no
@@ -406,43 +399,46 @@ pub struct Buffer {
 /// Snapshot of the primary buffer state saved when entering the alternate screen.
 ///
 /// Restored verbatim by [`Buffer::leave_alternate`].
+///
+/// Every field is crate-private: nothing outside `freminal-buffer` reads or
+/// builds one (verified across the workspace for Task 125.13); it is `pub`
+/// only because it names the type of the `pub(in crate::buffer)`
+/// `Buffer::saved_primary` field.
 #[derive(Debug, Clone)]
 pub struct SavedPrimaryState {
-    /// All primary-buffer rows (scrollback + visible region) at the time of the switch.
-    pub rows: Vec<Row>,
-    /// Per-row flat-representation cache saved alongside `rows`.
-    pub row_cache: Vec<Option<RowCacheEntry>>,
+    /// All primary-buffer rows (scrollback + visible region) at the time of the
+    /// switch, with their flat-representation cache entries and
+    /// compressed-block references. The alternate screen never accumulates
+    /// scrollback and so never compresses anything; the block references here
+    /// are restored verbatim on `leave_alternate`.
+    pub(in crate::buffer) rows: RowStore,
     /// Cursor state (position, attributes) at the time of the switch.
-    pub cursor: CursorState,
+    pub(in crate::buffer) cursor: CursorState,
     /// Caller-owned scroll offset (from `ViewState`) at the time of the switch.
-    pub scroll_offset: usize,
+    pub(in crate::buffer) scroll_offset: usize,
     /// Visible height of the terminal grid at the time of the switch.
-    pub height: usize,
+    pub(in crate::buffer) height: usize,
     /// Top of the DECSTBM scroll region at the time of the switch.
-    pub scroll_region_top: usize,
+    pub(in crate::buffer) scroll_region_top: usize,
     /// Bottom of the DECSTBM scroll region at the time of the switch.
-    pub scroll_region_bottom: usize,
+    pub(in crate::buffer) scroll_region_bottom: usize,
     /// Left margin (DECSLRM) at the time of the switch.
-    pub scroll_region_left: usize,
+    pub(in crate::buffer) scroll_region_left: usize,
     /// Right margin (DECSLRM) at the time of the switch.
-    pub scroll_region_right: usize,
+    pub(in crate::buffer) scroll_region_right: usize,
     /// Saved DECSC cursor carried across alternate-screen round-trips.
-    pub saved_cursor: Option<CursorState>,
+    pub(in crate::buffer) saved_cursor: Option<CursorState>,
     /// Saved image store from the primary buffer.
-    pub image_store: ImageStore,
+    pub(in crate::buffer) image_store: ImageStore,
     /// Saved image cell count from the primary buffer.
-    pub image_cell_count: usize,
+    pub(in crate::buffer) image_cell_count: usize,
     /// Saved compressed scrollback blocks from the primary buffer (Task
     /// 119). The alternate screen never accumulates scrollback and so never
     /// compresses anything; this is empty for as long as the alternate
     /// screen is active and is restored verbatim on `leave_alternate`.
-    pub blocks: HashMap<BlockId, CompressedBlock>,
+    pub(in crate::buffer) blocks: HashMap<BlockId, CompressedBlock>,
     /// Saved [`Buffer::next_block_id`] counter from the primary buffer.
-    pub next_block_id: u32,
-    /// Saved per-row compressed-block references from the primary buffer,
-    /// index-parallel to `rows`/`row_cache` above (see
-    /// `Buffer::row_block_map`).
-    pub row_block_map: Vec<Option<BlockRowRef>>,
+    pub(in crate::buffer) next_block_id: u32,
 }
 
 /// Heap-inclusive memory breakdown for a [`Buffer`]'s row storage, row-flatten
@@ -471,9 +467,9 @@ pub struct BufferHeapBreakdown {
     /// counted separately, once per distinct `Arc`, in [`Self::url_bytes`].
     pub rows_bytes: usize,
 
-    /// Heap bytes held by `self.row_cache`.
+    /// Heap bytes held by the per-row flatten cache (`Buffer::rows`' cache table).
     ///
-    /// Computed as the outer `self.row_cache.capacity() *
+    /// Computed as the outer cache-table `capacity() *
     /// size_of::<Option<RowCacheEntry>>()` allocation, plus, for each
     /// populated (`Some`) entry, the capacities of its `chars`, `tags`,
     /// `bytes`, `byte_to_char`, and `auto_urls` backing allocations.
@@ -575,7 +571,7 @@ impl Buffer {
             return;
         }
         self.auto_detect_urls = enabled;
-        self.row_cache.fill(None);
+        self.rows.cache_mut().fill(None);
         for row in &mut self.rows {
             row.mark_dirty();
         }
@@ -583,8 +579,8 @@ impl Buffer {
 
     /// Returns a reference to all rows in this buffer (scrollback + visible region).
     #[must_use]
-    pub const fn rows(&self) -> &Vec<Row> {
-        &self.rows
+    pub const fn rows(&self) -> &[Row] {
+        self.rows.as_slice()
     }
 
     /// Compact up to `budget` not-yet-compacted scrollback rows into the
@@ -615,9 +611,10 @@ impl Buffer {
         }
         let visible_start = self.visible_window_start(0);
         let mut compacted = 0usize;
-        for (row, cache_entry) in self.rows[..visible_start]
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, cache_entry) in rows[..visible_start]
             .iter_mut()
-            .zip(self.row_cache[..visible_start].iter_mut())
+            .zip(cache[..visible_start].iter_mut())
         {
             if compacted >= budget {
                 break;
@@ -697,9 +694,9 @@ impl Buffer {
         }
 
         let option_row_cache_entry_size = core::mem::size_of::<Option<RowCacheEntry>>();
-        let mut row_cache_bytes = self.row_cache.capacity() * option_row_cache_entry_size;
+        let mut row_cache_bytes = self.rows.cache_capacity() * option_row_cache_entry_size;
 
-        for entry in self.row_cache.iter().flatten() {
+        for entry in self.rows.cache().iter().flatten() {
             row_cache_bytes += entry.chars.capacity() * core::mem::size_of::<TChar>();
             row_cache_bytes += entry.tags.capacity() * core::mem::size_of::<FormatTag>();
             row_cache_bytes += entry.bytes.capacity();
@@ -748,7 +745,7 @@ impl Buffer {
         // Metadata changed: `join`/`origin` feed wrapped-URL grouping, so the
         // cached flat representation of this row must be rebuilt even though
         // the cells themselves are untouched.
-        self.row_cache[row_idx] = None;
+        self.rows.cache_mut()[row_idx] = None;
     }
 
     /// Insert `text` at the current cursor position, soft-wrapping as needed.
@@ -853,8 +850,6 @@ impl Buffer {
 
                 self.rows
                     .push(Row::new_with_origin(self.width, origin, join));
-                self.row_cache.push(None);
-                self.row_block_map.push(None);
             }
 
             // clone tag here to avoid long-lived borrows of &self
@@ -2595,7 +2590,6 @@ mod tests_gui_scroll {
         let mut b = Buffer::new(width, height);
         b.scrollback_limit = scrollback;
         b.rows = (0..n).map(|_| make_row(width)).collect();
-        b.row_cache = vec![None; b.rows.len()];
 
         // Put cursor at last row to begin
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
@@ -2743,7 +2737,6 @@ mod tests_gui_resize {
         b.rows = (0..n)
             .map(|_| Row::new_with_origin(width, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
-        b.row_cache = vec![None; b.rows.len()];
 
         b.cursor.pos.y = b.rows.len().saturating_sub(1);
         b.cursor.pos.x = 0;
@@ -6026,8 +6019,7 @@ mod reflow_to_width_tests {
         let mut buf = Buffer::new(10, 5);
         // don't insert any text, but buffer has default rows
         // Clear all rows to make it truly empty
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         buf.cursor.pos.y = 0;
         buf.cursor.pos.x = 0;
 
@@ -7462,8 +7454,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn visible_rows_empty_buffer() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(buf.visible_rows(0).is_empty());
     }
 
@@ -7490,8 +7481,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn any_visible_dirty_empty() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(!buf.any_visible_dirty(0));
     }
 
@@ -7508,8 +7498,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn visible_image_placements_empty_buffer() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         let placements = buf.visible_image_placements(0);
         assert_eq!(placements, []);
     }
@@ -7526,8 +7515,7 @@ mod column_scroll_and_misc_tests {
     #[test]
     fn has_visible_images_empty() {
         let mut buf = Buffer::new(10, 5);
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         assert!(!buf.has_visible_images(0));
     }
 
@@ -7750,7 +7738,6 @@ mod resize_and_insert_tests {
         buf.rows = (0..18)
             .map(|_| Row::new_with_origin(10, RowOrigin::HardBreak, RowJoin::NewLogicalLine))
             .collect();
-        buf.row_cache = vec![None; buf.rows.len()];
         buf.cursor.pos.y = buf.rows.len() - 1;
         assert_eq!(buf.rows.len(), 18);
 
@@ -7786,8 +7773,7 @@ mod resize_and_insert_tests {
         buf.cursor.pos.x = 5;
         buf.cursor.pos.y = 3;
         // Drain all rows to make it empty.
-        buf.rows.clear();
-        buf.row_cache.clear();
+        buf.rows.clear_all();
         buf.clamp_cursor_after_resize();
         assert_eq!(buf.cursor.pos.x, 0);
         assert_eq!(buf.cursor.pos.y, 0);
@@ -9430,7 +9416,7 @@ mod scrollback_compaction_tests {
             row.ensure_live();
             row.mark_dirty();
         }
-        buf.row_cache.fill(None);
+        buf.rows.cache_mut().fill(None);
 
         let (live_vis_chars, live_vis_tags, ..) = buf.visible_as_tchars_and_tags(0);
         let (live_sb_chars, live_sb_tags, ..) = buf.scrollback_as_tchars_and_tags(0);
@@ -9634,7 +9620,7 @@ mod scrollback_compaction_tests {
         let _ = buf.visible_as_tchars_and_tags(0);
         let _ = buf.scrollback_as_tchars_and_tags(0);
         assert!(
-            buf.row_cache.iter().all(Option::is_some),
+            buf.rows.cache().iter().all(Option::is_some),
             "precondition: every row cache entry warmed"
         );
 
@@ -9652,7 +9638,7 @@ mod scrollback_compaction_tests {
         // (rebuilt for the new height on next flatten).
         let new_visible_start = buf.rows.len().saturating_sub(new_height);
         assert!(
-            buf.row_cache[new_visible_start..]
+            buf.rows.cache()[new_visible_start..]
                 .iter()
                 .all(Option::is_none),
             "new visible window rows must have their cache invalidated on height grow"
@@ -9661,7 +9647,9 @@ mod scrollback_compaction_tests {
         // Cold scrollback rows at the top must NOT have been invalidated — this
         // is the 118.7 fix (the old `0..old_height` range wrongly cleared them).
         assert!(
-            buf.row_cache[..top_scrollback].iter().all(Option::is_some),
+            buf.rows.cache()[..top_scrollback]
+                .iter()
+                .all(Option::is_some),
             "top-of-scrollback cache entries must be retained across a height grow"
         );
     }

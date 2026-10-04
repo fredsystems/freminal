@@ -1315,6 +1315,17 @@ API decided in 125.11, still Vec-backed and still front-draining, so every
 existing test and benchmark is unchanged in behaviour. Mechanical call-site
 migration; no semantic change.
 
+**Complete.** `freminal-buffer/src/buffer/row_store.rs` owns rows, cache
+entries, and block refs in lockstep; `Buffer::rows()` returns `&[Row]`;
+`sync_row_block_map_len` and the lagging-map invariant are gone (the debug
+invariant now asserts equal lengths). `enter_alternate` moves the store instead
+of cloning it. Additions to the design: `take_rows()` for reflow; a test-only
+`clear_all()`; `EvictionReport` carries only `rows` until 125.15 needs more.
+No other crate changed. Benchmarks against `before_125_rowstore` are within
+noise (plain -0.4%, compressed +1.1%, prompts +2.3%, emulator burst +0.9%;
+image showed +4-7% against the stored baseline but an interleaved HEAD/new A/B
+measured 380/378/382 ms against 374/379/377 ms, i.e. machine drift).
+
 ### 125.14 — Logical row numbers
 
 Scope: `freminal-buffer`, and the emulator call sites that pass row indices.
