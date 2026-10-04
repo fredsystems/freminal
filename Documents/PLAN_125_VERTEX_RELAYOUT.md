@@ -1,7 +1,7 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
-> **STATUS: IN PROGRESS — measurement phase activated 2026-08-26;
-> 125.1–125.9 complete, 125.10 remains.** The measurement phase is
+> **STATUS: IN PROGRESS — measurement phase complete (125.1–125.10);
+> remediation phase (125.11–125.18) activated 2026-10-04.** The measurement phase is
 > decomposed below against the post-Task-124 codebase. No remediation is
 > selected or decomposed yet. Fixed-stride relayout remains
 > one conditional branch, not the task goal, and cannot affect cursor-only
@@ -1072,8 +1072,146 @@ data-structure cost, not rendering.
   has not been run.
 - **Accept residual:** not applicable while the eviction gap is open.
 
-Stop: awaiting maintainer selection of the eviction remediation and a decision
-on running the pointer screen.
+Maintainer decisions (2026-10-04): the pointer screen is skipped and the
+pointer gate stays `INCONCLUSIVE`; remediation (b) is selected, in its full
+form below. Batched eviction (a) is rejected as a partial fix: it keeps
+eviction O(retained) per chunk, loosens the exact scrollback limit, and leaves
+the absolute-index drift bugs in place.
+
+## Remediation phase: stable-row-number `RowStore`
+
+Goal: Freminal's `sustained-output` CPU at or below WezTerm's under the matched
+protocol, with eviction cost proportional to rows evicted rather than rows
+retained, and no row index anywhere that silently drifts on eviction.
+
+The defect is structural. Rows are addressed by physical position in three
+manually synchronised `Vec`s (`rows`, `row_cache`, `row_block_map`), so a
+front eviction shifts the storage and forces every holder of a row index to be
+rewritten (`adjust_prompt_rows`) or, where nobody rewrites it, to drift: GUI
+selection (`frame_dirty.rs` documents it), DECSC saved cursor, and kitty
+`RealPlacement.origin_row`. Per-eviction scans compound it:
+`gc_unreferenced_blocks` (whole-map `HashSet`), `image_store.retain_referenced`
+(all live cells), and `merge_cache = None` (full window re-merge).
+
+### Fixed design direction
+
+1. **One `RowStore`** owns rows, flatten cache entries, and block references
+   together; the three parallel `Vec`s cease to exist as separately mutable
+   fields.
+2. **Stable logical row numbers.** Each row has a number that never changes for
+   its lifetime: physical position plus a monotonic evicted-row base. Stored
+   row references (prompts, command blocks, saved cursor, image placements,
+   selection) hold logical numbers and are never rewritten on eviction.
+3. **Eviction is O(evicted).** No whole-store shift, no whole-store scan.
+   Compressed-block reclamation and image reachability become incremental
+   counts maintained on push and evict.
+4. **The scrollback limit stays exact.** No overshoot visible to any caller,
+   snapshot, or test.
+5. **Contiguous range access is preserved** for the flatten hot path, or its
+   replacement is proven no slower by benchmark.
+6. Task 120 (windowed reflow) builds on `RowStore`; this phase does not
+   implement Task 120 but must not foreclose it.
+
+### Remediation execution model
+
+```text
+125.11 design -> 125.12 benchmarks/baseline -> 125.13 RowStore (no behaviour
+change) -> 125.14 logical row numbers -> 125.15 O(evicted) eviction ->
+125.16 merge cache across eviction -> 125.17 snapshot + GUI coordinates ->
+125.18 matched re-capture and closure
+```
+
+Strictly sequential, one active editor. Each subtask leaves `cargo test --all`
+green and runs the buffer and snapshot benchmarks named in 125.12 before and
+after.
+
+### 125.11 — `RowStore` design
+
+Scope: this document only (a design section appended to this subtask).
+
+What: settle, against the current code: the storage mechanism (moving-head
+contiguous store with half-capacity compaction versus `VecDeque` with
+two-slice handling) with its flatten implications; the logical row-number type
+and its name; which coordinates become logical (cursor and scroll offset are
+screen-relative and may stay physical; decide and justify each); how
+`BlockRowRef`, compression, decompression, alternate-screen save/restore,
+resize reflow, `erase_scrollback`, and height-shrink drains map onto it; how
+reflow renumbers or preserves logical rows and what that does to stored
+references; the incremental block live-row count and image reference count
+designs; the snapshot contract for logical numbers; and the public API
+(`rows()`, `visible_rows()`, `SavedPrimaryState`) replacements. Enumerate every
+stored row index found in the workspace and its disposition.
+
+Deliverable: a decision record precise enough that 125.13-125.17 need no
+further design choices. Any choice that changes user-visible behaviour is
+flagged for the maintainer.
+
+### 125.12 — Capacity benchmarks and baseline
+
+Scope: `freminal-buffer/benches/buffer_row_bench.rs`,
+`freminal-terminal-emulator/benches/buffer_benches.rs`,
+`.opencode/skills/freminal-bench-table/SKILL.md`.
+
+What: benchmarks that run at the real 10,000-row capacity: line-feed eviction
+steady state with (i) plain rows, (ii) compressed blocks present, (iii) OSC 133
+prompts and command blocks present, and (iv) an inline image present; plus an
+emulator-level sustained-output ingest benchmark (`seq 1 200` bursts through
+`handle_incoming_data` at capacity). Correct the stale 4,000/4,100 comments.
+Capture a named Criterion baseline `before_125_rowstore`.
+
+### 125.13 — Introduce `RowStore` with identical behaviour
+
+Scope: `freminal-buffer` only.
+
+What: move `rows`, `row_cache`, and `row_block_map` behind `RowStore` with the
+API decided in 125.11, still Vec-backed and still front-draining, so every
+existing test and benchmark is unchanged in behaviour. Mechanical call-site
+migration; no semantic change.
+
+### 125.14 — Logical row numbers
+
+Scope: `freminal-buffer`, and the emulator call sites that pass row indices.
+
+What: introduce the logical base and convert stored row references inside the
+buffer and emulator (prompts, command blocks, saved cursor, image placements)
+to logical numbers; delete the eviction-time rewrite in `adjust_prompt_rows`.
+Regression tests prove each previously drifting reference stays attached to
+its row across eviction.
+
+### 125.15 — O(evicted) eviction
+
+Scope: `freminal-buffer`.
+
+What: switch `RowStore` eviction to the 125.11 mechanism; replace
+`gc_unreferenced_blocks` and `image_store.retain_referenced` on the eviction
+path with incremental counts. Benchmarks from 125.12 must show eviction cost
+independent of retained-row count.
+
+### 125.16 — Merge cache across eviction
+
+Scope: `freminal-buffer/src/buffer/flatten.rs` and its tests.
+
+What: key the visible-window merge cache by logical row so eviction no longer
+forces a full re-merge; oracle tests at capacity rotation must still match.
+
+### 125.17 — Snapshot and GUI coordinates
+
+Scope: `freminal-terminal-emulator` snapshot, `freminal` GUI selection and fold
+state.
+
+What: export logical numbers plus base in `TerminalSnapshot`; move GUI
+selection and fold ranges to logical numbers; remove the documented selection
+drift workaround. Windows cross-check required.
+
+### 125.18 — Matched re-capture and closure
+
+Scope: this document, `assets/profiling/task125/` (one new workload).
+
+What: add a `sustained-output` variant with shell integration prompts active
+and an idle gap that engages compression; run the seven-repeat confirmation for
+`sustained-output` and the new variant against both peers; record verdicts.
+Task 125 closes only if Freminal is at or below WezTerm on `sustained-output`
+with a CI excluding a regression, and no screened workload regressed.
 
 ---
 
