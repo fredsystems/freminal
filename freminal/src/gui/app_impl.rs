@@ -1609,7 +1609,7 @@ impl freminal_windowing::App for FreminalGui {
 
             // Always propagate the updated OS preference so DECRPM ?2031
             // reflects the new dark/light state, regardless of ThemeMode.
-            for tab in win.tabs.iter() {
+            for tab in &win.tabs {
                 if let Ok(panes) = tab.pane_tree.iter_panes() {
                     for pane in panes {
                         send_or_log!(
@@ -1625,7 +1625,7 @@ impl freminal_windowing::App for FreminalGui {
                 let slug = self.config.theme.active_slug(win.os_dark_mode);
                 if let Some(theme) = freminal_common::themes::by_slug(slug) {
                     // Notify every pane in every tab so all PTY threads get the new palette.
-                    for tab in win.tabs.iter() {
+                    for tab in &win.tabs {
                         if let Ok(panes) = tab.pane_tree.iter_panes() {
                             for pane in panes {
                                 send_or_log!(

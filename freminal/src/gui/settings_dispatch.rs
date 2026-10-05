@@ -44,7 +44,7 @@ impl FreminalGui {
                 && let Some(theme) =
                     freminal_common::themes::by_slug(new_cfg.theme.active_slug(win.os_dark_mode))
             {
-                for tab in win.tabs.iter() {
+                for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
                             for pane in panes {
@@ -100,7 +100,7 @@ impl FreminalGui {
         if new_cfg.ui.auto_detect_urls != self.config.ui.auto_detect_urls {
             let enabled = new_cfg.ui.auto_detect_urls;
             for win in self.windows.values() {
-                for tab in win.tabs.iter() {
+                for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
                             for pane in panes {
@@ -134,7 +134,7 @@ impl FreminalGui {
                 new_cfg.cursor.blink,
             );
             for win in self.windows.values() {
-                for tab in win.tabs.iter() {
+                for tab in &win.tabs {
                     match tab.pane_tree.iter_panes() {
                         Ok(panes) => {
                             for pane in panes {
@@ -179,7 +179,7 @@ impl FreminalGui {
         // Apply background image to all panes in all windows.
         let new_bg_path = self.config.ui.background_image.clone();
         for win in self.windows.values() {
-            for tab in win.tabs.iter() {
+            for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
                         for pane in panes {
@@ -226,7 +226,7 @@ impl FreminalGui {
 
         // Notify all panes of theme mode update.
         for win in self.windows.values() {
-            for tab in win.tabs.iter() {
+            for tab in &win.tabs {
                 match tab.pane_tree.iter_panes() {
                     Ok(panes) => {
                         for pane in panes {
@@ -353,7 +353,7 @@ impl FreminalGui {
                 // terminal *buffer* re-themes too (its renderer reads the
                 // snapshot's theme, set on the PTY side).
                 for win in self.windows.values() {
-                    for tab in win.tabs.iter() {
+                    for tab in &win.tabs {
                         match tab.pane_tree.iter_panes() {
                             Ok(panes) => {
                                 for pane in panes {
@@ -395,7 +395,7 @@ impl FreminalGui {
                 // buffer's PTY round-trip below.
                 self.preview_theme = Some(theme);
                 for win in self.windows.values() {
-                    for tab in win.tabs.iter() {
+                    for tab in &win.tabs {
                         match tab.pane_tree.iter_panes() {
                             Ok(panes) => {
                                 for pane in panes {

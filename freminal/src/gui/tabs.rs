@@ -321,7 +321,7 @@ impl TabManager {
     }
 
     /// Return an iterator over all tabs (in display order).
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Tab> + ExactSizeIterator {
+    pub fn iter(&self) -> std::slice::Iter<'_, Tab> {
         self.tabs.iter()
     }
 
@@ -480,6 +480,15 @@ impl TabManager {
     /// Returns `TabError::CannotCloseLastTab` if only one tab remains.
     pub fn close_active_tab(&mut self) -> Result<Tab, TabError> {
         self.close_tab(self.active)
+    }
+}
+
+impl<'a> IntoIterator for &'a TabManager {
+    type Item = &'a Tab;
+    type IntoIter = std::slice::Iter<'a, Tab>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 

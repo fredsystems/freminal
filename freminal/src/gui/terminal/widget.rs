@@ -5617,6 +5617,7 @@ mod live_profiling_tests {
         let rs = render_state.lock().unwrap();
         assert_eq!(rs.live_profile.pending(), None);
         assert_eq!(rs.live_profile.observation_count(), 0);
+        drop(rs);
     }
 
     /// End-to-end token lifecycle through the SAME `Arc<Mutex<RenderState>>`
@@ -5660,6 +5661,7 @@ mod live_profiling_tests {
         assert_eq!(rs.live_profile.class_counts().bounded, 1);
         assert_eq!(rs.live_profile.row_bucket_counts().five_to_eight, 1);
         assert_eq!(rs.live_profile.upload_totals().total(), 0);
+        drop(rs);
     }
 
     /// A pane whose paint callback never runs this frame (the
@@ -5807,6 +5809,7 @@ mod live_profiling_tests {
         assert_eq!(rs.live_profile.class_upload_totals().reuse, 0);
         assert_eq!(rs.live_profile.class_upload_totals().bounded, 0);
         assert_eq!(rs.live_profile.class_upload_totals().cursor_only, 0);
+        drop(rs);
     }
 }
 
