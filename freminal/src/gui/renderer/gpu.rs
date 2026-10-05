@@ -21,6 +21,7 @@ use tracing::error;
 use super::super::atlas::GlyphAtlas;
 use super::errors::{BufferAllocError, GpuInitError, ShaderCompileError, TextureUploadError};
 use super::gl_facade::Gl;
+use super::retire::GlRetireQueue;
 use super::shaders::{
     BG_IMG_FRAG_SRC, BG_IMG_VERT_SRC, BG_INST_FRAG_SRC, BG_INST_VERT_SRC, DECO_FRAG_SRC,
     DECO_VERT_SRC, FG_FRAG_SRC, FG_VERT_SRC, IMG_FRAG_SRC, IMG_VERT_SRC, POST_PASSTHROUGH_FRAG_SRC,
@@ -1587,7 +1588,11 @@ impl TerminalRenderer {
 
     /// Free all GPU resources.
     ///
-    /// Should be called when the widget is destroyed.
+    /// Requires the owning window's GL context to be current. Production code
+    /// does not call this directly: a pane's `RenderState` retires its
+    /// renderer into the window's [`GlRetireQueue`] when dropped, and the
+    /// queue's `drain` (top of `App::update`, or window teardown) calls this
+    /// with the context current. See [`super::retire`]. Idempotent.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
         if !self.initialized {
             return;
@@ -2250,6 +2255,17 @@ pub struct WindowPostRenderer {
     /// `FreminalGui` directly) and read once per frame on the main thread.
     /// Cleared by the reader after consumption.
     pub last_error: Option<String>,
+
+    /// Retired pane renderers awaiting GL destruction (Task 125.C2).
+    ///
+    /// Every pane of this window holds a clone of this queue (via its
+    /// `RenderState`) and pushes its [`TerminalRenderer`] here when it is
+    /// dropped. `WindowPostRenderer` is the carrier because it is the one
+    /// per-window, GL-context-scoped object every pane already shares; the
+    /// queue itself is its own leaf-locked handle ([`GlRetireQueue`]), so a
+    /// push from `Drop` never touches this struct's own mutex. See
+    /// [`super::retire`] for the full design.
+    retired: GlRetireQueue,
 }
 
 impl Default for WindowPostRenderer {
@@ -2263,7 +2279,7 @@ impl WindowPostRenderer {
     ///
     /// GPU resources are created lazily on the first call to [`Self::init`].
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             initialized: false,
             program: None,
@@ -2278,7 +2294,27 @@ impl WindowPostRenderer {
             time: 0.0,
             pending_shader: None,
             last_error: None,
+            retired: GlRetireQueue::new(),
         }
+    }
+
+    /// A handle to this window's retired-renderer queue.
+    ///
+    /// Panes clone this at construction so their `RenderState` can retire its
+    /// [`TerminalRenderer`] on drop without needing this renderer's lock.
+    #[must_use]
+    pub fn retire_queue(&self) -> GlRetireQueue {
+        self.retired.clone()
+    }
+
+    /// Destroy every pane renderer retired into this window's queue.
+    ///
+    /// Call with this window's GL context current (e.g. at the top of
+    /// `App::update`). Returns how many renderers were destroyed; `0` (and no
+    /// GL calls) when nothing was retired, which is the steady state.
+    #[must_use]
+    pub fn drain_retired(&self, gl: &Gl<'_>) -> usize {
+        self.retired.drain(gl)
     }
 
     /// Return `true` if GPU resources have been created.
@@ -2569,11 +2605,13 @@ impl WindowPostRenderer {
         }
     }
 
-    /// Free all GPU resources.
+    /// Free all GPU resources, including every pane renderer still waiting in
+    /// this window's retire queue.
     ///
-    /// Should be called when the application exits or when the GL context is
-    /// destroyed.
+    /// Called from the window-close path (`WindowGlTeardown::run`), with the
+    /// window's GL context current.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
+        self.retired.drain(gl);
         unsafe {
             if let Some(p) = self.program.take() {
                 gl.delete_program(p);
@@ -2594,6 +2632,9 @@ impl WindowPostRenderer {
         self.initialized = false;
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "gl-pixel"))]
+mod destroy_gl_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

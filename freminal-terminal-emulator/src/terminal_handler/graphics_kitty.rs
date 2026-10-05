@@ -773,13 +773,6 @@ impl TerminalHandler {
         display_cols: usize,
         display_rows: usize,
     ) {
-        // Save cursor position if `C=1` (no cursor movement).
-        let saved_cursor = if cmd.control.no_cursor_movement {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         let cursor = self.buffer.cursor().pos;
         tracing::debug!(
             "Kitty graphics: a=p placing image id={id} at cursor ({},{}) \
@@ -822,9 +815,11 @@ impl TerminalHandler {
             subcell_offset,
         );
 
-        // Restore cursor if `C=1`.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        // `C=1` (no cursor movement): put the cursor back on the image origin,
+        // located by row number so scrollback eviction during placement cannot
+        // displace it (Task 125.C7).
+        if cmd.control.no_cursor_movement {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
@@ -1539,17 +1534,6 @@ impl TerminalHandler {
         let source_crop = resolve_source_crop(control, img_width_px, img_height_px);
         let subcell_offset = self.resolve_subcell_offset(control);
 
-        // Save cursor position if `C=1` (no cursor movement) — mirrors
-        // `stamp_kitty_put`'s handling of the same flag on `a=p` (Task
-        // 100.16). Without this, `a=T`/Put ignored `C=1` entirely:
-        // `place_image` (Task 100.15) now always moves the cursor below
-        // the image, so `C=1` must explicitly restore it here.
-        let saved_cursor = if control.no_cursor_movement {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         // Kitty spec REPLACE semantics (Task 100.18): a second `a=T`
         // with the SAME non-zero `p=` replaces that one placement;
         // `p=0`/unspecified means multiple, independently-coexisting
@@ -1578,9 +1562,13 @@ impl TerminalHandler {
             subcell_offset,
         );
 
-        // Restore cursor if `C=1`.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        // `C=1` (no cursor movement) — mirrors `stamp_kitty_put`'s handling of
+        // the same flag on `a=p` (Task 100.16). `place_image` (Task 100.15)
+        // always moves the cursor below the image, so `C=1` must explicitly
+        // put it back on the image origin, located by row number so scrollback
+        // eviction during placement cannot displace it (Task 125.C7).
+        if control.no_cursor_movement {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
 
         // Record this real (cell-stamped) placement's origin so future
@@ -2522,18 +2510,24 @@ impl TerminalHandler {
     }
 
     /// `d=c`/`d=C` — delete placements intersecting the cursor cell.
+    ///
+    /// Kitty graphics spec, "Deleting images": `c` or `C` is "Delete all
+    /// placements that intersect with the current cursor position." kitty's
+    /// `graphics.c` does the same with a point filter on the cursor cell
+    /// (`d.x_offset = c->x + 1; d.y_offset = c->y + 1;`), so only placements
+    /// that cover that one cell go, not everything on its row. Only the
+    /// placement under the cursor is removed, so a second placement of the
+    /// same image elsewhere survives.
     fn handle_kitty_delete_at_cursor(&mut self, free_data: bool) {
-        let cursor_row = self.buffer.cursor().pos.y;
-        let ids = self.image_ids_in_row(cursor_row);
+        // `cursor().pos` indexes `Buffer::rows()` directly, as the cell
+        // lookups below do.
+        let cursor = self.buffer.cursor().pos;
         tracing::debug!(
-            "Kitty graphics: deleting placements at cursor row {cursor_row} (free_data={free_data})"
+            "Kitty graphics: deleting placements at cursor cell ({},{}) (free_data={free_data})",
+            cursor.y,
+            cursor.x,
         );
-        self.buffer.clear_image_placements_at_cursor();
-        if free_data {
-            for id in ids {
-                self.free_image_if_unreferenced(id);
-            }
-        }
+        self.delete_placements_at_cell(cursor.y, cursor.x, free_data);
     }
 
     /// `d=f`/`d=F` — delete animation frames for the `i=`/`I=` image.
@@ -2558,40 +2552,85 @@ impl TerminalHandler {
         }
     }
 
-    /// `d=p`/`d=P` — delete placements intersecting cell `x=`,`y=`.
-    fn handle_kitty_delete_at_cell(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        // Per Kitty spec, x/y default to cursor position if not specified.
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+    /// Resolve the `x=` key of a delete command to a 0-based column.
+    ///
+    /// Kitty graphics spec, "Deleting images": "The values of the x and y keys
+    /// are the same as cursor positions (i.e. x=1, y=1 is the top left cell)."
+    /// They are therefore 1-based coordinates of the SCREEN. A key of `0` names
+    /// no column (kitty compares `start_column <= x - 1`, which `0` never
+    /// satisfies), so it returns `None`. An absent key falls back to the
+    /// cursor's column (freminal behaviour kept from before Task 125.C8; the
+    /// spec is silent).
+    fn resolve_delete_column(&self, cmd: &KittyGraphicsCommand) -> Option<usize> {
+        match cmd.control.src_x {
+            Some(x) => usize::value_from(x).ok()?.checked_sub(1),
+            None => Some(self.buffer.cursor_screen_pos().x),
+        }
+    }
+
+    /// Resolve the `y=` key of a delete command to an index of
+    /// `Buffer::rows()`.
+    ///
+    /// `y` is a 1-based SCREEN row (see [`Self::resolve_delete_column`]), so it
+    /// is mapped through the visible window rather than used as a buffer index
+    /// (which is only the same thing while there is no scrollback). `0` and a
+    /// row below the screen name no row and return `None`; an absent key falls
+    /// back to the cursor's row.
+    fn resolve_delete_row(&self, cmd: &KittyGraphicsCommand) -> Option<usize> {
+        let screen_row = match cmd.control.src_y {
+            Some(y) => usize::value_from(y).ok()?.checked_sub(1)?,
+            None => self.buffer.cursor_screen_pos().y,
+        };
+        self.buffer.screen_row_index(screen_row)
+    }
+
+    /// Resolve the `x=`/`y=` keys of `d=p`/`d=P`/`d=q`/`d=Q` to a cell of the
+    /// buffer, as `(row_index, col)` where `row_index` indexes
+    /// `Buffer::rows()`. `None` when either coordinate names no cell.
+    fn resolve_delete_cell(&self, cmd: &KittyGraphicsCommand) -> Option<(usize, usize)> {
+        Some((
+            self.resolve_delete_row(cmd)?,
+            self.resolve_delete_column(cmd)?,
+        ))
+    }
+
+    /// Delete the placement covering buffer cell `(row, col)`, freeing the
+    /// image data afterwards when `free_data` and nothing else references it.
+    fn delete_placements_at_cell(&mut self, row: usize, col: usize, free_data: bool) {
         let id = self.image_id_at_cell(row, col);
-        tracing::debug!(
-            "Kitty graphics: deleting placements at cell ({row},{col}) (free_data={free_data})"
-        );
         self.buffer.clear_image_placements_at_cell(row, col);
         if free_data && let Some(id) = id {
             self.free_image_if_unreferenced(id);
         }
     }
 
+    /// `d=p`/`d=P` — delete placements intersecting cell `x=`,`y=`.
+    fn handle_kitty_delete_at_cell(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
+        let Some((row, col)) = self.resolve_delete_cell(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=p/d=P cell (x={:?}, y={:?}) is not on screen; ignoring",
+                cmd.control.src_x,
+                cmd.control.src_y,
+            );
+            return;
+        };
+        tracing::debug!(
+            "Kitty graphics: deleting placements at cell ({row},{col}) (free_data={free_data})"
+        );
+        self.delete_placements_at_cell(row, col, free_data);
+    }
+
     /// `d=q`/`d=Q` — delete placements intersecting cell `x=`,`y=` with
     /// z-index `z=`.
     fn handle_kitty_delete_at_cell_z_index(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+        let Some((row, col)) = self.resolve_delete_cell(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=q/d=Q cell (x={:?}, y={:?}) is not on screen; ignoring",
+                cmd.control.src_x,
+                cmd.control.src_y,
+            );
+            return;
+        };
         let z = cmd.control.z_index.unwrap_or(0);
         tracing::debug!(
             "Kitty graphics: deleting placements at cell ({row},{col}) z={z} (free_data={free_data})"
@@ -2630,12 +2669,20 @@ impl TerminalHandler {
     }
 
     /// `d=x`/`d=X` — delete placements intersecting column `x=`.
+    ///
+    /// Kitty graphics spec: "Delete all placements that intersect the
+    /// specified column, specified using the x key." `x=` is 1-based (see
+    /// [`Self::resolve_delete_column`]); kitty's `x_filter_func` tests
+    /// `start_column <= x - 1 < start_column + effective_num_cols` on every
+    /// placement, with no row restriction.
     fn handle_kitty_delete_in_column(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let col = cmd
-            .control
-            .src_x
-            .map_or(cursor.x, |v| usize::value_from(v).unwrap_or(0));
+        let Some(col) = self.resolve_delete_column(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=x/d=X column x={:?} names no column; ignoring",
+                cmd.control.src_x,
+            );
+            return;
+        };
         let ids = self.image_ids_in_column(col);
         tracing::debug!(
             "Kitty graphics: deleting placements in column {col} (free_data={free_data})"
@@ -2649,12 +2696,19 @@ impl TerminalHandler {
     }
 
     /// `d=y`/`d=Y` — delete placements intersecting row `y=`.
+    ///
+    /// Kitty graphics spec: "Delete all placements that intersect the
+    /// specified row, specified using the y key." `y=` is a 1-based screen row
+    /// (see [`Self::resolve_delete_row`]); kitty's `y_filter_func` tests
+    /// `start_row <= y - 1 < start_row + effective_num_rows`.
     fn handle_kitty_delete_in_row(&mut self, cmd: &KittyGraphicsCommand, free_data: bool) {
-        let cursor = self.buffer.cursor().pos;
-        let row = cmd
-            .control
-            .src_y
-            .map_or(cursor.y, |v| usize::value_from(v).unwrap_or(0));
+        let Some(row) = self.resolve_delete_row(cmd) else {
+            tracing::debug!(
+                "Kitty graphics: d=y/d=Y row y={:?} is not on screen; ignoring",
+                cmd.control.src_y,
+            );
+            return;
+        };
         let ids = self.image_ids_in_row(row);
         tracing::debug!("Kitty graphics: deleting placements in row {row} (free_data={free_data})");
         self.buffer.clear_image_placements_in_row(row);
@@ -2690,7 +2744,7 @@ impl TerminalHandler {
     /// delete targets.
     fn free_image_if_unreferenced(&mut self, id: u64) {
         let still_referenced = self.buffer.rows().iter().any(|row| {
-            row.cells()
+            row.cells_for_image_scan()
                 .iter()
                 .any(|c| c.image_placement().is_some_and(|p| p.image_id == id))
         });
@@ -2710,7 +2764,7 @@ impl TerminalHandler {
         self.buffer
             .rows()
             .get(row)?
-            .cells()
+            .cells_for_image_scan()
             .get(col)?
             .image_placement()
             .map(|p| p.image_id)
@@ -2723,7 +2777,7 @@ impl TerminalHandler {
             return Vec::new();
         };
         let mut ids = Vec::new();
-        for cell in row.cells() {
+        for cell in row.cells_for_image_scan() {
             if let Some(p) = cell.image_placement()
                 && !ids.contains(&p.image_id)
             {
@@ -2738,7 +2792,7 @@ impl TerminalHandler {
     fn image_ids_in_column(&self, col: usize) -> Vec<u64> {
         let mut ids = Vec::new();
         for row in self.buffer.rows() {
-            if let Some(cell) = row.cells().get(col)
+            if let Some(cell) = row.cells_for_image_scan().get(col)
                 && let Some(p) = cell.image_placement()
                 && !ids.contains(&p.image_id)
             {
@@ -6670,6 +6724,88 @@ mod tests {
         );
     }
 
+    /// Regression (Task 125.C7): at scrollback capacity, placing an image
+    /// evicts rows DURING the placement. `C=1` must still leave the cursor on
+    /// the image's origin cell, not on whatever row now holds the stale index.
+    #[test]
+    fn kitty_put_c1_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.handle_kitty_graphics(kitty_rgba_2x2_cmd(KittyAction::Transmit));
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        handler.handle_data(b"ab");
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+        let x_before = handler.buffer().cursor().pos.x;
+
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Put),
+                image_id: Some(42),
+                display_cols: Some(2),
+                display_rows: Some(2),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        });
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        assert_eq!(pos.x, x_before, "C=1 leaves the column alone");
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
+    }
+
+    /// Same regression for `a=T` (transmit-and-display) with `C=1`.
+    #[test]
+    fn kitty_transmit_and_display_c1_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.display_cols = Some(2);
+        cmd.control.display_rows = Some(2);
+        cmd.control.no_cursor_movement = true;
+        handler.handle_kitty_graphics(cmd);
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
+    }
+
     #[test]
     fn kitty_put_nonexistent_image_sends_error() {
         use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
@@ -7177,13 +7313,342 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::AtCell),
-                src_x: Some(0),
-                src_y: Some(0),
+                src_x: Some(1),
+                src_y: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
         };
         handler.handle_kitty_graphics(delete_cmd);
+    }
+
+    /// A 80x4 handler with scrollback, scrolled so the live window starts well
+    /// below buffer row 0 (Task 125.C8): screen row `n` is buffer row `n + start`.
+    fn kitty_handler_with_scrollback() -> (TerminalHandler, crossbeam_channel::Receiver<PtyWrite>) {
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(20);
+        let (tx, rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        for _ in 0..10 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        assert!(
+            handler.buffer().rows().len() > 4 + 3,
+            "setup: the live window must start below buffer row 3"
+        );
+        (handler, rx)
+    }
+
+    /// Display a 1x1-cell image (id 42, `z`) with its top-left at screen
+    /// cell `(col, row)`, with `C=1` so the cursor stays there.
+    fn place_kitty_image_at_screen(handler: &mut TerminalHandler, col: usize, row: usize, z: i32) {
+        place_kitty_image_sized(handler, col, row, 1, z);
+    }
+
+    /// As [`place_kitty_image_at_screen`], but `cols` cells wide (one row).
+    fn place_kitty_image_sized(
+        handler: &mut TerminalHandler,
+        col: usize,
+        row: usize,
+        cols: u32,
+        z: i32,
+    ) {
+        use freminal_common::buffer_states::kitty_graphics::KittyAction;
+
+        handler.buffer_mut().set_cursor_pos(Some(col), Some(row));
+        let mut cmd = kitty_rgba_2x2_cmd(KittyAction::TransmitAndDisplay);
+        cmd.control.display_cols = Some(cols);
+        cmd.control.display_rows = Some(1);
+        cmd.control.no_cursor_movement = true;
+        cmd.control.z_index = Some(z);
+        handler.handle_kitty_graphics(cmd);
+        assert!(handler.buffer().has_any_image_cell(), "setup: image placed");
+    }
+
+    fn kitty_delete_cmd(
+        target: freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget,
+        x: Option<u32>,
+        y: Option<u32>,
+        z: Option<i32>,
+        free_data: bool,
+    ) -> KittyGraphicsCommand {
+        use freminal_common::buffer_states::kitty_graphics::{KittyAction, KittyControlData};
+
+        KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::Delete),
+                delete_target: Some(target),
+                src_x: x,
+                src_y: y,
+                z_index: z,
+                delete_free_data: free_data,
+                ..KittyControlData::default()
+            },
+            payload: Vec::new(),
+        }
+    }
+
+    /// Kitty spec, "Deleting images": "The values of the x and y keys are the
+    /// same as cursor positions (i.e. x=1, y=1 is the top left cell)." With
+    /// scrollback, screen row `y-1` is not buffer row `y-1`.
+    #[test]
+    fn kitty_delete_at_cell_maps_one_based_screen_coordinates_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // Screen cell (col 3, row 2) -> 1-based x=4, y=3.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // The old physical-row reading would have matched buffer row 3 (or
+        // 2); neither is the image. Neighbouring cells must not match.
+        for (x, y) in [(3, 3), (4, 2), (4, 4), (3, 2), (1, 1)] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, Some(x), Some(y), None, false));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "x={x},y={y} is not the image's cell"
+            );
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, Some(4), Some(3), None, false));
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "x=4,y=3 is screen cell (3,2), where the image is"
+        );
+        assert!(
+            handler.buffer().image_store().get(42).is_some(),
+            "lowercase d=p keeps the image data"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_uppercase_frees_data_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, Some(4), Some(3), None, true));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_zero_or_off_screen_coordinates_match_nothing() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 0, 0, 0);
+
+        // x=0 / y=0 name no cell (1-based); y=5 is below the 4-row screen.
+        for (x, y) in [(0, 1), (1, 0), (1, 5), (0, 0)] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, Some(x), Some(y), None, false));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "x={x},y={y} must delete nothing"
+            );
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, Some(1), Some(1), None, false));
+        assert!(
+            !handler.buffer().has_any_image_cell(),
+            "x=1,y=1 is top-left"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_defaults_to_the_cursor_screen_cell_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCell;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // C=1 leaves the cursor on the image's cell.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCell, None, None, None, false));
+
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    #[test]
+    fn kitty_delete_at_cell_z_index_maps_screen_coordinates_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCellZIndex;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 5);
+
+        // Right cell, wrong z: nothing. Wrong cell, right z: nothing.
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(4),
+            Some(3),
+            Some(0),
+            false,
+        ));
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(3),
+            Some(2),
+            Some(5),
+            false,
+        ));
+        assert!(handler.buffer().has_any_image_cell());
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(
+            AtCellZIndex,
+            Some(4),
+            Some(3),
+            Some(5),
+            false,
+        ));
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    /// Kitty graphics spec, "Deleting images": `x` or `X` is "Delete all
+    /// placements that intersect the specified column, specified using the x
+    /// key", and x is 1-based like a cursor position.
+    #[test]
+    fn kitty_delete_in_column_uses_a_one_based_column() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InColumn;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // Column index 3 is x=4; the neighbours and the invalid x=0 miss.
+        for x in [3, 5, 1, 0] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(InColumn, Some(x), None, None, false));
+            assert!(handler.buffer().has_any_image_cell(), "x={x} misses");
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(InColumn, Some(4), None, None, false));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_in_column_uppercase_frees_data() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InColumn;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(InColumn, Some(4), None, None, true));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    /// Kitty graphics spec: `y` or `Y` is "Delete all placements that
+    /// intersect the specified row, specified using the y key". y is a
+    /// 1-based SCREEN row, so with scrollback it is not a buffer index.
+    #[test]
+    fn kitty_delete_in_row_maps_a_one_based_screen_row_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        // Screen row 2 is y=3. Neighbouring rows, y=0 and a row below the
+        // 4-row screen all miss.
+        for y in [2, 4, 1, 0, 5] {
+            handler.handle_kitty_graphics(kitty_delete_cmd(InRow, None, Some(y), None, false));
+            assert!(handler.buffer().has_any_image_cell(), "y={y} misses");
+        }
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(InRow, None, Some(3), None, false));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_in_row_uppercase_frees_data_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(InRow, None, Some(3), None, true));
+
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_none());
+    }
+
+    #[test]
+    fn kitty_delete_in_row_defaults_to_the_cursor_screen_row_with_scrollback() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::InRow;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // C=1 leaves the cursor on screen row 2.
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0);
+
+        handler.handle_kitty_graphics(kitty_delete_cmd(InRow, None, None, None, false));
+
+        assert!(!handler.buffer().has_any_image_cell());
+    }
+
+    /// Kitty graphics spec: `c` or `C` is "Delete all placements that
+    /// intersect with the current cursor position" -- the cursor CELL, not
+    /// its row. kitty's `graphics.c` uses a point filter on
+    /// `(c->x + 1, c->y + 1)`.
+    #[test]
+    fn kitty_delete_at_cursor_clears_only_a_placement_covering_the_cursor_cell() {
+        use freminal_common::buffer_states::kitty_graphics::KittyDeleteTarget::AtCursor;
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        // A 3-cell-wide image at screen columns 2..=4 of row 2.
+        place_kitty_image_sized(&mut handler, 2, 2, 3, 0);
+
+        // Same row, but outside the image: nothing intersects the cursor cell.
+        for (col, row) in [(1, 2), (5, 2), (3, 1), (3, 3)] {
+            handler.buffer_mut().set_cursor_pos(Some(col), Some(row));
+            handler.handle_kitty_graphics(kitty_delete_cmd(AtCursor, None, None, None, false));
+            assert!(
+                handler.buffer().has_any_image_cell(),
+                "cursor at ({col},{row}) is not on the image"
+            );
+        }
+
+        // A cell in the middle of the image deletes the whole placement.
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(2));
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCursor, None, None, None, false));
+        assert!(!handler.buffer().has_any_image_cell());
+        assert!(handler.buffer().image_store().get(42).is_some());
+    }
+
+    #[test]
+    fn kitty_delete_at_cursor_ignores_other_images_on_the_cursor_row() {
+        use freminal_common::buffer_states::kitty_graphics::{
+            KittyAction, KittyControlData, KittyDeleteTarget::AtCursor, KittyFormat,
+        };
+
+        let (mut handler, _rx) = kitty_handler_with_scrollback();
+        place_kitty_image_at_screen(&mut handler, 3, 2, 0); // image 42
+        // A second image (id 99) on the same screen row, away from the cursor.
+        handler.buffer_mut().set_cursor_pos(Some(8), Some(2));
+        handler.handle_kitty_graphics(KittyGraphicsCommand {
+            control: KittyControlData {
+                action: Some(KittyAction::TransmitAndDisplay),
+                format: Some(KittyFormat::Rgba),
+                src_width: Some(2),
+                src_height: Some(2),
+                image_id: Some(99),
+                display_cols: Some(1),
+                display_rows: Some(1),
+                no_cursor_movement: true,
+                ..KittyControlData::default()
+            },
+            payload: [0, 0, 0, 255].repeat(4),
+        });
+
+        handler.buffer_mut().set_cursor_pos(Some(3), Some(2));
+        handler.handle_kitty_graphics(kitty_delete_cmd(AtCursor, None, None, None, true));
+
+        assert!(handler.buffer().image_store().get(42).is_none());
+        assert!(
+            handler.buffer().image_store().get(99).is_some(),
+            "image 99 does not cover the cursor cell"
+        );
+        assert!(handler.buffer().has_any_image_cell());
     }
 
     #[test]
@@ -7218,13 +7683,14 @@ mod tests {
         handler.handle_kitty_graphics(cmd_b);
         let _ = rx.try_recv();
 
-        // Delete at cell (0,0) with z=5 — should only clear image B.
+        // Delete at cell x=1,y=1 (1-based: the top-left cell, where both
+        // images sit) with z=5 — should only clear image B.
         let delete_cmd = KittyGraphicsCommand {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::AtCellZIndex),
-                src_x: Some(0),
-                src_y: Some(0),
+                src_x: Some(1),
+                src_y: Some(1),
                 z_index: Some(5),
                 delete_free_data: true,
                 ..KittyControlData::default()
@@ -7258,7 +7724,7 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::InColumn),
-                src_x: Some(0),
+                src_x: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),
@@ -7281,7 +7747,7 @@ mod tests {
             control: KittyControlData {
                 action: Some(KittyAction::Delete),
                 delete_target: Some(KittyDeleteTarget::InRow),
-                src_y: Some(0),
+                src_y: Some(1),
                 ..KittyControlData::default()
             },
             payload: Vec::new(),

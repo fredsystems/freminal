@@ -12,7 +12,7 @@ use super::{
     PaneBorderDrag,
     chrome_damage::{ChromeTabSnapshot, DismissiblePresence},
     published_frame_state::PublishedFrameState,
-    renderer::WindowPostRenderer,
+    renderer::{WindowGlTeardown, WindowPostRenderer, gl_facade::Gl},
     tabs::TabId,
     tabs::TabManager,
     terminal::FreminalTerminalWidget,
@@ -616,6 +616,36 @@ pub(super) struct PerWindowState {
     /// classes (a genuinely-unchanged redraw costs no CPU rebuild; a `Full`
     /// frame rebuilds the visible vertex data).
     pub(super) frame_stats: FrameStats,
+}
+
+impl PerWindowState {
+    /// Destroy every pane renderer retired since the last frame (Task
+    /// 125.C2). Returns how many were destroyed.
+    ///
+    /// Must be called with this window's GL context current -- i.e. from
+    /// `App::update`, where `gl` is that context. A no-op (no GL calls, one
+    /// uncontended lock) in the steady state, when no pane has closed.
+    pub(super) fn drain_retired_gl(&self, gl: &glow::Context) -> usize {
+        self.window_post
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain_retired(&Gl::real(gl))
+    }
+
+    /// Consume this window's state, dropping its panes (which retire their
+    /// renderers into the window's queue), and hand back the handles needed
+    /// to destroy the window's remaining GL state later, once its context is
+    /// current again (`App::on_window_destroying`).
+    pub(super) fn into_gl_teardown(self) -> WindowGlTeardown {
+        let teardown = WindowGlTeardown::new(
+            Arc::clone(&self.window_post),
+            Arc::clone(&self.toast_render_state),
+        );
+        // Drop the panes now: every `RenderState` retires its renderer into
+        // the queue `teardown` will drain.
+        drop(self);
+        teardown
+    }
 }
 
 /// Diagnostic per-frame render attribution (see [`PerWindowState::frame_stats`]).

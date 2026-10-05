@@ -38,8 +38,8 @@ use super::{
         atlas::GlyphAtlas,
         font_manager::FontManager,
         renderer::{
-            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, ImageDrawEntry, MatchHighlight,
-            TerminalRenderer, WindowPostRenderer, build_background_instances,
+            BackgroundFrame, CURSOR_QUAD_FLOATS, FgRenderOptions, GlRetireQueue, ImageDrawEntry,
+            MatchHighlight, TerminalRenderer, WindowPostRenderer, build_background_instances,
             build_cursor_verts_only, build_foreground_instances, build_image_verts, gl_facade::Gl,
         },
         search::{
@@ -1363,6 +1363,27 @@ pub struct RenderState {
     /// from a default build.
     #[cfg(feature = "frame-profiling")]
     pub(super) live_profile: LiveRenderProfile,
+    /// The window's retired-renderer queue (Task 125.C2), cloned from
+    /// `window_post` at construction.
+    ///
+    /// `Drop` has no GL context, so [`Drop for RenderState`](#impl-Drop-for-RenderState)
+    /// moves `renderer` into this queue instead of destroying it; the window
+    /// drains the queue where its context is current. See
+    /// `gui::renderer::retire` for the design and invariants.
+    retire_queue: GlRetireQueue,
+}
+
+/// Retire this pane's GL objects when the pane's render state is discarded.
+///
+/// Runs when the **last** `Arc<Mutex<RenderState>>` clone is dropped. The
+/// pane's paint callback captures a clone, so a renderer an in-flight paint
+/// callback is still drawing through is never retired early; it is retired
+/// only after the frame that used it has been painted and its callbacks
+/// released. Touches no GL (see [`GlRetireQueue::retire`]).
+impl Drop for RenderState {
+    fn drop(&mut self) {
+        self.retire_queue.retire(std::mem::take(&mut self.renderer));
+    }
 }
 
 impl RenderState {
@@ -1394,6 +1415,13 @@ impl RenderState {
 /// All panes in the same session share one instance.
 #[must_use]
 pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mutex<RenderState>> {
+    // Take the window's retire queue handle once, here, so `Drop` never has to
+    // lock `window_post` (which could be held, or the pane dropped from inside
+    // a lock scope).
+    let retire_queue = window_post
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire_queue();
     Arc::new(Mutex::new(RenderState {
         renderer: TerminalRenderer::new(),
         atlas: GlyphAtlas::default(),
@@ -1413,6 +1441,7 @@ pub fn new_render_state(window_post: Arc<Mutex<WindowPostRenderer>>) -> Arc<Mute
         pending_bg_image: None,
         #[cfg(feature = "frame-profiling")]
         live_profile: LiveRenderProfile::new(),
+        retire_queue,
     }))
 }
 
@@ -5516,6 +5545,7 @@ mod subtask_1_7_tests {
             pending_bg_image: None,
             #[cfg(feature = "frame-profiling")]
             live_profile: LiveRenderProfile::new(),
+            retire_queue: GlRetireQueue::new(),
         };
         assert!(rs.bg_instances.is_empty(), "bg_instances should be empty");
         assert!(rs.deco_verts.is_empty(), "deco_verts should be empty");

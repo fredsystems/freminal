@@ -158,6 +158,11 @@ fn rows_keep_their_number_while_eviction_shifts_their_index() {
 }
 
 // ── DECSC saved cursor ───────────────────────────────────────────────────
+//
+// Task 125.C6: DECSC saves a *screen* position (xterm `CursorSave` stores
+// `screen->cur_row`; the VT510 manual defines it as "cursor position" on a
+// terminal without scrollback), so a restore never depends on which content
+// currently occupies the saved row, nor on eviction, scrolling or reflow.
 
 /// The first row of the visible (bottom-anchored) window.
 fn window_top(buf: &Buffer) -> usize {
@@ -165,84 +170,45 @@ fn window_top(buf: &Buffer) -> usize {
 }
 
 #[test]
-fn saved_cursor_inside_the_window_stays_attached_to_its_row_across_eviction() {
-    let mut buf = small_buffer();
-    // Fill to capacity so every further line evicts a row.
-    for i in 0..12 {
-        line(&mut buf, &format!("pad {i}"));
-    }
-    let base_before = buf.row_base();
-    buf.insert_text(&text("marker"));
-    buf.save_cursor();
-    let saved_index = buf.cursor().pos.y;
-    assert_eq!(row_text(&buf, saved_index), "marker");
-
-    // One more line evicts one row from the front: the marker's index drops
-    // by one, but it is still inside the 3-row window.
-    buf.handle_lf();
-    buf.handle_cr();
-    assert!(buf.row_base() > base_before, "setup must evict a row");
-    let marker_index = buf
-        .rows()
-        .iter()
-        .position(|r| {
-            r.cells()
-                .iter()
-                .map(Cell::into_utf8)
-                .collect::<String>()
-                .starts_with("marker")
-        })
-        .expect("marker row must survive the eviction");
-    assert_ne!(marker_index, saved_index, "setup must shift the marker");
-    assert!(marker_index >= window_top(&buf), "marker is in the window");
-
-    buf.restore_cursor();
-
-    assert_eq!(
-        buf.cursor().pos.y,
-        marker_index,
-        "DECRC must land on the row that held the cursor at DECSC, not on \
-         whatever now occupies the old index"
-    );
-    assert_eq!(row_text(&buf, buf.cursor().pos.y), "marker");
-}
-
-#[test]
-fn saved_cursor_scrolled_above_the_window_restores_to_the_window_top() {
+fn decsc_restores_the_same_screen_position_after_output_scrolls_the_screen() {
     let mut buf = Buffer::new(20, 3).with_scrollback_limit(50);
-    buf.insert_text(&text("marker"));
+    buf.set_cursor_pos(Some(4), Some(1));
     buf.save_cursor();
-    buf.handle_lf();
-    buf.handle_cr();
+    let saved_screen = buf.cursor_screen_pos();
+    assert_eq!((saved_screen.x, saved_screen.y), (4, 1));
+
+    // Scroll the screen several times: the saved row's content is now in
+    // scrollback, retained and not evicted.
     for i in 0..10 {
         line(&mut buf, &format!("out {i}"));
     }
     assert_eq!(buf.row_base(), RowNumber::ZERO, "nothing is evicted");
-    assert_eq!(
-        text_of_number(&buf, RowNumber::ZERO).as_deref(),
-        Some("marker"),
-        "the saved row is still retained, in scrollback"
-    );
+    assert!(window_top(&buf) > 1, "setup must scroll past the saved row");
 
     buf.restore_cursor();
 
+    let restored = buf.cursor_screen_pos();
     assert_eq!(
-        buf.cursor().pos.y,
-        window_top(&buf),
-        "the cursor must not be restored into off-screen scrollback"
+        (restored.x, restored.y),
+        (4, 1),
+        "DECRC must return to the screen position, not follow the old content \
+         into scrollback"
     );
-    assert!(buf.cursor().pos.y > 0);
+    assert_eq!(buf.cursor().pos.y, window_top(&buf) + 1);
 }
 
 #[test]
-fn saved_cursor_on_an_evicted_row_restores_to_the_window_top() {
+fn decsc_restores_the_same_screen_position_after_scrollback_eviction() {
     let mut buf = small_buffer();
-    buf.insert_text(&text("doomed"));
+    buf.set_cursor_pos(Some(2), Some(2));
     buf.save_cursor();
     for i in 0..30 {
         line(&mut buf, &format!("out {i}"));
     }
-    assert_eq!(buf.row_index_of(RowNumber::ZERO), None, "row 0 is evicted");
+    assert!(
+        buf.row_base() > RowNumber::ZERO,
+        "setup must evict rows from the front"
+    );
     assert!(
         window_top(&buf) > 0,
         "setup needs scrollback above the window"
@@ -250,91 +216,156 @@ fn saved_cursor_on_an_evicted_row_restores_to_the_window_top() {
 
     buf.restore_cursor();
 
+    let restored = buf.cursor_screen_pos();
+    assert_eq!((restored.x, restored.y), (2, 2));
+    assert_eq!(buf.cursor().pos.y, window_top(&buf) + 2);
+}
+
+#[test]
+fn decsc_at_the_bottom_row_restores_to_the_bottom_row_after_scrolling() {
+    let mut buf = Buffer::new(20, 4).with_scrollback_limit(50);
+    buf.set_cursor_pos(Some(0), Some(3));
+    buf.insert_text(&text("marker"));
+    buf.save_cursor();
+    for i in 0..9 {
+        line(&mut buf, &format!("out {i}"));
+    }
+    buf.set_cursor_pos(Some(0), Some(0));
+
+    buf.restore_cursor();
+
+    assert_eq!(buf.cursor_screen_pos().y, 3);
     assert_eq!(
         buf.cursor().pos.y,
-        window_top(&buf),
-        "an evicted saved row clamps to the top of the window, not to the \
-         oldest retained (off-screen) row"
+        buf.rows().len() - 1,
+        "bottom screen row is the last retained row"
+    );
+    assert_ne!(
+        row_text(&buf, buf.cursor().pos.y),
+        "marker",
+        "the restore does not follow the content that was under the cursor"
     );
 }
 
 #[test]
-fn saved_cursor_past_the_end_restores_to_the_window_bottom() {
-    let mut buf = Buffer::new(20, 5);
-    // Five rows of screen padding, cursor on the last; save there.
-    buf.set_cursor_pos(Some(0), Some(4));
-    assert_eq!(buf.rows().len(), 5);
+fn decsc_does_not_follow_content_when_scrollback_is_evicted_between_save_and_restore() {
+    // The pre-C6 behaviour re-attached the cursor to the row that held it at
+    // DECSC. The reference behaviour does not: after the screen scrolls, the
+    // saved screen row holds different content.
+    let mut buf = small_buffer();
+    for i in 0..12 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+    buf.insert_text(&text("marker"));
     buf.save_cursor();
-    let saved = buf.cursor_row_number();
+    let saved_screen_y = buf.cursor_screen_pos().y;
 
-    // Move up and grow the height: the trailing padding below the cursor is
-    // reclaimed, leaving the saved row's number past the end of the rows.
+    buf.handle_lf();
+    buf.handle_cr();
+    buf.insert_text(&text("later"));
+    buf.restore_cursor();
+
+    assert_eq!(buf.cursor_screen_pos().y, saved_screen_y);
+    assert_ne!(
+        row_text(&buf, buf.cursor().pos.y),
+        "marker",
+        "the marker row scrolled up by one; the screen position did not"
+    );
+}
+
+#[test]
+fn decsc_restore_clamps_to_the_screen_after_the_height_shrinks() {
+    let mut buf = Buffer::new(20, 8);
+    buf.set_cursor_pos(Some(15), Some(7));
+    buf.save_cursor();
+
+    let _ = buf.set_size(10, 4, 0);
+    buf.restore_cursor();
+
+    let restored = buf.cursor_screen_pos();
+    assert_eq!(restored.y, 3, "row clamps to the new bottom screen row");
+    assert_eq!(restored.x, 9, "column clamps to the new right edge");
+    assert!(
+        buf.cursor().pos.y >= window_top(&buf),
+        "never restored into off-screen scrollback"
+    );
+}
+
+#[test]
+fn decsc_restore_after_a_height_grow_keeps_the_screen_row() {
+    let mut buf = Buffer::new(20, 5);
+    buf.set_cursor_pos(Some(0), Some(4));
+    buf.save_cursor();
+
+    // Moving up and growing reclaims the trailing padding below the cursor.
     buf.set_cursor_pos(Some(0), Some(2));
     let _ = buf.set_size(20, 8, 0);
-    assert_eq!(
-        buf.rows().len(),
-        3,
-        "trailing padding must have been popped"
-    );
-    assert!(
-        saved >= buf.next_row_number(),
-        "setup must leave the saved number past the end"
-    );
-    assert_eq!(buf.row_index_of(saved), None);
 
     buf.restore_cursor();
 
     assert_eq!(
-        buf.cursor().pos.y,
-        buf.rows().len() - 1,
-        "a saved row past the end restores to the window's bottom row"
+        buf.cursor_screen_pos().y,
+        4,
+        "the saved screen row is kept; the rows needed to hold it are created"
     );
+    assert!(buf.cursor().pos.y < buf.rows().len());
 }
 
 #[test]
-fn saved_cursor_follows_its_row_through_reflow() {
-    // Tall enough that the whole reflowed content stays inside the window.
+fn decsc_survives_reflow_as_a_screen_position() {
     let mut buf = Buffer::new(20, 8);
     line(&mut buf, "head");
     buf.insert_text(&text("0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ"));
     buf.handle_lf();
     buf.handle_cr();
-    // Save on the first row of the long (wrapping) logical line, then park
-    // the cursor back below it.
-    let below = buf.cursor().pos.y;
-    buf.cursor.pos.y = 1;
-    buf.cursor.pos.x = 0;
+    buf.set_cursor_pos(Some(3), Some(1));
     buf.save_cursor();
-    buf.cursor.pos.y = below;
-    line(&mut buf, "tail");
+    let saved = buf.cursor_screen_pos();
 
     buf.set_size(10, 8, 0);
     buf.restore_cursor();
 
-    assert!(
-        row_text(&buf, buf.cursor().pos.y).starts_with("0123456789"),
-        "the saved cursor must follow the long line to its new first row, \
-         got {:?}",
-        row_text(&buf, buf.cursor().pos.y)
-    );
+    let restored = buf.cursor_screen_pos();
+    assert_eq!((restored.x, restored.y), (saved.x, saved.y));
 }
 
 #[test]
-fn saved_cursor_made_on_the_primary_screen_restores_by_index_on_the_alternate_screen() {
-    // The row number is in the primary namespace and cannot be located in the
-    // alternate store, so the restore falls back to the index recorded at
-    // save time (clamped), exactly as before row numbers existed.
+fn decsc_made_on_the_primary_screen_restores_the_screen_position_on_the_alternate_screen() {
+    // The 1049 shape: save on primary, switch, restore. The position is a
+    // screen position, so it is meaningful on either screen.
     let mut buf = Buffer::new(20, 5);
     for i in 0..3 {
         line(&mut buf, &format!("row {i}"));
     }
+    buf.set_cursor_pos(Some(6), Some(2));
     buf.save_cursor();
-    let saved_y = buf.cursor().pos.y;
 
     buf.enter_alternate(0);
     buf.restore_cursor();
 
-    assert_eq!(buf.cursor().pos.y, saved_y.min(buf.rows().len() - 1));
+    let restored = buf.cursor_screen_pos();
+    assert_eq!((restored.x, restored.y), (6, 2));
+}
+
+#[test]
+fn decsc_save_before_1049_and_restore_after_leaving_returns_to_the_primary_position() {
+    // ?1049h = save cursor, enter alternate; ?1049l = leave, restore cursor.
+    let mut buf = Buffer::new(20, 5).with_scrollback_limit(50);
+    for i in 0..9 {
+        line(&mut buf, &format!("row {i}"));
+    }
+    buf.set_cursor_pos(Some(7), Some(3));
+    buf.save_cursor();
+
+    buf.enter_alternate(0);
+    buf.set_cursor_pos(Some(0), Some(0));
+    buf.insert_text(&text("alt"));
+    let _ = buf.leave_alternate();
+    buf.restore_cursor();
+
+    let restored = buf.cursor_screen_pos();
+    assert_eq!((restored.x, restored.y), (7, 3));
+    assert_eq!(buf.cursor().pos.y, window_top(&buf) + 3);
 }
 
 // ── Image placement origin ───────────────────────────────────────────────
@@ -880,4 +911,104 @@ fn erase_scrollback_advances_the_base() {
         "the cursor is on the same row, whose number is unchanged"
     );
     assert_eq!(buf.row_index_of(old_base), None);
+}
+
+// ── Restoring the cursor to an image origin (Task 125.C7) ────────────────
+
+/// The cell under the cursor, which must be the image's top-left cell.
+fn assert_cursor_on_image_origin(buf: &Buffer, x: usize) {
+    let pos = buf.cursor().pos;
+    assert_eq!(pos.x, x, "cursor column");
+    let cell = &buf.rows()[pos.y].cells()[pos.x];
+    let placement = cell
+        .image_placement()
+        .expect("cursor must sit on an image cell");
+    assert_eq!(
+        (placement.col_in_image, placement.row_in_image),
+        (0, 0),
+        "cursor must sit on the image's top-left cell"
+    );
+}
+
+#[test]
+fn restore_cursor_to_image_origin_survives_eviction_during_placement() {
+    let mut buf = small_buffer(); // 3 visible + 5 scrollback = 8 rows max
+    for i in 0..6 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+    buf.set_cursor_pos(Some(4), None);
+    let expected = buf.cursor_row_number();
+
+    // Stamps rows 6..9 and appends one below: two rows are evicted DURING
+    // the placement, so any index read before it is stale afterwards.
+    let result = place(&mut buf, 1, 3);
+    assert_eq!(
+        buf.row_base(),
+        RowNumber::new(2),
+        "setup must evict two rows"
+    );
+    assert_ne!(buf.cursor_row_number(), expected, "place_image moved it");
+
+    buf.restore_cursor_to_image_origin(&result);
+
+    assert_eq!(buf.cursor_row_number(), expected);
+    assert_cursor_on_image_origin(&buf, 4);
+}
+
+#[test]
+fn restore_cursor_to_image_origin_without_eviction_matches_the_pre_placement_cursor() {
+    // The screen scrolls (rows are appended below the window) but nothing is
+    // evicted: the cursor must come back to where it was in the content, not
+    // to the same screen row, so `C=1` still leaves it on the image origin.
+    let mut buf = Buffer::new(20, 3);
+    for i in 0..4 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+    let before = buf.cursor().pos;
+    let before_number = buf.cursor_row_number();
+
+    let result = place(&mut buf, 2, 3);
+    buf.restore_cursor_to_image_origin(&result);
+
+    assert_eq!(buf.cursor().pos, before);
+    assert_eq!(buf.cursor_row_number(), before_number);
+    assert_cursor_on_image_origin(&buf, 0);
+}
+
+#[test]
+fn restore_cursor_to_image_origin_clamps_an_evicted_origin_to_the_oldest_row() {
+    let mut buf = small_buffer();
+    for i in 0..6 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+
+    // 10 rows from row 6 evict well past the origin itself.
+    let result = place(&mut buf, 1, 10);
+    assert!(
+        buf.row_index_of(result.origin_row).is_none(),
+        "setup: the origin row must itself be evicted"
+    );
+
+    buf.restore_cursor_to_image_origin(&result);
+
+    assert_eq!(buf.cursor().pos.y, 0, "clamped to the oldest retained row");
+    assert_eq!(buf.cursor().pos.x, 0);
+}
+
+#[test]
+fn restore_cursor_to_image_origin_ignores_decom() {
+    use freminal_common::buffer_states::modes::decom::Decom;
+
+    let mut buf = Buffer::new(20, 5);
+    for i in 0..3 {
+        line(&mut buf, &format!("pad {i}"));
+    }
+    buf.set_cursor_pos(Some(2), None);
+    let before = buf.cursor().pos;
+    let result = place(&mut buf, 1, 1);
+
+    buf.set_decom(Decom::OriginMode);
+    buf.restore_cursor_to_image_origin(&result);
+
+    assert_eq!(buf.cursor().pos, before, "restore is buffer-absolute");
 }

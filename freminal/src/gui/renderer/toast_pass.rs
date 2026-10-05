@@ -226,8 +226,9 @@ impl ToastRenderer {
 
     /// Free all GPU resources.
     ///
-    /// Should be called when the widget/renderer is destroyed. Mirrors
-    /// [`super::gpu::TerminalRenderer::destroy`]'s shape.
+    /// Called at window teardown by [`super::retire::WindowGlTeardown::run`]
+    /// (the window's GL context current); the pass lives exactly as long as
+    /// its window. Mirrors [`super::gpu::TerminalRenderer::destroy`]'s shape.
     pub fn destroy(&mut self, gl: &Gl<'_>) {
         if !self.initialized {
             return;

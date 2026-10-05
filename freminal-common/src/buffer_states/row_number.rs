@@ -10,7 +10,7 @@
 //! row's identity: assigned when the row is created (`base + index` at that
 //! moment) and never changed for the row's lifetime. Anything that must keep
 //! pointing at a particular row across eviction -- prompt marks, command-block
-//! boundaries, the DECSC saved cursor, image placements -- stores a
+//! boundaries, image placements -- stores a
 //! `RowNumber` instead of an index, so eviction never has to rewrite it.
 //!
 //! # Namespaces

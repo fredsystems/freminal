@@ -108,38 +108,30 @@ impl TerminalHandler {
             animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
-        // In DECSDM display mode (?80 h), the cursor does not advance past
-        // the image.  Save the cursor position so we can restore it after
-        // place_image (which always moves the cursor below the image).
-        let saved_cursor = if self.sixel_display_mode == Decsdm::DisplayMode {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         // Sixel has no placement-id concept and no `X=`/`Y=` sub-cell
         // control key — mint a fresh placement-instance id (Task 100.18)
         // so this placement never merges with an unrelated one, and pass
         // `None` sub-cell offset (Task 100.19, kitty-only).
         let placement_instance = next_placement_instance_id();
-        let _new_offset = self
-            .buffer
-            .place_image(
-                inline_image,
-                0,
-                ImageProtocol::Sixel,
-                None,
-                None,
-                0,
-                None,
-                placement_instance,
-                None,
-            )
-            .scroll_offset;
+        let place_result = self.buffer.place_image(
+            inline_image,
+            0,
+            ImageProtocol::Sixel,
+            None,
+            None,
+            0,
+            None,
+            placement_instance,
+            None,
+        );
 
-        // Restore cursor position for DECSDM display mode.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos_raw(pos);
+        // In DECSDM display mode (?80 h), the cursor does not advance past
+        // the image.  `place_image` always moves the cursor below the image,
+        // so put it back on the image origin, located by row number so
+        // scrollback eviction during placement cannot displace it
+        // (Task 125.C7).
+        if self.sixel_display_mode == Decsdm::DisplayMode {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
     }
 }
@@ -502,6 +494,51 @@ mod tests {
              before=({},{}) after=({},{})",
             cursor_before.x, cursor_before.y, cursor_after.x, cursor_after.y
         );
+    }
+
+    /// Regression (Task 125.C7): at scrollback capacity the placement evicts
+    /// rows, so the DECSDM restore must use the row number, not an index.
+    #[test]
+    fn sixel_display_mode_at_scrollback_capacity_keeps_cursor_on_image_origin() {
+        use freminal_common::buffer_states::{
+            mode::{Mode, SetMode},
+            modes::decsdm::Decsdm,
+            terminal_output::TerminalOutput,
+        };
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+        handler.process_outputs(&[TerminalOutput::Mode(Mode::Decsdm(Decsdm::new(
+            &SetMode::DecSet,
+        )))]);
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        handler.handle_data(b"ab");
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+        let x_before = handler.buffer().cursor().pos.x;
+
+        // 3 bands = 18px = 2 cell rows.
+        let sixel_body = b"#1;2;100;0;0#1~-#1~-#1~";
+        let dcs = build_sixel_dcs(b"0;0;0", sixel_body);
+        handler.handle_device_control_string(&dcs);
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        assert_eq!(pos.x, x_before);
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
     }
 
     // -----------------------------------------------------------------------

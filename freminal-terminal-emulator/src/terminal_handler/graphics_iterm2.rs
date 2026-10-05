@@ -120,14 +120,6 @@ impl TerminalHandler {
             animation: freminal_buffer::image_store::AnimationControl::default(),
         };
 
-        // Save cursor position if doNotMoveCursor is set — iTerm2 protocol
-        // specifies that the cursor should remain at its pre-image position.
-        let saved_cursor = if data.do_not_move_cursor {
-            Some(self.buffer.cursor().pos)
-        } else {
-            None
-        };
-
         // Place the image into the buffer. Pass 0 for scroll_offset — the
         // PTY thread always operates at the live bottom.
         //
@@ -136,24 +128,24 @@ impl TerminalHandler {
         // so this placement never merges with an unrelated one, and pass
         // `None` sub-cell offset (Task 100.19, kitty-only).
         let placement_instance = next_placement_instance_id();
-        let _new_offset = self
-            .buffer
-            .place_image(
-                inline_image,
-                0,
-                ImageProtocol::ITerm2,
-                None,
-                None,
-                0,
-                None,
-                placement_instance,
-                None,
-            )
-            .scroll_offset;
+        let place_result = self.buffer.place_image(
+            inline_image,
+            0,
+            ImageProtocol::ITerm2,
+            None,
+            None,
+            0,
+            None,
+            placement_instance,
+            None,
+        );
 
-        // Restore cursor position if doNotMoveCursor was requested.
-        if let Some(pos) = saved_cursor {
-            self.buffer.set_cursor_pos(Some(pos.x), Some(pos.y));
+        // doNotMoveCursor: the iTerm2 protocol keeps the cursor at its
+        // pre-image position, i.e. on the image origin. Locate it by row
+        // number so scrollback eviction during placement cannot displace it
+        // (Task 125.C7).
+        if data.do_not_move_cursor {
+            self.buffer.restore_cursor_to_image_origin(&place_result);
         }
     }
 
@@ -759,6 +751,61 @@ mod tests {
         // But the image should still have been placed.
         let has_image = handler.buffer().has_any_image_cell();
         assert!(has_image, "Image should still be placed");
+    }
+
+    /// Regression (Task 125.C7): at scrollback capacity the placement evicts
+    /// rows, so `doNotMoveCursor` must restore by row number, not by index.
+    #[test]
+    fn handle_iterm2_inline_image_do_not_move_cursor_at_scrollback_capacity() {
+        use image::ImageEncoder;
+
+        let mut handler = TerminalHandler::new(80, 4).with_scrollback_limit(4);
+        let (tx, _rx) = crossbeam_channel::unbounded::<PtyWrite>();
+        handler.set_write_tx(tx);
+
+        let mut png_buf = Vec::new();
+        {
+            let encoder = image::codecs::png::PngEncoder::new(&mut png_buf);
+            let rgba_data: [u8; 16] = [
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ];
+            encoder
+                .write_image(&rgba_data, 2, 2, image::ExtendedColorType::Rgba8)
+                .unwrap();
+        }
+
+        for _ in 0..20 {
+            handler.handle_data(b"pad");
+            handler.handle_newline();
+            handler.handle_carriage_return();
+        }
+        handler.handle_data(b"ab");
+        let base_before = handler.buffer().row_base();
+        let origin = handler.buffer().cursor_row_number();
+        let x_before = handler.buffer().cursor().pos.x;
+
+        handler.handle_iterm2_inline_image(&ITerm2InlineImageData {
+            name: None,
+            size: Some(png_buf.len()),
+            width: Some(ImageDimension::Cells(4)),
+            height: Some(ImageDimension::Cells(2)),
+            preserve_aspect_ratio: false,
+            inline: true,
+            do_not_move_cursor: true,
+            data: png_buf,
+        });
+
+        assert!(
+            handler.buffer().row_base() > base_before,
+            "setup: placement must evict rows"
+        );
+        assert_eq!(handler.buffer().cursor_row_number(), origin);
+        let pos = handler.buffer().cursor().pos;
+        assert_eq!(pos.x, x_before);
+        let placement = handler.buffer().rows()[pos.y].cells()[pos.x]
+            .image_placement()
+            .expect("cursor sits on the image origin cell");
+        assert_eq!((placement.col_in_image, placement.row_in_image), (0, 0));
     }
 
     // ------------------------------------------------------------------

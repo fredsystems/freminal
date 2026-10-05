@@ -657,7 +657,7 @@ pub(in crate::gui) const fn egui_mods_to_binding_mods(m: Modifiers) -> BindingMo
 /// Returns `None` only if no completed block exists in the snapshot at
 /// all, in which case the keybinding silently no-ops.
 fn find_fold_target(snap: &TerminalSnapshot) -> Option<CommandBlockId> {
-    let cursor_row = snap.cursor_pos.y;
+    let cursor_row = cursor_buffer_row(snap);
     // Block rows are logical numbers; resolve them to the snapshot's buffer
     // indices (a block whose prompt row was evicted no longer exists).
     let rows_of = |b: &CommandBlock| BlockRows::resolve(b, snap.row_base);
@@ -718,8 +718,29 @@ pub(super) fn find_last_copyable_block(snap: &TerminalSnapshot) -> Option<&Comma
         .find(|b| block_output_range(b, snap.row_base).is_some())
 }
 
+/// Retained buffer index of the row the PTY cursor is on.
+///
+/// `snap.cursor_pos.y` is relative to the top of the *live* window (the one the
+/// PTY thread operates on), not an index into the buffer, so it must be offset
+/// by that window's start before it is compared with block rows (which resolve
+/// to retained indices). With scrollback the two differ by
+/// `total_rows - term_height`; comparing them directly selects the wrong block
+/// (Task 125.C12). The live window is used regardless of the GUI's
+/// `scroll_offset`, because the PTY cursor never leaves it.
+const fn cursor_buffer_row(snap: &TerminalSnapshot) -> usize {
+    visible_window_start_for(snap, 0).saturating_add(snap.cursor_pos.y)
+}
+
+/// Find the completed command block the PTY cursor is inside, if any.
+///
+/// Resolves the cursor to a buffer row first ([`cursor_buffer_row`]), then
+/// defers to [`find_block_containing_row`].
+fn find_block_at_cursor(snap: &TerminalSnapshot) -> Option<&CommandBlock> {
+    find_block_containing_row(snap, cursor_buffer_row(snap))
+}
+
 /// Find the command block whose `[command_start_row, end_row]` row range
-/// contains `row`.
+/// contains `row`, where `row` is a retained buffer index of `snap`.
 ///
 /// Used by the right-click "Copy Command Output" menu entry and by
 /// `CopyCommandOutputAtCursor` to map a visible row back to a block.
@@ -942,8 +963,7 @@ pub(super) fn dispatch_binding_action(
             }
         }
         KeyAction::CopyCommandOutputAtCursor => {
-            let cursor_row = snap.cursor_pos.y;
-            if let Some(block) = find_block_containing_row(snap, cursor_row)
+            if let Some(block) = find_block_at_cursor(snap)
                 && let Some((start_row, end_row)) = block_output_range(block, snap.row_base)
                 && send_extract_output_range(input_tx, snap, start_row, end_row)
             {
@@ -2972,6 +2992,87 @@ mod fold_target_tests {
         );
         let block = find_last_copyable_block(&snap).unwrap();
         assert_eq!(block_output_range(block, snap.row_base), Some((6, 10)));
+    }
+
+    /// Task 125.C12: `cursor_pos.y` is relative to the live window, not an
+    /// index into the buffer. With scrollback the cursor's buffer row is
+    /// `total_rows - term_height + cursor_pos.y`.
+    #[test]
+    fn cursor_lookup_resolves_the_cursor_through_the_live_window() {
+        // 100 buffer rows, 24 visible: the live window starts at row 76.
+        // Block 1 (rows 5..=10) is deep in scrollback; block 2 (rows 80..=90)
+        // holds the cursor, which sits on screen row 8 -> buffer row 84.
+        let mut snap = snap_with(vec![completed(1, 5, 10), completed(2, 80, 90)], 8);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(cursor_buffer_row(&snap), 84);
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(2)),
+            "the block under the cursor, not the block at buffer row 8"
+        );
+    }
+
+    #[test]
+    fn cursor_lookup_does_not_match_a_block_at_the_raw_screen_row() {
+        // Screen row 7 would be inside block 1 (5..=10) if it were compared
+        // as a buffer index; the cursor's real buffer row (83) is in no block.
+        let mut snap = snap_with(vec![completed(1, 5, 10)], 7);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert!(find_block_at_cursor(&snap).is_none());
+    }
+
+    #[test]
+    fn cursor_lookup_ignores_the_gui_scroll_offset() {
+        // The PTY cursor stays in the live window however far the user has
+        // scrolled back, so the lookup must not move with `scroll_offset`.
+        let mut snap = snap_with(vec![completed(2, 80, 90)], 8);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+        snap.scroll_offset = 30;
+
+        assert_eq!(cursor_buffer_row(&snap), 84);
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(2))
+        );
+    }
+
+    #[test]
+    fn cursor_lookup_resolves_against_the_row_base() {
+        // Blocks store logical numbers; at base 100 the number 185 is
+        // retained index 85, which holds the cursor (76 + 9).
+        let mut snap = snap_with(vec![completed(3, 185, 190)], 9);
+        snap.row_base = RowNumber::new(100);
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(
+            find_block_at_cursor(&snap).map(|b| b.id),
+            Some(CommandBlockId(3))
+        );
+    }
+
+    #[test]
+    fn fold_target_pass_one_uses_the_cursor_buffer_row() {
+        // Block 1 holds the raw screen row 7; block 2 holds the cursor's real
+        // buffer row (83); block 3 is the newest, so the pass-2 fallback would
+        // pick block 3. Only a correct pass 1 yields block 2.
+        let mut snap = snap_with(
+            vec![
+                completed(1, 5, 10),
+                completed(2, 80, 90),
+                completed(3, 95, 99),
+            ],
+            7,
+        );
+        snap.total_rows = 100;
+        snap.term_height = 24;
+
+        assert_eq!(find_fold_target(&snap), Some(CommandBlockId(2)));
     }
 
     #[test]

@@ -264,6 +264,24 @@ pub trait App {
     /// Called when a window close is requested. Return `false` to cancel.
     fn on_close_requested(&mut self, window_id: WindowId) -> bool;
 
+    /// Called once per window, with that window's GL context **current**,
+    /// immediately before its egui painter is destroyed and its GL context is
+    /// torn down.
+    ///
+    /// This is the only point at which the app can delete GL objects it
+    /// created for the window (renderers, textures, buffers) while the
+    /// context that owns them still exists. It fires on every path that
+    /// destroys a window: an accepted [`App::on_close_requested`], an
+    /// app-initiated [`WindowHandle::close_window`], a viewport `Close`
+    /// command, and — for any window still open — event-loop exit. By the
+    /// time it fires for a close, `on_close_requested` has already returned
+    /// `true` (when it applies), so the app may already have dropped its own
+    /// per-window state; the hook exists so it can still free what that state
+    /// owned in GL.
+    ///
+    /// `gl` is the window's `glow` context. The default does nothing.
+    fn on_window_destroying(&mut self, _window_id: WindowId, _gl: &glow::Context) {}
+
     /// GL clear color for the given window (supports transparency via alpha).
     fn clear_color(&self, window_id: WindowId) -> [f32; 4];
 

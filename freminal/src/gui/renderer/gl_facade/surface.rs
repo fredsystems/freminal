@@ -187,7 +187,19 @@ mod tests {
     ///   instrument's own calls would land in the log and inflate the very
     ///   counts 123.8 asserts on. An instrument must not appear in its own
     ///   measurements.
-    const HARNESS_EXEMPT: [&str; 1] = ["src/gui/renderer/pixel_harness.rs"];
+    ///
+    /// `gpu/destroy_gl_tests.rs` (Task 125.C2) is exempt for the same
+    /// reason: it asks the real driver whether names are still valid
+    /// objects (`is_program`, `is_buffer`, `is_texture`, `get_error`) after
+    /// `TerminalRenderer::destroy`. Those are queries about the driver, not
+    /// calls freminal draws with, so they are absent from
+    /// [`GL_CALL_SURFACE`] by design, and a recording `Gl` has no driver to
+    /// ask. The facade-level *calls* `destroy` issues are covered separately
+    /// by the `renderer::retire` recording tests.
+    const HARNESS_EXEMPT: [&str; 2] = [
+        "src/gui/renderer/gpu/destroy_gl_tests.rs",
+        "src/gui/renderer/pixel_harness.rs",
+    ];
 
     /// The facade module is the one place in the crate that is *allowed* —
     /// and from 123.2, required — to reference `glow::HasContext` directly:

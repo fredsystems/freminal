@@ -7,7 +7,7 @@
 //!
 //! Reflow re-wraps logical lines, so the row count and the row boundaries
 //! change. Every stored [`RowNumber`] that referred to a pre-reflow row (prompt
-//! marks, command-block boundaries, the DECSC saved cursor, kitty placements)
+//! marks, command-block boundaries, kitty placements)
 //! has to be translated to the row that now holds the same content. Reflow
 //! installs its rows at fresh numbers (`base = old.next_number()`), so a number
 //! that is *not* translated falls below the new base and is detectably invalid
@@ -21,8 +21,7 @@
 //! anchor to different ends of an old row that re-wraps into several rows:
 //!
 //! - [`ReflowRemap::map_start`]: anchors to the row's *first* cell. Used for
-//!   "start" fields (prompt / command / output start, saved cursor, placement
-//!   origin).
+//!   "start" fields (prompt / command / output start, placement origin).
 //! - [`ReflowRemap::map_end`]: anchors to the row's *last* cell. Used for the
 //!   inclusive end of a region (`end_row`), so a row that re-wraps into several
 //!   narrower rows does not shrink the region to its first piece.

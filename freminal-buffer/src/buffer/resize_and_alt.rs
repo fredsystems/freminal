@@ -156,20 +156,7 @@ impl Buffer {
         // TUI on the alternate screen) renders with stale row data after a
         // resize, causing gaps, uncolored cells, and mispositioned content.
         if width_changed {
-            let (rows, cache, _) = self.rows.split_mut();
-            for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
-                row.set_max_width(new_width);
-                // On the alternate screen (which skips reflow) a shrink leaves
-                // stale cells beyond the new width in row.cells.  flatten_row
-                // iterates row.cells directly, so those stale cells would leak
-                // into the snapshot and render as a strip of old content at
-                // the right edge of the viewport.  `truncate_cells_to_width`
-                // is a no-op when cells.len() <= new_width, so it is safe to
-                // call unconditionally (including on grow).
-                row.truncate_cells_to_width(new_width);
-                row.dirty = true;
-                *entry = None;
-            }
+            self.clip_rows_to_width(new_width);
         }
 
         // Always clamp cursor after size change
@@ -205,6 +192,49 @@ impl Buffer {
         self.debug_assert_invariants();
 
         final_offset
+    }
+
+    /// Set every row's logical width to `new_width`, clipping any stored cell
+    /// at or beyond it, and invalidate the row caches.
+    ///
+    /// Alternate buffers never reflow, so a width change only clips: on the
+    /// alternate screen a shrink leaves stale cells beyond the new width in
+    /// `row.cells`. `flatten_row` iterates `row.cells` directly, so those would
+    /// leak into the snapshot as a strip of old content at the right edge, and
+    /// (for a full-screen TUI such as nvim) the row-level cache entries still
+    /// hold data flattened at the old width. `Row::truncate_cells_to_width` is a
+    /// no-op when `cells.len() <= new_width`, so this is safe on a grow too.
+    ///
+    /// The clipped cells can hold images, which the row cannot account for:
+    /// the buffer-wide `image_cell_count` is reduced by every image cell
+    /// removed, and a cell-owned (Sixel/iTerm2) image left without any cell is
+    /// freed, as when text overwrites its last cell (Task 125.C15). A Kitty
+    /// image's data outlives its cells and is kept.
+    fn clip_rows_to_width(&mut self, new_width: usize) {
+        let mut removed = 0usize;
+        let mut touched: Vec<u64> = Vec::new();
+        let scan_images = self.image_cell_count > 0;
+
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
+            if scan_images {
+                for cell in row.cells_for_image_scan().iter().skip(new_width) {
+                    if let Some(placement) = cell.image_placement() {
+                        removed += 1;
+                        if !touched.contains(&placement.image_id) {
+                            touched.push(placement.image_id);
+                        }
+                    }
+                }
+            }
+            row.set_max_width(new_width);
+            row.truncate_cells_to_width(new_width);
+            row.dirty = true;
+            *entry = None;
+        }
+
+        self.image_cell_count -= removed;
+        self.release_unreferenced_cell_owned_images(touched);
     }
 
     /// Resize a saved primary buffer to new dimensions.
@@ -333,7 +363,7 @@ impl Buffer {
     ///    all-`None` (every row is dirty after reflow). The new rows get
     ///    *fresh* logical row numbers (past the last pre-reflow number), and
     ///    a [`ReflowRemap`] translating every old number is applied to the
-    ///    prompt marks, command blocks and saved cursor and kept for
+    ///    prompt marks and command blocks and kept for
     ///    [`Buffer::take_reflow_remap`].
     ///
     /// The operation is O(total cells) — linear in the amount of text.
@@ -694,10 +724,10 @@ impl Buffer {
         }
 
         // 5) Translate every stored row number (Task 113, Bug R; Task
-        //    125.14). Reflow changed the row boundaries, so command blocks,
-        //    prompt rows and the saved cursor would otherwise point at the
-        //    wrong rows (or, now that rows are renumbered, at nothing),
-        //    corrupting the command-block gutter and fold layout.
+        //    125.14). Reflow changed the row boundaries, so command blocks and
+        //    prompt rows would otherwise point at the wrong rows (or, now that
+        //    rows are renumbered, at nothing), corrupting the command-block
+        //    gutter and fold layout.
         let remap = ReflowRemap::single(
             old_base,
             self.rows.base(),
@@ -709,7 +739,7 @@ impl Buffer {
     }
 
     /// Apply a reflow's [`ReflowRemap`] to every row number the buffer holds
-    /// (prompt marks, command blocks, the saved cursor) and remember it for
+    /// (prompt marks, command blocks) and remember it for
     /// [`Self::take_reflow_remap`].
     ///
     /// Marks that no longer map onto a real row (already evicted, or past the
@@ -745,15 +775,6 @@ impl Buffer {
             true
         });
 
-        // The saved cursor keeps its column (clamped on restore, as before)
-        // and follows its row. An unmappable row is left as is: it lies below
-        // the base and the restore clamps it to the oldest row.
-        if let Some(saved) = self.saved_cursor.as_mut()
-            && let Some(row) = remap.map_start(saved.row)
-        {
-            saved.row = row;
-        }
-
         match self.pending_reflow_remap.as_mut() {
             Some(pending) => pending.chain(remap),
             None => self.pending_reflow_remap = Some(remap),
@@ -764,7 +785,7 @@ impl Buffer {
     /// `None` if there was none.
     ///
     /// The buffer applies the remap to the row numbers it owns itself (prompt
-    /// marks, command blocks, saved cursor). A consumer that keeps row numbers
+    /// marks, command blocks). A consumer that keeps row numbers
     /// elsewhere -- the emulator's kitty placement table -- calls this after
     /// any operation that may reflow (a resize, DECCOLM) and translates its
     /// own numbers with [`ReflowRemap::map_start`]. A number the remap cannot

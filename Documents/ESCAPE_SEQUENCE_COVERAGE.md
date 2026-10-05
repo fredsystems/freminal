@@ -2,6 +2,30 @@
 
 ## Last updated
 
+Last updated: 2026-10-04 — Task 125.C14 — kitty graphics `a=d`: `d=x`/`d=X` and
+`d=y`/`d=Y` now read `x=`/`y=` as 1-based screen coordinates (`y` mapped through
+the visible window; `0` or an off-screen row names nothing), and `d=c`/`d=C`
+deletes only placements that intersect the **cursor cell** instead of every
+image on the cursor's row. `d=p`/`d=c`/`d=x`/`d=y` now delete the intersecting
+placements only, so a second placement of the same image elsewhere survives.
+No status change: the APC `_G` rows were already ✅.
+
+Last updated: 2026-10-04 — Task 125.C8 — kitty graphics `a=d` `d=p`/`d=P` and
+`d=q`/`d=Q` now read `x=`/`y=` as 1-based **screen** cell coordinates ("the same
+as cursor positions (i.e. x=1, y=1 is the top left cell)"), mapped through the
+visible window, instead of 0-based buffer indices. Before, they matched the
+wrong cell whenever scrollback existed and were off by one otherwise. `x=0`/`y=0`
+name no cell. No status change: the APC `_G` rows were already ✅. (Task 125.C7
+also keeps the cursor on the image origin for `C=1` / iTerm2 `doNotMoveCursor` /
+sixel DECSDM display mode when placement evicts scrollback; no semantics change.)
+
+Last updated: 2026-10-04 — Task 125.C6 — DECSC/DECRC (`ESC 7` / `ESC 8`, also
+`CSI s`/`CSI u` and `?1048`/`?1049`) now save and restore a **screen-relative**
+cursor position, as xterm does (`CursorSave` stores `screen->cur_row`;
+`CursorRestore` clamps it to the screen), instead of re-attaching the cursor to
+the buffer row that held it at save time. No status change: both rows were
+already ✅; only the documented semantics changed.
+
 Last updated: 2026-08-26 — issue #502 — valid ConEmu progress reports
 (`OSC 9;4;<state>[;<progress>]`) are recognized and silently consumed instead
 of being misrouted as OSC 9 desktop notifications. Visual per-pane progress
@@ -161,8 +185,8 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 
 | Sequence       | Name                       | Status                  | Notes                                                                                                                                                                                                                                                                                                                                                                                      |
 | -------------- | -------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ESC 7          | Save Cursor (DECSC)        | ✅                      | Saves cursor position and attributes                                                                                                                                                                                                                                                                                                                                                       |
-| ESC 8          | Restore Cursor (DECRC)     | ✅                      | Restores saved cursor                                                                                                                                                                                                                                                                                                                                                                      |
+| ESC 7          | Save Cursor (DECSC)        | ✅                      | Saves the cursor's screen-relative position (row/col within the screen) and attributes                                                                                                                                                                                                                                                                                                     |
+| ESC 8          | Restore Cursor (DECRC)     | ✅                      | Restores the saved screen position, clamped to the current screen; unaffected by scrolling, eviction, or reflow                                                                                                                                                                                                                                                                            |
 | ESC =          | DECPAM                     | ✅                      | Sets application keypad mode in `TerminalModes.keypad_mode`                                                                                                                                                                                                                                                                                                                                |
 | ESC >          | DECPNM                     | ✅                      | Sets numeric keypad mode in `TerminalModes.keypad_mode`                                                                                                                                                                                                                                                                                                                                    |
 | ESC F          | Cursor to lower-left       | ⬜                      | Parsed, stub with debug log                                                                                                                                                                                                                                                                                                                                                                |

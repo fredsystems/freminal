@@ -3805,6 +3805,28 @@ mod tests {
         assert_eq!(handler.buffer().cursor().pos.y, 4);
     }
 
+    /// Task 125.C6: DECSC saves a screen position (xterm `CursorSave`), so
+    /// output that scrolls the screen between DECSC and DECRC must not move the
+    /// restored cursor off its screen row.
+    #[test]
+    fn process_restore_cursor_is_screen_relative_after_scrolling_output() {
+        let mut handler = TerminalHandler::new(80, 24);
+        handler.handle_cursor_pos(Some(10), Some(5));
+        handler.process_outputs(&[TerminalOutput::SaveCursor]);
+
+        // Scroll the screen well past the saved row, then park the cursor.
+        handler.handle_cursor_pos(Some(0), Some(23));
+        for _ in 0..60 {
+            handler.handle_data(b"scrolling output");
+            handler.handle_newline();
+        }
+        handler.handle_cursor_pos(Some(1), Some(1));
+        handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+        let pos = handler.buffer().cursor_screen_pos();
+        assert_eq!((pos.x, pos.y), (9, 4));
+    }
+
     #[test]
     fn process_reset_device() {
         let mut handler = TerminalHandler::new(80, 24);

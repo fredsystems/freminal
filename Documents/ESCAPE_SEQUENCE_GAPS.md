@@ -1,5 +1,17 @@
 # Escape Sequence Gaps
 
+Last updated: 2026-10-04 — Task 125.C14 — kitty `d=x`/`d=y` use 1-based screen
+coordinates and `d=c` intersects only the cursor cell (see
+ESCAPE_SEQUENCE_COVERAGE.md). No gap entries added or removed.
+
+Last updated: 2026-10-04 — Task 125.C8 — kitty `d=p`/`d=q` now interpret `x=`/`y=`
+as 1-based screen cells (see ESCAPE_SEQUENCE_COVERAGE.md). No gap entries added
+or removed.
+
+Last updated: 2026-10-04 — Task 125.C6 — DECSC/DECRC now restore a
+screen-relative cursor position (xterm behaviour; see ESCAPE_SEQUENCE_COVERAGE.md).
+No gap entries added or removed.
+
 Last updated: 2026-08-26 — issue #502 — valid ConEmu `OSC 9;4` progress
 reports are now recognized and silently consumed instead of being misrouted
 as desktop notifications. Visual per-pane progress state remains unimplemented

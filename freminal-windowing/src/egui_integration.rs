@@ -867,6 +867,13 @@ impl EguiState {
         self.modifier_tracker.current()
     }
 
+    /// The `glow` context this window's painter draws through.
+    ///
+    /// Valid to use only while this window's GL context is current.
+    pub(crate) fn glow(&self) -> &glow::Context {
+        self.painter.gl()
+    }
+
     /// Free the painter's OpenGL resources.
     ///
     /// Must be called while this window's GL context is current and before the

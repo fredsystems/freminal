@@ -111,7 +111,7 @@ impl Buffer {
         // ever broken the primary numbering is unrecoverable; the fallback
         // restarts it at zero, which can alias only numbers held outside the
         // buffer, and RIS clears every such holder (the marks below, the
-        // saved cursor, the handler's kitty placements).
+        // handler's kitty placements).
         debug_assert!(
             self.kind == BufferType::Primary || self.saved_primary.is_some(),
             "alternate screen active without a parked primary store"

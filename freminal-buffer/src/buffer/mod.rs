@@ -49,6 +49,15 @@ mod cursor;
 mod erase;
 mod eviction;
 mod flatten;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_cell_trim_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_clip_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_delete_tests;
 mod images;
 mod lifecycle;
 mod lines;
@@ -324,8 +333,8 @@ pub struct Buffer {
     /// Saved cursor for DECSC / DECRC (ESC 7 / ESC 8).
     /// Independent of the alternate-screen save (`saved_primary`).
     ///
-    /// The saved row is a stable [`RowNumber`], so it stays attached to its
-    /// content across scrollback eviction (Task 125.14).
+    /// The saved position is screen-relative (xterm's `CursorSave`), not
+    /// attached to any stored row; see [`cursor::SavedCursor`] (Task 125.C6).
     pub(in crate::buffer) saved_cursor: Option<cursor::SavedCursor>,
 
     /// Current format tag to apply to inserted text.
@@ -638,10 +647,12 @@ impl Buffer {
     /// `budget` counts rows actually compacted, not rows scanned: a row
     /// that cannot be compacted (e.g. an image row — see [`Row::compact`])
     /// does not consume budget, so a screenful of images never starves
-    /// later, genuinely compactable rows of their turn. The scan is a
-    /// simple forward walk over `0..visible_start` that skips rows already
-    /// reported `is_compact()`; this is `O(visible_start)` worst case per
-    /// call, but that cost is paid on the idle path, not a hot one.
+    /// later, genuinely compactable rows of their turn. Rows already evicted
+    /// to a compressed block ([`Row::is_evicted`]) are skipped untouched
+    /// (Task 125.C10). The scan is a simple forward walk over
+    /// `0..visible_start` that skips rows already reported `is_compact()`;
+    /// this is `O(visible_start)` worst case per call, but that cost is paid
+    /// on the idle path, not a hot one.
     #[must_use]
     pub fn compact_idle_scrollback(&mut self, budget: usize) -> usize {
         if self.kind == BufferType::Alternate {
@@ -656,6 +667,14 @@ impl Buffer {
         {
             if compacted >= budget {
                 break;
+            }
+            if row.is_evicted() {
+                // The row's content already lives in a compressed block and
+                // the row is an inert placeholder (Task 119). It is neither
+                // compactable nor in need of cache release (eviction took
+                // both with it), and touching its storage would trip
+                // `Row::cells_ref`'s eviction assertion (Task 125.C10).
+                continue;
             }
             if row.is_compact() {
                 // Already compact. Its cache entry and decompaction memo are
@@ -8416,34 +8435,6 @@ mod image_clearing_tests {
         buf.set_image_cell_at(0, 0, make_placement(1, None, 0), FormatTag::default());
         assert_eq!(buf.image_cell_count, 1);
         buf.clear_image_placements_by_z_index(999);
-        assert_eq!(buf.image_cell_count, 1);
-    }
-
-    // ── `clear_image_placements_at_cursor` ──
-
-    #[test]
-    fn clear_at_cursor_clears_cursor_row() {
-        let mut buf = alt_buf(10, 5);
-        place(&mut buf, 2, 0, 1);
-        place(&mut buf, 2, 3, 2);
-        place(&mut buf, 3, 0, 3); // different row
-        buf.cursor.pos.y = 2;
-        assert_eq!(buf.image_cell_count, 3);
-
-        buf.clear_image_placements_at_cursor();
-        assert_eq!(buf.image_cell_count, 1);
-        assert!(!buf.rows[2].cells()[0].has_image());
-        assert!(!buf.rows[2].cells()[3].has_image());
-        assert!(buf.rows[3].cells()[0].has_image());
-    }
-
-    #[test]
-    fn clear_at_cursor_out_of_bounds_is_noop() {
-        let mut buf = alt_buf(10, 5);
-        place(&mut buf, 0, 0, 1);
-        buf.cursor.pos.y = 100;
-        assert_eq!(buf.image_cell_count, 1);
-        buf.clear_image_placements_at_cursor();
         assert_eq!(buf.image_cell_count, 1);
     }
 

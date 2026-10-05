@@ -9,6 +9,11 @@
 //!   surface and (from 123.2) the `Gl` recording facade.
 //! - [`gpu`] — [`TerminalRenderer`] struct, GL init/draw/destroy, shader compilation,
 //!   VAO/VBO setup, and GL upload helpers.
+//! - [`retire`] — deferred GL teardown (Task 125.C2): [`GlRetireQueue`] (a
+//!   window-scoped queue a dropped pane retires its [`TerminalRenderer`] into,
+//!   drained where the window's GL context is current) and
+//!   [`WindowGlTeardown`] (window-close destruction of the shared
+//!   post-processing renderer, the queue, and the toast passes).
 //! - `headless` (feature `gl-recording`) — drives [`TerminalRenderer`] and the
 //!   toast passes without a GUI event loop, for use with the GL recording
 //!   facade (Task 123); see its module docs for what it does and does not
@@ -61,12 +66,14 @@ pub mod pixel_golden;
 pub mod pixel_harness;
 #[cfg(feature = "frame-profiling")]
 pub mod profiling;
+pub mod retire;
 pub(super) mod shaders;
 pub mod toast_pass;
 pub mod toast_text_pass;
 pub mod vertex;
 
 pub use gpu::{TerminalRenderer, WindowPostRenderer};
+pub use retire::{GlRetireQueue, WindowGlTeardown};
 pub use toast_pass::{ToastQuad, ToastRenderer};
 pub use toast_text_pass::{ToastTextMetrics, ToastTextRenderer, ToastTextRun};
 pub use vertex::{

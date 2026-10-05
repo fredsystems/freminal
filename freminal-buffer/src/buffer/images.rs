@@ -10,7 +10,7 @@
 //! and iTerm2 inline images.
 
 use freminal_common::buffer_states::{
-    buffer_type::BufferType, format_tag::FormatTag, row_number::RowNumber,
+    buffer_type::BufferType, cursor::CursorPos, format_tag::FormatTag, row_number::RowNumber,
 };
 
 use crate::{
@@ -49,6 +49,24 @@ pub struct PlaceImageResult {
     /// argument so the caller can feed it into `record_real_placement`
     /// without having to keep a second copy around.
     pub placement_instance: u64,
+}
+
+/// Identity of one on-screen placement: the image it shows plus the
+/// per-display placement-instance id minted when it was put. Two placements of
+/// the same image differ in the second field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacementKey {
+    image_id: u64,
+    instance: u64,
+}
+
+impl PlacementKey {
+    const fn of(placement: &ImagePlacement) -> Self {
+        Self {
+            image_id: placement.image_id,
+            instance: placement.placement_instance,
+        }
+    }
 }
 
 impl Buffer {
@@ -167,7 +185,10 @@ impl Buffer {
     /// scanned, stopping as soon as every candidate has been found alive.
     /// Kitty images are never candidates for removal: their data outlives
     /// their cells.
-    fn release_unreferenced_cell_owned_images(&mut self, mut candidates: Vec<u64>) {
+    pub(in crate::buffer) fn release_unreferenced_cell_owned_images(
+        &mut self,
+        mut candidates: Vec<u64>,
+    ) {
         candidates.retain(|&id| {
             self.image_store.contains(id) && !self.image_store.is_protocol_retained(id)
         });
@@ -389,27 +410,6 @@ impl Buffer {
         self.image_cell_count -= cleared;
     }
 
-    /// Clear image placements at the current cursor position only (single row).
-    pub fn clear_image_placements_at_cursor(&mut self) {
-        let row_idx = self.cursor.pos.y;
-        if row_idx >= self.rows.len() {
-            return;
-        }
-        let row = &mut self.rows[row_idx];
-        let mut cleared = 0usize;
-        for cell in row.cells_mut() {
-            if cell.has_image() {
-                cell.clear_image();
-                cleared += 1;
-            }
-        }
-        if cleared > 0 {
-            row.dirty = true;
-            self.rows.invalidate(row_idx);
-            self.image_cell_count -= cleared;
-        }
-    }
-
     /// Returns `true` if any cell in the buffer has an image placement.
     ///
     /// O(1) — backed by the `image_cell_count` counter.
@@ -446,22 +446,20 @@ impl Buffer {
         self.image_cell_count -= cleared;
     }
 
-    /// Clear image placements at a specific cell position.
+    /// Clear the placement that has an image cell at `(row, col)`, if any
+    /// (Kitty `d=p`/`d=P`, and `d=c`/`d=C` at the cursor cell).
+    ///
+    /// Only the placement under the cell goes: every cell of that placement,
+    /// wherever it lies, but not another placement of the same image. A cell
+    /// outside the stored rows or columns matches nothing.
     pub fn clear_image_placements_at_cell(&mut self, row: usize, col: usize) {
-        if row >= self.rows.len() {
-            return;
-        }
-        let id = {
-            let cells = self.rows[row].cells();
-            if col < cells.len() {
-                cells[col].image_placement().map(|p| p.image_id)
-            } else {
-                None
-            }
-        };
-        if let Some(id) = id {
-            self.clear_image_placements_by_id(id);
-        }
+        let key = self
+            .rows
+            .get(row)
+            .and_then(|r| r.cells_for_image_scan().get(col))
+            .and_then(|c| c.image_placement())
+            .map(PlacementKey::of);
+        self.clear_placements(key.into_iter().collect());
     }
 
     /// Clear image placements at a specific cell and all cells after it.
@@ -484,47 +482,84 @@ impl Buffer {
         }
     }
 
-    /// Clear all image placements that intersect the given column.
+    /// Clear every placement that has an image cell in column `col`, on any
+    /// row (Kitty `d=x`/`d=X`). Each such placement is cleared whole; other
+    /// placements of the same image are not touched.
     pub fn clear_image_placements_in_column(&mut self, col: usize) {
-        let mut ids_to_clear: Vec<u64> = Vec::new();
+        let mut keys: Vec<PlacementKey> = Vec::new();
         for row in &self.rows {
+            if let Some(placement) = row
+                .cells_for_image_scan()
+                .get(col)
+                .and_then(|c| c.image_placement())
+            {
+                let key = PlacementKey::of(placement);
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        self.clear_placements(keys);
+    }
+
+    /// Clear every placement that has an image cell on the buffer row `row`
+    /// (Kitty `d=y`/`d=Y`). Each such placement is cleared whole; other
+    /// placements of the same image are not touched.
+    pub fn clear_image_placements_in_row(&mut self, row: usize) {
+        let Some(row) = self.rows.get(row) else {
+            return;
+        };
+        let mut keys: Vec<PlacementKey> = Vec::new();
+        for placement in row
+            .cells_for_image_scan()
+            .iter()
+            .filter_map(crate::cell::Cell::image_placement)
+        {
+            let key = PlacementKey::of(placement);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        self.clear_placements(keys);
+    }
+
+    /// Clear every cell of the placements in `keys`, buffer-wide, and free the
+    /// cell-owned images that are left without a cell.
+    fn clear_placements(&mut self, keys: Vec<PlacementKey>) {
+        if keys.is_empty() {
+            return;
+        }
+        let mut cleared = 0usize;
+        let (rows, cache, _) = self.rows.split_mut();
+        for (row, entry) in rows.iter_mut().zip(cache.iter_mut()) {
             // Task 119: skip evicted/compact rows — they hold no images.
             if row.is_compact() || row.is_evicted() {
                 continue;
             }
-            let cells = row.cells();
-            if col < cells.len()
-                && let Some(placement) = cells[col].image_placement()
-            {
-                let id = placement.image_id;
-                if !ids_to_clear.contains(&id) {
-                    ids_to_clear.push(id);
+            let mut changed = false;
+            for cell in row.cells_mut() {
+                if cell
+                    .image_placement()
+                    .is_some_and(|p| keys.contains(&PlacementKey::of(p)))
+                {
+                    cell.clear_image();
+                    cleared += 1;
+                    changed = true;
                 }
             }
-        }
-        for id in ids_to_clear {
-            self.clear_image_placements_by_id(id);
-        }
-    }
-
-    /// Clear all image placements that intersect the given row.
-    pub fn clear_image_placements_in_row(&mut self, row: usize) {
-        if row >= self.rows.len() {
-            return;
-        }
-        let mut ids_to_clear: Vec<u64> = Vec::new();
-        let cells = self.rows[row].cells();
-        for cell in cells {
-            if let Some(placement) = cell.image_placement() {
-                let id = placement.image_id;
-                if !ids_to_clear.contains(&id) {
-                    ids_to_clear.push(id);
-                }
+            if changed {
+                row.dirty = true;
+                *entry = None;
             }
         }
-        for id in ids_to_clear {
-            self.clear_image_placements_by_id(id);
+        self.image_cell_count -= cleared;
+        let mut ids: Vec<u64> = Vec::new();
+        for key in keys {
+            if !ids.contains(&key.image_id) {
+                ids.push(key.image_id);
+            }
         }
+        self.release_unreferenced_cell_owned_images(ids);
     }
 
     /// Clear image placements from every cell in the VISIBLE window only
@@ -845,6 +880,27 @@ impl Buffer {
             origin_col: start_col,
             placement_instance,
         }
+    }
+
+    /// Put the cursor back on the top-left cell of the image `result` describes.
+    ///
+    /// `place_image` always moves the cursor below the image, so protocols whose
+    /// placement leaves the cursor in place (kitty `C=1`, iTerm2
+    /// `doNotMoveCursor`, sixel in DECSDM display mode) call this afterwards.
+    ///
+    /// The row is located by its stable [`RowNumber`], never by an index read
+    /// before the call: placement can evict scrollback rows from the top, which
+    /// shifts every retained index (Task 125.C7). An origin row that was itself
+    /// evicted clamps to the oldest retained row, as `place_image` does. The
+    /// position is buffer-absolute: DECOM and the visible window are not
+    /// consulted, so the cursor lands on the image origin even when placement
+    /// scrolled the screen.
+    pub fn restore_cursor_to_image_origin(&mut self, result: &PlaceImageResult) {
+        let y = result.origin_row.rows_after(self.rows.base()).unwrap_or(0);
+        self.set_cursor_pos_raw(CursorPos {
+            x: result.origin_col,
+            y,
+        });
     }
 
     /// Stamp an image's cell grid at an explicit screen origin `(origin_row,

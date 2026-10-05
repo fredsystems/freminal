@@ -515,7 +515,17 @@ from inside a paint callback rather than a direct call from `Drop`. Whether
 an existing teardown pattern can be reused is unverified.
 
 Scheduling: not part of the Task 125 measurement phase; must not block
-125.9 or 125.10. Status: open, not complete.
+125.9 or 125.10.
+
+**Complete.** `impl Drop for RenderState` moves an initialized renderer into a
+window-scoped `GlRetireQueue` (`renderer/retire.rs`), drained at the start of
+the window's next `update` with its context current; the paint callback's
+`Arc` clone guarantees no renderer is retired mid-frame. A new
+`App::on_window_destroying(window_id, &glow::Context)` hook in
+`freminal-windowing`, run with the context current before the egui painter is
+destroyed, tears down the queue, the shared post renderer, and both toast
+passes. Recording tests match every create with a delete; offscreen tests prove
+the names are invalid after destroy. Partial-`init` failure is 125.C16.
 
 ### 125.C3 — Capture the 125.8 GPU timing log target
 
@@ -597,8 +607,9 @@ Surface point: 125.11 design. Freminal's DECSC saves a buffer position, so a
 restore is content-attached; xterm may store a screen-relative position. Not
 verified against a reference. 125.14 preserves today's semantics (clamped
 `RowNumber`). Fix scope: look up the xterm/DEC behaviour, then either keep or
-change it with a regression test and the escape-sequence docs. Open; must not
-block 125.11-125.18.
+change it with a regression test and the escape-sequence docs.
+
+**Complete.** xterm `cursor.c` (`CursorSave2` stores `screen->cur_row`; restore goes through `CursorSet`, clamping to the screen) and the VT510 DECSC page establish a screen-relative save. `SavedCursor` now stores a screen position and restores clamped to the screen; the content-attached tests were replaced by nine reference-behaviour tests and the escape-sequence docs updated. Remaining xterm divergences (per-screen save slots, DECRC with nothing saved, DECOM re-clamp) are pre-existing and unchanged.
 
 ### 125.C7 — Image placement cursor save/restore uses physical rows
 
@@ -606,15 +617,18 @@ Surface point: 125.11 design. `graphics_kitty.rs:776-827`, `:1546`,
 `graphics_iterm2.rs:125-157`, and `graphics_sixel.rs:114-143` save a physical
 cursor row around `place_image` and restore it after an eviction may have
 occurred; kitty and iTerm2 pass it to a screen-relative setter. Fix: capture
-`cursor_screen_pos()` instead, with an eviction regression test. Open;
-schedule after 125.14.
+`cursor_screen_pos()` instead, with an eviction regression test.
+
+**Complete.** Restore uses the stable `RowNumber` returned by `place_image` (`Buffer::restore_cursor_to_image_origin`), not a screen position: a placement that scrolls without evicting would otherwise move the cursor off the image origin, which kitty `C=1` forbids. Covers kitty `a=p`/`a=T`, iTerm2, and sixel DECSDM, and drops an accidental DECOM application; tested at capacity.
 
 ### 125.C8 — Kitty delete-by-cell `y=` treated as a physical row
 
 Surface point: 125.11 design. `graphics_kitty.rs:2542-2570` interprets `d=p` /
 `d=q` `y=` as a physical buffer row rather than a screen row. Fix scope: map
 through the visible window per the kitty spec, with a test at nonzero
-scrollback. Open; schedule after 125.14.
+scrollback.
+
+**Complete.** Per the kitty spec ("x=1, y=1 is the top left cell"), `d=p`/`d=q` resolve 1-based screen cells through the live window; `0` or off-screen is a no-op. Tested at nonzero scrollback.
 
 ### 125.C9 — `scroll_slice_*` deducted image cells from the wrong row
 
@@ -628,15 +642,17 @@ regression tests.
 Surface point: 125.15. `compact_idle_scrollback` calls `row.compact()` on rows
 already evicted to a compressed block, tripping the `cells_ref` debug assertion;
 no release impact. Fix: skip `evicted_to_block` rows, with a debug-build test.
-Open; not on the 125 critical path.
+
+**Complete.** `compact_idle_scrollback` skips rows evicted to a block; a debug test that previously tripped the assertion now passes.
 
 ### 125.C11 — `Row::erase_cells_at` trims image cells uncounted
 
 Surface point: 125.15. Trailing default-tag blank trimming also removes image
 cells (default-tag spaces) without decrementing `image_cell_count`, so the
 count over-states (the safe direction for horizons) and a cell-owned image may
-not be freed. Fix: account image cells before trimming, with a test. Open; not
-on the 125 critical path.
+not be freed. Fix: account image cells before trimming, with a test.
+
+**Complete.** The `erase_cells_at` trailing trim stops at image cells; generalised to every trim loop by 125.C13.
 
 ### 125.C12 — Copy-command-output-at-cursor mixes coordinate spaces
 
@@ -644,7 +660,43 @@ Surface point: 125.17. `CopyCommandOutputAtCursor` compares the screen-relative
 `cursor_pos.y` with buffer rows in `find_block_containing_row`, so it selects
 the wrong block whenever scrollback exists. Fix: resolve the cursor to a
 `RowNumber` through the snapshot first, with a test at nonzero scrollback.
-Open; not on the 125 critical path.
+
+**Complete.** The cursor resolves through the live window (`cursor_buffer_row`), independent of GUI scroll offset; `find_fold_target` had the same bug and is fixed too. Tested at nonzero scrollback.
+
+### 125.C13 — Row trim loops delete image cells uncounted
+
+Surface point: 125.C11. The trailing-blank trims in `insert_spaces_at*`,
+`clear_from`, and `delete_cells_at*` had the same defect as `erase_cells_at`.
+
+**Complete.** One `trim_trailing_blanks` helper in `row.rs` stops at image
+cells and replaces all six loops; 14 tests in `image_cell_trim_tests.rs` assert
+the counter against real cells after ICH, DCH, EL, ED, and ECH.
+
+### 125.C14 — Kitty `d=x` / `d=y` / `d=c` coordinates
+
+Surface point: 125.C8. `d=x`/`d=y` used 0-based physical coordinates and `d=c`
+cleared the whole cursor row.
+
+**Complete.** All three follow the spec and kitty `graphics.c`: 1-based screen
+cells through the live window, `d=c` intersecting only the cursor cell.
+Clearing now keys on `(image_id, placement_instance)`, so other placements of
+the same image survive, as kitty's "placements that intersect" requires; the
+row-wide `clear_image_placements_at_cursor` was removed.
+
+### 125.C15 — Alternate-screen width clip drops image cells uncounted
+
+Surface point: 125.C13. `Row::truncate_cells_to_width` clipped image cells with
+no accounting.
+
+**Complete.** `Buffer::clip_rows_to_width` decrements the counter and frees
+cell-owned images left with no cell; Kitty data is retained. Seven tests.
+
+### 125.C16 — Partially failed renderer init leaks GL objects
+
+Surface point: 125.C2. If `TerminalRenderer::init` fails midway, `initialized`
+stays false, so neither `destroy` nor the retire queue deletes the objects
+already created. Fix: release created objects on the init error path, with a
+recording-facade test that fails a mid-init step.
 
 ### 125.3 — Repair the incremental vertex-construction benchmarks
 
@@ -1511,9 +1563,8 @@ result.
 is below WezTerm and Ghostty on every sustained-output variant and on every
 screened workload except `sparse-row`, where it is statistically level with
 the slower peer. Buffer-level, a 200-line burst at capacity fell from 4.39 ms
-to about 118 us, and eviction no longer scales with retained rows. Open
-follow-ups are the numbered cleanups 125.C6, C7, C8, C10, C11, and C12; none
-gates this task.
+to about 118 us, and eviction no longer scales with retained rows. All
+numbered cleanups (125.C1-C15) are complete.
 
 ---
 

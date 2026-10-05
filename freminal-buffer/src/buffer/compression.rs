@@ -749,6 +749,41 @@ mod tests {
         let _ = buf.rows[0].cells();
     }
 
+    /// Regression (Task 125.C10): the idle tick calls `compact_idle_scrollback`
+    /// on every pass, and by then earlier passes have already compressed the
+    /// oldest rows into blocks. Those rows are inert placeholders; compacting
+    /// them tripped `Row::cells_ref`'s eviction `debug_assert` (and, in
+    /// release, replaced the placeholder's storage). They must be skipped,
+    /// stay evicted, and still round-trip their content.
+    #[test]
+    fn compact_idle_scrollback_skips_rows_evicted_to_a_block() {
+        let mut buf = buffer_with_compact_scrollback(20);
+        let visible_start = buf.visible_window_start(0);
+        assert!(visible_start >= 2, "test needs scrollback");
+        let (chars_before, tags_before, ..) =
+            buf.visible_as_tchars_and_tags(buf.max_scroll_offset());
+
+        assert!(buf.compress_scrollback_block(0, visible_start));
+        assert!(buf.rows[0].is_evicted());
+
+        // Second idle pass over an already-compressed region.
+        let compacted = buf.compact_idle_scrollback(usize::MAX);
+
+        assert_eq!(compacted, 0, "evicted rows consume no compaction budget");
+        assert!(
+            (0..visible_start).all(|i| buf.rows[i].is_evicted()),
+            "the pass must leave compressed rows evicted"
+        );
+        assert!(
+            (0..visible_start).all(|i| !buf.rows[i].is_compact()),
+            "an evicted placeholder must not be turned into a compact row"
+        );
+
+        let (chars_after, tags_after, ..) = buf.visible_as_tchars_and_tags(buf.max_scroll_offset());
+        assert_eq!(chars_before, chars_after);
+        assert_eq!(tags_before, tags_after);
+    }
+
     #[test]
     fn erase_scrollback_drops_compressed_blocks() {
         let mut buf = buffer_with_compact_scrollback(20);
