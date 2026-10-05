@@ -62,14 +62,15 @@ use super::csi_commands::{
     decscusr::ansi_parser_inner_csi_finished_decscusr,
     decslpp::ansi_parser_inner_csi_finished_decslpp,
     decslrm::ansi_parser_inner_csi_finished_decslrm,
-    decstbm::ansi_parser_inner_csi_finished_decstbm, dl::ansi_parser_inner_csi_finished_dl,
-    dsr::ansi_parser_inner_csi_finished_dsr, ech::ansi_parser_inner_csi_finished_ech,
-    ed::ansi_parser_inner_csi_finished_ed, el::ansi_parser_inner_csi_finished_el,
-    ich::ansi_parser_inner_csi_finished_ich, il::ansi_parser_inner_csi_finished_il,
-    rep::ansi_parser_inner_csi_finished_rep, scorc::ansi_parser_inner_csi_finished_scorc,
-    sd::ansi_parser_inner_csi_finished_sd, sgr::ansi_parser_inner_csi_finished_sgr,
-    su::ansi_parser_inner_csi_finished_su, tbc::ansi_parser_inner_csi_finished_tbc,
-    vpa::ansi_parser_inner_csi_finished_vpa, xtversion::ansi_parser_inner_csi_finished_xtversion,
+    decstbm::ansi_parser_inner_csi_finished_decstbm, decstr::ansi_parser_inner_csi_finished_decstr,
+    dl::ansi_parser_inner_csi_finished_dl, dsr::ansi_parser_inner_csi_finished_dsr,
+    ech::ansi_parser_inner_csi_finished_ech, ed::ansi_parser_inner_csi_finished_ed,
+    el::ansi_parser_inner_csi_finished_el, ich::ansi_parser_inner_csi_finished_ich,
+    il::ansi_parser_inner_csi_finished_il, rep::ansi_parser_inner_csi_finished_rep,
+    scorc::ansi_parser_inner_csi_finished_scorc, sd::ansi_parser_inner_csi_finished_sd,
+    sgr::ansi_parser_inner_csi_finished_sgr, su::ansi_parser_inner_csi_finished_su,
+    tbc::ansi_parser_inner_csi_finished_tbc, vpa::ansi_parser_inner_csi_finished_vpa,
+    xtversion::ansi_parser_inner_csi_finished_xtversion,
 };
 use crate::ansi_components::tracer::{SequenceTracer, escape_sequence_for_log};
 use crate::{ansi::ParserOutcome, ansi_components::tracer::SequenceTraceable};
@@ -347,7 +348,19 @@ impl AnsiCsiParser {
                 ansi_parser_inner_csi_finished_decslpp(&self.params, output)
             }
             AnsiCsiParserState::Finished(b'p') => {
-                ansi_parser_inner_csi_finished_decrqm(&self.params, &self.intermediates, b, output)
+                if self.intermediates.as_slice() == b"!" {
+                    // DECSTR — Soft Terminal Reset (`CSI ! p`). Exactly one
+                    // `!` intermediate: `CSI !! p` or `CSI $ ! p` is not
+                    // DECSTR and must not trigger a soft reset.
+                    ansi_parser_inner_csi_finished_decstr(&self.params, output)
+                } else {
+                    ansi_parser_inner_csi_finished_decrqm(
+                        &self.params,
+                        &self.intermediates,
+                        b,
+                        output,
+                    )
+                }
             }
             AnsiCsiParserState::Finished(b'q') => {
                 if self.params.is_empty() || self.params.first().unwrap_or(&b'0') != &b'>' {

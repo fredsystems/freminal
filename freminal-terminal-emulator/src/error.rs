@@ -114,8 +114,12 @@ pub enum ParserFailures {
     UnhandledDECSTBMCommand(String),
     #[error("Invalid set left/right margins (DECSLRM) sequence: {0}")]
     UnhandledDECSLRMCommand(String),
-    #[error("Invalid set margins (DECRQM) set position sequence: {0:?}")]
+    #[error("Invalid request mode (DECRQM) sequence: {0:?}")]
     UnhandledDECRQMCommand(Vec<u8>),
+    #[error("Request mode (DECRQM) with intermediates other than a single `$`: {0:?}")]
+    MalformedDECRQMIntermediates(Vec<u8>),
+    #[error("Request mode (DECRQM) with no mode number: {0:?}")]
+    MissingDECRQMMode(Vec<u8>),
     #[error("Invalid send device attributes (DA) set position sequence: {0}")]
     UnhandledDACommand(String),
     #[error("Invalid request device name and version (XTVERSION) set position sequence: {0}")]
@@ -140,4 +144,6 @@ pub enum ParserFailures {
     UnhandledCBTCommand(String),
     #[error("Invalid repeat character (REP) sequence: {0}")]
     UnhandledREPCommand(String),
+    #[error("Invalid soft terminal reset (DECSTR) sequence: {0}")]
+    UnhandledDECSTRCommand(String),
 }

@@ -32,6 +32,7 @@ use freminal_common::{
             rl_bracket::RlBracket,
         },
         pointer_shape::PointerShape,
+        progress::ProgressReport,
         row_number::RowNumber,
         tchar::TChar,
     },
@@ -371,6 +372,13 @@ pub struct TerminalSnapshot {
     /// `PointerShape::Default` means no override — use the OS default arrow.
     pub pointer_shape: PointerShape,
 
+    /// Current progress state reported via OSC 9;4 (issue #507).
+    ///
+    /// Stale reports (no update within
+    /// `TerminalHandler::PROGRESS_STALE_TIMEOUT`) are expired before this
+    /// field is populated — see `TerminalEmulator::build_snapshot`.
+    pub progress: ProgressReport,
+
     /// All inline images referenced by the visible window.
     ///
     /// The map contains only the images that appear in `visible_image_placements`
@@ -480,6 +488,7 @@ impl TerminalSnapshot {
             visible_line_widths: Arc::new(Vec::new()),
             cursor_color_override: None,
             pointer_shape: PointerShape::Default,
+            progress: ProgressReport::default(),
         }
     }
 }
@@ -606,5 +615,14 @@ mod tests {
         let alt = snap_at(1 << 63, 4, 4);
         assert_eq!(alt.retained_index_of(RowNumber::new(5)), None);
         assert_eq!(alt.retained_index_of(RowNumber::ALTERNATE_BASE), Some(0));
+    }
+
+    #[test]
+    fn empty_progress_is_inactive() {
+        use freminal_common::buffer_states::progress::ProgressState;
+        let progress = TerminalSnapshot::empty().progress;
+        assert_eq!(progress.state(), ProgressState::Inactive);
+        assert_eq!(progress.percent(), 0);
+        assert!(!progress.is_active());
     }
 }

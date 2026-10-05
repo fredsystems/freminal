@@ -2,6 +2,51 @@
 
 ## Last updated
 
+Last updated: 2026-10-05 — PR #527 review — DECRQM now requires exactly one
+`$` intermediate and a mode number. Malformed forms (`CSI ? 1 $ ! p`,
+`CSI ? 1 $ $ p`, `CSI ? 1 SP $ p`, `CSI $ ! p`) and queries naming no mode
+(`CSI $ p`, `CSI ? $ p`) are ignored instead of being answered. Before this
+they produced a reply, which was injected into the application's input
+unasked. The ANSI-mode form `CSI Pa $ p` is now listed separately as 🚧: its
+replies use the DEC-private form, and an IRM query clears insert mode
+(issue #528).
+
+Last updated: 2026-10-05 — issue #507 — per-pane OSC 9;4 progress-report
+state and indicator implemented, closing the gap previously described in
+the `OSC 9 ; 4 ; state ; progress` row below. Progress reports resolve into
+a typed `ProgressReport` (`ProgressState` + `percent`) by applying a
+parser-level `ProgressUpdate` wire form, preserving the ConEmu/ghostty
+value-retention rule where the error, indeterminate, and paused states
+leave the percentage unchanged when `v` is omitted. An empty value field
+(`4;<state>;`) is treated the same as an omitted one. Neither the ghostty
+nor the Windows Terminal reference documents that spelling; it is accepted
+deliberately so it is not shown as notification text, which is what the
+narrower #502 rule did. An empty state field (`4;`) is still rejected and
+stays notification text. State is per-pane,
+transported on `TerminalSnapshot` following the `cursor_color_override` /
+`pointer_shape` precedent, and rendered as a bar across the top of each
+pane inside that pane's own painter pass, contributing a bounded damage
+`Region` rather than a full repaint. Indeterminate renders a static
+full-width bar — deliberately not animated, since a moving sweep would
+break the fixed-rect assumption the damage merge depends on. A hardcoded
+15s staleness timeout (matching ghostty) clears a stalled report, checked
+from both `build_snapshot()` and the PTY consumer's idle arm (armed for
+the exact remaining deadline). Cleared on `s=0`, on RIS, and on DECSTR.
+Display is gated by the new `[progress] enabled` config option (default
+`true`); recognition and parsing remain unconditional, as issue #502 made
+them.
+
+Last updated: 2026-10-05 — issue #507 — DECSTR (`CSI ! p`, Soft Terminal
+Reset) implemented, scoped into #507 because #507 requires clearing
+per-pane progress state on soft reset. Resets DECTCEM, IRM, DECOM (without
+moving the live cursor), DECAWM, DECNRCM, DECSTBM (and, as a deliberate
+deviation from Table 5-9, DECLRMM/left-right margins), G0 DEC Special
+Graphics, SGR, and DECSC per Table 5-9 of the VT510 Programmer Reference;
+`TerminalState` additionally resets DECCKM and DECNKM. See the new `CSI ! p`
+row below and `TerminalHandler::soft_reset` for the full accounting of
+which Table 5-9 items are no-ops in freminal (KAM, DECSCA, DECAUPSS,
+DECSASD, DECKPM, DECRLM, DECPCTERM, full G1/G2/G3 designation).
+
 Last updated: 2026-10-04 — Task 125.C6 review — documented, without changing
 behaviour, the known divergences from xterm in cursor save/restore and in Sixel
 placement under DECSDM (`?80`): per-screen DECSC save slots, DECRC with nothing
@@ -281,7 +326,9 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | CSI > u       | Kitty Keyboard: push flags          | ✅     | Kitty keyboard protocol (Task 35); functional keys emit `:event-type` on repeat/release under flag 2. Super modifier (bit 8), F13–F35 (`CSI 57376 u`…), modifier-keys-as-keys (Shift/Control/Alt/Super Left/Right under flag 8), F3 normalized to `CSI 13 ~` (Task 101). Task 114 delivered the previously egui-blocked keypad/media/print/pause/menu keys (raw-winit intercept). NOT implemented: caps_lock/num_lock decoration bits + CapsLock/NumLock/ScrollLock transition events (Task 114 lock-state half reverted — not producible uniformly: Wayland compositor-consumed, Win/macOS level-only), ISO_Level3/5_Shift (no winit `KeyCode` variant), hyper/meta bits (no platform source). Tracked upstream: egui#3653, egui#2041, winit#1426 |
 | CSI ? u       | Kitty Keyboard: query flags         | ✅     | (Task 35)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | CSI = u       | Kitty Keyboard: set flags           | ✅     | (Task 35)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| CSI ? Pm $p   | DECRQM — Request Mode               | ✅     | Full mode query support via mode-sync loop; includes DECRPM ?2031 adaptive theme (Task 52)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| CSI ? Pm $p   | DECRQM — Request Mode               | ✅     | Full mode query support via mode-sync loop; includes DECRPM ?2031 adaptive theme (Task 52). Requires exactly one `$` intermediate and a mode number; malformed forms are ignored, not answered (PR #527) |
+| CSI Pa $p     | DECRQM — Request Mode (ANSI modes)  | 🚧     | Queries are recognised, but replies use the DEC-private form (`CSI ? Pa ; Ps $ y` instead of `CSI Pa ; Ps $ y`), an IRM (`4`) query gets no reply and clears insert mode, and only LNM (`20`) reports a real state. See ESCAPE_SEQUENCE_GAPS.md (issue #528) |
+| CSI ! p       | DECSTR — Soft Terminal Reset        | ✅     | Resets DECTCEM, IRM, DECOM (without moving the live cursor), DECAWM, DECNRCM, DECSTBM, G0 DEC Special Graphics, SGR, and DECSC per Table 5-9 (VT510); `TerminalState` also resets DECCKM and DECNKM. Also resets DECLRMM and the left/right margins — a documented deviation from Table 5-9, which predates DECSLRM. No-ops, since freminal has no representation for them: KAM, DECSCA, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM, and full independent G1/G2/G3 charset designation (see `TerminalHandler::soft_reset`). Issue #507.                                                                                                                                                                                                    |
 | CSI Ps h      | SM — Set Standard Mode              | 🚧     | LNM (mode 20) and IRM (mode 4) implemented. SRM (12) missing.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | CSI Ps l      | RM — Reset Standard Mode            | 🚧     | Same as SM                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
@@ -298,7 +345,7 @@ is verified by unit tests (`c0_bs_inside_csi`, `c0_cr_inside_csi`, `c0_vt_inside
 | OSC 7 ; URI                  | Current Working Directory     | ✅     | Parsed and stored in `TerminalHandler.current_working_directory`                                                                                                                                                                                                                                                            |
 | OSC 8 ; params ; URI BEL     | Hyperlink                     | ✅     | Fully implemented — hyperlink start/end with URL metadata                                                                                                                                                                                                                                                                   |
 | OSC 9 ; body BEL             | Desktop notification (iTerm2) | ✅     | Body parsed into `AnsiOscType::Notify` (source-tagged `OscNotifySource::Osc9`); routed by GUI per `[notifications]` config (Task 76), honouring the `notifications.osc_9` enable toggle (issue #433).                                                                                                                       |
-| OSC 9 ; 4 ; state ; progress | Progress state (ConEmu)       | ⬜     | Valid reports are recognized and silently consumed rather than misrouted as desktop notifications (issue #502). Per-pane progress state and UI remain unimplemented (issue #507); see [ESCAPE_SEQUENCE_GAPS.md](./ESCAPE_SEQUENCE_GAPS.md). Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
+| OSC 9 ; 4 ; state ; progress | Progress state (ConEmu)       | ✅     | Typed five-state parsing (inactive/in-progress/error/indeterminate/paused) with the ConEmu value-retention rule (states 2/3/4 keep the previous value when `v` is omitted); an empty value field (`4;s;`) is accepted as omitted, a deliberate leniency that neither reference documents; per-pane state carried on `TerminalSnapshot`; rendered as a bar across the top of each pane with a static (non-animated) indeterminate presentation; hardcoded 15s staleness timeout; cleared on `s=0`, RIS, and DECSTR; display gated by `[progress] enabled` (recognition/parsing stay unconditional) (issue #507). Reference: [Ghostty ConEmu extensions](https://ghostty.org/docs/vt/osc/conemu). |
 | OSC 10 ; ? BEL               | Foreground color query/set    | ✅     | Query returns theme fg (or dynamic override); set stores override                                                                                                                                                                                                                                                           |
 | OSC 11 ; ? BEL               | Background color query/set    | ✅     | Query returns theme bg (or dynamic override); set stores override                                                                                                                                                                                                                                                           |
 | OSC 12 ; color               | Set/query cursor color        | ✅     | Set/query/reset via `cursor_color_override`; snapshotted and consumed by renderer                                                                                                                                                                                                                                           |
@@ -463,7 +510,6 @@ The gaps that remain are either low-priority polish or require significant new i
 3. **Standard mode SRM (12)** — Rare in practice.
 4. **?1034 (Interpret meta key)** and **?1001 functional hilite tracking** — Niche.
 5. **OSC 133 command-block UI** — Markers parsed; navigation/gutter UI planned for Task 72 (v0.9.0).
-6. **OSC 9;4 ConEmu progress-report UI** — Valid progress reports are recognized and silently consumed, but per-pane progress state and visual presentation remain unimplemented (issue #507).
 
 ---
 

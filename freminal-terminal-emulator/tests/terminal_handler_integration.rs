@@ -2708,6 +2708,346 @@ fn test_ris_resets_deccolm_back_to_80() {
     assert_eq!(handler.cursor_pos().y, 0);
 }
 
+// ── DECSTR (Soft Terminal Reset, CSI ! p) integration tests ─────────
+
+#[test]
+fn test_decstr_resets_sgr_decom_decawm_dectcem_and_scroll_region() {
+    use freminal_common::buffer_states::{
+        format_tag::FormatTag,
+        mode::Mode,
+        modes::{decom::Decom, dectcem::Dectcem},
+    };
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Move SGR, DECOM, DECTCEM and the scroll region away from their
+    // defaults. DECAWM is deliberately left at `AutoWrap`, the enum's
+    // `Default`: DECSTR resets it to `NoAutoWrap`, so the assertion below
+    // can only pass if DECSTR actually changed it, not if it was left alone
+    // or reset to `Default`.
+    handler.process_outputs(&[
+        TerminalOutput::Sgr(freminal_common::sgr::SelectGraphicRendition::Bold),
+        TerminalOutput::Mode(Mode::Decom(Decom::OriginMode)),
+        TerminalOutput::Mode(Mode::Dectem(Dectcem::Hide)),
+    ]);
+    handler.handle_set_scroll_region(3, 8);
+
+    assert_ne!(*handler.current_format(), FormatTag::default());
+    assert_eq!(handler.buffer().is_decom_enabled(), Decom::OriginMode);
+    assert!(!handler.show_cursor());
+    assert_eq!(handler.buffer().scroll_region(), (2, 7));
+
+    // DECSTR.
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    assert_eq!(
+        *handler.current_format(),
+        FormatTag::default(),
+        "DECSTR must reset SGR to normal rendition"
+    );
+    assert_eq!(
+        handler.buffer().is_decom_enabled(),
+        Decom::NormalCursor,
+        "DECSTR must reset DECOM to Absolute"
+    );
+    assert_eq!(
+        handler.buffer().is_wrap_enabled(),
+        freminal_common::buffer_states::modes::decawm::Decawm::NoAutoWrap,
+        "DECSTR must reset DECAWM to No Autowrap (not the enum default AutoWrap)"
+    );
+    assert!(
+        handler.show_cursor(),
+        "DECSTR must reset DECTCEM to cursor enabled"
+    );
+    assert_eq!(
+        handler.buffer().scroll_region(),
+        (0, 9),
+        "DECSTR must reset the scroll region to the full page"
+    );
+}
+
+#[test]
+fn test_decstr_resets_irm_to_replace_mode() {
+    use freminal_common::buffer_states::{mode::Mode, modes::irm::Irm};
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Write "AB", then return the cursor to column 0.
+    handler.handle_data(&text_to_bytes("AB"));
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(1),
+        y: Some(1),
+    }]);
+
+    // Enable insert mode, then DECSTR.
+    handler.process_outputs(&[
+        TerminalOutput::Mode(Mode::Irm(Irm::Insert)),
+        TerminalOutput::SoftReset,
+    ]);
+
+    // Writing "X" at column 0 must overwrite (replace mode), not insert —
+    // if IRM were still active this would read "XAB" instead.
+    handler.handle_data(&text_to_bytes("X"));
+    let rows = handler.buffer().visible_rows(0);
+    assert_eq!(
+        row_text(&rows[0]),
+        "XB",
+        "DECSTR must reset IRM to replace mode"
+    );
+}
+
+#[test]
+fn test_decstr_preserves_screen_content_scrollback_and_cursor_position() {
+    let mut handler = TerminalHandler::new(40, 10);
+
+    fill_lines(&mut handler, 10);
+    let cursor_before = handler.cursor_pos();
+    let rows_before: Vec<String> = handler
+        .buffer()
+        .visible_rows(0)
+        .iter()
+        .map(row_text)
+        .collect();
+
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        cursor_before.x,
+        "DECSTR must not move the live cursor (x)"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        cursor_before.y,
+        "DECSTR must not move the live cursor (y)"
+    );
+    let rows_after: Vec<String> = handler
+        .buffer()
+        .visible_rows(0)
+        .iter()
+        .map(row_text)
+        .collect();
+    assert_eq!(
+        rows_before, rows_after,
+        "DECSTR must not clear or alter screen content (contrast: RIS does, see test_ris_clears_screen_and_resets_cursor)"
+    );
+}
+
+#[test]
+fn test_decstr_preserves_tab_stops_unlike_a_full_reset() {
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Clear all tab stops, then DECSTR.
+    handler.process_outputs(&[
+        TerminalOutput::TabClear(TabClearMode::All),
+        TerminalOutput::SoftReset,
+    ]);
+
+    // If tab stops were reset to the default (every 8 columns), HT from
+    // column 0 would land on column 8. Since Table 5-9 does not include tab
+    // stops, they must remain cleared, so HT instead jumps to the last
+    // column (no next stop found).
+    handler.process_outputs(&[TerminalOutput::Tab]);
+    assert_eq!(
+        handler.cursor_pos().x,
+        39,
+        "DECSTR must not reset tab stops"
+    );
+}
+
+#[test]
+fn test_decstr_preserves_queued_window_title_command() {
+    use freminal_common::buffer_states::osc::AnsiOscType;
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    handler.handle_osc(&AnsiOscType::SetTitleBar("My Terminal".to_string()));
+
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    // Unlike RIS (which clears `window_commands`), DECSTR must leave any
+    // already-queued window commands (e.g. a pending title change) alone.
+    let cmds = handler.take_window_commands();
+    assert_eq!(cmds.len(), 1);
+    assert!(matches!(
+        &cmds[0],
+        freminal_common::buffer_states::window_manipulation::WindowManipulation::SetTitleBarText(t)
+            if t == "My Terminal"
+    ));
+}
+
+#[test]
+fn test_decstr_does_not_exit_alternate_screen() {
+    let mut handler = TerminalHandler::new(40, 10);
+
+    handler.handle_enter_alternate();
+    assert!(handler.is_alternate_screen());
+
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    assert!(
+        handler.is_alternate_screen(),
+        "DECSTR must not exit the alternate screen"
+    );
+}
+
+#[test]
+fn test_decrc_after_decstr_restores_home_with_default_attributes() {
+    use freminal_common::buffer_states::format_tag::FormatTag;
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Move away from home and apply a non-default SGR.
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(10),
+        y: Some(5),
+    }]);
+    handler.process_outputs(&[TerminalOutput::Sgr(
+        freminal_common::sgr::SelectGraphicRendition::Bold,
+    )]);
+
+    // DECSTR, then move away again so DECRC's effect is observable.
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(20),
+        y: Some(8),
+    }]);
+
+    // DECRC (ESC 8).
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        0,
+        "DECRC after DECSTR must restore to home column"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        0,
+        "DECRC after DECSTR must restore to home row"
+    );
+    assert_eq!(
+        *handler.current_format(),
+        FormatTag::default(),
+        "attributes must be default after DECSTR + DECRC"
+    );
+}
+
+#[test]
+fn test_decrc_after_decstr_restores_default_character_set() {
+    // DECSTR records a complete saved cursor, including the default G0
+    // character set. Designating DEC Special Graphics afterwards and then
+    // issuing DECRC without a new DECSC must restore the default set.
+    use freminal_common::buffer_states::{line_draw::DecSpecialGraphics, tchar::TChar};
+
+    let mut handler = TerminalHandler::new(40, 10);
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+    handler.process_outputs(&[TerminalOutput::DecSpecialGraphics(
+        DecSpecialGraphics::Replace,
+    )]);
+    handler.process_outputs(&[TerminalOutput::RestoreCursor]);
+    handler.handle_data(&[0x6a]);
+
+    let visible_rows = handler.buffer().visible_rows(0);
+    let cell = visible_rows[0]
+        .char_at(0)
+        .expect("cell 0 must exist after writing");
+    assert_eq!(
+        cell.tchar(),
+        &TChar::from('j'),
+        "DECRC after DECSTR must restore the default (ASCII) character set"
+    );
+}
+
+#[test]
+fn test_decstr_does_not_move_cursor_with_decom_enabled_and_cursor_inside_custom_scroll_region() {
+    // This is the highest-risk combination for DECSTR's "must not move the
+    // live cursor" guarantee: `soft_reset()` relies on capturing
+    // `cursor_screen_pos()` *before* `set_decom`/`reset_scroll_region_to_full`
+    // home the cursor, then restoring it afterward. With DECOM enabled, the
+    // live cursor's coordinates are interpreted relative to the scroll
+    // region, so this combination is the one most likely to expose an
+    // off-by-one or an absolute-vs-region-relative mixup in that
+    // capture/restore round trip.
+    use freminal_common::buffer_states::{mode::Mode, modes::decom::Decom};
+
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Non-default scroll region: rows 3-7 (1-indexed) -> (2, 6) 0-indexed.
+    handler.handle_set_scroll_region(3, 7);
+    assert_eq!(handler.buffer().scroll_region(), (2, 6));
+
+    // Enable DECOM — homes the cursor to the top of the scroll region.
+    handler.process_outputs(&[TerminalOutput::Mode(Mode::Decom(Decom::OriginMode))]);
+
+    // Position the cursor inside the scroll region. With DECOM enabled,
+    // `y` is 1-indexed relative to the scroll region top, so `y: Some(3)`
+    // lands on absolute row `2 + (3 - 1) = 4`; `x: Some(5)` is column 4
+    // (0-indexed).
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5),
+        y: Some(3),
+    }]);
+    let cursor_before = handler.cursor_pos();
+    assert_eq!(cursor_before.x, 4);
+    assert_eq!(cursor_before.y, 4);
+
+    // DECSTR.
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        cursor_before.x,
+        "DECSTR must not move the live cursor (x) with DECOM enabled and a \
+         non-default scroll region containing the cursor"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        cursor_before.y,
+        "DECSTR must not move the live cursor (y) with DECOM enabled and a \
+         non-default scroll region containing the cursor"
+    );
+}
+
+#[test]
+fn test_decstr_does_not_move_cursor_with_decom_disabled_and_cursor_inside_custom_scroll_region() {
+    // DECOM-disabled counterpart to the test above. Less risky (cursor
+    // coordinates are already screen-absolute, matching `cursor_screen_pos`
+    // directly), but still exercises the capture/restore round trip with a
+    // non-default scroll region present.
+    let mut handler = TerminalHandler::new(40, 10);
+
+    // Same non-default scroll region: rows 3-7 (1-indexed) -> (2, 6) 0-indexed.
+    handler.handle_set_scroll_region(3, 7);
+    assert_eq!(handler.buffer().scroll_region(), (2, 6));
+
+    // Position the cursor inside the scroll region using screen-absolute
+    // coordinates (DECOM is disabled, the default).
+    handler.process_outputs(&[TerminalOutput::SetCursorPos {
+        x: Some(5),
+        y: Some(4),
+    }]);
+    let cursor_before = handler.cursor_pos();
+    assert_eq!(cursor_before.x, 4);
+    assert_eq!(cursor_before.y, 3);
+
+    // DECSTR.
+    handler.process_outputs(&[TerminalOutput::SoftReset]);
+
+    assert_eq!(
+        handler.cursor_pos().x,
+        cursor_before.x,
+        "DECSTR must not move the live cursor (x) with DECOM disabled and a \
+         non-default scroll region containing the cursor"
+    );
+    assert_eq!(
+        handler.cursor_pos().y,
+        cursor_before.y,
+        "DECSTR must not move the live cursor (y) with DECOM disabled and a \
+         non-default scroll region containing the cursor"
+    );
+}
+
 // ── 7.21 — HTS, TBC, CHT, CBT (Tab Stop Control) ────────────────────
 
 #[test]

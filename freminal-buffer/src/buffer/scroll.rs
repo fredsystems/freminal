@@ -85,7 +85,18 @@ impl Buffer {
         &self.rows[start.min(total)..end.min(total)]
     }
 
-    pub(in crate::buffer) fn reset_scroll_region_to_full(&mut self) {
+    /// Reset the DECSTBM scroll region to the full page (top = row 0,
+    /// bottom = last row).
+    ///
+    /// As a side effect, homes the cursor to (0, 0) — same as DECSTBM with
+    /// no parameters. Callers that must not move the live cursor (e.g.
+    /// DECSTR / soft reset) need to capture and restore the cursor position
+    /// around this call.
+    ///
+    /// Public so `TerminalHandler` can call it when DECSTR (`CSI ! p`)
+    /// resets the scroll region per Table 5-9 of the VT510 Programmer
+    /// Reference.
+    pub fn reset_scroll_region_to_full(&mut self) {
         self.scroll_region_top = 0;
         self.scroll_region_bottom = self.height.saturating_sub(1);
         // Reset cursor to home position (screen row 0, col 0).

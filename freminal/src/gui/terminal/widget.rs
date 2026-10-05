@@ -18,8 +18,8 @@ use crate::gui::{
 use crossbeam_channel::{Receiver, Sender};
 use freminal_common::{
     buffer_states::{
-        command_block::CommandStatus, pointer_shape::PointerShape, row_number::RowNumber,
-        tchar::TChar, url::Url,
+        command_block::CommandStatus, pointer_shape::PointerShape, progress::ProgressState,
+        row_number::RowNumber, tchar::TChar, url::Url,
     },
     config::Config,
     send_or_log,
@@ -1786,6 +1786,13 @@ pub struct PaneRenderCache {
     /// damage instead of forcing `Full` while search is open. See
     /// [`super::search_damage::SearchDamageState`] for the full invariant.
     pub(super) search_damage: super::search_damage::SearchDamageState,
+    /// The OSC 9;4 progress bar's `(state, percent)` fingerprint as of the
+    /// most recently rendered frame, or `None` when the bar was not drawn
+    /// (progress inactive, or `progress_enabled` off) -- issue #507 phase
+    /// B2. Compared against the current frame's fingerprint in `show()` to
+    /// decide whether the bar's fixed-geometry damage rect needs merging
+    /// into [`Self::last_frame_cursor_damage`]; see `merge_progress_damage`.
+    pub(super) previous_progress: Option<(ProgressState, u8)>,
 }
 
 impl PaneRenderCache {
@@ -1832,6 +1839,7 @@ impl PaneRenderCache {
             pending_repaint_delay: None,
             pointer_report_inputs: PanePointerReportInputs::default(),
             search_damage: super::search_damage::SearchDamageState::new(),
+            previous_progress: None,
         }
     }
 
@@ -2152,6 +2160,97 @@ fn rect_damage_relative_to_terminal(
     )
 }
 
+/// Height, in physical pixels, of the OSC 9;4 progress indicator bar
+/// painted across each pane's top edge (issue #507, phase B2). Thin enough
+/// not to compete visually with the first row of terminal content, while
+/// still reading clearly at typical DPI scales.
+const PROGRESS_BAR_HEIGHT_PX: f32 = 3.0;
+
+/// The OSC 9;4 progress bar's full-width track rect for a pane, in logical
+/// points, anchored to `pane_rect`'s top edge.
+///
+/// Spans the pane's ENTIRE width -- including the command-block gutter
+/// strip, if any -- not just the cell grid (`terminal_rect`), matching
+/// Ghostty's "a progress bar on top of each split" placement (the
+/// reference behavior this `ConEmu`-style OSC 9;4 extension is modelled
+/// on; see <https://ghostty.org/docs/vt/osc/conemu>).
+fn progress_bar_track_rect(pane_rect: egui::Rect, height_logical: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        pane_rect.min,
+        egui::pos2(pane_rect.max.x, pane_rect.min.y + height_logical),
+    )
+}
+
+/// The filled (determinate) portion of `track_rect` for `percent` (0-100),
+/// left-anchored.
+///
+/// Pure geometry, extracted so the percent -> pixel-width conversion --
+/// the obvious `as`-cast trap here, per `freminal-numeric-conversions` --
+/// is directly unit-tested rather than only reachable through a render
+/// pass. `percent` is clamped and converted via the lossless `f32::from`
+/// (not a cast) before the width multiplication.
+fn progress_fill_rect(track_rect: egui::Rect, percent: u8) -> egui::Rect {
+    let percent_f = f32::from(percent.min(100)) / 100.0;
+    let fill_width = track_rect.width() * percent_f;
+    egui::Rect::from_min_max(
+        track_rect.min,
+        egui::pos2(track_rect.min.x + fill_width, track_rect.max.y),
+    )
+}
+
+/// Merge the OSC 9;4 progress bar's damage into this frame's already-decided
+/// `PaneFrameDamage` (issue #507, phase B2). Called only when the bar's
+/// active/state/percent fingerprint changed since the last frame -- see the
+/// call site in `show()`.
+///
+/// **Classification (`freminal-damage-model` skill, section 1):
+/// BOUNDABLE-NOW.** Unlike terminal content, the bar's rect is a FIXED,
+/// pane-relative extent that depends only on `pane_rect` -- never on
+/// scroll position, folds, or the bar's own state/percent. So the instant
+/// a fingerprint change is detected, the complete old-and-new extent is
+/// already known: old and new are literally the same rect (only the fill
+/// color/width *within* it changes, never the rect's own bounds), so no
+/// separate erase-the-old-extent step is needed the way selection/hover/
+/// search damage need one.
+///
+/// This safety is a **cross-file coupling**, not something this function
+/// (or `dims_changed`) enforces on its own: `dims_changed` is defined in
+/// CELL counts, so a pane-border drag that moves `pane_rect` by less than
+/// one cell's worth of pixels changes the bar's on-screen rect without
+/// flipping `dims_changed`. What actually keeps that case safe today is
+/// three other mechanisms: (1) interactive pane-border dragging forces
+/// `PaneFrameDamage::Full` via the pointer/border-drag `force_full` path in
+/// `app_impl.rs`; (2) window resize and pixels-per-point changes force
+/// `Full` via the chrome `size_changed` / `ppp_changed` signals; and (3)
+/// theme changes are covered by the separate `theme_changed` global damage
+/// category. If any of those three were changed or removed, a stale or
+/// ghosted progress bar could reappear here with no test catching it.
+///
+/// `bar_rect` is `None` only when the viewport-relative geometry
+/// conversion itself degenerated (e.g. a zero-height viewport). Per the
+/// damage model's complete-bound rule (section 6), that is an
+/// unprovable-bound case, not a "nothing to report" one, so it escalates
+/// to `Full` rather than silently reporting no damage for a bar that DID
+/// change.
+fn merge_progress_damage(
+    damage: crate::gui::renderer::PaneFrameDamage,
+    bar_rect: Option<crate::gui::renderer::PaneDamageRect>,
+) -> crate::gui::renderer::PaneFrameDamage {
+    use crate::gui::renderer::PaneFrameDamage;
+    let Some(bar_rect) = bar_rect else {
+        return PaneFrameDamage::Full;
+    };
+    match damage {
+        PaneFrameDamage::Full | PaneFrameDamage::CursorOnly(None) => damage,
+        PaneFrameDamage::Unchanged => PaneFrameDamage::Region(vec![bar_rect]),
+        PaneFrameDamage::CursorOnly(Some(r)) => PaneFrameDamage::Region(vec![r, bar_rect]),
+        PaneFrameDamage::Region(mut rects) => {
+            rects.push(bar_rect);
+            PaneFrameDamage::Region(rects)
+        }
+    }
+}
+
 /// Compute the terminal viewport's top-left corner in physical framebuffer
 /// pixels, plus the framebuffer height, from egui's own screen rect and
 /// `ppp`. Shared by the cursor-only/bounded-damage full-rebuild arms
@@ -2442,10 +2541,13 @@ fn build_bounded_damage(
 pub struct FreminalTerminalWidget {
     /// Shared font manager — metrics, rasterisation, fallback chain.
     pub(super) font_manager: FontManager,
-    /// Whether OpenType ligatures are enabled for text shaping.
-    ligatures: bool,
-    /// Whether cursor trail animation is enabled (cursor glides to new position).
-    cursor_trail: bool,
+    /// Hot-reloadable single-bool feature toggles cached from config,
+    /// grouped into their own type to keep this struct's own field count
+    /// under clippy's `struct_excessive_bools` threshold (a fourth
+    /// independent bool -- `progress_enabled`, issue #507 phase B2 -- would
+    /// otherwise trip it). See [`WidgetDisplayToggles`]'s own doc for why
+    /// each field is still correctly a `bool`, not an enum.
+    toggles: WidgetDisplayToggles,
     /// Duration of the cursor trail animation.
     cursor_trail_duration: Duration,
     /// The base egui `FontDefinitions` (without any preview font registered).
@@ -2458,6 +2560,30 @@ pub struct FreminalTerminalWidget {
     /// Cleared on the next frame when the terminal window calls
     /// `flush_egui_fonts_if_dirty`.
     egui_fonts_dirty: bool,
+}
+
+/// Hot-reloadable single-bool feature toggles [`FreminalTerminalWidget`]
+/// caches from config and reads every frame in `show()`.
+///
+/// Each field is independently a TOML config toggle -- one of the three
+/// cases `freminal-state-representation` names as still correctly a
+/// `bool` rather than an enum -- so grouping them here is purely to keep
+/// [`FreminalTerminalWidget`]'s own field count under clippy's
+/// `struct_excessive_bools` limit; it carries no combined meaning of its
+/// own (unlike, say, `PaneRenderCache`'s bools, which are genuinely
+/// per-pane dirty-tracking flags and are grouped under an explicit
+/// `#[allow(clippy::struct_excessive_bools)]` instead).
+#[derive(Debug, Clone, Copy)]
+struct WidgetDisplayToggles {
+    /// Whether OpenType ligatures are enabled for text shaping.
+    ligatures: bool,
+    /// Whether cursor trail animation is enabled (cursor glides to new position).
+    cursor_trail: bool,
+    /// Whether the per-pane OSC 9;4 progress indicator is drawn
+    /// (`config.progress.enabled`, issue #507 phase B2). Gates display
+    /// only -- recognition/parsing of OSC 9;4 always happens regardless of
+    /// this flag (see [`freminal_common::config::ProgressConfig`]'s doc).
+    progress_enabled: bool,
 }
 
 /// Compute a pane's terminal-rect origin: the top-left corner of the cell
@@ -2505,8 +2631,11 @@ impl FreminalTerminalWidget {
 
         Ok(Self {
             font_manager: FontManager::new(config, pixels_per_point)?,
-            ligatures: config.font.ligatures,
-            cursor_trail: config.cursor.trail,
+            toggles: WidgetDisplayToggles {
+                ligatures: config.font.ligatures,
+                cursor_trail: config.cursor.trail,
+                progress_enabled: config.progress.enabled,
+            },
             cursor_trail_duration: Duration::from_millis(u64::from(
                 config.cursor.trail_duration_ms,
             )),
@@ -3216,7 +3345,7 @@ impl FreminalTerminalWidget {
                 CursorFrameInputs {
                     blink_on: cursor_blink_on,
                     show_cursor: effective_show_cursor,
-                    trail_enabled: self.cursor_trail,
+                    trail_enabled: self.toggles.cursor_trail,
                     trail_duration: self.cursor_trail_duration,
                 },
             );
@@ -3422,7 +3551,7 @@ impl FreminalTerminalWidget {
                         snap.term_width,
                         &mut self.font_manager,
                         cell_w_f,
-                        self.ligatures,
+                        self.toggles.ligatures,
                         &snap.visible_line_widths,
                     );
 
@@ -3480,7 +3609,7 @@ impl FreminalTerminalWidget {
                                         dim_fg,
                                         &mut self.font_manager,
                                         cell_w_f,
-                                        self.ligatures,
+                                        self.toggles.ligatures,
                                     );
                                     out.push(Arc::new(shaped));
 
@@ -4454,6 +4583,69 @@ impl FreminalTerminalWidget {
             }
         }
 
+        // ── OSC 9;4 progress indicator (issue #507, phase B2) ─────────
+        // Ghostty-style: a thin bar across the pane's TOP edge, drawn only
+        // when the config gate is on and the snapshot reports active
+        // progress. Unlike the gutter/duration-label overlays above, this
+        // is not tied to command blocks or gated on the primary screen --
+        // Ghostty renders it "on top of each split" unconditionally.
+        let progress_state = snap.progress.state();
+        let progress_active =
+            self.toggles.progress_enabled && progress_state != ProgressState::Inactive;
+        if progress_active {
+            let bar_height_logical = PROGRESS_BAR_HEIGHT_PX / ppp;
+            let track_rect = progress_bar_track_rect(pane_rect, bar_height_logical);
+            let (r, g, b) = snap.theme.progress_color_for(progress_state);
+            let fill_color = egui::Color32::from_rgb(r, g, b);
+            if matches!(progress_state, ProgressState::Indeterminate) {
+                // Indeterminate: paint a full-width bar with NO marching/
+                // marquee animation. A real animated sweep would need a
+                // continuously re-armed repaint request and its own
+                // moving-extent damage handling -- `merge_progress_damage`
+                // below relies on the bar's rect being fixed across frames,
+                // which a moving sweep would break. Deliberately out of
+                // scope for this phase; see the phase B2 plan.
+                ui.painter().rect_filled(track_rect, 0.0, fill_color);
+            } else {
+                // Determinate states (InProgress/Error/Paused): a dim
+                // translucent track plus an opaque fill sized to
+                // `percent()`, left-anchored.
+                let track_color = egui::Color32::from_rgba_unmultiplied(r, g, b, 70);
+                ui.painter().rect_filled(track_rect, 0.0, track_color);
+                let fill_rect = progress_fill_rect(track_rect, snap.progress.percent());
+                ui.painter().rect_filled(fill_rect, 0.0, fill_color);
+            }
+        }
+
+        // Damage (issue #507 phase B2; BOUNDABLE-NOW, see
+        // `merge_progress_damage`'s doc): only touch
+        // `cache.last_frame_cursor_damage` when the bar's active/state/
+        // percent fingerprint actually changed since the last frame. An
+        // unchanged fingerprint means the previously-presented frame
+        // already has the correct pixels here, so there is nothing new to
+        // bound -- the same changed-vs-static split the gutter-hover and
+        // scrollbar decisions above already use for their own
+        // plain-painter overlays.
+        let current_progress_fingerprint =
+            progress_active.then_some((progress_state, snap.progress.percent()));
+        if current_progress_fingerprint != cache.previous_progress {
+            let bar_height_logical = PROGRESS_BAR_HEIGHT_PX / ppp;
+            let track_rect = progress_bar_track_rect(pane_rect, bar_height_logical);
+            let (vp_left_px, vp_top_px, fb_height_px) =
+                viewport_framebuffer_geometry(ui, terminal_rect, ppp);
+            let bar_damage_rect = rect_damage_relative_to_terminal(
+                track_rect,
+                terminal_rect,
+                ppp,
+                vp_left_px,
+                vp_top_px,
+                fb_height_px,
+            );
+            let damage = std::mem::take(&mut cache.last_frame_cursor_damage);
+            cache.last_frame_cursor_damage = merge_progress_damage(damage, bar_damage_rect);
+        }
+        cache.previous_progress = current_progress_fingerprint;
+
         // ── Search overlay ───────────────────────────────────────────
         // Run search refresh when query changed (outside the !snap.skip_draw block
         // to ensure it fires even on identical content frames). Also update
@@ -4733,8 +4925,11 @@ impl FreminalTerminalWidget {
             });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
-        self.ligatures = new_config.font.ligatures;
-        self.cursor_trail = new_config.cursor.trail;
+        self.toggles = WidgetDisplayToggles {
+            ligatures: new_config.font.ligatures,
+            cursor_trail: new_config.cursor.trail,
+            progress_enabled: new_config.progress.enabled,
+        };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
 
@@ -4776,8 +4971,11 @@ impl FreminalTerminalWidget {
             });
         let ligatures_changed = old_config.font.ligatures != new_config.font.ligatures;
         let needs_pane_atlas_clear = rebuild_result.font_changed() || ligatures_changed;
-        self.ligatures = new_config.font.ligatures;
-        self.cursor_trail = new_config.cursor.trail;
+        self.toggles = WidgetDisplayToggles {
+            ligatures: new_config.font.ligatures,
+            cursor_trail: new_config.cursor.trail,
+            progress_enabled: new_config.progress.enabled,
+        };
         self.cursor_trail_duration =
             Duration::from_millis(u64::from(new_config.cursor.trail_duration_ms));
 
@@ -4809,6 +5007,212 @@ impl FreminalTerminalWidget {
                 error!("fatal: font manager could not apply font zoom: {e}");
                 std::process::exit(1);
             })
+    }
+
+    /// Live-preview an expensive font change (family and/or line height) via
+    /// a full [`FontManager::rebuild`] (issue #452 phase C).
+    ///
+    /// Callers reserve this for changes that actually touch family or line
+    /// height -- a size-only change should go through the cheaper
+    /// [`Self::apply_font_zoom`] instead, exactly as it does for Ctrl+Scroll
+    /// zoom. `FontManager::rebuild` reads only `config.font.family` /
+    /// `config.font.size` / `config.font.line_height`, so it is safe to
+    /// build a throwaway [`Config`] carrying just those three values rather
+    /// than threading the caller's real (uncommitted) config through here.
+    ///
+    /// Returns `true` if any font-related state was invalidated, in which
+    /// case the caller must clear each pane's `RenderState::atlas` and
+    /// `PaneRenderCache::invalidate_content()`. As with
+    /// [`Self::apply_config_changes`], no resize event is sent here -- the
+    /// normal resize-detection logic notices the character-dimension
+    /// mismatch on the next frame and sends the correct
+    /// `InputEvent::Resize` on its own.
+    pub fn apply_font_preview_rebuild(
+        &mut self,
+        family: Option<&str>,
+        size: f32,
+        line_height: f32,
+    ) -> bool {
+        let pixels_per_point = self.font_manager.pixels_per_point();
+        let mut synthetic_config = Config::default();
+        synthetic_config.font.family = family.map(str::to_owned);
+        synthetic_config.font.size = size;
+        synthetic_config.font.line_height = line_height;
+        self.font_manager
+            .rebuild(&synthetic_config, pixels_per_point)
+            .unwrap_or_else(|e| {
+                error!("fatal: font manager rebuild failed during font preview: {e}");
+                std::process::exit(1);
+            })
+            .font_changed()
+    }
+
+    /// Live-preview the OpenType ligature toggle (issue #452 phase B)
+    /// without a full [`FontManager::rebuild`].
+    ///
+    /// Ligatures only change which shaping features `rustybuzz` applies --
+    /// no new fonts are loaded and no metrics change -- so calling the full
+    /// config-apply path (which reparses font files) would be wasted work on
+    /// every preview edit. This only flips the cached toggle `show()` reads
+    /// each frame. Returns `true` when the value actually changed, so the
+    /// caller knows whether to invalidate the pane atlases: a ligature
+    /// change alters shaping output, so previously-shaped lines must
+    /// re-shape to be visible.
+    pub const fn set_ligatures_preview(&mut self, enabled: bool) -> bool {
+        if self.toggles.ligatures == enabled {
+            return false;
+        }
+        self.toggles.ligatures = enabled;
+        true
+    }
+
+    /// Schedule the egui chrome fonts to be rebuilt from the GUI's config
+    /// on this window's next frame (see [`Self::flush_egui_fonts_if_dirty`]).
+    ///
+    /// Used by the Settings font preview, which writes the previewed font
+    /// into the GUI's config directly; without this the chrome would keep
+    /// the old font, and a later Apply would see no font change to refresh.
+    pub const fn mark_egui_fonts_dirty(&mut self) {
+        self.egui_fonts_dirty = true;
+    }
+
+    /// Live-preview the OSC 9;4 progress-bar display toggle (issue #507).
+    ///
+    /// Only flips the cached toggle `show()` reads each frame. No atlas
+    /// invalidation is needed: the bar is a plain painter overlay, and
+    /// flipping the toggle while a bar is active changes the bar's damage
+    /// fingerprint, so `show()` reports a bounded damage region for it on
+    /// the next frame. Returns `true` when the value actually changed.
+    pub const fn set_progress_enabled_preview(&mut self, enabled: bool) -> bool {
+        if self.toggles.progress_enabled == enabled {
+            return false;
+        }
+        self.toggles.progress_enabled = enabled;
+        true
+    }
+
+    /// Live-preview the cursor trail toggle and its duration (issue #452
+    /// phase B).
+    ///
+    /// Both are GUI-side render parameters `show()` reads each frame
+    /// (`CursorFrameInputs::trail_enabled` / `CursorFrameInputs::trail_duration`)
+    /// -- there is no PTY round trip and no glyph shaping is affected, so no
+    /// atlas invalidation is needed either.
+    pub fn set_cursor_trail_preview(&mut self, trail: bool, duration_ms: u32) {
+        self.toggles.cursor_trail = trail;
+        self.cursor_trail_duration = Duration::from_millis(u64::from(duration_ms));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod visual_preview_tests {
+    //! Tests for the cheap, GUI-side preview setters used by
+    //! `apply_visual_preview` (issue #452 phase B): `set_ligatures_preview`
+    //! and `set_cursor_trail_preview`. Both avoid the full
+    //! `apply_config_changes[_no_ctx]` path, so they need their own
+    //! coverage that the cached toggles actually change (or correctly
+    //! report no change).
+    //!
+    //! Also covers `apply_font_preview_rebuild` (issue #452 phase C), the
+    //! expensive counterpart applied only once the debounce in
+    //! `visual_preview::DebouncedPreview` settles.
+
+    use super::FreminalTerminalWidget;
+    use freminal_common::config::Config;
+    use std::time::Duration;
+
+    fn widget() -> FreminalTerminalWidget {
+        let ctx = egui::Context::default();
+        FreminalTerminalWidget::new(&ctx, &Config::default())
+            .expect("widget construction must succeed with the bundled default font")
+    }
+
+    #[test]
+    fn set_ligatures_preview_updates_toggle_and_reports_change() {
+        let mut widget = widget();
+        assert!(widget.toggles.ligatures, "default config enables ligatures");
+
+        assert!(
+            !widget.set_ligatures_preview(true),
+            "setting to the already-active value must report no change"
+        );
+        assert!(widget.toggles.ligatures);
+
+        assert!(
+            widget.set_ligatures_preview(false),
+            "setting to a different value must report a change"
+        );
+        assert!(!widget.toggles.ligatures);
+    }
+
+    #[test]
+    fn set_progress_enabled_preview_updates_toggle_and_reports_change() {
+        let mut widget = widget();
+        assert!(
+            widget.toggles.progress_enabled,
+            "default config enables the progress bar"
+        );
+
+        assert!(
+            !widget.set_progress_enabled_preview(true),
+            "setting to the already-active value must report no change"
+        );
+        assert!(widget.toggles.progress_enabled);
+
+        assert!(
+            widget.set_progress_enabled_preview(false),
+            "setting to a different value must report a change"
+        );
+        assert!(!widget.toggles.progress_enabled);
+    }
+
+    #[test]
+    fn set_cursor_trail_preview_updates_toggle_and_duration() {
+        let mut widget = widget();
+
+        widget.set_cursor_trail_preview(true, 250);
+        assert!(widget.toggles.cursor_trail);
+        assert_eq!(widget.cursor_trail_duration, Duration::from_millis(250));
+
+        widget.set_cursor_trail_preview(false, 400);
+        assert!(!widget.toggles.cursor_trail);
+        assert_eq!(widget.cursor_trail_duration, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn apply_font_preview_rebuild_reports_change_on_size_only() {
+        let mut widget = widget();
+        let default_size = Config::default().font.size;
+
+        assert!(
+            !widget.apply_font_preview_rebuild(
+                None,
+                default_size,
+                Config::default().font.line_height
+            ),
+            "re-applying the already-active values must report no change"
+        );
+
+        assert!(
+            widget.apply_font_preview_rebuild(
+                None,
+                default_size + 4.0,
+                Config::default().font.line_height
+            ),
+            "a genuine size change must report a change"
+        );
+    }
+
+    #[test]
+    fn apply_font_preview_rebuild_reports_change_on_line_height_only() {
+        let mut widget = widget();
+        let default = Config::default().font;
+
+        assert!(
+            widget.apply_font_preview_rebuild(None, default.size, default.line_height + 0.2),
+            "a genuine line-height change must report a change"
+        );
     }
 }
 
@@ -6612,6 +7016,174 @@ mod full_pane_rebuild_damage_rect_tests {
             damage, None,
             "a pane rect entirely below the framebuffer must clamp away to \
              nothing (-> Full at the call site), not emit a degenerate rect"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod progress_bar_geometry_tests {
+    //! Issue #507 phase B2: [`progress_bar_track_rect`], [`progress_fill_rect`],
+    //! and [`merge_progress_damage`] exercised directly at the pure-function
+    //! level, mirroring `full_pane_rebuild_damage_rect_tests` above.
+    use super::*;
+    use crate::gui::renderer::{PaneDamageRect, PaneFrameDamage};
+
+    // ── progress_bar_track_rect ──────────────────────────────────────────
+
+    /// The track spans the pane's FULL width (including any gutter strip
+    /// to its left), anchored to the pane's top edge, with the given
+    /// height -- not the terminal cell grid's width, and not centered.
+    #[test]
+    fn track_rect_spans_full_pane_width_at_the_top_edge() {
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 100.0));
+
+        let track = progress_bar_track_rect(pane_rect, 3.0);
+
+        assert_eq!(track.min, egui::pos2(0.0, 0.0));
+        assert_eq!(track.max, egui::pos2(200.0, 3.0));
+    }
+
+    /// A gutter-shifted pane (nonzero `pane_rect.min.x`) still has the
+    /// track start at the pane's own left edge, not the terminal viewport's
+    /// -- mirroring `full_pane_rebuild_damage_rect`'s use of `pane_rect`
+    /// rather than `terminal_rect` for the same reason (the bar spans the
+    /// gutter strip too).
+    #[test]
+    fn track_rect_starts_at_the_panes_own_left_edge() {
+        let pane_rect = egui::Rect::from_min_max(egui::pos2(50.0, 10.0), egui::pos2(250.0, 110.0));
+
+        let track = progress_bar_track_rect(pane_rect, 4.0);
+
+        assert_eq!(track.min, egui::pos2(50.0, 10.0));
+        assert_eq!(track.max, egui::pos2(250.0, 14.0));
+    }
+
+    // ── progress_fill_rect ───────────────────────────────────────────────
+
+    /// 0% fills nothing: the fill rect collapses to a zero-width sliver at
+    /// the track's left edge.
+    #[test]
+    fn fill_rect_at_zero_percent_has_zero_width() {
+        let track = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 3.0));
+
+        let fill = progress_fill_rect(track, 0);
+
+        assert_eq!(fill.min, track.min);
+        assert!(fill.width().abs() < f32::EPSILON);
+        assert!((fill.height() - track.height()).abs() < f32::EPSILON);
+    }
+
+    /// 100% fills the entire track width.
+    #[test]
+    fn fill_rect_at_100_percent_matches_the_full_track_width() {
+        let track = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 3.0));
+
+        let fill = progress_fill_rect(track, 100);
+
+        assert_eq!(fill.min, track.min);
+        assert!((fill.max.x - track.max.x).abs() < f32::EPSILON);
+        assert!((fill.height() - track.height()).abs() < f32::EPSILON);
+    }
+
+    /// An intermediate percentage fills exactly that fraction of the
+    /// track's width, left-anchored -- the core percent -> pixel-width
+    /// conversion this function exists to isolate for direct testing.
+    #[test]
+    fn fill_rect_at_50_percent_is_half_the_track_width() {
+        let track = egui::Rect::from_min_max(egui::pos2(10.0, 0.0), egui::pos2(210.0, 3.0));
+
+        let fill = progress_fill_rect(track, 50);
+
+        assert!((fill.min.x - 10.0).abs() < f32::EPSILON);
+        assert!((fill.width() - 100.0).abs() < f32::EPSILON);
+    }
+
+    /// A `percent` above 100 (should never occur -- `ProgressReport` already
+    /// clamps at parse time -- but this is a pure function with no way to
+    /// enforce that at the type level) is clamped rather than overflowing
+    /// the track's own bounds.
+    #[test]
+    fn fill_rect_clamps_percent_above_100() {
+        let track = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 3.0));
+
+        let fill = progress_fill_rect(track, 255);
+
+        assert!((fill.max.x - track.max.x).abs() < f32::EPSILON);
+    }
+
+    // ── merge_progress_damage ────────────────────────────────────────────
+
+    fn dr(x: i32) -> PaneDamageRect {
+        PaneDamageRect {
+            x,
+            y: 0,
+            width: 10,
+            height: 3,
+        }
+    }
+
+    /// Merging into `Unchanged` (the common case: nothing else changed
+    /// this frame besides the progress bar) produces a `Region` containing
+    /// exactly the bar's rect.
+    #[test]
+    fn merge_into_unchanged_yields_region_with_only_the_bar_rect() {
+        let result = merge_progress_damage(PaneFrameDamage::Unchanged, Some(dr(1)));
+        assert_eq!(result, PaneFrameDamage::Region(vec![dr(1)]));
+    }
+
+    /// Merging into an existing `CursorOnly(Some(rect))` (e.g. the cursor
+    /// also moved this frame) upgrades to `Region` carrying BOTH rects, in
+    /// order -- neither is dropped.
+    #[test]
+    fn merge_into_cursor_only_preserves_both_rects() {
+        let result = merge_progress_damage(PaneFrameDamage::CursorOnly(Some(dr(5))), Some(dr(1)));
+        assert_eq!(result, PaneFrameDamage::Region(vec![dr(5), dr(1)]));
+    }
+
+    /// Merging into an existing `Region(rects)` (e.g. a bounded content
+    /// rebuild ran this same frame) appends the bar's rect rather than
+    /// replacing the existing ones.
+    #[test]
+    fn merge_into_region_appends_the_bar_rect() {
+        let result =
+            merge_progress_damage(PaneFrameDamage::Region(vec![dr(3), dr(7)]), Some(dr(1)));
+        assert_eq!(result, PaneFrameDamage::Region(vec![dr(3), dr(7), dr(1)]));
+    }
+
+    /// `Full` is left untouched -- it already covers the bar's rect, and
+    /// downgrading it would be a correctness regression, not an
+    /// optimization.
+    #[test]
+    fn merge_into_full_stays_full() {
+        let result = merge_progress_damage(PaneFrameDamage::Full, Some(dr(1)));
+        assert_eq!(result, PaneFrameDamage::Full);
+    }
+
+    /// A degenerate `CursorOnly(None)` (already Full-equivalent once
+    /// aggregated) is left as-is rather than being "fixed up" into
+    /// something boundable -- it already forces `Full` at aggregation
+    /// regardless of what this function does with it.
+    #[test]
+    fn merge_into_cursor_only_none_is_left_unchanged() {
+        let result = merge_progress_damage(PaneFrameDamage::CursorOnly(None), Some(dr(1)));
+        assert_eq!(result, PaneFrameDamage::CursorOnly(None));
+    }
+
+    /// A `None` bar rect (the geometry conversion itself degenerated) means
+    /// the bar's extent cannot be bounded, so the whole pane escalates to
+    /// `Full` regardless of what damage was already decided -- the
+    /// complete-bound rule (`freminal-damage-model` section 6): an
+    /// unprovable bound must over-report, never silently drop the change.
+    #[test]
+    fn merge_with_no_bar_rect_escalates_to_full() {
+        assert_eq!(
+            merge_progress_damage(PaneFrameDamage::Unchanged, None),
+            PaneFrameDamage::Full
+        );
+        assert_eq!(
+            merge_progress_damage(PaneFrameDamage::Region(vec![dr(3)]), None),
+            PaneFrameDamage::Full
         );
     }
 }

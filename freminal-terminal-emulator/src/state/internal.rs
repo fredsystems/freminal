@@ -255,6 +255,24 @@ impl TerminalState {
                 self.parser.s8c1t_mode = S8c1t::SevenBit;
                 self.handler.set_s8c1t_mode(S8c1t::SevenBit);
             }
+            // DECSTR (CSI ! p) — soft terminal reset. The handler applies
+            // its own subset of Table 5-9 of the VT510 Programmer Reference.
+            // Of the `TerminalState`-owned mode fields only DECCKM (cursor
+            // keys) and DECNKM (keypad) are on that table, so only those two
+            // are reset here. Mouse tracking, bracketed paste, focus
+            // reporting, synchronized updates, DECSCNM and the rest of
+            // `TerminalModes` are deliberately left alone: none are in
+            // Table 5-9.
+            //
+            // This must run here, in event order, rather than as a scan over
+            // the whole chunk afterwards: `CSI ! p` followed by `CSI ? 1 h`
+            // in one write must leave DECCKM in application mode. Handling
+            // it here also covers DECSTR arriving through the tmux
+            // passthrough reparse path, which calls this same function.
+            TerminalOutput::SoftReset => {
+                self.modes.cursor_key = Decckm::Ansi;
+                self.modes.keypad_mode = KeypadMode::Numeric;
+            }
             _ => {}
         }
     }
@@ -805,6 +823,56 @@ mod tests {
         assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
     }
 
+    // ── DECSTR (CSI ! p) — soft terminal reset, TerminalState-owned modes ──
+
+    #[test]
+    fn decstr_resets_decckm_and_keypad_mode() {
+        use freminal_common::buffer_states::modes::keypad::KeypadMode;
+        let mut state = TerminalState::default();
+
+        // Put DECCKM (cursor keys) and DECNKM (keypad) into their non-default
+        // "application" states.
+        state.modes.cursor_key = Decckm::Application;
+        state.modes.keypad_mode = KeypadMode::Application;
+
+        state.handle_incoming_data(b"\x1b[!p");
+
+        assert_eq!(
+            state.modes.cursor_key,
+            Decckm::Ansi,
+            "DECSTR must reset DECCKM to Normal (Ansi)"
+        );
+        assert_eq!(
+            state.modes.keypad_mode,
+            KeypadMode::Numeric,
+            "DECSTR must reset DECNKM to Numeric characters"
+        );
+    }
+
+    #[test]
+    fn decstr_does_not_reset_unrelated_modes() {
+        use freminal_common::buffer_states::modes::mouse::MouseTrack;
+        let mut state = TerminalState::default();
+
+        // Mouse tracking is not in Table 5-9; DECSTR must leave it alone.
+        state.modes.mouse_tracking = MouseTrack::XtMseX11;
+        state.modes.bracketed_paste =
+            freminal_common::buffer_states::modes::rl_bracket::RlBracket::Enabled;
+
+        state.handle_incoming_data(b"\x1b[!p");
+
+        assert_eq!(
+            state.modes.mouse_tracking,
+            MouseTrack::XtMseX11,
+            "DECSTR must not reset mouse tracking"
+        );
+        assert_eq!(
+            state.modes.bracketed_paste,
+            freminal_common::buffer_states::modes::rl_bracket::RlBracket::Enabled,
+            "DECSTR must not reset bracketed paste"
+        );
+    }
+
     // ── leftover UTF-8 reassembly ────────────────────────────────────────────
 
     #[test]
@@ -1044,5 +1112,83 @@ mod tests {
             remaining.is_empty(),
             "tmux reparse queue should be drained after handle_incoming_data"
         );
+    }
+
+    // ── DECSTR (CSI ! p) mode reset ordering ────────────────────────────────
+
+    #[test]
+    fn decstr_followed_by_mode_setup_in_one_write_keeps_the_later_modes() {
+        // Applications commonly send a soft reset and then their own mode
+        // setup in a single write. The reset must apply in wire order, so the
+        // modes set after it survive.
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[!p\x1b[?1h\x1b=");
+        assert_eq!(state.modes.cursor_key, Decckm::Application);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Application);
+    }
+
+    #[test]
+    fn mode_setup_followed_by_decstr_in_one_write_resets_the_modes() {
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[?1h\x1b=\x1b[!p");
+        assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+    }
+
+    #[test]
+    fn decstr_through_tmux_passthrough_resets_cursor_keys_and_keypad() {
+        use freminal_common::buffer_states::modes::{decckm::Decckm, keypad::KeypadMode};
+        let mut state = TerminalState::default();
+        state.handle_incoming_data(b"\x1b[?1h\x1b=");
+        // DCS tmux ; ESC ESC [ ! p ST -- tmux doubles the inner ESC.
+        state.handle_incoming_data(b"\x1bPtmux;\x1b\x1b[!p\x1b\\");
+        assert_eq!(state.modes.cursor_key, Decckm::Ansi);
+        assert_eq!(state.modes.keypad_mode, KeypadMode::Numeric);
+    }
+
+    // ── DECRQM replies: only well-formed queries are answered ───────────────
+
+    /// Everything the terminal wrote back to the application while
+    /// processing `bytes`.
+    fn pty_replies(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut state = TerminalState::new(tx, None);
+        state.handle_incoming_data(bytes);
+        rx.try_iter()
+            .filter_map(|msg| match msg {
+                PtyWrite::Write(bytes) => Some(bytes),
+                PtyWrite::Resize(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decrqm_well_formed_private_query_is_answered() {
+        assert_eq!(pty_replies(b"\x1b[?1$p"), vec![b"\x1b[?1;2$y".to_vec()]);
+    }
+
+    #[test]
+    fn decrqm_malformed_queries_are_not_answered() {
+        // Extra or misplaced intermediates make these unrecognised
+        // sequences, and a query with no mode number names nothing. None of
+        // them may inject a reply into the application's input.
+        for seq in [
+            &b"\x1b[?1$!p"[..],
+            b"\x1b[?1$$p",
+            b"\x1b[?1 $p",
+            b"\x1b[$!p",
+            b"\x1b[!$p",
+            b"\x1b[$p",
+            b"\x1b[?$p",
+        ] {
+            assert_eq!(
+                pty_replies(seq),
+                Vec::<Vec<u8>>::new(),
+                "{:?} must not be answered",
+                String::from_utf8_lossy(seq)
+            );
+        }
     }
 }

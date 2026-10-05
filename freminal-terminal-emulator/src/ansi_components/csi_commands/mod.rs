@@ -50,6 +50,7 @@
 //! | `q`        | ` ` (SP)     | DECSCUSR    | `decscusr`    |
 //! | `p`        | `$`          | DECSLPP     | `decslpp`     |
 //! | `p`        | `$`+`?`      | DECRQM      | `decrqm`      |
+//! | `p`        | `!`          | DECSTR      | `decstr`      |
 
 pub mod cbt;
 pub mod cha;
@@ -68,6 +69,7 @@ pub mod decscusr;
 pub mod decslpp;
 pub mod decslrm;
 pub mod decstbm;
+pub mod decstr;
 pub mod dl;
 pub mod dsr;
 pub mod ech;

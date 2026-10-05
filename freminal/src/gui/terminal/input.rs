@@ -1807,6 +1807,7 @@ pub(super) fn write_input_to_terminal(params: WriteInputParams<'_, '_>) -> Write
         {
             let combo = KeyCombo::new(binding_key, egui_mods_to_binding_mods(*modifiers));
             if let Some(action) = binding_map.lookup(&combo) {
+                tracing::debug!("binding map: {combo:?} -> {action:?}");
                 dispatch_binding_action(
                     action,
                     view_state,

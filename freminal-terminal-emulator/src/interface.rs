@@ -814,6 +814,19 @@ impl TerminalEmulator {
         // ── Remaining cheap reads ────────────────────────────────────────────
         self.apply_sync_updates_timeout();
 
+        // Expire a stale OSC 9;4 progress report before reading it below —
+        // see `TerminalHandler::expire_stale_progress` (issue #507). This
+        // covers every snapshot built in response to PTY or GUI activity.
+        // A fully idle pane (no further PTY/GUI activity to trigger a
+        // fresh `build_snapshot` call) is covered separately: the PTY
+        // consumer thread's idle tick (`freminal/src/gui/pty.rs`, the
+        // `idle_deadline` arm) re-arms itself for the EXACT remaining time
+        // until staleness (`TerminalHandler::time_until_progress_stale`)
+        // rather than polling, also calls `expire_stale_progress` when that
+        // deadline fires, and republishes a snapshot only when doing so
+        // actually flips progress from active to inactive.
+        self.internal.handler.expire_stale_progress();
+
         let mode_fields = self.collect_mode_fields();
 
         // ── Carry the scroll change signal across frames the GUI will not render ──
@@ -970,6 +983,7 @@ impl TerminalEmulator {
             visible_line_widths,
             cursor_color_override: self.internal.handler.cursor_color_override(),
             pointer_shape: self.internal.handler.pointer_shape(),
+            progress: self.internal.handler.progress(),
         }
     }
 

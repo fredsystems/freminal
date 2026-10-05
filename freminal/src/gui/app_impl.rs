@@ -35,6 +35,7 @@ use super::rendering;
 use super::tabs::{Tab, TabManager};
 use super::terminal::{FreminalTerminalWidget, SplitBorderHover};
 use super::view_state;
+use super::visual_preview::ShaderErrorRoute;
 use super::window::PerWindowState;
 use super::{FreminalGui, PaneBorderDrag};
 
@@ -923,6 +924,20 @@ impl freminal_windowing::App for FreminalGui {
                 return false;
             }
             self.settings_modal.is_open = false;
+            // Veto the OS close and let the Settings window's own next
+            // `update()` close it through the self-close branch, the same
+            // route the owning window's `CloseNow` takes below. That branch
+            // has the `WindowHandle` this function lacks, and runs
+            // `end_settings_session`: with a clean draft a debounced value
+            // can still differ from the committed config on screen (commit
+            // A, let B settle, retype A, close), and that has to be
+            // reverted.
+            if let Some((proxy, _)) = self.windows.values().find_map(|w| w.repaint_handle.get()) {
+                proxy.request_repaint(window_id);
+                return false;
+            }
+            // No terminal window is left to wake the Settings window from.
+            // Nothing remains on screen to revert, so close it directly.
             self.settings_window_id = None;
             self.settings_owner = None;
             self.persist_window_state();
@@ -1423,6 +1438,16 @@ impl freminal_windowing::App for FreminalGui {
             let settings_action = self.settings_modal.show_standalone(ctx, os_dark);
             self.handle_settings_action(&settings_action, handle, window_id);
 
+            // Check whether a stashed debounced-preview value -- font,
+            // background image path, or shader path (issues #452 phases C
+            // and D) -- has settled. This runs every frame regardless of
+            // `settings_action` because a stable draft produces no further
+            // `SettingsAction::Preview` on its own -- the scheduled
+            // `request_repaint_after` wake that fires once a debounce
+            // interval elapses relies entirely on this call to actually
+            // apply the settled value.
+            self.tick_visual_preview_debounces(handle);
+
             // Track the settings window's current geometry so we can restore
             // it the next time it is opened.  We query the windowing layer
             // directly rather than `ctx.input().viewport()` because the
@@ -1440,15 +1465,13 @@ impl freminal_windowing::App for FreminalGui {
                 }
             }
 
-            // If the modal closed (Cancel or Apply), close the OS window.
+            // If the modal closed, close the OS window. Every way a
+            // Settings session ends is routed through here (or, for the
+            // owning window's Discard, calls the same helper), so the
+            // session cleanup lives in one place: see
+            // `end_settings_session`.
             if !self.settings_modal.is_open {
-                // Drop the live chrome preview override: the session is over.
-                // On Apply the committed theme now flows via the snapshot; on
-                // Cancel the RevertTheme broadcast restored it. Clearing also
-                // re-enables per-window Auto-mode theming, which a pinned global
-                // override cannot represent. The follow-up repaints scheduled by
-                // the Apply / Revert dispatch cover the snapshot catch-up.
-                self.preview_theme = None;
+                self.end_settings_session(handle);
                 self.persist_window_state();
                 self.settings_window_id = None;
                 self.settings_owner = None;
@@ -1526,6 +1549,14 @@ impl freminal_windowing::App for FreminalGui {
         // Drained here every frame (71.4 bug fix): previously only ran in the
         // subsequent-window branch of `on_window_created`, which never fires
         // for the first/only window and never re-runs after window creation.
+        //
+        // Where the drained error is surfaced depends on `self.shader_error_route`
+        // (issue #452 phase D): a committed change (Apply / Reload Config,
+        // the initial config, `hot_reload`, or a preview revert) keeps the
+        // original toast behaviour, but a shader path still being live-edited
+        // in the Settings window routes to that window's own status message
+        // instead -- a user typing a path would otherwise get a toast per
+        // keystroke on every open terminal window.
         {
             let err = {
                 let mut wpr = win
@@ -1535,7 +1566,18 @@ impl freminal_windowing::App for FreminalGui {
                 wpr.last_error.take()
             };
             if let Some(msg) = err {
-                self.push_error_toast("Shader error", Some(msg));
+                match self.shader_error_route {
+                    ShaderErrorRoute::SettingsStatus => {
+                        self.settings_modal
+                            .set_preview_status_message(format!("Shader error: {msg}"));
+                        if let Some(settings_window_id) = self.settings_window_id {
+                            handle.request_repaint(settings_window_id);
+                        }
+                    }
+                    ShaderErrorRoute::Toast => {
+                        self.push_error_toast("Shader error", Some(msg));
+                    }
+                }
             }
         }
 
@@ -1545,18 +1587,6 @@ impl freminal_windowing::App for FreminalGui {
         // paint callbacks released them -- so they are deleted at the top of
         // the next frame.
         win.drain_retired_gl(gl);
-
-        // ── Spawn new window ─────────────────────────────────────────────────
-        if win.pending_new_window {
-            win.pending_new_window = false;
-            self.spawn_new_window(handle);
-        }
-
-        // ── Quit all windows (issue #509) ────────────────────────────────────
-        if win.pending_quit_all {
-            win.pending_quit_all = false;
-            self.quit_all_windows(ctx, window_id, &win, handle);
-        }
 
         // ── Apply pending window geometry from layout engine ─────────────────
         if let Some((size_opt, pos_opt)) = win.pending_geometry.take() {
@@ -1728,6 +1758,13 @@ impl freminal_windowing::App for FreminalGui {
         match process_dead_panes(&mut win, &self.recording_swap) {
             DeadPaneOutcome::Continue => {}
             DeadPaneOutcome::CloseWindow => {
+                // Reinserts without draining `win.lifecycle_requests` (issue
+                // #512). Currently safe: both writers (the menu render and
+                // the deferred key-action dispatch) run later in `update()`,
+                // after this point, so nothing has been requested yet this
+                // frame. Any request already pending from a previous frame
+                // simply survives on `win` and is drained on the next one —
+                // moot here anyway, since this window is closing.
                 self.windows.insert(window_id, win);
                 ctx.send_viewport_cmd(ViewportCommand::Close);
                 return;
@@ -1746,6 +1783,12 @@ impl freminal_windowing::App for FreminalGui {
                 // `PerWindowState` — including, since #436, its chrome cache and
                 // self-dismissal settle state — leaving the window rendering a
                 // blank/fatal-error surface forever. Reinsert before returning.
+                //
+                // This also reinserts without draining `win.lifecycle_requests`
+                // (issue #512), which is safe for the same reason as the
+                // `CloseWindow` arm above: both writers run later in `update()`,
+                // so nothing pending can be lost — it survives on `win` and is
+                // drained on the next frame.
                 self.windows.insert(window_id, win);
                 return;
             };
@@ -2186,6 +2229,11 @@ impl freminal_windowing::App for FreminalGui {
                             // guard without re-prompting (issue #401).
                             self.settings_modal.is_open = false;
                             self.settings_owner = None;
+                            // The Settings window is closed directly here,
+                            // so its self-close branch never runs: end the
+                            // session now, or the discarded previews stay
+                            // live and written into `self.config`.
+                            self.end_settings_session(handle);
                             if let Some(sid) = self.settings_window_id.take() {
                                 handle.close_window(sid);
                             }
@@ -4076,6 +4124,42 @@ impl freminal_windowing::App for FreminalGui {
 
         trace!("{}", frame_time);
 
+        // ── Window-lifecycle requests (issue #512) ───────────────────────────
+        //
+        // Both requests below are raised from two places: the Freminal menu
+        // (during the menu-bar render, above) and `dispatch_deferred_action`
+        // for the equivalent key binding (further down, inside the
+        // `CentralPanel` closure). They are drained HERE, at the very end of
+        // the frame, so that both writers are observed in the same `update()`
+        // pass that raised them.
+        //
+        // This drain used to sit near the top of `update()`, upstream of both
+        // writers above. Several statements ran in between there and here —
+        // chrome-damage sampling, the chrome warm-up counter, the shader-error
+        // drain, and more — but none of them write these requests, so the
+        // read was still upstream of both places that could set them for the
+        // current frame. That meant a request could never be observed in its
+        // own frame and depended on some later event scheduling another one.
+        // Clicking a menu item happens to schedule that frame (the dropdown
+        // closes); an otherwise-idle key press does not. That is issue #512:
+        // `QuitAll` via the menu worked, via `Ctrl+Shift+Q` it silently did
+        // nothing. `NewWindow` had the identical defect, merely less visibly.
+        //
+        // Placement is load-bearing in the other direction too: this must stay
+        // BEFORE the reinsert below, because `quit_all_windows` reads
+        // `self.windows.keys()` as "every *other* window" and relies on the
+        // current window still being absent from the map.
+        let requests = win.lifecycle_requests.take();
+
+        if requests.wants_new_window() {
+            self.spawn_new_window(handle);
+        }
+
+        if requests.wants_quit_all() {
+            debug!("QuitAll: consuming pending flag on window {window_id:?}");
+            self.quit_all_windows(ctx, window_id, &win, handle);
+        }
+
         // Reinsert per-window state before returning.
         self.windows.insert(window_id, win);
 
@@ -4577,8 +4661,7 @@ impl FreminalGui {
             window_post,
             toast_render_state: crate::gui::renderer::ToastRenderState::new_shared(),
             repaint_handle,
-            pending_new_window: false,
-            pending_quit_all: false,
+            lifecycle_requests: super::window_lifecycle::WindowLifecycleRequests::default(),
             pending_geometry: None,
             last_known_size: None,
             last_known_position: None,

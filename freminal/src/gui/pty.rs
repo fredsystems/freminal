@@ -611,6 +611,29 @@ fn spawn_pty_consumer_thread(
             // compress backlog without a large burst.
             const IDLE_COMPRESSION_BUDGET: usize = 4096;
 
+            // OSC 9;4 progress staleness cadence (issue #507, phase B2).
+            // `TerminalHandler::expire_stale_progress` enforces a 15s
+            // timeout, but before this arm existed it was only ever invoked
+            // from `build_snapshot()` — i.e. only in response to PTY or GUI
+            // activity — so a program that died mid-progress with no
+            // further activity left the bar on screen forever, exactly the
+            // failure the timeout exists to prevent. Once both compaction
+            // backlogs are drained this arm would otherwise disarm to
+            // `never()`; while progress is still active it instead re-arms
+            // for the EXACT remaining time until staleness
+            // (`TerminalHandler::time_until_progress_stale`), so the wake
+            // count for a long-running progress report is O(number of OSC
+            // 9;4 updates) rather than O(duration / poll interval).
+            //
+            // A fixed-interval poll (originally 1s) was considered and
+            // rejected: this repo treats idle wakes as regressions (Tasks
+            // 68, 121, 123), and a progress-reporting program that updates
+            // less often than the compaction cadence — a large download or
+            // build running for minutes to hours — would otherwise keep the
+            // PTY thread waking once per second for the entire operation
+            // just to re-check a timeout that, absent a new update, cannot
+            // trip any sooner than the exact deadline already known.
+
             let mut emulator = terminal;
 
             let child_exit = child_exit_rx.unwrap_or_else(crossbeam_channel::never::<()>);
@@ -931,11 +954,20 @@ fn spawn_pty_consumer_thread(
                     recv(idle_deadline) -> _ => {
                         // Snapshot content is byte-identical after compaction
                         // or compression (both only change the internal
-                        // storage representation), so this arm must never
-                        // call `post_event` — doing so would be a spurious
-                        // GUI wake and defeat the idle/battery goal.
-                        // `continue` skips the trailing `post_event` call
-                        // below.
+                        // storage representation), so THAT part of this arm
+                        // must never call `post_event` on its own — doing so
+                        // would be a spurious GUI wake and defeat the
+                        // idle/battery goal. `continue` at the bottom still
+                        // skips the trailing unconditional `post_event` call.
+                        //
+                        // Issue #507 phase B2 added a second, independent
+                        // reason for this arm to fire: OSC 9;4 progress
+                        // staleness expiry (below), which — unlike
+                        // compaction/compression — CAN change what the GUI
+                        // renders (the progress bar disappearing), so it is
+                        // allowed its own conditional `post_event` call
+                        // further down, gated on `progress_became_inactive`
+                        // so a tick that finds nothing stale stays silent.
                         //
                         // Compact first, compress second: a row must be
                         // Task-118-compacted before it is a Task-119
@@ -951,10 +983,45 @@ fn spawn_pty_consumer_thread(
                         } else {
                             0
                         };
+
+                        // OSC 9;4 staleness (issue #507): `expire_stale_progress`
+                        // (15s timeout) previously only ran from
+                        // `build_snapshot()`, i.e. only in response to real
+                        // PTY/GUI activity — so a program that died mid-progress
+                        // with no further activity left the bar on screen
+                        // forever, the exact failure the timeout exists to
+                        // prevent. Checked every tick regardless of the
+                        // compaction/compression outcome above.
+                        let was_progress_active = emulator.internal.handler.progress().is_active();
+                        emulator.internal.handler.expire_stale_progress();
+                        let progress_became_inactive = was_progress_active
+                            && !emulator.internal.handler.progress().is_active();
+
+                        // Exact remaining time until the (possibly
+                        // just-expired) progress report goes stale, or
+                        // `None` when no progress is active. `None` here
+                        // means "no progress deadline to race against" —
+                        // NOT "arm immediately" — so it must never be
+                        // treated as a zero duration below.
+                        let progress_deadline =
+                            emulator.internal.handler.time_until_progress_stale();
+
                         if compacted > 0 || compressed > 0 {
-                            // More may remain — keep draining on the next tick.
+                            // More may remain — keep draining on the next
+                            // tick. If an active progress deadline falls
+                            // sooner than the next compaction slice, arm for
+                            // that instead so staleness expiry is not
+                            // delayed behind an ongoing drain; otherwise
+                            // (the common case, no active progress or a
+                            // deadline farther out than the next slice) arm
+                            // at the compaction cadence exactly as before.
                             work_since_trim = true;
-                            idle_deadline = crossbeam_channel::after(IDLE_COMPACTION_INTERVAL);
+                            idle_deadline = match progress_deadline {
+                                Some(remaining) if remaining < IDLE_COMPACTION_INTERVAL => {
+                                    crossbeam_channel::after(remaining)
+                                }
+                                _ => crossbeam_channel::after(IDLE_COMPACTION_INTERVAL),
+                            };
                         } else {
                             // Both backlogs fully drained. If we actually did
                             // work since the last trim, release the freed
@@ -968,7 +1035,35 @@ fn spawn_pty_consumer_thread(
                                 release_freed_heap();
                                 work_since_trim = false;
                             }
-                            idle_deadline = crossbeam_channel::never();
+                            // Stay armed at the EXACT progress staleness
+                            // deadline while progress is still active —
+                            // `never()` would permanently disarm this arm
+                            // and a stale progress report on a truly idle
+                            // pane (no further compaction/compression work,
+                            // no PTY/GUI activity) would never be
+                            // re-checked, let alone expire. Once progress is
+                            // inactive (here or already, e.g. a normal
+                            // `s=0` clear), fall back to `never()` exactly
+                            // as before phase B2.
+                            idle_deadline = progress_deadline.map_or_else(
+                                crossbeam_channel::never,
+                                crossbeam_channel::after,
+                            );
+                        }
+
+                        if progress_became_inactive {
+                            // The one case this arm publishes: staleness
+                            // expiry actually changed what the GUI would
+                            // render, so unlike the byte-identical
+                            // compaction/compression case this needs a real
+                            // snapshot + repaint, not a silent tick.
+                            post_event(
+                                &mut emulator,
+                                &window_cmd_tx,
+                                &arc_swap,
+                                &repaint_handle,
+                                true,
+                            );
                         }
                         continue;
                     }
