@@ -2391,6 +2391,23 @@ impl WindowPostRenderer {
         self.retired.clone()
     }
 
+    /// Wake this window's event loop whenever one of its panes retires a
+    /// renderer, so a frame runs to drain the queue even if the retirement
+    /// happens after `App::update` returned (see [`super::retire`], "Waking
+    /// the window"). `handle` is the window's repaint handle; it may still be
+    /// unpopulated here and is read lazily at wake time.
+    pub fn wake_window_on_retire(
+        &self,
+        handle: std::sync::Arc<
+            std::sync::OnceLock<(
+                freminal_windowing::RepaintProxy,
+                freminal_windowing::WindowId,
+            )>,
+        >,
+    ) {
+        self.retired.wake_window_on_retire(handle);
+    }
+
     /// Destroy every pane renderer retired into this window's queue.
     ///
     /// Call with this window's GL context current (e.g. at the top of

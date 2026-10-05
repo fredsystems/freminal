@@ -138,7 +138,8 @@ enum GlTarget<'a> {
 ```
 
 Every renderer signature changes from `gl: &glow::Context` to
-`gl: &Gl<'_>`. All 47 methods live on `Gl` as thin dispatch: the `Real` arm
+`gl: &Gl<'_>`. All 47 methods (the activation estimate; 49 as built, 56 after
+Task 125.8) live on `Gl` as thin dispatch: the `Real` arm
 delegates directly to `glow::Context`; the `Recording` arm appends a
 call-record entry and returns a fabricated handle where one is expected.
 

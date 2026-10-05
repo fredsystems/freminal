@@ -201,10 +201,13 @@ validation = []
 # with this feature entirely absent from the crate graph, since timing calls
 # in the frame path would otherwise perturb the very thing being measured.
 # Enables `freminal-windowing/frame-profiling` so one flag turns on both
-# crates' instrumentation. Task 125.4 adds the live render-work profiling
-# foundation (`gui::renderer::profiling`: `RenderWorkClass`,
-# `ChangedRowBucket`, `UploadByteCounts`, `LiveRenderProfile`) behind this
-# same flag; it is not yet wired to any call site (125.5/125.6 do that).
+# crates' instrumentation. Tasks 125.4-125.6 add the live render-work
+# profile (`gui::renderer::profiling`: `RenderWorkClass`, `ChangedRowBucket`,
+# `UploadByteCounts`, `LiveRenderProfile`) behind this same flag: each pane's
+# `show()` and paint callback classify every frame by the work it did and the
+# bytes it uploaded, and flush a summary under the
+# `freminal::task_125::live_render_profile` tracing target. See
+# `Documents/PROFILING.md`.
 frame-profiling = ["freminal-windowing/frame-profiling"]
 # Enables the `Recording` arm of `gui::renderer::gl_facade::Gl` (Task 123),
 # which logs each GL call instead of issuing it, for the Task 123
@@ -225,7 +228,11 @@ gl-recording = []
 # `target_os = "linux"`-gated) and needs Mesa plus a live $DISPLAY, so it is
 # NOT enabled by default and its tests skip when no context can be created.
 gl-pixel = ["gl-recording", "freminal-windowing/gl-offscreen"]
-# Forwards to `freminal-windowing/gpu-profiling` (Task 125.7): the
-# asynchronous GPU timestamp-query foundation. NOT enabled by default; not
-# yet wired to any renderer call site (125.8/125.9 do that).
+# Forwards to `freminal-windowing/gpu-profiling` and turns on asynchronous
+# GPU timestamp-query timing. Task 125.8: each pane's `TerminalRenderer`
+# measures its terminal upload and draw phases per drawn frame (tracing target
+# `freminal::task_125::gpu_timing`). Task 125.9, in `freminal-windowing`: each
+# window measures chrome, terminal-band and total-frame GPU time (target
+# `freminal_windowing::task_125::gpu_timing`). NOT enabled by default, and
+# independent of `frame-profiling`. See `Documents/PROFILING.md`.
 gpu-profiling = ["freminal-windowing/gpu-profiling"]

@@ -437,6 +437,7 @@ impl Buffer {
                 line: logical_lines.len(),
                 flat_start: row_start_flat_offset,
                 cells: row_cell_count,
+                new_row: None,
             });
 
             if old_row_idx == old_cursor_y {
@@ -462,7 +463,13 @@ impl Buffer {
         // command-block / prompt / placement row numbers after reflow.
         let mut line_new_starts: Vec<usize> = Vec::with_capacity(old_row_meta.len());
 
+        // Index into `old_row_meta` of the first old row of the logical line
+        // being processed (old rows are grouped consecutively, in order).
+        let mut line_first_old_row: usize = 0;
+
         for (line_idx, line) in logical_lines.into_iter().enumerate() {
+            let first_old_row = line_first_old_row;
+            line_first_old_row += line.len();
             // Determine origin for the first row of this logical line.
             let first_origin = line.first().map_or(RowOrigin::HardBreak, |r| r.origin);
             let is_cursor_line = cursor_logical_line == Some(line_idx);
@@ -503,6 +510,14 @@ impl Buffer {
                     } else {
                         (old_row.origin, RowJoin::ContinueLogicalLine)
                     };
+                    // This line is emitted verbatim, so old row `row_pos` is
+                    // exactly new row `line_start_idx + row_pos`. Its clipped
+                    // cell count differs from the old one, so tell the remap
+                    // directly rather than let it re-derive the row from flat
+                    // offsets that no longer line up.
+                    if let Some(meta) = old_row_meta.get_mut(first_old_row + row_pos) {
+                        meta.new_row = Some(line_start_idx + row_pos);
+                    }
                     new_rows.push(Row::from_cells(new_width, origin, join, cells));
                 }
 

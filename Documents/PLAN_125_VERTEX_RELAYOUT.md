@@ -1,11 +1,9 @@
 # PLAN_125_VERTEX_RELAYOUT.md — Task 125 "Performance Parity and Residual Remediation"
 
 > **STATUS: PENDING MERGE — measurement (125.1–125.10) and remediation
-> (125.11–125.18) complete 2026-10-04; see "Closure".** The measurement phase is
-> decomposed below against the post-Task-124 codebase. No remediation is
-> selected or decomposed yet. Fixed-stride relayout remains
-> one conditional branch, not the task goal, and cannot affect cursor-only
-> idle frames.
+> (125.11–125.18) complete 2026-10-04; see "Closure".** Measurement selected
+> the stable-row-number `RowStore` remediation; fixed-stride relayout was
+> refuted (see "Gate verdicts").
 >
 > **Version: v0.12.0.** Task 124 is complete and merged. The maintainer assigned
 > Task 125 to v0.12.0 on 2026-08-26; the release now gates on the measurement

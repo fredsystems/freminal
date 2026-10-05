@@ -783,6 +783,12 @@ impl freminal_windowing::App for FreminalGui {
             let _ = repaint_handle.set((proxy, window_id));
 
             let window_post = Arc::new(Mutex::new(WindowPostRenderer::new()));
+            // A pane retired after `update()` returned must still get a
+            // draining frame.
+            window_post
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .wake_window_on_retire(Arc::clone(&repaint_handle));
 
             let terminal_widget =
                 FreminalTerminalWidget::new(ctx, &self.config).unwrap_or_else(|e| {
@@ -3842,7 +3848,10 @@ impl freminal_windowing::App for FreminalGui {
         // A pane closed during this update retired its renderer after the
         // top-of-frame drain ran. Without a further frame the objects would
         // linger on an idle window; ask for exactly one (its drain empties
-        // the queue, so this cannot loop).
+        // the queue, so this cannot loop). This covers retirements that
+        // already happened; one that happens after `update` returns (the
+        // paint callback still held the pane's state) is covered by the
+        // queue's own wake -- see `renderer::retire`, "Waking the window".
         if win.has_pending_gl_retirees() {
             ctx.request_repaint();
         }

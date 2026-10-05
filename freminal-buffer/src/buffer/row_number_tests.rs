@@ -682,6 +682,7 @@ fn long_block(buf: &mut Buffer, fid: &str, output_len: usize) {
 fn reflow_renumbers_rows_and_remaps_every_holder() {
     let mut buf = Buffer::new(20, 6);
     long_block(&mut buf, "r", 55);
+    let saved_screen_pos = buf.cursor_screen_pos();
     buf.save_cursor();
     let old_base = buf.row_base();
     let old_next = buf.next_row_number();
@@ -726,10 +727,77 @@ fn reflow_renumbers_rows_and_remaps_every_holder() {
         end_text.ends_with('4'),
         "end_row must name the last output row, got {end_text:?}"
     );
-    // The saved cursor row is remapped too (it was on the row after the
-    // output, i.e. an empty row).
+    // DECSC saves a *screen* position, not a row number, so it needs no
+    // remap: restoring after the reflow returns to the same screen row and
+    // column (clamped to the screen), wherever the content now sits.
     buf.restore_cursor();
+    assert_eq!(
+        buf.cursor_screen_pos(),
+        saved_screen_pos,
+        "DECRC returns to the screen position DECSC saved"
+    );
     assert!(buf.cursor().pos.y < buf.rows().len());
+}
+
+#[test]
+fn reflow_of_an_image_bearing_wrapped_line_keeps_marks_on_their_rows() {
+    // One soft-wrapped logical line of three full 10-cell rows, with an image
+    // cell on the middle row. Narrowing to 3 columns must not re-wrap an
+    // image-bearing line: each old row is emitted verbatim, clipped to 3
+    // cells, so old rows 0/1/2 become new rows 0/1/2. Before the fix the
+    // remap compared the unclipped old offsets (0/10/20) with the clipped new
+    // cell counts (3/3/3) and sent rows 1 and 2 to the last row.
+    let mut buf = Buffer::new(10, 6);
+    buf.insert_text(&text("AAAAAAAAAABBBBBBBBBBCCCCCCCCCC"));
+    assert_eq!(buf.rows().len(), 3, "one logical line wrapped over 3 rows");
+    // Mark every old row (a prompt mark per row stands in for any holder).
+    for index in 0..3 {
+        let number = buf.row_number_at(index);
+        buf.prompt_rows.push(number);
+    }
+    buf.place_image_at(
+        next_image_id(),
+        1,
+        0,
+        1,
+        1,
+        ImageProtocol::Sixel,
+        None,
+        None,
+        0,
+        None,
+        1,
+        None,
+    );
+    assert_eq!(buf.prompt_rows().len(), 3);
+    assert_eq!(buf.image_cell_count, 1, "fixture holds an image cell");
+    let old_marks = buf.prompt_rows().to_vec();
+    let old_base = buf.row_base();
+    assert!(old_marks.iter().all(|&m| m.rows_after(old_base).is_some()));
+
+    buf.set_size(3, 6, 0);
+
+    let remap = buf.take_reflow_remap().expect("width change reflows");
+    let new_base = buf.row_base();
+    for (i, old) in old_marks.iter().enumerate() {
+        let mapped = remap.map_start(*old).unwrap();
+        assert_eq!(
+            mapped,
+            new_base.saturating_add(i),
+            "old row {i} must map to new row {i}"
+        );
+        assert_eq!(
+            remap.map_end(*old),
+            Some(mapped),
+            "a verbatim row has one row for both anchors"
+        );
+        assert_eq!(
+            buf.prompt_rows()[i],
+            mapped,
+            "buffer applied the same translation to its own prompt mark"
+        );
+    }
+    assert_eq!(row_text(&buf, 0), "AAA", "row 0 is the clipped first row");
 }
 
 #[test]

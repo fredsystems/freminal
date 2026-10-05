@@ -111,6 +111,11 @@ fn normal_run(args: Args, cfg: freminal_common::config::Config) -> Result<()> {
     let config_path = args.config.clone();
 
     let window_post = Arc::new(Mutex::new(gui::renderer::WindowPostRenderer::new()));
+    // A pane retired after `update()` returned must still get a draining frame.
+    window_post
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .wake_window_on_retire(Arc::clone(&repaint_handle));
 
     gui::run(
         cfg,

@@ -535,7 +535,7 @@ The kernel already provides `sched:sched_wakeup`, but this host mounts tracefs
 as `root:root` mode `0700`. The driver performs `sudo -v` before opening any
 window and runs only the system-wide, terminal-thread-filtered wakeup collector
 through `sudo`. It never remounts or changes tracefs permissions, and never
-relables context switches as wakeups.
+relabels context switches as wakeups.
 
 The wakeup filter and integrity baseline are built from the same thread-list
 snapshot after warm-up. Only a thread **created** during the interval

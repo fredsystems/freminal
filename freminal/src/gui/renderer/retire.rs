@@ -31,6 +31,9 @@
 //!    gone) but not yet *destroyed* (their GL objects still exist). Pushing
 //!    needs no GL context; [`GlRetireQueue::drain`] needs one and deletes
 //!    everything queued.
+//!    The queue can also carry a *repaint wake* ([`RepaintWake`]): when a
+//!    renderer is retired it pokes the window's event loop so a frame runs
+//!    and drains it (see "Waking the window" below).
 //! 2. `RenderState`'s `Drop` (in `gui::terminal::widget`) -- moves its
 //!    [`TerminalRenderer`] into the window's queue. Because it is `Drop`, it
 //!    covers **every** path that discards a pane (pane close, tab close,
@@ -43,6 +46,25 @@
 //!    context-lifetime GL state (the shared [`WindowPostRenderer`], its
 //!    retire queue, and the toast passes) once the app has already dropped
 //!    the window's `PerWindowState`.
+//!
+//! # Waking the window
+//!
+//! A retirement can happen *after* `FreminalGui::update` has finished its
+//! frame: a deferred `ClosePane` drops the pane's `RenderState` during
+//! `update`, but the paint callback of that same frame still holds an `Arc`
+//! clone, so `Drop` (and therefore the retirement) only runs once the
+//! windowing layer releases the paint jobs -- after `update` returned. The
+//! queue is empty when `update` looks, and an otherwise idle window would
+//! never run another frame to drain it. [`GlRetireQueue::retire`] therefore
+//! calls the queue's wake itself, after the push and with the queue lock
+//! released.
+//!
+//! The wake is built on the window's cross-thread `RepaintProxy` (the same
+//! one the PTY thread uses), **not** on `egui::Context::request_repaint`:
+//! `retire` runs from `Drop`, possibly while egui or the windowing layer is
+//! tearing down paint data, and egui's context lock is not re-entrant. The
+//! proxy only enqueues an event-loop message, takes no egui lock, and a
+//! closed window's id is ignored by the event loop. The wake runs no GL.
 //!
 //! # Where the drains run
 //!
@@ -71,11 +93,19 @@
 //!   belongs to exactly one window, so a renderer is only ever destroyed in
 //!   the context that created it. (Panes never migrate between windows.)
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+use freminal_windowing::{RepaintProxy, WindowId};
 
 use super::ToastRenderState;
 use super::gl_facade::Gl;
 use super::gpu::{TerminalRenderer, WindowPostRenderer};
+
+/// A thread-safe, GL-free callback that asks a window's event loop for a frame.
+///
+/// Invoked by [`GlRetireQueue::retire`]; must not take any lock the retiring
+/// code path may already hold (notably egui's context lock).
+pub type RepaintWake = Arc<dyn Fn() + Send + Sync>;
 
 /// A window-scoped queue of retired [`TerminalRenderer`]s awaiting GL
 /// destruction.
@@ -90,6 +120,9 @@ use super::gpu::{TerminalRenderer, WindowPostRenderer};
 #[derive(Clone, Default)]
 pub struct GlRetireQueue {
     pending: Arc<Mutex<Vec<TerminalRenderer>>>,
+    /// Shared by every clone, so a pane that cloned the queue before the
+    /// window installed its wake still sees it. Set at most once.
+    wake: Arc<OnceLock<RepaintWake>>,
 }
 
 impl GlRetireQueue {
@@ -99,7 +132,28 @@ impl GlRetireQueue {
         Self::default()
     }
 
-    /// Queue `renderer` for destruction on the next [`Self::drain`].
+    /// Install the callback [`Self::retire`] uses to ask the window for a
+    /// frame that will drain the queue. Only the first call has an effect;
+    /// the wake is shared by every clone of this queue.
+    pub fn set_repaint_wake(&self, wake: RepaintWake) {
+        // A second install is ignored: a window has exactly one event-loop
+        // target for the lifetime of its queue.
+        let _ = self.wake.set(wake);
+    }
+
+    /// Wake the window identified by `handle` (a `RepaintProxy` plus window
+    /// id, filled in once the event loop exists) whenever a renderer is
+    /// retired. A handle that is not yet populated wakes nothing.
+    pub fn wake_window_on_retire(&self, handle: Arc<OnceLock<(RepaintProxy, WindowId)>>) {
+        self.set_repaint_wake(Arc::new(move || {
+            if let Some((proxy, window_id)) = handle.get() {
+                proxy.request_repaint(*window_id);
+            }
+        }));
+    }
+
+    /// Queue `renderer` for destruction on the next [`Self::drain`], then
+    /// wake the window (see [`RepaintWake`]) so a frame runs to drain it.
     ///
     /// Touches no GL. A renderer that owns no GL objects is simply dropped
     /// rather than queued -- this keeps the queue empty (and `drain` free) for
@@ -115,6 +169,10 @@ impl GlRetireQueue {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(renderer);
+        // The queue lock is released: the wake never runs under it.
+        if let Some(wake) = self.wake.get() {
+            wake();
+        }
     }
 
     /// Number of renderers waiting to be destroyed.
@@ -217,8 +275,22 @@ impl WindowGlTeardown {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+
+    /// A queue whose wake bumps the returned counter.
+    fn queue_with_counting_wake() -> (GlRetireQueue, Arc<AtomicUsize>) {
+        let queue = GlRetireQueue::new();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&wakes);
+        queue.set_repaint_wake(Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        (queue, wakes)
+    }
 
     #[test]
     fn retiring_a_renderer_with_no_gl_objects_queues_nothing() {
@@ -226,6 +298,38 @@ mod tests {
         queue.retire(TerminalRenderer::new());
         assert!(queue.is_empty());
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn retiring_a_renderer_with_no_gl_objects_does_not_wake() {
+        let (queue, wakes) = queue_with_counting_wake();
+        queue.retire(TerminalRenderer::new());
+        assert_eq!(wakes.load(Ordering::SeqCst), 0, "nothing was queued");
+    }
+
+    #[test]
+    fn the_wake_is_shared_by_clones_and_installed_once() {
+        let queue = GlRetireQueue::new();
+        let early_clone = queue.clone();
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        for counter in [&first, &second] {
+            let counter = Arc::clone(counter);
+            queue.set_repaint_wake(Arc::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        // A clone made before the wake was installed still sees the first one.
+        early_clone.wake.get().expect("wake installed")();
+        assert_eq!(first.load(Ordering::SeqCst), 1);
+        assert_eq!(second.load(Ordering::SeqCst), 0, "second install ignored");
+    }
+
+    #[test]
+    fn an_unpopulated_repaint_handle_wakes_nothing_and_does_not_panic() {
+        let queue = GlRetireQueue::new();
+        queue.wake_window_on_retire(Arc::new(OnceLock::new()));
+        queue.wake.get().expect("wake installed")();
     }
 
     #[test]
@@ -281,6 +385,33 @@ mod recording_tests {
         let total_calls = gl.recorded().unwrap().calls().len();
         assert_eq!(queue.drain(&gl), 0);
         assert_eq!(gl.recorded().unwrap().calls().len(), total_calls);
+    }
+
+    #[test]
+    fn retiring_an_initialized_renderer_wakes_the_window_after_queueing_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gl = Gl::recording();
+        let queue = GlRetireQueue::new();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let observed_len = Arc::new(AtomicUsize::new(usize::MAX));
+        {
+            let wakes = Arc::clone(&wakes);
+            let observed_len = Arc::clone(&observed_len);
+            let probe = queue.clone();
+            queue.set_repaint_wake(Arc::new(move || {
+                wakes.fetch_add(1, Ordering::SeqCst);
+                // Reading the queue from inside the wake proves the queue
+                // lock is not held across the wake (it would self-deadlock)
+                // and that the renderer is already queued.
+                observed_len.store(probe.len(), Ordering::SeqCst);
+            }));
+        }
+
+        queue.retire(initialized_renderer(&gl));
+
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(observed_len.load(Ordering::SeqCst), 1);
     }
 
     #[test]

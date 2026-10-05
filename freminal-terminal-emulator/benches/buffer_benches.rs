@@ -510,9 +510,12 @@ fn bench_build_snapshot_with_scrollback(c: &mut Criterion) {
 //   clean_<N>
 //     Snapshot already built, nothing changed -- the repeat-snapshot path.
 //   text_change_<N>
-//     One byte of text written between snapshots, command blocks untouched --
-//     the common sustained-output case. The `_0` variant is the same work with
-//     no blocks, so `text_change_<N> - text_change_0` is the block cost.
+//     One character rewritten at a fixed cell (CUP + alternating `x` / `y`)
+//     between snapshots, command blocks untouched. The cursor never reaches
+//     the bottom margin, so the buffer never scrolls and no block is ever
+//     evicted: the block count is identical on every iteration, and the
+//     group asserts that after measurement. The `_0` variant is the same work
+//     with no blocks, so `text_change_<N> - text_change_0` is the block cost.
 // ---------------------------------------------------------------
 fn bench_build_snapshot_command_blocks(c: &mut Criterion) {
     const WIDTH: usize = 124;
@@ -547,12 +550,30 @@ fn bench_build_snapshot_command_blocks(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("clean", blocks), |b| {
             b.iter(|| std::hint::black_box(emulator.build_snapshot()));
         });
+        // Rewrite one cell in place instead of appending: appending would
+        // wrap and scroll after a few hundred iterations and evict blocks,
+        // so the measured block count would drift with the iteration count.
+        let mut flip = false;
         group.bench_function(BenchmarkId::new("text_change", blocks), |b| {
             b.iter(|| {
-                emulator.internal.handle_incoming_data(b"x");
+                flip = !flip;
+                let change: &[u8] = if flip { b"\x1b[1;1Hx" } else { b"\x1b[1;1Hy" };
+                emulator.internal.handle_incoming_data(change);
                 std::hint::black_box(emulator.build_snapshot())
             });
         });
+
+        // Outside the timed spans: the block count must not have drifted.
+        let held_after = emulator.internal.handler.buffer().command_blocks().len();
+        assert_eq!(
+            held_after, blocks,
+            "block count drifted during measurement ({held_after} != {blocks})"
+        );
+        let snapshot_blocks = emulator.build_snapshot().command_blocks.len();
+        assert_eq!(
+            snapshot_blocks, blocks,
+            "snapshot block count drifted during measurement"
+        );
     }
 
     group.finish();

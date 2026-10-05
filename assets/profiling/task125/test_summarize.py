@@ -265,8 +265,45 @@ class IntervalLabelTests(unittest.TestCase):
 
 class ValidationTests(unittest.TestCase):
     def test_wrong_repeat_count_is_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "expected 7 paired repeats, got 3"):
+        with self.assertRaisesRegex(ValueError, "freminal has 3 repeats, expected 7"):
             summarize.summarize(series("w", [1.0] * 3, [1.0] * 3, [1.0] * 3), 7)
+
+    def test_short_terminal_that_is_not_the_peer_is_rejected(self) -> None:
+        # ghostty is the faster terminal, so wezterm is the chosen peer; the
+        # old Freminal/peer-only check never looked at ghostty's short series.
+        with self.assertRaisesRegex(ValueError, "ghostty has 2 repeats, expected 3"):
+            summarize.summarize(
+                series("w", [9.0] * 3, [8.0] * 3, [1.0] * 2), expected_repeats=3
+            )
+
+    def test_short_peer_terminal_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "wezterm has 2 repeats, expected 3"):
+            summarize.summarize(
+                series("w", [9.0] * 3, [8.0] * 2, [1.0] * 3), expected_repeats=3
+            )
+
+    def test_extra_repeats_on_one_terminal_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ghostty has 4 repeats, expected 3"):
+            summarize.summarize(
+                series("w", [9.0] * 3, [8.0] * 3, [1.0] * 4), expected_repeats=3
+            )
+
+    def test_right_count_but_different_repeat_ids_is_rejected(self) -> None:
+        samples = [
+            s
+            for s in series("w", [9.0] * 3, [8.0] * 3, [1.0] * 3)
+            if not (s.terminal == "ghostty" and s.repeat == 3)
+        ]
+        samples.append(sample(4, "w", "ghostty", 1.0))
+        with self.assertRaisesRegex(ValueError, "repeat IDs differ"):
+            summarize.summarize(samples, expected_repeats=3)
+
+    def test_validation_is_per_workload(self) -> None:
+        samples = series("a", [9.0] * 3, [8.0] * 3, [1.0] * 3) + series(
+            "b", [9.0] * 3, [8.0] * 3, [1.0] * 2
+        )
+        with self.assertRaisesRegex(ValueError, "^b: ghostty has 2 repeats"):
+            summarize.summarize(samples, expected_repeats=3)
 
     def test_missing_terminal_is_rejected(self) -> None:
         samples = [

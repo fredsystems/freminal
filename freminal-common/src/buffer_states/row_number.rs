@@ -107,14 +107,36 @@ impl RowNumber {
         usize::value_from(distance).ok()
     }
 
-    /// Move by a signed number of rows, saturating at `0` and `u64::MAX`.
+    /// Move by a signed number of rows, saturating at the edges of **this
+    /// row's namespace**.
+    ///
+    /// A primary number saturates within `[0, ALTERNATE_BASE - 1]` and an
+    /// alternate number within `[ALTERNATE_BASE, u64::MAX]`, so the result is
+    /// always in the same namespace as `self` and the "primary can never alias
+    /// alternate" guarantee of the [module docs](self) holds for any `delta`
+    /// (an `i64` magnitude reaches `1 << 63`, exactly the namespace width).
+    /// Use [`Self::checked_offset`] to learn that a move ran off the edge
+    /// instead of silently stopping there.
     #[must_use]
     pub const fn offset(self, delta: i64) -> Self {
         let magnitude = delta.unsigned_abs();
-        if delta >= 0 {
-            Self(self.0.saturating_add(magnitude))
+        let (floor, ceiling) = if self.is_alternate() {
+            (Self::ALTERNATE_BASE.0, u64::MAX)
         } else {
-            Self(self.0.saturating_sub(magnitude))
+            (0, Self::ALTERNATE_BASE.0 - 1)
+        };
+        let raw = if delta >= 0 {
+            self.0.saturating_add(magnitude)
+        } else {
+            self.0.saturating_sub(magnitude)
+        };
+        // `Ord::clamp` is not `const`.
+        if raw < floor {
+            Self(floor)
+        } else if raw > ceiling {
+            Self(ceiling)
+        } else {
+            Self(raw)
         }
     }
 }
@@ -300,9 +322,20 @@ mod tests {
     }
 
     #[test]
-    fn offset_saturates_at_both_ends() {
+    fn offset_saturates_at_both_ends_of_the_primary_namespace() {
+        let top_primary = RowNumber::new((1u64 << 63) - 1);
         assert_eq!(RowNumber::new(3).offset(-100), RowNumber::ZERO);
         assert_eq!(RowNumber::ZERO.offset(i64::MIN), RowNumber::ZERO);
+        assert_eq!(top_primary.offset(1), top_primary);
+        assert_eq!(RowNumber::new(5).offset(i64::MAX), top_primary);
+        assert!(!RowNumber::new(5).offset(i64::MAX).is_alternate());
+    }
+
+    #[test]
+    fn offset_saturates_at_both_ends_of_the_alternate_namespace() {
+        let alt = RowNumber::ALTERNATE_BASE;
+        assert_eq!(alt.offset(-1), alt);
+        assert_eq!(alt.saturating_add(3).offset(-100), alt);
         assert_eq!(
             RowNumber::new(u64::MAX - 1).offset(100),
             RowNumber::new(u64::MAX)
@@ -316,8 +349,44 @@ mod tests {
     #[test]
     fn offset_handles_i64_min_without_overflow() {
         // `i64::MIN.unsigned_abs()` is 2^63; a plain `-delta` would overflow.
+        // From the top of the alternate namespace that magnitude would land on
+        // `u64::MAX - 2^63`, a PRIMARY number; it must clamp to the
+        // alternate namespace's first row instead.
         let n = RowNumber::new(u64::MAX);
-        assert_eq!(n.offset(i64::MIN), RowNumber::new(u64::MAX - (1u64 << 63)));
+        assert_eq!(n.offset(i64::MIN), RowNumber::ALTERNATE_BASE);
+        assert!(n.offset(i64::MIN).is_alternate());
+    }
+
+    #[test]
+    fn offset_never_changes_namespace() {
+        for start in [
+            RowNumber::ZERO,
+            RowNumber::new(7),
+            RowNumber::new((1u64 << 63) - 1),
+            RowNumber::ALTERNATE_BASE,
+            RowNumber::ALTERNATE_BASE.saturating_add(7),
+            RowNumber::new(u64::MAX),
+        ] {
+            for delta in [i64::MIN, -1, 0, 1, i64::MAX] {
+                assert_eq!(
+                    start.offset(delta).is_alternate(),
+                    start.is_alternate(),
+                    "{start}.offset({delta}) crossed namespaces"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offset_agrees_with_checked_offset_whenever_that_succeeds() {
+        for start in [
+            RowNumber::new(10),
+            RowNumber::ALTERNATE_BASE.saturating_add(10),
+        ] {
+            for delta in [-5, 0, 5] {
+                assert_eq!(start.checked_offset(delta), Some(start.offset(delta)));
+            }
+        }
     }
 
     #[test]

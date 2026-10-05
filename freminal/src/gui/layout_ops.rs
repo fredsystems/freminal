@@ -660,6 +660,11 @@ impl FreminalGui {
             let proxy = handle.event_loop_proxy();
             let _ = rh.set((proxy, window_id));
             let wp = Arc::new(Mutex::new(renderer::WindowPostRenderer::new()));
+            // A pane retired after `update()` returned must still get a
+            // draining frame.
+            wp.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .wake_window_on_retire(Arc::clone(&rh));
             (rh, wp)
         };
 

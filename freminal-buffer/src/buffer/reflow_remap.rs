@@ -37,6 +37,14 @@ pub(in crate::buffer) struct OldRowMeta {
     pub flat_start: usize,
     /// Number of cells the old row stored.
     pub cells: usize,
+    /// The post-reflow row index this old row became, when reflow emitted it
+    /// verbatim: an image-bearing logical line is not re-wrapped, it is carried
+    /// over one new row per old row (clipped to the new width), so the mapping
+    /// is exact and one-to-one. `flat_start` / `cells` count the *unclipped*
+    /// old cells while the new rows hold clipped ones, so a flat-offset
+    /// translation would land on the wrong row; this override bypasses it.
+    /// `None` for a re-wrapped line, which is translated by flat offset.
+    pub new_row: Option<usize>,
 }
 
 /// One reflow's row translation. See the module docs.
@@ -92,14 +100,22 @@ impl ReflowStage {
 
     fn map_start(&self, row: RowNumber) -> Option<RowNumber> {
         let meta = self.old_rows.get(self.old_index(row)?)?;
-        let new_idx = self.offset_to_new_row(meta.line, meta.flat_start)?;
+        let new_idx = match meta.new_row {
+            Some(verbatim) => verbatim,
+            None => self.offset_to_new_row(meta.line, meta.flat_start)?,
+        };
         Some(self.new_base.saturating_add(new_idx))
     }
 
     fn map_end(&self, row: RowNumber) -> Option<RowNumber> {
         let meta = self.old_rows.get(self.old_index(row)?)?;
-        let last_cell = meta.flat_start + meta.cells.saturating_sub(1);
-        let new_idx = self.offset_to_new_row(meta.line, last_cell)?;
+        // A verbatim row is one row before and after: both anchors agree.
+        let new_idx = if let Some(verbatim) = meta.new_row {
+            verbatim
+        } else {
+            let last_cell = meta.flat_start + meta.cells.saturating_sub(1);
+            self.offset_to_new_row(meta.line, last_cell)?
+        };
         Some(self.new_base.saturating_add(new_idx))
     }
 
@@ -199,16 +215,19 @@ mod tests {
                     line: 0,
                     flat_start: 0,
                     cells: 4,
+                    new_row: None,
                 },
                 OldRowMeta {
                     line: 0,
                     flat_start: 4,
                     cells: 4,
+                    new_row: None,
                 },
                 OldRowMeta {
                     line: 1,
                     flat_start: 0,
                     cells: 2,
+                    new_row: None,
                 },
             ],
             vec![0, 3],
@@ -293,6 +312,7 @@ mod tests {
                     line: i,
                     flat_start: 0,
                     cells: 1,
+                    new_row: None,
                 })
                 .collect(),
             vec![0, 1, 2, 3],
@@ -322,6 +342,7 @@ mod tests {
                 line: 0,
                 flat_start: 0,
                 cells: 10,
+                new_row: None,
             }],
             vec![0],
             vec![1, 1],
@@ -338,11 +359,44 @@ mod tests {
                 line: 0,
                 flat_start: 0,
                 cells: 0,
+                new_row: None,
             }],
             vec![0],
             vec![0],
         );
         assert_eq!(remap.map_start(RowNumber::new(0)), Some(RowNumber::new(10)));
         assert_eq!(remap.map_end(RowNumber::new(0)), Some(RowNumber::new(10)));
+    }
+
+    #[test]
+    fn verbatim_rows_map_one_to_one_despite_clipped_cell_counts() {
+        // One soft-wrapped logical line of three 10-cell old rows, emitted
+        // verbatim and clipped to 3 cells each. A flat-offset translation
+        // would see old starts 0/10/20 against new cells 3/3/3 and map the
+        // later rows past the line's content (clamping them all to the last
+        // row); the explicit override keeps them one-to-one.
+        let meta = |flat_start: usize, new_row: usize| OldRowMeta {
+            line: 0,
+            flat_start,
+            cells: 10,
+            new_row: Some(new_row),
+        };
+        let remap = ReflowRemap::single(
+            RowNumber::new(0),
+            RowNumber::new(50),
+            vec![meta(0, 0), meta(10, 1), meta(20, 2)],
+            vec![0],
+            vec![3, 3, 3],
+        );
+        for (old, new) in [(0, 50), (1, 51), (2, 52)] {
+            assert_eq!(
+                remap.map_start(RowNumber::new(old)),
+                Some(RowNumber::new(new))
+            );
+            assert_eq!(
+                remap.map_end(RowNumber::new(old)),
+                Some(RowNumber::new(new))
+            );
+        }
     }
 }

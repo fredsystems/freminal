@@ -90,15 +90,29 @@ def summarize(samples: list[Sample], expected_repeats: int) -> list[dict[str, ob
             raise ValueError(
                 f"{workload}: missing terminals: {missing}; unexpected: {unexpected}"
             )
+        # Every terminal must carry the same repeat IDs, and exactly the
+        # expected number of them. Checking only the Freminal/peer
+        # intersection would let a short or misaligned terminal slip through
+        # whenever it happened not to be chosen as the peer.
+        repeat_ids = {name: set(terminals[name]) for name in sorted(required)}
+        for name, ids in repeat_ids.items():
+            if len(ids) != expected_repeats:
+                raise ValueError(
+                    f"{workload}: {name} has {len(ids)} repeats, "
+                    f"expected {expected_repeats}"
+                )
+        reference = repeat_ids["freminal"]
+        for name, ids in repeat_ids.items():
+            if ids != reference:
+                raise ValueError(
+                    f"{workload}: repeat IDs differ: freminal={sorted(reference)} "
+                    f"{name}={sorted(ids)}"
+                )
         peer = max(
             ("wezterm", "ghostty"),
             key=lambda name: statistics.median(terminals[name].values()),
         )
-        repeats = sorted(set(terminals["freminal"]) & set(terminals[peer]))
-        if len(repeats) != expected_repeats:
-            raise ValueError(
-                f"{workload}: expected {expected_repeats} paired repeats, got {len(repeats)}"
-            )
+        repeats = sorted(reference)
         deltas = [
             terminals["freminal"][repeat] - terminals[peer][repeat]
             for repeat in repeats

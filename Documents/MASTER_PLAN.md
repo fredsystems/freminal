@@ -570,17 +570,15 @@ by two new damage states, `PaneFrameDamage::Region` (124.14) and `FrameDamage::N
 The maintainer's governing instruction at activation: do the structural fix, not a band-aid
 that improves the number while leaving the shape wrong.
 
-**Task 125 (v0.12.0, complete, pending merge):** measurement found one material gap, scrollback eviction under sustained output, remediated by the stable-row-number `RowStore` (125.11–125.18); Freminal is now at or below WezTerm and Ghostty on every matched workload. Original activation text: close or explain Freminal's remaining
-CPU/GPU gap against matched WezTerm and Ghostty workloads. The old fixed-stride proposal is now
-one conditional branch, not the goal: recon established that it cannot improve idle, while
-Task 124's live captures did not record changed-row distributions, live upload bytes, or actual
-GPU execution time. Its activated measurement phase begins with matched external process measurements,
-live rebuild/upload attribution, corrected incremental vertex benchmarks, and asynchronous
-real-GPU timing. Findings then select the remediation: idle/chrome bypass, incremental CPU or
-GPU vertex work, persistent buffers, scheduling, presentation, another measured lever, or an
-explicitly explained residual. If fixed stride is selected, its hard constraint remains that
-`DefaultBackground` means "leave these pixels untouched" (Task 34), so padded slots emit no
-fragments and the Phase 2 pixel harness is mandatory.
+**Task 125 (v0.12.0, complete, pending merge):** close or explain Freminal's remaining CPU/GPU
+gap against matched WezTerm and Ghostty workloads. The measurement phase (125.1–125.10) built a
+matched parity runner, live render-work and upload-byte profiling, and asynchronous GPU timing,
+and found one material gap: scrollback eviction under sustained output (429 ms/s against 20 and
+37), caused by front-draining the scrollback vectors on every line feed. The fixed-stride
+relayout and every other rendering lever were refuted. The remediation (125.11–125.18) replaced
+the row storage with a stable-row-number `RowStore` whose eviction is O(evicted); Freminal is now
+at or below both peers on every matched workload, and anchors that used to drift on eviction
+(selection, search, command blocks, placements) are stable.
 
 **Task 104 (v0.13.0, text sizing):** OSC 66 is the highest-risk rendering item (multicell
 blocks, fractional scaling, custom width algorithm). It shares no seams with Tasks 102 and
@@ -817,7 +815,7 @@ Update this section as tasks complete:
 - `Documents/PLAN_121_PERF_REMEDIATION.md` — Task 121 "Performance Remediation", CLOSED 2026-08-20 and now a historical record; carries the migration map to Tasks 123/124
 - `Documents/PLAN_123_GL_MEASUREMENT_HARNESS.md` — Task 123 "GL Pipeline Measurement Harness" (123.1–123.14, decomposed)
 - `Documents/PLAN_124_RENDER_EFFICIENCY.md` — Task 124 "Damage Model Remediation" (124.1–124.16 plus 124.C1, activated and decomposed 2026-08-23)
-- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0 measurement phase in progress)
+- `Documents/PLAN_125_VERTEX_RELAYOUT.md` — Task 125 "Performance Parity and Residual Remediation" (v0.12.0, complete, pending merge)
 - `Documents/DECOUPLING_FRAMEWORK.md` — decision record for the egui main-window rewrite question (reopened, leaning against); not a plan document and not tracked in this file
 - `Documents/PLAN_VERSION_130.md` — v0.13.0 "Kitty: Transfer, Cursors & Text Sizing" (Tasks 102–104, decomposed)
 - `Documents/PLAN_VERSION_140.md` — v0.14.0 "Power-User Toolkit" (stubs, Tasks 78–83, 96–97)

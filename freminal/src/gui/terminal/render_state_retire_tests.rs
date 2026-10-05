@@ -150,3 +150,63 @@ fn a_second_windows_panes_do_not_land_in_the_first_windows_queue() {
     );
     assert_eq!(queue_b.len(), 1);
 }
+
+#[test]
+fn a_retirement_after_update_returned_wakes_the_window() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let gl = Gl::recording();
+    let post = window_post();
+    let queue = post.lock().unwrap().retire_queue();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    {
+        let wakes = Arc::clone(&wakes);
+        queue.set_repaint_wake(Arc::new(move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    let rs = new_render_state(Arc::clone(&post));
+    init_renderer(&rs, &gl);
+    let in_flight_callback = Arc::clone(&rs);
+
+    // `update()` closes the pane and then checks the queue: still empty,
+    // because the paint callback of this very frame holds the state.
+    drop(rs);
+    assert!(queue.is_empty());
+    assert_eq!(wakes.load(Ordering::SeqCst), 0, "not retired yet: no wake");
+
+    // The windowing layer releases the paint jobs after `update` returned.
+    // This is the retirement `update` could not see; it must request a frame.
+    drop(in_flight_callback);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        1,
+        "the late retirement must ask the idle window for a draining frame"
+    );
+}
+
+#[test]
+fn a_pane_created_before_the_wake_was_installed_still_wakes_the_window() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let gl = Gl::recording();
+    let post = window_post();
+    let rs = new_render_state(Arc::clone(&post)); // clones the queue first
+    init_renderer(&rs, &gl);
+
+    let wakes = Arc::new(AtomicUsize::new(0));
+    {
+        let wakes = Arc::clone(&wakes);
+        post.lock()
+            .unwrap()
+            .retire_queue()
+            .set_repaint_wake(Arc::new(move || {
+                wakes.fetch_add(1, Ordering::SeqCst);
+            }));
+    }
+
+    drop(rs);
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+}
