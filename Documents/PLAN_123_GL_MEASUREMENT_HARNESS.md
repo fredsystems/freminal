@@ -294,23 +294,23 @@ stability over an observation period — see 123.12's stop condition.
 
 ## Subtask summary
 
-| Subtask | Phase | Title                                                              |
-| ------- | ----- | ------------------------------------------------------------------ |
+| Subtask | Phase | Title                                                               |
+| ------- | ----- | ------------------------------------------------------------------- |
 | 123.1   | 1     | Enumerate and freeze the GL call surface, with a compile-time guard |
-| 123.2   | 1     | Define the `Gl` facade and `RecordingState`                        |
+| 123.2   | 1     | Define the `Gl` facade and `RecordingState`                         |
 | 123.3   | 1     | Handle fabrication for the recording backend                        |
-| 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                  |
+| 123.4   | 1     | Migrate `gpu.rs` to the `Gl` facade                                 |
 | 123.5   | 1     | Migrate `toast_pass.rs` and `toast_text_pass.rs`                    |
 | 123.6   | 1     | Verify zero production overhead (static proof; see re-scope note)   |
 | 123.6b  | 2     | Verify dispatch cost by reading emitted code (replaced benchmark)   |
-| 123.7   | 1     | Headless render-path driver                                          |
-| 123.8   | 1     | Workload assertion tests against the recording log                   |
-| 123.9   | 1     | Wire Phase 1 into the existing CI matrix                             |
-| 123.10  | 2     | `flake.nix`: Mesa, llvmpipe, Xvfb (STOP for `nix develop`)           |
-| 123.11  | 2     | Offscreen pbuffer GL context                                         |
-| 123.12  | 2     | Readback, golden storage, comparison, and tolerance policy           |
-| 123.13  | 2     | New Nix-based CI job for Phase 2                                     |
-| 123.14  | both  | Quantified findings report                                           |
+| 123.7   | 1     | Headless render-path driver                                         |
+| 123.8   | 1     | Workload assertion tests against the recording log                  |
+| 123.9   | 1     | Wire Phase 1 into the existing CI matrix                            |
+| 123.10  | 2     | `flake.nix`: Mesa, llvmpipe, Xvfb (STOP for `nix develop`)          |
+| 123.11  | 2     | Offscreen pbuffer GL context                                        |
+| 123.12  | 2     | Readback, golden storage, comparison, and tolerance policy          |
+| 123.13  | 2     | New Nix-based CI job for Phase 2                                    |
+| 123.14  | both  | Quantified findings report                                          |
 
 Ordering: 123.1 through 123.9 are Phase 1 and largely sequential (each
 migrates or depends on the previous). 123.10 through 123.13 are Phase 2 and
